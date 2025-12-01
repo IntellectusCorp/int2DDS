@@ -1,0 +1,58 @@
+{
+  "files.trimTrailingWhitespace": true,
+  "files.eol": "\n",
+  "editor.formatOnSave": true,
+  "editor.formatOnSaveMode": "file",
+  "[rust]": {
+    "editor.defaultFormatter": "rust-lang.rust-analyzer"
+  },
+  //logFileHighlighter
+  "logFileHighlighter.customPatterns": [
+    {
+      "pattern": "\\[TRACE\\]",
+      "foreground": "#999797",
+      "fontStyle": "bold"
+    },
+    {
+      "pattern": "\\[DEBUG\\]",
+      "foreground": "#00bfff",
+      "fontStyle": "bold"
+    },
+    {
+      "pattern": "\\[INFO\\]",
+      "foreground": "#00ff00",
+      "fontStyle": "bold"
+    },
+    {
+      "pattern": "\\[WARN\\]",
+      "foreground": "#ffaa00",
+      "fontStyle": "bold"
+    },
+    {
+      "pattern": "\\[ERROR\\]",
+      "foreground": "#ff3333",
+      "fontStyle": "bold"
+    },
+    {
+      "pattern": "\\[LOG\\]",
+      "foreground": "#cc66ff",
+      "fontStyle": "bold"
+    },
+    {
+      "pattern": "^(\\[[^\\]]+\\])",
+      "foreground": "#938753",
+      "fontWeight": "bold"
+    },
+    {
+      "pattern": "(?:\\[[^\\]]*\\]){2}(\\[[^\\]]+\\])",
+      "foreground": "#ecbe05",
+      "fontWeight": "bold"
+    },
+    // class/module
+    {
+      "pattern": "(?:\\[[^\\]]*\\]){3}(\\[[^\\]]+\\])",
+      "foreground": "#dcd2aa"
+    }
+  ],
+  //logFileHighlighter
+}

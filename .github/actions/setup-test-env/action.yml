@@ -1,0 +1,24 @@
+name: 'Setup Test Environment'
+description: 'Downloads executables and sets up Python environment for DDS interoperability tests'
+runs:
+  using: 'composite'
+  steps:
+    - name: Download executables
+      uses: actions/download-artifact@v4
+      with:
+        name: executables
+        path: ./executables/
+    - name: Download dds-rtps files
+      uses: actions/download-artifact@v4
+      with:
+        name: dds-rtps-files
+        path: .
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.11.4"
+    - name: Setting up environment
+      run: |
+        python3 -m venv .venv
+        source .venv/bin/activate
+        pip install -r requirements.txt
+      shell: bash

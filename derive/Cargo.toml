@@ -1,0 +1,25 @@
+[package]
+name = "int2dds-derive"
+version = "0.0.1"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Procedural macros for int2DDS - DdsType derive macro for automatic type support generation"
+keywords = ["dds", "derive", "macro", "codegen"]
+categories = [
+    "development-tools::procedural-macro-helpers",
+    "network-programming",
+]
+documentation = "https://docs.rs/int2dds-derive"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2.0", features = ["full", "extra-traits"] }
+quote = "1.0"
+proc-macro2 = "1.0"
+md5 = "0.8"
+# int2dds = { path = "int2DDS" }

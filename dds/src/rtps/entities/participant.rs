@@ -1,0 +1,1125 @@
+//! RTPS participant implementation.
+//!
+//! This module implements the `Participant` which represents a DDS domain participant
+//! at the RTPS layer. Participants manage readers, writers, discovery endpoints, and
+//! communication with remote participants in the DDS domain.
+
+#![allow(dead_code)]
+#![allow(unused_variables)]
+
+use std::{
+    collections::HashMap,
+    fmt::Debug,
+    sync::{atomic::AtomicBool, Arc, Mutex, OnceLock},
+};
+
+use arc_swap::ArcSwap;
+use dashmap::DashMap;
+
+use log::{debug, info};
+
+use crate::{
+    common::{
+        builtin::topic::{
+            publication_builtin_topic_data::PublicationBuiltinTopicData,
+            subscription_builtin_topic_data::SubscriptionBuiltinTopicData,
+        },
+        instance_handle::InstanceHandle,
+    },
+    infrastructure::status::{StatusInfo, StatusKind},
+    rtps::{
+        builtin::{
+            builtin_endpoints::BuiltinEndpoints,
+            data::{
+                builtin_endpoint_set::{BuiltinEndpointFlag, BuiltinEndpointSet},
+                spdp_discovered_participant_data::SPDPDiscoveredParticipantData,
+            },
+            spdp_builtin_participant_reader::SPDPBuiltinParticipantReader,
+            spdp_builtin_participant_writer::SPDPbuiltinParticipantWriter,
+        },
+        common::{
+            entity_id::EntityId,
+            entity_kind::EntityKind,
+            guid::{Guid, GuidPrefix},
+            rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
+            sequence::SequenceNumber,
+            time::RtpsTime,
+            types::{ChangeKind, DomainId, ParticipantId},
+        },
+        entities::{
+            entity::Entity,
+            history::history_cache::HistoryCache,
+            reader::{Reader, StatefulReader, StatelessReader},
+            writer::{StatefulWriter, StatelessWriter, Writer},
+        },
+        logic::{
+            sedp_logic::SedpLogic, spdp_logic::SpdpLogic, user_logic::UserLogic,
+            wlp_logic::WlpLogic,
+        },
+        task::sending_handler::{MessageType, SendingHandler},
+        transport::TransportSender,
+    },
+};
+
+#[derive(Clone)]
+pub struct Participant {
+    guid: Guid,
+    domain_id: DomainId,
+    participant_id: ParticipantId,
+    builtin_endpoints: Arc<BuiltinEndpoints>,
+    // My data
+    local_participant_proxy_data: Arc<SPDPDiscoveredParticipantData>,
+    // Remote participant data
+    remote_participant_proxy_datas: Arc<Mutex<Vec<SPDPDiscoveredParticipantData>>>,
+
+    callback:
+        Arc<ArcSwap<Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>>>,
+
+    // RTPS data reader/writer matched with DCPS r/w
+    // Key is domain id + topic name
+    rtps_reader_map: Arc<DashMap<String, HashMap<EntityId, Arc<dyn Reader + Send + Sync>>>>,
+    rtps_writer_map: Arc<DashMap<String, HashMap<EntityId, Arc<dyn Writer + Send + Sync>>>>,
+
+    spdp_logic: OnceLock<Arc<Option<SpdpLogic>>>,
+    sedp_logic: OnceLock<Arc<Option<SedpLogic>>>,
+    user_logic: OnceLock<Arc<Option<UserLogic>>>,
+    wlp_logic: Arc<OnceLock<WlpLogic>>,
+
+    // Entity ID used each time RTPS data reader/writer is added (incremented by one)
+    current_entity_id: Arc<Mutex<[u8; 3]>>,
+
+    remote_publications: Arc<DashMap<String, HashMap<Guid, PublicationBuiltinTopicData>>>,
+    remote_subscriptions: Arc<DashMap<String, HashMap<Guid, SubscriptionBuiltinTopicData>>>,
+
+    working_ip: String,
+    terminated: Arc<AtomicBool>,
+}
+impl Debug for Participant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Participant: {:?}", self.guid)
+    }
+}
+
+impl Entity for Participant {
+    fn guid(&self) -> Guid {
+        self.guid
+    }
+
+    fn update_status(&self, status: StatusKind, info: Option<Arc<dyn StatusInfo>>) {
+        let callback = self.callback.load();
+        if let Some(callback) = callback.as_ref() {
+            callback(status, info);
+        }
+    }
+
+    fn set_update_status(
+        &self,
+        f: Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>,
+    ) {
+        self.callback.store(Arc::new(Some(f)));
+    }
+}
+
+impl Participant {
+    pub(crate) fn new(
+        domain_id: DomainId,
+        participant_id: ParticipantId,
+        working_ip: String,
+    ) -> Self {
+        let guid = Guid::new(Guid::generate_unique_guid_prefix(), EntityId::PARTICIPANT);
+        let local_participant_proxy_data = Arc::new(SPDPDiscoveredParticipantData::new(
+            domain_id,
+            guid.prefix(),
+            Participant::init_builtin_endpoints(),
+        ));
+        let builtin_endpoints = Arc::new(BuiltinEndpoints::new(guid));
+
+        Self {
+            guid,
+            domain_id,
+            participant_id,
+            builtin_endpoints,
+            local_participant_proxy_data,
+            remote_participant_proxy_datas: Arc::new(Mutex::new(vec![])),
+            callback: Arc::new(ArcSwap::new(Arc::new(None))),
+            rtps_reader_map: Arc::new(DashMap::new()),
+            rtps_writer_map: Arc::new(DashMap::new()),
+            spdp_logic: OnceLock::new(),
+            sedp_logic: OnceLock::new(),
+            user_logic: OnceLock::new(),
+            wlp_logic: Arc::new(OnceLock::new()),
+            current_entity_id: Arc::new(Mutex::new([0, 0, 0])),
+            remote_publications: Arc::new(DashMap::new()),
+            remote_subscriptions: Arc::new(DashMap::new()),
+            working_ip,
+            terminated: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub(crate) fn init_builtin_endpoints() -> BuiltinEndpointSet {
+        let mut endpointset = BuiltinEndpointSet::new();
+        endpointset.add(BuiltinEndpointFlag::DISC_BUILTIN_ENDPOINT_PARTICIPANT_ANNOUNCER);
+        endpointset.add(BuiltinEndpointFlag::DISC_BUILTIN_ENDPOINT_PARTICIPANT_DETECTOR);
+
+        endpointset.add(BuiltinEndpointFlag::DISC_BUILTIN_ENDPOINT_PUBLICATIONS_ANNOUNCER);
+        endpointset.add(BuiltinEndpointFlag::DISC_BUILTIN_ENDPOINT_PUBLICATIONS_DETECTOR);
+        endpointset.add(BuiltinEndpointFlag::DISC_BUILTIN_ENDPOINT_SUBSCRIPTIONS_ANNOUNCER);
+        endpointset.add(BuiltinEndpointFlag::DISC_BUILTIN_ENDPOINT_SUBSCRIPTIONS_DETECTOR);
+
+        endpointset.add(BuiltinEndpointFlag::BUILTIN_ENDPOINT_PARTICIPANT_MESSAGE_DATA_WRITER);
+        endpointset.add(BuiltinEndpointFlag::BUILTIN_ENDPOINT_PARTICIPANT_MESSAGE_DATA_READER);
+
+        endpointset.add(BuiltinEndpointFlag::DISC_BUILTIN_ENDPOINT_TOPICS_ANNOUNCER);
+        endpointset.add(BuiltinEndpointFlag::DISC_BUILTIN_ENDPOINT_TOPICS_DETECTOR);
+        endpointset
+    }
+
+    pub(crate) fn builtin_endpoints(&self) -> Arc<BuiltinEndpoints> {
+        self.builtin_endpoints.clone()
+    }
+
+    pub(crate) fn local_participant_proxy_data(&self) -> Arc<SPDPDiscoveredParticipantData> {
+        self.local_participant_proxy_data.clone()
+    }
+
+    pub(crate) fn remote_participant_proxy_datas(
+        &self,
+    ) -> Arc<Mutex<Vec<SPDPDiscoveredParticipantData>>> {
+        self.remote_participant_proxy_datas.clone()
+    }
+
+    pub(crate) fn remote_publications(
+        &self,
+    ) -> Arc<DashMap<String, HashMap<Guid, PublicationBuiltinTopicData>>> {
+        self.remote_publications.clone()
+    }
+
+    pub(crate) fn remote_subscriptions(
+        &self,
+    ) -> Arc<DashMap<String, HashMap<Guid, SubscriptionBuiltinTopicData>>> {
+        self.remote_subscriptions.clone()
+    }
+
+    pub(crate) fn working_ip(&self) -> String {
+        self.working_ip.clone()
+    }
+
+    pub(crate) fn participant_id(&self) -> ParticipantId {
+        self.participant_id
+    }
+
+    pub(crate) fn find_remote_participant_proxy_data(
+        &self,
+        guid_prefix: GuidPrefix,
+    ) -> Option<SPDPDiscoveredParticipantData> {
+        match self.remote_participant_proxy_datas.lock() {
+            Ok(remote_participant_proxy_datas) => {
+                for remote_participant_data in remote_participant_proxy_datas.iter() {
+                    if remote_participant_data.guid_prefix() == guid_prefix {
+                        return Some(remote_participant_data.clone());
+                    }
+                }
+                None
+            }
+            Err(e) => {
+                log::error!("Failed to lock remote_participant_proxy_datas: {:?}", e);
+                None
+            }
+        }
+    }
+
+    pub(crate) fn add_remote_participant_proxy_data(
+        &self,
+        spdp_discovered_participant_data: SPDPDiscoveredParticipantData,
+    ) {
+        match self.remote_participant_proxy_datas.lock() {
+            Ok(mut remote_participant_proxy_datas) => {
+                remote_participant_proxy_datas.push(spdp_discovered_participant_data);
+            }
+            Err(e) => {
+                log::error!("Failed to lock remote_participant_proxy_datas: {:?}", e);
+            }
+        }
+    }
+
+    pub(crate) fn remove_remote_participant_proxy_data(&self, participant_guid: Guid) -> bool {
+        match self.remote_participant_proxy_datas.lock() {
+            Ok(mut remote_participant_proxy_datas) => {
+                let initial_len = remote_participant_proxy_datas.len();
+                remote_participant_proxy_datas
+                    .retain(|data| data.participant_guid() != participant_guid);
+                let removed = initial_len != remote_participant_proxy_datas.len();
+                if removed {
+                    debug!(
+                        "Removed remote participant proxy data for GUID: {:?}",
+                        participant_guid
+                    );
+                }
+                removed
+            }
+            Err(e) => {
+                log::error!("Failed to lock remote_participant_proxy_datas: {:?}", e);
+                false
+            }
+        }
+    }
+
+    pub(crate) fn assert_liveliness(&self) -> bool {
+        if let Some(wlp_logic) = self.wlp_logic.get() {
+            match wlp_logic.assert_participant_liveliness() {
+                Ok(()) => return true,
+                Err(_) => return false,
+            }
+        }
+        false
+    }
+
+    pub(crate) fn spdp_builtin_participant_writer(
+        &self,
+    ) -> Arc<Mutex<SPDPbuiltinParticipantWriter>> {
+        self.builtin_endpoints.spdp_builtin_participant_writer.clone()
+    }
+
+    pub(crate) fn spdp_builtin_participant_reader(
+        &self,
+    ) -> Arc<Mutex<SPDPBuiltinParticipantReader>> {
+        self.builtin_endpoints.spdp_builtin_participant_reader.clone()
+    }
+
+    pub(crate) fn builtin_participant_message_writer(&self) -> Arc<StatefulWriter> {
+        self.builtin_endpoints.builtin_participant_message_writer.clone()
+    }
+
+    pub(crate) fn builtin_participant_message_reader(&self) -> Arc<StatefulReader> {
+        self.builtin_endpoints.builtin_participant_message_reader.clone()
+    }
+
+    pub(crate) fn sedp_builtin_publications_writer(&self) -> Arc<StatefulWriter> {
+        self.builtin_endpoints.sedp_builtin_publications_writer.clone()
+    }
+
+    pub(crate) fn sedp_builtin_publications_reader(&self) -> Arc<StatefulReader> {
+        self.builtin_endpoints.sedp_builtin_publications_reader.clone()
+    }
+
+    pub(crate) fn sedp_builtin_subscriptions_writer(&self) -> Arc<StatefulWriter> {
+        self.builtin_endpoints.sedp_builtin_subscriptions_writer.clone()
+    }
+
+    pub(crate) fn sedp_builtin_subscriptions_reader(&self) -> Arc<StatefulReader> {
+        self.builtin_endpoints.sedp_builtin_subscriptions_reader.clone()
+    }
+
+    pub(crate) fn sedp_builtin_topics_writer(&self) -> Arc<StatefulWriter> {
+        self.builtin_endpoints.sedp_builtin_topics_writer.clone()
+    }
+
+    pub(crate) fn sedp_builtin_topics_reader(&self) -> Arc<StatefulReader> {
+        self.builtin_endpoints.sedp_builtin_topics_reader.clone()
+    }
+
+    pub(crate) fn domain_id(&self) -> DomainId {
+        self.domain_id
+    }
+
+    pub(crate) fn is_terminated(&self) -> bool {
+        self.terminated.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) fn terminate(&self) {
+        self.terminated.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(crate) fn add_writer(
+        &self,
+        topic_name: String,
+        entity_id: EntityId,
+        writer: Arc<dyn Writer + Send + Sync>,
+    ) -> RtpsResult<()> {
+        self.rtps_writer_map.entry(topic_name).or_default().insert(entity_id, writer.clone());
+        let liveliness = writer.liveliness()?;
+
+        if writer.guid().entity_id().entity_kind().is_user_defined() {
+            if let Some(wlp_logic) = self.wlp_logic.get() {
+                let _ = wlp_logic.add_local_writer(writer.guid(), liveliness);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn find_writer_from_entry(
+        &self,
+        topic_name: &str,
+        entity_id: EntityId,
+    ) -> Option<Arc<dyn Writer + Send + Sync>> {
+        self.rtps_writer_map.get(topic_name)?.get(&entity_id).cloned()
+    }
+
+    pub(crate) fn find_writers_from_topic_name(
+        &self,
+        topic_name: &str,
+    ) -> Vec<Arc<dyn Writer + Send + Sync>> {
+        match self.rtps_writer_map.get(topic_name) {
+            Some(map) => map.values().cloned().collect(),
+            None => Vec::new(),
+        }
+    }
+
+    pub(crate) fn find_writer_from_entity_id(
+        &self,
+        entity_id: EntityId,
+    ) -> Option<Arc<dyn Writer + Send + Sync>> {
+        self.rtps_writer_map.iter().find_map(|entry| entry.value().get(&entity_id).cloned())
+    }
+
+    pub(crate) fn find_readers_from_topic_name(
+        &self,
+        topic_name: &str,
+    ) -> Vec<Arc<dyn Reader + Send + Sync>> {
+        match self.rtps_reader_map.get(topic_name) {
+            Some(map) => map.values().cloned().collect(),
+            None => Vec::new(),
+        }
+    }
+
+    // pub(crate) fn find_history_cache(
+    //     &self,
+    //     topic_name: &str,
+    //     entity_id: EntityId,
+    // ) -> Option<Arc<Mutex<WriterHistoryCache>>> {
+    //     self.rtps_writer_map
+    //         .get(topic_name)
+    //         .and_then(|map| map.get(&entity_id).cloned())
+    //         .map(|writer| writer.writer_cache())
+    // }
+
+    pub(crate) fn add_reader(
+        &self,
+        topic_name: String,
+        entity_id: EntityId,
+        reader: Arc<dyn Reader + Send + Sync>,
+    ) {
+        self.rtps_reader_map.entry(topic_name.to_string()).or_default().insert(entity_id, reader);
+    }
+
+    pub(crate) fn find_reader_from_entry(
+        &self,
+        topic_name: &str,
+        entity_id: EntityId,
+    ) -> Option<Arc<dyn Reader + Send + Sync>> {
+        self.rtps_reader_map.get(topic_name).and_then(|map| map.get(&entity_id).cloned())
+    }
+
+    pub(crate) fn find_reader_from_entity_id(
+        &self,
+        entity_id: EntityId,
+    ) -> Option<Arc<dyn Reader + Send + Sync>> {
+        self.rtps_reader_map.iter().find_map(|map| map.get(&entity_id).cloned())
+    }
+
+    /// Function to increment entity_key by 1
+    fn increment_key(key: &mut [u8; 3]) {
+        for i in (0..3).rev() {
+            if key[i] < 0xFF {
+                key[i] += 1;
+                break;
+            } else {
+                key[i] = 0x00;
+            }
+        }
+    }
+
+    /// Function to find the next entity_key
+    pub(crate) fn next_entity_key(&self, kind: EntityKind) -> EntityId {
+        match self.current_entity_id.lock() {
+            Ok(mut current_entity_id) => {
+                Self::increment_key(&mut current_entity_id);
+                EntityId::new(*current_entity_id, kind)
+            }
+            Err(e) => {
+                log::error!("Failed to lock current_entity_id: {:?}", e);
+                EntityId::UNKNOWN
+            }
+        }
+    }
+
+    /// Method to remove RTPS Writer
+    pub(crate) fn remove_writer(&self, topic_name: String, entity_id: EntityId) -> RtpsResult<()> {
+        // Send Data[w(UD)]
+        let writer_arc =
+            self.rtps_writer_map.get(&topic_name).and_then(|map| map.get(&entity_id).cloned());
+
+        if let Some(writer) = writer_arc {
+            if writer.guid().entity_id().entity_kind().is_user_defined() {
+                if let Some(wlp_logic) = self.wlp_logic.get() {
+                    let _ = wlp_logic.remove_local_writer(writer.guid());
+                }
+            }
+
+            let writer_info = if let Some(stateful_writer) =
+                writer.as_any().downcast_ref::<StatefulWriter>()
+            {
+                Some((stateful_writer.guid(), stateful_writer.publication_builtin_topic_data()?))
+            } else {
+                writer.as_any().downcast_ref::<StatelessWriter>().and_then(|stateless_writer| {
+                    stateless_writer
+                        .publication_builtin_topic_data()
+                        .ok()
+                        .map(|data| (stateless_writer.guid(), data))
+                })
+            };
+
+            if let Some((writer_guid, publication_builtin_topic_data)) = writer_info {
+                // Make payload (In case matched DDS requires payload in addition to inline QoS)
+                let payload = publication_builtin_topic_data.to_serialized_data();
+                let a_cache_change = self.sedp_builtin_publications_writer().new_change(
+                    ChangeKind::NotAliveDisposedUnregistered,
+                    payload, // Can empty also, just like Fast DDS
+                    InstanceHandle::from_guid(&writer_guid),
+                    Some(RtpsTime::now()),
+                );
+
+                let handler = SendingHandler::get_instance(Arc::new(self.clone()), None, None);
+                handler.push_message_and_wake(MessageType::SedpTerminateEndpoint(
+                    self.sedp_builtin_publications_writer().guid(),
+                    Arc::new(a_cache_change),
+                ));
+                log::info!("Remote writer with GUID {:?} terminated", writer_guid);
+
+                // Remove builtin topic data from builtin endpoint
+                match self.builtin_endpoints.sedp_builtin_publications_writer.writer_cache().lock()
+                {
+                    Ok(mut writer_cache) => {
+                        for cache in writer_cache.get_changes() {
+                            if let Ok(publication_builtin_topic_data) =
+                                PublicationBuiltinTopicData::from_serialized_data(
+                                    cache.data_value_arc(),
+                                )
+                            {
+                                if publication_builtin_topic_data.endpoint_guid() == writer_guid {
+                                    let _ = writer_cache.remove_change(cache);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::error!(
+                            "Failed to lock sedp_builtin_publications_writer's cache: {:?}",
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
+        // Remove from map in participant
+        self.rtps_writer_map.get_mut(&topic_name).and_then(|mut map| map.remove(&entity_id));
+
+        Ok(())
+    }
+
+    /// Method to remove RTPS Reader
+    pub(crate) fn remove_reader(&self, topic_name: String, entity_id: EntityId) -> RtpsResult<()> {
+        // Send Data[r(UD)]
+        let reader_arc =
+            self.rtps_reader_map.get(&topic_name).and_then(|map| map.get(&entity_id).cloned());
+
+        if let Some(reader) = reader_arc {
+            let reader_info = if let Some(stateful_reader) =
+                reader.as_any().downcast_ref::<StatefulReader>()
+            {
+                Some((stateful_reader.guid(), stateful_reader.subscription_builtin_topic_data()?))
+            } else {
+                reader.as_any().downcast_ref::<StatelessReader>().and_then(|stateless_reader| {
+                    stateless_reader
+                        .subscription_builtin_topic_data()
+                        .ok()
+                        .map(|data| (stateless_reader.guid(), data))
+                })
+            };
+
+            if let Some((reader_guid, subscription_builtin_topic_data)) = reader_info {
+                let payload = subscription_builtin_topic_data.to_serialized_data();
+                let a_cache_change = self.sedp_builtin_subscriptions_writer().new_change(
+                    ChangeKind::NotAliveDisposedUnregistered,
+                    payload,
+                    InstanceHandle::from_guid(&reader_guid),
+                    Some(RtpsTime::now()),
+                );
+
+                let handler = SendingHandler::get_instance(Arc::new(self.clone()), None, None);
+                handler.push_message_and_wake(MessageType::SedpTerminateEndpoint(
+                    self.sedp_builtin_subscriptions_writer().guid(),
+                    Arc::new(a_cache_change),
+                ));
+
+                // Remove builtin topic data from builtin endpoint
+                match self.builtin_endpoints.sedp_builtin_subscriptions_writer.writer_cache().lock()
+                {
+                    Ok(mut writer_cache) => {
+                        for cache in writer_cache.get_changes() {
+                            if let Ok(subscription_builtin_topic_data) =
+                                SubscriptionBuiltinTopicData::from_serialized_data(
+                                    cache.data_value_arc(),
+                                )
+                            {
+                                if subscription_builtin_topic_data.endpoint_guid() == reader_guid {
+                                    let _ = writer_cache.remove_change(cache);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::error!(
+                            "Failed to lock sedp_builtin_subscriptions_writer's cache: {:?}",
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
+        // Remove from map in participant
+        self.rtps_reader_map.get_mut(&topic_name).and_then(|mut map| map.remove(&entity_id));
+
+        Ok(())
+    }
+
+    /// Iterate through all Readers in the Participant to find Readers matched with the Writer, then remove Writer Proxy
+    pub(crate) fn remove_unmatched_writer_from_reader(&self, writer_guid: Guid) {
+        for topic_entry in self.rtps_reader_map.iter() {
+            for reader in topic_entry.value().values() {
+                if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
+                    if let Ok(mut writer_proxies) = stateful_reader.writer_proxies().lock() {
+                        let len_before_unmatch = writer_proxies.len();
+                        debug!(
+                            "Before unmatching with writer, this reader had {:?} matched writer",
+                            len_before_unmatch
+                        );
+
+                        writer_proxies.retain(|writer_proxy| {
+                            writer_proxy.remote_writer_guid() != writer_guid
+                        });
+
+                        if len_before_unmatch == writer_proxies.len() + 1 {
+                            stateful_reader.update_subscription_matched_status(
+                                -1,
+                                InstanceHandle::from_guid(&writer_guid),
+                            );
+                            info!("Unmatched with remote writer {:?}", writer_guid);
+                            debug!("Current number of matched writer: {:?}", writer_proxies.len());
+                        } else if len_before_unmatch == writer_proxies.len() {
+                            debug!(
+                                "No matching writer found to unmatch for GUID: {:?}",
+                                writer_guid
+                            );
+                        } else {
+                            log::error!("This is abnormal behavior, this reader had {:?} writer proxy of same guid", len_before_unmatch - writer_proxies.len());
+                        }
+                    }
+                } else if let Some(stateless_reader) =
+                    reader.as_any().downcast_ref::<StatelessReader>()
+                {
+                    if let Ok(mut writer_locator) = stateless_reader.writer_locators().lock() {
+                        let len_before_unmatch = writer_locator.len();
+                        debug!(
+                            "Before unmatching with writer, this reader had {:?} matched writer",
+                            len_before_unmatch
+                        );
+
+                        writer_locator
+                            .retain(|locator| locator.remote_writer_guid() != writer_guid);
+
+                        if len_before_unmatch == writer_locator.len() + 1 {
+                            stateless_reader.update_subscription_matched_status(
+                                -1,
+                                InstanceHandle::from_guid(&writer_guid),
+                            );
+                            info!("Unmatched with remote writer {:?}", writer_guid);
+                            debug!("Current number of matched writer: {:?}", writer_locator.len());
+                        } else if len_before_unmatch == writer_locator.len() {
+                            debug!(
+                                "No matching writer found to unmatch for GUID: {:?}",
+                                writer_guid
+                            );
+                        } else {
+                            log::error!("This is abnormal behavior, this reader had {:?} writer locator of same guid", len_before_unmatch - writer_locator.len());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Iterate through all Writers in the Participant to find Writers matched with the Reader, then remove Reader Locator or Reader Proxy
+    pub(crate) fn remove_unmatched_reader_from_writer(&self, reader_guid: Guid) {
+        for topic_entry in self.rtps_writer_map.iter() {
+            for writer in topic_entry.value().values() {
+                if let Some(stateful_writer) = writer.as_any().downcast_ref::<StatefulWriter>() {
+                    if let Ok(mut reader_proxies) = stateful_writer.reader_proxies().lock() {
+                        let len_before_unmatch = reader_proxies.len();
+                        debug!(
+                            "Before unmatching with reader, this writer had {:?} matched readers",
+                            len_before_unmatch
+                        );
+
+                        reader_proxies.retain(|reader_proxy| {
+                            reader_proxy.remote_reader_guid() != reader_guid
+                        });
+
+                        if len_before_unmatch == reader_proxies.len() + 1 {
+                            stateful_writer.update_publication_matched_status(
+                                -1,
+                                InstanceHandle::from_guid(&reader_guid),
+                            );
+                            info!("Unmatched with remote reader {:?}", reader_guid);
+                            debug!("Current number of matched reader: {:?}", reader_proxies.len());
+                        } else if len_before_unmatch == reader_proxies.len() {
+                            debug!(
+                                "No matching reader found to unmatch for GUID: {:?}",
+                                reader_guid
+                            );
+                        } else {
+                            log::error!("This is abnormal behavior, this writer had {:?} reader proxy of same guid", len_before_unmatch - reader_proxies.len());
+                        }
+                    }
+                } else if let Some(stateless_writer) =
+                    writer.as_any().downcast_ref::<StatelessWriter>()
+                {
+                    if let Ok(mut reader_locator) = stateless_writer.reader_locator().lock() {
+                        let len_before_unmatch = reader_locator.len();
+                        debug!(
+                            "Before unmatching with reader, this writer had {:?} matched readers",
+                            len_before_unmatch
+                        );
+
+                        reader_locator.retain(|locator| {
+                            locator.guid_prefix() != reader_guid.prefix()
+                                || locator.remote_entity_id() != reader_guid.entity_id()
+                        });
+
+                        if len_before_unmatch == reader_locator.len() + 1 {
+                            stateless_writer.update_publication_matched_status(
+                                -1,
+                                InstanceHandle::from_guid(&reader_guid),
+                            );
+                            info!("Unmatched with remote reader {:?}", reader_guid);
+                            debug!("Current number of matched reader: {:?}", reader_locator.len());
+                        } else if len_before_unmatch == reader_locator.len() {
+                            debug!(
+                                "No matching reader found to unmatch for GUID: {:?}",
+                                reader_guid
+                            );
+                        } else {
+                            log::error!("This is abnormal behavior, this writer had {:?} reader locator of same guid", len_before_unmatch - reader_locator.len());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn find_readers_matched_with_remote_writer(
+        &self,
+        writer_guid: Guid,
+    ) -> RtpsResult<Vec<Arc<dyn Reader + Send + Sync>>> {
+        let mut matched_readers: Vec<Arc<dyn Reader + Send + Sync>> = Vec::new();
+
+        for topic_entry in self.rtps_reader_map.iter() {
+            for reader in topic_entry.value().values() {
+                if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
+                    let writer_proxies_arc = stateful_reader.writer_proxies();
+                    let writer_proxies = writer_proxies_arc.lock().map_err(|_e| {
+                        RtpsError::new(
+                            RtpsErrorCode::LockError,
+                            "Failed to acquire writer proxy lock",
+                        )
+                    })?;
+
+                    if writer_proxies.iter().any(|wp| wp.remote_writer_guid() == writer_guid) {
+                        matched_readers.push(reader.clone());
+                    }
+                } else if let Some(stateless_reader) =
+                    reader.as_any().downcast_ref::<StatelessReader>()
+                {
+                    let writer_locators_arc = stateless_reader.writer_locators();
+                    let writer_locators = writer_locators_arc.lock().map_err(|e| {
+                        RtpsError::new(
+                            RtpsErrorCode::LockError,
+                            format!("Failed to acquire writer locator lock: {:?}", e),
+                        )
+                    })?;
+
+                    if writer_locators.iter().any(|wl| wl.remote_writer_guid() == writer_guid) {
+                        matched_readers.push(reader.clone());
+                    }
+                }
+            }
+        }
+
+        Ok(matched_readers)
+    }
+
+    /// Function to send Data(w[UD]), DATA(r[UD]) for all DataWriters and DataReaders in the Participant
+    /// Later changed to send Data(p[UD]) only once
+    pub(crate) fn send_termination_message_on_shutdown(&self) -> RtpsResult<()> {
+        // Send Data(r[UD]) messages
+        for topic_entry in self.rtps_reader_map.iter() {
+            for reader in topic_entry.value().values() {
+                let subscription_builtin_topic_data = if let Some(stateful_reader) =
+                    reader.as_any().downcast_ref::<StatefulReader>()
+                {
+                    Some(stateful_reader.subscription_builtin_topic_data()?)
+                } else {
+                    reader.as_any().downcast_ref::<StatelessReader>().and_then(|stateless_reader| {
+                        stateless_reader.subscription_builtin_topic_data().ok()
+                    })
+                };
+
+                let payload = subscription_builtin_topic_data.unwrap().to_serialized_data();
+                let a_cache_change = self.sedp_builtin_subscriptions_writer().new_change(
+                    ChangeKind::NotAliveDisposedUnregistered,
+                    payload,
+                    InstanceHandle::from_guid(&reader.guid()),
+                    Some(RtpsTime::now()),
+                );
+
+                let handler = SendingHandler::get_instance(Arc::new(self.clone()), None, None);
+                if let Some(sending_task) = handler.get_sending_task() {
+                    // Send messages synchronously without using event loop
+                    if let Ok(sending_task_guard) = sending_task.lock() {
+                        // let join_handle = sending_task_guard.create_worker_thread(MessageType::SedpTerminateEndpoint(
+                        //     self.sedp_builtin_subscriptions_writer().guid(),
+                        //     Arc::new(a_cache_change),
+                        // ));
+
+                        // if let Err(e) = join_handle.join() {
+                        //     log::error!("Failed to join sending task thread for SEDP Terminate endpoint task: {:?}", e);
+                        // }
+                        sending_task_guard.sync_sedp_terminate_endpoint_task(
+                            self.sedp_builtin_subscriptions_writer().guid(),
+                            Arc::new(a_cache_change),
+                        );
+                    }
+                }
+            }
+        }
+
+        // Send Data(w[UD]) messages
+        for topic_entry in self.rtps_writer_map.iter() {
+            for writer in topic_entry.value().values() {
+                let publication_builtin_topic_data = if let Some(stateful_writer) =
+                    writer.as_any().downcast_ref::<StatefulWriter>()
+                {
+                    Some(stateful_writer.publication_builtin_topic_data()?)
+                } else {
+                    writer.as_any().downcast_ref::<StatelessWriter>().and_then(|stateless_writer| {
+                        stateless_writer.publication_builtin_topic_data().ok()
+                    })
+                };
+
+                let payload = publication_builtin_topic_data.unwrap().to_serialized_data();
+                let a_cache_change = self.sedp_builtin_publications_writer().new_change(
+                    ChangeKind::NotAliveDisposedUnregistered,
+                    payload,
+                    InstanceHandle::from_guid(&writer.guid()),
+                    Some(RtpsTime::now()),
+                );
+
+                let handler = SendingHandler::get_instance(Arc::new(self.clone()), None, None);
+                if let Some(sending_task) = handler.get_sending_task() {
+                    // Send messages synchronously without using event loop
+                    if let Ok(sending_task_guard) = sending_task.lock() {
+                        // let join_handle = sending_task_guard.create_worker_thread(
+                        //     MessageType::SedpTerminateEndpoint(
+                        //         self.sedp_builtin_publications_writer().guid(),
+                        //         Arc::new(a_cache_change),
+                        //     ),
+                        // );
+
+                        // if let Err(e) = join_handle.join() {
+                        //     log::error!("Failed to join sending task thread for SEDP Terminate endpoint task: {:?}", e);
+                        // }
+
+                        sending_task_guard.sync_sedp_terminate_endpoint_task(
+                            self.sedp_builtin_publications_writer().guid(),
+                            Arc::new(a_cache_change),
+                        );
+                    }
+                }
+            }
+        }
+
+        // Send Data(p[UD]) messages
+        let handler = SendingHandler::get_instance(Arc::new(self.clone()), None, None);
+        if let Some(sending_task) = handler.get_sending_task() {
+            // Send messages synchronously without using event loop
+            if let Ok(sending_task_guard) = sending_task.lock() {
+                // let join_handle = sending_task_guard
+                //     .create_worker_thread(MessageType::SpdpTerminateParticipant());
+
+                // if let Err(e) = join_handle.join() {
+                //     log::error!("Failed to join sending task thread for SPDP Terminate participant task: {:?}", e);
+                // }
+
+                sending_task_guard.sync_spdp_terminate_participant_task();
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Method to remove all information about remote participant
+    pub(crate) fn unmatch_with_remote_participant(&self, terminated_participant_guid: &Guid) {
+        // Remove participant proxy
+        if !self.remove_remote_participant_proxy_data(*terminated_participant_guid) {
+            debug!("Remote participant not found, participant may have already been unmatched");
+            return;
+        }
+
+        // Remove proxies from built-in endpoint
+        self.builtin_endpoints().remove_unmatched_endpoint(terminated_participant_guid.prefix());
+
+        // Remove proxies from endpoint
+        self.remove_all_unmatched_endpoint_from_terminated_participant(
+            terminated_participant_guid.prefix(),
+        );
+
+        info!("Successfully unmatched with remote participant: {:?}", terminated_participant_guid);
+    }
+
+    /// Function to remove all Remote Endpoints with the given GuidPrefix when Remote Participant terminates
+    pub(crate) fn remove_all_unmatched_endpoint_from_terminated_participant(
+        &self,
+        terminated_participant_guid_prefix: GuidPrefix,
+    ) {
+        for topic_entry in self.rtps_reader_map.iter() {
+            for reader in topic_entry.value().values() {
+                if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
+                    if let Ok(mut writer_proxies) = stateful_reader.writer_proxies().lock() {
+                        debug!(
+                            "Before unmatching with writer, this reader had {:?} matched writer",
+                            writer_proxies.len()
+                        );
+                        for writer_proxy in writer_proxies.iter() {
+                            if writer_proxy.remote_writer_guid().prefix()
+                                == terminated_participant_guid_prefix
+                            {
+                                stateful_reader.update_subscription_matched_status(
+                                    -1,
+                                    InstanceHandle::from_guid(&writer_proxy.remote_writer_guid()),
+                                );
+                            }
+                        }
+                        writer_proxies.retain(|writer_proxy| {
+                            writer_proxy.remote_writer_guid().prefix()
+                                != terminated_participant_guid_prefix
+                        });
+
+                        debug!(
+                            "Removed all unmatched remote writers from participant: {:?}",
+                            terminated_participant_guid_prefix
+                        );
+                        debug!("Current number of matched writer: {:?}", writer_proxies.len());
+                    } else if let Some(stateless_reader) =
+                        reader.as_any().downcast_ref::<StatelessReader>()
+                    {
+                        if let Ok(mut writer_locator) = stateless_reader.writer_locators().lock() {
+                            debug!(
+                            "Before unmatching with writer, this reader had {:?} matched writer",
+                            writer_locator.len()
+                        );
+                            for writer_locator in writer_locator.iter() {
+                                if writer_locator.remote_writer_guid().prefix()
+                                    == terminated_participant_guid_prefix
+                                {
+                                    stateless_reader.update_subscription_matched_status(
+                                        -1,
+                                        InstanceHandle::from_guid(
+                                            &writer_locator.remote_writer_guid(),
+                                        ),
+                                    );
+                                }
+                            }
+                            writer_locator.retain(|writer_locator| {
+                                writer_locator.remote_writer_guid().prefix()
+                                    != terminated_participant_guid_prefix
+                            });
+
+                            debug!(
+                                "Removed all unmatched remote writers from participant: {:?}",
+                                terminated_participant_guid_prefix
+                            );
+                            debug!("Current number of matched writer: {:?}", writer_locator.len());
+                        }
+
+                        stateless_reader
+                            .update_subscription_matched_status(-1, InstanceHandle::NIL);
+                    }
+                }
+            }
+        }
+
+        for topic_entry in self.rtps_writer_map.iter() {
+            for writer in topic_entry.value().values() {
+                if let Some(stateful_writer) = writer.as_any().downcast_ref::<StatefulWriter>() {
+                    if let Ok(mut reader_proxies) = stateful_writer.reader_proxies().lock() {
+                        debug!(
+                            "Before unmatching with reader, this writer had {:?} matched readers",
+                            reader_proxies.len()
+                        );
+                        for reader_proxy in reader_proxies.iter() {
+                            if reader_proxy.remote_reader_guid().prefix()
+                                == terminated_participant_guid_prefix
+                            {
+                                stateful_writer.update_publication_matched_status(
+                                    -1,
+                                    InstanceHandle::from_guid(&reader_proxy.remote_reader_guid()),
+                                );
+                            }
+                        }
+                        reader_proxies.retain(|reader_proxy| {
+                            reader_proxy.remote_reader_guid().prefix()
+                                != terminated_participant_guid_prefix
+                        });
+                        debug!(
+                            "Removed all unmatched reader proxies from unmatched participant: {:?}",
+                            terminated_participant_guid_prefix
+                        );
+                        debug!("Current number of matched reader: {:?}", reader_proxies.len());
+                    }
+                } else if let Some(stateless_writer) =
+                    writer.as_any().downcast_ref::<StatelessWriter>()
+                {
+                    if let Ok(mut reader_locator) = stateless_writer.reader_locator().lock() {
+                        debug!(
+                            "Before unmatching with reader, this writer had {:?} matched readers",
+                            reader_locator.len()
+                        );
+                        for locator in reader_locator.iter() {
+                            if locator.guid_prefix() == terminated_participant_guid_prefix {
+                                stateless_writer.update_publication_matched_status(
+                                    -1,
+                                    InstanceHandle::from_guid(&Guid::new(
+                                        locator.guid_prefix(),
+                                        locator.remote_entity_id(),
+                                    )),
+                                );
+                            }
+                        }
+                        reader_locator.retain(|locator| {
+                            locator.guid_prefix() != terminated_participant_guid_prefix
+                        });
+                        debug!(
+                            "Removed all unmatched reader locators from participant: {:?}",
+                            terminated_participant_guid_prefix
+                        );
+                        debug!("Current number of matched reader: {:?}", reader_locator.len());
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn on_reader_cache_change_removal(
+        &self,
+        entity_id: EntityId,
+        sequence_number: SequenceNumber,
+    ) {
+        for topic_entry in self.rtps_reader_map.iter() {
+            for reader in topic_entry.value().values() {
+                if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
+                    match stateful_reader.writer_proxies().lock() {
+                        Ok(mut writer_proxies) => {
+                            for writer_proxy in writer_proxies.iter_mut() {
+                                if writer_proxy.remote_writer_guid().entity_id() == entity_id {
+                                    writer_proxy.remove_change_from_writer_by_sn(sequence_number);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            log::error!("Failed to acquire writer_proxies lock: {}", e);
+                        }
+                    };
+                }
+            }
+        }
+    }
+
+    pub(crate) fn set_spdp_logic(&self, spdp_logic: Arc<Option<SpdpLogic>>) {
+        let _ = self.spdp_logic.set(spdp_logic);
+    }
+
+    pub(crate) fn set_sedp_logic(&self, sedp_logic: Arc<Option<SedpLogic>>) {
+        let _ = self.sedp_logic.set(sedp_logic);
+    }
+
+    pub(crate) fn set_user_logic(&self, user_logic: Arc<Option<UserLogic>>) {
+        let _ = self.user_logic.set(user_logic);
+    }
+
+    pub(crate) fn get_logics(
+        &self,
+    ) -> (Arc<Option<SpdpLogic>>, Arc<Option<SedpLogic>>, Arc<Option<UserLogic>>) {
+        (
+            self.spdp_logic.get().expect("spdp_logic not set").clone(),
+            self.sedp_logic.get().expect("sedp_logic not set").clone(),
+            self.user_logic.get().expect("user_logic not set").clone(),
+        )
+    }
+
+    /// Initialize all logic instances. Must be called immediately after creating Participant.
+    /// This creates SPDP, SEDP, User, and WLP logic instances using the provided sender.
+    pub(crate) fn init_logics(
+        self: &Arc<Self>,
+        sender: Arc<TransportSender>,
+        tcp_sender: Option<Arc<TransportSender>>,
+    ) {
+        // Get initial peers from environment for TCP/Hybrid discovery
+        let initial_peers = crate::common::env::get_initial_peers();
+        if !initial_peers.is_empty() {
+            log::info!("Configured initial peers for SPDP: {:?}", initial_peers);
+        }
+
+        // Create SPDP logic
+        let spdp_logic = Arc::new(Some(SpdpLogic::new(
+            self.clone(),
+            Some(sender.clone()),
+            tcp_sender.clone(),
+            initial_peers,
+        )));
+        let _ = self.spdp_logic.set(spdp_logic);
+
+        // Create SEDP logic
+        let sedp_logic = Arc::new(Some(SedpLogic::new(self.clone(), Some(sender.clone()))));
+        let _ = self.sedp_logic.set(sedp_logic);
+
+        // Create User logic
+        let user_logic =
+            Arc::new(Some(UserLogic::new(self.clone(), Some(sender.clone()), tcp_sender.clone())));
+        let _ = self.user_logic.set(user_logic);
+
+        // Create WLP logic
+        let wlp_logic = WlpLogic::new(self.clone(), sender);
+        let _ = self.wlp_logic.set(wlp_logic);
+    }
+
+    pub(crate) fn set_wlp_logic(&self, wlp_logic: WlpLogic) {
+        let _ = self.wlp_logic.set(wlp_logic);
+    }
+
+    pub(crate) fn wlp_logic(&self) -> Option<WlpLogic> {
+        self.wlp_logic.get().cloned()
+    }
+
+    /// Clear the WlpLogic sender reference to allow Arc cleanup during shutdown.
+    pub(crate) fn clear_wlp_logic_sender(&self) {
+        if let Some(wlp_logic) = self.wlp_logic.get() {
+            wlp_logic.clear_sender();
+        }
+    }
+
+    pub(crate) fn increase_manual_liveliness_count(&self) -> RtpsResult<()> {
+        self.local_participant_proxy_data.increase_manual_liveliness_count()
+    }
+}

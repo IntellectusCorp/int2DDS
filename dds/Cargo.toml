@@ -1,0 +1,117 @@
+# [workspace]
+# members = [".", "int2DDS-derive"]
+
+[package]
+name = "int2dds"
+version = "0.0.1"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Rust implementation of the Data Distribution Service (DDS) middleware standard with RTPS protocol support"
+keywords = ["dds", "rtps", "middleware", "pubsub", "realtime"]
+categories = ["network-programming", "embedded", "api-bindings"]
+documentation = "https://docs.rs/int2dds"
+readme = "../README.md"
+
+[features]
+default = []
+
+[dependencies]
+int2dds-derive = { path = "../derive" }
+mio = { version = "1.0.2", features = ["net", "os-poll"] }
+network-interface = "2.0.0"
+const-default = { version = "1.0.0", features = ["derive", "std", "alloc"] }
+bitflags = "2.4"
+speedy = "0.8.0"
+bytes = "1"
+log = { version = "0.4.11", features = ["release_max_level_error"] }
+env_logger = "0.11"
+socket2 = { version = "0.5", features = ["all"] }
+paste = { version = "1.0" }
+chrono = "0.4.41"
+uuid = { version = "1.17.0", features = ["v4"] }
+strum = "0.27.1"
+strum_macros = "0.27.1"
+rand = "0.9.2"
+regex = "1.0"
+hostname = "0.4.1"
+fern = "0.7.1"
+md5 = "0.8"
+clap = { version = "4.5", features = ["derive"] }
+dashmap = "5.5"
+arc-swap = "1.7"
+libloading = "0.8"
+
+# Function timing and tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = [
+    "fmt",
+    "env-filter",
+    "json",
+    "time",
+] }
+tracing-appender = "0.2"
+
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.21"
+futures-util = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gpio-cdev = "0.6"
+
+[lib]
+crate-type = ["rlib"]
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.3.9"
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+local-ip-address = "0.6.1"
+ctrlc = "3.4.7"
+winapi = { version = "0.3", features = [
+    "processthreadsapi",
+    "tlhelp32",
+    "handleapi",
+    "winnt",
+    "winbase",
+    "combaseapi",
+    "errhandlingapi",
+    "winerror",
+    "libloaderapi",
+] }
+# For getting Windows thread names in newer versions
+windows-sys = "0.52"
+
+[[example]]
+name = "hello_world_param"
+path = "examples/hello_world/hello_world_param.rs"
+
+[[example]]
+name = "perftest_publisher"
+path = "examples/performace_test/perftest_publisher.rs"
+
+[[example]]
+name = "perftest_subscriber"
+path = "examples/performace_test/perftest_subscriber.rs"
+
+[profile.dev]
+opt-level = 1
+
+[dev-dependencies]
+husky-rs = "0.1.5"
+# Faster than opt-level = 0 and still reasonably debuggable
+# opt-level = 1: keeps most of the code structure while applying light optimizations → much faster debugging
+# opt-level = 2~3: too heavily optimized, making variable tracking difficult
+criterion = { version = "0.7.0", features = ["html_reports"] }
+
+[[bench]]
+name = "reliable" # Name of the Rust source file where the benchmark code will be written
+harness = false   # Set to false to disable the default benchmark functionality and enable Criterion
+
+[profile.release]
+# Keep debug info for tracing/profiling (does not affect runtime performance)
+debug = 1 # Minimal debug info for function names and line numbers

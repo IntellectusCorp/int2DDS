@@ -1,0 +1,92 @@
+name: 'Run DDS Interoperability Test'
+description: 'Run interoperability test for a specific DDS implementation'
+inputs:
+  dds-name:
+    description: 'Name of the DDS implementation (e.g., connext, dust, eprosima)'
+    required: true
+  executable-pattern:
+    description: 'Pattern to match the DDS executable file (e.g., connext_dds-*_shape_main_linux)'
+    required: true
+  role:
+    description: 'Test role: "publisher" or "subscriber"'
+    required: true
+  dump-packet:
+    description: 'Enable tcpdump packet capture'
+    required: false
+    default: 'false'
+runs:
+  using: 'composite'
+  steps:
+    - name: Run Interoperability test for ${{ inputs.dds-name }} (${{ inputs.role }})
+      run: |
+        source .venv/bin/activate
+        cd executables
+        chmod +x ./${{ inputs.executable-pattern }}
+        chmod +x ./int2dds_shape_main_linux
+
+        # Start tshark if enabled
+        if [ "${{ inputs.dump-packet }}" = "true" ]; then
+          echo "Installing tshark..."
+          sudo apt-get update -qq
+          sudo apt-get install -y tshark
+          sudo tshark --version
+
+          # Start packet capture with verbose output for debugging
+          echo "Starting tshark on any interface, capturing UDP traffic..."
+          sudo tshark -i any -f 'udp' -w /tmp/tshark_${{ inputs.dds-name }}_${{ inputs.role }}.pcap &
+          TSHARK_PID=$!
+
+          # Check if tshark is actually running
+          if ps -p $TSHARK_PID > /dev/null; then
+            echo "tshark process is running (PID: $TSHARK_PID)"
+          else
+            echo "ERROR: tshark process failed to start or died"
+          fi
+        fi
+
+        # Run the interoperability test
+        if [ "${{ inputs.role }}" = "publisher" ]; then
+          echo "Testing Publisher ${{ inputs.dds-name }} --- Subscriber int2dds" | tee test.log
+          python3 ../interoperability_report.py -P ./${{ inputs.executable-pattern }} -S ./int2dds_shape_main_linux -o=../junit_report_${{ inputs.dds-name }}_${{ inputs.role }}.xml | tee -a test.log
+        else
+          echo "Testing Publisher int2dds --- Subscriber ${{ inputs.dds-name }}" | tee test.log
+          python3 ../interoperability_report.py -P ./int2dds_shape_main_linux -S ./${{ inputs.executable-pattern }} -o=../junit_report_${{ inputs.dds-name }}_${{ inputs.role }}.xml | tee -a test.log
+        fi
+
+        # Stop tshark if it was started
+        if [ "${{ inputs.dump-packet }}" = "true" ]; then
+          echo "Stopping tshark..."
+          if ps -p $TSHARK_PID > /dev/null; then
+            sudo kill -TERM $TSHARK_PID 2>/dev/null || true
+          fi
+
+          # Check if pcap file was created in /tmp
+          cd /tmp
+          ls -alh
+          if [ -f "/tmp/tshark_${{ inputs.dds-name }}_${{ inputs.role }}.pcap" ]; then
+            echo "pcap file created successfully:"
+            ls -la /tmp/tshark_${{ inputs.dds-name }}_${{ inputs.role }}.pcap
+            sudo chmod 644 /tmp/tshark_${{ inputs.dds-name }}_${{ inputs.role }}.pcap
+          else
+            echo "ERROR: pcap file not found in /tmp"
+          fi
+        fi
+      shell: bash
+    - name: Upload test report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: junit_report_${{ inputs.dds-name }}_${{ inputs.role }}
+        path: ./junit_report_${{ inputs.dds-name }}_${{ inputs.role }}.xml
+    - name: Upload test log
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test_log_${{ inputs.dds-name }}_${{ inputs.role }}
+        path: ./executables/test.log
+    - name: Upload tshark capture
+      if: inputs.dump-packet == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: tshark_${{ inputs.dds-name }}_${{ inputs.role }}
+        path: /tmp/tshark_${{ inputs.dds-name }}_${{ inputs.role }}.pcap

@@ -1,0 +1,11 @@
+[workspace]
+
+members = ["dds", "derive"]
+default-members = ["dds", "derive"]
+
+[workspace.package]
+authors = ["Intellectus Corp"]
+license = "Apache-2.0"
+repository = "https://github.com/IntellectusCorp/int2DDS"
+homepage = "https://github.com/IntellectusCorp/int2DDS"
+edition = "2021"

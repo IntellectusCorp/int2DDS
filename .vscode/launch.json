@@ -1,0 +1,14 @@
+{
+  "args": ["test", "--", "--nocapture"],
+  "sourceLanguages": ["rust"],
+  // "configurations": [
+  //   {
+  //     "type": "lldb",
+  //     "request": "launch",
+  //     "name": "Debug shapes demo",
+  //     "program": "${workspaceFolder}/target/debug/shapes_demo",
+  //     "args": ["-S", "-t", "Square", "-d", "80"],
+  //     "cwd": "${workspaceFolder}"
+  //   }
+  // ]
+}

@@ -1,0 +1,322 @@
+use speedy::Endianness;
+
+use super::{CdrError, EncodingKind, ExtensibilityKind, MemberHeader};
+use crate::serialize::core::endianness_from_bool;
+use crate::serialize::{
+    align_buffer, align_position_with_header_offset, to_bytes_u32, BufferManager,
+    DeserializerReader,
+};
+
+/// XCDR v2 Serializer supporting PLAIN_CDR2, DELIMITED_CDR, and PL_CDR2
+/// Based on DDS-XTypes specification v1.3 Extended CDR version 2
+pub struct Xcdr2Serializer {
+    pub(super) endianness: Endianness,
+    pub(super) buffer: Vec<u8>,
+    pub(super) extensibility_kind: ExtensibilityKind,
+    pub(super) type_hash: Option<[u8; 32]>, // Type hash for type consistency checking
+}
+
+impl Xcdr2Serializer {
+    /// Create a new XCDR serializer
+    pub fn new(little_endian: bool, extensibility: ExtensibilityKind) -> Self {
+        Self {
+            endianness: endianness_from_bool(little_endian),
+            buffer: Vec::new(),
+            extensibility_kind: extensibility,
+            type_hash: None,
+        }
+    }
+
+    /// Create XCDR serializer with pre-allocated capacity
+    pub fn with_capacity(
+        little_endian: bool,
+        extensibility: ExtensibilityKind,
+        capacity: usize,
+    ) -> Self {
+        Self {
+            endianness: endianness_from_bool(little_endian),
+            buffer: Vec::with_capacity(capacity),
+            extensibility_kind: extensibility,
+            type_hash: None,
+        }
+    }
+
+    /// Create XCDR serializer with type hash for type safety
+    pub fn with_type_hash(
+        little_endian: bool,
+        extensibility: ExtensibilityKind,
+        type_hash: [u8; 32],
+    ) -> Self {
+        Self {
+            endianness: endianness_from_bool(little_endian),
+            buffer: Vec::new(),
+            extensibility_kind: extensibility,
+            type_hash: Some(type_hash),
+        }
+    }
+
+    /// Write XCDR encapsulation header (auto-detects version based on extensibility)
+    pub fn write_encapsulation_header(&mut self) -> Result<(), CdrError> {
+        let encoding_kind = match (self.extensibility_kind, self.endianness) {
+            // FINAL types use PLAINCDR2 (XCDR2)
+            (ExtensibilityKind::Final, Endianness::LittleEndian) => EncodingKind::PlainCdr2Le,
+            (ExtensibilityKind::Final, Endianness::BigEndian) => EncodingKind::PlainCdr2Be,
+
+            // APPENDABLE types use DELIMITED_CDR (XCDR2)
+            (ExtensibilityKind::Appendable, Endianness::LittleEndian) => EncodingKind::DCdr2Le,
+            (ExtensibilityKind::Appendable, Endianness::BigEndian) => EncodingKind::DCdr2Be,
+
+            // MUTABLE types use PL_CDR2 (XCDR2)
+            (ExtensibilityKind::Mutable, Endianness::LittleEndian) => EncodingKind::PlCdr2Le,
+            (ExtensibilityKind::Mutable, Endianness::BigEndian) => EncodingKind::PlCdr2Be,
+        };
+
+        // Encoding identifier (2 bytes) - always in big-endian
+        let encap_id_bytes = (encoding_kind as u16).to_be_bytes();
+        self.buffer.extend_from_slice(&encap_id_bytes);
+
+        // Options (2 bytes) - bit 0 indicates type hash presence
+        let options = if self.type_hash.is_some() { 0x0001u16 } else { 0x0000u16 };
+        self.buffer.extend_from_slice(&options.to_be_bytes());
+
+        // Optional type hash (32 bytes) if present
+        if let Some(hash) = self.type_hash {
+            self.buffer.extend_from_slice(&hash);
+        }
+
+        Ok(())
+    }
+
+    /// Align to boundary (XCDR v2 uses 4-byte max alignment)
+    #[inline]
+    pub(super) fn align(&mut self, alignment: usize) {
+        // XCDR2 standard: limit to 4-byte max alignment to reduce padding
+        let actual_alignment = std::cmp::min(alignment, 4);
+        align_buffer(&mut self.buffer, actual_alignment);
+    }
+
+    /// Write member header for MUTABLE types
+    pub fn write_member_header(&mut self, member_id: u32, length: usize) -> Result<(), CdrError> {
+        let header = MemberHeader::new(member_id, length);
+        header.write(&mut self.buffer, self.endianness)?;
+        Ok(())
+    }
+
+    /// Get current buffer position (for calculating lengths)
+    pub fn position(&self) -> usize {
+        self.buffer.len()
+    }
+
+    /// Reserve space for DHEADER and return position
+    pub fn reserve_dheader(&mut self) -> usize {
+        let pos = self.buffer.len();
+        self.buffer.extend_from_slice(&[0u8; 4]); // Reserve 4 bytes for DHEADER
+        pos
+    }
+
+    /// Write DHEADER at reserved position
+    pub fn write_dheader_at(&mut self, position: usize, length: u32) {
+        let bytes = to_bytes_u32(length, self.endianness);
+        self.buffer[position..position + 4].copy_from_slice(&bytes);
+    }
+
+    /// Helper method for writing u32 (used by begin_struct)
+    fn write_u32(&mut self, value: u32) -> Result<(), CdrError> {
+        self.align(4);
+        let bytes = to_bytes_u32(value, self.endianness);
+        self.buffer.extend_from_slice(&bytes);
+        Ok(())
+    }
+
+    /// Begin struct serialization (write DHEADER placeholder if needed)
+    pub fn begin_struct(&mut self) -> Result<usize, CdrError> {
+        match self.extensibility_kind {
+            ExtensibilityKind::Final => Ok(0), // No header needed
+            ExtensibilityKind::Appendable => {
+                // Write placeholder for DHEADER
+                let size_pos = self.buffer.len();
+                self.write_u32(0)?; // Will be backpatched
+                Ok(size_pos)
+            }
+            ExtensibilityKind::Mutable => {
+                // Write placeholder for DHEADER
+                let size_pos = self.buffer.len();
+                self.write_u32(0)?; // Will be backpatched
+                Ok(size_pos)
+            }
+        }
+    }
+
+    /// End struct serialization (backpatch size if needed)
+    pub fn end_struct(&mut self, size_pos: usize) -> Result<(), CdrError> {
+        match self.extensibility_kind {
+            ExtensibilityKind::Final => Ok(()), // No backpatching needed
+            ExtensibilityKind::Appendable | ExtensibilityKind::Mutable => {
+                if size_pos > 0 {
+                    let current_pos = self.buffer.len();
+                    let object_size = (current_pos - size_pos - 4) as u32;
+
+                    // Backpatch the size
+                    let size_bytes = to_bytes_u32(object_size, self.endianness);
+
+                    self.buffer[size_pos..size_pos + 4].copy_from_slice(&size_bytes);
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl BufferManager for Xcdr2Serializer {
+    /// Get the serialized data
+    fn into_bytes(self) -> Vec<u8> {
+        self.buffer
+    }
+
+    /// Get reference to the internal buffer
+    fn as_bytes(&self) -> &[u8] {
+        &self.buffer
+    }
+
+    /// Reset the serializer for reuse
+    fn reset(&mut self) {
+        self.buffer.clear();
+    }
+}
+
+/// XCDR v2 Deserializer
+pub struct Xcdr2Deserializer<'a> {
+    pub(super) endianness: Endianness,
+    pub(super) data: &'a [u8],
+    pub(super) position: usize,
+    header_size: usize,
+}
+
+impl<'a> Xcdr2Deserializer<'a> {
+    /// Create a new CDR deserializer
+    pub fn new(data: &'a [u8]) -> Result<Self, CdrError> {
+        let (endianness, header_size) = parse_encapsulation_header(data)?;
+
+        Ok(Self { endianness, data: &data[header_size..], position: 0, header_size })
+    }
+
+    /// Create deserializer without encapsulation header
+    pub fn new_without_header(data: &'a [u8], little_endian: bool) -> Self {
+        Self { endianness: endianness_from_bool(little_endian), data, position: 0, header_size: 0 }
+    }
+
+    /// Align position to boundary (accounting for removed header)
+    pub(super) fn align(&mut self, alignment: usize) {
+        align_position_with_header_offset(&mut self.position, alignment, self.header_size);
+    }
+
+    /// Check if enough data is available
+    #[inline]
+    pub(super) fn check_available(&self, size: usize) -> Result<(), CdrError> {
+        if self.position + size > self.data.len() {
+            Err(CdrError::InsufficientData)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Read DHEADER (4-byte object size for APPENDABLE/MUTABLE types)
+    pub fn read_dheader(&mut self) -> Result<u32, CdrError> {
+        self.deserialize_u32()
+    }
+
+    /// Skip bytes (for forward compatibility)
+    pub fn skip(&mut self, bytes: usize) -> Result<(), CdrError> {
+        self.check_available(bytes)?;
+        self.position += bytes;
+        Ok(())
+    }
+
+    /// Begin reading a struct with DHEADER (for APPENDABLE/MUTABLE types)
+    /// Returns the object size and starting position for boundary checking
+    pub fn begin_struct(&mut self) -> Result<(u32, usize), CdrError> {
+        let object_size = self.read_dheader()?;
+        let start_position = self.position;
+        Ok((object_size, start_position))
+    }
+
+    /// End reading a struct with DHEADER, automatically skipping any remaining bytes
+    /// This enables forward compatibility for APPENDABLE types
+    pub fn end_struct(&mut self, object_size: u32, start_position: usize) -> Result<(), CdrError> {
+        let current_position = self.position;
+        let bytes_read = current_position - start_position;
+
+        if bytes_read < object_size as usize {
+            // Skip remaining bytes for forward compatibility (unknown fields)
+            let remaining_bytes = object_size as usize - bytes_read;
+            self.skip(remaining_bytes)?;
+        } else if bytes_read > object_size as usize {
+            // This shouldn't happen with well-formed data
+            return Err(CdrError::DeserializationError(format!(
+                "Object size mismatch: read {} bytes but DHEADER indicates {} bytes",
+                bytes_read, object_size
+            )));
+        }
+
+        Ok(())
+    }
+}
+
+impl<'a> DeserializerReader for Xcdr2Deserializer<'a> {
+    type Error = CdrError;
+
+    fn check_available(&self, size: usize) -> Result<(), Self::Error> {
+        self.check_available(size)
+    }
+
+    fn get_data(&self) -> &[u8] {
+        self.data
+    }
+
+    fn get_position(&self) -> usize {
+        self.position
+    }
+
+    fn set_position(&mut self, position: usize) {
+        self.position = position;
+    }
+
+    fn get_endianness(&self) -> Endianness {
+        self.endianness
+    }
+
+    fn align(&mut self, alignment: usize) {
+        self.align(alignment);
+    }
+}
+
+const TYPE_HASH_FLAG: u16 = 0x0001;
+const TYPE_HASH_LENGTH: usize = 32;
+
+fn parse_encapsulation_header(data: &[u8]) -> Result<(Endianness, usize), CdrError> {
+    if data.len() < 4 {
+        return Err(CdrError::InsufficientData);
+    }
+
+    let encap_id = u16::from_be_bytes([data[0], data[1]]);
+    let options = u16::from_be_bytes([data[2], data[3]]);
+
+    let (endianness, is_xcdr2) = match encap_id {
+        0x0000 | 0x0002 => (Endianness::BigEndian, false),
+        0x0001 | 0x0003 => (Endianness::LittleEndian, false),
+        0x0006 | 0x0008 | 0x000A => (Endianness::BigEndian, true),
+        0x0007 | 0x0009 | 0x000B => (Endianness::LittleEndian, true),
+        _ => return Err(CdrError::InvalidEncapsulation(encap_id)),
+    };
+
+    let mut header_size = 4;
+    if is_xcdr2 && (options & TYPE_HASH_FLAG) != 0 {
+        header_size += TYPE_HASH_LENGTH;
+    }
+
+    if data.len() < header_size {
+        return Err(CdrError::InsufficientData);
+    }
+
+    Ok((endianness, header_size))
+}

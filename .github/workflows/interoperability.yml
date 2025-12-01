@@ -1,0 +1,202 @@
+name: Run Interoperability Tests
+run-name: ${{ github.actor }} is running Interoperability Tests 🍀
+on:
+  workflow_dispatch:
+    inputs:
+      enable_packet_dump:
+        description: "Enable packet capture"
+        required: false
+        type: boolean
+        default: false
+      dump_dds_name:
+        description: "DDS implementation to capture (e.g., opendds, fastdds, connext, dustdds, intercom, coredx, all)"
+        required: false
+        type: string
+        default: "all"
+      dump_role:
+        description: "Role to capture (publisher, subscriber, both)"
+        required: false
+        type: choice
+        options:
+          - publisher
+          - subscriber
+          - both
+        default: "both"
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+jobs:
+  build_binary:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout int2DDS repo
+        uses: actions/checkout@v4
+      - name: Checkout shapes demo repo
+        uses: actions/checkout@v4
+        with:
+          repository: IntellectusCorp/int2DDS-shapes-demo
+          token: ${{ secrets.ORG_PAT }}
+          path: shapes-demo
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.89.0
+          rustflags: ""
+      - run: |
+          cd shapes-demo/shapes-demo-interoperability
+          cargo build --release
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: int2DDS_shapes_demo
+          path: shapes-demo/shapes-demo-interoperability/target/release/shapes-demo-interoperability
+  download_binaries:
+    needs: build_binary
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout dds-rtps repo
+        uses: actions/checkout@v4
+        with:
+          repository: omg-dds/dds-rtps
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11.4"
+      - name: Downloads assets
+        uses: robinraju/release-downloader@v1.10
+        with:
+          repository: "omg-dds/dds-rtps"
+          latest: true
+          fileName: "*"
+      - name: Unzip
+        run: |
+          unzip '*.zip' -d executables
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: int2DDS_shapes_demo
+          path: ./executables/temp
+      - name: Make binaries executable
+        run: |
+          mv ./executables/temp/shapes-demo-interoperability ./executables/int2DDS_shape_main_linux
+          rmdir ./executables/temp
+          chmod +x ./executables/int2DDS_shape_main_linux
+          ls -alh ./executables/
+      - name: Upload executables
+        uses: actions/upload-artifact@v4
+        with:
+          name: executables
+          path: ./executables/
+      - name: Upload dds-rtps repo files
+        uses: actions/upload-artifact@v4
+        with:
+          name: dds-rtps-files
+          path: |
+            ./interoperability_report.py
+            ./test_suite.py
+            ./rtps_test_utilities.py
+            ./test_suite_functions.py
+            ./requirements.txt
+
+  test_all_dds:
+    name: Test ${{ matrix.display_name || format('{0}-{1}', matrix.dds.name, matrix.role) }}
+    needs: download_binaries
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        dds:
+          - name: connext
+            pattern: connext_dds-*_shape_main_linux
+          - name: dustdds
+            pattern: dust_dds-*_shape_main_linux
+          - name: fastdds
+            pattern: eprosima_fastdds-*_shape_main_linux
+          - name: intercom
+            pattern: intercom_dds-*_shape_main_linux
+          - name: opendds
+            pattern: opendds-*_shape_main_linux
+          - name: coredx
+            pattern: toc_coredx_dds-*-shape_main_linux
+        role: [publisher, subscriber]
+        include:
+          - dds:
+              name: int2DDS
+              pattern: int2DDS_shape_main_linux
+            role: publisher
+            display_name: int2DDS
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup test environment
+        uses: ./.github/actions/setup-test-env
+      - name: Run DDS test
+        uses: ./.github/actions/run-dds-test
+        with:
+          dds-name: ${{ matrix.dds.name }}
+          executable-pattern: ${{ matrix.dds.pattern }}
+          role: ${{ matrix.role }}
+          dump-packet: ${{ inputs.enable_packet_dump && (inputs.dump_dds_name == 'all' || inputs.dump_dds_name == matrix.dds.name) && (inputs.dump_role == 'both' || inputs.dump_role == matrix.role) }}
+
+  merge_reports:
+    needs: test_all_dds
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all test reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: junit_report_*
+          merge-multiple: true
+      - name: Install junitparser
+        run: pip install junitparser
+      - name: Merge reports
+        run: |
+          junitparser merge *.xml junit_interoperability_report.xml
+          ls -la *.xml
+      - name: Upload merged report
+        uses: actions/upload-artifact@v4
+        with:
+          name: xml_report
+          path: ./junit_interoperability_report.xml
+
+  generate_report:
+    runs-on: ubuntu-latest
+    needs: merge_reports
+    steps:
+      - name: Checkout dds-rtps repo
+        uses: actions/checkout@v4
+        with:
+          repository: omg-dds/dds-rtps
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: xml_report
+          path: .
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11.4"
+      - name: Setting up environment
+        run: |
+          python3 -m venv .venv
+          source .venv/bin/activate
+          pip install -r requirements.txt
+      - name: Generate xlsx report
+        run: |
+          source .venv/bin/activate
+          sed -i "66i\\        elif 'int2' in product.lower():" generate_xlsx_report.py
+          sed -i "67i\\            return 'Intellectus'" generate_xlsx_report.py
+          sed -i "87i\\        elif 'int2DDS' in product.lower():" generate_xlsx_report.py
+          sed -i "88i\\            return 'int2DDS'" generate_xlsx_report.py
+          python3 generate_xlsx_report.py --input junit_interoperability_report.xml --output interoperability_report.xlsx
+      - name: XUnit Viewer
+        id: xunit-viewer
+        uses: AutoModality/action-xunit-viewer@v1
+        with:
+          results: ./junit_interoperability_report.xml
+          fail: false
+      - name: Attach the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: interoperability_report_complete
+          path: |
+            ./index.html
+            ./junit_interoperability_report.xml
+            ./interoperability_report.xlsx
