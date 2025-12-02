@@ -44,16 +44,6 @@ dashmap = "5.5"
 arc-swap = "1.7"
 libloading = "0.8"
 
-# Function timing and tracing
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = [
-    "fmt",
-    "env-filter",
-    "json",
-    "time",
-] }
-tracing-appender = "0.2"
-
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.21"
 futures-util = "0.3"
@@ -111,7 +101,3 @@ criterion = { version = "0.7.0", features = ["html_reports"] }
 [[bench]]
 name = "reliable" # Name of the Rust source file where the benchmark code will be written
 harness = false   # Set to false to disable the default benchmark functionality and enable Criterion
-
-[profile.release]
-# Keep debug info for tracing/profiling (does not affect runtime performance)
-debug = 1 # Minimal debug info for function names and line numbers
