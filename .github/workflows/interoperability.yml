@@ -9,7 +9,7 @@ on:
         type: boolean
         default: false
       dump_dds_name:
-        description: "DDS implementation to capture (e.g., opendds, fastdds, connext, dustdds, intercom, coredx, all)"
+        description: "DDS implementation to capture (e.g., opendds, fastdds, connext, dustdds, intercom, coredx, int2DDS, all)"
         required: false
         type: string
         default: "all"
