@@ -23,7 +23,7 @@ on:
           - both
         default: "both"
   pull_request:
-    branches: [main]
+    branches: [develop]
     types: [opened, synchronize, reopened, ready_for_review]
 jobs:
   build_binary:
