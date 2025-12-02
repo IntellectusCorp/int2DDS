@@ -328,8 +328,6 @@ Developed by [Intellectus Corp](https://github.com/IntellectusCorp).
 
 - [Documents](./docs/): 문서(설계 자료, 참고 논문 등)
   - [guide](./docs/guide/): 개발 관련 가이드
-    - [Rust 로깅 가이드](./docs/guide/logging.md)
-    - [Tracing crate 가이드](./docs/guide/tracing.md)
     - [환경변수](./docs/guide/env.md)
   - [Rules](./docs/rules/): 개발 관련 그라운드 룰
     - [Git 사용 방안](./docs/rules/git.md)
