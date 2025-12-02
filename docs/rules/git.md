@@ -105,12 +105,14 @@ A commit consists of a title and body. The title and body must be **separated by
 | feature/ | Adding new features                                                |
 | fix/     | Bug fixes                                                          |
 | hotfix/  | Urgent fixes for operational issues that bypass the review process |
+| chore/   | Build tasks, config changes, dependency updates, cleanup           |
 
 - Examples
 
 > feature/dds-topic-qos-configuration
 > fix/participant-memory-leak
 > hotfix/connection-timeout-crash
+> chore/update-dependencies
 
 ### Tag
 
