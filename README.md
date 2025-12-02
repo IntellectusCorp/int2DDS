@@ -25,7 +25,6 @@ A **Rust implementation** of the [Data Distribution Service (DDS)](https://www.o
 - **Transport Flexibility**: UDP multicast, broadcast, and TCP transport support
 - **Data Fragmentation**: Automatic handling of large messages
 - **XCDR2 Serialization**: Support for extensible data representation
-- **FFI Support**: C bindings for integration with non-Rust applications
 - **Cross-Platform**: Works on Windows, Linux, and macOS
 - **Interoperability**: Interoperable with other RTPS/DDS implementations
 
@@ -270,7 +269,6 @@ int2DDS/
 │   │   └── common/   # Shared utilities
 │   └── examples/     # 80+ example programs
 ├── derive/           # DdsType derive macro
-├── ffi/              # C FFI bindings
 └── docs/             # Documentation and guides
 ```
 
@@ -310,7 +308,6 @@ Developed by [Intellectus Corp](https://github.com/IntellectusCorp).
 - **전송 유연성**: UDP 멀티캐스트, 브로드캐스트, TCP 전송 지원
 - **데이터 단편화**: 대용량 메시지 자동 처리
 - **XCDR2 직렬화**: 확장 가능한 데이터 표현 지원
-- **FFI 지원**: 비Rust 애플리케이션과의 통합을 위한 C 바인딩
 - **크로스 플랫폼**: Windows, Linux, macOS 지원
 - **상호운용성**: 다른 RTPS/DDS 구현체와 상호운용 가능
 
@@ -333,7 +330,6 @@ Developed by [Intellectus Corp](https://github.com/IntellectusCorp).
     - [Git 사용 방안](./docs/rules/git.md)
 - [dds/](./dds/): DDS 라이브러리 구현
 - [derive/](./derive/): DdsType 매크로
-- [ffi/](./ffi/): C FFI 바인딩
 - [dds/examples/](./dds/examples/): 예제 프로그램
 
 ### 라이선스
