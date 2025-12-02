@@ -22,7 +22,7 @@ runs:
         source .venv/bin/activate
         cd executables
         chmod +x ./${{ inputs.executable-pattern }}
-        chmod +x ./int2dds_shape_main_linux
+        chmod +x ./int2DDS_shape_main_linux
 
         # Start tshark if enabled
         if [ "${{ inputs.dump-packet }}" = "true" ]; then
@@ -47,10 +47,10 @@ runs:
         # Run the interoperability test
         if [ "${{ inputs.role }}" = "publisher" ]; then
           echo "Testing Publisher ${{ inputs.dds-name }} --- Subscriber int2dds" | tee test.log
-          python3 ../interoperability_report.py -P ./${{ inputs.executable-pattern }} -S ./int2dds_shape_main_linux -o=../junit_report_${{ inputs.dds-name }}_${{ inputs.role }}.xml | tee -a test.log
+          python3 ../interoperability_report.py -P ./${{ inputs.executable-pattern }} -S ./int2DDS_shape_main_linux -o=../junit_report_${{ inputs.dds-name }}_${{ inputs.role }}.xml | tee -a test.log
         else
           echo "Testing Publisher int2dds --- Subscriber ${{ inputs.dds-name }}" | tee test.log
-          python3 ../interoperability_report.py -P ./int2dds_shape_main_linux -S ./${{ inputs.executable-pattern }} -o=../junit_report_${{ inputs.dds-name }}_${{ inputs.role }}.xml | tee -a test.log
+          python3 ../interoperability_report.py -P ./int2DDS_shape_main_linux -S ./${{ inputs.executable-pattern }} -o=../junit_report_${{ inputs.dds-name }}_${{ inputs.role }}.xml | tee -a test.log
         fi
 
         # Stop tshark if it was started
