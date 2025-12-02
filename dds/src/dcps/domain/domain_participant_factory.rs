@@ -104,9 +104,6 @@ impl DomainParticipantFactory {
         listener: Option<Arc<dyn DomainParticipantListener>>,
         mask: StatusMask,
     ) -> DdsResult<DomainParticipant> {
-        // Initialize tracing for function timing measurements
-        // init_tracing();
-
         let participant = DomainParticipant::new(domain_id, qos_list.clone(), listener, mask)?;
         if self.get_qos()?.entity_factory.autoenable_created_entities {
             participant.enable()?;
