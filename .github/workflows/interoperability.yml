@@ -4,14 +4,23 @@ on:
   workflow_dispatch:
     inputs:
       enable_packet_dump:
-        description: "Enable packet capture"
+        description: "Enable packet capture for debugging"
         required: false
         type: boolean
         default: false
       dump_dds_name:
-        description: "DDS implementation to capture (e.g., opendds, fastdds, connext, dustdds, intercom, coredx, int2DDS, all)"
+        description: "DDS implementation to capture"
         required: false
-        type: string
+        type: choice
+        options:
+          - opendds
+          - fastdds
+          - connext
+          - dustdds
+          - intercom
+          - coredx
+          - int2DDS
+          - all
         default: "all"
       dump_role:
         description: "Role to capture (publisher, subscriber, both)"
