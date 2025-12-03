@@ -207,7 +207,6 @@ impl SedpLogic {
         let mut discovery_unicast_listening_task = DiscoveryUnicastListeningTask::new(
             discovery_unicast_listener,
             discovery_tcp_listener,
-            sender.clone(),
             self.participant.clone(),
         );
 
@@ -2327,7 +2326,6 @@ mod tests {
         let mut discovery_unicast_listening_task = DiscoveryUnicastListeningTask::new(
             socket.discovery_unicast_listener(),
             socket.discovery_tcp_listener(),
-            socket.sender(),
             participant.clone(),
         );
 
