@@ -46,8 +46,8 @@ use crate::{
         deadline_monitor::DeadlineMonitor,
         domain_entity::DomainEntity,
         entity::{
-            impl_dds_entity, impl_dds_entity_impl, BaseEntity, EnableChild, Entity, EntityInternal,
-            UpdateStatus,
+            impl_check_parent_enabled, impl_dds_entity, impl_dds_entity_impl, BaseEntity,
+            EnableChild, Entity, EntityInternal, UpdateStatus,
         },
         history_cache::HistoryCache as _,
         qos_policy::{
@@ -301,6 +301,8 @@ impl<Foo: 'static + Clone> EnableChild for DataWriter<Foo> {
 
         Ok(())
     }
+
+    impl_check_parent_enabled!(get_publisher);
 }
 impl<Foo: 'static + Clone> UpdateStatus for DataWriter<Foo> {
     fn update_status(
