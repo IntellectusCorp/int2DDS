@@ -235,8 +235,6 @@ mod tests {
         let participant =
             Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ip()));
 
-        let sender = socket.sender();
-
         //user multicast port : 7400
         //user unicast port : 7410
         //user traffic multicast port : 7401
