@@ -1655,9 +1655,3 @@ impl QosPolicy for DataRepresentationQosPolicy {
         DATAREPRESENTATION_QOS_POLICY_NAME
     }
 }
-
-impl DataRepresentationQosPolicy {
-    pub fn new(representations: Vec<DataRepresentationId>) -> Self {
-        DataRepresentationQosPolicy { value: representations }
-    }
-}
