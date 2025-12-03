@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use int2dds::dcps::{
@@ -27,6 +29,10 @@ pub struct KeyedDataType {
 impl KeyedDataType {
     pub fn new(key: i16, value: i16) -> Self {
         Self { key, value }
+    }
+
+    pub fn default() -> Self {
+        Self { key: 0, value: 0 }
     }
 }
 
