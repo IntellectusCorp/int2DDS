@@ -265,7 +265,7 @@ impl ParsedBuiltinTopicData {
             }
             ParameterId::PidGroupData => {
                 if let ParameterValue::GroupData(group_data) = parameter.value {
-                    self.group_data = Some(GroupDataQosPolicy { datavalue: group_data.to_vec() });
+                    self.group_data = Some(GroupDataQosPolicy { value: group_data.to_vec() });
                 }
             }
             ParameterId::PidTimeBasedFilter => {

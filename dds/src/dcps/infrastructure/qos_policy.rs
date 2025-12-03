@@ -685,7 +685,7 @@ impl QosPolicy for TopicDataQosPolicy {
 #[derive(Debug, Default, ConstDefault, Clone, PartialEq, Eq, Readable, Writable)]
 pub struct GroupDataQosPolicy {
     /// Arbitrary group-specific data.
-    pub datavalue: Vec<u8>,
+    pub value: Vec<u8>,
 }
 
 impl QosPolicy for GroupDataQosPolicy {
@@ -1644,24 +1644,14 @@ impl DataRepresentationId {
 ///     .create_datareader::<HelloWorldType>(&topic, reader_qos, None, StatusMask::default())
 ///     .unwrap();
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Readable, Writable, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Readable, Writable, Default, ConstDefault)]
 pub struct DataRepresentationQosPolicy {
     /// List of supported data representations.
     pub value: Vec<DataRepresentationId>,
 }
 
-impl ConstDefault for DataRepresentationQosPolicy {
-    const DEFAULT: Self = DataRepresentationQosPolicy { value: Vec::new() };
-}
-
 impl QosPolicy for DataRepresentationQosPolicy {
     fn name(&self) -> &str {
         DATAREPRESENTATION_QOS_POLICY_NAME
-    }
-}
-
-impl DataRepresentationQosPolicy {
-    pub fn new(representations: Vec<DataRepresentationId>) -> Self {
-        DataRepresentationQosPolicy { value: representations }
     }
 }
