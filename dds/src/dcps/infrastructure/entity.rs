@@ -224,5 +224,18 @@ macro_rules! impl_dds_entity {
     };
 }
 
+macro_rules! impl_check_parent_enabled {
+    ($parent_getter:ident) => {
+        fn check_parent_enabled(&self) -> DdsResult<()> {
+            match self.$parent_getter()?.is_enabled() {
+                Ok(()) => Ok(()),
+                Err(DdsError::NotEnabled) => Err(DdsError::PreconditionNotMet),
+                Err(e) => Err(e),
+            }
+        }
+    };
+}
+
+pub(crate) use impl_check_parent_enabled;
 pub(crate) use impl_dds_entity;
 pub(crate) use impl_dds_entity_impl;
