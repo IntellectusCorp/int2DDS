@@ -406,7 +406,11 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                 writer.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
             datawriter_cache.set_datawriter(weak_ref);
         }
-        *writer.self_ref.lock().unwrap() = Some(writer_arc); // Without Arc, memory is freed when new() function ends. StatusCondition's entity field returns None.
+        {
+            let mut self_ref =
+                writer.self_ref.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            *self_ref = Some(writer_arc);
+        }
         let period = writer.get_qos()?.deadline.period;
         if !period.is_infinite() && guid.entity_kind() == EntityKind::USER_DEFINED_WRITER_WITH_KEY {
             let status_callback = writer.create_status_callback()?;
