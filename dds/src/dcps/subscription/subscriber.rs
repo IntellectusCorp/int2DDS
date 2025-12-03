@@ -32,8 +32,8 @@ use crate::{
     infrastructure::{
         domain_entity::DomainEntity,
         entity::{
-            impl_dds_entity, impl_dds_entity_impl, BaseEntity, EnableChild, Entity, EntityInternal,
-            UpdateStatus,
+            impl_check_parent_enabled, impl_dds_entity, impl_dds_entity_impl, BaseEntity,
+            EnableChild, Entity, EntityInternal, UpdateStatus,
         },
         qos_policy::{PresentationQosAccessScopeKind, Qos},
         status::StatusMask,
@@ -134,6 +134,8 @@ impl EnableChild for Subscriber {
 
         Ok(())
     }
+
+    impl_check_parent_enabled!(get_participant);
 }
 impl UpdateStatus for Subscriber {}
 impl DomainEntity for Subscriber {}
