@@ -571,8 +571,10 @@ impl DomainParticipant {
             .ok_or(DdsError::Error("DomainParticipant is not properly initialized".to_string()))?;
         let publisher = Publisher::new(qos, listener, mask, handle, self_ref);
         let qos = self.get_qos()?;
-        if qos.entity_factory.autoenable_created_entities {
-            publisher.enable()?;
+        if let Ok(()) = self.is_enabled() {
+            if qos.entity_factory.autoenable_created_entities {
+                publisher.enable()?;
+            }
         }
 
         let publisher_ref = publisher
@@ -737,8 +739,10 @@ impl DomainParticipant {
             .ok_or(DdsError::Error("DomainParticipant not properly initialized".to_string()))?;
         let subscriber = Subscriber::new(qos, listener, mask, handle, self_ref);
         let qos = self.get_qos()?;
-        if qos.entity_factory.autoenable_created_entities {
-            subscriber.enable()?;
+        if let Ok(()) = self.is_enabled() {
+            if qos.entity_factory.autoenable_created_entities {
+                subscriber.enable()?;
+            }
         }
 
         let subscriber_ref = subscriber
@@ -1306,8 +1310,10 @@ impl DomainParticipant {
             .ok_or(DdsError::Error("DomainParticipant not properly initialized".to_string()))?;
         let topic = Topic::new(topic_name, type_name, qos, listener, mask, handle, self_ref);
         let qos = self.get_qos()?;
-        if qos.entity_factory.autoenable_created_entities {
-            topic.enable()?;
+        if let Ok(()) = self.is_enabled() {
+            if qos.entity_factory.autoenable_created_entities {
+                topic.enable()?;
+            }
         }
 
         let topic_ref = topic
