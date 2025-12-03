@@ -1005,12 +1005,12 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         <Self as DataWriterBase>::wait_for_acknowledgments(self, max_wait)
     }
 
-    fn is_enabled(&self) -> DdsResult<()> {
+    pub(crate) fn is_enabled(&self) -> DdsResult<()> {
         self.is_deleted()?;
-        {
-            let _ = self.get_rtps_writer()?;
-        }
         if self.enabled.load(Ordering::SeqCst) {
+            {
+                let _ = self.get_rtps_writer()?;
+            }
             Ok(())
         } else {
             Err(DdsError::NotEnabled)
