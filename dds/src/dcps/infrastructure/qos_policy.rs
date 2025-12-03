@@ -685,7 +685,7 @@ impl QosPolicy for TopicDataQosPolicy {
 #[derive(Debug, Default, ConstDefault, Clone, PartialEq, Eq, Readable, Writable)]
 pub struct GroupDataQosPolicy {
     /// Arbitrary group-specific data.
-    pub datavalue: Vec<u8>,
+    pub value: Vec<u8>,
 }
 
 impl QosPolicy for GroupDataQosPolicy {
