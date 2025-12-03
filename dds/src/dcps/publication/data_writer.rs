@@ -360,7 +360,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         publisher: &Arc<Publisher>,
         wlp_logic: Option<WlpLogic>,
     ) -> DdsResult<Self> {
-        let mut writer = Self {
+        let writer = Self {
             guid,
             qos: Arc::new(Mutex::new(qos.clone())),
             listener: Arc::new(RwLock::new(listener)),
@@ -406,7 +406,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                 writer.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
             datawriter_cache.set_datawriter(weak_ref);
         }
-        writer.self_ref = Arc::new(Mutex::new(Some(writer_arc))); // Without Arc, memory is freed when new() function ends. StatusCondition's entity field returns None.
+        *writer.self_ref.lock().unwrap() = Some(writer_arc); // Without Arc, memory is freed when new() function ends. StatusCondition's entity field returns None.
         let period = writer.get_qos()?.deadline.period;
         if !period.is_infinite() && guid.entity_kind() == EntityKind::USER_DEFINED_WRITER_WITH_KEY {
             let status_callback = writer.create_status_callback()?;
