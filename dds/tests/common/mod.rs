@@ -97,7 +97,7 @@ pub fn wait_for_writer_status(data_writer: &DataWriter<KeyedDataType>, status_ma
     condition.set_enabled_statuses(status_mask).unwrap();
     let wait_set = WaitSet::new();
     wait_set.attach_condition(condition).unwrap();
-    wait_set.wait(Duration::infinite()).unwrap();
+    wait_set.wait(Duration::from_seconds(1)).unwrap();
 }
 
 pub fn wait_for_reader_status(data_reader: &DataReader<KeyedDataType>, status_mask: StatusMask) {
@@ -105,5 +105,5 @@ pub fn wait_for_reader_status(data_reader: &DataReader<KeyedDataType>, status_ma
     condition.set_enabled_statuses(status_mask).unwrap();
     let wait_set = WaitSet::new();
     wait_set.attach_condition(condition).unwrap();
-    wait_set.wait(Duration::infinite()).unwrap();
+    wait_set.wait(Duration::from_seconds(1)).unwrap();
 }
