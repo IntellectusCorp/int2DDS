@@ -25,7 +25,6 @@ impl UserUnicastListeningTask {
     pub(crate) fn new(
         user_unicast_listener: Option<UdpListener>,
         tcp_listener: Option<TcpListener>,
-        sender: Arc<TransportSender>,
         participant: Arc<Participant>,
     ) -> Self {
         // Extract TCP sender from participant if available (for Hybrid mode)
@@ -245,7 +244,6 @@ mod tests {
         let mut user_unicast_listening_task = UserUnicastListeningTask::new(
             socket.user_traffic_unicast_listener(),
             socket.user_traffic_tcp_listener(),
-            sender.clone(),
             participant,
         );
         let _ = user_unicast_listening_task.unicast_listening();
