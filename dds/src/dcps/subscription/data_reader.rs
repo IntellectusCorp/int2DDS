@@ -774,10 +774,10 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
     pub(crate) fn is_enabled(&self) -> DdsResult<()> {
         self.is_deleted()?;
-        {
-            let _ = self.get_rtps_reader()?;
-        }
         if self.enabled.load(Ordering::SeqCst) {
+            {
+                let _ = self.get_rtps_reader()?;
+            }
             Ok(())
         } else {
             Err(DdsError::NotEnabled)
