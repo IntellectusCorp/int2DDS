@@ -174,12 +174,10 @@ impl SedpLogic {
         discovery_multicast_listener: Option<UdpListener>,
         discovery_unicast_listener: Option<UdpListener>,
         discovery_tcp_listener: Option<TcpListener>,
-        sender: Arc<TransportSender>,
     ) {
         let mut discovery_multicast_listening_task = DiscoveryMulticastListeningTask::new(
             discovery_multicast_listener,
             self.participant.clone(),
-            sender.clone(),
         );
 
         // multicast listening
@@ -2251,7 +2249,6 @@ mod tests {
         let mut discovery_multicast_listening_task = DiscoveryMulticastListeningTask::new(
             socket.discovery_multicast_listener(),
             participant.clone(),
-            socket.sender(),
         );
         //multicast listening
         thread::Builder::new()
@@ -2304,7 +2301,6 @@ mod tests {
         let mut discovery_multicast_listening_task = DiscoveryMulticastListeningTask::new(
             socket.discovery_multicast_listener(),
             participant.clone(),
-            socket.sender(),
         );
         //multicast listening
         thread::Builder::new()
