@@ -259,8 +259,10 @@ impl Publisher {
             wlp_logic,
         )?;
 
-        if self.get_qos()?.entity_factory.autoenable_created_entities {
-            datawriter.enable()?;
+        if let Ok(()) = self.is_enabled() {
+            if self.get_qos()?.entity_factory.autoenable_created_entities {
+                datawriter.enable()?;
+            }
         }
 
         let writer_ops: Arc<dyn DataWriterInternal<Qos = DataWriterQos>> = datawriter
