@@ -7,7 +7,6 @@ use crate::rtps::messages::message_receiver::MessageReceiver;
 use crate::rtps::transport::socket::MAX_EVENTS;
 use crate::rtps::transport::tcp::tcp_listener::TcpListener;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
-use crate::rtps::transport::TransportSender;
 use log::{debug, error, info, warn};
 use mio::{Events, Interest, Poll, Token};
 use std::net::SocketAddr;
@@ -26,7 +25,6 @@ impl DiscoveryUnicastListeningTask {
     pub(crate) fn new(
         discovery_unicast_listener: Option<UdpListener>,
         tcp_listener: Option<TcpListener>,
-        sender: Arc<TransportSender>,
         participant: Arc<Participant>,
     ) -> Self {
         let (_, sedp_logic, _) = participant.get_logics();
@@ -247,8 +245,6 @@ mod tests {
         let participant =
             Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ip()));
 
-        let sender = socket.sender();
-
         //discovery multicast port : 7400
         //discovery unicast port : 7410
         //user traffic multicast port : 7401
@@ -256,7 +252,6 @@ mod tests {
         let mut discovery_unicast_listening_task = DiscoveryUnicastListeningTask::new(
             socket.discovery_unicast_listener(),
             socket.discovery_tcp_listener(),
-            sender.clone(),
             participant,
         );
         let _ = discovery_unicast_listening_task.unicast_listening();
