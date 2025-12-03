@@ -58,6 +58,7 @@ jobs:
         with:
           name: int2DDS_shapes_demo
           path: shapes-demo/shapes-demo-interoperability/target/release/shapes-demo-interoperability
+          retention-days: 1
   download_binaries:
     needs: build_binary
     runs-on: ubuntu-latest
@@ -94,6 +95,7 @@ jobs:
         with:
           name: executables
           path: ./executables/
+          retention-days: 1
       - name: Upload dds-rtps repo files
         uses: actions/upload-artifact@v4
         with:
@@ -104,6 +106,7 @@ jobs:
             ./rtps_test_utilities.py
             ./test_suite_functions.py
             ./requirements.txt
+          retention-days: 1
 
   test_all_dds:
     name: Test ${{ matrix.display_name || format('{0}-{1}', matrix.dds.name, matrix.role) }}
@@ -165,9 +168,28 @@ jobs:
           name: xml_report
           path: ./junit_interoperability_report.xml
 
+  merge_test_logs:
+    needs: test_all_dds
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all test logs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: test_log_*
+          merge-multiple: true
+      - name: Create test logs archive
+        run: |
+          ls -la
+          zip -r test_logs.zip *.log
+      - name: Upload test logs archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: test_logs
+          path: test_logs.zip
+
   generate_report:
     runs-on: ubuntu-latest
-    needs: merge_reports
+    needs: [merge_reports, merge_test_logs]
     steps:
       - name: Checkout dds-rtps repo
         uses: actions/checkout@v4
@@ -209,3 +231,15 @@ jobs:
             ./index.html
             ./junit_interoperability_report.xml
             ./interoperability_report.xlsx
+      - name: Delete intermediate artifacts
+        if: always()
+        uses: geekyeggo/delete-artifact@v5
+        with:
+          name: |
+            int2DDS_shapes_demo
+            executables
+            dds-rtps-files
+            junit_report_*
+            test_log_*
+            xml_report
+          failOnError: false
