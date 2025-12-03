@@ -102,6 +102,30 @@ impl CdrSerializer {
         }
         Ok(())
     }
+
+    /// Serialize fixed-size bool array (no length prefix)
+    pub fn serialize_bool_array(&mut self, data: &[bool]) -> Result<(), CdrError> {
+        for &value in data {
+            self.buffer.push(if value { 1 } else { 0 });
+        }
+        Ok(())
+    }
+
+    /// Serialize fixed-size char array (no length prefix)
+    pub fn serialize_char_array_fixed(&mut self, data: &[char]) -> Result<(), CdrError> {
+        for &value in data {
+            self.buffer.push(value as u8);
+        }
+        Ok(())
+    }
+
+    /// Serialize fixed-size string array (no length prefix)
+    pub fn serialize_string_array(&mut self, data: &[String]) -> Result<(), CdrError> {
+        for value in data {
+            self.serialize_string(value)?;
+        }
+        Ok(())
+    }
 }
 
 // Xcdr2Serializer uses the same array serialization logic
@@ -196,6 +220,30 @@ impl Xcdr2Serializer {
         for &value in values {
             let bytes = to_bytes_f64(value, self.endianness);
             self.buffer.extend_from_slice(&bytes);
+        }
+        Ok(())
+    }
+
+    /// Serialize fixed-size bool array (no length prefix)
+    pub fn serialize_bool_array(&mut self, values: &[bool]) -> Result<(), CdrError> {
+        for &value in values {
+            self.buffer.push(if value { 1 } else { 0 });
+        }
+        Ok(())
+    }
+
+    /// Serialize fixed-size char array (no length prefix)
+    pub fn serialize_char_array_fixed(&mut self, values: &[char]) -> Result<(), CdrError> {
+        for &value in values {
+            self.buffer.push(value as u8);
+        }
+        Ok(())
+    }
+
+    /// Serialize fixed-size string array (no length prefix)
+    pub fn serialize_string_array(&mut self, values: &[String]) -> Result<(), CdrError> {
+        for value in values {
+            self.serialize_string(value)?;
         }
         Ok(())
     }
