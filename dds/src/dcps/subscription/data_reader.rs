@@ -61,8 +61,8 @@ use crate::{
         deadline_monitor::DeadlineMonitor,
         domain_entity::DomainEntity,
         entity::{
-            impl_dds_entity, impl_dds_entity_impl, BaseEntity, EnableChild, Entity, EntityInternal,
-            UpdateStatus,
+            impl_check_parent_enabled, impl_dds_entity, impl_dds_entity_impl, BaseEntity,
+            EnableChild, Entity, EntityInternal, UpdateStatus,
         },
         history_cache::HistoryCache as DcpsHistoryCache,
         qos_policy::{DestinationOrderQosPolicyKind, HistoryQosPolicyKind, Qos},
@@ -422,6 +422,8 @@ impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
 
         Ok(())
     }
+
+    impl_check_parent_enabled!(get_subscriber);
 }
 impl<Foo: 'static + Clone + Debug> UpdateStatus for DataReader<Foo> {
     fn update_status(
