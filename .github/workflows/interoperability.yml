@@ -182,7 +182,7 @@ jobs:
           source .venv/bin/activate
           sed -i "66i\\        elif 'int2' in product.lower():" generate_xlsx_report.py
           sed -i "67i\\            return 'Intellectus'" generate_xlsx_report.py
-          sed -i "87i\\        elif 'int2DDS' in product.lower():" generate_xlsx_report.py
+          sed -i "87i\\        elif 'int2' in product.lower():" generate_xlsx_report.py
           sed -i "88i\\            return 'int2DDS'" generate_xlsx_report.py
           python3 generate_xlsx_report.py --input junit_interoperability_report.xml --output interoperability_report.xlsx
       - name: XUnit Viewer
