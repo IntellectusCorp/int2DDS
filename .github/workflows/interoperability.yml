@@ -4,14 +4,23 @@ on:
   workflow_dispatch:
     inputs:
       enable_packet_dump:
-        description: "Enable packet capture"
+        description: "Enable packet capture for debugging"
         required: false
         type: boolean
         default: false
       dump_dds_name:
-        description: "DDS implementation to capture (e.g., opendds, fastdds, connext, dustdds, intercom, coredx, int2DDS, all)"
+        description: "DDS implementation to capture"
         required: false
-        type: string
+        type: choice
+        options:
+          - opendds
+          - fastdds
+          - connext
+          - dustdds
+          - intercom
+          - coredx
+          - int2DDS
+          - all
         default: "all"
       dump_role:
         description: "Role to capture (publisher, subscriber, both)"
@@ -135,7 +144,7 @@ jobs:
           role: ${{ matrix.role }}
           dump-packet: ${{ inputs.enable_packet_dump && (inputs.dump_dds_name == 'all' || inputs.dump_dds_name == matrix.dds.name) && (inputs.dump_role == 'both' || inputs.dump_role == matrix.role) }}
 
-  merge_reports:
+  merge_files:
     needs: test_all_dds
     runs-on: ubuntu-latest
     steps:
@@ -144,21 +153,66 @@ jobs:
         with:
           pattern: junit_report_*
           merge-multiple: true
+          path: ./reports
+      - name: Download all test logs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: test_log_*
+          merge-multiple: true
+          path: ./logs
+      - name: Download all packet captures
+        uses: actions/download-artifact@v4
+        with:
+          pattern: tshark_*
+          merge-multiple: true
+          path: ./packets
+        continue-on-error: true
       - name: Install junitparser
         run: pip install junitparser
       - name: Merge reports
         run: |
+          cd reports
           junitparser merge *.xml junit_interoperability_report.xml
           ls -la *.xml
+          mv junit_interoperability_report.xml ../
+          cd ..
+      - name: Create test logs archive
+        run: |
+          cd logs
+          ls -la
+          zip -r ../test_logs.zip *.log
+          cd ..
+      - name: Create packet captures archive
+        run: |
+          if [ -d "./packets" ] && [ "$(ls -A ./packets)" ]; then
+            cd packets
+            ls -la
+            zip -r ../packet_captures.zip *.pcap
+            cd ..
+          else
+            echo "No packet captures found, skipping archive creation"
+          fi
+        continue-on-error: true
       - name: Upload merged report
         uses: actions/upload-artifact@v4
         with:
           name: xml_report
           path: ./junit_interoperability_report.xml
+      - name: Upload test logs archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: test_logs
+          path: test_logs.zip
+      - name: Upload packet captures archive
+        if: hashFiles('packet_captures.zip') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: packet_captures
+          path: packet_captures.zip
 
   generate_report:
     runs-on: ubuntu-latest
-    needs: merge_reports
+    needs: merge_files
     steps:
       - name: Checkout dds-rtps repo
         uses: actions/checkout@v4
@@ -182,7 +236,7 @@ jobs:
           source .venv/bin/activate
           sed -i "66i\\        elif 'int2' in product.lower():" generate_xlsx_report.py
           sed -i "67i\\            return 'Intellectus'" generate_xlsx_report.py
-          sed -i "87i\\        elif 'int2DDS' in product.lower():" generate_xlsx_report.py
+          sed -i "87i\\        elif 'int2' in product.lower():" generate_xlsx_report.py
           sed -i "88i\\            return 'int2DDS'" generate_xlsx_report.py
           python3 generate_xlsx_report.py --input junit_interoperability_report.xml --output interoperability_report.xlsx
       - name: XUnit Viewer
@@ -200,3 +254,16 @@ jobs:
             ./index.html
             ./junit_interoperability_report.xml
             ./interoperability_report.xlsx
+      - name: Delete intermediate artifacts
+        if: always()
+        uses: geekyeggo/delete-artifact@v5
+        with:
+          name: |
+            int2DDS_shapes_demo
+            executables
+            dds-rtps-files
+            junit_report_*
+            test_log_*
+            tshark_*
+            xml_report
+          failOnError: false
