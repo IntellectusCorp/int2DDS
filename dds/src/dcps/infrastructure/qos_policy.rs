@@ -1644,14 +1644,10 @@ impl DataRepresentationId {
 ///     .create_datareader::<HelloWorldType>(&topic, reader_qos, None, StatusMask::default())
 ///     .unwrap();
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Readable, Writable, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Readable, Writable, Default, ConstDefault)]
 pub struct DataRepresentationQosPolicy {
     /// List of supported data representations.
     pub value: Vec<DataRepresentationId>,
-}
-
-impl ConstDefault for DataRepresentationQosPolicy {
-    const DEFAULT: Self = DataRepresentationQosPolicy { value: Vec::new() };
 }
 
 impl QosPolicy for DataRepresentationQosPolicy {
