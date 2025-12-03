@@ -58,14 +58,6 @@ impl MessageCreator {
     pub(crate) fn create_spdp_msg_with_inline_qos(
         participant: Arc<Participant>,
     ) -> RtpsResult<Arc<RtpsMessage>> {
-        let (participant_guid, _) = {
-            let local_participant_data = participant.local_participant_proxy_data();
-            (
-                local_participant_data.participant_guid(),
-                local_participant_data.available_builtin_endpoints(),
-            )
-        };
-
         let mut param_list = ParameterList::default();
         let key_hash = participant.guid().to_bytes();
         param_list.add_parameter(Self::create_key_hash_parameter(&key_hash));
