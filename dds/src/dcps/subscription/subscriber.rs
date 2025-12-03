@@ -248,8 +248,10 @@ impl Subscriber {
         let datareader =
             DataReader::new(guid, type_support, topic_description, qos, listener, mask, self_ref)?;
 
-        if self.get_qos()?.entity_factory.autoenable_created_entities {
-            datareader.enable()?;
+        if let Ok(()) = self.is_enabled() {
+            if self.get_qos()?.entity_factory.autoenable_created_entities {
+                datareader.enable()?;
+            }
         }
 
         let reader_ops: Arc<dyn DataReaderInternal<Qos = DataReaderQos>> = datareader
