@@ -1,11 +1,9 @@
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use int2dds::dcps::{
-    domain::{
-        domain_participant::DomainParticipant,
-        domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos,
-    },
-    infrastructure::status::StatusMask,
+    core::time::Duration,
+    domain::domain_participant::DomainParticipant,
+    infrastructure::{status::StatusMask, wait_set::WaitSet},
     publication::{
         data_writer::DataWriter,
         qos::{DataWriterQos, PublisherQos},
@@ -16,7 +14,6 @@ use int2dds::dcps::{
     },
     topic::{qos::TopicQos, type_support::DdsType},
 };
-use socket2::Domain;
 use speedy::{Readable, Writable};
 
 #[derive(DdsType, Readable, Writable)]
@@ -25,6 +22,12 @@ pub struct KeyedDataType {
     #[dds(key)]
     pub key: i16,
     pub value: i16,
+}
+
+impl KeyedDataType {
+    pub fn new(key: i16, value: i16) -> Self {
+        Self { key, value }
+    }
 }
 
 static DOMAIN_ID: AtomicI32 = AtomicI32::new(0);
@@ -58,7 +61,7 @@ pub fn create_datareader(
     reader
 }
 
-fn create_datawriter(
+pub fn create_datawriter(
     domain_participant: &DomainParticipant,
     datawriter_qos: DataWriterQos,
 ) -> DataWriter<KeyedDataType> {
@@ -81,4 +84,20 @@ fn create_datawriter(
         .unwrap();
 
     writer
+}
+
+pub fn wait_for_writer_status(data_writer: &DataWriter<KeyedDataType>, status_mask: StatusMask) {
+    let mut condition = data_writer.get_statuscondition().unwrap().clone();
+    condition.set_enabled_statuses(status_mask).unwrap();
+    let wait_set = WaitSet::new();
+    wait_set.attach_condition(condition).unwrap();
+    wait_set.wait(Duration::infinite()).unwrap();
+}
+
+pub fn wait_for_reader_status(data_reader: &DataReader<KeyedDataType>, status_mask: StatusMask) {
+    let mut condition = data_reader.get_statuscondition().unwrap().clone();
+    condition.set_enabled_statuses(status_mask).unwrap();
+    let wait_set = WaitSet::new();
+    wait_set.attach_condition(condition).unwrap();
+    wait_set.wait(Duration::infinite()).unwrap();
 }
