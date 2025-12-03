@@ -89,7 +89,6 @@ impl UserLogic {
         let mut user_unicast_listening_task = UserUnicastListeningTask::new(
             user_unicast_listener,
             tcp_listener,
-            sender.clone(),
             self.participant.clone(),
         );
 
