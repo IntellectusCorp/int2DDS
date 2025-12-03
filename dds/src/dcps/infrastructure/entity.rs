@@ -46,6 +46,9 @@ pub(crate) trait EnableChild: Entity {
     fn update_rtps_entity(&self, _qos: &Self::Qos) -> DdsResult<()> {
         Ok(())
     }
+    fn check_parent_enabled(&self) -> DdsResult<()> {
+        Ok(())
+    }
 }
 
 pub(crate) trait UpdateStatus: Entity {
@@ -90,6 +93,9 @@ macro_rules! impl_dds_entity_impl {
                 if self.is_enabled().is_ok() {
                     return Ok(());
                 }
+
+                self.check_parent_enabled()?;
+
                 let qos = self.get_qos()?;
                 qos.check_unsupported_policies()?;
                 qos.is_consistent()?;
