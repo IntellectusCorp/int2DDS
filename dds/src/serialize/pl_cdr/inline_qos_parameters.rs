@@ -239,7 +239,7 @@ impl InlineQosParameters for ParameterList {
                 if representations.is_empty() {
                     None
                 } else {
-                    Some(DataRepresentationQosPolicy::new(representations))
+                    Some(DataRepresentationQosPolicy { value: representations })
                 }
             })
     }
