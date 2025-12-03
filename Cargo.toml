@@ -1,7 +1,7 @@
 [workspace]
-
 members = ["dds", "derive"]
 default-members = ["dds", "derive"]
+resolver = "2"
 
 [workspace.package]
 authors = ["Intellectus Corp"]
