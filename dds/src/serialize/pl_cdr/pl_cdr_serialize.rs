@@ -932,7 +932,7 @@ impl super::ParsedBuiltinTopicData {
         if let Some(group_data) = &self.group_data {
             parameters.push(PlCdrParameter {
                 id: ParameterId::PidGroupData,
-                value: ParameterValue::GroupData(&group_data.datavalue),
+                value: ParameterValue::GroupData(&group_data.value),
             });
         }
         if let Some(time_based_filter) = &self.time_based_filter {
