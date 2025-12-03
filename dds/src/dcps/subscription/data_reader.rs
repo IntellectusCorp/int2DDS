@@ -1605,7 +1605,7 @@ impl<Foo: DdsType> DataReader<Foo> {
             *status_condition = StatusCondition::new(Some(weak_ref.clone()));
         }
 
-        reader.self_ref = Arc::new(Mutex::new(Some(reader_arc))); // Without the Arc, the new() function ends and memory is freed. StatusCondition's entity field returns None.
+        *reader.self_ref.lock().unwrap() = Some(reader_arc); // Without the Arc, the new() function ends and memory is freed. StatusCondition's entity field returns None.
 
         let change_callback = reader.create_change_received_callback()?;
         reader.change_callback = Some(change_callback.clone());
