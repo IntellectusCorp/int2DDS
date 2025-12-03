@@ -4,25 +4,16 @@ use common::*;
 use int2dds::{
     common::instance_handle::InstanceHandle,
     dcps::{
-        core::{error::DdsError, time::Duration},
+        core::error::DdsError,
         domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
-        infrastructure::status::{RequestedDeadlineMissedStatus, StatusMask},
+        infrastructure::status::StatusMask,
         publication::qos::{DataWriterQos, PublisherQos},
         subscription::{
-            data_reader::DataReader,
-            data_reader_listener::DataReaderListener,
             qos::{DataReaderQos, SubscriberQos},
             sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind},
         },
         topic::qos::TopicQos,
     },
-};
-use std::{
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
-    thread,
 };
 
 #[test]
