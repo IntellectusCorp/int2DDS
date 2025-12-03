@@ -88,9 +88,6 @@ path = "examples/performace_test/perftest_publisher.rs"
 name = "perftest_subscriber"
 path = "examples/performace_test/perftest_subscriber.rs"
 
-[profile.dev]
-opt-level = 1
-
 [dev-dependencies]
 husky-rs = "0.1.5"
 # Faster than opt-level = 0 and still reasonably debuggable
