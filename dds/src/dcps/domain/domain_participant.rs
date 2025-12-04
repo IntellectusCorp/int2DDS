@@ -571,8 +571,10 @@ impl DomainParticipant {
             .ok_or(DdsError::Error("DomainParticipant is not properly initialized".to_string()))?;
         let publisher = Publisher::new(qos, listener, mask, handle, self_ref);
         let qos = self.get_qos()?;
-        if qos.entity_factory.autoenable_created_entities {
-            publisher.enable()?;
+        if let Ok(()) = self.is_enabled() {
+            if qos.entity_factory.autoenable_created_entities {
+                publisher.enable()?;
+            }
         }
 
         let publisher_ref = publisher
@@ -737,8 +739,10 @@ impl DomainParticipant {
             .ok_or(DdsError::Error("DomainParticipant not properly initialized".to_string()))?;
         let subscriber = Subscriber::new(qos, listener, mask, handle, self_ref);
         let qos = self.get_qos()?;
-        if qos.entity_factory.autoenable_created_entities {
-            subscriber.enable()?;
+        if let Ok(()) = self.is_enabled() {
+            if qos.entity_factory.autoenable_created_entities {
+                subscriber.enable()?;
+            }
         }
 
         let subscriber_ref = subscriber
@@ -1306,8 +1310,10 @@ impl DomainParticipant {
             .ok_or(DdsError::Error("DomainParticipant not properly initialized".to_string()))?;
         let topic = Topic::new(topic_name, type_name, qos, listener, mask, handle, self_ref);
         let qos = self.get_qos()?;
-        if qos.entity_factory.autoenable_created_entities {
-            topic.enable()?;
+        if let Ok(()) = self.is_enabled() {
+            if qos.entity_factory.autoenable_created_entities {
+                topic.enable()?;
+            }
         }
 
         let topic_ref = topic
@@ -2191,6 +2197,7 @@ impl DomainParticipant {
 mod domain_participant_tests {
     use super::*;
     use crate::domain::domain_participant_factory::DomainParticipantFactory;
+    use crate::infrastructure::qos_policy::EntityFactoryQosPolicy;
     use crate::publication::qos::DataWriterQos;
     use crate::subscription::data_reader::DataReaderInternal;
     use crate::subscription::qos::DataReaderQos;
@@ -2285,6 +2292,125 @@ mod domain_participant_tests {
         // Add Publisher to participant
 
         assert!(participant == participant_clone);
+    }
+
+    #[test]
+    fn autoenable_created_entities_false() {
+        let domain_id = 87;
+        let factory = DomainParticipantFactory::get_instance();
+
+        let mut domain_participant_qos = DomainParticipantQos::default();
+        domain_participant_qos.entity_factory =
+            EntityFactoryQosPolicy { autoenable_created_entities: false };
+
+        let participant = factory
+            .create_participant(domain_id, domain_participant_qos, None, StatusMask::default())
+            .unwrap();
+
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "hello_world",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+
+        let res = publisher.is_enabled();
+        assert!(res.is_err());
+
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &topic,
+                DataWriterQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let res = writer.is_enabled();
+        assert!(res.is_err());
+
+        // write() should fail when not enabled
+        let res = writer
+            .write(&HelloWorld { index: 0, message: "hello".to_string() }, InstanceHandle::NIL);
+        assert!(res.is_err());
+
+        // Manually enable the writer
+        let res = writer.enable();
+        assert!(res.is_err());
+
+        participant.enable().unwrap();
+        let res = participant.is_enabled();
+        assert!(res.is_ok());
+        publisher.enable().unwrap();
+
+        // Now write() should succeed
+        let res_2 = writer
+            .write(&HelloWorld { index: 0, message: "hello".to_string() }, InstanceHandle::NIL);
+        assert!(res_2.is_ok());
+    }
+
+    #[test]
+    fn autoenable_created_entities_false_pub() {
+        let domain_id: i32 = 87;
+        let factory = DomainParticipantFactory::get_instance();
+
+        let domain_participant_qos = DomainParticipantQos::default();
+        let participant = factory
+            .create_participant(domain_id, domain_participant_qos, None, StatusMask::default())
+            .unwrap();
+
+        let topic = participant
+            .create_topic::<HelloWorld>(
+                "hello_world",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let mut publisher_qos = PublisherQos::default();
+        publisher_qos.entity_factory =
+            EntityFactoryQosPolicy { autoenable_created_entities: false };
+
+        let publisher =
+            participant.create_publisher(publisher_qos, None, StatusMask::default()).unwrap();
+
+        let res = publisher.is_enabled();
+        assert!(res.is_ok());
+
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &topic,
+                DataWriterQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let res = writer.is_enabled();
+        assert!(res.is_err());
+
+        // write() should fail when not enabled
+        let res = writer
+            .write(&HelloWorld { index: 0, message: "hello".to_string() }, InstanceHandle::NIL);
+        assert!(res.is_err());
+
+        // Manually enable the writer
+        let res = writer.enable();
+        assert!(res.is_ok());
+
+        // Now write() should succeed
+        let res_2 = writer
+            .write(&HelloWorld { index: 0, message: "hello".to_string() }, InstanceHandle::NIL);
+        assert!(res_2.is_ok());
     }
 
     use crate::dcps::topic::type_support::DdsType;
