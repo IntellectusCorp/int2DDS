@@ -2205,7 +2205,7 @@ mod domain_participant_tests {
     use std::time::{Duration as StdDuration, Instant};
     use std::{sync::Arc, thread};
 
-    #[derive(DdsType, speedy::Readable, speedy::Writable)]
+    #[derive(DdsType)]
     pub struct HelloWorld {
         pub index: u32,
         pub message: String,
@@ -2414,9 +2414,8 @@ mod domain_participant_tests {
     }
 
     use crate::dcps::topic::type_support::DdsType;
-    use speedy::{Readable, Writable};
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     pub struct TestData {
         #[dds(key)]
         id: u32,
