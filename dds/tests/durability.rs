@@ -10,7 +10,6 @@ use int2dds::{
             qos_policy::{
                 DurabilityQosPolicy, DurabilityQosPolicyKind, HistoryQosPolicy,
                 HistoryQosPolicyKind, ReliabilityQosPolicy, ReliabilityQosPolicyKind,
-                ResourceLimitsQosPolicy,
             },
             status::StatusMask,
         },
@@ -31,10 +30,9 @@ fn test_volatile() {
         .unwrap();
 
     let writer_qos = DataWriterQos {
-        resource_limits: ResourceLimitsQosPolicy {
-            max_samples: 10,
-            max_instances: 1,
-            max_samples_per_instance: 10,
+        history: HistoryQosPolicy {
+            kind: HistoryQosPolicyKind::KeepLast(10),
+            ..Default::default()
         },
         ..Default::default()
     };

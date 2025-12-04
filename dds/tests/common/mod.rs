@@ -92,8 +92,8 @@ pub fn create_datawriter(
     writer
 }
 
-pub fn wait_for_writer_status(
-    data_writer: &DataWriter<KeyedDataType>,
+pub fn wait_for_writer_status<Foo: DdsType>(
+    data_writer: &DataWriter<Foo>,
     status_mask: StatusMask,
     duration: Duration,
 ) -> Result<Vec<std::sync::Arc<dyn Condition + Send + Sync>>, int2dds::dcps::core::error::DdsError>
@@ -105,8 +105,8 @@ pub fn wait_for_writer_status(
     wait_set.wait(duration)
 }
 
-pub fn wait_for_reader_status(
-    data_reader: &DataReader<KeyedDataType>,
+pub fn wait_for_reader_status<Foo: DdsType>(
+    data_reader: &DataReader<Foo>,
     status_mask: StatusMask,
     duration: Duration,
 ) -> Result<Vec<std::sync::Arc<dyn Condition + Send + Sync>>, int2dds::dcps::core::error::DdsError>
