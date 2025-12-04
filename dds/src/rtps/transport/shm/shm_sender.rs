@@ -48,14 +48,13 @@ impl ShmSender {
                     if shm.is_creator() { "created" } else { "attached" }
                 );
 
-                // Initialize ring buffer header if we're the creator
-                if shm.is_creator() {
-                    let header = shm.as_ptr() as *mut RingBufferHeader;
-                    unsafe {
-                        (*header).init(DEFAULT_BUFFER_SIZE as u32, DEFAULT_MAX_MESSAGE_SIZE as u32);
-                    }
-                    debug!("[ShmSender] Ring buffer header initialized");
+                // Always initialize ring buffer header when sender starts
+                // This ensures clean state even if SHM segment persisted from previous run
+                let header = shm.as_ptr() as *mut RingBufferHeader;
+                unsafe {
+                    (*header).init(DEFAULT_BUFFER_SIZE as u32, DEFAULT_MAX_MESSAGE_SIZE as u32);
                 }
+                info!("[ShmSender] Ring buffer header initialized (write_pos=0, read_pos=0)");
 
                 shm
             }

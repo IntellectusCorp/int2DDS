@@ -92,9 +92,9 @@ impl UserUnicastListeningTask {
             info!("[UserUnicast] SHM listener enabled for user data");
         }
 
-        // Use shorter poll timeout when SHM is enabled for faster message processing
+        // Use zero timeout when SHM is enabled for immediate processing
         let poll_timeout = if has_shm_listener {
-            Duration::from_millis(1) // 1ms for SHM to reduce latency
+            Duration::from_nanos(0) // No wait for SHM - busy poll
         } else {
             Duration::from_millis(100)
         };
@@ -213,18 +213,25 @@ impl UserUnicastListeningTask {
             }
 
             // Poll SHM listener for messages (SHM doesn't use mio events)
+            let mut shm_had_data = false;
             if let Some(shm_listener) = &mut self.shm_listener {
                 while let Some((buffer, from_addr)) = shm_listener.get_message() {
                     if self.participant.is_terminated() {
                         return Ok(());
                     }
                     messages_to_process.push((buffer.to_vec(), from_addr));
+                    shm_had_data = true;
                 }
             }
 
             // Process all collected messages
             for (buffer, from_addr) in messages_to_process {
                 self.process_rtps_message(&buffer, from_addr);
+            }
+
+            // If SHM enabled but no data, yield CPU briefly to avoid 100% usage
+            if has_shm_listener && !shm_had_data && events.is_empty() {
+                std::thread::sleep(Duration::from_micros(10));
             }
         }
     }
