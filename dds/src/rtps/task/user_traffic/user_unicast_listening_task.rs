@@ -216,10 +216,8 @@ impl UserUnicastListeningTask {
             if let Some(shm_listener) = &mut self.shm_listener {
                 while let Some((buffer, from_addr)) = shm_listener.get_message() {
                     if self.participant.is_terminated() {
-                        println!("Detected global termination flag during SHM processing");
                         return Ok(());
                     }
-                    println!("[UserUnicast] Received SHM message, {} bytes", buffer.len());
                     messages_to_process.push((buffer.to_vec(), from_addr));
                 }
             }
