@@ -176,123 +176,123 @@ fn test_ownership_revoked_when_deadline_missed() {
     assert!(!samples.is_empty());
 }
 
-// #[test]
-// fn test_ownership_revoked_when_liveliness_lost() {
-//     let domain_id = next_domain_id();
-//     let factory = DomainParticipantFactory::get_instance();
-//     let participant = factory
-//         .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
-//         .unwrap();
+#[test]
+fn test_ownership_revoked_when_liveliness_lost() {
+    let domain_id = next_domain_id();
+    let factory = DomainParticipantFactory::get_instance();
+    let participant = factory
+        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
 
-//     let weaker_writer_qos = DataWriterQos {
-//         ownership: OwnershipQosPolicy { kind: OwnershipQosPolicyKind::Exclusive },
-//         ownership_strength: OwnershipStrengthQosPolicy { value: 10 },
-//         liveliness: LivelinessQosPolicy {
-//             kind: LivelinessQosPolicyKind::ManualByTopic,
-//             lease_duration: Duration::from_millis(1000),
-//         },
-//         ..Default::default()
-//     };
+    let weaker_writer_qos = DataWriterQos {
+        ownership: OwnershipQosPolicy { kind: OwnershipQosPolicyKind::Exclusive },
+        ownership_strength: OwnershipStrengthQosPolicy { value: 10 },
+        liveliness: LivelinessQosPolicy {
+            kind: LivelinessQosPolicyKind::ManualByTopic,
+            lease_duration: Duration::from_millis(1000),
+        },
+        ..Default::default()
+    };
 
-//     let stronger_writer_qos = DataWriterQos {
-//         ownership: OwnershipQosPolicy { kind: OwnershipQosPolicyKind::Exclusive },
-//         ownership_strength: OwnershipStrengthQosPolicy { value: 20 },
-//         liveliness: LivelinessQosPolicy {
-//             kind: LivelinessQosPolicyKind::ManualByTopic,
-//             lease_duration: Duration::from_millis(1000),
-//         },
-//         ..Default::default()
-//     };
+    let stronger_writer_qos = DataWriterQos {
+        ownership: OwnershipQosPolicy { kind: OwnershipQosPolicyKind::Exclusive },
+        ownership_strength: OwnershipStrengthQosPolicy { value: 20 },
+        liveliness: LivelinessQosPolicy {
+            kind: LivelinessQosPolicyKind::ManualByTopic,
+            lease_duration: Duration::from_millis(1000),
+        },
+        ..Default::default()
+    };
 
-//     let weaker_data_writer =
-//         create_datawriter(&participant, PublisherQos::default(), weaker_writer_qos);
-//     let stronger_data_writer =
-//         create_datawriter(&participant, PublisherQos::default(), stronger_writer_qos);
+    let weaker_data_writer =
+        create_datawriter(&participant, PublisherQos::default(), weaker_writer_qos);
+    let stronger_data_writer =
+        create_datawriter(&participant, PublisherQos::default(), stronger_writer_qos);
 
-//     let reader_qos = DataReaderQos {
-//         ownership: OwnershipQosPolicy { kind: OwnershipQosPolicyKind::Exclusive },
-//         liveliness: LivelinessQosPolicy {
-//             kind: LivelinessQosPolicyKind::ManualByTopic,
-//             lease_duration: Duration::from_millis(1000),
-//         },
-//         ..Default::default()
-//     };
+    let reader_qos = DataReaderQos {
+        ownership: OwnershipQosPolicy { kind: OwnershipQosPolicyKind::Exclusive },
+        liveliness: LivelinessQosPolicy {
+            kind: LivelinessQosPolicyKind::ManualByTopic,
+            lease_duration: Duration::from_millis(1000),
+        },
+        ..Default::default()
+    };
 
-//     let data_reader = create_datareader(&participant, SubscriberQos::default(), reader_qos);
+    let data_reader = create_datareader(&participant, SubscriberQos::default(), reader_qos);
 
-//     wait_for_reader_status(
-//         &data_reader,
-//         StatusMask::SUBSCRIPTION_MATCHED,
-//         Duration::from_seconds(1),
-//     )
-//     .unwrap();
-//     wait_for_writer_status(
-//         &weaker_data_writer,
-//         StatusMask::PUBLICATION_MATCHED,
-//         Duration::from_seconds(1),
-//     )
-//     .unwrap();
-//     wait_for_writer_status(
-//         &stronger_data_writer,
-//         StatusMask::PUBLICATION_MATCHED,
-//         Duration::from_seconds(1),
-//     )
-//     .unwrap();
+    wait_for_reader_status(
+        &data_reader,
+        StatusMask::SUBSCRIPTION_MATCHED,
+        Duration::from_seconds(1),
+    )
+    .unwrap();
+    wait_for_writer_status(
+        &weaker_data_writer,
+        StatusMask::PUBLICATION_MATCHED,
+        Duration::from_seconds(1),
+    )
+    .unwrap();
+    wait_for_writer_status(
+        &stronger_data_writer,
+        StatusMask::PUBLICATION_MATCHED,
+        Duration::from_seconds(1),
+    )
+    .unwrap();
 
-//     println!("Both writers matched. Starting test...");
+    println!("Both writers matched. Starting test...");
 
-//     // Stronger writer's data should be received
-//     stronger_data_writer.write(&KeyedDataType::new(0, 1), InstanceHandle::NIL).unwrap();
-//     wait_for_reader_status(&data_reader, StatusMask::DATA_AVAILABLE, Duration::from_seconds(1))
-//         .unwrap();
+    // Stronger writer's data should be received
+    stronger_data_writer.write(&KeyedDataType::new(0, 1), InstanceHandle::NIL).unwrap();
+    wait_for_reader_status(&data_reader, StatusMask::DATA_AVAILABLE, Duration::from_millis(100))
+        .unwrap();
 
-//     let samples = data_reader
-//         .take(
-//             10,
-//             &[SampleStateKind::ANY_SAMPLE_STATE],
-//             &[ViewStateKind::ANY_VIEW_STATE],
-//             &[InstanceStateKind::ANY_INSTANCE_STATE],
-//         )
-//         .unwrap();
+    let samples = data_reader
+        .take(
+            10,
+            &[SampleStateKind::ANY_SAMPLE_STATE],
+            &[ViewStateKind::ANY_VIEW_STATE],
+            &[InstanceStateKind::ANY_INSTANCE_STATE],
+        )
+        .unwrap();
 
-//     assert!(!samples.is_empty());
-//     assert_eq!(samples[0].data().unwrap().value, 1);
+    assert!(!samples.is_empty());
+    assert_eq!(samples[0].data().unwrap().value, 1);
 
-//     weaker_data_writer.write(&KeyedDataType::new(0, 2), InstanceHandle::NIL).unwrap();
+    weaker_data_writer.write(&KeyedDataType::new(0, 2), InstanceHandle::NIL).unwrap();
 
-//     let res = wait_for_reader_status(
-//         &data_reader,
-//         StatusMask::DATA_AVAILABLE,
-//         Duration::from_millis(500),
-//     );
+    let res = wait_for_reader_status(
+        &data_reader,
+        StatusMask::DATA_AVAILABLE,
+        Duration::from_millis(100),
+    );
 
-//     // Weaker writer's data should not be received
-//     assert!(res.is_err());
+    // Weaker writer's data should not be received
+    assert!(res.is_err());
 
-//     let res = wait_for_reader_status(
-//         &data_reader,
-//         StatusMask::LIVELINESS_LOST,
-//         Duration::from_millis(1100),
-//     );
+    let res = wait_for_reader_status(
+        &data_reader,
+        StatusMask::LIVELINESS_CHANGED,
+        Duration::from_millis(5000),
+    );
 
-//     // Wait for stronger writer's liveliness to be lost
-//     assert!(res.is_ok(), "Liveliness was not lost in time: {:?}", res);
+    // Wait for stronger writer's liveliness to be lost
+    assert!(res.is_ok(), "Liveliness was not lost in time: {:?}", res);
 
-//     // Now weaker writer should become owner
-//     weaker_data_writer.write(&KeyedDataType::new(0, 3), InstanceHandle::NIL).unwrap();
-//     wait_for_reader_status(&data_reader, StatusMask::DATA_AVAILABLE, Duration::from_seconds(1))
-//         .unwrap();
+    // Now weaker writer should become owner
+    weaker_data_writer.write(&KeyedDataType::new(0, 3), InstanceHandle::NIL).unwrap();
+    wait_for_reader_status(&data_reader, StatusMask::DATA_AVAILABLE, Duration::from_seconds(1))
+        .unwrap();
 
-//     let samples = data_reader
-//         .take(
-//             10,
-//             &[SampleStateKind::ANY_SAMPLE_STATE],
-//             &[ViewStateKind::ANY_VIEW_STATE],
-//             &[InstanceStateKind::ANY_INSTANCE_STATE],
-//         )
-//         .unwrap();
+    let samples = data_reader
+        .take(
+            10,
+            &[SampleStateKind::ANY_SAMPLE_STATE],
+            &[ViewStateKind::ANY_VIEW_STATE],
+            &[InstanceStateKind::ANY_INSTANCE_STATE],
+        )
+        .unwrap();
 
-//     // Weaker writer's data should be received because stronger writer lost liveliness
-//     assert!(!samples.is_empty());
-//     assert_eq!(samples[0].data().unwrap().value, 3);
-// }
+    // Weaker writer's data should be received because stronger writer lost liveliness
+    assert!(!samples.is_empty());
+    assert_eq!(samples[0].data().unwrap().value, 3);
+}
