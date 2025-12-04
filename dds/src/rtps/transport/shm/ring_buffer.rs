@@ -331,10 +331,14 @@ impl RingBufferReader {
             }
         }
 
-        // Update local read position (not shared!)
+        // Update both local and shared read position
         let total_size = align_up(msg_header.total_len as usize, 8);
         let new_read_pos = read_pos + total_size as u64;
         self.local_read_pos = new_read_pos;
+
+        // Update shared read_pos so writer knows we've consumed the data
+        let header = unsafe { &*self.header };
+        header.read_pos.store(new_read_pos, Ordering::SeqCst);
 
         Ok(Some(data_len))
     }
