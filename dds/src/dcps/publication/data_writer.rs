@@ -1936,9 +1936,9 @@ mod tests {
 
     // Test struct - for detecting drop
     use crate::dcps::topic::type_support::DdsType;
-    use speedy::{Readable, Writable};
 
-    #[derive(DdsType, Readable, Writable)]
+
+    #[derive(DdsType)]
     pub struct TestData {
         #[dds(key)]
         id: u32,

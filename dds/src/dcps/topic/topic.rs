@@ -309,7 +309,7 @@ pub(crate) mod tests {
     };
 
     use int2dds_derive::DdsType;
-    use speedy::{Readable, Writable};
+
 
     use crate::{
         core::{error::DdsError, time::Duration},
@@ -319,13 +319,13 @@ pub(crate) mod tests {
         topic::{qos::TopicQos, topic_listener::TopicListener},
     };
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     pub struct HelloWorld {
         pub index: u32,
         pub message: String,
     }
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     pub struct HelloWorldWithKey {
         #[dds(key)]
         pub index: u32,
