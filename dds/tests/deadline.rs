@@ -7,7 +7,7 @@ use int2dds::{
         core::time::Duration,
         domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
         infrastructure::status::{RequestedDeadlineMissedStatus, StatusMask},
-        publication::qos::DataWriterQos,
+        publication::qos::{DataWriterQos, PublisherQos},
         subscription::{
             data_reader::DataReader,
             data_reader_listener::DataReaderListener,
@@ -53,7 +53,7 @@ fn test_reader_deadline_qos_basic() {
     let mut reader_qos = DataReaderQos::default();
     reader_qos.deadline.period = Duration::from_millis(200);
 
-    let data_writer = create_datawriter(&participant, writer_qos);
+    let data_writer = create_datawriter(&participant, PublisherQos::default(), writer_qos);
 
     let topic = participant
         .create_topic::<KeyedDataType>(
@@ -122,7 +122,7 @@ fn test_reader_deadline_qos_on_dispose() {
     let mut reader_qos = DataReaderQos::default();
     reader_qos.deadline.period = Duration::from_millis(150);
 
-    let data_writer = create_datawriter(&participant, writer_qos);
+    let data_writer = create_datawriter(&participant, PublisherQos::default(), writer_qos);
 
     let topic = participant
         .create_topic::<KeyedDataType>(
@@ -197,7 +197,7 @@ fn test_reader_deadline_qos_multiple_instances() {
     let mut reader_qos = DataReaderQos::default();
     reader_qos.deadline.period = Duration::from_millis(150);
 
-    let data_writer = create_datawriter(&participant, writer_qos);
+    let data_writer = create_datawriter(&participant, PublisherQos::default(), writer_qos);
 
     let topic = participant
         .create_topic::<KeyedDataType>(

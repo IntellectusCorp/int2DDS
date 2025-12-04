@@ -24,7 +24,8 @@ fn autoenable_created_entities_true() {
         .unwrap();
 
     // Publisher with autoenable_created_entities = true (default)
-    let data_writer = create_datawriter(&participant, DataWriterQos::default());
+    let data_writer =
+        create_datawriter(&participant, PublisherQos::default(), DataWriterQos::default());
 
     // DataWriter should be automatically enabled
     let res = data_writer.write(&KeyedDataType::new(1, 100), InstanceHandle::NIL);
