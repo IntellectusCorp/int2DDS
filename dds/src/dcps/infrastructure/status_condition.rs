@@ -193,7 +193,7 @@ mod tests {
 
     use std::time::Duration;
 
-    use speedy::{Readable, Writable};
+
 
     use crate::{
         domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
@@ -203,7 +203,7 @@ mod tests {
         DdsType,
     };
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     #[dds_type(crate_path = "crate")]
     struct HelloWorldType {
         index: u32,

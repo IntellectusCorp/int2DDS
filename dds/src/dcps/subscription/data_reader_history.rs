@@ -675,7 +675,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
 
 #[cfg(test)]
 mod tests {
-    use speedy::{Readable, Writable};
+
 
     use super::*;
     use crate::dcps::topic::type_support::DdsType;
@@ -693,14 +693,14 @@ mod tests {
         topic::qos::TopicQos,
     };
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     #[dds_type(crate_path = "int2dds")]
     struct HelloWorldType {
         index: u32,
         message: String,
     }
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     #[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
     struct ShapeType {
         #[dds(key)]

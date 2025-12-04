@@ -173,7 +173,7 @@ impl ContentFilteredTopic {
 
 #[cfg(test)]
 mod tests {
-    use speedy::{Readable, Writable};
+
 
     use super::*;
     use crate::{
@@ -186,7 +186,7 @@ mod tests {
     };
     use std::sync::Arc;
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     struct TestData {
         pub id: i32,
         pub name: String,

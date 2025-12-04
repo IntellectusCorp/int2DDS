@@ -413,9 +413,9 @@ mod tests {
         topic::qos::TopicQos,
         DdsType,
     };
-    use speedy::{Readable, Writable};
 
-    #[derive(DdsType, Readable, Writable)]
+
+    #[derive(DdsType)]
     #[dds_type(crate_path = "crate")]
     struct HelloWorldType {
         index: u32,
