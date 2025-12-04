@@ -7,8 +7,8 @@ use std::io;
 
 #[cfg(unix)]
 use libc::{
-    c_int, close, ftruncate, mmap, munmap, shm_open, shm_unlink,
-    MAP_FAILED, MAP_SHARED, O_CREAT, O_EXCL, O_RDWR, PROT_READ, PROT_WRITE,
+    c_int, close, ftruncate, mmap, munmap, shm_open, shm_unlink, MAP_FAILED, MAP_SHARED, O_CREAT,
+    O_EXCL, O_RDWR, PROT_READ, PROT_WRITE,
 };
 
 /// Unix shared memory implementation
@@ -39,25 +39,13 @@ impl UnixSharedMemory {
 
         let ptr = Self::map_memory(fd, size)?;
 
-        Ok(Self {
-            fd,
-            ptr,
-            size,
-            name: shm_name,
-            is_creator,
-        })
+        Ok(Self { fd, ptr, size, name: shm_name, is_creator })
     }
 
     #[cfg(unix)]
     fn create_shm(name: &CString, size: usize) -> io::Result<(i32, bool)> {
         // Try to create exclusively first
-        let fd = unsafe {
-            shm_open(
-                name.as_ptr(),
-                O_CREAT | O_EXCL | O_RDWR,
-                0o666,
-            )
-        };
+        let fd = unsafe { shm_open(name.as_ptr(), O_CREAT | O_EXCL | O_RDWR, 0o666) };
 
         if fd >= 0 {
             // We created it, set the size
@@ -70,9 +58,7 @@ impl UnixSharedMemory {
         }
 
         // Already exists, open it
-        let fd = unsafe {
-            shm_open(name.as_ptr(), O_RDWR, 0o666)
-        };
+        let fd = unsafe { shm_open(name.as_ptr(), O_RDWR, 0o666) };
 
         if fd < 0 {
             return Err(io::Error::last_os_error());
@@ -94,16 +80,8 @@ impl UnixSharedMemory {
 
     #[cfg(unix)]
     fn map_memory(fd: i32, size: usize) -> io::Result<*mut u8> {
-        let ptr = unsafe {
-            mmap(
-                std::ptr::null_mut(),
-                size,
-                PROT_READ | PROT_WRITE,
-                MAP_SHARED,
-                fd,
-                0,
-            )
-        };
+        let ptr =
+            unsafe { mmap(std::ptr::null_mut(), size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) };
 
         if ptr == MAP_FAILED {
             return Err(io::Error::last_os_error());

@@ -7,19 +7,19 @@ use std::io;
 use std::ptr;
 
 #[cfg(windows)]
+use winapi::shared::minwindef::DWORD;
+#[cfg(windows)]
+use winapi::shared::winerror::ERROR_ALREADY_EXISTS;
+#[cfg(windows)]
+use winapi::um::errhandlingapi::GetLastError;
+#[cfg(windows)]
+use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
+#[cfg(windows)]
 use winapi::um::memoryapi::{MapViewOfFile, UnmapViewOfFile, FILE_MAP_ALL_ACCESS};
 #[cfg(windows)]
 use winapi::um::winbase::{CreateFileMappingA, OpenFileMappingA};
 #[cfg(windows)]
 use winapi::um::winnt::PAGE_READWRITE;
-#[cfg(windows)]
-use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
-#[cfg(windows)]
-use winapi::um::errhandlingapi::GetLastError;
-#[cfg(windows)]
-use winapi::shared::winerror::ERROR_ALREADY_EXISTS;
-#[cfg(windows)]
-use winapi::shared::minwindef::DWORD;
 #[cfg(windows)]
 type HANDLE = winapi::shared::ntdef::HANDLE;
 
@@ -52,12 +52,7 @@ impl WindowsSharedMemory {
 
         let ptr = Self::map_view(handle, size)?;
 
-        Ok(Self {
-            handle,
-            ptr,
-            size,
-            is_creator,
-        })
+        Ok(Self { handle, ptr, size, is_creator })
     }
 
     #[cfg(windows)]
@@ -89,9 +84,7 @@ impl WindowsSharedMemory {
 
     #[cfg(windows)]
     fn open_mapping(name: &CString) -> io::Result<HANDLE> {
-        let handle = unsafe {
-            OpenFileMappingA(FILE_MAP_ALL_ACCESS, 0, name.as_ptr())
-        };
+        let handle = unsafe { OpenFileMappingA(FILE_MAP_ALL_ACCESS, 0, name.as_ptr()) };
 
         if handle.is_null() {
             return Err(io::Error::last_os_error());
