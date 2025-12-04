@@ -479,12 +479,11 @@ impl RelOp {
 
 #[cfg(test)]
 mod tests {
-    use speedy::{Readable, Writable};
 
     use super::*;
     use crate::topic::sql::{lexer::Lexer, parser::Parser};
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     struct TestData {
         pub id: i32,
         pub name: String,
