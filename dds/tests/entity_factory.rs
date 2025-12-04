@@ -4,10 +4,7 @@ use common::*;
 use int2dds::{
     common::instance_handle::InstanceHandle,
     dcps::{
-        domain::{
-            domain_participant, domain_participant_factory::DomainParticipantFactory,
-            qos::DomainParticipantQos,
-        },
+        domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
         infrastructure::{qos_policy::EntityFactoryQosPolicy, status::StatusMask},
         publication::qos::{DataWriterQos, PublisherQos},
         topic::qos::TopicQos,
