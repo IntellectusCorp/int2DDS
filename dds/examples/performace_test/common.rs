@@ -4,10 +4,10 @@ use int2dds::{
     infrastructure::qos_policy::{ReliabilityQosPolicy, ReliabilityQosPolicyKind},
     topic::type_support::DdsType,
 };
-use speedy::{Readable, Writable};
+
 use std::fmt;
 
-#[derive(DdsType, Readable, Writable)]
+#[derive(DdsType)]
 #[dds_type(crate_path = "int2dds")]
 pub struct PerformanceTestData {
     pub seq_num: u64,
@@ -15,7 +15,7 @@ pub struct PerformanceTestData {
     pub data: Vec<u8>,
 }
 
-#[derive(DdsType, Readable, Writable)]
+#[derive(DdsType)]
 #[dds_type(crate_path = "int2dds")]
 pub struct LatencyTestData {
     pub seq_num: u64,

@@ -42,8 +42,8 @@ use crate::{
     infrastructure::{
         domain_entity::DomainEntity,
         entity::{
-            impl_dds_entity, impl_dds_entity_impl, BaseEntity, EnableChild, Entity, EntityInternal,
-            UpdateStatus,
+            impl_check_parent_enabled, impl_dds_entity, impl_dds_entity_impl, BaseEntity,
+            EnableChild, Entity, EntityInternal, UpdateStatus,
         },
         qos_policy::Qos,
         status::StatusMask,
@@ -135,6 +135,8 @@ impl EnableChild for Publisher {
 
         Ok(())
     }
+
+    impl_check_parent_enabled!(get_participant);
 }
 impl UpdateStatus for Publisher {}
 impl DomainEntity for Publisher {}
@@ -259,8 +261,10 @@ impl Publisher {
             wlp_logic,
         )?;
 
-        if self.get_qos()?.entity_factory.autoenable_created_entities {
-            datawriter.enable()?;
+        if let Ok(()) = self.is_enabled() {
+            if self.get_qos()?.entity_factory.autoenable_created_entities {
+                datawriter.enable()?;
+            }
         }
 
         let writer_ops: Arc<dyn DataWriterInternal<Qos = DataWriterQos>> = datawriter
@@ -996,7 +1000,7 @@ mod tests {
         publication::qos::PublisherQos,
     };
 
-    #[derive(DdsType, speedy::Readable, speedy::Writable)]
+    #[derive(DdsType)]
     pub struct HelloWorld {
         pub index: u32,
         pub message: String,
