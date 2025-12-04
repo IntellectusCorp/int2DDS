@@ -174,7 +174,6 @@ impl ContentFilteredTopic {
 #[cfg(test)]
 mod tests {
 
-
     use super::*;
     use crate::{
         common::instance_handle::InstanceHandle,

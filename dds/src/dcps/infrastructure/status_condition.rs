@@ -193,8 +193,6 @@ mod tests {
 
     use std::time::Duration;
 
-
-
     use crate::{
         domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
         infrastructure::status::{StatusKind, StatusMask},

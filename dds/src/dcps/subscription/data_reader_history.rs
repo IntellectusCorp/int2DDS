@@ -676,7 +676,6 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
 #[cfg(test)]
 mod tests {
 
-
     use super::*;
     use crate::dcps::topic::type_support::DdsType;
     use crate::infrastructure::qos_policy::{OwnershipQosPolicy, ReliabilityQosPolicyKind};

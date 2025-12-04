@@ -414,7 +414,6 @@ mod tests {
         DdsType,
     };
 
-
     #[derive(DdsType)]
     #[dds_type(crate_path = "crate")]
     struct HelloWorldType {

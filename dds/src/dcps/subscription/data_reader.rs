@@ -2961,7 +2961,6 @@ impl<Foo: 'static + Clone + Debug> DataReaderInternal for DataReader<Foo> {
 #[cfg(test)]
 pub(crate) mod tests {
 
-
     use super::*;
     use crate::dcps::topic::type_support::DdsType;
     use crate::domain::domain_participant_factory::DomainParticipantFactory;

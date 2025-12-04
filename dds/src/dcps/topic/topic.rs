@@ -310,7 +310,6 @@ pub(crate) mod tests {
 
     use int2dds_derive::DdsType;
 
-
     use crate::{
         core::{error::DdsError, time::Duration},
         domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
