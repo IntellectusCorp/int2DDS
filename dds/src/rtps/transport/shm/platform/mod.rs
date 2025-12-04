@@ -39,16 +39,12 @@ impl SharedMemory {
     pub fn new(name: &str, size: usize, create: bool) -> io::Result<Self> {
         #[cfg(windows)]
         {
-            Ok(Self {
-                inner: windows::WindowsSharedMemory::new(name, size, create)?,
-            })
+            Ok(Self { inner: windows::WindowsSharedMemory::new(name, size, create)? })
         }
 
         #[cfg(unix)]
         {
-            Ok(Self {
-                inner: unix::UnixSharedMemory::new(name, size, create)?,
-            })
+            Ok(Self { inner: unix::UnixSharedMemory::new(name, size, create)? })
         }
 
         #[cfg(not(any(windows, unix)))]
