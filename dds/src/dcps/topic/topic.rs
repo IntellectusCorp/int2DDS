@@ -42,8 +42,8 @@ use crate::{
     infrastructure::{
         domain_entity::DomainEntity,
         entity::{
-            impl_dds_entity, impl_dds_entity_impl, BaseEntity, EnableChild, Entity, EntityInternal,
-            UpdateStatus,
+            impl_check_parent_enabled, impl_dds_entity, impl_dds_entity_impl, BaseEntity,
+            EnableChild, Entity, EntityInternal, UpdateStatus,
         },
         qos_policy::Qos,
         status::{InconsistentTopicStatus, StatusInfo, StatusKind, StatusMask},
@@ -117,7 +117,9 @@ impl Drop for Topic {
 
 impl_topic_description!(Topic);
 impl_dds_entity!(Topic, TopicQos);
-impl EnableChild for Topic {}
+impl EnableChild for Topic {
+    impl_check_parent_enabled!(get_participant);
+}
 impl DomainEntity for Topic {}
 impl UpdateStatus for Topic {
     fn update_status(
@@ -307,7 +309,6 @@ pub(crate) mod tests {
     };
 
     use int2dds_derive::DdsType;
-    use speedy::{Readable, Writable};
 
     use crate::{
         core::{error::DdsError, time::Duration},
@@ -317,13 +318,13 @@ pub(crate) mod tests {
         topic::{qos::TopicQos, topic_listener::TopicListener},
     };
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     pub struct HelloWorld {
         pub index: u32,
         pub message: String,
     }
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     pub struct HelloWorldWithKey {
         #[dds(key)]
         pub index: u32,

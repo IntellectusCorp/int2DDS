@@ -61,8 +61,8 @@ use crate::{
         deadline_monitor::DeadlineMonitor,
         domain_entity::DomainEntity,
         entity::{
-            impl_dds_entity, impl_dds_entity_impl, BaseEntity, EnableChild, Entity, EntityInternal,
-            UpdateStatus,
+            impl_check_parent_enabled, impl_dds_entity, impl_dds_entity_impl, BaseEntity,
+            EnableChild, Entity, EntityInternal, UpdateStatus,
         },
         history_cache::HistoryCache as DcpsHistoryCache,
         qos_policy::{DestinationOrderQosPolicyKind, HistoryQosPolicyKind, Qos},
@@ -422,6 +422,8 @@ impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
 
         Ok(())
     }
+
+    impl_check_parent_enabled!(get_subscriber);
 }
 impl<Foo: 'static + Clone + Debug> UpdateStatus for DataReader<Foo> {
     fn update_status(
@@ -772,10 +774,10 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
     pub(crate) fn is_enabled(&self) -> DdsResult<()> {
         self.is_deleted()?;
-        {
-            let _ = self.get_rtps_reader()?;
-        }
         if self.enabled.load(Ordering::SeqCst) {
+            {
+                let _ = self.get_rtps_reader()?;
+            }
             Ok(())
         } else {
             Err(DdsError::NotEnabled)
@@ -1603,7 +1605,12 @@ impl<Foo: DdsType> DataReader<Foo> {
             *status_condition = StatusCondition::new(Some(weak_ref.clone()));
         }
 
-        reader.self_ref = Arc::new(Mutex::new(Some(reader_arc))); // Without the Arc, the new() function ends and memory is freed. StatusCondition's entity field returns None.
+        // Without the Arc, the new() function ends and memory is freed. StatusCondition's entity field returns None.
+        {
+            let mut self_ref =
+                reader.self_ref.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            *self_ref = Some(reader_arc);
+        }
 
         let change_callback = reader.create_change_received_callback()?;
         reader.change_callback = Some(change_callback.clone());
@@ -2953,7 +2960,6 @@ impl<Foo: 'static + Clone + Debug> DataReaderInternal for DataReader<Foo> {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use speedy::{Readable, Writable};
 
     use super::*;
     use crate::dcps::topic::type_support::DdsType;
@@ -2972,19 +2978,19 @@ pub(crate) mod tests {
     use std::sync::Arc;
     use std::thread;
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     pub struct TestData {
         #[dds(key)]
         id: u32,
     }
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     pub struct HelloWorld {
         pub index: u32,
         pub message: String,
     }
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     pub struct HelloWorldWithKey {
         #[dds(key)]
         pub index: u32,
