@@ -45,12 +45,23 @@ fn test_partition_a_subscriber_success() {
 
     let data_reader = create_datareader(&participant, subscriber_qos, DataReaderQos::default());
 
-    wait_for_reader_status(&data_reader, StatusMask::SUBSCRIPTION_MATCHED);
-    wait_for_writer_status(&data_writer, StatusMask::PUBLICATION_MATCHED);
+    wait_for_reader_status(
+        &data_reader,
+        StatusMask::SUBSCRIPTION_MATCHED,
+        Duration::from_seconds(1),
+    )
+    .unwrap();
+    wait_for_writer_status(
+        &data_writer,
+        StatusMask::PUBLICATION_MATCHED,
+        Duration::from_seconds(1),
+    )
+    .unwrap();
 
     data_writer.write(&KeyedDataType::default(), InstanceHandle::NIL).unwrap();
 
-    wait_for_reader_status(&data_reader, StatusMask::DATA_AVAILABLE);
+    wait_for_reader_status(&data_reader, StatusMask::DATA_AVAILABLE, Duration::from_seconds(1))
+        .unwrap();
 
     let samples = data_reader
         .take(
@@ -81,12 +92,23 @@ fn test_partition_abc_subscriber_success() {
 
     let data_reader = create_datareader(&participant, subscriber_qos, DataReaderQos::default());
 
-    wait_for_reader_status(&data_reader, StatusMask::SUBSCRIPTION_MATCHED);
-    wait_for_writer_status(&data_writer, StatusMask::PUBLICATION_MATCHED);
+    wait_for_reader_status(
+        &data_reader,
+        StatusMask::SUBSCRIPTION_MATCHED,
+        Duration::from_seconds(1),
+    )
+    .unwrap();
+    wait_for_writer_status(
+        &data_writer,
+        StatusMask::PUBLICATION_MATCHED,
+        Duration::from_seconds(1),
+    )
+    .unwrap();
 
     data_writer.write(&KeyedDataType::default(), InstanceHandle::NIL).unwrap();
 
-    wait_for_reader_status(&data_reader, StatusMask::DATA_AVAILABLE);
+    wait_for_reader_status(&data_reader, StatusMask::DATA_AVAILABLE, Duration::from_seconds(1))
+        .unwrap();
 
     let samples = data_reader
         .take(
@@ -115,12 +137,23 @@ fn test_partition_asterisk_subscriber_success() {
 
     let data_reader = create_datareader(&participant, subscriber_qos, DataReaderQos::default());
 
-    wait_for_reader_status(&data_reader, StatusMask::SUBSCRIPTION_MATCHED);
-    wait_for_writer_status(&data_writer, StatusMask::PUBLICATION_MATCHED);
+    wait_for_reader_status(
+        &data_reader,
+        StatusMask::SUBSCRIPTION_MATCHED,
+        Duration::from_seconds(1),
+    )
+    .unwrap();
+    wait_for_writer_status(
+        &data_writer,
+        StatusMask::PUBLICATION_MATCHED,
+        Duration::from_seconds(1),
+    )
+    .unwrap();
 
     data_writer.write(&KeyedDataType::default(), InstanceHandle::NIL).unwrap();
 
-    wait_for_reader_status(&data_reader, StatusMask::DATA_AVAILABLE);
+    wait_for_reader_status(&data_reader, StatusMask::DATA_AVAILABLE, Duration::from_seconds(1))
+        .unwrap();
 
     let samples = data_reader
         .take(
@@ -149,17 +182,17 @@ fn test_partition_d_subscriber_fail() {
 
     let data_reader = create_datareader(&participant, subscriber_qos, DataReaderQos::default());
 
-    let mut condition = data_reader.get_statuscondition().unwrap().clone();
-    condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
-    let reader_waitset = WaitSet::new();
-    reader_waitset.attach_condition(condition).unwrap();
-
-    let mut condition = data_writer.get_statuscondition().unwrap().clone();
-    condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
-    let writer_waitset = WaitSet::new();
-    writer_waitset.attach_condition(condition).unwrap();
-
     // They should not match
-    assert!(reader_waitset.wait(Duration::from_seconds(1)).is_err());
-    assert!(writer_waitset.wait(Duration::from_seconds(1)).is_err());
+    assert!(wait_for_reader_status(
+        &data_reader,
+        StatusMask::SUBSCRIPTION_MATCHED,
+        Duration::from_seconds(1)
+    )
+    .is_err());
+    assert!(wait_for_writer_status(
+        &data_writer,
+        StatusMask::PUBLICATION_MATCHED,
+        Duration::from_seconds(1)
+    )
+    .is_err());
 }

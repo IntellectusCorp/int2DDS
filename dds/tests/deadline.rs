@@ -36,7 +36,7 @@ impl DataReaderListener for ReaderDeadlineListener {
         _status: &RequestedDeadlineMissedStatus,
     ) {
         self.miss_count.fetch_add(1, Ordering::SeqCst);
-        println!("Reader deadline missed detected!");
+        // println!("Reader deadline missed detected!");
     }
 }
 
@@ -83,8 +83,18 @@ fn test_reader_deadline_qos_basic() {
         )
         .unwrap();
 
-    wait_for_reader_status(&data_reader, StatusMask::SUBSCRIPTION_MATCHED);
-    wait_for_writer_status(&data_writer, StatusMask::PUBLICATION_MATCHED);
+    wait_for_reader_status(
+        &data_reader,
+        StatusMask::SUBSCRIPTION_MATCHED,
+        Duration::from_seconds(1),
+    )
+    .unwrap();
+    wait_for_writer_status(
+        &data_writer,
+        StatusMask::PUBLICATION_MATCHED,
+        Duration::from_seconds(1),
+    )
+    .unwrap();
 
     // Send first data
     data_writer.write(&KeyedDataType::default(), InstanceHandle::NIL).unwrap();
@@ -152,8 +162,18 @@ fn test_reader_deadline_qos_on_dispose() {
         )
         .unwrap();
 
-    wait_for_reader_status(&data_reader, StatusMask::SUBSCRIPTION_MATCHED);
-    wait_for_writer_status(&data_writer, StatusMask::PUBLICATION_MATCHED);
+    wait_for_reader_status(
+        &data_reader,
+        StatusMask::SUBSCRIPTION_MATCHED,
+        Duration::from_seconds(1),
+    )
+    .unwrap();
+    wait_for_writer_status(
+        &data_writer,
+        StatusMask::PUBLICATION_MATCHED,
+        Duration::from_seconds(1),
+    )
+    .unwrap();
 
     // Send data (register instance)
     let handle = data_writer.register_instance(&KeyedDataType::default()).unwrap();
@@ -227,8 +247,18 @@ fn test_reader_deadline_qos_multiple_instances() {
         )
         .unwrap();
 
-    wait_for_reader_status(&data_reader, StatusMask::SUBSCRIPTION_MATCHED);
-    wait_for_writer_status(&data_writer, StatusMask::PUBLICATION_MATCHED);
+    wait_for_reader_status(
+        &data_reader,
+        StatusMask::SUBSCRIPTION_MATCHED,
+        Duration::from_seconds(1),
+    )
+    .unwrap();
+    wait_for_writer_status(
+        &data_writer,
+        StatusMask::PUBLICATION_MATCHED,
+        Duration::from_seconds(1),
+    )
+    .unwrap();
 
     // Send multiple instances
     let data1 = KeyedDataType { key: 1, value: 0 };
