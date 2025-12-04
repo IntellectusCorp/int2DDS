@@ -124,6 +124,12 @@ impl WlpLogic {
         writer_guid: Guid,
         liveliness: LivelinessQosPolicy,
     ) -> RtpsResult<()> {
+        log::debug!(
+            "[WLP] add_local_writer: writer_guid={:?}, liveliness_kind={:?}, lease_duration={:?}",
+            writer_guid,
+            liveliness.kind,
+            liveliness.lease_duration
+        );
         self.local_writers.insert(writer_guid, liveliness);
 
         if liveliness.kind == LivelinessQosPolicyKind::Automatic {
@@ -156,8 +162,17 @@ impl WlpLogic {
                 if let Some(writer) = writer.as_any().downcast_ref::<StatefulWriter>() {
                     match writer.reader_proxies().lock() {
                         Ok(proxies) => {
+                            log::debug!(
+                                "[WLP] add_local_writer: writer_guid={:?}, reader_proxies count={}",
+                                writer_guid,
+                                proxies.len()
+                            );
                             if proxies.is_empty() {
                                 // No readers yet, skip liveliness setup
+                                log::warn!(
+                                    "[WLP] add_local_writer: SKIPPING liveliness registration for writer_guid={:?} - no readers matched yet!",
+                                    writer_guid
+                                );
                                 return Ok(());
                             }
                         }
@@ -191,6 +206,10 @@ impl WlpLogic {
 
                     match liveliness_monitor.as_ref() {
                         Some(liveliness_monitor) => {
+                            log::info!(
+                                "[WLP] add_local_writer: Registering writer_guid={:?} to LivelinessMonitor, lease_duration={:?}",
+                                writer_guid, liveliness.lease_duration
+                            );
                             liveliness_monitor
                                 .track_writer(&writer_guid, liveliness.lease_duration);
                             Ok(())
@@ -1303,16 +1322,30 @@ impl WlpLogic {
         guid: Guid,
         remote_participants: Arc<DashMap<GuidPrefix, HashMap<Guid, RemoteWriterInfo>>>,
     ) -> bool {
+        log::info!("[WLP] update_liveliness called: guid={:?}", guid);
+
         // Local
         if let Some(writer) = participant.find_writer_from_entity_id(guid.entity_id()) {
+            log::info!(
+                "[WLP] update_liveliness: Found LOCAL writer for guid={:?}, sending LIVELINESS_LOST to writer",
+                guid
+            );
             writer.update_status(
                 StatusKind::LIVELINESS_LOST,
                 Some(Arc::new(LivelinessLostStatus { total_count: 0, total_count_change: 1 })),
+            );
+            log::warn!(
+                "[WLP] update_liveliness: Returning early for LOCAL writer guid={:?} - readers will NOT be notified!",
+                guid
             );
             return false;
         }
 
         // Remote
+        log::info!(
+            "[WLP] update_liveliness: No local writer found for guid={:?}, treating as REMOTE",
+            guid
+        );
         Self::update_remote_liveliness(participant, guid, remote_participants, false);
         true
     }
@@ -1323,7 +1356,14 @@ impl WlpLogic {
         remote_participants: Arc<DashMap<GuidPrefix, HashMap<Guid, RemoteWriterInfo>>>,
         is_add: bool,
     ) {
+        log::debug!("[WLP] update_remote_liveliness: guid={:?}, is_add={}", guid, is_add);
+
         if let Ok(readers) = participant.find_readers_matched_with_remote_writer(guid) {
+            log::info!(
+                "[WLP] update_remote_liveliness: Found {} readers matched with writer {:?}",
+                readers.len(),
+                guid
+            );
             for reader in readers {
                 if is_add {
                     reader.update_status(
