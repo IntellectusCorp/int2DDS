@@ -46,8 +46,8 @@ use crate::{
         deadline_monitor::DeadlineMonitor,
         domain_entity::DomainEntity,
         entity::{
-            impl_dds_entity, impl_dds_entity_impl, BaseEntity, EnableChild, Entity, EntityInternal,
-            UpdateStatus,
+            impl_check_parent_enabled, impl_dds_entity, impl_dds_entity_impl, BaseEntity,
+            EnableChild, Entity, EntityInternal, UpdateStatus,
         },
         history_cache::HistoryCache as _,
         qos_policy::{
@@ -301,6 +301,8 @@ impl<Foo: 'static + Clone> EnableChild for DataWriter<Foo> {
 
         Ok(())
     }
+
+    impl_check_parent_enabled!(get_publisher);
 }
 impl<Foo: 'static + Clone> UpdateStatus for DataWriter<Foo> {
     fn update_status(
@@ -358,7 +360,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         publisher: &Arc<Publisher>,
         wlp_logic: Option<WlpLogic>,
     ) -> DdsResult<Self> {
-        let mut writer = Self {
+        let writer = Self {
             guid,
             qos: Arc::new(Mutex::new(qos.clone())),
             listener: Arc::new(RwLock::new(listener)),
@@ -404,7 +406,11 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                 writer.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
             datawriter_cache.set_datawriter(weak_ref);
         }
-        writer.self_ref = Arc::new(Mutex::new(Some(writer_arc))); // Without Arc, memory is freed when new() function ends. StatusCondition's entity field returns None.
+        {
+            let mut self_ref =
+                writer.self_ref.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            *self_ref = Some(writer_arc);
+        }
         let period = writer.get_qos()?.deadline.period;
         if !period.is_infinite() && guid.entity_kind() == EntityKind::USER_DEFINED_WRITER_WITH_KEY {
             let status_callback = writer.create_status_callback()?;
@@ -1003,12 +1009,12 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         <Self as DataWriterBase>::wait_for_acknowledgments(self, max_wait)
     }
 
-    fn is_enabled(&self) -> DdsResult<()> {
+    pub(crate) fn is_enabled(&self) -> DdsResult<()> {
         self.is_deleted()?;
-        {
-            let _ = self.get_rtps_writer()?;
-        }
         if self.enabled.load(Ordering::SeqCst) {
+            {
+                let _ = self.get_rtps_writer()?;
+            }
             Ok(())
         } else {
             Err(DdsError::NotEnabled)
