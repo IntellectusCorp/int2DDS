@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use int2dds::dcps::{
     core::time::Duration,
     domain::domain_participant::DomainParticipant,
-    infrastructure::{status::StatusMask, wait_set::WaitSet},
+    infrastructure::{condition::Condition, status::StatusMask, wait_set::WaitSet},
     publication::{
         data_writer::DataWriter,
         qos::{DataWriterQos, PublisherQos},
@@ -92,18 +92,28 @@ pub fn create_datawriter(
     writer
 }
 
-pub fn wait_for_writer_status(data_writer: &DataWriter<KeyedDataType>, status_mask: StatusMask) {
+pub fn wait_for_writer_status(
+    data_writer: &DataWriter<KeyedDataType>,
+    status_mask: StatusMask,
+    duration: Duration,
+) -> Result<Vec<std::sync::Arc<dyn Condition + Send + Sync>>, int2dds::dcps::core::error::DdsError>
+{
     let mut condition = data_writer.get_statuscondition().unwrap().clone();
     condition.set_enabled_statuses(status_mask).unwrap();
     let wait_set = WaitSet::new();
     wait_set.attach_condition(condition).unwrap();
-    wait_set.wait(Duration::from_seconds(1)).unwrap();
+    wait_set.wait(duration)
 }
 
-pub fn wait_for_reader_status(data_reader: &DataReader<KeyedDataType>, status_mask: StatusMask) {
+pub fn wait_for_reader_status(
+    data_reader: &DataReader<KeyedDataType>,
+    status_mask: StatusMask,
+    duration: Duration,
+) -> Result<Vec<std::sync::Arc<dyn Condition + Send + Sync>>, int2dds::dcps::core::error::DdsError>
+{
     let mut condition = data_reader.get_statuscondition().unwrap().clone();
     condition.set_enabled_statuses(status_mask).unwrap();
     let wait_set = WaitSet::new();
     wait_set.attach_condition(condition).unwrap();
-    wait_set.wait(Duration::from_seconds(1)).unwrap();
+    wait_set.wait(duration)
 }

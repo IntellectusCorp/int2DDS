@@ -4,7 +4,7 @@ use common::*;
 use int2dds::{
     common::instance_handle::InstanceHandle,
     dcps::{
-        core::error::DdsError,
+        core::{error::DdsError, time::Duration},
         domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
         infrastructure::status::StatusMask,
         publication::qos::{DataWriterQos, PublisherQos},
@@ -129,8 +129,18 @@ fn test_content_filtered_topic_read() {
         )
         .unwrap();
 
-    wait_for_reader_status(&data_reader, StatusMask::SUBSCRIPTION_MATCHED);
-    wait_for_writer_status(&data_writer, StatusMask::PUBLICATION_MATCHED);
+    wait_for_reader_status(
+        &data_reader,
+        StatusMask::SUBSCRIPTION_MATCHED,
+        Duration::from_seconds(1),
+    )
+    .unwrap();
+    wait_for_writer_status(
+        &data_writer,
+        StatusMask::PUBLICATION_MATCHED,
+        Duration::from_seconds(1),
+    )
+    .unwrap();
 
     // Write test data
     let data1 = KeyedDataType { key: 0, value: 1 };
@@ -222,8 +232,18 @@ fn test_content_filtered_topic_with_read_condition() {
         )
         .unwrap();
 
-    wait_for_reader_status(&data_reader, StatusMask::SUBSCRIPTION_MATCHED);
-    wait_for_writer_status(&data_writer, StatusMask::PUBLICATION_MATCHED);
+    wait_for_reader_status(
+        &data_reader,
+        StatusMask::SUBSCRIPTION_MATCHED,
+        Duration::from_seconds(1),
+    )
+    .unwrap();
+    wait_for_writer_status(
+        &data_writer,
+        StatusMask::PUBLICATION_MATCHED,
+        Duration::from_seconds(1),
+    )
+    .unwrap();
 
     // Write test data
     let data1 = KeyedDataType { key: 0, value: 0 };
@@ -315,8 +335,18 @@ fn test_content_filtered_topic_with_query_condition() {
         )
         .unwrap();
 
-    wait_for_reader_status(&data_reader, StatusMask::SUBSCRIPTION_MATCHED);
-    wait_for_writer_status(&data_writer, StatusMask::PUBLICATION_MATCHED);
+    wait_for_reader_status(
+        &data_reader,
+        StatusMask::SUBSCRIPTION_MATCHED,
+        Duration::from_seconds(1),
+    )
+    .unwrap();
+    wait_for_writer_status(
+        &data_writer,
+        StatusMask::PUBLICATION_MATCHED,
+        Duration::from_seconds(1),
+    )
+    .unwrap();
 
     // Write test data
     let data1 = KeyedDataType { key: 0, value: 0 };

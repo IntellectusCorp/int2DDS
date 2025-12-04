@@ -49,13 +49,23 @@ fn test_volatile() {
     let data_reader =
         create_datareader(&participant, SubscriberQos::default(), DataReaderQos::default());
 
-    wait_for_reader_status(&data_reader, StatusMask::SUBSCRIPTION_MATCHED);
-    wait_for_writer_status(&data_writer, StatusMask::PUBLICATION_MATCHED);
+    wait_for_reader_status(
+        &data_reader,
+        StatusMask::SUBSCRIPTION_MATCHED,
+        Duration::from_seconds(1),
+    )
+    .unwrap();
+    wait_for_writer_status(
+        &data_writer,
+        StatusMask::PUBLICATION_MATCHED,
+        Duration::from_seconds(1),
+    )
+    .unwrap();
 
     data_writer.write(&KeyedDataType::new(1, 5), InstanceHandle::NIL).unwrap();
 
-    wait_for_reader_status(&data_reader, StatusMask::DATA_AVAILABLE);
-
+    wait_for_reader_status(&data_reader, StatusMask::DATA_AVAILABLE, Duration::from_seconds(1))
+        .unwrap();
     let samples = data_reader
         .take(
             10,
@@ -111,12 +121,22 @@ fn test_transient_local() {
 
     let data_reader = create_datareader(&participant, SubscriberQos::default(), reader_qos);
 
-    wait_for_reader_status(&data_reader, StatusMask::SUBSCRIPTION_MATCHED);
-    wait_for_writer_status(&data_writer, StatusMask::PUBLICATION_MATCHED);
+    wait_for_reader_status(
+        &data_reader,
+        StatusMask::SUBSCRIPTION_MATCHED,
+        Duration::from_seconds(1),
+    )
+    .unwrap();
+    wait_for_writer_status(
+        &data_writer,
+        StatusMask::PUBLICATION_MATCHED,
+        Duration::from_seconds(1),
+    )
+    .unwrap();
 
     data_writer.write(&KeyedDataType::new(1, 5), InstanceHandle::NIL).unwrap();
 
-    wait_for_reader_status(&data_reader, StatusMask::DATA_AVAILABLE);
+    std::thread::sleep(std::time::Duration::from_millis(500));
 
     let samples = data_reader
         .take(
@@ -128,4 +148,5 @@ fn test_transient_local() {
         .unwrap();
 
     assert_eq!(samples[0].data().unwrap().value, 0);
+    assert_eq!(samples.len(), 6);
 }
