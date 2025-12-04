@@ -1074,6 +1074,7 @@ impl Participant {
         self: &Arc<Self>,
         sender: Arc<TransportSender>,
         tcp_sender: Option<Arc<TransportSender>>,
+        shm_sender: Option<Arc<TransportSender>>,
     ) {
         // Get initial peers from environment for TCP/Hybrid discovery
         let initial_peers = crate::common::env::get_initial_peers();
@@ -1095,8 +1096,12 @@ impl Participant {
         let _ = self.sedp_logic.set(sedp_logic);
 
         // Create User logic
-        let user_logic =
-            Arc::new(Some(UserLogic::new(self.clone(), Some(sender.clone()), tcp_sender.clone())));
+        let user_logic = Arc::new(Some(UserLogic::new(
+            self.clone(),
+            Some(sender.clone()),
+            tcp_sender.clone(),
+            shm_sender,
+        )));
         let _ = self.user_logic.set(user_logic);
 
         // Create WLP logic

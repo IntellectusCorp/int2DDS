@@ -37,7 +37,8 @@ use crate::{
             entity_id::EntityId,
             guid::{Guid, GuidPrefix},
             locator::{
-                LOCATOR_KIND_TCP_V4, LOCATOR_KIND_TCP_V6, LOCATOR_KIND_UDP_V4, LOCATOR_KIND_UDP_V6,
+                LOCATOR_KIND_SHM, LOCATOR_KIND_TCP_V4, LOCATOR_KIND_TCP_V6, LOCATOR_KIND_UDP_V4,
+                LOCATOR_KIND_UDP_V6,
             },
             parameters::ParameterList,
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
@@ -1556,7 +1557,8 @@ impl SedpLogic {
             if !(locator.kind() == LOCATOR_KIND_UDP_V4
                 || locator.kind() == LOCATOR_KIND_UDP_V6
                 || locator.kind() == LOCATOR_KIND_TCP_V4
-                || locator.kind() == LOCATOR_KIND_TCP_V6)
+                || locator.kind() == LOCATOR_KIND_TCP_V6
+                || locator.kind() == LOCATOR_KIND_SHM)
             {
                 continue;
             }
@@ -1579,7 +1581,8 @@ impl SedpLogic {
             if !(locator.kind() == LOCATOR_KIND_UDP_V4
                 || locator.kind() == LOCATOR_KIND_UDP_V6
                 || locator.kind() == LOCATOR_KIND_TCP_V4
-                || locator.kind() == LOCATOR_KIND_TCP_V6)
+                || locator.kind() == LOCATOR_KIND_TCP_V6
+                || locator.kind() == LOCATOR_KIND_SHM)
             {
                 continue;
             }
