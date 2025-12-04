@@ -44,6 +44,7 @@ pub fn next_domain_id() -> i32 {
 
 pub fn create_datareader(
     domain_participant: &DomainParticipant,
+    subscriber_qos: SubscriberQos,
     data_reader_qos: DataReaderQos,
 ) -> DataReader<KeyedDataType> {
     let topic = domain_participant
@@ -56,9 +57,8 @@ pub fn create_datareader(
         )
         .unwrap();
 
-    let subscriber = domain_participant
-        .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
-        .unwrap();
+    let subscriber =
+        domain_participant.create_subscriber(subscriber_qos, None, StatusMask::default()).unwrap();
 
     let reader = subscriber
         .create_datareader::<KeyedDataType>(&topic, data_reader_qos, None, StatusMask::default())
@@ -69,6 +69,7 @@ pub fn create_datareader(
 
 pub fn create_datawriter(
     domain_participant: &DomainParticipant,
+    publisher_qos: PublisherQos,
     datawriter_qos: DataWriterQos,
 ) -> DataWriter<KeyedDataType> {
     let topic = domain_participant
@@ -81,9 +82,8 @@ pub fn create_datawriter(
         )
         .unwrap();
 
-    let publisher = domain_participant
-        .create_publisher(PublisherQos::default(), None, StatusMask::default())
-        .unwrap();
+    let publisher =
+        domain_participant.create_publisher(publisher_qos, None, StatusMask::default()).unwrap();
 
     let writer = publisher
         .create_datawriter::<KeyedDataType>(&topic, datawriter_qos, None, StatusMask::default())

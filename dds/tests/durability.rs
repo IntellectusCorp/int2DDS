@@ -14,9 +14,9 @@ use int2dds::{
             },
             status::StatusMask,
         },
-        publication::qos::DataWriterQos,
+        publication::qos::{DataWriterQos, PublisherQos},
         subscription::{
-            qos::DataReaderQos,
+            qos::{DataReaderQos, SubscriberQos},
             sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind},
         },
     },
@@ -39,14 +39,15 @@ fn test_volatile() {
         ..Default::default()
     };
 
-    let data_writer = create_datawriter(&participant, writer_qos);
+    let data_writer = create_datawriter(&participant, PublisherQos::default(), writer_qos);
 
     // Write data from seq 0 to 4 before matching
     for i in 0..=4 {
         data_writer.write(&KeyedDataType::new(1, i), InstanceHandle::NIL).unwrap();
     }
 
-    let data_reader = create_datareader(&participant, DataReaderQos::default());
+    let data_reader =
+        create_datareader(&participant, SubscriberQos::default(), DataReaderQos::default());
 
     wait_for_reader_status(&data_reader, StatusMask::SUBSCRIPTION_MATCHED);
     wait_for_writer_status(&data_writer, StatusMask::PUBLICATION_MATCHED);
@@ -88,7 +89,7 @@ fn test_transient_local() {
         ..Default::default()
     };
 
-    let data_writer = create_datawriter(&participant, writer_qos);
+    let data_writer = create_datawriter(&participant, PublisherQos::default(), writer_qos);
 
     // Write data from seq 0 to 4 before matching
     for i in 0..=4 {
@@ -108,7 +109,7 @@ fn test_transient_local() {
         ..Default::default()
     };
 
-    let data_reader = create_datareader(&participant, reader_qos);
+    let data_reader = create_datareader(&participant, SubscriberQos::default(), reader_qos);
 
     wait_for_reader_status(&data_reader, StatusMask::SUBSCRIPTION_MATCHED);
     wait_for_writer_status(&data_writer, StatusMask::PUBLICATION_MATCHED);
