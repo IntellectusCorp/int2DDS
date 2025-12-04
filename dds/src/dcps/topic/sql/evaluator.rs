@@ -480,7 +480,6 @@ impl RelOp {
 #[cfg(test)]
 mod tests {
 
-
     use super::*;
     use crate::topic::sql::{lexer::Lexer, parser::Parser};
 

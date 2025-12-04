@@ -1937,7 +1937,6 @@ mod tests {
     // Test struct - for detecting drop
     use crate::dcps::topic::type_support::DdsType;
 
-
     #[derive(DdsType)]
     pub struct TestData {
         #[dds(key)]
