@@ -158,14 +158,12 @@ impl RingBufferWriter {
             };
 
             unsafe {
-                // Write wrap marker using volatile writes
-                let marker_bytes = std::slice::from_raw_parts(
+                // Write wrap marker
+                std::ptr::copy_nonoverlapping(
                     &wrap_marker as *const MessageHeader as *const u8,
+                    self.data.add(write_offset),
                     MessageHeader::SIZE,
                 );
-                for (i, byte) in marker_bytes.iter().enumerate() {
-                    std::ptr::write_volatile(self.data.add(write_offset + i), *byte);
-                }
             }
 
             // Update write position to start of buffer
@@ -176,24 +174,21 @@ impl RingBufferWriter {
             return self.write(data);
         }
 
-        // Write message header and data using volatile writes for cross-process visibility
+        // Write message header and data using memcpy for performance
         unsafe {
-            // Write message header byte by byte using volatile
-            let header_bytes = std::slice::from_raw_parts(
+            // Write message header
+            std::ptr::copy_nonoverlapping(
                 &msg_header as *const MessageHeader as *const u8,
+                self.data.add(write_offset),
                 MessageHeader::SIZE,
             );
-            for (i, byte) in header_bytes.iter().enumerate() {
-                std::ptr::write_volatile(self.data.add(write_offset + i), *byte);
-            }
 
-            // Write message data byte by byte using volatile
-            for (i, byte) in data.iter().enumerate() {
-                std::ptr::write_volatile(
-                    self.data.add(write_offset + MessageHeader::SIZE + i),
-                    *byte,
-                );
-            }
+            // Write message data
+            std::ptr::copy_nonoverlapping(
+                data.as_ptr(),
+                self.data.add(write_offset + MessageHeader::SIZE),
+                data.len(),
+            );
         }
 
         // Memory fence to ensure all data writes are visible before updating write_pos
@@ -299,20 +294,18 @@ impl RingBufferReader {
 
         let read_offset = (read_pos as usize) % self.buffer_size;
 
-        // Read message header using volatile reads for cross-process visibility
-        let msg_header: MessageHeader = unsafe {
-            let mut header_bytes = [0u8; MessageHeader::SIZE];
-            for (i, byte) in header_bytes.iter_mut().enumerate() {
-                *byte = std::ptr::read_volatile(self.data.add(read_offset + i));
-            }
-            std::ptr::read(header_bytes.as_ptr() as *const MessageHeader)
-        };
+        // Read message header
+        let msg_header: MessageHeader =
+            unsafe { std::ptr::read(self.data.add(read_offset) as *const MessageHeader) };
 
         // Check for wrap marker
         if msg_header.data_len == 0 {
             // Skip wrap marker and continue from beginning
             let new_read_pos = read_pos + msg_header.total_len as u64;
             self.local_read_pos = new_read_pos;
+            // Update shared read_pos for wrap marker too
+            let header = unsafe { &*self.header };
+            header.read_pos.store(new_read_pos, Ordering::SeqCst);
             return self.read(buffer);
         }
 
@@ -323,12 +316,13 @@ impl RingBufferReader {
             return Err(RingBufferError::BufferTooSmall);
         }
 
-        // Copy message data using volatile reads
+        // Copy message data
         unsafe {
-            for (i, byte) in buffer[..data_len].iter_mut().enumerate() {
-                *byte =
-                    std::ptr::read_volatile(self.data.add(read_offset + MessageHeader::SIZE + i));
-            }
+            std::ptr::copy_nonoverlapping(
+                self.data.add(read_offset + MessageHeader::SIZE),
+                buffer.as_mut_ptr(),
+                data_len,
+            );
         }
 
         // Update both local and shared read position
