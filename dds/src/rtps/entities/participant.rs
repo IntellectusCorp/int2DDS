@@ -719,6 +719,26 @@ impl Participant {
         }
     }
 
+    pub(crate) fn find_readers_matched_with_local_writer(
+        &self,
+        writer_guid: &Guid,
+    ) -> RtpsResult<Vec<Arc<dyn Reader + Send + Sync>>> {
+        let writer = match self.find_writer_from_entity_id(writer_guid.entity_id()) {
+            Some(w) => w,
+            None => return Ok(Vec::new()),
+        };
+
+        let topic_name = writer
+            .get_publication_builtin_topic_data()?
+            .ok_or(RtpsError::new(
+                RtpsErrorCode::NotInitialized,
+                format!("Publication builtin topic data not set for writer: {:?}", writer_guid),
+            ))?
+            .topic_name();
+
+        Ok(self.find_readers_from_topic_name(&topic_name))
+    }
+
     pub(crate) fn find_readers_matched_with_remote_writer(
         &self,
         writer_guid: Guid,
