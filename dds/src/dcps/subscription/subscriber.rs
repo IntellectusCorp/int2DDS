@@ -32,8 +32,8 @@ use crate::{
     infrastructure::{
         domain_entity::DomainEntity,
         entity::{
-            impl_dds_entity, impl_dds_entity_impl, BaseEntity, EnableChild, Entity, EntityInternal,
-            UpdateStatus,
+            impl_check_parent_enabled, impl_dds_entity, impl_dds_entity_impl, BaseEntity,
+            EnableChild, Entity, EntityInternal, UpdateStatus,
         },
         qos_policy::{PresentationQosAccessScopeKind, Qos},
         status::StatusMask,
@@ -134,6 +134,8 @@ impl EnableChild for Subscriber {
 
         Ok(())
     }
+
+    impl_check_parent_enabled!(get_participant);
 }
 impl UpdateStatus for Subscriber {}
 impl DomainEntity for Subscriber {}
@@ -248,8 +250,10 @@ impl Subscriber {
         let datareader =
             DataReader::new(guid, type_support, topic_description, qos, listener, mask, self_ref)?;
 
-        if self.get_qos()?.entity_factory.autoenable_created_entities {
-            datareader.enable()?;
+        if let Ok(()) = self.is_enabled() {
+            if self.get_qos()?.entity_factory.autoenable_created_entities {
+                datareader.enable()?;
+            }
         }
 
         let reader_ops: Arc<dyn DataReaderInternal<Qos = DataReaderQos>> = datareader

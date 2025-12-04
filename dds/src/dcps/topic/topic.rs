@@ -42,8 +42,8 @@ use crate::{
     infrastructure::{
         domain_entity::DomainEntity,
         entity::{
-            impl_dds_entity, impl_dds_entity_impl, BaseEntity, EnableChild, Entity, EntityInternal,
-            UpdateStatus,
+            impl_check_parent_enabled, impl_dds_entity, impl_dds_entity_impl, BaseEntity,
+            EnableChild, Entity, EntityInternal, UpdateStatus,
         },
         qos_policy::Qos,
         status::{InconsistentTopicStatus, StatusInfo, StatusKind, StatusMask},
@@ -117,7 +117,9 @@ impl Drop for Topic {
 
 impl_topic_description!(Topic);
 impl_dds_entity!(Topic, TopicQos);
-impl EnableChild for Topic {}
+impl EnableChild for Topic {
+    impl_check_parent_enabled!(get_participant);
+}
 impl DomainEntity for Topic {}
 impl UpdateStatus for Topic {
     fn update_status(
