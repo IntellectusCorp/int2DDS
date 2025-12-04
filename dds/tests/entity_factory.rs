@@ -79,28 +79,50 @@ fn autoenable_created_entities_false_direct_parent() {
     assert!(res_2.is_ok());
 }
 
-// #[test]
-// fn autoenable_created_entities_false_dp() {
-//     let domain_id = next_domain_id();
-//     let factory = DomainParticipantFactory::get_instance();
+#[test]
+fn autoenable_created_entities_false_dp() {
+    let domain_id = next_domain_id();
+    let factory = DomainParticipantFactory::get_instance();
 
-//     let mut domain_participant_qos = DomainParticipantQos::default();
-//     domain_participant_qos.entity_factory = EntityFactoryQosPolicy { autoenable_created_entities: false };
+    let mut domain_participant_qos = DomainParticipantQos::default();
+    domain_participant_qos.entity_factory =
+        EntityFactoryQosPolicy { autoenable_created_entities: false };
 
-//     let participant = factory
-//         .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
-//         .unwrap();
+    let participant = factory
+        .create_participant(domain_id, domain_participant_qos, None, StatusMask::default())
+        .unwrap();
 
-//     let writer = create_datawriter(&participant, DataWriterQos::default());
+    let topic = participant
+        .create_topic::<KeyedDataType>(
+            "test_topic",
+            "KeyedDataType",
+            TopicQos::default(),
+            None,
+            StatusMask::default(),
+        )
+        .unwrap();
 
-//     // write() should fail when not enabled
-//     let res = writer.write(&KeyedDataType::new(1, 100), InstanceHandle::NIL);
-//     assert!(res.is_err());
+    let publisher =
+        participant.create_publisher(PublisherQos::default(), None, StatusMask::default()).unwrap();
 
-//     // Manually enable the writer
-//     writer.enable().unwrap();
+    let writer = publisher
+        .create_datawriter::<KeyedDataType>(
+            &topic,
+            DataWriterQos::default(),
+            None,
+            StatusMask::default(),
+        )
+        .unwrap();
 
-//     // Now write() should succeed
-//     let res_2 = writer.write(&KeyedDataType::new(1, 100), InstanceHandle::NIL);
-//     assert!(res_2.is_ok());
-// }
+    // write() should fail when not enabled
+    let res = writer.write(&KeyedDataType::new(1, 100), InstanceHandle::NIL);
+    assert!(res.is_err());
+
+    participant.enable().unwrap();
+    publisher.enable().unwrap();
+    writer.enable().unwrap();
+
+    // Now write() should succeed
+    let res_2 = writer.write(&KeyedDataType::new(1, 100), InstanceHandle::NIL);
+    assert!(res_2.is_ok());
+}
