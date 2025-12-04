@@ -994,7 +994,7 @@ mod tests {
         topic::qos::TopicQos,
     };
 
-    #[derive(DdsType, speedy::Readable, speedy::Writable)]
+    #[derive(DdsType)]
     pub struct HelloWorld {
         pub index: u32,
         pub message: String,
