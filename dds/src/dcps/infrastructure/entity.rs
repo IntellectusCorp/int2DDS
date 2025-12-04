@@ -99,11 +99,13 @@ macro_rules! impl_dds_entity_impl {
                 let qos = self.get_qos()?;
                 qos.check_unsupported_policies()?;
                 qos.is_consistent()?;
+
+                self.enable_rtps_entities()?;
+                self.enabled.store(true, Ordering::SeqCst);
+
                 if qos.autoenable_created_entities() {
                     self.enable_child_entities()?;
                 }
-                self.enable_rtps_entities()?;
-                self.enabled.store(true, Ordering::SeqCst);
                 Ok(())
             }
 
