@@ -21,14 +21,13 @@ use int2dds::{
         topic::{qos::TopicQos, type_support::DdsType},
     },
 };
-use speedy::{Readable, Writable};
 
 /**
  * Tests fragmentation with large data samples
  * Need to configure the underlying transport to support fragmentation
  */
 
-#[derive(DdsType, Readable, Writable)]
+#[derive(DdsType)]
 #[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
 pub struct LargeData {
     index: i32,
