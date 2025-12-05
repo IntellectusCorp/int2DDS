@@ -1471,13 +1471,8 @@ impl WlpLogic {
         }
     }
 
-    // For ManualByTopic Writer
     pub(crate) fn update_local_writer_liveliness(&self, writer_guid: &Guid) {
         if let Some(mut info) = self.local_writers.get_mut(&writer_guid) {
-            if info.qos().kind != LivelinessQosPolicyKind::ManualByTopic {
-                return;
-            }
-
             let was_not_alive = info.alive_state() == WriterAliveState::NotAlive;
             info.set_alive();
 
@@ -1512,15 +1507,15 @@ impl WlpLogic {
 
     // Participant level liveliness renewal (all MANUAL_BY_PARTICIPANT writers)
     pub(crate) fn update_local_participant_liveliness(&self) {
-        if let Ok(monitor) = self.liveliness_monitor.lock() {
-            if let Some(monitor) = monitor.as_ref() {
-                for entry in self.local_writers.iter() {
-                    let (guid, info) = entry.pair();
-                    if info.qos.kind == LivelinessQosPolicyKind::ManualByParticipant {
-                        monitor.update_writer(guid);
-                    }
-                }
-            }
+        let guids: Vec<Guid> = self
+            .local_writers
+            .iter()
+            .filter(|entry| entry.value().qos.kind == LivelinessQosPolicyKind::ManualByParticipant)
+            .map(|entry| *entry.key())
+            .collect();
+
+        for guid in guids {
+            self.update_local_writer_liveliness(&guid);
         }
     }
 
