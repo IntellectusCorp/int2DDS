@@ -133,6 +133,13 @@ impl WlpLogic {
         let info = WriterInfo::new(liveliness);
         self.local_writers.insert(writer_guid, info);
 
+        Self::update_local_liveliness(
+            self.participant.clone(),
+            writer_guid,
+            self.local_writers.clone(),
+            true,
+        );
+
         if liveliness.kind == LivelinessQosPolicyKind::Automatic {
             match self.min_lease_duration.lock() {
                 Ok(mut min_lease_duration) => {
@@ -192,12 +199,14 @@ impl WlpLogic {
                 Ok(mut liveliness_monitor) => {
                     if liveliness_monitor.is_none() {
                         let participant = self.participant.clone();
+                        let local_writers = self.local_writers.clone();
                         let remote_participants = self.remote_participants.clone();
 
                         let callback = Arc::new(move |guid: Guid| {
                             Self::update_liveliness(
                                 participant.clone(),
                                 guid,
+                                local_writers.clone(),
                                 remote_participants.clone(),
                             )
                         });
@@ -284,12 +293,14 @@ impl WlpLogic {
             Ok(mut liveliness_monitor) => {
                 if liveliness_monitor.is_none() {
                     let participant = self.participant.clone();
+                    let local_writers = self.local_writers.clone();
                     let remote_participants = self.remote_participants.clone();
 
                     let callback = Arc::new(move |guid: Guid| {
                         Self::update_liveliness(
                             participant.clone(),
                             guid,
+                            local_writers.clone(),
                             remote_participants.clone(),
                         )
                     });
@@ -1320,24 +1331,14 @@ impl WlpLogic {
     fn update_liveliness(
         participant: Arc<Participant>,
         guid: Guid,
+        local_writers: Arc<DashMap<Guid, WriterInfo>>,
         remote_participants: Arc<DashMap<GuidPrefix, HashMap<Guid, WriterInfo>>>,
     ) -> bool {
         log::info!("[WLP] update_liveliness called: guid={:?}", guid);
 
         // Local
-        if let Some(writer) = participant.find_writer_from_entity_id(guid.entity_id()) {
-            log::info!(
-                "[WLP] update_liveliness: Found LOCAL writer for guid={:?}, sending LIVELINESS_LOST to writer",
-                guid
-            );
-            writer.update_status(
-                StatusKind::LIVELINESS_LOST,
-                Some(Arc::new(LivelinessLostStatus { total_count: 0, total_count_change: 1 })),
-            );
-            log::warn!(
-                "[WLP] update_liveliness: Returning early for LOCAL writer guid={:?} - readers will NOT be notified!",
-                guid
-            );
+        if participant.find_writer_from_entity_id(guid.entity_id()).is_some() {
+            Self::update_local_liveliness(participant, guid, local_writers, false);
             return false;
         }
 
