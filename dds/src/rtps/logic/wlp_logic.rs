@@ -299,7 +299,6 @@ impl WlpLogic {
                 match liveliness_monitor.as_ref() {
                     Some(liveliness_monitor) => {
                         liveliness_monitor.track_writer(&writer_guid, liveliness.lease_duration);
-                        liveliness_monitor.update_writer(writer_guid);
                         Ok(())
                     }
                     None => {
@@ -816,7 +815,7 @@ impl WlpLogic {
     }
     // ManualByTopic
     pub(crate) fn assert_writer_liveliness(&self, writer_guid: Guid) -> RtpsResult<()> {
-        self.update_local_writer_liveliness(writer_guid);
+        self.update_local_writer_liveliness(&writer_guid);
 
         self.send_liveliness_heartbeat(true, true, Some(writer_guid), None)
     }
@@ -1435,7 +1434,7 @@ impl WlpLogic {
                 for entry in self.local_writers.iter() {
                     let (guid, qos) = entry.pair();
                     if qos.kind == LivelinessQosPolicyKind::ManualByParticipant {
-                        monitor.update_writer(*guid);
+                        monitor.update_writer(guid);
                     }
                 }
             }

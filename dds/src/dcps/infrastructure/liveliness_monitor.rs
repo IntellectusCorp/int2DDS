@@ -93,7 +93,7 @@ impl LivelinessMonitor {
             warn!("[LivelinessMonitor] Failed to acquire lock for tracking Entity: {:?}", guid);
         }
     }
-    pub(crate) fn update_writer(&self, guid: Guid) {
+    pub(crate) fn update_writer(&self, guid: &Guid) {
         trace!("[LivelinessMonitor] Rescheduling Guid: {:?}", guid);
         if let Ok(mut trackers) = self.writer_trackers.lock() {
             if let Some(tracker_info) = trackers.get_mut(&guid) {
