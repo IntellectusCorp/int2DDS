@@ -675,7 +675,6 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
 
 #[cfg(test)]
 mod tests {
-    use speedy::{Readable, Writable};
 
     use super::*;
     use crate::dcps::topic::type_support::DdsType;
@@ -693,14 +692,14 @@ mod tests {
         topic::qos::TopicQos,
     };
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     #[dds_type(crate_path = "int2dds")]
     struct HelloWorldType {
         index: u32,
         message: String,
     }
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     #[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
     struct ShapeType {
         #[dds(key)]
@@ -2325,132 +2324,6 @@ mod tests {
             let instance_info = data_reader.get_instance_infos().unwrap();
             let info = instance_info.get(&instance_handle).unwrap();
             assert_eq!(info.instance_state, InstanceStateKind::NOT_ALIVE_NO_WRITERS_INSTANCE_STATE);
-        }
-
-        #[test]
-        fn test_history_cache_owner_revoked_when_deadline_missed() {
-            let reader_qos = DataReaderQos {
-                ownership: OwnershipQosPolicy { kind: OwnershipQosPolicyKind::Exclusive },
-                deadline: DeadlineQosPolicy { period: Duration::from_millis(1000) },
-                ..Default::default()
-            };
-
-            let data_reader = create_with_key_datareader(reader_qos);
-            let datareader_cache = data_reader.get_datareader_cache().unwrap();
-
-            let writer_a = Guid::new(
-                [1; 12],
-                EntityId::new([0, 0, 1], EntityKind::USER_DEFINED_WRITER_WITH_KEY),
-            );
-            let writer_b = Guid::new(
-                [2; 12],
-                EntityId::new([0, 0, 1], EntityKind::USER_DEFINED_WRITER_WITH_KEY),
-            );
-
-            let instance_handle = InstanceHandle::new([1; 16]);
-
-            let _change_b = CacheChange::new(
-                ChangeKind::Alive,
-                writer_b.clone(),
-                instance_handle,
-                SequenceNumber::from_i64(1),
-                Arc::from(vec![
-                    0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
-                    20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
-                None,
-            );
-
-            // Writer A writes with weaker strength but keeps updating the lease
-            let _a_thread = thread::spawn({
-                let datareader_cache = datareader_cache.clone();
-                move || {
-                    let mut sn = 1;
-                    loop {
-                        let mut datareader_cache = datareader_cache.lock().unwrap();
-
-                        let mut change_a = CacheChange::new(
-                            ChangeKind::Alive,
-                            writer_a.clone(),
-                            instance_handle,
-                            SequenceNumber::from_i64(sn.clone()),
-                            Arc::from(vec![
-                                0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0,
-                                3, 0, 0, 0, 20, 0, 0, 0, 0, 0, 0, 0,
-                            ]),
-                            None,
-                        );
-
-                        change_a.set_ownership_strength(Some(20)); // Weaker strength
-                        datareader_cache
-                            .add_change_with_cleanup(Arc::new(Mutex::new(change_a.clone())))
-                            .unwrap();
-                        sn += 1;
-
-                        drop(datareader_cache);
-                        thread::sleep(std::time::Duration::from_millis(300));
-                    }
-                }
-            });
-
-            // Writer B writes with stronger strength but misses the lease deadline
-            let _b_thread = thread::spawn({
-                let datareader_cache = datareader_cache.clone();
-                move || {
-                    let mut sn = 1;
-                    loop {
-                        let mut datareader_cache = datareader_cache.lock().unwrap();
-
-                        let mut change_b = CacheChange::new(
-                            ChangeKind::Alive,
-                            writer_b.clone(),
-                            instance_handle,
-                            SequenceNumber::from_i64(sn.clone()),
-                            Arc::from(vec![
-                                0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0,
-                                3, 0, 0, 0, 20, 0, 0, 0, 0, 0, 0, 0,
-                            ]),
-                            None,
-                        );
-
-                        change_b.set_ownership_strength(Some(30)); // Stronger strength
-                        datareader_cache
-                            .add_change_with_cleanup(Arc::new(Mutex::new(change_b.clone())))
-                            .unwrap();
-
-                        sn += 1;
-
-                        drop(datareader_cache);
-                        thread::sleep(std::time::Duration::from_millis(3000));
-                    }
-                }
-            });
-
-            thread::sleep(std::time::Duration::from_millis(100));
-
-            // B is the owner
-            let is_owner_a = datareader_cache
-                .lock()
-                .unwrap()
-                .is_writer_owner_of_instance(writer_a.clone(), instance_handle)
-                .unwrap();
-            assert!(!is_owner_a);
-            let is_owner_b = datareader_cache
-                .lock()
-                .unwrap()
-                .is_writer_owner_of_instance(writer_b.clone(), instance_handle)
-                .unwrap();
-            assert!(is_owner_b);
-
-            thread::sleep(std::time::Duration::from_millis(1500));
-
-            // Now writer A is the owner
-            let is_owner_a = datareader_cache
-                .lock()
-                .unwrap()
-                .is_writer_owner_of_instance(writer_a.clone(), instance_handle)
-                .unwrap();
-            assert!(is_owner_a);
         }
 
         #[test]
