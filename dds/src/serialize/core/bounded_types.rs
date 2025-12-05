@@ -1,3 +1,98 @@
+/// Wide character type for DDS (UTF-16 encoded)
+///
+/// WChar wraps a Rust `char` and serializes it as UTF-16 (2 bytes).
+/// Note: Characters outside BMP (> U+FFFF) will be truncated during serialization.
+///
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct WChar {
+    inner: char,
+}
+
+impl Default for WChar {
+    fn default() -> Self {
+        Self { inner: '\0' }
+    }
+}
+
+impl WChar {
+    /// Create a new WChar from a char
+    pub fn new(c: char) -> Self {
+        Self { inner: c }
+    }
+
+    /// Get the inner char
+    pub fn as_char(&self) -> char {
+        self.inner
+    }
+
+    /// Convert to UTF-16 code unit (truncates if > U+FFFF)
+    pub fn to_utf16(&self) -> u16 {
+        let code = self.inner as u32;
+        if code > 0xFFFF {
+            0xFFFD // Replacement character
+        } else {
+            code as u16
+        }
+    }
+
+    /// Create from UTF-16 code unit
+    pub fn from_utf16(code: u16) -> Self {
+        Self { inner: char::from_u32(code as u32).unwrap_or('\u{FFFD}') }
+    }
+}
+
+impl From<char> for WChar {
+    fn from(c: char) -> Self {
+        Self::new(c)
+    }
+}
+
+impl From<WChar> for char {
+    fn from(wc: WChar) -> Self {
+        wc.inner
+    }
+}
+
+impl std::ops::Deref for WChar {
+    type Target = char;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl std::fmt::Display for WChar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.inner)
+    }
+}
+
+// Speedy serialization support for WChar
+impl<'a, C: speedy::Context> speedy::Readable<'a, C> for WChar {
+    #[inline]
+    fn read_from<R: speedy::Reader<'a, C>>(reader: &mut R) -> Result<Self, C::Error> {
+        let c = <char as speedy::Readable<'a, C>>::read_from(reader)?;
+        Ok(WChar::from(c))
+    }
+
+    #[inline]
+    fn minimum_bytes_needed() -> usize {
+        <char as speedy::Readable<'a, C>>::minimum_bytes_needed()
+    }
+}
+
+impl<C: speedy::Context> speedy::Writable<C> for WChar {
+    #[inline]
+    fn write_to<T: ?Sized + speedy::Writer<C>>(&self, writer: &mut T) -> Result<(), C::Error> {
+        <char as speedy::Writable<C>>::write_to(&self.inner, writer)
+    }
+
+    #[inline]
+    fn bytes_needed(&self) -> Result<usize, C::Error> {
+        <char as speedy::Writable<C>>::bytes_needed(&self.inner)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct WString {
     inner: String,
