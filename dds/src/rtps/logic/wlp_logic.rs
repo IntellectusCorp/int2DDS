@@ -401,7 +401,7 @@ impl WlpLogic {
                     )?;
 
                 if let Some(writer) = writer.as_any().downcast_ref::<StatefulWriter>() {
-                    self.send_heartbeat_impl(
+                    self.send_heartbeat_to_reader_proxies(
                         writer,
                         None,
                         guid.entity_id(),
@@ -415,7 +415,7 @@ impl WlpLogic {
             }
             None => {
                 let writer = self.participant.builtin_participant_message_writer();
-                self.send_heartbeat_impl(
+                self.send_heartbeat_to_reader_proxies(
                     &writer,
                     Some(EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_READER),
                     EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_WRITER,
@@ -427,7 +427,7 @@ impl WlpLogic {
         }
     }
 
-    fn send_heartbeat_impl(
+    fn send_heartbeat_to_reader_proxies(
         &self,
         writer: &StatefulWriter,
         reader_entity_id: Option<EntityId>,
