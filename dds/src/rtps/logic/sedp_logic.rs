@@ -1703,17 +1703,18 @@ impl SedpLogic {
 
         // Check if writer is already matched to avoid duplicates
         if reader.matched_writer_is_matched(endpoint_guid) {
-            if reader
-                .matched_writer_lookup(endpoint_guid)
-                .ok_or(RtpsError::new(
-                    RtpsErrorCode::MatchedEntityNotFound,
-                    "There is no writer locator for reader",
-                ))?
-                .publication_builtin_topic_data()
-                .changeable_qos_equals(&publication_builtin_topic_data)
-            {
-                return Ok(());
-            }
+            // println!("Writer is already matched");
+            // if reader
+            //     .matched_writer_lookup(endpoint_guid)
+            //     .ok_or(RtpsError::new(
+            //         RtpsErrorCode::MatchedEntityNotFound,
+            //         "There is no writer locator for reader",
+            //     ))?
+            //     .publication_builtin_topic_data()
+            //     .changeable_qos_equals(&publication_builtin_topic_data)
+            // {
+            //     return Ok(());
+            // }
 
             // QoS changed - check compatibility first
             if let Err(e) = validate_endpoint_compatibility(
