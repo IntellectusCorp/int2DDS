@@ -27,7 +27,7 @@ use crate::{
             entity::Entity,
             history::history_cache::HistoryCache,
             participant::Participant,
-            reader::{StatefulReader, WriterProxy},
+            reader::{Reader, StatefulReader, WriterProxy},
             writer::{StatefulWriter, Writer},
         },
         logic::data::builtin_endpoint_pair::BuiltinEndpointPair,
@@ -1349,10 +1349,10 @@ impl WlpLogic {
         participant: Arc<Participant>,
         guid: Guid,
         local_writers: Arc<DashMap<Guid, WriterInfo>>,
-        is_add: bool,
+        is_alive: bool,
     ) {
         if let Some(writer) = participant.find_writer_from_entity_id(guid.entity_id()) {
-            if !is_add {
+            if !is_alive {
                 log::info!("[WLP] update_liveliness: Found LOCAL writer for guid={:?}", guid);
                 writer.update_status(
                     StatusKind::LIVELINESS_LOST,
@@ -1372,32 +1372,10 @@ impl WlpLogic {
                 guid
             );
             for reader in readers {
-                if is_add {
-                    reader.update_status(
-                        StatusKind::LIVELINESS_CHANGED,
-                        Some(Arc::new(LivelinessChangedStatus {
-                            alive_count: 0,
-                            not_alive_count: 0,
-                            alive_count_change: 1,
-                            not_alive_count_change: 0,
-                            last_publication_handle: InstanceHandle::from_guid(&guid),
-                        })),
-                    );
-                } else {
-                    reader.update_status(
-                        StatusKind::LIVELINESS_CHANGED,
-                        Some(Arc::new(LivelinessChangedStatus {
-                            alive_count: 0,
-                            not_alive_count: 0,
-                            alive_count_change: -1,
-                            not_alive_count_change: 1,
-                            last_publication_handle: InstanceHandle::from_guid(&guid),
-                        })),
-                    );
-                }
+                notify_reader_liveliness_changed(&reader, &guid, is_alive);
             }
 
-            if !is_add {
+            if !is_alive {
                 if let Some(mut writer_info) = local_writers.get_mut(&guid) {
                     writer_info.set_not_alive();
                     debug!(
@@ -1413,9 +1391,9 @@ impl WlpLogic {
         participant: Arc<Participant>,
         guid: Guid,
         remote_participants: Arc<DashMap<GuidPrefix, HashMap<Guid, WriterInfo>>>,
-        is_add: bool,
+        is_alive: bool,
     ) {
-        log::debug!("[WLP] update_remote_liveliness: guid={:?}, is_add={}", guid, is_add);
+        log::debug!("[WLP] update_remote_liveliness: guid={:?}, is_alive={}", guid, is_alive);
 
         if let Ok(readers) = participant.find_readers_matched_with_remote_writer(guid) {
             log::info!(
@@ -1424,32 +1402,10 @@ impl WlpLogic {
                 guid
             );
             for reader in readers {
-                if is_add {
-                    reader.update_status(
-                        StatusKind::LIVELINESS_CHANGED,
-                        Some(Arc::new(LivelinessChangedStatus {
-                            alive_count: 0,
-                            not_alive_count: 0,
-                            alive_count_change: 1,
-                            not_alive_count_change: 0,
-                            last_publication_handle: InstanceHandle::from_guid(&guid),
-                        })),
-                    );
-                } else {
-                    reader.update_status(
-                        StatusKind::LIVELINESS_CHANGED,
-                        Some(Arc::new(LivelinessChangedStatus {
-                            alive_count: 0,
-                            not_alive_count: 0,
-                            alive_count_change: -1,
-                            not_alive_count_change: 1,
-                            last_publication_handle: InstanceHandle::from_guid(&guid),
-                        })),
-                    );
-                }
+                notify_reader_liveliness_changed(&reader, &guid, is_alive);
             }
 
-            if !is_add {
+            if !is_alive {
                 let participant_prefix = guid.prefix();
 
                 if let Some(mut remote_writers) = remote_participants.get_mut(&participant_prefix) {
@@ -1476,16 +1432,7 @@ impl WlpLogic {
                     self.participant.find_readers_matched_with_local_writer(writer_guid)
                 {
                     for reader in readers {
-                        reader.update_status(
-                            StatusKind::LIVELINESS_CHANGED,
-                            Some(Arc::new(LivelinessChangedStatus {
-                                alive_count: 0,
-                                not_alive_count: 0,
-                                alive_count_change: 1,
-                                not_alive_count_change: -1,
-                                last_publication_handle: InstanceHandle::from_guid(&writer_guid),
-                            })),
-                        );
+                        notify_reader_liveliness_changed(&reader, &writer_guid, false);
                     }
                 }
             }
@@ -1562,18 +1509,7 @@ impl WlpLogic {
                         self.participant.find_readers_matched_with_remote_writer(writer_guid)
                     {
                         for reader in readers {
-                            reader.update_status(
-                                StatusKind::LIVELINESS_CHANGED,
-                                Some(Arc::new(LivelinessChangedStatus {
-                                    alive_count: 0,
-                                    not_alive_count: 0,
-                                    alive_count_change: 1,
-                                    not_alive_count_change: -1,
-                                    last_publication_handle: InstanceHandle::from_guid(
-                                        &writer_guid,
-                                    ),
-                                })),
-                            );
+                            notify_reader_liveliness_changed(&reader, &writer_guid, false);
                         }
                     }
                 }
@@ -1639,4 +1575,22 @@ impl WlpLogic {
             *monitor = None;
         }
     }
+}
+
+fn notify_reader_liveliness_changed(
+    reader: &Arc<dyn Reader + Send + Sync>,
+    guid: &Guid,
+    is_alive: bool,
+) {
+    let (alive_change, not_alive_change) = if is_alive { (1, 0) } else { (-1, 1) };
+    reader.update_status(
+        StatusKind::LIVELINESS_CHANGED,
+        Some(Arc::new(LivelinessChangedStatus {
+            alive_count: 0,
+            not_alive_count: 0,
+            alive_count_change: alive_change,
+            not_alive_count_change: not_alive_change,
+            last_publication_handle: InstanceHandle::from_guid(guid),
+        })),
+    );
 }
