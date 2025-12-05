@@ -207,6 +207,40 @@ impl<'a> CdrDeserializer<'a> {
         Ok(result)
     }
 
+    /// Deserialize bool sequence with length prefix
+    pub fn deserialize_bool_sequence(&mut self) -> Result<Vec<bool>, CdrError> {
+        let length = self.deserialize_u32()? as usize;
+        self.check_available(length)?;
+        let mut result = Vec::with_capacity(length);
+        for _ in 0..length {
+            result.push(self.data[self.position] != 0);
+            self.position += 1;
+        }
+        Ok(result)
+    }
+
+    /// Deserialize char sequence with length prefix
+    pub fn deserialize_char_sequence(&mut self) -> Result<Vec<char>, CdrError> {
+        let length = self.deserialize_u32()? as usize;
+        self.check_available(length)?;
+        let mut result = Vec::with_capacity(length);
+        for _ in 0..length {
+            result.push(self.data[self.position] as char);
+            self.position += 1;
+        }
+        Ok(result)
+    }
+
+    /// Deserialize string sequence with length prefix
+    pub fn deserialize_string_sequence(&mut self) -> Result<Vec<String>, CdrError> {
+        let length = self.deserialize_u32()? as usize;
+        let mut result = Vec::with_capacity(length);
+        for _ in 0..length {
+            result.push(self.deserialize_string()?);
+        }
+        Ok(result)
+    }
+
     /// Deserialize sequence of values with length prefix
     pub fn deserialize_sequence<T, F>(&mut self, mut deserialize_fn: F) -> Result<Vec<T>, CdrError>
     where
@@ -424,6 +458,37 @@ impl<'a> Xcdr2Deserializer<'a> {
             );
             result.push(value);
             self.position += 8;
+        }
+        Ok(result)
+    }
+
+    pub fn deserialize_bool_sequence(&mut self) -> Result<Vec<bool>, CdrError> {
+        let length = self.deserialize_u32()? as usize;
+        self.check_available(length)?;
+        let mut result = Vec::with_capacity(length);
+        for _ in 0..length {
+            result.push(self.data[self.position] != 0);
+            self.position += 1;
+        }
+        Ok(result)
+    }
+
+    pub fn deserialize_char_sequence(&mut self) -> Result<Vec<char>, CdrError> {
+        let length = self.deserialize_u32()? as usize;
+        self.check_available(length)?;
+        let mut result = Vec::with_capacity(length);
+        for _ in 0..length {
+            result.push(self.data[self.position] as char);
+            self.position += 1;
+        }
+        Ok(result)
+    }
+
+    pub fn deserialize_string_sequence(&mut self) -> Result<Vec<String>, CdrError> {
+        let length = self.deserialize_u32()? as usize;
+        let mut result = Vec::with_capacity(length);
+        for _ in 0..length {
+            result.push(self.deserialize_string()?);
         }
         Ok(result)
     }
