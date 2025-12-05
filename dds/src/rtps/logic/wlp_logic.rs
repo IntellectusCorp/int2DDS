@@ -57,12 +57,12 @@ pub(crate) enum WriterAliveState {
 }
 
 #[derive(Clone)]
-pub(crate) struct RemoteWriterInfo {
+pub(crate) struct WriterInfo {
     qos: LivelinessQosPolicy,
     alive_state: WriterAliveState,
 }
 
-impl RemoteWriterInfo {
+impl WriterInfo {
     pub fn new(qos: LivelinessQosPolicy) -> Self {
         Self { qos, alive_state: WriterAliveState::Alive }
     }
@@ -92,7 +92,7 @@ pub(crate) struct WlpLogic {
     // Local user-defined writers (GUID -> LivelinessQosPolicy)
     local_writers: Arc<DashMap<Guid, LivelinessQosPolicy>>,
     // Remote user-defined writers (GUID -> LivelinessQosPolicy)
-    remote_participants: Arc<DashMap<GuidPrefix, HashMap<Guid, RemoteWriterInfo>>>,
+    remote_participants: Arc<DashMap<GuidPrefix, HashMap<Guid, WriterInfo>>>,
     min_lease_duration: Arc<Mutex<RtpsDuration>>,
     liveliness_monitor: Arc<Mutex<Option<LivelinessMonitor>>>,
 }
@@ -262,7 +262,7 @@ impl WlpLogic {
         liveliness: LivelinessQosPolicy,
     ) -> RtpsResult<()> {
         let prefix = writer_guid.prefix();
-        let writer_info = RemoteWriterInfo::new(liveliness);
+        let writer_info = WriterInfo::new(liveliness);
 
         if let Some(mut writers) = self.remote_participants.get_mut(&prefix) {
             writers.insert(writer_guid, writer_info);
@@ -1320,7 +1320,7 @@ impl WlpLogic {
     fn update_liveliness(
         participant: Arc<Participant>,
         guid: Guid,
-        remote_participants: Arc<DashMap<GuidPrefix, HashMap<Guid, RemoteWriterInfo>>>,
+        remote_participants: Arc<DashMap<GuidPrefix, HashMap<Guid, WriterInfo>>>,
     ) -> bool {
         log::info!("[WLP] update_liveliness called: guid={:?}", guid);
 
@@ -1353,7 +1353,7 @@ impl WlpLogic {
     fn update_remote_liveliness(
         participant: Arc<Participant>,
         guid: Guid,
-        remote_participants: Arc<DashMap<GuidPrefix, HashMap<Guid, RemoteWriterInfo>>>,
+        remote_participants: Arc<DashMap<GuidPrefix, HashMap<Guid, WriterInfo>>>,
         is_add: bool,
     ) {
         log::debug!("[WLP] update_remote_liveliness: guid={:?}, is_add={}", guid, is_add);
@@ -1528,7 +1528,7 @@ impl WlpLogic {
 
                                 drop(remote_writers);
 
-                                // NOT_ALIVE ??ALIVE
+                                // NOT_ALIVE -> ALIVE
                                 if was_not_alive {
                                     if let Ok(readers) = self
                                         .participant
