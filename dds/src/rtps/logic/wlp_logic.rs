@@ -151,90 +151,84 @@ impl WlpLogic {
                         *min_lease_duration = new.into();
 
                         self.start_periodic_liveliness(*min_lease_duration);
-                        Ok(())
                     } else {
                         *min_lease_duration = std::cmp::min(*min_lease_duration, new.into());
 
                         if prev != *min_lease_duration {
                             self.update_automatic_lease_duration(*min_lease_duration);
                         }
-                        Ok(())
                     }
                 }
-                Err(e) => Err(RtpsError::new(RtpsErrorCode::LockError, e.to_string())),
+                Err(e) => return Err(RtpsError::new(RtpsErrorCode::LockError, e.to_string())),
             }
-        } else {
-            if let Some(writer) =
-                self.participant.find_writer_from_entity_id(writer_guid.entity_id())
-            {
-                if let Some(writer) = writer.as_any().downcast_ref::<StatefulWriter>() {
-                    match writer.reader_proxies().lock() {
-                        Ok(proxies) => {
-                            log::debug!(
-                                "[WLP] add_local_writer: writer_guid={:?}, reader_proxies count={}",
-                                writer_guid,
-                                proxies.len()
-                            );
-                            if proxies.is_empty() {
-                                // No readers yet, skip liveliness setup
-                                log::warn!(
+        }
+        if let Some(writer) = self.participant.find_writer_from_entity_id(writer_guid.entity_id()) {
+            if let Some(writer) = writer.as_any().downcast_ref::<StatefulWriter>() {
+                match writer.reader_proxies().lock() {
+                    Ok(proxies) => {
+                        log::debug!(
+                            "[WLP] add_local_writer: writer_guid={:?}, reader_proxies count={}",
+                            writer_guid,
+                            proxies.len()
+                        );
+                        if proxies.is_empty() {
+                            // No readers yet, skip liveliness setup
+                            log::warn!(
                                     "[WLP] add_local_writer: SKIPPING liveliness registration for writer_guid={:?} - no readers matched yet!",
                                     writer_guid
                                 );
-                                return Ok(());
-                            }
-                        }
-                        Err(e) => {
-                            log::warn!("Failed to lock reader proxies in add_local_writer: {:?}, continuing anyway", e);
-                            // Continue to add writer to WLP even if lock fails
-                            // Better to have false positive than miss liveliness
+                            return Ok(());
                         }
                     }
-                } else {
-                    // StatelessWriter has no WLP
-                    return Ok(());
+                    Err(e) => {
+                        log::warn!("Failed to lock reader proxies in add_local_writer: {:?}, continuing anyway", e);
+                        // Continue to add writer to WLP even if lock fails
+                        // Better to have false positive than miss liveliness
+                    }
                 }
+            } else {
+                // StatelessWriter has no WLP
+                return Ok(());
             }
-            match self.liveliness_monitor.lock() {
-                Ok(mut liveliness_monitor) => {
-                    if liveliness_monitor.is_none() {
-                        let participant = self.participant.clone();
-                        let local_writers = self.local_writers.clone();
-                        let remote_participants = self.remote_participants.clone();
+        }
+        match self.liveliness_monitor.lock() {
+            Ok(mut liveliness_monitor) => {
+                if liveliness_monitor.is_none() {
+                    let participant = self.participant.clone();
+                    let local_writers = self.local_writers.clone();
+                    let remote_participants = self.remote_participants.clone();
 
-                        let callback = Arc::new(move |guid: Guid| {
-                            Self::update_liveliness(
-                                participant.clone(),
-                                guid,
-                                local_writers.clone(),
-                                remote_participants.clone(),
-                            )
-                        });
+                    let callback = Arc::new(move |guid: Guid| {
+                        Self::update_liveliness(
+                            participant.clone(),
+                            guid,
+                            local_writers.clone(),
+                            remote_participants.clone(),
+                        )
+                    });
 
-                        *liveliness_monitor = Some(LivelinessMonitor::new(callback));
-                    }
+                    *liveliness_monitor = Some(LivelinessMonitor::new(callback));
+                }
 
-                    match liveliness_monitor.as_ref() {
-                        Some(liveliness_monitor) => {
-                            log::info!(
+                match liveliness_monitor.as_ref() {
+                    Some(liveliness_monitor) => {
+                        log::info!(
                                 "[WLP] add_local_writer: Registering writer_guid={:?} to LivelinessMonitor, lease_duration={:?}",
                                 writer_guid, liveliness.lease_duration
                             );
-                            liveliness_monitor
-                                .track_writer(&writer_guid, liveliness.lease_duration);
-                            Ok(())
-                        }
-                        None => Err(RtpsError::new(
-                            RtpsErrorCode::NotInitialized,
-                            format!(
-                                "Liveliness Monitor for Participant: {:?}",
-                                self.participant.guid(),
-                            ),
-                        )),
+                        liveliness_monitor.track_writer(&writer_guid, liveliness.lease_duration);
+                        Ok(())
                     }
+                    None => Err(RtpsError::new(
+                        RtpsErrorCode::NotInitialized,
+                        format!(
+                            "Liveliness Monitor for Participant: {:?}",
+                            self.participant.guid(),
+                        ),
+                    )),
                 }
-                Err(e) => Err(RtpsError::new(RtpsErrorCode::LockError, e.to_string())),
             }
+            Err(e) => Err(RtpsError::new(RtpsErrorCode::LockError, e.to_string())),
         }
     }
 
