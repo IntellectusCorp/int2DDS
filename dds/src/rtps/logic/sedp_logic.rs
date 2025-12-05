@@ -1333,18 +1333,6 @@ impl SedpLogic {
         let endpoint_guid = subscription_builtin_topic_data.endpoint_guid();
 
         if writer.matched_reader_is_matched(endpoint_guid) {
-            if writer
-                .matched_reader_lookup(endpoint_guid)
-                .ok_or(RtpsError::new(
-                    RtpsErrorCode::MatchedEntityNotFound,
-                    "There is no reader proxy for writer",
-                ))?
-                .subscription_builtin_topic_data()
-                .changeable_qos_equals(&subscription_builtin_topic_data)
-            {
-                return Ok(());
-            }
-
             // QoS changed - check compatibility first
             if let Err(e) = validate_endpoint_compatibility(
                 writer,
@@ -1463,22 +1451,6 @@ impl SedpLogic {
         let endpoint_guid = subscription_builtin_topic_data.endpoint_guid();
 
         if writer.matched_reader_is_matched(endpoint_guid) {
-            if writer
-                .matched_reader_lookup(endpoint_guid)
-                .ok_or(RtpsError::new(
-                    RtpsErrorCode::MatchedEntityNotFound,
-                    "There is no reader locator for writer",
-                ))?
-                .subscription_builtin_topic_data()
-                .changeable_qos_equals(&subscription_builtin_topic_data)
-            {
-                debug!(
-                    "[handle_stateless_writer_subscription] Found existing ReaderLocator for GUID: {:?}",
-                    subscription_builtin_topic_data.endpoint_guid()
-                );
-                return Ok(());
-            }
-
             // QoS changed - check compatibility first
             if let Err(e) = validate_endpoint_compatibility(
                 writer,
@@ -1703,18 +1675,6 @@ impl SedpLogic {
 
         // Check if writer is already matched to avoid duplicates
         if reader.matched_writer_is_matched(endpoint_guid) {
-            if reader
-                .matched_writer_lookup(endpoint_guid)
-                .ok_or(RtpsError::new(
-                    RtpsErrorCode::MatchedEntityNotFound,
-                    "There is no writer locator for reader",
-                ))?
-                .publication_builtin_topic_data()
-                .changeable_qos_equals(&publication_builtin_topic_data)
-            {
-                return Ok(());
-            }
-
             // QoS changed - check compatibility first
             if let Err(e) = validate_endpoint_compatibility(
                 reader,
@@ -1807,18 +1767,6 @@ impl SedpLogic {
 
         // Check if writer is already matched to avoid duplicates
         if reader.matched_writer_is_matched(endpoint_guid) {
-            if reader
-                .matched_writer_lookup(endpoint_guid)
-                .ok_or(RtpsError::new(
-                    RtpsErrorCode::MatchedEntityNotFound,
-                    "There is no writer proxy for reader",
-                ))?
-                .publication_builtin_topic_data()
-                .changeable_qos_equals(&publication_builtin_topic_data)
-            {
-                return Ok(());
-            }
-
             // QoS changed - check compatibility first
             if let Err(e) = validate_endpoint_compatibility(
                 reader,
