@@ -301,43 +301,6 @@ impl DcpsBridge {
             writer.as_ref(),
         );
 
-        // // Local matching: match with local readers in the same participant (bidirectional)
-        // if let Some(sedp_logic) = self.sedp_logic.as_ref() {
-        //     if let Some(ref writer) = writer {
-        //         let local_readers = self
-        //             .participant
-        //             .find_readers_from_topic_name(&publication_builtin_topic_data.topic_name());
-
-        //         // Get local participant's locators for local matching
-        //         let (local_unicast_locators, _) = self.default_endpoint_info().unwrap_or_default();
-
-        //         for reader in local_readers {
-        //             // Add WriterProxy to Reader (for Reader to receive from Writer)
-        //             // For local matching, ensure publication_data has locators
-        //             let mut local_pub_data = publication_builtin_topic_data.clone();
-        //             if local_pub_data.unicast_locator_list().is_empty() {
-        //                 for locator in &local_unicast_locators {
-        //                     local_pub_data.add_unicast_locator(locator.clone());
-        //                 }
-        //             }
-        //             sedp_logic.match_reader_with_publication(reader.clone(), local_pub_data);
-
-        //             // Add ReaderProxy to Writer (for Writer to send to Reader)
-        //             // For local matching, ensure subscription_data has locators
-        //             if let Ok(mut subscription_data) = reader.get_subscription_builtin_topic_data()
-        //             {
-        //                 if subscription_data.unicast_locator_list().is_empty() {
-        //                     for locator in &local_unicast_locators {
-        //                         subscription_data.add_unicast_locator(locator.clone());
-        //                     }
-        //                 }
-        //                 let _ = sedp_logic
-        //                     .match_writer_with_subscription(writer.clone(), subscription_data);
-        //             }
-        //         }
-        //     }
-        // }
-
         match writer {
             Some(writer) => {
                 let _ = self.participant.add_writer(
@@ -491,44 +454,6 @@ impl DcpsBridge {
             },
             reader.as_ref(),
         );
-
-        // Local matching: match with local writers in the same participant (bidirectional)
-        // if let Some(sedp_logic) = self.sedp_logic.as_ref() {
-        //     if let Some(ref reader) = reader {
-        //         let local_writers = self
-        //             .participant
-        //             .find_writers_from_topic_name(&subscription_builtin_topic_data.topic_name());
-
-        //         // Get local participant's locators for local matching
-        //         let (local_unicast_locators, _) = self.default_endpoint_info().unwrap_or_default();
-
-        //         for writer in local_writers {
-        //             // Add ReaderProxy to Writer (for Writer to send to Reader)
-        //             // For local matching, ensure subscription_data has locators
-        //             let mut local_sub_data = subscription_builtin_topic_data.clone();
-        //             if local_sub_data.unicast_locator_list().is_empty() {
-        //                 for locator in &local_unicast_locators {
-        //                     local_sub_data.add_unicast_locator(locator.clone());
-        //                 }
-        //             }
-        //             let _ =
-        //                 sedp_logic.match_writer_with_subscription(writer.clone(), local_sub_data);
-
-        //             // Add WriterProxy to Reader (for Reader to receive from Writer)
-        //             // For local matching, ensure publication_data has locators
-        //             if let Ok(Some(mut publication_data)) =
-        //                 writer.get_publication_builtin_topic_data()
-        //             {
-        //                 if publication_data.unicast_locator_list().is_empty() {
-        //                     for locator in &local_unicast_locators {
-        //                         publication_data.add_unicast_locator(locator.clone());
-        //                     }
-        //                 }
-        //                 sedp_logic.match_reader_with_publication(reader.clone(), publication_data);
-        //             }
-        //         }
-        //     }
-        // }
 
         match reader {
             Some(reader) => {
