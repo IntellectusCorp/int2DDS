@@ -393,258 +393,127 @@ impl WlpLogic {
         writer_guid: Option<Guid>,
         target_guid_prefix: Option<GuidPrefix>, // for P2P initial
     ) -> RtpsResult<()> {
-        if let Some(writer_guid) = writer_guid {
-            if let Some(writer) =
-                self.participant.find_writer_from_entity_id(writer_guid.entity_id())
-            {
+        match writer_guid {
+            Some(guid) => {
+                let writer =
+                    self.participant.find_writer_from_entity_id(guid.entity_id()).ok_or_else(
+                        || RtpsError::new(RtpsErrorCode::NotInitialized, "Writer not found"),
+                    )?;
+
                 if let Some(writer) = writer.as_any().downcast_ref::<StatefulWriter>() {
-                    let (first_sn, last_sn, heartbeat_count) = {
-                        match writer.writer_cache().lock() {
-                            Ok(writer_cache) => {
-                                let info = (
-                                    writer_cache.get_seq_num_min(),
-                                    writer_cache.get_seq_num_max(),
-                                    writer.heartbeat_count(),
-                                );
-                                debug!("send_liveliness_heartbeat called: count={}, first={:?}, last={:?}, cache_size={}, liveliness_flag={}",
-                        info.2, info.0, info.1, writer_cache.get_changes().len(), liveliness_flag);
-                                info
-                            }
-                            Err(e) => {
-                                log::warn!("Failed to lock writer cache for WLP heartbeat: {}, using UNKNOWN sequence numbers", e);
-                                // Use UNKNOWN sequence numbers to still send heartbeat
-                                (
-                                    SequenceNumber::UNKNOWN,
-                                    SequenceNumber::UNKNOWN,
-                                    writer.heartbeat_count(),
-                                )
-                            }
-                        }
-                    };
-
-                    let reader_proxies = writer.reader_proxies();
-                    let proxies_guard = reader_proxies.lock().map_err(|e| {
-                        RtpsError::new(
-                            RtpsErrorCode::LockError,
-                            format!("Failed to lock reader proxies for WLP: {}", e),
-                        )
-                    })?;
-                    for reader_proxy in proxies_guard.iter() {
-                        if !reader_proxy.is_active() {
-                            log::warn!(
-                                "[WLP] Skipping inactive reader proxy: {:?}",
-                                reader_proxy.remote_reader_guid()
-                            );
-                            continue;
-                        }
-                        log::debug!(
-                            "[WLP] Sending heartbeat to active reader proxy: {:?}",
-                            reader_proxy.remote_reader_guid()
-                        );
-
-                        let participant_guid = {
-                            let local_participant_data =
-                                self.participant.local_participant_proxy_data();
-                            local_participant_data.participant_guid()
-                        };
-
-                        let buffer = match MessageCreator::create_heartbeat_message(
-                            participant_guid,
-                            reader_proxy.remote_reader_guid(),
-                            heartbeat_count,
-                            reader_proxy.remote_group_entity_id(),
-                            writer_guid.entity_id(),
-                            first_sn,
-                            last_sn,
-                            final_flag,
-                            liveliness_flag,
-                        ) {
-                            Ok(buf) => buf,
-                            Err(e) => {
-                                log::warn!("Failed to create WLP heartbeat message: {:?}", e);
-                                continue; // Skip this reader proxy
-                            }
-                        };
-
-                        // WLP messages must use metatraffic locators, not user traffic locators
-                        let remote_guid_prefix = reader_proxy.remote_reader_guid().prefix();
-                        match self.participant.remote_participant_proxy_datas().clone().lock() {
-                            Ok(remote_participant_datas) => {
-                                for remote_participant_data in remote_participant_datas.iter() {
-                                    if remote_participant_data.participant_guid().prefix()
-                                        == remote_guid_prefix
-                                    {
-                                        for locator in remote_participant_data
-                                            .metatraffic_unicast_locator_list()
-                                        {
-                                            if locator.kind() == 1 {
-                                                //UDPv4
-                                                let socket_addr =
-                                                    SocketAddr::V4(SocketAddrV4::new(
-                                                        locator.to_ip_v4_addr(),
-                                                        locator.port() as u16,
-                                                    ));
-
-                                                if let Ok(guard) = self.sender.lock() {
-                                                    if let Some(sender) = guard.as_ref() {
-                                                        if let Err(e) =
-                                                            sender.send(&socket_addr, &buffer)
-                                                        {
-                                                            log::warn!(
-                                                                "Failed to send WLP heartbeat: {:?}",
-                                                                e
-                                                            );
-                                                        } else {
-                                                            debug!("[WLP] Sent liveliness heartbeat to metatraffic port: {}", socket_addr);
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        break;
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                log::warn!(
-                                    "Failed to lock remote_participant_datas for WLP heartbeat: {}",
-                                    e
-                                );
-                                continue; // Skip this reader proxy, continue with others
-                            }
-                        }
-                    }
-
-                    writer.increase_heartbeat_count();
-                    Ok(())
+                    self.send_heartbeat_impl(
+                        writer,
+                        None,
+                        guid.entity_id(),
+                        target_guid_prefix, // None
+                        liveliness_flag,
+                        final_flag,
+                    )
                 } else {
-                    // Nothing to process
-                    Ok(())
-                    // Err(RtpsError::new(
-                    //     RtpsErrorCode::InvalidEntityKind,
-                    //     "User writer is not stateful",
-                    // ))
+                    Ok(()) // Stateless writers do not send Heartbeat messages carrying liveliness flags.
                 }
-            } else {
-                Err(RtpsError::new(
-                    RtpsErrorCode::NotInitialized,
-                    "Writer not Initialized for Guid: {:?}",
-                ))
             }
-        } else {
-            let writer = self.participant.builtin_participant_message_writer();
-
-            let (first_sn, last_sn, heartbeat_count) = {
-                match writer.writer_cache().lock() {
-                    Ok(writer_cache) => {
-                        let info = (
-                            writer_cache.get_seq_num_min(),
-                            writer_cache.get_seq_num_max(),
-                            writer.heartbeat_count(),
-                        );
-                        debug!("send_liveliness_heartbeat called: count={}, first={:?}, last={:?}, cache_size={}, liveliness_flag={}",
-                        info.2, info.0, info.1, writer_cache.get_changes().len(), liveliness_flag);
-                        info
-                    }
-                    Err(e) => {
-                        log::warn!("Failed to lock writer cache for P2P WLP heartbeat: {}, using UNKNOWN sequence numbers", e);
-                        // Use UNKNOWN sequence numbers to still send heartbeat
-                        (SequenceNumber::UNKNOWN, SequenceNumber::UNKNOWN, writer.heartbeat_count())
-                    }
-                }
-            };
-
-            let reader_proxies = writer.reader_proxies();
-            let proxies_guard = reader_proxies.lock().map_err(|e| {
-                RtpsError::new(
-                    RtpsErrorCode::LockError,
-                    format!("Failed to lock reader proxies for P2P: {}", e),
-                )
-            })?;
-
-            for reader_proxy in proxies_guard.iter() {
-                if !reader_proxy.is_active() {
-                    continue;
-                }
-
-                if let Some(prefix) = target_guid_prefix {
-                    if reader_proxy.remote_reader_guid().prefix() != prefix {
-                        continue;
-                    }
-                }
-
-                let participant_guid = {
-                    let local_participant_data = self.participant.local_participant_proxy_data();
-                    local_participant_data.participant_guid()
-                };
-                let buffer = match MessageCreator::create_heartbeat_message(
-                    participant_guid,
-                    reader_proxy.remote_reader_guid(),
-                    heartbeat_count,
-                    EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_READER,
+            None => {
+                let writer = self.participant.builtin_participant_message_writer();
+                self.send_heartbeat_impl(
+                    &writer,
+                    Some(EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_READER),
                     EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_WRITER,
-                    first_sn,
-                    last_sn,
-                    final_flag,
+                    target_guid_prefix,
                     liveliness_flag,
-                ) {
-                    Ok(buf) => buf,
-                    Err(e) => {
-                        log::warn!("Failed to create P2P heartbeat message: {:?}", e);
-                        continue; // Skip this reader proxy
-                    }
-                };
-
-                // WLP messages must use metatraffic locators, not user traffic locators
-                let remote_guid_prefix = reader_proxy.remote_reader_guid().prefix();
-                match self.participant.remote_participant_proxy_datas().clone().lock() {
-                    Ok(remote_participant_datas) => {
-                        for remote_participant_data in remote_participant_datas.iter() {
-                            if remote_participant_data.participant_guid().prefix()
-                                == remote_guid_prefix
-                            {
-                                for locator in
-                                    remote_participant_data.metatraffic_unicast_locator_list()
-                                {
-                                    if locator.kind() == 1 {
-                                        //UDPv4
-                                        let socket_addr = SocketAddr::V4(SocketAddrV4::new(
-                                            locator.to_ip_v4_addr(),
-                                            locator.port() as u16,
-                                        ));
-
-                                        if let Ok(guard) = self.sender.lock() {
-                                            if let Some(sender) = guard.as_ref() {
-                                                if let Err(e) = sender.send(&socket_addr, &buffer) {
-                                                    log::warn!(
-                                                        "Failed to send P2P heartbeat: {:?}",
-                                                        e
-                                                    );
-                                                } else {
-                                                    debug!("[WLP] Sent P2P liveliness heartbeat to metatraffic port: {}", socket_addr);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                break;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "Failed to lock remote_participant_datas for P2P heartbeat: {}",
-                            e
-                        );
-                        continue; // Skip this reader proxy, continue with others
-                    }
-                }
+                    final_flag,
+                )
             }
-
-            writer.increase_heartbeat_count();
-            Ok(())
         }
     }
+
+    fn send_heartbeat_impl(
+        &self,
+        writer: &StatefulWriter,
+        reader_entity_id: Option<EntityId>,
+        writer_entity_id: EntityId,
+        target_guid_prefix: Option<GuidPrefix>,
+        liveliness_flag: bool,
+        final_flag: bool,
+    ) -> RtpsResult<()> {
+        let (first_sn, last_sn, heartbeat_count) = match writer.writer_cache().lock() {
+            Ok(cache) => {
+                (cache.get_seq_num_min(), cache.get_seq_num_max(), writer.heartbeat_count())
+            }
+            Err(_) => (SequenceNumber::UNKNOWN, SequenceNumber::UNKNOWN, writer.heartbeat_count()),
+        };
+
+        let reader_proxies = writer.reader_proxies();
+        let proxies_guard = reader_proxies.lock().map_err(|e| {
+            RtpsError::new(
+                RtpsErrorCode::LockError,
+                format!("Failed to lock reader proxies for WLP: {}", e),
+            )
+        })?;
+
+        let remote_datas = self.participant.remote_participant_proxy_datas().clone();
+        let remote_datas_guard = remote_datas
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+        for reader_proxy in proxies_guard.iter() {
+            if !reader_proxy.is_active() {
+                continue;
+            }
+
+            if let Some(prefix) = target_guid_prefix {
+                if reader_proxy.remote_reader_guid().prefix() != prefix {
+                    continue;
+                }
+            }
+
+            let actual_reader_entity_id =
+                reader_entity_id.unwrap_or_else(|| reader_proxy.remote_group_entity_id());
+
+            let participant_guid =
+                self.participant.local_participant_proxy_data().participant_guid();
+
+            let buffer = match MessageCreator::create_heartbeat_message(
+                participant_guid,
+                reader_proxy.remote_reader_guid(),
+                heartbeat_count,
+                actual_reader_entity_id,
+                writer_entity_id,
+                first_sn,
+                last_sn,
+                final_flag,
+                liveliness_flag,
+            ) {
+                Ok(buf) => buf,
+                Err(_) => continue,
+            };
+
+            // metatraffic locator로 전송
+            let remote_prefix = reader_proxy.remote_reader_guid().prefix();
+            for remote_data in remote_datas_guard.iter() {
+                if remote_data.participant_guid().prefix() == remote_prefix {
+                    for locator in remote_data.metatraffic_unicast_locator_list() {
+                        if locator.kind() == 1 {
+                            let socket_addr = SocketAddr::V4(SocketAddrV4::new(
+                                locator.to_ip_v4_addr(),
+                                locator.port() as u16,
+                            ));
+                            if let Ok(guard) = self.sender.lock() {
+                                if let Some(sender) = guard.as_ref() {
+                                    let _ = sender.send(&socket_addr, &buffer);
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        writer.increase_heartbeat_count();
+        Ok(())
+    }
+
     // Automatic
     pub(crate) fn start_periodic_liveliness(&self, lease_duration: RtpsDuration) {
         let data = ParticipantMessageData::new(
