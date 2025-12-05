@@ -514,6 +514,14 @@ impl Participant {
 
         // Remove from map in participant
         self.rtps_writer_map.get_mut(&topic_name).and_then(|mut map| map.remove(&entity_id));
+        if let Some(mut entry) = self.remote_publications().get_mut(&topic_name) {
+            entry.value_mut().remove(&Guid::new(self.guid().prefix(), entity_id));
+
+            if entry.value().is_empty() {
+                drop(entry);
+                self.remote_publications().remove(&topic_name);
+            }
+        }
 
         Ok(())
     }
@@ -581,6 +589,14 @@ impl Participant {
 
         // Remove from map in participant
         self.rtps_reader_map.get_mut(&topic_name).and_then(|mut map| map.remove(&entity_id));
+        if let Some(mut entry) = self.remote_subscriptions().get_mut(&topic_name) {
+            entry.value_mut().remove(&Guid::new(self.guid().prefix(), entity_id));
+
+            if entry.value().is_empty() {
+                drop(entry);
+                self.remote_subscriptions().remove(&topic_name);
+            }
+        }
 
         Ok(())
     }
