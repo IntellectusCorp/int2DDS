@@ -1525,116 +1525,69 @@ impl WlpLogic {
     ) {
         let message_kind = participant_message_data.kind();
 
-        if let Ok(monitor) = self.liveliness_monitor.lock() {
-            if let Some(monitor) = monitor.as_ref() {
-                if let Some(mut remote_writers) = self
-                    .remote_participants
-                    .get_mut(&participant_message_data.participant_guid_prefix())
-                {
-                    for (guid, info) in remote_writers.iter_mut() {
-                        let should_update: bool = match message_kind {
-                            ParticipantMessageDataKind::AUTOMATIC_LIVELINESS_UPDATE => {
-                                info.qos().kind == LivelinessQosPolicyKind::Automatic
-                            }
-                            ParticipantMessageDataKind::MANUAL_LIVELINESS_UPDATE => {
-                                info.qos().kind == LivelinessQosPolicyKind::ManualByParticipant
-                            }
-                            _ => false,
-                        };
+        let mut guids = Vec::new();
 
-                        if should_update {
-                            let was_not_alive = info.alive_state() == WriterAliveState::NotAlive;
-                            let lease_duration = info.qos().lease_duration;
-
-                            info.set_alive();
-
-                            if was_not_alive {
-                                if let Ok(readers) =
-                                    self.participant.find_readers_matched_with_remote_writer(*guid)
-                                {
-                                    for reader in readers {
-                                        reader.update_status(
-                                            StatusKind::LIVELINESS_CHANGED,
-                                            Some(Arc::new(LivelinessChangedStatus {
-                                                alive_count: 0,
-                                                not_alive_count: 0,
-                                                alive_count_change: 1,
-                                                not_alive_count_change: -1,
-                                                last_publication_handle: InstanceHandle::from_guid(
-                                                    guid,
-                                                ),
-                                            })),
-                                        );
-                                    }
-                                }
-                            }
-
-                            // Re-track writer (restores is_alive = true in monitor)
-                            monitor.track_writer(guid, lease_duration);
-                        }
+        if let Some(remote_writers) =
+            self.remote_participants.get_mut(&participant_message_data.participant_guid_prefix())
+        {
+            for (guid, info) in remote_writers.iter() {
+                let should_update: bool = match message_kind {
+                    ParticipantMessageDataKind::AUTOMATIC_LIVELINESS_UPDATE => {
+                        info.qos().kind == LivelinessQosPolicyKind::Automatic
                     }
+                    ParticipantMessageDataKind::MANUAL_LIVELINESS_UPDATE => {
+                        info.qos().kind == LivelinessQosPolicyKind::ManualByParticipant
+                    }
+                    _ => false,
+                };
+
+                if should_update {
+                    guids.push(guid.clone());
                 }
             }
+        }
+
+        for guid in guids {
+            self.update_remote_writer_liveliness(guid);
         }
     }
 
     pub(crate) fn update_remote_writer_liveliness(&self, writer_guid: Guid) {
-        if let Some(remote_writers) = self.remote_participants.get(&writer_guid.prefix()) {
-            if let Some(info) = remote_writers.get(&writer_guid) {
-                let qos_kind = info.qos().kind;
+        if let Some(mut remote_writers) = self.remote_participants.get_mut(&writer_guid.prefix()) {
+            if let Some(info) = remote_writers.get_mut(&writer_guid) {
+                let was_not_alive = info.alive_state() == WriterAliveState::NotAlive;
+                info.set_alive();
+
+                let lease_duration = info.qos().lease_duration;
+
                 drop(remote_writers);
 
-                match qos_kind {
-                    LivelinessQosPolicyKind::Automatic => {}
-                    LivelinessQosPolicyKind::ManualByParticipant => {
-                        self.update_remote_participant_liveliness(ParticipantMessageData::new(
-                            writer_guid.prefix(),
-                            qos_kind,
-                        ));
-                    }
-                    LivelinessQosPolicyKind::ManualByTopic => {
-                        if let Some(mut remote_writers) =
-                            self.remote_participants.get_mut(&writer_guid.prefix())
-                        {
-                            if let Some(info) = remote_writers.get_mut(&writer_guid) {
-                                let was_not_alive =
-                                    info.alive_state() == WriterAliveState::NotAlive;
-                                info.set_alive();
-
-                                let lease_duration = info.qos().lease_duration;
-
-                                drop(remote_writers);
-
-                                // NOT_ALIVE -> ALIVE
-                                if was_not_alive {
-                                    if let Ok(readers) = self
-                                        .participant
-                                        .find_readers_matched_with_remote_writer(writer_guid)
-                                    {
-                                        for reader in readers {
-                                            reader.update_status(
-                                                StatusKind::LIVELINESS_CHANGED,
-                                                Some(Arc::new(LivelinessChangedStatus {
-                                                    alive_count: 0,
-                                                    not_alive_count: 0,
-                                                    alive_count_change: 1,
-                                                    not_alive_count_change: -1,
-                                                    last_publication_handle:
-                                                        InstanceHandle::from_guid(&writer_guid),
-                                                })),
-                                            );
-                                        }
-                                    }
-                                }
-
-                                // LivelinessMonitor Timer Update (re-track if removed after LOST)
-                                if let Ok(monitor) = self.liveliness_monitor.lock() {
-                                    if let Some(monitor) = monitor.as_ref() {
-                                        monitor.track_writer(&writer_guid, lease_duration);
-                                    }
-                                }
-                            }
+                // NOT_ALIVE -> ALIVE
+                if was_not_alive {
+                    if let Ok(readers) =
+                        self.participant.find_readers_matched_with_remote_writer(writer_guid)
+                    {
+                        for reader in readers {
+                            reader.update_status(
+                                StatusKind::LIVELINESS_CHANGED,
+                                Some(Arc::new(LivelinessChangedStatus {
+                                    alive_count: 0,
+                                    not_alive_count: 0,
+                                    alive_count_change: 1,
+                                    not_alive_count_change: -1,
+                                    last_publication_handle: InstanceHandle::from_guid(
+                                        &writer_guid,
+                                    ),
+                                })),
+                            );
                         }
+                    }
+                }
+
+                // LivelinessMonitor Timer Update (re-track if removed after LOST)
+                if let Ok(monitor) = self.liveliness_monitor.lock() {
+                    if let Some(monitor) = monitor.as_ref() {
+                        monitor.track_writer(&writer_guid, lease_duration);
                     }
                 }
             }
