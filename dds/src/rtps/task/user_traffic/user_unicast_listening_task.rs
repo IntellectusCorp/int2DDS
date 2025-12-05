@@ -6,7 +6,6 @@ use crate::rtps::messages::message_receiver::MessageReceiver;
 use crate::rtps::transport::socket::MAX_EVENTS;
 use crate::rtps::transport::tcp::tcp_listener::TcpListener;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
-use crate::rtps::transport::TransportSender;
 use log::{debug, error, info, warn};
 use mio::{Events, Interest, Poll, Token};
 use std::net::SocketAddr;
@@ -25,7 +24,6 @@ impl UserUnicastListeningTask {
     pub(crate) fn new(
         user_unicast_listener: Option<UdpListener>,
         tcp_listener: Option<TcpListener>,
-        sender: Arc<TransportSender>,
         participant: Arc<Participant>,
     ) -> Self {
         // Extract TCP sender from participant if available (for Hybrid mode)
@@ -236,8 +234,6 @@ mod tests {
         let participant =
             Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ip()));
 
-        let sender = socket.sender();
-
         //user multicast port : 7400
         //user unicast port : 7410
         //user traffic multicast port : 7401
@@ -245,7 +241,6 @@ mod tests {
         let mut user_unicast_listening_task = UserUnicastListeningTask::new(
             socket.user_traffic_unicast_listener(),
             socket.user_traffic_tcp_listener(),
-            sender.clone(),
             participant,
         );
         let _ = user_unicast_listening_task.unicast_listening();

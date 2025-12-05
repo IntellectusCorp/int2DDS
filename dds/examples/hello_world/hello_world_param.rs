@@ -29,7 +29,6 @@ use int2dds::{
     topic::{qos::TopicQos, type_support::DdsType},
 };
 use log::info;
-use speedy::{Readable, Writable};
 
 #[derive(Clone, ValueEnum, Debug)]
 enum Role {
@@ -59,7 +58,7 @@ struct Args {
     reliability: Reliability,
 }
 
-#[derive(DdsType, Readable, Writable)]
+#[derive(DdsType)]
 #[dds_type(crate_path = "int2dds")]
 struct HelloWorldType {
     index: u32,

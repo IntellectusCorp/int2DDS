@@ -115,7 +115,6 @@ impl DcpsBridge {
                 self.socket.discovery_multicast_listener(),
                 self.socket.discovery_unicast_listener(),
                 self.socket.discovery_tcp_listener(),
-                self.socket.sender(),
             );
         } else {
             log::error!("sedp_logic is not set");
@@ -817,9 +816,8 @@ mod tests {
         },
         subscription::qos::{DataReaderQos, SubscriberQos},
         topic::{qos::TopicQos, type_support::DdsType},
-        DeriveDdsType,
     };
-    #[derive(DeriveDdsType, speedy::Writable, speedy::Readable)]
+    #[derive(DdsType)]
     #[dds_type(crate_path = "crate")]
     pub(crate) struct HelloWorld {
         pub index: u32,

@@ -643,9 +643,9 @@ impl PlCdrParser {
                     return Err("No valid data representation IDs found".to_string());
                 }
 
-                ParameterValue::DataRepresentation(DataRepresentationQosPolicy::new(
-                    representations,
-                ))
+                ParameterValue::DataRepresentation(DataRepresentationQosPolicy {
+                    value: representations,
+                })
             }
             _ => ParameterValue::Unknown(data),
         };

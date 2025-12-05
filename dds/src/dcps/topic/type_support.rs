@@ -19,7 +19,7 @@
 //! ```no_run
 //! use int2dds::topic::type_support::DdsType;
 //!
-//! #[derive(DdsType, Clone)]
+//! #[derive(DdsType)]
 //! #[dds_type(crate_path = "int2dds")]
 //! struct MyData {
 //!     #[dds(key)]
@@ -148,9 +148,8 @@ pub trait TypeSupport: Send + Sync + 'static {
 mod tests {
     use super::*;
     use log::debug;
-    use speedy::{Readable, Writable};
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     #[dds_type(crate_path = "crate")]
     struct HelloWorldType {
         index: u32,
@@ -217,7 +216,7 @@ mod tests {
         assert_eq!(data3.message, deserialized4.message);
     }
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     #[dds_type(crate_path = "crate")]
     struct UnifiedHelloWorldType {
         #[dds(key)]
@@ -272,7 +271,7 @@ mod tests {
         debug!("✓ Unified CDR/XCDR test passed!");
     }
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     #[dds_type(crate_path = "crate")]
     struct UnifiedPaddingTestType {
         small: u8,
@@ -330,13 +329,13 @@ mod tests {
         }
     }
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     #[dds_type(crate_path = "crate")]
     struct SimpleArrayTest {
         data: [u8; 4],
     }
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     #[dds_type(crate_path = "crate")]
     struct MixedArrayTest {
         id: u32,
@@ -366,7 +365,7 @@ mod tests {
         debug!("✓ MixedArrayTest TypeSupport: {}", mixed_type_support.get_type_name());
     }
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     #[dds_type(crate_path = "crate")]
     struct ArrayTestType {
         id: u32,
@@ -523,7 +522,7 @@ mod tests {
         debug!("=== RTPS KeyHash Calculation Test Complete ===");
     }
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     #[dds_type(crate_path = "crate")]
     struct CharacterTestType {
         ascii_char: char, // Latin-1 character (8-bit)
@@ -594,7 +593,7 @@ mod tests {
         debug!("=== char Serialization Test Complete ===");
     }
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     #[dds_type(crate_path = "crate")]
     struct DataPacket {
         id: u32,
