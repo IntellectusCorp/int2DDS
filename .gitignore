@@ -1,5 +1,3 @@
-int2DDS-shapes-demo
-
 # Python
 __pycache__/
 *.py[cod]
@@ -144,3 +142,4 @@ CLAUDE.md
 #.idea/
 
 *.log
+int2DDS-shapes-demo
