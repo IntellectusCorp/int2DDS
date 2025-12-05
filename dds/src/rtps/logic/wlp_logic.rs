@@ -90,7 +90,7 @@ pub(crate) struct WlpLogic {
     sender: Arc<Mutex<Option<Arc<TransportSender>>>>,
     timer_handler: Arc<Mutex<TimerHandler>>,
     // Local user-defined writers (GUID -> LivelinessQosPolicy)
-    local_writers: Arc<DashMap<Guid, LivelinessQosPolicy>>,
+    local_writers: Arc<DashMap<Guid, WriterInfo>>,
     // Remote user-defined writers (GUID -> LivelinessQosPolicy)
     remote_participants: Arc<DashMap<GuidPrefix, HashMap<Guid, WriterInfo>>>,
     min_lease_duration: Arc<Mutex<RtpsDuration>>,
@@ -130,7 +130,8 @@ impl WlpLogic {
             liveliness.kind,
             liveliness.lease_duration
         );
-        self.local_writers.insert(writer_guid, liveliness);
+        let info = WriterInfo::new(liveliness);
+        self.local_writers.insert(writer_guid, info);
 
         if liveliness.kind == LivelinessQosPolicyKind::Automatic {
             match self.min_lease_duration.lock() {
@@ -239,7 +240,7 @@ impl WlpLogic {
                     let has_automatic = self
                         .local_writers
                         .iter()
-                        .any(|entry| entry.value().kind == LivelinessQosPolicyKind::Automatic);
+                        .any(|entry| entry.value().qos.kind == LivelinessQosPolicyKind::Automatic);
 
                     if !has_automatic {
                         self.stop_periodic_liveliness();
@@ -1432,8 +1433,8 @@ impl WlpLogic {
         if let Ok(monitor) = self.liveliness_monitor.lock() {
             if let Some(monitor) = monitor.as_ref() {
                 for entry in self.local_writers.iter() {
-                    let (guid, qos) = entry.pair();
-                    if qos.kind == LivelinessQosPolicyKind::ManualByParticipant {
+                    let (guid, info) = entry.pair();
+                    if info.qos.kind == LivelinessQosPolicyKind::ManualByParticipant {
                         monitor.update_writer(guid);
                     }
                 }
