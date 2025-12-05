@@ -7,7 +7,6 @@ use crate::rtps::logic::spdp_logic::SpdpLogic;
 use crate::rtps::messages::message_receiver::MessageReceiver;
 use crate::rtps::transport::socket::MAX_EVENTS;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
-use crate::rtps::transport::TransportSender;
 use crate::serialize::pl_cdr::InlineQosParameters;
 use log::{debug, error, info};
 use mio::{Events, Interest, Poll, Token};
@@ -25,7 +24,6 @@ impl DiscoveryMulticastListeningTask {
     pub(crate) fn new(
         discovery_multicast_listener: Option<UdpListener>,
         participant: Arc<Participant>,
-        sender: Arc<TransportSender>,
     ) -> Self {
         let guid_prefix = { participant.guid().prefix() };
         let domain_id = { participant.domain_id() };
@@ -184,7 +182,6 @@ mod tests {
         let mut discovery_multicast_listening_task = DiscoveryMulticastListeningTask::new(
             socket.discovery_multicast_listener(),
             participant,
-            socket.sender(),
         );
         let _ = discovery_multicast_listening_task.multicast_listening();
     }

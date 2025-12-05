@@ -236,9 +236,9 @@ impl HistoryQosPolicyKind {
 /// #     domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
 /// #     topic::{qos::TopicQos, type_support::DdsType},
 /// };
-/// # use speedy::{Readable, Writable};
 /// #
-/// # #[derive(DdsType, Readable, Writable)]
+/// #
+/// # #[derive(DdsType)]
 /// # #[dds_type(crate_path = "int2dds")]
 /// # struct HelloWorldType { index: u32, message: String }
 /// #
@@ -317,9 +317,9 @@ impl HistoryQosPolicy {
 /// #     domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
 /// #     topic::{qos::TopicQos, type_support::DdsType},
 /// };
-/// # use speedy::{Readable, Writable};
 /// #
-/// # #[derive(DdsType, Readable, Writable)]
+/// #
+/// # #[derive(DdsType)]
 /// # #[dds_type(crate_path = "int2dds")]
 /// # struct HelloWorldType { index: u32, message: String }
 /// #
@@ -414,9 +414,9 @@ impl OwnershipQosPolicyKind {
 /// #     domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
 /// #     topic::{qos::TopicQos, type_support::DdsType},
 /// };
-/// # use speedy::{Readable, Writable};
 /// #
-/// # #[derive(DdsType, Readable, Writable)]
+/// #
+/// # #[derive(DdsType)]
 /// # #[dds_type(crate_path = "int2dds")]
 /// # struct HelloWorldType { index: u32, message: String }
 /// #
@@ -685,7 +685,7 @@ impl QosPolicy for TopicDataQosPolicy {
 #[derive(Debug, Default, ConstDefault, Clone, PartialEq, Eq, Readable, Writable)]
 pub struct GroupDataQosPolicy {
     /// Arbitrary group-specific data.
-    pub datavalue: Vec<u8>,
+    pub value: Vec<u8>,
 }
 
 impl QosPolicy for GroupDataQosPolicy {
@@ -740,9 +740,9 @@ impl QosPolicy for LatencyBudgetQosPolicy {
 /// #     domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
 /// #     topic::{qos::TopicQos, type_support::DdsType},
 /// };
-/// # use speedy::{Readable, Writable};
 /// #
-/// # #[derive(DdsType, Readable, Writable)]
+/// #
+/// # #[derive(DdsType)]
 /// # #[dds_type(crate_path = "int2dds")]
 /// # struct HelloWorldType { index: u32, message: String }
 /// #
@@ -845,9 +845,9 @@ impl QosPolicy for TimeBasedFilterQosPolicy {
 /// #     domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
 /// #     topic::{qos::TopicQos, type_support::DdsType},
 /// };
-/// # use speedy::{Readable, Writable};
 /// #
-/// # #[derive(DdsType, Readable, Writable)]
+/// #
+/// # #[derive(DdsType)]
 /// # #[dds_type(crate_path = "int2dds")]
 /// # struct HelloWorldType { index: u32, message: String }
 /// #
@@ -921,9 +921,9 @@ impl QosPolicy for EntityFactoryQosPolicy {
 /// #     domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
 /// #     topic::{qos::TopicQos, type_support::DdsType},
 /// };
-/// # use speedy::{Readable, Writable};
 /// #
-/// # #[derive(DdsType, Readable, Writable)]
+/// #
+/// # #[derive(DdsType)]
 /// # #[dds_type(crate_path = "int2dds")]
 /// # struct HelloWorldType { index: u32, message: String }
 /// #
@@ -1029,9 +1029,9 @@ impl ReliabilityQosPolicyKind {
 /// #     domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
 /// #     topic::{qos::TopicQos, type_support::DdsType},
 /// };
-/// # use speedy::{Readable, Writable};
 /// #
-/// # #[derive(DdsType, Readable, Writable)]
+/// #
+/// # #[derive(DdsType)]
 /// # #[dds_type(crate_path = "int2dds")]
 /// # struct HelloWorldType { index: u32, message: String }
 /// #
@@ -1124,9 +1124,9 @@ impl LivelinessQosPolicyKind {
 /// #     domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
 /// #     topic::{qos::TopicQos, type_support::DdsType},
 /// };
-/// # use speedy::{Readable, Writable};
 /// #
-/// # #[derive(DdsType, Readable, Writable)]
+/// #
+/// # #[derive(DdsType)]
 /// # #[dds_type(crate_path = "int2dds")]
 /// # struct HelloWorldType { index: u32, message: String }
 /// #
@@ -1261,9 +1261,9 @@ impl DurabilityQosPolicyKind {
 /// #     domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
 /// #     topic::{qos::TopicQos, type_support::DdsType},
 /// };
-/// # use speedy::{Readable, Writable};
 /// #
-/// # #[derive(DdsType, Readable, Writable)]
+/// #
+/// # #[derive(DdsType)]
 /// # #[dds_type(crate_path = "int2dds")]
 /// # struct HelloWorldType { index: u32, message: String }
 /// #
@@ -1330,9 +1330,9 @@ impl QosPolicy for DurabilityQosPolicy {
 /// #     domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
 /// #     topic::{qos::TopicQos, type_support::DdsType},
 /// };
-/// # use speedy::{Readable, Writable};
 /// #
-/// # #[derive(DdsType, Readable, Writable)]
+/// #
+/// # #[derive(DdsType)]
 /// # #[dds_type(crate_path = "int2dds")]
 /// # struct HelloWorldType { index: u32, message: String }
 /// #
@@ -1511,9 +1511,9 @@ impl DestinationOrderQosPolicyKind {
 /// #     domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
 /// #     topic::{qos::TopicQos, type_support::DdsType},
 /// };
-/// # use speedy::{Readable, Writable};
 /// #
-/// # #[derive(DdsType, Readable, Writable)]
+/// #
+/// # #[derive(DdsType)]
 /// # #[dds_type(crate_path = "int2dds")]
 /// # struct HelloWorldType { index: u32, message: String }
 /// #
@@ -1602,9 +1602,9 @@ impl DataRepresentationId {
 /// #     domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
 /// #     topic::{qos::TopicQos, type_support::DdsType},
 /// };
-/// # use speedy::{Readable, Writable};
 /// #
-/// # #[derive(DdsType, Readable, Writable)]
+/// #
+/// # #[derive(DdsType)]
 /// # #[dds_type(crate_path = "int2dds")]
 /// # struct HelloWorldType { index: u32, message: String }
 /// #
@@ -1644,24 +1644,14 @@ impl DataRepresentationId {
 ///     .create_datareader::<HelloWorldType>(&topic, reader_qos, None, StatusMask::default())
 ///     .unwrap();
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Readable, Writable, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Readable, Writable, Default, ConstDefault)]
 pub struct DataRepresentationQosPolicy {
     /// List of supported data representations.
     pub value: Vec<DataRepresentationId>,
 }
 
-impl ConstDefault for DataRepresentationQosPolicy {
-    const DEFAULT: Self = DataRepresentationQosPolicy { value: Vec::new() };
-}
-
 impl QosPolicy for DataRepresentationQosPolicy {
     fn name(&self) -> &str {
         DATAREPRESENTATION_QOS_POLICY_NAME
-    }
-}
-
-impl DataRepresentationQosPolicy {
-    pub fn new(representations: Vec<DataRepresentationId>) -> Self {
-        DataRepresentationQosPolicy { value: representations }
     }
 }
