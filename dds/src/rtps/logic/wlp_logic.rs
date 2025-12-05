@@ -1350,6 +1350,70 @@ impl WlpLogic {
         true
     }
 
+    fn update_local_liveliness(
+        participant: Arc<Participant>,
+        guid: Guid,
+        local_writers: Arc<DashMap<Guid, WriterInfo>>,
+        is_add: bool,
+    ) {
+        if let Some(writer) = participant.find_writer_from_entity_id(guid.entity_id()) {
+            if !is_add {
+                log::info!("[WLP] update_liveliness: Found LOCAL writer for guid={:?}", guid);
+                writer.update_status(
+                    StatusKind::LIVELINESS_LOST,
+                    Some(Arc::new(LivelinessLostStatus { total_count: 0, total_count_change: 1 })),
+                );
+                log::warn!(
+                    "[WLP] update_liveliness: Returning early for LOCAL writer guid={:?} - readers will NOT be notified!",
+                    guid
+                );
+            }
+        }
+
+        if let Ok(readers) = participant.find_readers_matched_with_local_writer(&guid) {
+            log::info!(
+                "[WLP] update_local_liveliness: Found {} readers matched with writer {:?}",
+                readers.len(),
+                guid
+            );
+            for reader in readers {
+                if is_add {
+                    reader.update_status(
+                        StatusKind::LIVELINESS_CHANGED,
+                        Some(Arc::new(LivelinessChangedStatus {
+                            alive_count: 0,
+                            not_alive_count: 0,
+                            alive_count_change: 1,
+                            not_alive_count_change: 0,
+                            last_publication_handle: InstanceHandle::from_guid(&guid),
+                        })),
+                    );
+                } else {
+                    reader.update_status(
+                        StatusKind::LIVELINESS_CHANGED,
+                        Some(Arc::new(LivelinessChangedStatus {
+                            alive_count: 0,
+                            not_alive_count: 0,
+                            alive_count_change: -1,
+                            not_alive_count_change: 1,
+                            last_publication_handle: InstanceHandle::from_guid(&guid),
+                        })),
+                    );
+                }
+            }
+
+            if !is_add {
+                if let Some(mut writer_info) = local_writers.get_mut(&guid) {
+                    writer_info.set_not_alive();
+                    debug!(
+                        "[WLP] Writer {:?} set to NOT_ALIVE (participant kept for recovery)",
+                        guid
+                    );
+                }
+            }
+        }
+    }
+
     fn update_remote_liveliness(
         participant: Arc<Participant>,
         guid: Guid,
