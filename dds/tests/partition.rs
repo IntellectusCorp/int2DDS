@@ -9,7 +9,7 @@ use int2dds::{
             domain_participant::DomainParticipant,
             domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos,
         },
-        infrastructure::{status::StatusMask, wait_set::WaitSet},
+        infrastructure::status::StatusMask,
         publication::{
             data_writer::DataWriter,
             qos::{DataWriterQos, PublisherQos},
