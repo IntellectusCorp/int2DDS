@@ -1406,24 +1406,41 @@ impl WlpLogic {
         }
     }
 
-    pub(crate) fn update_local_writer_liveliness(&self, writer_guid: Guid) {
-        match self.liveliness_monitor.lock() {
-            Ok(monitor) => {
-                if let Some(monitor) = monitor.as_ref() {
-                    monitor.update_writer(writer_guid);
-                } else {
-                    log::warn!(
-                        "[WLP] Liveliness monitor is None when updating writer {:?}",
-                        writer_guid
-                    );
+    // For ManualByTopic Writer
+    pub(crate) fn update_local_writer_liveliness(&self, writer_guid: &Guid) {
+        if let Some(mut info) = self.local_writers.get_mut(&writer_guid) {
+            if info.qos().kind != LivelinessQosPolicyKind::ManualByTopic {
+                return;
+            }
+
+            let was_not_alive = info.alive_state() == WriterAliveState::NotAlive;
+            info.set_alive();
+
+            // NOT_ALIVE -> ALIVE
+            if was_not_alive {
+                if let Ok(readers) =
+                    self.participant.find_readers_matched_with_local_writer(writer_guid)
+                {
+                    for reader in readers {
+                        reader.update_status(
+                            StatusKind::LIVELINESS_CHANGED,
+                            Some(Arc::new(LivelinessChangedStatus {
+                                alive_count: 0,
+                                not_alive_count: 0,
+                                alive_count_change: 1,
+                                not_alive_count_change: -1,
+                                last_publication_handle: InstanceHandle::from_guid(&writer_guid),
+                            })),
+                        );
+                    }
                 }
             }
-            Err(e) => {
-                log::error!(
-                    "[WLP] Failed to lock liveliness monitor when updating writer {:?}: {}",
-                    writer_guid,
-                    e
-                );
+
+            // LivelinessMonitor Timer Update (re-track if removed after LOST)
+            if let Ok(monitor) = self.liveliness_monitor.lock() {
+                if let Some(monitor) = monitor.as_ref() {
+                    monitor.update_writer(&writer_guid);
+                }
             }
         }
     }
