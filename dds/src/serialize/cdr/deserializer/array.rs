@@ -196,6 +196,37 @@ impl<'a> CdrDeserializer<'a> {
         }
         Ok(result)
     }
+
+    /// Deserialize fixed-size bool array (no length prefix)
+    pub fn deserialize_bool_array(&mut self, size: usize) -> Result<Vec<bool>, CdrError> {
+        self.check_available(size)?;
+        let mut result = Vec::with_capacity(size);
+        for _ in 0..size {
+            result.push(self.data[self.position] != 0);
+            self.position += 1;
+        }
+        Ok(result)
+    }
+
+    /// Deserialize fixed-size char array (no length prefix)
+    pub fn deserialize_char_array_fixed(&mut self, size: usize) -> Result<Vec<char>, CdrError> {
+        self.check_available(size)?;
+        let mut result = Vec::with_capacity(size);
+        for _ in 0..size {
+            result.push(self.data[self.position] as char);
+            self.position += 1;
+        }
+        Ok(result)
+    }
+
+    /// Deserialize fixed-size string array (no length prefix)
+    pub fn deserialize_string_array(&mut self, size: usize) -> Result<Vec<String>, CdrError> {
+        let mut result = Vec::with_capacity(size);
+        for _ in 0..size {
+            result.push(self.deserialize_string()?);
+        }
+        Ok(result)
+    }
 }
 
 // Xcdr2Deserializer uses the same array deserialization logic
@@ -375,6 +406,34 @@ impl<'a> Xcdr2Deserializer<'a> {
             );
             result.push(value);
             self.position += 8;
+        }
+        Ok(result)
+    }
+
+    pub fn deserialize_bool_array(&mut self, size: usize) -> Result<Vec<bool>, CdrError> {
+        self.check_available(size)?;
+        let mut result = Vec::with_capacity(size);
+        for _ in 0..size {
+            result.push(self.data[self.position] != 0);
+            self.position += 1;
+        }
+        Ok(result)
+    }
+
+    pub fn deserialize_char_array_fixed(&mut self, size: usize) -> Result<Vec<char>, CdrError> {
+        self.check_available(size)?;
+        let mut result = Vec::with_capacity(size);
+        for _ in 0..size {
+            result.push(self.data[self.position] as char);
+            self.position += 1;
+        }
+        Ok(result)
+    }
+
+    pub fn deserialize_string_array(&mut self, size: usize) -> Result<Vec<String>, CdrError> {
+        let mut result = Vec::with_capacity(size);
+        for _ in 0..size {
+            result.push(self.deserialize_string()?);
         }
         Ok(result)
     }

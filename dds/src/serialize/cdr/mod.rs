@@ -479,3 +479,32 @@ impl XcdrDeserialize for WString {
         Ok(WString::from(s))
     }
 }
+
+// WChar support
+use crate::serialize::core::WChar;
+
+impl CdrSerialize for WChar {
+    fn serialize_cdr(&self, serializer: &mut CdrSerializer) -> CdrResult<()> {
+        serializer.serialize_wchar16(self.as_char())
+    }
+}
+
+impl CdrDeserialize for WChar {
+    fn deserialize_cdr(deserializer: &mut CdrDeserializer) -> CdrResult<Self> {
+        let c = deserializer.deserialize_wchar16()?;
+        Ok(WChar::from(c))
+    }
+}
+
+impl XcdrSerialize for WChar {
+    fn serialize_xcdr(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()> {
+        serializer.serialize_wchar16(self.as_char())
+    }
+}
+
+impl XcdrDeserialize for WChar {
+    fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
+        let c = deserializer.deserialize_wchar16()?;
+        Ok(WChar::from(c))
+    }
+}
