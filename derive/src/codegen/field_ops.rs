@@ -220,6 +220,24 @@ fn gen_serialize_code(
         SerializationMethod::VecF64 => {
             gen_sequence_serialize("serialize_f64_sequence", field_name, crate_path, bound)
         }
+        SerializationMethod::VecBool => {
+            gen_sequence_serialize("serialize_bool_sequence", field_name, crate_path, bound)
+        }
+        SerializationMethod::VecChar => {
+            gen_sequence_serialize("serialize_char_sequence", field_name, crate_path, bound)
+        }
+        SerializationMethod::VecString => {
+            gen_sequence_serialize("serialize_string_sequence", field_name, crate_path, bound)
+        }
+        SerializationMethod::BoolArray => {
+            gen_array_serialize("serialize_bool_array", field_name, crate_path)
+        }
+        SerializationMethod::CharArray => {
+            gen_array_serialize("serialize_char_array_fixed", field_name, crate_path)
+        }
+        SerializationMethod::StringArray => {
+            gen_array_serialize("serialize_string_array", field_name, crate_path)
+        }
         SerializationMethod::Fallback => {
             let trait_path = if xcdr {
                 quote!(#crate_path::serialize::xcdr::XcdrSerialize::serialize_xcdr)
@@ -518,6 +536,62 @@ fn gen_deserialize_code(
         }
         SerializationMethod::VecF64 => {
             gen_sequence_deserialize("deserialize_f64_sequence", field_name, crate_path, bound)
+        }
+        SerializationMethod::VecBool => {
+            gen_sequence_deserialize("deserialize_bool_sequence", field_name, crate_path, bound)
+        }
+        SerializationMethod::VecChar => {
+            gen_sequence_deserialize("deserialize_char_sequence", field_name, crate_path, bound)
+        }
+        SerializationMethod::VecString => {
+            gen_sequence_deserialize("deserialize_string_sequence", field_name, crate_path, bound)
+        }
+        SerializationMethod::BoolArray => {
+            if let Some(size) = get_array_size(field_type) {
+                quote! {
+                    let data_vec = deserializer.deserialize_bool_array(#size)
+                        .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+                    let #field_name: #field_type = {
+                        let mut array = [false; #size];
+                        array.copy_from_slice(&data_vec);
+                        array
+                    };
+                }
+            } else {
+                quote! { compile_error!("Cannot determine array size for field"); }
+            }
+        }
+        SerializationMethod::CharArray => {
+            if let Some(size) = get_array_size(field_type) {
+                quote! {
+                    let data_vec = deserializer.deserialize_char_array_fixed(#size)
+                        .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+                    let #field_name: #field_type = {
+                        let mut array = ['\0'; #size];
+                        array.copy_from_slice(&data_vec);
+                        array
+                    };
+                }
+            } else {
+                quote! { compile_error!("Cannot determine array size for field"); }
+            }
+        }
+        SerializationMethod::StringArray => {
+            if let Some(size) = get_array_size(field_type) {
+                quote! {
+                    let data_vec = deserializer.deserialize_string_array(#size)
+                        .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+                    let #field_name: #field_type = {
+                        let mut array: [String; #size] = std::array::from_fn(|_| String::new());
+                        for (i, s) in data_vec.into_iter().enumerate() {
+                            array[i] = s;
+                        }
+                        array
+                    };
+                }
+            } else {
+                quote! { compile_error!("Cannot determine array size for field"); }
+            }
         }
         SerializationMethod::Fallback => {
             if xcdr {
