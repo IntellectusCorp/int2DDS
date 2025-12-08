@@ -6,22 +6,16 @@ use std::sync::{
 };
 
 use common::*;
-use int2dds::{
-    common::{
-        env::{set_file_log_level, set_log_type},
-        log::{LogLevel, LogType},
+use int2dds::dcps::{
+    core::time::Duration,
+    domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
+    infrastructure::{qos_policy::DeadlineQosPolicy, status::StatusMask},
+    publication::qos::{DataWriterQos, PublisherQos},
+    subscription::{
+        data_reader_listener::DataReaderListener,
+        qos::{DataReaderQos, SubscriberQos},
     },
-    dcps::{
-        core::time::Duration,
-        domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
-        infrastructure::{qos_policy::DeadlineQosPolicy, status::StatusMask},
-        publication::qos::{DataWriterQos, PublisherQos},
-        subscription::{
-            data_reader_listener::DataReaderListener,
-            qos::{DataReaderQos, SubscriberQos},
-        },
-        topic::qos::TopicQos,
-    },
+    topic::qos::TopicQos,
 };
 
 struct SubListener {
@@ -37,10 +31,10 @@ impl DataReaderListener for SubListener {
         status: &int2dds::infrastructure::status::SubscriptionMatchedStatus,
     ) {
         if status.current_count() > 0 {
-            println!("Matched");
+            // println!("Matched");
             let _ = self.sender.send(true);
         } else {
-            println!("Unmatched");
+            // println!("Unmatched");
             let _ = self.sender.send(false);
         }
     }
@@ -48,9 +42,6 @@ impl DataReaderListener for SubListener {
 
 #[test]
 fn test_unmatch_after_set_qos() {
-    set_log_type(LogType::File);
-    set_file_log_level(LogLevel::Debug);
-
     let domain_id = next_domain_id();
     let factory = DomainParticipantFactory::get_instance();
     let participant = factory
@@ -97,6 +88,6 @@ fn test_unmatch_after_set_qos() {
     reader_qos.deadline = DeadlineQosPolicy { period: Duration::from_millis(500) };
     data_reader.set_qos(reader_qos).unwrap();
 
-    let res = receiver.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+    let res = receiver.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
     assert!(!res);
 }
