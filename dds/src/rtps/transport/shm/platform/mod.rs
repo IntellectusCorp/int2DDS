@@ -79,6 +79,6 @@ impl Drop for SharedMemory {
 }
 
 /// Generate a shared memory segment name for a given domain
-pub fn shm_segment_name(domain_id: u32, segment_type: &str) -> String {
-    format!("int2dds_shm_d{}_{}", domain_id, segment_type)
+pub fn shm_segment_name(domain_id: u32) -> String {
+    format!("int2dds_shm_d{}", domain_id)
 }

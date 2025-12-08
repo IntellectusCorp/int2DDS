@@ -11,7 +11,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use crate::rtps::transport::shm::platform::{shm_segment_name, SharedMemory};
 use crate::rtps::transport::shm::ring_buffer::{
-    RingBufferHeader, RingBufferReader, DEFAULT_BUFFER_SIZE, DEFAULT_MAX_MESSAGE_SIZE,
+    RingBufferHeader, RingBufferReader, DEFAULT_BUFFER_SIZE,
 };
 use crate::rtps::transport::Listener;
 use log::{debug, info, warn};
@@ -32,14 +32,14 @@ pub(crate) struct ShmListener {
 }
 
 impl ShmListener {
-    /// Create a new SHM listener
+    /// Create a new SHM listener for a domain
     ///
     /// # Arguments
-    /// * `domain_id` - DDS domain ID for identifying the shared memory segment
+    /// * `domain_id` - DDS domain ID
     pub(crate) fn new(domain_id: u32) -> std::io::Result<Self> {
         info!("[ShmListener] Creating SHM listener for domain {}", domain_id);
 
-        let segment_name = shm_segment_name(domain_id, "data");
+        let segment_name = shm_segment_name(domain_id);
         let total_size = RingBufferHeader::SIZE + DEFAULT_BUFFER_SIZE;
 
         // Try to attach to existing shared memory segment
@@ -50,15 +50,6 @@ impl ShmListener {
                     segment_name,
                     if shm.is_creator() { "created" } else { "attached" }
                 );
-
-                // Initialize ring buffer header if we're the creator
-                if shm.is_creator() {
-                    let header = shm.as_ptr() as *mut RingBufferHeader;
-                    unsafe {
-                        (*header).init(DEFAULT_BUFFER_SIZE as u32, DEFAULT_MAX_MESSAGE_SIZE as u32);
-                    }
-                    debug!("[ShmListener] Ring buffer header initialized");
-                }
 
                 shm
             }
@@ -76,7 +67,7 @@ impl ShmListener {
         // Create ring buffer reader
         // Each reader maintains its own local read position, initialized to current write_pos
         // This allows multiple readers without interfering with each other
-        let header = shm.as_ptr() as *mut RingBufferHeader;
+        let header = shm.as_ptr() as *const RingBufferHeader;
         let data = unsafe { shm.as_ptr().add(RingBufferHeader::SIZE) as *const u8 };
         let reader = unsafe { RingBufferReader::new(header, data) };
         info!("[ShmListener] Ring buffer reader created with local read position");
@@ -103,7 +94,10 @@ impl ShmListener {
         let reader = self.reader.as_mut()?;
 
         match reader.read(&mut self.recv_buffer[..]) {
-            Ok(Some(len)) => {
+            Ok(Some((len, lost))) => {
+                if lost > 0 {
+                    warn!("[ShmListener] Lost {} messages (reader too slow)", lost);
+                }
                 debug!("[ShmListener] Read {} bytes from SHM", len);
                 // Use a pseudo address to indicate SHM source
                 // Port 0 indicates SHM transport

@@ -7,7 +7,7 @@ use crate::rtps::transport::shm::ShmListener;
 use crate::rtps::transport::socket::MAX_EVENTS;
 use crate::rtps::transport::tcp::tcp_listener::TcpListener;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
-use log::{debug, error, info, trace, warn};
+use log::{debug, error, info, warn};
 use mio::{Events, Interest, Poll, Token};
 use std::net::SocketAddr;
 use std::sync::Arc;
