@@ -1,0 +1,87 @@
+use quote::quote;
+use syn::DeriveInput;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExtensibilityKind {
+    #[default]
+    Final,
+    Appendable,
+    Mutable,
+}
+
+#[derive(Debug, Clone)]
+pub struct DdsTypeConfig {
+    pub crate_path: proc_macro2::TokenStream,
+    pub extensibility: Option<ExtensibilityKind>,
+}
+
+pub fn parse_dds_type_attributes(input: &DeriveInput) -> DdsTypeConfig {
+    let mut crate_path: Option<String> = None;
+    let mut extensibility: Option<ExtensibilityKind> = None;
+
+    // Parse #[dds_type(...)] attributes
+    for attr in &input.attrs {
+        if attr.path().is_ident("dds_type") {
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("crate_path") {
+                    let value = meta.value()?;
+                    let lit: syn::LitStr = value.parse()?;
+                    crate_path = Some(lit.value());
+                } else if meta.path.is_ident("extensibility") {
+                    let value = meta.value()?;
+                    let lit: syn::LitStr = value.parse()?;
+                    extensibility = Some(match lit.value().to_lowercase().as_str() {
+                        "final" => ExtensibilityKind::Final,
+                        "appendable" => ExtensibilityKind::Appendable,
+                        "mutable" => ExtensibilityKind::Mutable,
+                        _ => {
+                            return Err(meta.error(format!(
+                                "Unknown extensibility kind: '{}'. Valid values are: 'final', 'appendable', 'mutable' (case-insensitive)",
+                                lit.value()
+                            )));
+                        }
+                    });
+                } else if meta.path.is_ident("final") {
+                    extensibility = Some(ExtensibilityKind::Final);
+                } else if meta.path.is_ident("appendable") {
+                    extensibility = Some(ExtensibilityKind::Appendable);
+                } else if meta.path.is_ident("mutable") {
+                    extensibility = Some(ExtensibilityKind::Mutable);
+                }
+                Ok(())
+            });
+        }
+    }
+
+    // Process crate_path
+    let crate_path_tokens = if let Some(path) = crate_path {
+        if path == "crate" {
+            quote! { crate }
+        } else {
+            let path_tokens: proc_macro2::TokenStream = path.parse().unwrap();
+            quote! { #path_tokens }
+        }
+    } else {
+        quote! { int2dds }
+    };
+
+    DdsTypeConfig { crate_path: crate_path_tokens, extensibility }
+}
+
+/// Generate extensibility kind tokens from ExtensibilityKind enum
+pub fn quote_extensibility_tokens(
+    ext_kind: ExtensibilityKind,
+    crate_path: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    match ext_kind {
+        ExtensibilityKind::Final => {
+            quote! { #crate_path::serialize::xcdr::ExtensibilityKind::Final }
+        }
+        ExtensibilityKind::Appendable => {
+            quote! { #crate_path::serialize::xcdr::ExtensibilityKind::Appendable }
+        }
+        ExtensibilityKind::Mutable => {
+            quote! { #crate_path::serialize::xcdr::ExtensibilityKind::Mutable }
+        }
+    }
+}
