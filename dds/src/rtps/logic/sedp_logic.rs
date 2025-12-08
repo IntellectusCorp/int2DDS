@@ -1184,17 +1184,42 @@ impl SedpLogic {
                         &mut publication_data,
                         &self.participant,
                     );
-                    self.handle_stateful_reader_publication(stateful_reader, publication_data)
+                    self.handle_stateful_reader_publication(
+                        stateful_reader,
+                        publication_data.clone(),
+                    )?;
+
+                    self.check_if_local_and_cross_match(
+                        publication_data.endpoint_guid(),
+                        BuiltinTopicData::Subscription(
+                            stateful_reader.subscription_builtin_topic_data()?,
+                        ),
+                    )?;
                 } else if let Some(stateless_reader) = endpoint.downcast_ref::<StatelessReader>() {
                     self.handle_empty_locator_lists_for_publication(
                         &mut publication_data,
                         &self.participant,
                     );
-                    self.handle_stateless_reader_publication(stateless_reader, publication_data)
+                    self.handle_stateless_reader_publication(
+                        stateless_reader,
+                        publication_data.clone(),
+                    )?;
+
+                    self.check_if_local_and_cross_match(
+                        publication_data.endpoint_guid(),
+                        BuiltinTopicData::Subscription(
+                            stateless_reader.subscription_builtin_topic_data()?,
+                        ),
+                    )?;
                 } else {
                     warn!("SEDP Logic: reader is not StatefulReader or StatelessReader");
-                    Err(RtpsError::new(RtpsErrorCode::DowncastError, "Unknown reader type"))
+                    return Err(RtpsError::new(
+                        RtpsErrorCode::DowncastError,
+                        "Unknown reader type",
+                    ));
                 }
+
+                Ok(())
             }
             (
                 MatchType::WriterSubscription,
@@ -1202,22 +1227,96 @@ impl SedpLogic {
             ) => {
                 if let Some(stateful_writer) = endpoint.downcast_ref::<StatefulWriter>() {
                     self.handle_empty_locator_lists(&mut subscription_data, &self.participant);
-                    self.handle_stateful_writer_subscription(stateful_writer, subscription_data)
+                    self.handle_stateful_writer_subscription(
+                        stateful_writer,
+                        subscription_data.clone(),
+                    )?;
+
+                    self.check_if_local_and_cross_match(
+                        subscription_data.endpoint_guid(),
+                        BuiltinTopicData::Publication(
+                            stateful_writer.publication_builtin_topic_data()?,
+                        ),
+                    )?;
                 } else if let Some(stateless_writer) = endpoint.downcast_ref::<StatelessWriter>() {
                     self.handle_empty_locator_lists(&mut subscription_data, &self.participant);
-                    self.handle_stateless_writer_subscription(stateless_writer, subscription_data)
+                    self.handle_stateless_writer_subscription(
+                        stateless_writer,
+                        subscription_data.clone(),
+                    )?;
+
+                    self.check_if_local_and_cross_match(
+                        subscription_data.endpoint_guid(),
+                        BuiltinTopicData::Publication(
+                            stateless_writer.publication_builtin_topic_data()?,
+                        ),
+                    )?;
                 } else {
                     warn!(
                         "SEDP Logic: Unknown writer type, cannot determine subscription handling"
                     );
-                    Err(RtpsError::new(RtpsErrorCode::DowncastError, "Unknown writer type"))
+                    return Err(RtpsError::new(
+                        RtpsErrorCode::DowncastError,
+                        "Unknown writer type",
+                    ));
                 }
+                Ok(())
             }
             _ => Err(RtpsError::new(
                 RtpsErrorCode::DowncastError,
                 "Mismatched direction and data type",
             )),
         }
+    }
+
+    fn check_if_local_and_cross_match(
+        &self,
+        endpoint_guid: Guid,
+        builtin_topic_data: BuiltinTopicData,
+    ) -> RtpsResult<()> {
+        if self.participant.guid().prefix() != endpoint_guid.prefix() {
+            debug!("Not local endpoint, skipping matching for GUID: {:?}", endpoint_guid);
+            return Ok(());
+        }
+
+        debug!("Local endpoint detected, proceeding to match for GUID: {:?}", endpoint_guid);
+        if let BuiltinTopicData::Publication(publication_builtin_topic_data) = builtin_topic_data {
+            let local_reader = self
+                .participant
+                .find_reader_from_entity_id(endpoint_guid.entity_id())
+                .ok_or_else(|| {
+                    RtpsError::new(
+                        RtpsErrorCode::RtpsEntityNotFound,
+                        "Local reader should exist since it was found on remote_subscriptions()",
+                    )
+                })?;
+
+            self.match_endpoint(
+                MatchType::ReaderPublication,
+                local_reader.as_any(),
+                BuiltinTopicData::Publication(publication_builtin_topic_data),
+            )?;
+        } else if let BuiltinTopicData::Subscription(subscription_builtin_topic_data) =
+            builtin_topic_data
+        {
+            let local_writer = self
+                .participant
+                .find_writer_from_entity_id(endpoint_guid.entity_id())
+                .ok_or_else(|| {
+                    RtpsError::new(
+                        RtpsErrorCode::RtpsEntityNotFound,
+                        "Local writer should exist since it was found on remote_subscriptions()",
+                    )
+                })?;
+
+            self.match_endpoint(
+                MatchType::WriterSubscription,
+                local_writer.as_any(),
+                BuiltinTopicData::Subscription(subscription_builtin_topic_data),
+            )?;
+        }
+
+        Ok(())
     }
 
     pub(crate) fn match_writer_with_subscription(
@@ -1333,7 +1432,7 @@ impl SedpLogic {
         let endpoint_guid = subscription_builtin_topic_data.endpoint_guid();
 
         if writer.matched_reader_is_matched(endpoint_guid) {
-            // QoS changed - check compatibility first
+            // Check QoS compatibility in case of QoS change of writer itself or remote reader
             if let Err(e) = validate_endpoint_compatibility(
                 writer,
                 &subscription_builtin_topic_data,
@@ -1365,24 +1464,34 @@ impl SedpLogic {
             }
 
             // Still compatible - just update builtin_topic_data
-            debug!(
-                "QoS changed for remote reader {:?}, still compatible - updating builtin_topic_data",
-                endpoint_guid
-            );
-            writer
-                .reader_proxies()
-                .lock()
-                .map_err(|e| {
-                    RtpsError::new(
-                        RtpsErrorCode::LockError,
-                        format!("Failed to lock ReaderProxies: {}", e),
-                    )
-                })?
-                .iter_mut()
-                .find(|proxy| proxy.remote_reader_guid() == endpoint_guid)
-                .map(|proxy| {
-                    proxy.set_subscription_builtin_topic_data(subscription_builtin_topic_data)
-                });
+            if writer
+                .matched_reader_lookup(endpoint_guid)
+                .ok_or(RtpsError::new(
+                    RtpsErrorCode::MatchedEntityNotFound,
+                    "There is no reader proxy for writer",
+                ))?
+                .subscription_builtin_topic_data()
+                .changeable_qos_equals(&subscription_builtin_topic_data)
+            {
+                debug!(
+                    "QoS changed for remote reader {:?}, still compatible - updating builtin_topic_data",
+                    endpoint_guid
+                );
+                writer
+                    .reader_proxies()
+                    .lock()
+                    .map_err(|e| {
+                        RtpsError::new(
+                            RtpsErrorCode::LockError,
+                            format!("Failed to lock ReaderProxies: {}", e),
+                        )
+                    })?
+                    .iter_mut()
+                    .find(|proxy| proxy.remote_reader_guid() == endpoint_guid)
+                    .map(|proxy| {
+                        proxy.set_subscription_builtin_topic_data(subscription_builtin_topic_data)
+                    });
+            }
 
             return Ok(());
         }
@@ -1451,7 +1560,7 @@ impl SedpLogic {
         let endpoint_guid = subscription_builtin_topic_data.endpoint_guid();
 
         if writer.matched_reader_is_matched(endpoint_guid) {
-            // QoS changed - check compatibility first
+            // Check QoS compatibility in case of QoS change of writer itself or remote reader
             if let Err(e) = validate_endpoint_compatibility(
                 writer,
                 &subscription_builtin_topic_data,
@@ -1484,24 +1593,34 @@ impl SedpLogic {
             }
 
             // Still compatible - just update builtin_topic_data
-            debug!(
-                "QoS changed for remote reader {:?}, still compatible - updating builtin_topic_data",
-                endpoint_guid
-            );
-            writer
-                .reader_locator()
-                .lock()
-                .map_err(|e| {
-                    RtpsError::new(
-                        RtpsErrorCode::LockError,
-                        format!("Failed to lock ReaderLocator: {}", e),
-                    )
-                })?
-                .iter_mut()
-                .find(|locator| locator.remote_reader_guid() == endpoint_guid)
-                .map(|locator| {
-                    locator.set_subscription_builtin_topic_data(subscription_builtin_topic_data)
-                });
+            if writer
+                .matched_reader_lookup(endpoint_guid)
+                .ok_or(RtpsError::new(
+                    RtpsErrorCode::MatchedEntityNotFound,
+                    "There is no reader proxy for writer",
+                ))?
+                .subscription_builtin_topic_data()
+                .changeable_qos_equals(&subscription_builtin_topic_data)
+            {
+                debug!(
+                    "QoS changed for remote reader {:?}, still compatible - updating builtin_topic_data",
+                    endpoint_guid
+                );
+                writer
+                    .reader_locator()
+                    .lock()
+                    .map_err(|e| {
+                        RtpsError::new(
+                            RtpsErrorCode::LockError,
+                            format!("Failed to lock ReaderLocator: {}", e),
+                        )
+                    })?
+                    .iter_mut()
+                    .find(|locator| locator.remote_reader_guid() == endpoint_guid)
+                    .map(|locator| {
+                        locator.set_subscription_builtin_topic_data(subscription_builtin_topic_data)
+                    });
+            }
 
             return Ok(());
         }
@@ -1675,7 +1794,7 @@ impl SedpLogic {
 
         // Check if writer is already matched to avoid duplicates
         if reader.matched_writer_is_matched(endpoint_guid) {
-            // QoS changed - check compatibility first
+            // Check QoS compatibility in case of QoS change of writer itself or remote reader
             if let Err(e) = validate_endpoint_compatibility(
                 reader,
                 &reader.subscription_builtin_topic_data()?,
@@ -1707,24 +1826,35 @@ impl SedpLogic {
             }
 
             // Still compatible - just update builtin_topic_data
-            debug!(
-                "QoS changed for remote writer {:?}, still compatible - updating builtin_topic_data",
-                endpoint_guid
-            );
-            reader
-                .writer_locators()
-                .lock()
-                .map_err(|e| {
-                    RtpsError::new(
-                        RtpsErrorCode::LockError,
-                        format!("Failed to lock WriterLocators: {}", e),
-                    )
-                })?
-                .iter_mut()
-                .find(|locator| locator.remote_writer_guid() == endpoint_guid)
-                .map(|locator| {
-                    locator.set_publication_builtin_topic_data(publication_builtin_topic_data)
-                });
+            if reader
+                .matched_writer_lookup(endpoint_guid)
+                .ok_or(RtpsError::new(
+                    RtpsErrorCode::MatchedEntityNotFound,
+                    "There is no writer locator for reader",
+                ))?
+                .publication_builtin_topic_data()
+                .changeable_qos_equals(&publication_builtin_topic_data)
+            {
+                debug!(
+                    "QoS changed for remote writer {:?}, still compatible - updating builtin_topic_data",
+                    endpoint_guid
+                );
+
+                reader
+                    .writer_locators()
+                    .lock()
+                    .map_err(|e| {
+                        RtpsError::new(
+                            RtpsErrorCode::LockError,
+                            format!("Failed to lock WriterLocators: {}", e),
+                        )
+                    })?
+                    .iter_mut()
+                    .find(|locator| locator.remote_writer_guid() == endpoint_guid)
+                    .map(|locator| {
+                        locator.set_publication_builtin_topic_data(publication_builtin_topic_data)
+                    });
+            }
 
             return Ok(());
         }
@@ -1767,7 +1897,7 @@ impl SedpLogic {
 
         // Check if writer is already matched to avoid duplicates
         if reader.matched_writer_is_matched(endpoint_guid) {
-            // QoS changed - check compatibility first
+            // Check QoS compatibility in case of QoS change of writer itself or remote reader
             if let Err(e) = validate_endpoint_compatibility(
                 reader,
                 &reader.subscription_builtin_topic_data()?,
@@ -1798,25 +1928,35 @@ impl SedpLogic {
                 return Err(e);
             }
 
-            // Still compatible - just update builtin_topic_data
-            debug!(
-                "QoS changed for remote writer {:?}, still compatible - updating builtin_topic_data",
-                endpoint_guid
-            );
-            reader
-                .writer_proxies()
-                .lock()
-                .map_err(|e| {
-                    RtpsError::new(
-                        RtpsErrorCode::LockError,
-                        format!("Failed to lock WriterProxies: {}", e),
-                    )
-                })?
-                .iter_mut()
-                .find(|proxy| proxy.remote_writer_guid() == endpoint_guid)
-                .map(|proxy| {
-                    proxy.set_publication_builtin_topic_data(publication_builtin_topic_data)
-                });
+            if reader
+                .matched_writer_lookup(endpoint_guid)
+                .ok_or(RtpsError::new(
+                    RtpsErrorCode::MatchedEntityNotFound,
+                    "There is no writer locator for reader",
+                ))?
+                .publication_builtin_topic_data()
+                .changeable_qos_equals(&publication_builtin_topic_data)
+            {
+                // Still compatible - just update builtin_topic_data
+                debug!(
+                    "QoS changed for remote writer {:?}, still compatible - updating builtin_topic_data",
+                    endpoint_guid
+                );
+                reader
+                    .writer_proxies()
+                    .lock()
+                    .map_err(|e| {
+                        RtpsError::new(
+                            RtpsErrorCode::LockError,
+                            format!("Failed to lock WriterProxies: {}", e),
+                        )
+                    })?
+                    .iter_mut()
+                    .find(|proxy| proxy.remote_writer_guid() == endpoint_guid)
+                    .map(|proxy| {
+                        proxy.set_publication_builtin_topic_data(publication_builtin_topic_data)
+                    });
+            }
 
             return Ok(());
         }
