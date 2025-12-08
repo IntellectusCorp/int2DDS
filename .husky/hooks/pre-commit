@@ -1,1 +1,2 @@
 cargo fmt --all
+git add -u
