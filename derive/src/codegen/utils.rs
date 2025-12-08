@@ -73,6 +73,14 @@ pub enum SerializationMethod {
     VecI64,
     VecF32,
     VecF64,
+    // New sequence types for ROS2 RMW support
+    VecBool,
+    VecChar,
+    VecString,
+    // New array types for ROS2 RMW support
+    BoolArray,
+    CharArray,
+    StringArray,
     Fallback,
 }
 
@@ -110,6 +118,9 @@ pub fn get_serialization_method(ty: &syn::Type) -> SerializationMethod {
                                         "i64" => SerializationMethod::VecI64,
                                         "f32" => SerializationMethod::VecF32,
                                         "f64" => SerializationMethod::VecF64,
+                                        "bool" => SerializationMethod::VecBool,
+                                        "char" => SerializationMethod::VecChar,
+                                        "String" => SerializationMethod::VecString,
                                         _ => SerializationMethod::Fallback,
                                     };
                                 }
@@ -142,6 +153,9 @@ pub fn get_serialization_method(ty: &syn::Type) -> SerializationMethod {
                     "i64" => SerializationMethod::I64Array,
                     "f32" => SerializationMethod::F32Array,
                     "f64" => SerializationMethod::F64Array,
+                    "bool" => SerializationMethod::BoolArray,
+                    "char" => SerializationMethod::CharArray,
+                    "String" => SerializationMethod::StringArray,
                     _ => SerializationMethod::Fallback,
                 };
             }

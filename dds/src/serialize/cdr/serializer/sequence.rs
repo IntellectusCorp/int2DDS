@@ -135,6 +135,36 @@ impl CdrSerializer {
         Ok(())
     }
 
+    /// Serialize bool sequence with length prefix
+    pub fn serialize_bool_sequence(&mut self, data: &[bool]) -> Result<(), CdrError> {
+        let length = checked_length(data.len())?;
+        self.serialize_u32(length)?;
+        for &value in data {
+            self.buffer.push(if value { 1 } else { 0 });
+        }
+        Ok(())
+    }
+
+    /// Serialize char sequence with length prefix
+    pub fn serialize_char_sequence(&mut self, data: &[char]) -> Result<(), CdrError> {
+        let length = checked_length(data.len())?;
+        self.serialize_u32(length)?;
+        for &value in data {
+            self.buffer.push(value as u8);
+        }
+        Ok(())
+    }
+
+    /// Serialize string sequence with length prefix
+    pub fn serialize_string_sequence(&mut self, data: &[String]) -> Result<(), CdrError> {
+        let length = checked_length(data.len())?;
+        self.serialize_u32(length)?;
+        for value in data {
+            self.serialize_string(value)?;
+        }
+        Ok(())
+    }
+
     /// Serialize sequence of values with length prefix
     pub fn serialize_sequence<T, F>(
         &mut self,
@@ -284,6 +314,36 @@ impl Xcdr2Serializer {
         for &value in values {
             let bytes = to_bytes_f64(value, self.endianness);
             self.buffer.extend_from_slice(&bytes);
+        }
+        Ok(())
+    }
+
+    /// Serialize bool sequence with length prefix
+    pub fn serialize_bool_sequence(&mut self, values: &[bool]) -> Result<(), CdrError> {
+        let length = checked_length(values.len())?;
+        self.serialize_u32(length)?;
+        for &value in values {
+            self.buffer.push(if value { 1 } else { 0 });
+        }
+        Ok(())
+    }
+
+    /// Serialize char sequence with length prefix
+    pub fn serialize_char_sequence(&mut self, values: &[char]) -> Result<(), CdrError> {
+        let length = checked_length(values.len())?;
+        self.serialize_u32(length)?;
+        for &value in values {
+            self.buffer.push(value as u8);
+        }
+        Ok(())
+    }
+
+    /// Serialize string sequence with length prefix
+    pub fn serialize_string_sequence(&mut self, values: &[String]) -> Result<(), CdrError> {
+        let length = checked_length(values.len())?;
+        self.serialize_u32(length)?;
+        for value in values {
+            self.serialize_string(value)?;
         }
         Ok(())
     }
