@@ -48,8 +48,8 @@ impl DataReaderListener for SubListener {
 
 #[test]
 fn test_unmatch_after_set_qos() {
-    set_log_type(LogType::File);
-    set_file_log_level(LogLevel::Debug);
+    // set_log_type(LogType::File);
+    // set_file_log_level(LogLevel::Debug);
 
     let domain_id = next_domain_id();
     let factory = DomainParticipantFactory::get_instance();
@@ -97,6 +97,6 @@ fn test_unmatch_after_set_qos() {
     reader_qos.deadline = DeadlineQosPolicy { period: Duration::from_millis(500) };
     data_reader.set_qos(reader_qos).unwrap();
 
-    let res = receiver.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+    let res = receiver.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
     assert!(!res);
 }
