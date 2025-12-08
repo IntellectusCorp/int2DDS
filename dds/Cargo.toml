@@ -1,6 +1,3 @@
-# [workspace]
-# members = [".", "int2DDS-derive"]
-
 [package]
 name = "int2dds"
 version = "0.0.1"
@@ -90,10 +87,11 @@ path = "examples/performace_test/perftest_subscriber.rs"
 
 [dev-dependencies]
 husky-rs = "0.1.5"
+criterion = { version = "0.7.0", features = ["html_reports"] }
+
 # Faster than opt-level = 0 and still reasonably debuggable
 # opt-level = 1: keeps most of the code structure while applying light optimizations → much faster debugging
 # opt-level = 2~3: too heavily optimized, making variable tracking difficult
-criterion = { version = "0.7.0", features = ["html_reports"] }
 
 [[bench]]
 name = "reliable" # Name of the Rust source file where the benchmark code will be written
