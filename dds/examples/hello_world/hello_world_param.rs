@@ -128,6 +128,14 @@ impl DataReaderListener for SubListener {
             }
         }
     }
+
+    fn on_requested_incompatible_qos(
+        &self,
+        _reader: &int2dds::subscription::data_reader::DataReader<Self::Foo>,
+        status: &int2dds::infrastructure::status::RequestedIncompatibleQosStatus,
+    ) {
+        info!("Requested incompatible QoS: {:?}", status);
+    }
 }
 
 fn run_publisher(domain_id: i32, reliability: Reliability) {
