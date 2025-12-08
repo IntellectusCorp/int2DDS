@@ -91,3 +91,55 @@ fn test_unmatch_after_set_qos() {
     let res = receiver.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
     assert!(!res);
 }
+
+#[test]
+fn test_match_after_set_qos() {
+    let domain_id = next_domain_id();
+    let factory = DomainParticipantFactory::get_instance();
+    let participant = factory
+        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+
+    let mut writer_qos = DataWriterQos::default();
+    writer_qos.deadline = DeadlineQosPolicy { period: Duration::from_millis(1000) };
+
+    let _data_writer = create_datawriter(&participant, PublisherQos::default(), writer_qos);
+
+    let subscriber = participant
+        .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+        .unwrap();
+
+    let topic = participant
+        .create_topic::<KeyedDataType>(
+            "test_topic",
+            "KeyedDataType",
+            TopicQos::default(),
+            None,
+            StatusMask::default(),
+        )
+        .unwrap();
+
+    let (sender, receiver) = sync_channel(10);
+    let read_listener = SubListener { sender };
+
+    let mut reader_qos = DataReaderQos::default();
+    reader_qos.deadline = DeadlineQosPolicy { period: Duration::from_millis(500) };
+
+    let data_reader = subscriber
+        .create_datareader::<KeyedDataType>(
+            &topic,
+            reader_qos.clone(),
+            Some(Arc::new(read_listener)),
+            StatusMask::default(),
+        )
+        .unwrap();
+
+    let res = receiver.recv_timeout(std::time::Duration::from_millis(500));
+    assert!(res.is_err());
+
+    reader_qos.deadline = DeadlineQosPolicy { period: Duration::from_millis(1000) };
+    data_reader.set_qos(reader_qos).unwrap();
+
+    let res = receiver.recv_timeout(std::time::Duration::from_millis(500)).unwrap();
+    assert!(res);
+}
