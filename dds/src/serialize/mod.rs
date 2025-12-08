@@ -72,5 +72,6 @@ pub use core::{
     DeserializerReader,
     PooledBuffer,
     SerializationError,
+    WChar,
     WString,
 };
