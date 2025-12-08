@@ -29,14 +29,14 @@ pub(crate) struct ShmSender {
 }
 
 impl ShmSender {
-    /// Create a new SHM sender
+    /// Create a new SHM sender for a domain
     ///
     /// # Arguments
-    /// * `domain_id` - DDS domain ID for identifying the shared memory segment
+    /// * `domain_id` - DDS domain ID
     pub(crate) fn new(domain_id: u32) -> io::Result<Self> {
         info!("[ShmSender] Creating SHM sender for domain {}", domain_id);
 
-        let segment_name = shm_segment_name(domain_id, "data");
+        let segment_name = shm_segment_name(domain_id);
         let total_size = RingBufferHeader::SIZE + DEFAULT_BUFFER_SIZE;
 
         // Create or attach to shared memory segment
@@ -48,13 +48,14 @@ impl ShmSender {
                     if shm.is_creator() { "created" } else { "attached" }
                 );
 
-                // Always initialize ring buffer header when sender starts
-                // This ensures clean state even if SHM segment persisted from previous run
-                let header = shm.as_ptr() as *mut RingBufferHeader;
-                unsafe {
-                    (*header).init(DEFAULT_BUFFER_SIZE as u32, DEFAULT_MAX_MESSAGE_SIZE as u32);
+                // Only initialize header if we created the segment
+                if shm.is_creator() {
+                    let header = shm.as_ptr() as *mut RingBufferHeader;
+                    unsafe {
+                        (*header).init(DEFAULT_BUFFER_SIZE as u32, DEFAULT_MAX_MESSAGE_SIZE as u32);
+                    }
+                    info!("[ShmSender] Ring buffer header initialized");
                 }
-                info!("[ShmSender] Ring buffer header initialized (write_pos=0, read_pos=0)");
 
                 shm
             }

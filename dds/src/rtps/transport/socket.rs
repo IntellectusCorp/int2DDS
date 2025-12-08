@@ -165,11 +165,14 @@ impl Socket {
                     }
                 };
 
-                // Create SHM sender for user data
+                // Create SHM sender for user data (domain-wide shared segment)
                 self.shm_sender = match ShmSender::new(self.domain_id) {
                     Ok(shm_sender) => {
                         let transport_sender = TransportSender::Shm(shm_sender);
-                        log::info!("[socket] SHM mode: SHM sender created for user data");
+                        log::info!(
+                            "[socket] SHM mode: SHM sender created for domain {}",
+                            self.domain_id
+                        );
                         Some(Arc::new(transport_sender))
                     }
                     Err(e) => {
@@ -383,7 +386,10 @@ impl Socket {
     fn create_shm_listener(&mut self) {
         match ShmListener::new(self.domain_id) {
             Ok(listener) => {
-                log::info!("[socket] SHM listener created for domain {}", self.domain_id);
+                log::info!(
+                    "[socket] SHM listener created for domain {}",
+                    self.domain_id
+                );
                 self.shm_listener = Some(listener);
             }
             Err(e) => {

@@ -1,9 +1,11 @@
 //! Lock-free Ring Buffer for Shared Memory Transport
 //!
-//! This module implements a lock-free single-producer single-consumer (SPSC)
+//! This module implements a lock-free multi-producer multi-consumer (MPMC)
 //! ring buffer designed for shared memory communication.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use log::warn;
 
 /// Header structure stored at the beginning of shared memory segment
 /// This is placed in shared memory and accessed by multiple processes
@@ -15,10 +17,10 @@ pub struct RingBufferHeader {
     pub version: u32,
     /// Total size of the ring buffer data area (excluding header)
     pub buffer_size: u32,
-    /// Write position (updated by sender)
+    /// Write position (atomically updated by multiple writers via CAS)
     pub write_pos: AtomicU64,
-    /// Read position (updated by receiver)
-    pub read_pos: AtomicU64,
+    /// Global sequence counter (atomically incremented by all writers)
+    pub sequence: AtomicU64,
     /// Maximum message size
     pub max_message_size: u32,
     /// Padding for alignment
@@ -62,7 +64,7 @@ impl RingBufferHeader {
         self.version = RING_BUFFER_VERSION;
         self.buffer_size = buffer_size;
         self.write_pos = AtomicU64::new(0);
-        self.read_pos = AtomicU64::new(0);
+        self.sequence = AtomicU64::new(0);
         self.max_message_size = max_message_size;
         self._padding = 0;
     }
@@ -74,6 +76,7 @@ impl RingBufferHeader {
 }
 
 /// Ring buffer writer (used by sender)
+/// Multiple writers can safely write concurrently using CAS-based space reservation.
 pub struct RingBufferWriter {
     /// Pointer to the header in shared memory
     header: *mut RingBufferHeader,
@@ -81,16 +84,13 @@ pub struct RingBufferWriter {
     data: *mut u8,
     /// Cached buffer size
     buffer_size: usize,
-    /// Sequence counter
-    sequence: u64,
+    /// Cached max message size
+    max_message_size: usize,
 }
 
 impl std::fmt::Debug for RingBufferWriter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RingBufferWriter")
-            .field("buffer_size", &self.buffer_size)
-            .field("sequence", &self.sequence)
-            .finish()
+        f.debug_struct("RingBufferWriter").field("buffer_size", &self.buffer_size).finish()
     }
 }
 
@@ -98,6 +98,9 @@ impl std::fmt::Debug for RingBufferWriter {
 // The underlying shared memory is thread-safe due to atomic operations
 unsafe impl Send for RingBufferWriter {}
 unsafe impl Sync for RingBufferWriter {}
+
+/// Maximum number of CAS retry attempts before giving up
+const MAX_CAS_RETRIES: usize = 100;
 
 impl RingBufferWriter {
     /// Create a new ring buffer writer from raw pointers
@@ -108,73 +111,104 @@ impl RingBufferWriter {
     /// - The memory must remain valid for the lifetime of this writer
     pub unsafe fn new(header: *mut RingBufferHeader, data: *mut u8) -> Self {
         let buffer_size = (*header).buffer_size as usize;
-        Self { header, data, buffer_size, sequence: 0 }
+        let max_message_size = (*header).max_message_size as usize;
+        Self { header, data, buffer_size, max_message_size }
     }
 
-    /// Write a message to the ring buffer
+    /// Write a message to the ring buffer using CAS-based space reservation
     ///
-    /// Returns the number of bytes written, or an error if the buffer is full
+    /// Multiple writers can safely call this method concurrently.
+    /// Space is reserved atomically using compare-and-swap, then data is written.
     pub fn write(&mut self, data: &[u8]) -> Result<usize, RingBufferError> {
-        let header = unsafe { &*self.header };
-
         // Check message size
-        if data.len() > header.max_message_size as usize {
+        if data.len() > self.max_message_size {
             return Err(RingBufferError::MessageTooLarge);
         }
+
+        let total_size = align_up(MessageHeader::SIZE + data.len(), 8);
+
+        // Check if message fits in buffer at all
+        if total_size > self.buffer_size {
+            return Err(RingBufferError::MessageTooLarge);
+        }
+
+        let header = unsafe { &*self.header };
+
+        // CAS loop to reserve space
+        let mut retries = 0;
+        let reserved_pos = loop {
+            if retries >= MAX_CAS_RETRIES {
+                return Err(RingBufferError::BufferFull);
+            }
+
+            let current_pos = header.write_pos.load(Ordering::SeqCst);
+            let write_offset = (current_pos as usize) % self.buffer_size;
+            let remaining_space = self.buffer_size - write_offset;
+
+            // Check if we need to wrap
+            if total_size > remaining_space {
+                // Try to advance write_pos to wrap around
+                let wrap_pos = current_pos + remaining_space as u64;
+
+                // Write wrap marker if there's space for header
+                if remaining_space >= MessageHeader::SIZE {
+                    // Try CAS first to claim the wrap operation
+                    if header
+                        .write_pos
+                        .compare_exchange(current_pos, wrap_pos, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_ok()
+                    {
+                        // We won the CAS, write the wrap marker
+                        let wrap_marker = MessageHeader {
+                            total_len: remaining_space as u32,
+                            data_len: 0, // Indicates wrap marker
+                            sequence: 0,
+                        };
+
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                &wrap_marker as *const MessageHeader as *const u8,
+                                self.data.add(write_offset),
+                                MessageHeader::SIZE,
+                            );
+                        }
+                    }
+                    // If CAS failed, another writer handled the wrap, retry
+                }
+
+                retries += 1;
+                continue;
+            }
+
+            // Try to reserve space for our message
+            let new_pos = current_pos + total_size as u64;
+            match header.write_pos.compare_exchange(
+                current_pos,
+                new_pos,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break current_pos, // Successfully reserved space
+                Err(_) => {
+                    // Another writer beat us, retry
+                    retries += 1;
+                    continue;
+                }
+            }
+        };
+
+        // Get sequence number atomically
+        let sequence = header.sequence.fetch_add(1, Ordering::SeqCst);
+
+        // Now we have exclusive access to the reserved space, write the data
+        let write_offset = (reserved_pos as usize) % self.buffer_size;
 
         let msg_header = MessageHeader {
             total_len: (MessageHeader::SIZE + data.len()) as u32,
             data_len: data.len() as u32,
-            sequence: self.sequence,
+            sequence,
         };
 
-        let total_size = align_up(msg_header.total_len as usize, 8);
-
-        // Load current positions with SeqCst for cross-process visibility
-        let write_pos = header.write_pos.load(Ordering::SeqCst);
-        let read_pos = header.read_pos.load(Ordering::SeqCst);
-
-        // Calculate available space
-        let available = if write_pos >= read_pos {
-            self.buffer_size - (write_pos - read_pos) as usize
-        } else {
-            (read_pos - write_pos) as usize
-        };
-
-        // Need space for message + possible wrap marker
-        if available < total_size + MessageHeader::SIZE {
-            return Err(RingBufferError::BufferFull);
-        }
-
-        let write_offset = (write_pos as usize) % self.buffer_size;
-
-        // Check if we need to wrap
-        if write_offset + total_size > self.buffer_size {
-            // Write wrap marker (message with zero data_len)
-            let wrap_marker = MessageHeader {
-                total_len: (self.buffer_size - write_offset) as u32,
-                data_len: 0, // Indicates wrap marker
-                sequence: 0,
-            };
-
-            unsafe {
-                // Write wrap marker
-                std::ptr::copy_nonoverlapping(
-                    &wrap_marker as *const MessageHeader as *const u8,
-                    self.data.add(write_offset),
-                    MessageHeader::SIZE,
-                );
-            }
-
-            // Update write position to start of buffer
-            let new_write_pos = write_pos + (self.buffer_size - write_offset) as u64;
-            header.write_pos.store(new_write_pos, Ordering::SeqCst);
-
-            // Recursively write at the beginning
-            return self.write(data);
-        }
-
-        // Write message header and data using memcpy for performance
         unsafe {
             // Write message header
             std::ptr::copy_nonoverlapping(
@@ -191,43 +225,40 @@ impl RingBufferWriter {
             );
         }
 
-        // Memory fence to ensure all data writes are visible before updating write_pos
+        // Memory fence to ensure all data writes are visible
         std::sync::atomic::fence(Ordering::SeqCst);
-
-        // Update write position with strongest ordering for cross-process visibility
-        let new_write_pos = write_pos + total_size as u64;
-        header.write_pos.store(new_write_pos, Ordering::SeqCst);
-
-        self.sequence += 1;
 
         Ok(data.len())
     }
 
-    /// Get the number of bytes available for writing
-    pub fn available_space(&self) -> usize {
+    /// Get current write position (for diagnostics)
+    pub fn write_position(&self) -> u64 {
         let header = unsafe { &*self.header };
-        let write_pos = header.write_pos.load(Ordering::Acquire);
-        let read_pos = header.read_pos.load(Ordering::Acquire);
+        header.write_pos.load(Ordering::Acquire)
+    }
 
-        if write_pos >= read_pos {
-            self.buffer_size - (write_pos - read_pos) as usize
-        } else {
-            (read_pos - write_pos) as usize
-        }
+    /// Get current global sequence number (for diagnostics)
+    pub fn sequence(&self) -> u64 {
+        let header = unsafe { &*self.header };
+        header.sequence.load(Ordering::Acquire)
     }
 }
 
-/// Ring buffer reader (used by receiver)
-/// Each reader maintains its own local read position to allow multiple readers
+/// Ring buffer reader (used by receiver in MPMC pattern)
+///
+/// Each reader maintains its own local read position, allowing multiple
+/// readers to consume from the same ring buffer independently.
 pub struct RingBufferReader {
-    /// Pointer to the header in shared memory
-    header: *mut RingBufferHeader,
+    /// Pointer to the header in shared memory (read-only access to write_pos)
+    header: *const RingBufferHeader,
     /// Pointer to the data area in shared memory
     data: *const u8,
     /// Cached buffer size
     buffer_size: usize,
-    /// Local read position (each reader tracks its own position)
+    /// Local read position (independent per reader, not shared)
     local_read_pos: u64,
+    /// Last seen sequence number for detecting gaps
+    last_sequence: u64,
 }
 
 impl std::fmt::Debug for RingBufferReader {
@@ -247,23 +278,20 @@ impl RingBufferReader {
     /// - `header` must point to a valid, initialized RingBufferHeader in shared memory
     /// - `data` must point to the data area immediately following the header
     /// - The memory must remain valid for the lifetime of this reader
-    pub unsafe fn new(header: *mut RingBufferHeader, data: *const u8) -> Self {
+    pub unsafe fn new(header: *const RingBufferHeader, data: *const u8) -> Self {
         let buffer_size = (*header).buffer_size as usize;
         // Initialize local_read_pos to current write_pos to only receive new messages
         let local_read_pos = (*header).write_pos.load(Ordering::SeqCst);
-        Self { header, data, buffer_size, local_read_pos }
+        Self { header, data, buffer_size, local_read_pos, last_sequence: 0 }
     }
 
     /// Read a message from the ring buffer
-    ///
-    /// Returns the message data, or None if the buffer is empty
-    /// Each reader maintains its own local read position, allowing multiple readers
-    pub fn read(&mut self, buffer: &mut [u8]) -> Result<Option<usize>, RingBufferError> {
+    pub fn read(&mut self, buffer: &mut [u8]) -> Result<Option<(usize, u64)>, RingBufferError> {
         let header = unsafe { &*self.header };
 
         // Use SeqCst for strongest cross-process memory ordering
         let write_pos = header.write_pos.load(Ordering::SeqCst);
-        let read_pos = self.local_read_pos; // Use local read position
+        let read_pos = self.local_read_pos;
 
         // Check if buffer is empty (no new data since our last read)
         if write_pos == read_pos {
@@ -271,22 +299,19 @@ impl RingBufferReader {
         }
 
         // Check if we're too far behind (data was overwritten)
-        // This happens when writer has wrapped around and overwritten our data
-        let distance = if write_pos >= read_pos {
-            write_pos - read_pos
-        } else {
-            // Handle wrap-around of write_pos counter
-            u64::MAX - read_pos + write_pos + 1
-        };
+        let distance = write_pos.saturating_sub(read_pos);
 
         if distance > self.buffer_size as u64 {
-            // We're too far behind, skip to current write position
-            log::warn!(
-                "[RingBuffer] Reader too far behind, skipping {} bytes",
-                distance - self.buffer_size as u64
+            let skip_to = write_pos - self.buffer_size as u64;
+            warn!(
+                "[RingBuffer] Reader too far behind, skipping from {} to {} ({} bytes lost)",
+                read_pos,
+                skip_to,
+                skip_to - read_pos
             );
-            self.local_read_pos = write_pos;
-            return Ok(None);
+            self.local_read_pos = skip_to;
+            // Try reading again from new position
+            return self.read(buffer);
         }
 
         // Memory fence to ensure we see the latest data written by the writer
@@ -303,9 +328,6 @@ impl RingBufferReader {
             // Skip wrap marker and continue from beginning
             let new_read_pos = read_pos + msg_header.total_len as u64;
             self.local_read_pos = new_read_pos;
-            // Update shared read_pos for wrap marker too
-            let header = unsafe { &*self.header };
-            header.read_pos.store(new_read_pos, Ordering::SeqCst);
             return self.read(buffer);
         }
 
@@ -325,16 +347,23 @@ impl RingBufferReader {
             );
         }
 
-        // Update both local and shared read position
+        // Calculate lost messages via sequence gap
+        let expected_sequence = self.last_sequence + 1;
+        let lost = if self.last_sequence == 0 {
+            0 // First message, no loss
+        } else if msg_header.sequence >= expected_sequence {
+            msg_header.sequence - expected_sequence
+        } else {
+            0 // Sequence wrapped or reset
+        };
+
+        self.last_sequence = msg_header.sequence;
+
+        // Update local read position only (no shared state update)
         let total_size = align_up(msg_header.total_len as usize, 8);
-        let new_read_pos = read_pos + total_size as u64;
-        self.local_read_pos = new_read_pos;
+        self.local_read_pos = read_pos + total_size as u64;
 
-        // Update shared read_pos so writer knows we've consumed the data
-        let header = unsafe { &*self.header };
-        header.read_pos.store(new_read_pos, Ordering::SeqCst);
-
-        Ok(Some(data_len))
+        Ok(Some((data_len, lost)))
     }
 
     /// Check if there are messages available to read
@@ -348,13 +377,12 @@ impl RingBufferReader {
     pub fn available_data(&self) -> usize {
         let header = unsafe { &*self.header };
         let write_pos = header.write_pos.load(Ordering::Acquire);
-        let read_pos = self.local_read_pos;
+        write_pos.saturating_sub(self.local_read_pos) as usize
+    }
 
-        if write_pos >= read_pos {
-            (write_pos - read_pos) as usize
-        } else {
-            self.buffer_size - (read_pos - write_pos) as usize
-        }
+    /// Get current local read position (for diagnostics)
+    pub fn read_position(&self) -> u64 {
+        self.local_read_pos
     }
 }
 
@@ -387,6 +415,7 @@ impl std::error::Error for RingBufferError {}
 /// Align a value up to the specified alignment
 #[inline]
 fn align_up(value: usize, alignment: usize) -> usize {
+    debug_assert!(alignment.is_power_of_two(), "alignment must be a power of two");
     (value + alignment - 1) & !(alignment - 1)
 }
 
