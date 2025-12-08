@@ -759,7 +759,7 @@ impl SedpLogic {
                                             return Err(RtpsError::new(
                                                 RtpsErrorCode::BuiltinEndpointNotFound,
                                                 format!(
-                                                    "[heartbeat] SPDP Message may have not been received, cause builtin reader not matched with remote guid: {:?}",
+                                                    "[data] SPDP Message may have not been received, cause builtin reader not matched with remote guid: {:?}",
                                                     writer_guid
                                                 ),
                                             ));

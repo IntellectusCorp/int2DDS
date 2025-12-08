@@ -73,18 +73,16 @@ impl SendingTask {
             .spdp_logic
             .as_ref()
             .as_ref()
-            .ok_or(RtpsError::new(RtpsErrorCode::DataNotSet, "SpdpLogic is not initialized"))?
+            .ok_or_else(|| {
+                RtpsError::new(RtpsErrorCode::DataNotSet, "SpdpLogic is not initialized")
+            })?
             .clone();
-        let sedp_logic = self
-            .sedp_logic
-            .as_ref()
-            .as_ref()
-            .ok_or(RtpsError::new(RtpsErrorCode::DataNotSet, "SedpLogic is not initialized"))?;
-        let user_logic = self
-            .user_logic
-            .as_ref()
-            .as_ref()
-            .ok_or(RtpsError::new(RtpsErrorCode::DataNotSet, "UserLogic is not initialized"))?;
+        let sedp_logic = self.sedp_logic.as_ref().as_ref().ok_or_else(|| {
+            RtpsError::new(RtpsErrorCode::DataNotSet, "SedpLogic is not initialized")
+        })?;
+        let user_logic = self.user_logic.as_ref().as_ref().ok_or_else(|| {
+            RtpsError::new(RtpsErrorCode::DataNotSet, "UserLogic is not initialized")
+        })?;
 
         match message {
             MessageType::SpdpMulticast(start_time, duration, domain_id, data) => {

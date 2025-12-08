@@ -217,7 +217,9 @@ impl DiscoveryUnicastListeningTask {
             .sedp_logic
             .as_ref()
             .as_ref()
-            .ok_or(RtpsError::new(RtpsErrorCode::DataNotSet, "SpdpLogic is not initialized"))?
+            .ok_or_else(|| {
+                RtpsError::new(RtpsErrorCode::DataNotSet, "SpdpLogic is not initialized")
+            })?
             .clone();
         sedp_logic.handle_rtps_message(message_receiver.clone())?;
         if let Some(wlp_logic) = self.participant.wlp_logic() {
