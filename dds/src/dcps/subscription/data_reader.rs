@@ -2960,7 +2960,6 @@ impl<Foo: 'static + Clone + Debug> DataReaderInternal for DataReader<Foo> {
 
 #[cfg(test)]
 pub(crate) mod tests {
-
     use super::*;
     use crate::dcps::topic::type_support::DdsType;
     use crate::domain::domain_participant_factory::DomainParticipantFactory;
@@ -2973,10 +2972,8 @@ pub(crate) mod tests {
     use crate::subscription::sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind};
     use crate::subscription::subscriber_listener::SubscriberListener;
     use crate::topic::qos::TopicQos;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::{sync_channel, SyncSender};
     use std::sync::Arc;
-    use std::thread;
 
     #[derive(DdsType)]
     pub struct TestData {
