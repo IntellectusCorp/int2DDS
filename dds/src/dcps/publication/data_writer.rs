@@ -1340,7 +1340,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                     .ok_or(DdsError::Error("WLP not initialized".to_string()))?;
                 // Update Participant liveliness
                 let writer_guid = self.get_rtps_writer()?.guid();
-                wlp.update_local_writer_liveliness(writer_guid);
+                wlp.update_local_writer_liveliness(&writer_guid);
                 Ok(())
             }
         }
@@ -1936,9 +1936,8 @@ mod tests {
 
     // Test struct - for detecting drop
     use crate::dcps::topic::type_support::DdsType;
-    use speedy::{Readable, Writable};
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     pub struct TestData {
         #[dds(key)]
         id: u32,

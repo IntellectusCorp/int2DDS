@@ -1000,7 +1000,7 @@ mod tests {
         publication::qos::PublisherQos,
     };
 
-    #[derive(DdsType, speedy::Readable, speedy::Writable)]
+    #[derive(DdsType)]
     pub struct HelloWorld {
         pub index: u32,
         pub message: String,

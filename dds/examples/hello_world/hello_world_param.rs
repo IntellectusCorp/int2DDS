@@ -29,7 +29,6 @@ use int2dds::{
     topic::{qos::TopicQos, type_support::DdsType},
 };
 use log::info;
-use speedy::{Readable, Writable};
 
 #[derive(Clone, ValueEnum, Debug)]
 enum Role {
@@ -59,7 +58,7 @@ struct Args {
     reliability: Reliability,
 }
 
-#[derive(DdsType, Readable, Writable)]
+#[derive(DdsType)]
 #[dds_type(crate_path = "int2dds")]
 struct HelloWorldType {
     index: u32,
@@ -128,6 +127,14 @@ impl DataReaderListener for SubListener {
                 println!("Read sample: {:?}", sample);
             }
         }
+    }
+
+    fn on_requested_incompatible_qos(
+        &self,
+        _reader: &int2dds::subscription::data_reader::DataReader<Self::Foo>,
+        status: &int2dds::infrastructure::status::RequestedIncompatibleQosStatus,
+    ) {
+        info!("Requested incompatible QoS: {:?}", status);
     }
 }
 

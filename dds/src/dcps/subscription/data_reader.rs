@@ -2960,7 +2960,6 @@ impl<Foo: 'static + Clone + Debug> DataReaderInternal for DataReader<Foo> {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use speedy::{Readable, Writable};
 
     use super::*;
     use crate::dcps::topic::type_support::DdsType;
@@ -2979,19 +2978,19 @@ pub(crate) mod tests {
     use std::sync::Arc;
     use std::thread;
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     pub struct TestData {
         #[dds(key)]
         id: u32,
     }
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     pub struct HelloWorld {
         pub index: u32,
         pub message: String,
     }
 
-    #[derive(DdsType, Readable, Writable)]
+    #[derive(DdsType)]
     pub struct HelloWorldWithKey {
         #[dds(key)]
         pub index: u32,
