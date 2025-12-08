@@ -514,14 +514,6 @@ impl Participant {
 
         // Remove from map in participant
         self.rtps_writer_map.get_mut(&topic_name).and_then(|mut map| map.remove(&entity_id));
-        if let Some(mut entry) = self.remote_publications().get_mut(&topic_name) {
-            entry.value_mut().remove(&Guid::new(self.guid().prefix(), entity_id));
-
-            if entry.value().is_empty() {
-                drop(entry);
-                self.remote_publications().remove(&topic_name);
-            }
-        }
 
         Ok(())
     }
@@ -589,14 +581,6 @@ impl Participant {
 
         // Remove from map in participant
         self.rtps_reader_map.get_mut(&topic_name).and_then(|mut map| map.remove(&entity_id));
-        if let Some(mut entry) = self.remote_subscriptions().get_mut(&topic_name) {
-            entry.value_mut().remove(&Guid::new(self.guid().prefix(), entity_id));
-
-            if entry.value().is_empty() {
-                drop(entry);
-                self.remote_subscriptions().remove(&topic_name);
-            }
-        }
 
         Ok(())
     }
@@ -733,6 +717,26 @@ impl Participant {
                 }
             }
         }
+    }
+
+    pub(crate) fn find_readers_matched_with_local_writer(
+        &self,
+        writer_guid: &Guid,
+    ) -> RtpsResult<Vec<Arc<dyn Reader + Send + Sync>>> {
+        let writer = match self.find_writer_from_entity_id(writer_guid.entity_id()) {
+            Some(w) => w,
+            None => return Ok(Vec::new()),
+        };
+
+        let topic_name = writer
+            .get_publication_builtin_topic_data()?
+            .ok_or(RtpsError::new(
+                RtpsErrorCode::NotInitialized,
+                format!("Publication builtin topic data not set for writer: {:?}", writer_guid),
+            ))?
+            .topic_name();
+
+        Ok(self.find_readers_from_topic_name(&topic_name))
     }
 
     pub(crate) fn find_readers_matched_with_remote_writer(
