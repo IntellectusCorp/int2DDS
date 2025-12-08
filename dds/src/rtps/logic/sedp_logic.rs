@@ -1176,6 +1176,7 @@ impl SedpLogic {
         match_type: MatchType,
         endpoint: &dyn std::any::Any,
         builtin_topic_data: BuiltinTopicData,
+        skip_cross_match: bool, // To prevent infinite recursion during cross-matching
     ) -> RtpsResult<()> {
         match (match_type, builtin_topic_data) {
             (MatchType::ReaderPublication, BuiltinTopicData::Publication(mut publication_data)) => {
@@ -1189,12 +1190,14 @@ impl SedpLogic {
                         publication_data.clone(),
                     )?;
 
-                    self.check_if_local_and_cross_match(
-                        publication_data.endpoint_guid(),
-                        BuiltinTopicData::Subscription(
-                            stateful_reader.subscription_builtin_topic_data()?,
-                        ),
-                    )?;
+                    if !skip_cross_match {
+                        self.check_if_local_and_cross_match(
+                            publication_data.endpoint_guid(),
+                            BuiltinTopicData::Subscription(
+                                stateful_reader.subscription_builtin_topic_data()?,
+                            ),
+                        )?;
+                    }
                 } else if let Some(stateless_reader) = endpoint.downcast_ref::<StatelessReader>() {
                     self.handle_empty_locator_lists_for_publication(
                         &mut publication_data,
@@ -1205,12 +1208,14 @@ impl SedpLogic {
                         publication_data.clone(),
                     )?;
 
-                    self.check_if_local_and_cross_match(
-                        publication_data.endpoint_guid(),
-                        BuiltinTopicData::Subscription(
-                            stateless_reader.subscription_builtin_topic_data()?,
-                        ),
-                    )?;
+                    if !skip_cross_match {
+                        self.check_if_local_and_cross_match(
+                            publication_data.endpoint_guid(),
+                            BuiltinTopicData::Subscription(
+                                stateless_reader.subscription_builtin_topic_data()?,
+                            ),
+                        )?;
+                    }
                 } else {
                     warn!("SEDP Logic: reader is not StatefulReader or StatelessReader");
                     return Err(RtpsError::new(
@@ -1232,12 +1237,14 @@ impl SedpLogic {
                         subscription_data.clone(),
                     )?;
 
-                    self.check_if_local_and_cross_match(
-                        subscription_data.endpoint_guid(),
-                        BuiltinTopicData::Publication(
-                            stateful_writer.publication_builtin_topic_data()?,
-                        ),
-                    )?;
+                    if !skip_cross_match {
+                        self.check_if_local_and_cross_match(
+                            subscription_data.endpoint_guid(),
+                            BuiltinTopicData::Publication(
+                                stateful_writer.publication_builtin_topic_data()?,
+                            ),
+                        )?;
+                    }
                 } else if let Some(stateless_writer) = endpoint.downcast_ref::<StatelessWriter>() {
                     self.handle_empty_locator_lists(&mut subscription_data, &self.participant);
                     self.handle_stateless_writer_subscription(
@@ -1245,12 +1252,14 @@ impl SedpLogic {
                         subscription_data.clone(),
                     )?;
 
-                    self.check_if_local_and_cross_match(
-                        subscription_data.endpoint_guid(),
-                        BuiltinTopicData::Publication(
-                            stateless_writer.publication_builtin_topic_data()?,
-                        ),
-                    )?;
+                    if !skip_cross_match {
+                        self.check_if_local_and_cross_match(
+                            subscription_data.endpoint_guid(),
+                            BuiltinTopicData::Publication(
+                                stateless_writer.publication_builtin_topic_data()?,
+                            ),
+                        )?;
+                    }
                 } else {
                     warn!(
                         "SEDP Logic: Unknown writer type, cannot determine subscription handling"
@@ -1295,6 +1304,7 @@ impl SedpLogic {
                 MatchType::ReaderPublication,
                 local_reader.as_any(),
                 BuiltinTopicData::Publication(publication_builtin_topic_data),
+                true,
             )?;
         } else if let BuiltinTopicData::Subscription(subscription_builtin_topic_data) =
             builtin_topic_data
@@ -1313,6 +1323,7 @@ impl SedpLogic {
                 MatchType::WriterSubscription,
                 local_writer.as_any(),
                 BuiltinTopicData::Subscription(subscription_builtin_topic_data),
+                true,
             )?;
         }
 
@@ -1328,6 +1339,7 @@ impl SedpLogic {
             MatchType::WriterSubscription,
             writer.as_any(),
             BuiltinTopicData::Subscription(subscription_builtin_topic_data),
+            false,
         )
     }
     pub(crate) fn match_reader_with_publication(
@@ -1339,6 +1351,7 @@ impl SedpLogic {
             MatchType::ReaderPublication,
             reader.as_any(),
             BuiltinTopicData::Publication(publication_builtin_topic_data),
+            false,
         );
     }
 
