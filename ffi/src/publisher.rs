@@ -278,12 +278,12 @@ pub unsafe extern "C" fn int2dds_register_instance(
 
     let writer_ref = &*writer;
 
-    // Create RawData with key for registration
+    // Create RawData with key for registration (using key_only to avoid empty data allocation)
     let raw_data = if !key.is_null() && key_size > 0 {
         let key_vec = std::slice::from_raw_parts(key, key_size).to_vec();
-        RawData::with_key(Vec::new(), key_vec)
+        RawData::key_only(key_vec)
     } else {
-        RawData::new(Vec::new())
+        RawData::empty()
     };
 
     match writer_ref.inner.register_instance(&raw_data) {
@@ -316,12 +316,12 @@ pub unsafe extern "C" fn int2dds_unregister_instance(
 
     let writer_ref = &*writer;
 
-    // Create RawData with key for identification
+    // Create RawData with key for identification (using key_only to avoid empty data allocation)
     let raw_data = if !key.is_null() && key_size > 0 {
         let key_vec = std::slice::from_raw_parts(key, key_size).to_vec();
-        RawData::with_key(Vec::new(), key_vec)
+        RawData::key_only(key_vec)
     } else {
-        RawData::new(Vec::new())
+        RawData::empty()
     };
 
     let instance_handle =
@@ -354,12 +354,12 @@ pub unsafe extern "C" fn int2dds_dispose(
 
     let writer_ref = &*writer;
 
-    // Create RawData with key for identification
+    // Create RawData with key for identification (using key_only to avoid empty data allocation)
     let raw_data = if !key.is_null() && key_size > 0 {
         let key_vec = std::slice::from_raw_parts(key, key_size).to_vec();
-        RawData::with_key(Vec::new(), key_vec)
+        RawData::key_only(key_vec)
     } else {
-        RawData::new(Vec::new())
+        RawData::empty()
     };
 
     let instance_handle =

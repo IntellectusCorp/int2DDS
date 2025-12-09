@@ -29,6 +29,9 @@ pub struct RawData {
     pub key: Option<Arc<[u8]>>,
 }
 
+/// Static empty data for key-only operations (avoids allocation)
+static EMPTY_DATA: &[u8] = &[];
+
 impl RawData {
     /// Create new RawData from bytes
     pub fn new(data: Vec<u8>) -> Self {
@@ -38,6 +41,23 @@ impl RawData {
     /// Create new RawData with key
     pub fn with_key(data: Vec<u8>, key: Vec<u8>) -> Self {
         Self { data: data.into(), key: Some(key.into()) }
+    }
+
+    /// Create RawData with key only (for register/unregister/dispose operations)
+    /// This avoids allocating empty data vector
+    pub fn key_only(key: Vec<u8>) -> Self {
+        Self {
+            data: Arc::from(EMPTY_DATA),
+            key: Some(key.into()),
+        }
+    }
+
+    /// Create empty RawData (for operations that don't need data or key)
+    pub fn empty() -> Self {
+        Self {
+            data: Arc::from(EMPTY_DATA),
+            key: None,
+        }
     }
 
     /// Get the raw bytes
