@@ -2,6 +2,8 @@ use std::sync::Arc;
 
 use crate::rtps::common::types::{DomainId, ParticipantId};
 use crate::rtps::transport::port_manager::PortManager;
+use crate::rtps::transport::shm::shm_listener::ShmListener;
+use crate::rtps::transport::shm::shm_sender::ShmSender;
 use crate::rtps::transport::tcp::tcp_listener::TcpListener;
 use crate::rtps::transport::tcp::tcp_sender::TcpSender;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
@@ -16,7 +18,10 @@ pub(crate) struct Socket {
     //tcp_sender - additional TCP sender for Hybrid mode
     tcp_sender: Option<Arc<TransportSender>>,
 
-    //UDP listeners (used when transport = UDP or Hybrid)
+    //shm_sender - SHM sender for user data in SHM mode
+    shm_sender: Option<Arc<TransportSender>>,
+
+    //UDP listeners (used when transport = UDP or Hybrid or SHM for discovery)
     //discovery listener(spdp)
     discovery_traffic_multicast_listener: Option<UdpListener>,
     discovery_traffic_unicast_listener: Option<UdpListener>,
@@ -28,6 +33,9 @@ pub(crate) struct Socket {
     //TCP listeners (used when transport = TCP or Hybrid)
     discovery_tcp_listener: Option<TcpListener>,
     user_traffic_tcp_listener: Option<TcpListener>,
+
+    //SHM listener (used when transport = SHM for user data)
+    shm_listener: Option<ShmListener>,
 
     domain_id: DomainId,
     participant_id: ParticipantId,
@@ -46,6 +54,7 @@ impl Socket {
             //sender
             sender: None,
             tcp_sender: None,
+            shm_sender: None,
 
             //UDP listeners
             //discovery listener(spdp + sedp)
@@ -63,6 +72,9 @@ impl Socket {
             //TCP listeners
             discovery_tcp_listener: None,
             user_traffic_tcp_listener: None,
+
+            //SHM listener
+            shm_listener: None,
 
             domain_id,
             participant_id: 0,
@@ -139,6 +151,36 @@ impl Socket {
                     }
                 };
             }
+            TransportType::SHM => {
+                // SHM mode uses UDP for discovery (SPDP, SEDP)
+                self.sender = match UdpSender::new(self.working_ip.clone()) {
+                    Ok(udp_sender) => {
+                        let transport_sender = TransportSender::Udp(udp_sender);
+                        log::info!("[socket] SHM mode: UDP sender created for discovery");
+                        Some(Arc::new(transport_sender))
+                    }
+                    Err(e) => {
+                        log::error!("SHM mode: UDP sender creation failed: {}", e);
+                        panic!("UDP sender is not created");
+                    }
+                };
+
+                // Create SHM sender for user data (domain-wide shared segment)
+                self.shm_sender = match ShmSender::new(self.domain_id) {
+                    Ok(shm_sender) => {
+                        let transport_sender = TransportSender::Shm(shm_sender);
+                        log::info!(
+                            "[socket] SHM mode: SHM sender created for domain {}",
+                            self.domain_id
+                        );
+                        Some(Arc::new(transport_sender))
+                    }
+                    Err(e) => {
+                        log::error!("SHM mode: SHM sender creation failed: {}", e);
+                        panic!("SHM sender is not created");
+                    }
+                };
+            }
         }
     }
     pub(crate) fn sender(&self) -> Arc<TransportSender> {
@@ -153,6 +195,10 @@ impl Socket {
 
     pub(crate) fn tcp_sender(&self) -> Option<Arc<TransportSender>> {
         self.tcp_sender.as_ref().map(Arc::clone)
+    }
+
+    pub(crate) fn shm_sender(&self) -> Option<Arc<TransportSender>> {
+        self.shm_sender.as_ref().map(Arc::clone)
     }
 
     //listener
@@ -177,6 +223,15 @@ impl Socket {
                 self.create_unicast_listener();
                 self.create_tcp_listeners();
                 log::info!("[socket] Hybrid mode: UDP and TCP listeners created");
+            }
+            TransportType::SHM => {
+                // SHM mode uses UDP for discovery (SPDP, SEDP)
+                self.create_multicast_listener();
+                self.create_unicast_listener();
+                log::info!("[socket] SHM mode: UDP listeners created for discovery");
+
+                // Create SHM listener for user data
+                self.create_shm_listener();
             }
         }
     }
@@ -327,6 +382,26 @@ impl Socket {
         self.user_traffic_tcp_listener.take()
     }
 
+    //SHM listener
+    fn create_shm_listener(&mut self) {
+        match ShmListener::new(self.domain_id) {
+            Ok(listener) => {
+                log::info!(
+                    "[socket] SHM listener created for domain {}",
+                    self.domain_id
+                );
+                self.shm_listener = Some(listener);
+            }
+            Err(e) => {
+                log::error!("[socket] Failed to create SHM listener: {}", e);
+            }
+        }
+    }
+
+    pub(crate) fn shm_listener(&mut self) -> Option<ShmListener> {
+        self.shm_listener.take()
+    }
+
     pub(crate) fn close(&mut self) {
         // Close senders
         if let Some(sender) = self.sender.take() {
@@ -355,6 +430,19 @@ impl Socket {
                 }
             }
         }
+        if let Some(shm_sender) = self.shm_sender.take() {
+            let ref_count = Arc::strong_count(&shm_sender);
+            match Arc::try_unwrap(shm_sender) {
+                Ok(s) => s.close(),
+                Err(arc) => {
+                    log::warn!(
+                        "[socket] shm_sender has other references, force closing, ref_count: {}",
+                        ref_count
+                    );
+                    arc.force_close();
+                }
+            }
+        }
 
         // Close UDP listeners
         if let Some(mut listener) = self.discovery_traffic_multicast_listener.take() {
@@ -375,6 +463,11 @@ impl Socket {
             listener.close();
         }
         if let Some(mut listener) = self.user_traffic_tcp_listener.take() {
+            listener.close();
+        }
+
+        // Close SHM listener
+        if let Some(mut listener) = self.shm_listener.take() {
             listener.close();
         }
 
