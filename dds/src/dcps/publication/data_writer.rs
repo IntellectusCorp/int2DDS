@@ -1235,7 +1235,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
 
         // Listener
         let mask = self.get_listener_mask()?;
-        if mask.contains(StatusKind::SAMPLE_LOST) {
+        if mask.contains(StatusKind::LIVELINESS_LOST) {
             let mut listener_called = false;
             if let Some(listener) = self.get_listener()? {
                 listener.on_liveliness_lost(self, &status);

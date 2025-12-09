@@ -1223,10 +1223,7 @@ impl WlpLogic {
         if let Some(writer) = participant.find_writer_from_entity_id(guid.entity_id()) {
             if !is_alive {
                 log::info!("[WLP] update_liveliness: Found LOCAL writer for guid={:?}", guid);
-                writer.update_status(
-                    StatusKind::LIVELINESS_LOST,
-                    Some(Arc::new(LivelinessLostStatus { total_count: 0, total_count_change: 1 })),
-                );
+                writer.update_status(StatusKind::LIVELINESS_LOST, None);
                 log::warn!(
                     "[WLP] update_liveliness: Returning early for LOCAL writer guid={:?} - readers will NOT be notified!",
                     guid
