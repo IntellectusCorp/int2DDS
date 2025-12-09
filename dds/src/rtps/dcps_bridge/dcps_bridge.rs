@@ -574,10 +574,8 @@ impl DcpsBridge {
             user_logic.join_unicast_listening_thread()?;
         }
 
-        // Shutdown SPDP participant liveliness monitor
-        if let Some(spdp_logic) = self.spdp_logic.as_ref() {
-            spdp_logic.shutdown_liveliness_monitor();
-        }
+        // Shutdown participant liveliness monitor
+        self.participant.shutdown_liveliness_monitor();
 
         // Shutdown WLP liveliness monitor
         if let Some(wlp_logic) = self.participant.wlp_logic() {

@@ -56,6 +56,7 @@ use crate::{
             },
         },
         logic::data::builtin_endpoint_pair::BuiltinEndpointPair,
+        logic::data::participant_message_processor::ParticipantMessageProcessor,
         messages::{
             message_creator::MessageCreator,
             message_receiver::{MessageReceiver, TypedSubmessage},
@@ -266,32 +267,6 @@ impl SedpLogic {
         Arc::clone(&self.unicast_listening_handle)
     }
 
-    pub(crate) fn send_sedp_message(
-        &self,
-        duration: StdDuration,
-        spdp_discovered_participant_data: Arc<SPDPDiscoveredParticipantData>,
-        data: Option<Arc<Vec<u8>>>,
-    ) {
-        let handler = SendingHandler::get_instance(self.participant.clone(), None, None);
-        handler.push_message(MessageType::SedpSpdp(
-            None,
-            duration,
-            spdp_discovered_participant_data.clone(),
-            data,
-        ));
-        handler.push_message(MessageType::SedpPublication(
-            None,
-            duration,
-            Arc::new(spdp_discovered_participant_data.guid_prefix()),
-        ));
-        handler.push_message(MessageType::SedpSubscription(
-            None,
-            duration,
-            Arc::new(spdp_discovered_participant_data.guid_prefix()),
-        ));
-        handler.wake_event_loop();
-    }
-
     fn timer_sleep_and_send_message(
         &self,
         start_time: Option<Instant>,
@@ -338,9 +313,9 @@ impl SedpLogic {
         }
     }
 
-    // SEDP SPDP message repeated transmission
+    // Sends periodic SPDP Data & SEDP Heartbeat
     #[allow(unused_variables)]
-    pub(crate) fn send_sedp_spdp_message(
+    pub(crate) fn send_periodic_participant_data_unicast(
         &self,
         start_time: Option<Instant>,
         duration: StdDuration,
@@ -371,7 +346,7 @@ impl SedpLogic {
                     }
                 }
                 for remote_participant_data in list.iter() {
-                    if let Err(e) = self.send_discovery_message(
+                    if let Err(e) = self.send_message_to_discovery_traffic(
                         &data,
                         remote_participant_data.participant_guid(),
                         "spdp",
@@ -383,7 +358,7 @@ impl SedpLogic {
                         Some(start_time),
                         logic_start_time,
                         duration,
-                        MessageType::SedpSpdp(
+                        MessageType::PeriodicParticipantDataUnicast(
                             Some(start_time),
                             duration,
                             spdp_discovered_participant_data.clone(),
@@ -399,7 +374,7 @@ impl SedpLogic {
 
     // SEDP HEARTBEAT message connection and unsent / reader proxy check unsent
     #[allow(unused_variables)]
-    pub(crate) fn send_sedp_heartbeat_message(
+    pub(crate) fn send_sedp_periodic_heartbeat_message(
         &self,
         start_time: Option<Instant>,
         duration: StdDuration,
@@ -517,21 +492,33 @@ impl SedpLogic {
                     Some(start_time),
                     logic_start_time,
                     duration,
-                    MessageType::SedpPublication(Some(start_time), duration, guid_prefix.clone()),
+                    MessageType::PeriodicPublicationHeartbeat(
+                        Some(start_time),
+                        duration,
+                        guid_prefix.clone(),
+                    ),
                 );
             } else if entity_id == EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_WRITER {
                 self.timer_sleep_and_send_message(
                     Some(start_time),
                     logic_start_time,
                     duration,
-                    MessageType::SedpSubscription(Some(start_time), duration, guid_prefix.clone()),
+                    MessageType::PeriodicSubscriptionHeartbeat(
+                        Some(start_time),
+                        duration,
+                        guid_prefix.clone(),
+                    ),
                 );
             } else if entity_id == EntityId::SEDP_BUILTIN_TOPICS_WRITER {
                 self.timer_sleep_and_send_message(
                     Some(start_time),
                     logic_start_time,
                     duration,
-                    MessageType::SedpTopic(Some(start_time), duration, guid_prefix.clone()),
+                    MessageType::PeriodicSedpTopicHeartbeat(
+                        Some(start_time),
+                        duration,
+                        guid_prefix.clone(),
+                    ),
                 );
             } else {
                 return Err(RtpsError::new(
@@ -561,7 +548,7 @@ impl SedpLogic {
         );
 
         match buffer {
-            Ok(buffer) => self.send_discovery_message(&buffer, remote_guid, "data")?,
+            Ok(buffer) => self.send_message_to_discovery_traffic(&buffer, remote_guid, "data")?,
             Err(e) => {
                 return Err(RtpsError::new(
                     RtpsErrorCode::SerializationError,
@@ -573,7 +560,7 @@ impl SedpLogic {
         Ok(())
     }
 
-    fn send_discovery_message(
+    fn send_message_to_discovery_traffic(
         &self,
         buffer: &[u8],
         remote_guid: Guid,
@@ -877,16 +864,12 @@ impl SedpLogic {
                                 }
 
                                 if !is_termination_message {
-                                    let handler = SendingHandler::get_instance(
-                                        self.participant.clone(),
-                                        None,
-                                        None,
-                                    );
-                                    handler.push_message_and_wake(
-                                        MessageType::OnSpdpMessageArrival(
-                                            participant_proxy_data.clone(),
-                                        ),
-                                    );
+                                    // Use trait to handle participant discovery
+                                    if let Err(e) = self.handle_discovered_participant_data(
+                                        participant_proxy_data.clone(),
+                                    ) {
+                                        error!("Failed to handle discovered participant data: {:?}", e);
+                                    }
                                 }
                             }
                             None => {
@@ -1100,7 +1083,9 @@ impl SedpLogic {
 
         match buffer {
             Ok(buffer) => {
-                if let Err(e) = self.send_discovery_message(&buffer, remote_guid, "AckNack") {
+                if let Err(e) =
+                    self.send_message_to_discovery_traffic(&buffer, remote_guid, "AckNack")
+                {
                     warn!("Failed to send SEDP AckNack message: {:?}", e);
                 }
             }
@@ -2031,7 +2016,7 @@ impl SedpLogic {
             if let Some(sending_handler) =
                 SendingHandler::get_instance_by_participant_guid(participant.guid())
             {
-                sending_handler.push_message_and_wake(MessageType::SendPreemptiveAcknack(
+                sending_handler.push_message_and_wake(MessageType::UserPreemptiveAcknack(
                     stateful_reader_id,
                     remote_writer_guid,
                 ));
@@ -2067,7 +2052,7 @@ impl SedpLogic {
             if let Some(sending_handler) =
                 SendingHandler::get_instance_by_participant_guid(participant.guid())
             {
-                sending_handler.push_message_and_wake(MessageType::SendHeartbeatMessageToOne(
+                sending_handler.push_message_and_wake(MessageType::UserHeartbeatToOne(
                     stateful_writer_id,
                     remote_reader_guid,
                     true,
@@ -2170,7 +2155,8 @@ impl SedpLogic {
 
             match buffer {
                 Ok(buffer) => {
-                    if let Err(e) = self.send_discovery_message(&buffer, remote_guid, "termination")
+                    if let Err(e) =
+                        self.send_message_to_discovery_traffic(&buffer, remote_guid, "termination")
                     {
                         warn!("Failed to send SEDP termination message: {:?}", e);
                     }
@@ -2301,6 +2287,12 @@ impl SedpLogic {
         }
 
         Ok(())
+    }
+}
+
+impl ParticipantMessageProcessor for SedpLogic {
+    fn participant(&self) -> Arc<Participant> {
+        self.participant.clone()
     }
 }
 
