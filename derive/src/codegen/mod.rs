@@ -1,9 +1,19 @@
 pub mod derives;
+pub mod enum_ops;
 pub mod field_ops;
 pub mod key_methods;
+pub mod type_config;
+pub mod type_enum;
+pub mod type_struct;
+pub mod union_ops;
 pub mod utils;
 
 pub use derives::*;
+pub use enum_ops::*;
 pub use field_ops::*;
 pub use key_methods::*;
+pub use type_config::*;
+pub use type_enum::*;
+pub use type_struct::*;
+pub use union_ops::*;
 pub use utils::*;

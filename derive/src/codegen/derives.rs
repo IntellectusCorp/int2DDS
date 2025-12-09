@@ -104,6 +104,11 @@ pub fn generate_additional_derives(
     input: &DeriveInput,
     name: &syn::Ident,
 ) -> proc_macro2::TokenStream {
+    // Check if this is an enum
+    if let Data::Enum(_) = &input.data {
+        return generate_enum_additional_derives(input, name);
+    }
+
     let default_fields = generate_default_fields(input);
     let debug_fields = generate_debug_fields(input);
     let clone_fields = generate_clone_fields(input);
@@ -162,5 +167,135 @@ pub fn generate_additional_derives(
                 })
             }
         }
+    }
+}
+
+/// Generate additional derives for enum types
+fn generate_enum_additional_derives(
+    input: &DeriveInput,
+    name: &syn::Ident,
+) -> proc_macro2::TokenStream {
+    if let Data::Enum(data) = &input.data {
+        let variants = &data.variants;
+
+        // Get first variant for Default impl
+        let first_variant = variants.first();
+        let default_impl = if let Some(variant) = first_variant {
+            let variant_name = &variant.ident;
+            // Check if variant has data
+            match &variant.fields {
+                Fields::Unit => quote! {
+                    #[automatically_derived]
+                    impl Default for #name {
+                        fn default() -> Self {
+                            Self::#variant_name
+                        }
+                    }
+                },
+                Fields::Unnamed(fields) if fields.unnamed.len() == 1 => quote! {
+                    #[automatically_derived]
+                    impl Default for #name {
+                        fn default() -> Self {
+                            Self::#variant_name(Default::default())
+                        }
+                    }
+                },
+                _ => quote! {}, // Cannot generate default for complex variants
+            }
+        } else {
+            quote! {}
+        };
+
+        // Generate Debug impl for enum
+        let debug_arms: Vec<_> = variants
+            .iter()
+            .map(|variant| {
+                let variant_name = &variant.ident;
+                let variant_str = variant_name.to_string();
+                match &variant.fields {
+                    Fields::Unit => quote! {
+                        Self::#variant_name => write!(f, "{}", #variant_str),
+                    },
+                    Fields::Unnamed(fields) if fields.unnamed.len() == 1 => quote! {
+                        Self::#variant_name(value) => write!(f, "{}({:?})", #variant_str, value),
+                    },
+                    _ => quote! {
+                        Self::#variant_name { .. } => write!(f, "{} {{ ... }}", #variant_str),
+                    },
+                }
+            })
+            .collect();
+
+        // Generate Clone impl for enum
+        let clone_arms: Vec<_> = variants
+            .iter()
+            .map(|variant| {
+                let variant_name = &variant.ident;
+                match &variant.fields {
+                    Fields::Unit => quote! {
+                        Self::#variant_name => Self::#variant_name,
+                    },
+                    Fields::Unnamed(fields) if fields.unnamed.len() == 1 => quote! {
+                        Self::#variant_name(value) => Self::#variant_name(value.clone()),
+                    },
+                    _ => quote! {
+                        Self::#variant_name { .. } => unimplemented!("Clone not supported for this variant"),
+                    },
+                }
+            })
+            .collect();
+
+        // Generate PartialEq impl for enum
+        let eq_arms: Vec<_> = variants
+            .iter()
+            .map(|variant| {
+                let variant_name = &variant.ident;
+                match &variant.fields {
+                    Fields::Unit => quote! {
+                        (Self::#variant_name, Self::#variant_name) => true,
+                    },
+                    Fields::Unnamed(fields) if fields.unnamed.len() == 1 => quote! {
+                        (Self::#variant_name(a), Self::#variant_name(b)) => a == b,
+                    },
+                    _ => quote! {
+                        (Self::#variant_name { .. }, Self::#variant_name { .. }) => false,
+                    },
+                }
+            })
+            .collect();
+
+        quote! {
+            #default_impl
+
+            #[automatically_derived]
+            impl std::fmt::Debug for #name {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    match self {
+                        #(#debug_arms)*
+                    }
+                }
+            }
+
+            #[automatically_derived]
+            impl Clone for #name {
+                fn clone(&self) -> Self {
+                    match self {
+                        #(#clone_arms)*
+                    }
+                }
+            }
+
+            #[automatically_derived]
+            impl PartialEq for #name {
+                fn eq(&self, other: &Self) -> bool {
+                    match (self, other) {
+                        #(#eq_arms)*
+                        _ => false,
+                    }
+                }
+            }
+        }
+    } else {
+        quote! {}
     }
 }

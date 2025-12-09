@@ -217,3 +217,108 @@ pub fn is_map_type(ty: &syn::Type) -> bool {
         false
     }
 }
+
+/// Discriminant type for enum/union (FastDDS compatible)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DiscriminantType {
+    #[default]
+    I32, // switch (long) - default
+    I16,  // switch (short)
+    U8,   // switch (octet)
+    Bool, // switch (boolean)
+}
+
+impl DiscriminantType {
+    /// Get the Rust type name for this discriminant type
+    pub fn rust_type(&self) -> &'static str {
+        match self {
+            DiscriminantType::I32 => "i32",
+            DiscriminantType::I16 => "i16",
+            DiscriminantType::U8 => "u8",
+            DiscriminantType::Bool => "bool",
+        }
+    }
+
+    /// Get the serialization method name for this discriminant type
+    pub fn serialize_method(&self) -> &'static str {
+        match self {
+            DiscriminantType::I32 => "serialize_i32",
+            DiscriminantType::I16 => "serialize_i16",
+            DiscriminantType::U8 => "serialize_u8",
+            DiscriminantType::Bool => "serialize_bool",
+        }
+    }
+
+    /// Get the deserialization method name for this discriminant type
+    pub fn deserialize_method(&self) -> &'static str {
+        match self {
+            DiscriminantType::I32 => "deserialize_i32",
+            DiscriminantType::I16 => "deserialize_i16",
+            DiscriminantType::U8 => "deserialize_u8",
+            DiscriminantType::Bool => "deserialize_bool",
+        }
+    }
+}
+
+/// Parse #[repr(...)] attribute to determine discriminant type
+pub fn parse_repr_attribute(attrs: &[syn::Attribute]) -> DiscriminantType {
+    for attr in attrs {
+        if attr.path().is_ident("repr") {
+            if let Ok(repr) = attr.parse_args::<syn::Ident>() {
+                return match repr.to_string().as_str() {
+                    "i32" => DiscriminantType::I32,
+                    "i16" => DiscriminantType::I16,
+                    "u8" => DiscriminantType::U8,
+                    "bool" => DiscriminantType::Bool,
+                    _ => DiscriminantType::I32, // default
+                };
+            }
+        }
+    }
+    DiscriminantType::I32 // default
+}
+
+/// Check if an enum variant has associated data
+pub fn variant_has_data(variant: &syn::Variant) -> bool {
+    !matches!(variant.fields, syn::Fields::Unit)
+}
+
+/// Check if enum is C-style (all variants have no data)
+pub fn is_c_style_enum(
+    variants: &syn::punctuated::Punctuated<syn::Variant, syn::token::Comma>,
+) -> bool {
+    variants.iter().all(|v| !variant_has_data(v))
+}
+
+/// Get the type of a tuple variant (single field only)
+pub fn get_variant_type(variant: &syn::Variant) -> Option<&syn::Type> {
+    match &variant.fields {
+        syn::Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
+            Some(&fields.unnamed.first()?.ty)
+        }
+        _ => None,
+    }
+}
+
+/// Get the discriminant value for a variant (explicit or auto-generated)
+pub fn get_discriminant_value(variant: &syn::Variant, index: usize) -> i64 {
+    if let Some((_, expr)) = &variant.discriminant {
+        if let syn::Expr::Lit(lit) = expr {
+            if let syn::Lit::Int(int_lit) = &lit.lit {
+                return int_lit.base10_parse().unwrap_or(index as i64);
+            }
+        }
+        // Handle negative literals
+        if let syn::Expr::Unary(unary) = expr {
+            if matches!(unary.op, syn::UnOp::Neg(_)) {
+                if let syn::Expr::Lit(lit) = &*unary.expr {
+                    if let syn::Lit::Int(int_lit) = &lit.lit {
+                        let val: i64 = int_lit.base10_parse().unwrap_or(index as i64);
+                        return -val;
+                    }
+                }
+            }
+        }
+    }
+    index as i64 // default: use index
+}
