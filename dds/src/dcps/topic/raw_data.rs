@@ -38,26 +38,37 @@ impl RawData {
         Self { data: data.into(), key: None }
     }
 
+    /// Create new RawData from a slice (zero-copy to Arc)
+    ///
+    /// This is more efficient than `new()` as it avoids intermediate Vec allocation.
+    /// Arc allocates exactly the required size without Vec's capacity overhead.
+    #[inline]
+    pub fn from_slice(data: &[u8]) -> Self {
+        Self { data: Arc::from(data), key: None }
+    }
+
     /// Create new RawData with key
     pub fn with_key(data: Vec<u8>, key: Vec<u8>) -> Self {
         Self { data: data.into(), key: Some(key.into()) }
     }
 
+    /// Create new RawData with key from slices (zero-copy to Arc)
+    ///
+    /// This is more efficient than `with_key()` as it avoids intermediate Vec allocations.
+    #[inline]
+    pub fn from_slices(data: &[u8], key: &[u8]) -> Self {
+        Self { data: Arc::from(data), key: Some(Arc::from(key)) }
+    }
+
     /// Create RawData with key only (for register/unregister/dispose operations)
     /// This avoids allocating empty data vector
     pub fn key_only(key: Vec<u8>) -> Self {
-        Self {
-            data: Arc::from(EMPTY_DATA),
-            key: Some(key.into()),
-        }
+        Self { data: Arc::from(EMPTY_DATA), key: Some(key.into()) }
     }
 
     /// Create empty RawData (for operations that don't need data or key)
     pub fn empty() -> Self {
-        Self {
-            data: Arc::from(EMPTY_DATA),
-            key: None,
-        }
+        Self { data: Arc::from(EMPTY_DATA), key: None }
     }
 
     /// Get the raw bytes
