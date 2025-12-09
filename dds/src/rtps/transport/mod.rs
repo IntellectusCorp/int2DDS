@@ -12,6 +12,7 @@
 //! - **UDP**: Default mode with multicast discovery and unicast data
 //! - **TCP**: Connection-oriented mode for NAT/firewall traversal
 //! - **Hybrid**: Combined UDP multicast discovery with TCP unicast
+//! - **SHM**: Shared memory for high-performance intra-host communication
 //!
 //! ## Submodules
 //!
@@ -19,6 +20,7 @@
 //! - [`socket`] - High-level socket abstraction
 //! - [`tcp`] - TCP transport implementation
 //! - [`udp`] - UDP transport implementation
+//! - [`shm`] - Shared memory transport implementation
 //!
 //! ## Key Traits
 //!
@@ -29,6 +31,7 @@
 #![allow(unused_variables)]
 
 pub(crate) mod port_manager;
+pub(crate) mod shm;
 pub(crate) mod socket;
 pub(crate) mod tcp;
 pub(crate) mod udp;
@@ -36,6 +39,7 @@ pub(crate) mod udp;
 use std::env;
 use std::io;
 use std::net::SocketAddr;
+use std::sync::OnceLock;
 
 /// Transport protocol type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +50,8 @@ pub enum TransportType {
     TCP,
     /// Hybrid transport (both UDP and TCP simultaneously)
     Hybrid,
+    /// Shared Memory transport
+    SHM,
 }
 
 impl Default for TransportType {
@@ -60,6 +66,7 @@ impl std::fmt::Display for TransportType {
             TransportType::UDP => write!(f, "udp"),
             TransportType::TCP => write!(f, "tcp"),
             TransportType::Hybrid => write!(f, "hybrid"),
+            TransportType::SHM => write!(f, "shm"),
         }
     }
 }
@@ -72,18 +79,28 @@ impl std::str::FromStr for TransportType {
             "udp" => Ok(TransportType::UDP),
             "tcp" => Ok(TransportType::TCP),
             "hybrid" => Ok(TransportType::Hybrid),
+            "shm" => Ok(TransportType::SHM),
             _ => Err(format!(
-                "Invalid transport type: {}. Valid options are 'udp', 'tcp', or 'hybrid'",
+                "Invalid transport type: {}. Valid options are 'udp', 'tcp', 'hybrid', or 'shm'",
                 s
             )),
         }
     }
 }
 
+/// Cached transport type - read once from environment variable
+static TRANSPORT_TYPE: OnceLock<TransportType> = OnceLock::new();
+
 /// Get the transport type from environment variable INT2DDS_TRANSPORT
 /// Defaults to UDP if not set or invalid
+/// The value is cached after the first call
 pub fn get_transport_type() -> TransportType {
-    env::var("INT2DDS_TRANSPORT").ok().and_then(|val| val.parse().ok()).unwrap_or_default()
+    *TRANSPORT_TYPE.get_or_init(|| {
+        let transport =
+            env::var("INT2DDS_TRANSPORT").ok().and_then(|val| val.parse().ok()).unwrap_or_default();
+        log::info!("[Transport] Using transport type: {:?}", transport);
+        transport
+    })
 }
 
 /// Transport trait for abstracting network transport mechanisms (UDP, TCP, etc.)
@@ -146,7 +163,7 @@ pub(crate) trait Listener: Send {
     fn close(&mut self);
 }
 
-/// Transport sender enum that can hold either UDP or TCP sender
+/// Transport sender enum that can hold either UDP, TCP, or SHM sender
 ///
 /// This enum allows the Socket struct to work with different transport types
 /// without knowing the specific implementation at compile time.
@@ -156,6 +173,8 @@ pub(crate) enum TransportSender {
     Udp(udp::UdpSender),
     /// TCP transport sender
     Tcp(tcp::TcpSender),
+    /// Shared Memory transport sender
+    Shm(shm::ShmSender),
 }
 
 impl TransportSender {
@@ -168,6 +187,9 @@ impl TransportSender {
                 // TCP sender doesn't support force_close yet
                 log::warn!("[TransportSender] force_close not implemented for TCP");
             }
+            TransportSender::Shm(sender) => {
+                sender.force_close();
+            }
         }
     }
 }
@@ -177,6 +199,7 @@ impl Transport for TransportSender {
         match self {
             TransportSender::Udp(sender) => sender.send(addr, data),
             TransportSender::Tcp(sender) => sender.send(addr, data),
+            TransportSender::Shm(sender) => sender.send(addr, data),
         }
     }
 
@@ -184,6 +207,7 @@ impl Transport for TransportSender {
         match self {
             TransportSender::Udp(sender) => sender.send_multicast(domain_id, data),
             TransportSender::Tcp(sender) => sender.send_multicast(domain_id, data),
+            TransportSender::Shm(sender) => sender.send_multicast(domain_id, data),
         }
     }
 
@@ -191,6 +215,7 @@ impl Transport for TransportSender {
         match self {
             TransportSender::Udp(sender) => sender.port(),
             TransportSender::Tcp(sender) => sender.port(),
+            TransportSender::Shm(sender) => sender.port(),
         }
     }
 
@@ -198,6 +223,7 @@ impl Transport for TransportSender {
         match self {
             TransportSender::Udp(sender) => sender.transport_type(),
             TransportSender::Tcp(sender) => sender.transport_type(),
+            TransportSender::Shm(sender) => sender.transport_type(),
         }
     }
 
@@ -205,6 +231,7 @@ impl Transport for TransportSender {
         match self {
             TransportSender::Udp(sender) => sender.close(),
             TransportSender::Tcp(sender) => sender.close(),
+            TransportSender::Shm(sender) => sender.close(),
         }
     }
 }

@@ -155,6 +155,108 @@ struct LatencySubListener {
     first_sample_received: Arc<AtomicBool>,
 }
 
+#[allow(dead_code)]
+struct LocalLatencySubListener {
+    stats: Arc<Mutex<PerformanceStats>>,
+    last_message_time_ns: Arc<AtomicU64>,
+    start_instant: Instant,
+    should_stop: Arc<AtomicBool>,
+    first_sample_received: Arc<AtomicBool>,
+}
+
+impl LocalLatencySubListener {
+    fn new() -> Self {
+        Self {
+            stats: Arc::new(Mutex::new(PerformanceStats::new())),
+            last_message_time_ns: Arc::new(AtomicU64::new(0)),
+            start_instant: Instant::now(),
+            should_stop: Arc::new(AtomicBool::new(false)),
+            first_sample_received: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn get_stats(&self) -> Arc<Mutex<PerformanceStats>> {
+        Arc::clone(&self.stats)
+    }
+
+    fn get_last_message_time_ns(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.last_message_time_ns)
+    }
+
+    fn get_start_instant(&self) -> Instant {
+        self.start_instant
+    }
+
+    fn get_should_stop(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.should_stop)
+    }
+}
+
+impl DataReaderListener for LocalLatencySubListener {
+    type Foo = PerformanceTestData;
+
+    fn on_subscription_matched(
+        &self,
+        _reader: &int2dds::subscription::data_reader::DataReader<Self::Foo>,
+        status: &int2dds::infrastructure::status::SubscriptionMatchedStatus,
+    ) {
+        if status.current_count() > 0 {
+            println!("Local latency test publisher matched! Waiting for data...");
+        }
+    }
+
+    fn on_data_available(
+        &self,
+        reader: &int2dds::subscription::data_reader::DataReader<Self::Foo>,
+    ) {
+        let receive_time_ns = get_current_time_ns();
+        let now = Instant::now();
+
+        if self.should_stop.load(Ordering::Relaxed) {
+            return;
+        }
+
+        if let Ok(samples) = reader.take(
+            100,
+            &[SampleStateKind::ANY_SAMPLE_STATE],
+            &[ViewStateKind::ANY_VIEW_STATE],
+            &[InstanceStateKind::ANY_INSTANCE_STATE],
+        ) {
+            // Update last message time
+            let elapsed_ns = now.duration_since(self.start_instant).as_nanos() as u64;
+            self.last_message_time_ns.store(elapsed_ns, Ordering::Release);
+
+            let mut stats = self.stats.lock().unwrap();
+
+            // Set start_time on first sample
+            if self
+                .first_sample_received
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                stats.start_time = now;
+                println!("First local latency sample received. Starting measurements...");
+            }
+
+            for sample in samples {
+                if let Ok(data) = sample.data() {
+                    // Skip warmup samples
+                    if data.seq_num == common::WARMUP_SEQ_NUM {
+                        continue;
+                    }
+
+                    stats.add_sample(data.data.len());
+                    stats.seen_seqs.insert(data.seq_num);
+
+                    // Calculate one-way latency: receive_time - send_timestamp
+                    let latency_ns = receive_time_ns.saturating_sub(data.timestamp);
+                    stats.latency_samples.push(latency_ns as f64);
+                }
+            }
+        }
+    }
+}
+
 impl LatencySubListener {
     fn new() -> Self {
         Self {
@@ -590,6 +692,220 @@ fn run_latency_subscriber(args: &SubscriberArgs) {
     std::fs::write(&filename, log_content).expect("Failed to write log file");
 }
 
+fn run_local_latency_subscriber(args: &SubscriberArgs) {
+    let reliability = ReliabilityMode::from(args.common.reliability.as_str());
+
+    println!("Starting local latency subscriber:");
+    println!("  Reliability: {}", reliability);
+    println!("  Execution time: {} seconds", args.common.execution_time);
+
+    env_logger::builder().filter_level(log::LevelFilter::Error).init();
+
+    let participant_qos = DomainParticipantQos::default();
+    let factory = DomainParticipantFactory::get_instance();
+    let participant = factory
+        .create_participant(args.common.domain_id, participant_qos, None, StatusMask::default())
+        .expect("Failed to create participant");
+
+    // Use throughput topic (same as throughput test publisher)
+    let topic = participant
+        .create_topic::<PerformanceTestData>(
+            "local_latency_test_topic",
+            "ThroughputTestData",
+            TopicQos::default(),
+            None,
+            StatusMask::default(),
+        )
+        .expect("Failed to create topic");
+
+    let subscriber = participant
+        .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+        .expect("Failed to create subscriber");
+
+    let reader_qos =
+        DataReaderQos { reliability: reliability.to_qos_policy(), ..Default::default() };
+
+    let listener = Arc::new(LocalLatencySubListener::new());
+    let stats = listener.get_stats();
+    let last_message_time_ns = listener.get_last_message_time_ns();
+    let start_instant = listener.get_start_instant();
+    let should_stop = listener.get_should_stop();
+
+    let _reader = subscriber
+        .create_datareader::<PerformanceTestData>(
+            &topic,
+            reader_qos,
+            Some(Arc::clone(&listener) as Arc<dyn DataReaderListener<Foo = PerformanceTestData>>),
+            StatusMask::default(),
+        )
+        .expect("Failed to create datareader");
+
+    println!("Waiting for publisher...");
+
+    // Spawn timeout monitoring thread
+    let last_msg_ns_clone = Arc::clone(&last_message_time_ns);
+    let should_stop_clone = Arc::clone(&should_stop);
+    let timeout_thread = thread::spawn(move || {
+        // Wait for first message
+        loop {
+            if last_msg_ns_clone.load(Ordering::Acquire) > 0 {
+                break;
+            }
+            thread::sleep(StdDuration::from_millis(100));
+        }
+
+        // Monitor for 2 second timeout after last message
+        loop {
+            thread::sleep(StdDuration::from_millis(100));
+
+            let last_ns = last_msg_ns_clone.load(Ordering::Acquire);
+            if last_ns > 0 {
+                let last_instant = start_instant + StdDuration::from_nanos(last_ns);
+                if last_instant.elapsed() >= StdDuration::from_secs(2) {
+                    println!("\n2 second timeout after last message. Stopping...");
+                    should_stop_clone.store(true, Ordering::Release);
+                    break;
+                }
+            }
+        }
+    });
+
+    // Spawn a thread for periodic reporting
+    let stats_clone = Arc::clone(&stats);
+    let execution_time = args.common.execution_time;
+    let should_stop_clone2 = Arc::clone(&should_stop);
+    let report_thread = thread::spawn(move || {
+        // Wait for first sample
+        let measurement_start;
+        loop {
+            let stats = stats_clone.lock().unwrap();
+            if stats.total_samples > 0 {
+                measurement_start = stats.start_time;
+                drop(stats);
+                break;
+            }
+            drop(stats);
+            thread::sleep(StdDuration::from_millis(100));
+        }
+
+        // Report every 5 seconds
+        for interval in (5..=execution_time).step_by(5) {
+            loop {
+                if should_stop_clone2.load(Ordering::Acquire) {
+                    return;
+                }
+
+                let elapsed = measurement_start.elapsed();
+                if elapsed >= StdDuration::from_secs(interval) {
+                    break;
+                }
+                thread::sleep(StdDuration::from_millis(100));
+            }
+
+            if should_stop_clone2.load(Ordering::Acquire) {
+                return;
+            }
+
+            let stats = stats_clone.lock().unwrap();
+            let sample_count = stats.latency_samples.len();
+            if sample_count > 0 {
+                let sum: f64 = stats.latency_samples.iter().sum();
+                let avg_ns = sum / sample_count as f64;
+                let min_ns = stats.latency_samples.iter().cloned().fold(f64::INFINITY, f64::min);
+                let max_ns = stats.latency_samples.iter().cloned().fold(0.0_f64, f64::max);
+                println!(
+                    "[{}s] Samples: {}, Avg: {:.3} ms, Min: {:.3} ms, Max: {:.3} ms",
+                    interval,
+                    sample_count,
+                    avg_ns / 1_000_000.0,
+                    min_ns / 1_000_000.0,
+                    max_ns / 1_000_000.0
+                );
+            }
+        }
+    });
+
+    // Wait for timeout
+    loop {
+        if should_stop.load(Ordering::Acquire) {
+            break;
+        }
+        thread::sleep(StdDuration::from_millis(100));
+    }
+
+    let _ = timeout_thread.join();
+    let _ = report_thread.join();
+
+    let mut final_stats = stats.lock().unwrap();
+    let last_ns = last_message_time_ns.load(Ordering::Acquire);
+    if last_ns > 0 {
+        final_stats.end_time = start_instant + StdDuration::from_nanos(last_ns);
+    } else {
+        final_stats.end_time = final_stats.start_time;
+    }
+
+    println!("\n=== Local Latency Test Results ===");
+    let duration_secs = final_stats.end_time.duration_since(final_stats.start_time).as_secs_f64();
+    println!("Test duration: {:.2} seconds", duration_secs);
+    println!("[INFO] Total samples: {}", final_stats.total_samples);
+
+    if !final_stats.latency_samples.is_empty() {
+        let sample_count = final_stats.latency_samples.len();
+        let sum: f64 = final_stats.latency_samples.iter().sum();
+        let avg_ns = sum / sample_count as f64;
+        let min_ns = final_stats.latency_samples.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max_ns = final_stats.latency_samples.iter().cloned().fold(0.0_f64, f64::max);
+
+        // Calculate percentiles
+        let mut sorted_samples = final_stats.latency_samples.clone();
+        sorted_samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        println!("[INFO] Latency samples: {}", sample_count);
+        println!("[INFO] Average latency: {:.3} ms", avg_ns / 1_000_000.0);
+        println!("[INFO] Min latency: {:.3} ms", min_ns / 1_000_000.0);
+        println!("[INFO] Max latency: {:.3} ms", max_ns / 1_000_000.0);
+
+        // CSV output
+        let csv_filename = if let Some(hz) = args.common.hz {
+            format!("subscriber_local_latency_results_{}b_{}hz.csv", args.common.data_len, hz)
+        } else {
+            format!("subscriber_local_latency_results_{}b.csv", args.common.data_len)
+        };
+        let file_exists = std::path::Path::new(&csv_filename).exists();
+        let mut csv_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&csv_filename)
+            .expect("Failed to open CSV file");
+
+        use std::io::Write;
+
+        if !file_exists {
+            writeln!(
+                csv_file,
+                "Timestamp,Total_Samples,Avg_Latency_ms,Min_Latency_ms,Max_Latency_ms,P50_Latency_ms,P90_Latency_ms,P99_Latency_ms"
+            )
+            .expect("Failed to write CSV header");
+        }
+
+        writeln!(
+            csv_file,
+            "{},{},{:.3},{:.3},{:.3}",
+            Local::now().format("%Y-%m-%d %H:%M:%S"),
+            sample_count,
+            avg_ns / 1_000_000.0,
+            min_ns / 1_000_000.0,
+            max_ns / 1_000_000.0,
+        )
+        .expect("Failed to write CSV data");
+    }
+
+    let log_content = format!("Local Latency Test\nTotal samples: {}\n", final_stats.total_samples);
+    let timestamp = Local::now().format("%Y%m%dT%H%M%S");
+    let filename = format!("sub_local_lat-{}.log", timestamp);
+    std::fs::write(&filename, log_content).expect("Failed to write log file");
+}
+
 fn main() {
     let args = SubscriberArgs::parse();
 
@@ -605,9 +921,13 @@ fn main() {
             println!("Starting latency test mode");
             run_latency_subscriber(&args)
         }
+        "local_latency" | "local" | "ll" | "3" => {
+            println!("Starting local latency test mode");
+            run_local_latency_subscriber(&args)
+        }
         _ => {
             println!(
-                "Invalid test mode '{}'. Supported modes: throughput, latency",
+                "Invalid test mode '{}'. Supported modes: throughput, latency, local_latency",
                 args.common.test_mode
             );
             println!("Defaulting to throughput test.");

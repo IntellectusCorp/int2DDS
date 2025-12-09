@@ -51,7 +51,7 @@ use crate::{
             sending_handler::SendingHandler, thread_monitor::ThreadMonitor,
             timer_handler::TimerHandler,
         },
-        transport::{port_manager::PortManager, socket::Socket},
+        transport::{get_transport_type, port_manager::PortManager, socket::Socket, TransportType},
     },
 };
 
@@ -81,7 +81,7 @@ impl DcpsBridge {
         let participant = Arc::new(participant);
 
         // Initialize all logics in Participant first (SendingHandler needs them)
-        participant.init_logics(socket.sender(), socket.tcp_sender());
+        participant.init_logics(socket.sender(), socket.tcp_sender(), socket.shm_sender());
 
         // Get logics from participant
         let (spdp_logic, sedp_logic, user_logic) = participant.get_logics();
@@ -134,6 +134,7 @@ impl DcpsBridge {
                 self.socket.user_traffic_multicast_listener(),
                 self.socket.user_traffic_unicast_listener(),
                 self.socket.user_traffic_tcp_listener(),
+                self.socket.shm_listener(),
                 self.socket.sender(),
             );
         } else {
@@ -186,7 +187,11 @@ impl DcpsBridge {
                     self.domain_id,
                     self.socket.participant_id(),
                 );
-                let locator = Locator::from_ip_v4_addr_and_port(&ip, port as u32);
+                // Use SHM locator if transport type is SHM, otherwise use UDP
+                let locator = match get_transport_type() {
+                    TransportType::SHM => Locator::from_shm(&ip, port as u32),
+                    _ => Locator::from_ip_v4_addr_and_port(&ip, port as u32),
+                };
                 unicast_locator_list.push(locator);
             }
         }

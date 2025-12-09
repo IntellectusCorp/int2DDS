@@ -236,6 +236,36 @@ impl SpdpMessage {
                     tcp_default.address,
                 ));
             }
+            TransportType::SHM => {
+                // SHM mode uses UDP locators for discovery (SPDP, SEDP)
+                let metatraffic = Locator::from_ip_v4_addr_and_port(
+                    &participant_ip,
+                    PortManager::get_discovery_traffic_unicast_port(
+                        participant.domain_id(),
+                        participant.participant_id(),
+                    ) as u32,
+                );
+                let default = Locator::from_shm(
+                    &participant_ip,
+                    PortManager::get_user_traffic_unicast_port(
+                        participant.domain_id(),
+                        participant.participant_id(),
+                    ) as u32,
+                );
+                locators.push((
+                    ParameterId::PidMetatrafficUnicastLocator,
+                    metatraffic.kind(),
+                    metatraffic.port(),
+                    metatraffic.address,
+                ));
+                locators.push((
+                    ParameterId::PidDefaultUnicastLocator,
+                    default.kind(),
+                    default.port(),
+                    default.address,
+                ));
+                // TODO: Add SHM locator for user data when implemented
+            }
         }
 
         match discovery_helpers::create_spdp_participant_message(
