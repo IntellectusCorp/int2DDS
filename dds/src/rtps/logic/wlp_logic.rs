@@ -9,7 +9,7 @@ use crate::{
     infrastructure::{
         liveliness_monitor::LivelinessMonitor,
         qos_policy::{LivelinessQosPolicy, LivelinessQosPolicyKind},
-        status::{LivelinessChangedStatus, LivelinessLostStatus, StatusKind},
+        status::{LivelinessChangedStatus, StatusKind},
     },
     rtps::{
         builtin::data::participant_message_data::{
