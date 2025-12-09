@@ -150,8 +150,8 @@ pub unsafe extern "C" fn int2dds_write(
 
     let writer_ref = &*writer;
 
-    // Create RawData from input bytes
-    let raw_data = RawData::new(std::slice::from_raw_parts(data, data_size).to_vec());
+    // Create RawData from input bytes (zero-copy to Arc)
+    let raw_data = RawData::from_slice(std::slice::from_raw_parts(data, data_size));
 
     // Write with NIL handle (instance identification from data)
     ffi_try!(writer_ref.inner.write(&raw_data, InstanceHandle::NIL));
@@ -182,13 +182,13 @@ pub unsafe extern "C" fn int2dds_write_with_key(
 
     let writer_ref = &*writer;
 
-    // Create RawData with key
-    let data_vec = std::slice::from_raw_parts(data, data_size).to_vec();
+    // Create RawData with key (zero-copy to Arc)
+    let data_slice = std::slice::from_raw_parts(data, data_size);
     let raw_data = if !key.is_null() && key_size > 0 {
-        let key_vec = std::slice::from_raw_parts(key, key_size).to_vec();
-        RawData::with_key(data_vec, key_vec)
+        let key_slice = std::slice::from_raw_parts(key, key_size);
+        RawData::from_slices(data_slice, key_slice)
     } else {
-        RawData::new(data_vec)
+        RawData::from_slice(data_slice)
     };
 
     // Write with NIL handle
