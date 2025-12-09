@@ -13,6 +13,9 @@ pub enum SerializationError {
     InvalidExtensibility,
     InvalidMemberHeader,
     TypeHashMismatch([u8; 32], [u8; 32]),
+    // Enum/Union specific errors
+    InvalidEnumDiscriminant(i32),
+    InvalidUnionDiscriminant(i32),
 }
 
 impl std::fmt::Display for SerializationError {
@@ -35,6 +38,12 @@ impl std::fmt::Display for SerializationError {
             SerializationError::InvalidMemberHeader => write!(f, "Invalid member header"),
             SerializationError::TypeHashMismatch(expected, actual) => {
                 write!(f, "Type hash mismatch: expected {:?}, got {:?}", expected, actual)
+            }
+            SerializationError::InvalidEnumDiscriminant(d) => {
+                write!(f, "Invalid enum discriminant: {}", d)
+            }
+            SerializationError::InvalidUnionDiscriminant(d) => {
+                write!(f, "Invalid union discriminant: {}", d)
             }
         }
     }
