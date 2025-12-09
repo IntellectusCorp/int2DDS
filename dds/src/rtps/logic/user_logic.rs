@@ -39,6 +39,7 @@ use crate::rtps::messages::submessages::nack_frag::NackFrag;
 use crate::rtps::task::sending_handler::{MessageType, SendingHandler};
 use crate::rtps::task::timer_handler::TimerHandler;
 use crate::rtps::task::user_traffic::user_unicast_listening_task::UserUnicastListeningTask;
+use crate::rtps::transport::shm::ShmListener;
 use crate::rtps::transport::tcp::TcpListener;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 use crate::rtps::transport::{Transport, TransportSender};
@@ -58,6 +59,7 @@ pub(crate) struct UserLogic {
     participant: Arc<Participant>,
     sender: Option<Arc<TransportSender>>,
     tcp_sender: Option<Arc<TransportSender>>,
+    shm_sender: Option<Arc<TransportSender>>,
     fragment_buffers: Arc<DashMap<(Guid, SequenceNumber), FragmentBuffer>>,
     unicast_listening_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
@@ -67,11 +69,13 @@ impl UserLogic {
         participant: Arc<Participant>,
         sender: Option<Arc<TransportSender>>,
         tcp_sender: Option<Arc<TransportSender>>,
+        shm_sender: Option<Arc<TransportSender>>,
     ) -> Self {
         Self {
             participant,
             sender,
             tcp_sender,
+            shm_sender,
             fragment_buffers: Arc::new(DashMap::new()),
             unicast_listening_handle: Arc::new(Mutex::new(None)),
         }
@@ -84,11 +88,13 @@ impl UserLogic {
         user_multicast_listener: Option<UdpListener>,
         user_unicast_listener: Option<UdpListener>,
         tcp_listener: Option<TcpListener>,
+        shm_listener: Option<ShmListener>,
         sender: Arc<TransportSender>,
     ) {
         let mut user_unicast_listening_task = UserUnicastListeningTask::new(
             user_unicast_listener,
             tcp_listener,
+            shm_listener,
             self.participant.clone(),
         );
 
@@ -1465,8 +1471,31 @@ impl UserLogic {
         let mut last_error = None;
 
         for locator in locators {
+            // Check if this is a SHM locator
+            if locator.is_shm() {
+                // Use SHM sender if available
+                if let Some(shm_sender) = &self.shm_sender {
+                    // SHM doesn't use socket addresses, but Transport trait requires it
+                    // Use a dummy address - the actual routing is done via shared memory
+                    let dummy_addr =
+                        SocketAddr::V4(SocketAddrV4::new(std::net::Ipv4Addr::new(127, 0, 0, 1), 0));
+                    match shm_sender.send(&dummy_addr, buffer) {
+                        Ok(_) => {
+                            is_sent = true;
+                        }
+                        Err(e) => {
+                            warn!("[UserLogic] Failed to send SHM message: {:?}", e);
+                            last_error = Some(e);
+                            continue;
+                        }
+                    }
+                } else {
+                    warn!("[UserLogic] SHM locator found but no SHM sender available");
+                    continue;
+                }
+            }
             // Check if this is a TCP locator
-            if locator.is_tcp() {
+            else if locator.is_tcp() {
                 // Use TCP sender if available
                 if let Some(tcp_sender) = &self.tcp_sender {
                     let socket_addr = SocketAddr::V4(SocketAddrV4::new(
