@@ -129,6 +129,28 @@ pub unsafe extern "C" fn int2dds_participant_get_domain_id(
     }
 }
 
+/// Delete all entities contained by a participant
+///
+/// This operation deletes all Publisher, Subscriber, Topic, ContentFilteredTopic
+/// and MultiTopic objects created through this participant. It recursively calls
+/// delete_contained_entities on each contained entity.
+///
+/// # Safety
+/// - `participant` must be a valid participant
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_participant_delete_contained_entities(
+    participant: *const Int2DdsParticipant,
+) -> Int2DdsRet {
+    check_null!(participant);
+
+    let participant_ref = &*participant;
+
+    match participant_ref.inner.delete_contained_entities() {
+        Ok(()) => INT2DDS_RET_OK,
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

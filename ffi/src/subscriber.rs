@@ -319,6 +319,27 @@ pub unsafe extern "C" fn int2dds_get_subscription_matched_status(
     }
 }
 
+/// Delete all entities contained by a subscriber
+///
+/// This operation deletes all DataReader objects contained by this Subscriber.
+/// It also recursively calls delete_contained_entities on each DataReader.
+///
+/// # Safety
+/// - `subscriber` must be a valid subscriber
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscriber_delete_contained_entities(
+    subscriber: *const Int2DdsSubscriber,
+) -> Int2DdsRet {
+    check_null!(subscriber);
+
+    let subscriber_ref = &*subscriber;
+
+    match subscriber_ref.inner.delete_contained_entities() {
+        Ok(()) => INT2DDS_RET_OK,
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
