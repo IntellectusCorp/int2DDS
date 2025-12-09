@@ -868,7 +868,10 @@ impl SedpLogic {
                                     if let Err(e) = self.handle_discovered_participant_data(
                                         participant_proxy_data.clone(),
                                     ) {
-                                        error!("Failed to handle discovered participant data: {:?}", e);
+                                        error!(
+                                            "Failed to handle discovered participant data: {:?}",
+                                            e
+                                        );
                                     }
                                 }
                             }

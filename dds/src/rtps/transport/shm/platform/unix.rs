@@ -7,8 +7,8 @@ use std::io;
 
 #[cfg(unix)]
 use libc::{
-    c_int, close, ftruncate, mmap, munmap, shm_open, shm_unlink, MAP_FAILED, MAP_SHARED, O_CREAT,
-    O_EXCL, O_RDWR, PROT_READ, PROT_WRITE,
+    close, ftruncate, mmap, munmap, shm_open, shm_unlink, MAP_FAILED, MAP_SHARED, O_CREAT, O_EXCL,
+    O_RDWR, PROT_READ, PROT_WRITE,
 };
 
 /// Unix shared memory implementation

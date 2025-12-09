@@ -140,11 +140,14 @@ impl DiscoveryMulticastListeningTask {
                                         .as_ref()
                                         .as_ref()
                                         .expect("SpdpLogic is not initialized");
-                                    
-                                    if let Err(e) = spdp_logic.handle_discovered_participant_data(
-                                        participant_proxy_data,
-                                    ) {
-                                        error!("Failed to handle discovered participant data: {:?}", e);
+
+                                    if let Err(e) = spdp_logic
+                                        .handle_discovered_participant_data(participant_proxy_data)
+                                    {
+                                        error!(
+                                            "Failed to handle discovered participant data: {:?}",
+                                            e
+                                        );
                                     }
                                 }
                             }

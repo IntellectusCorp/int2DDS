@@ -22,33 +22,29 @@ use crate::rtps::transport::TransportSender;
 
 #[derive(Debug, Clone)]
 pub(crate) enum MessageType {
-    //SPDP
-    SpdpMulticast(Option<Instant>, StdDuration, DomainId, Option<Arc<Vec<u8>>>),
-    OnSpdpMessageArrival(SPDPDiscoveredParticipantData),
+    // WLP
+    P2pData(Option<Instant>, StdDuration, Arc<ParticipantMessageData>),
+    P2pHeartbeat(Option<GuidPrefix>),
 
-    //SEDP
-    #[allow(dead_code)]
-    Sedp(StdDuration, Arc<SPDPDiscoveredParticipantData>, Option<Arc<Vec<u8>>>),
-    SedpSpdp(
+    // Discovery traffic
+    PeriodicParticipantDataMulticast(Option<Instant>, StdDuration, DomainId, Option<Arc<Vec<u8>>>),
+    PeriodicParticipantDataUnicast(
         Option<Instant>,
         StdDuration,
         Arc<SPDPDiscoveredParticipantData>,
         Option<Arc<Vec<u8>>>,
     ),
-    SedpPublication(Option<Instant>, StdDuration, Arc<GuidPrefix>),
-    SedpSubscription(Option<Instant>, StdDuration, Arc<GuidPrefix>),
-    SedpTopic(Option<Instant>, StdDuration, Arc<GuidPrefix>),
+    PeriodicPublicationHeartbeat(Option<Instant>, StdDuration, Arc<GuidPrefix>),
+    PeriodicSubscriptionHeartbeat(Option<Instant>, StdDuration, Arc<GuidPrefix>),
+    PeriodicSedpTopicHeartbeat(Option<Instant>, StdDuration, Arc<GuidPrefix>),
     SedpTerminateEndpoint(Guid, Arc<CacheChange>),
 
-    // WLP
-    P2p(Option<Instant>, StdDuration, Arc<ParticipantMessageData>),
-
-    //user data
-    SendHeartbeatMessageToOne(EntityId, Guid, bool),
-    SendHeartbeatMessageToAll(EntityId),
-    SendUnsentChanges(EntityId),
-    SendRequestedChanges(EntityId, Guid),
-    SendPreemptiveAcknack(EntityId, Guid),
+    // User traffic
+    UserHeartbeatToOne(EntityId, Guid, bool),
+    UserHeartbeatToAll(EntityId),
+    UserUnsentChanges(EntityId),
+    UserRequestedChanges(EntityId, Guid),
+    UserPreemptiveAcknack(EntityId, Guid),
     OnUserCacheChangeRemoval(bool, SequenceNumber, EntityId),
 }
 
@@ -198,9 +194,9 @@ impl SendingHandler {
         match self.message_queue.lock() {
             Ok(mut queue_guard) => {
                 // Deduplication: skip if SendUnsentChanges for same EntityId already exists
-                if let MessageType::SendUnsentChanges(entity_id) = &message {
+                if let MessageType::UserUnsentChanges(entity_id) = &message {
                     if queue_guard.iter().any(
-                        |m| matches!(m, MessageType::SendUnsentChanges(eid) if eid == entity_id),
+                        |m| matches!(m, MessageType::UserUnsentChanges(eid) if eid == entity_id),
                     ) {
                         return; // Already queued, no need to add duplicate
                     }
@@ -267,7 +263,7 @@ impl SendingHandler {
 
     pub(crate) fn cancel_p2p_messages(&self) {
         if let Ok(mut queue) = self.message_queue.lock() {
-            queue.retain(|msg| !matches!(msg, MessageType::P2p(_, _, _)));
+            queue.retain(|msg| !matches!(msg, MessageType::P2pData(_, _, _)));
         }
     }
 }
