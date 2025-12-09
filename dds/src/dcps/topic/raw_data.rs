@@ -66,6 +66,14 @@ impl RawData {
         Self { data: Arc::from(EMPTY_DATA), key: Some(key.into()) }
     }
 
+    /// Create RawData with key only from slice (zero-copy to Arc)
+    ///
+    /// More efficient than `key_only()` as it avoids intermediate Vec allocation.
+    #[inline]
+    pub fn key_only_from_slice(key: &[u8]) -> Self {
+        Self { data: Arc::from(EMPTY_DATA), key: Some(Arc::from(key)) }
+    }
+
     /// Create empty RawData (for operations that don't need data or key)
     pub fn empty() -> Self {
         Self { data: Arc::from(EMPTY_DATA), key: None }

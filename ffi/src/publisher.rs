@@ -73,8 +73,14 @@ pub unsafe extern "C" fn int2dds_delete_publisher(publisher: *mut Int2DdsPublish
         return INT2DDS_RET_NULL_POINTER;
     }
 
-    let publisher_box = Box::from_raw(publisher);
-    let publisher_obj = (*publisher_box.inner).clone();
+    // Destructure Box to move Arc out
+    let Int2DdsPublisher { inner: publisher_arc } = *Box::from_raw(publisher);
+
+    // Try to unwrap Arc without cloning (succeeds if this is the only reference)
+    let publisher_obj = match Arc::try_unwrap(publisher_arc) {
+        Ok(p) => p,
+        Err(arc) => (*arc).clone(), // Fall back to clone if other references exist
+    };
 
     // Get the participant to delete the publisher
     let participant = match publisher_obj.get_participant() {
@@ -278,10 +284,9 @@ pub unsafe extern "C" fn int2dds_register_instance(
 
     let writer_ref = &*writer;
 
-    // Create RawData with key for registration (using key_only to avoid empty data allocation)
+    // Create RawData with key for registration (zero-copy to Arc)
     let raw_data = if !key.is_null() && key_size > 0 {
-        let key_vec = std::slice::from_raw_parts(key, key_size).to_vec();
-        RawData::key_only(key_vec)
+        RawData::key_only_from_slice(std::slice::from_raw_parts(key, key_size))
     } else {
         RawData::empty()
     };
@@ -316,10 +321,9 @@ pub unsafe extern "C" fn int2dds_unregister_instance(
 
     let writer_ref = &*writer;
 
-    // Create RawData with key for identification (using key_only to avoid empty data allocation)
+    // Create RawData with key for identification (zero-copy to Arc)
     let raw_data = if !key.is_null() && key_size > 0 {
-        let key_vec = std::slice::from_raw_parts(key, key_size).to_vec();
-        RawData::key_only(key_vec)
+        RawData::key_only_from_slice(std::slice::from_raw_parts(key, key_size))
     } else {
         RawData::empty()
     };
@@ -354,10 +358,9 @@ pub unsafe extern "C" fn int2dds_dispose(
 
     let writer_ref = &*writer;
 
-    // Create RawData with key for identification (using key_only to avoid empty data allocation)
+    // Create RawData with key for identification (zero-copy to Arc)
     let raw_data = if !key.is_null() && key_size > 0 {
-        let key_vec = std::slice::from_raw_parts(key, key_size).to_vec();
-        RawData::key_only(key_vec)
+        RawData::key_only_from_slice(std::slice::from_raw_parts(key, key_size))
     } else {
         RawData::empty()
     };
