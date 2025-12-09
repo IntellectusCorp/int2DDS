@@ -46,7 +46,7 @@ use crate::{
 use std::{
     collections::HashMap,
     net::{SocketAddr, SocketAddrV4},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     time::{Duration as StdDuration, Instant},
 };
 
@@ -86,7 +86,7 @@ impl WriterInfo {
 
 #[derive(Clone)]
 pub(crate) struct WlpLogic {
-    participant: Arc<Participant>,
+    participant: Weak<Participant>,
     sender: Arc<Mutex<Option<Arc<TransportSender>>>>,
     timer_handler: Arc<Mutex<TimerHandler>>,
     // Local user-defined writers (GUID -> LivelinessQosPolicy)
@@ -101,7 +101,7 @@ impl WlpLogic {
     pub(crate) fn new(participant: Arc<Participant>, sender: Arc<TransportSender>) -> Self {
         let timer_handler = TimerHandler::get_instance(participant.clone());
         Self {
-            participant,
+            participant: Arc::downgrade(&participant),
             sender: Arc::new(Mutex::new(Some(sender))),
             timer_handler,
             local_writers: Arc::new(DashMap::new()),
@@ -133,8 +133,13 @@ impl WlpLogic {
         let info = WriterInfo::new(liveliness);
         self.local_writers.insert(writer_guid, info);
 
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
+
         Self::update_local_liveliness(
-            self.participant.clone(),
+            participant.clone(),
             writer_guid,
             self.local_writers.clone(),
             true,
@@ -150,19 +155,19 @@ impl WlpLogic {
                     {
                         *min_lease_duration = new.into();
 
-                        self.start_periodic_liveliness(*min_lease_duration);
+                        self.start_periodic_liveliness(*min_lease_duration)?;
                     } else {
                         *min_lease_duration = std::cmp::min(*min_lease_duration, new.into());
 
                         if prev != *min_lease_duration {
-                            self.update_automatic_lease_duration(*min_lease_duration);
+                            self.update_automatic_lease_duration(*min_lease_duration)?;
                         }
                     }
                 }
                 Err(e) => return Err(RtpsError::new(RtpsErrorCode::LockError, e.to_string())),
             }
         }
-        if let Some(writer) = self.participant.find_writer_from_entity_id(writer_guid.entity_id()) {
+        if let Some(writer) = participant.find_writer_from_entity_id(writer_guid.entity_id()) {
             if let Some(writer) = writer.as_any().downcast_ref::<StatefulWriter>() {
                 match writer.reader_proxies().lock() {
                     Ok(proxies) => {
@@ -194,7 +199,7 @@ impl WlpLogic {
         match self.liveliness_monitor.lock() {
             Ok(mut liveliness_monitor) => {
                 if liveliness_monitor.is_none() {
-                    let participant = self.participant.clone();
+                    let participant = participant.clone();
                     let local_writers = self.local_writers.clone();
                     let remote_participants = self.remote_participants.clone();
 
@@ -221,10 +226,7 @@ impl WlpLogic {
                     }
                     None => Err(RtpsError::new(
                         RtpsErrorCode::NotInitialized,
-                        format!(
-                            "Liveliness Monitor for Participant: {:?}",
-                            self.participant.guid(),
-                        ),
+                        format!("Liveliness Monitor for Participant: {:?}", participant.guid(),),
                     )),
                 }
             }
@@ -246,14 +248,23 @@ impl WlpLogic {
                         .any(|entry| entry.value().qos.kind == LivelinessQosPolicyKind::Automatic);
 
                     if !has_automatic {
-                        self.stop_periodic_liveliness();
+                        self.stop_periodic_liveliness()?;
                     }
 
                     Ok(())
                 }
                 None => Err(RtpsError::new(
                     RtpsErrorCode::NotInitialized,
-                    format!("Liveliness Monitor for Participant: {:?}", self.participant.guid(),),
+                    format!(
+                        "Liveliness Monitor for Participant: {:?}",
+                        self.participant
+                            .upgrade()
+                            .ok_or(RtpsError::new(
+                                RtpsErrorCode::ArcUpgradeError,
+                                "Participant upgrade"
+                            ))?
+                            .guid(),
+                    ),
                 )),
             },
             Err(e) => Err(RtpsError::new(RtpsErrorCode::LockError, e.to_string())),
@@ -276,8 +287,13 @@ impl WlpLogic {
             self.remote_participants.insert(prefix, new_map);
         }
 
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
+
         Self::update_remote_liveliness(
-            self.participant.clone(),
+            participant.clone(),
             writer_guid,
             self.remote_participants.clone(),
             true,
@@ -286,7 +302,7 @@ impl WlpLogic {
         match self.liveliness_monitor.lock() {
             Ok(mut liveliness_monitor) => {
                 if liveliness_monitor.is_none() {
-                    let participant = self.participant.clone();
+                    let participant = participant.clone();
                     let local_writers = self.local_writers.clone();
                     let remote_participants = self.remote_participants.clone();
 
@@ -310,14 +326,11 @@ impl WlpLogic {
                     None => {
                         log::error!(
                             "Liveliness Monitor not initialized for Participant: {:?}",
-                            self.participant.guid()
+                            participant.guid()
                         );
                         Err(RtpsError::new(
                             RtpsErrorCode::NotInitialized,
-                            format!(
-                                "Liveliness Monitor for Participant: {:?}",
-                                self.participant.guid(),
-                            ),
+                            format!("Liveliness Monitor for Participant: {:?}", participant.guid(),),
                         ))
                     }
                 }
@@ -340,8 +353,13 @@ impl WlpLogic {
             }
         }
 
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
+
         Self::update_remote_liveliness(
-            self.participant.clone(),
+            participant.clone(),
             writer_guid,
             self.remote_participants.clone(),
             false,
@@ -355,7 +373,7 @@ impl WlpLogic {
                 }
                 None => Err(RtpsError::new(
                     RtpsErrorCode::NotInitialized,
-                    format!("Liveliness Monitor for Participant: {:?}", self.participant.guid(),),
+                    format!("Liveliness Monitor for Participant: {:?}", participant.guid(),),
                 )),
             },
             Err(e) => Err(RtpsError::new(RtpsErrorCode::LockError, e.to_string())),
@@ -368,7 +386,7 @@ impl WlpLogic {
         _start_time: Option<Instant>,
         duration: StdDuration,
         participant_message_data: Arc<ParticipantMessageData>,
-    ) {
+    ) -> RtpsResult<()> {
         let logic_start_time = Instant::now();
 
         debug!("send_participant_message_data called, duration: {:?}", duration);
@@ -382,8 +400,10 @@ impl WlpLogic {
                 logic_start_time,
                 duration,
                 MessageType::P2p(Some(start_time), duration, participant_message_data),
-            );
+            )?;
         }
+
+        Ok(())
     }
     // EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_WRITER Heartbeat
     pub(crate) fn send_liveliness_heartbeat(
@@ -393,12 +413,17 @@ impl WlpLogic {
         writer_guid: Option<Guid>,
         target_guid_prefix: Option<GuidPrefix>, // for P2P initial
     ) -> RtpsResult<()> {
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
+
         match writer_guid {
             Some(guid) => {
                 let writer =
-                    self.participant.find_writer_from_entity_id(guid.entity_id()).ok_or_else(
-                        || RtpsError::new(RtpsErrorCode::NotInitialized, "Writer not found"),
-                    )?;
+                    participant.find_writer_from_entity_id(guid.entity_id()).ok_or_else(|| {
+                        RtpsError::new(RtpsErrorCode::NotInitialized, "Writer not found")
+                    })?;
 
                 if let Some(writer) = writer.as_any().downcast_ref::<StatefulWriter>() {
                     self.send_heartbeat_to_reader_proxies(
@@ -414,7 +439,7 @@ impl WlpLogic {
                 }
             }
             None => {
-                let writer = self.participant.builtin_participant_message_writer();
+                let writer = participant.builtin_participant_message_writer();
                 self.send_heartbeat_to_reader_proxies(
                     &writer,
                     Some(EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_READER),
@@ -451,7 +476,12 @@ impl WlpLogic {
             )
         })?;
 
-        let remote_datas = self.participant.remote_participant_proxy_datas().clone();
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
+
+        let remote_datas = participant.remote_participant_proxy_datas().clone();
         let remote_datas_guard = remote_datas
             .lock()
             .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
@@ -470,8 +500,7 @@ impl WlpLogic {
             let actual_reader_entity_id =
                 reader_entity_id.unwrap_or_else(|| reader_proxy.remote_group_entity_id());
 
-            let participant_guid =
-                self.participant.local_participant_proxy_data().participant_guid();
+            let participant_guid = participant.local_participant_proxy_data().participant_guid();
 
             let buffer = match MessageCreator::create_heartbeat_message(
                 participant_guid,
@@ -515,15 +544,20 @@ impl WlpLogic {
     }
 
     // Automatic
-    pub(crate) fn start_periodic_liveliness(&self, lease_duration: RtpsDuration) {
+    pub(crate) fn start_periodic_liveliness(&self, lease_duration: RtpsDuration) -> RtpsResult<()> {
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
+
         let data = ParticipantMessageData::new(
-            self.participant.guid().prefix(),
+            participant.guid().prefix(),
             LivelinessQosPolicyKind::Automatic,
         );
 
         if !lease_duration.is_infinite() {
             let handler = SendingHandler::get_instance(
-                self.participant.clone(),
+                participant.clone(),
                 self.sender.lock().ok().and_then(|g| g.clone()),
                 None,
             );
@@ -533,26 +567,42 @@ impl WlpLogic {
         } else if let Err(e) = self.send_liveliness_once(&data) {
             error!("Failed to send liveliness: {}", e);
         }
+
+        Ok(())
     }
 
-    pub(crate) fn stop_periodic_liveliness(&self) {
+    pub(crate) fn stop_periodic_liveliness(&self) -> RtpsResult<()> {
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
         let handler = SendingHandler::get_instance(
-            self.participant.clone(),
+            participant.clone(),
             self.sender.lock().ok().and_then(|g| g.clone()),
             None,
         );
 
         handler.cancel_p2p_messages();
+
+        Ok(())
     }
 
-    pub(crate) fn update_automatic_lease_duration(&self, lease_duration: RtpsDuration) {
+    pub(crate) fn update_automatic_lease_duration(
+        &self,
+        lease_duration: RtpsDuration,
+    ) -> RtpsResult<()> {
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
+
         let data = ParticipantMessageData::new(
-            self.participant.guid().prefix(),
+            participant.guid().prefix(),
             LivelinessQosPolicyKind::Automatic,
         );
 
         let handler = SendingHandler::get_instance(
-            self.participant.clone(),
+            participant.clone(),
             self.sender.lock().ok().and_then(|g| g.clone()),
             None,
         );
@@ -563,10 +613,17 @@ impl WlpLogic {
             let send_period = lease_duration.to_std_duration() * 2 / 3;
             handler.push_message_and_wake(MessageType::P2p(None, send_period, Arc::new(data)));
         }
+
+        Ok(())
     }
     // ManualByParticipant
     pub(crate) fn send_liveliness_once(&self, data: &ParticipantMessageData) -> RtpsResult<()> {
-        let writer = self.participant.builtin_participant_message_writer();
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
+
+        let writer = participant.builtin_participant_message_writer();
 
         let payload = data.to_serialized_data();
         // Check if there are any reader proxies first
@@ -677,28 +734,43 @@ impl WlpLogic {
     }
     // ManualByParticipant
     pub(crate) fn assert_participant_liveliness(&self) -> RtpsResult<()> {
-        self.update_local_participant_liveliness();
+        self.update_local_participant_liveliness()?;
+
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
 
         let data = ParticipantMessageData::new(
-            self.participant.guid().prefix(),
+            participant.guid().prefix(),
             LivelinessQosPolicyKind::ManualByParticipant,
         );
 
-        self.participant.increase_manual_liveliness_count()?;
+        participant.increase_manual_liveliness_count()?;
 
         self.send_liveliness_once(&data)
     }
     // ManualByTopic
     pub(crate) fn assert_writer_liveliness(&self, writer_guid: Guid) -> RtpsResult<()> {
-        self.update_local_writer_liveliness(&writer_guid);
+        self.update_local_writer_liveliness(&writer_guid)?;
 
         self.send_liveliness_heartbeat(true, true, Some(writer_guid), None)
     }
 
-    fn send_discovery_message(&self, buffer: &[u8], remote_guid: Guid, message_type: &str) -> bool {
+    fn send_discovery_message(
+        &self,
+        buffer: &[u8],
+        remote_guid: Guid,
+        message_type: &str,
+    ) -> RtpsResult<bool> {
         let mut is_sent = false;
 
-        match self.participant.remote_participant_proxy_datas().clone().lock() {
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
+
+        match participant.remote_participant_proxy_datas().clone().lock() {
             Ok(remote_participant_datas) => {
                 for remote_participant_data in remote_participant_datas.iter() {
                     if remote_participant_data.participant_guid().prefix() == remote_guid.prefix() {
@@ -737,16 +809,22 @@ impl WlpLogic {
                 message_type, remote_guid
             );
         }
-        is_sent
+        Ok(is_sent)
     }
 
-    pub(crate) fn handle_rtps_message(&self, message_receiver: MessageReceiver) {
+    pub(crate) fn handle_rtps_message(&self, message_receiver: MessageReceiver) -> RtpsResult<()> {
         debug!("[WlpLogic] handle_rtps_message called");
+
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
+
         if message_receiver.has_dst_submessage() {
-            let local_guid_prefix = self.participant.guid().prefix();
+            let local_guid_prefix = participant.guid().prefix();
             if !message_receiver.is_dst_me(local_guid_prefix) {
                 debug!("WLP Logic: INFO_DST is not me");
-                return;
+                return Ok(());
             }
         }
 
@@ -803,7 +881,7 @@ impl WlpLogic {
                                                 EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_WRITER,
                                             ),
                                             data.writer_sn,
-                                        );
+                                        )?;
                                     }
                                     Err(e) => {
                                         error!("WLP Logic: failed to deserialize data: {}", e);
@@ -821,6 +899,8 @@ impl WlpLogic {
                 }
             }
         }
+
+        Ok(())
     }
 
     // Automatic, ManualByParticipant
@@ -829,10 +909,16 @@ impl WlpLogic {
         participant_message_data: ParticipantMessageData,
         remote_guid: Guid,
         writer_sn: SequenceNumber,
-    ) {
+    ) -> RtpsResult<()> {
         debug!("[WlpLogic] handle_liveliness_message called");
+
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
+
         // 1. Find WriterProxy
-        let reader = self.participant.builtin_participant_message_reader();
+        let reader = participant.builtin_participant_message_reader();
 
         // 2. Update WriterProxy
         if let Ok(mut matched_writers) = reader.writer_proxies().lock() {
@@ -842,9 +928,11 @@ impl WlpLogic {
                 writer_proxy.mark_change_received(writer_sn, None);
 
                 // 3. Update Liveliness timer
-                self.update_remote_participant_liveliness(participant_message_data);
+                self.update_remote_participant_liveliness(participant_message_data)?;
             }
         }
+
+        Ok(())
     }
     // ManualByTopic
     pub(crate) fn handle_heartbeat_message(
@@ -854,11 +942,16 @@ impl WlpLogic {
         final_flag: bool,
         liveliness_flag: bool,
     ) -> RtpsResult<()> {
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
+
         if heartbeat.writer_id.entity_kind().is_built_in() {
             // Builtin endpoint (Automatic/ManualByParticipant)
             let builtin_endpoint_pair = match BuiltinEndpointPair::reader_writer_from_entity_id(
                 heartbeat.writer_id,
-                self.participant.clone(),
+                participant.clone(),
             )? {
                 Some(proxy) => proxy,
                 None => {
@@ -885,11 +978,11 @@ impl WlpLogic {
                 remote_guid,
                 heartbeat,
                 final_flag,
-            );
+            )?;
 
             debug!("[WLP] Processing builtin heartbeat from writer: {:?}", remote_guid);
         } else {
-            match self.participant.find_readers_matched_with_remote_writer(remote_guid) {
+            match participant.find_readers_matched_with_remote_writer(remote_guid) {
                 Ok(readers) => {
                     if readers.is_empty() {
                         warn!(
@@ -899,7 +992,7 @@ impl WlpLogic {
                         return Ok(());
                     }
                     if liveliness_flag {
-                        self.update_remote_writer_liveliness(remote_guid);
+                        self.update_remote_writer_liveliness(remote_guid)?;
 
                         let stateful_reader = readers
                             .iter()
@@ -912,7 +1005,7 @@ impl WlpLogic {
                                     remote_guid,
                                     heartbeat,
                                     final_flag,
-                                );
+                                )?;
                             }
                             None => {
                                 debug!(
@@ -942,7 +1035,7 @@ impl WlpLogic {
         remote_guid: Guid,
         heartbeat: &Heartbeat,
         final_flag: bool,
-    ) {
+    ) -> RtpsResult<()> {
         if let Ok(mut matched_writers) = local_reader.writer_proxies().lock() {
             if let Some(writer_proxy) =
                 matched_writers.iter_mut().find(|proxy| proxy.remote_writer_guid() == remote_guid)
@@ -968,7 +1061,7 @@ impl WlpLogic {
                         missing_changes,
                         acknack_count,
                         bitmap_base,
-                    );
+                    )?;
                 }
             } else {
                 warn!("[heartbeat] Failed to find writer proxy for GUID: {:?}", remote_guid);
@@ -976,6 +1069,8 @@ impl WlpLogic {
         } else {
             error!("[heartbeat] Failed to acquire matched_writers lock");
         }
+
+        Ok(())
     }
 
     fn find_or_create_writer_proxy(
@@ -1025,9 +1120,14 @@ impl WlpLogic {
         missing_changes: Vec<SequenceNumber>,
         acknack_count: i32,
         bitmap_base: SequenceNumber,
-    ) {
+    ) -> RtpsResult<()> {
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
+
         let buffer = MessageCreator::create_acknack_message(
-            self.participant.guid(),
+            participant.guid(),
             remote_guid,
             reader_entity_id,
             writer_entity_id,
@@ -1039,12 +1139,14 @@ impl WlpLogic {
 
         match buffer {
             Ok(buffer) => {
-                self.send_discovery_message(&buffer, remote_guid, "AckNack");
+                self.send_discovery_message(&buffer, remote_guid, "AckNack")?;
             }
             Err(e) => {
                 warn!("Failed to create WLP AckNack message: {:?}", e);
             }
         }
+
+        Ok(())
     }
 
     pub(crate) fn handle_acknack_message(
@@ -1052,9 +1154,14 @@ impl WlpLogic {
         acknack: AckNack,
         remote_guid: Guid,
     ) -> RtpsResult<()> {
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
+
         let builtin_endpoint_pair = match BuiltinEndpointPair::reader_writer_from_entity_id(
             acknack.writer_id,
-            self.participant.clone(),
+            participant.clone(),
         )? {
             Some(proxy) => proxy,
             None => {
@@ -1287,15 +1394,18 @@ impl WlpLogic {
         }
     }
 
-    pub(crate) fn update_local_writer_liveliness(&self, writer_guid: &Guid) {
+    pub(crate) fn update_local_writer_liveliness(&self, writer_guid: &Guid) -> RtpsResult<()> {
         if let Some(mut info) = self.local_writers.get_mut(&writer_guid) {
             let was_not_alive = info.alive_state() == WriterAliveState::NotAlive;
             info.set_alive();
 
             // NOT_ALIVE -> ALIVE
             if was_not_alive {
-                if let Ok(readers) =
-                    self.participant.find_readers_matched_with_local_writer(writer_guid)
+                let participant = self
+                    .participant
+                    .upgrade()
+                    .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
+                if let Ok(readers) = participant.find_readers_matched_with_local_writer(writer_guid)
                 {
                     for reader in readers {
                         notify_reader_liveliness_changed(&reader, &writer_guid, false);
@@ -1310,10 +1420,12 @@ impl WlpLogic {
                 }
             }
         }
+
+        Ok(())
     }
 
     // Participant level liveliness renewal (all MANUAL_BY_PARTICIPANT writers)
-    pub(crate) fn update_local_participant_liveliness(&self) {
+    pub(crate) fn update_local_participant_liveliness(&self) -> RtpsResult<()> {
         let guids: Vec<Guid> = self
             .local_writers
             .iter()
@@ -1322,14 +1434,16 @@ impl WlpLogic {
             .collect();
 
         for guid in guids {
-            self.update_local_writer_liveliness(&guid);
+            self.update_local_writer_liveliness(&guid)?;
         }
+
+        Ok(())
     }
 
     pub(crate) fn update_remote_participant_liveliness(
         &self,
         participant_message_data: ParticipantMessageData,
-    ) {
+    ) -> RtpsResult<()> {
         let message_kind = participant_message_data.kind();
 
         let mut guids = Vec::new();
@@ -1355,11 +1469,13 @@ impl WlpLogic {
         }
 
         for guid in guids {
-            self.update_remote_writer_liveliness(guid);
+            self.update_remote_writer_liveliness(guid)?;
         }
+
+        Ok(())
     }
 
-    pub(crate) fn update_remote_writer_liveliness(&self, writer_guid: Guid) {
+    pub(crate) fn update_remote_writer_liveliness(&self, writer_guid: Guid) -> RtpsResult<()> {
         if let Some(mut remote_writers) = self.remote_participants.get_mut(&writer_guid.prefix()) {
             if let Some(info) = remote_writers.get_mut(&writer_guid) {
                 let was_not_alive = info.alive_state() == WriterAliveState::NotAlive;
@@ -1371,8 +1487,12 @@ impl WlpLogic {
 
                 // NOT_ALIVE -> ALIVE
                 if was_not_alive {
+                    let participant = self.participant.upgrade().ok_or(RtpsError::new(
+                        RtpsErrorCode::ArcUpgradeError,
+                        "Participant upgrade",
+                    ))?;
                     if let Ok(readers) =
-                        self.participant.find_readers_matched_with_remote_writer(writer_guid)
+                        participant.find_readers_matched_with_remote_writer(writer_guid)
                     {
                         for reader in readers {
                             notify_reader_liveliness_changed(&reader, &writer_guid, false);
@@ -1388,6 +1508,8 @@ impl WlpLogic {
                 }
             }
         }
+
+        Ok(())
     }
 
     fn timer_sleep_and_send_message(
@@ -1396,7 +1518,7 @@ impl WlpLogic {
         logic_start_time: Instant,
         duration: StdDuration,
         message: MessageType,
-    ) {
+    ) -> RtpsResult<()> {
         let elapsed = logic_start_time.elapsed();
         let remaining_duration = match start_time {
             Some(start) => {
@@ -1406,13 +1528,17 @@ impl WlpLogic {
             None => duration.checked_sub(elapsed).unwrap_or(StdDuration::ZERO),
         };
 
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
+
         let timer_id = format!(
             "wlp_p2p_{:?}_{}",
-            self.participant.guid().prefix(),
+            participant.guid().prefix(),
             logic_start_time.elapsed().as_nanos(),
         );
 
-        let participant = self.participant.clone();
         let message = Arc::new(message);
         if let Ok(handler) = self.timer_handler.lock() {
             handler.add_timer(
@@ -1430,6 +1556,8 @@ impl WlpLogic {
                 },
             );
         }
+
+        Ok(())
     }
 
     /// Shutdown liveliness monitor and join its thread
