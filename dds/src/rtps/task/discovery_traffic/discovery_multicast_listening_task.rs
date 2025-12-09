@@ -3,6 +3,7 @@ use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::types::DomainId;
 use crate::rtps::entities::entity::Entity;
 use crate::rtps::entities::participant::Participant;
+use crate::rtps::logic::data::participant_message_processor::ParticipantMessageProcessor as _;
 use crate::rtps::logic::spdp_logic::SpdpLogic;
 use crate::rtps::messages::message_receiver::MessageReceiver;
 use crate::rtps::transport::socket::MAX_EVENTS;
@@ -139,8 +140,12 @@ impl DiscoveryMulticastListeningTask {
                                         .as_ref()
                                         .as_ref()
                                         .expect("SpdpLogic is not initialized");
-                                    spdp_logic
-                                        .handle_multicast_spdp_message(participant_proxy_data);
+                                    
+                                    if let Err(e) = spdp_logic.handle_discovered_participant_data(
+                                        participant_proxy_data,
+                                    ) {
+                                        error!("Failed to handle discovered participant data: {:?}", e);
+                                    }
                                 }
                             }
                             None => {
