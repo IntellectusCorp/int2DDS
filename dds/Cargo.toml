@@ -69,9 +69,11 @@ winapi = { version = "0.3", features = [
     "errhandlingapi",
     "winerror",
     "libloaderapi",
+    "memoryapi",
+    "minwindef",
 ] }
 # For getting Windows thread names in newer versions
-windows-sys = "0.52"
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_Memory"] }
 
 [[example]]
 name = "hello_world_param"
