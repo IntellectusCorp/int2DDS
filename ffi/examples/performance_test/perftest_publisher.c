@@ -558,6 +558,23 @@ static void run_throughput_test(int32_t domain_id, size_t data_len, int executio
         }
     }
 
+    /* Final interval report */
+    {
+        uint64_t now = get_current_time_ns();
+        double elapsed_final = (double)(now - start_time) / 1000000000.0;
+        double interval_elapsed = (double)(now - last_report_time) / 1000000000.0;
+        uint64_t interval_sent = total_sent - last_report_count;
+
+        double avg_rate = total_sent / elapsed_final;
+        double interval_rate = (interval_elapsed > 0) ? interval_sent / interval_elapsed : 0;
+        double avg_mbps = (total_sent * data_len * 8.0) / (elapsed_final * 1000000.0);
+        double interval_mbps = (interval_elapsed > 0) ? (interval_sent * data_len * 8.0) / (interval_elapsed * 1000000.0) : 0;
+
+        printf("[%.1fs] Sent: %llu, Avg: %.0f msg/s (%.2f Mbps), Interval: %.0f msg/s (%.2f Mbps)\n",
+               elapsed_final, (unsigned long long)total_sent,
+               avg_rate, avg_mbps, interval_rate, interval_mbps);
+    }
+
     /* Final statistics */
     double elapsed = (double)(get_current_time_ns() - start_time) / 1000000000.0;
     double final_rate = total_sent / elapsed;
@@ -724,7 +741,46 @@ static void run_latency_test(int32_t domain_id, size_t data_len, int execution_t
     }
     memset(payload, 0xAA, data_len);
 
-    /* Test variables */
+    /* Warmup phase - send a few messages to ensure subscriber is ready */
+    printf("Warming up (waiting for first echo)...\n");
+    {
+        LatencyTestData warmup_data;
+        warmup_data.seq_num = 0;
+        warmup_data.send_timestamp = get_current_time_ns();
+        warmup_data.echo_timestamp = 0;
+        warmup_data.data_len = data_len;
+        warmup_data.data = payload;
+
+        size_t warmup_size = serialize_latency_data(&warmup_data, send_buffer, send_buffer_size);
+
+        /* Send warmup messages until we get an echo */
+        int warmup_attempts = 0;
+        bool warmup_done = false;
+        while (!warmup_done && warmup_attempts < 50) {
+            ret = int2dds_write(writer, send_buffer, warmup_size);
+            warmup_attempts++;
+
+            /* Wait for echo with short timeout */
+            uint64_t warmup_timeout = get_current_time_ns() + 100000000ULL; /* 100ms timeout */
+            while (get_current_time_ns() < warmup_timeout) {
+                size_t data_size = 0;
+                bool valid_data = false;
+                ret = int2dds_take(reader, recv_buffer, recv_buffer_size, &data_size, &valid_data);
+                if (ret == INT2DDS_RET_OK && valid_data) {
+                    warmup_done = true;
+                    printf("Warmup complete after %d attempts. Starting test...\n", warmup_attempts);
+                    break;
+                }
+                sleep_us(100);
+            }
+        }
+
+        if (!warmup_done) {
+            fprintf(stderr, "Warning: Warmup failed, starting test anyway...\n");
+        }
+    }
+
+    /* Test variables - start timer AFTER warmup */
     uint64_t start_time = get_current_time_ns();
     uint64_t end_time = start_time + (uint64_t)execution_time * 1000000000ULL;
     uint64_t seq_num = 0;
@@ -735,11 +791,21 @@ static void run_latency_test(int32_t domain_id, size_t data_len, int execution_t
 
     stats.start_time_ns = start_time;
 
+    /* Ring buffer to store send timestamps for async latency calculation */
+    #define TIMESTAMP_BUFFER_SIZE 100000
+    uint64_t* send_timestamps = (uint64_t*)calloc(TIMESTAMP_BUFFER_SIZE, sizeof(uint64_t));
+    if (!send_timestamps) {
+        fprintf(stderr, "Failed to allocate timestamp buffer\n");
+        goto cleanup;
+    }
+
     bool running = true;
     while (running) {
+        uint64_t now = get_current_time_ns();
+
         /* Check termination conditions */
         if (latency_count > 0) {
-            if (seq_num >= (uint64_t)latency_count || get_current_time_ns() >= end_time) {
+            if (seq_num >= (uint64_t)latency_count || now >= end_time) {
                 if (seq_num < (uint64_t)latency_count) {
                     printf("Test stopped by execution_time limit. Sent %llu / %d samples.\n",
                            (unsigned long long)seq_num, latency_count);
@@ -747,30 +813,52 @@ static void run_latency_test(int32_t domain_id, size_t data_len, int execution_t
                 break;
             }
         } else {
-            if (get_current_time_ns() >= end_time) {
+            if (now >= end_time) {
                 break;
             }
         }
 
-        /* Create and send data */
-        LatencyTestData send_data;
-        send_data.seq_num = seq_num;
-        send_data.send_timestamp = get_current_time_ns();
-        send_data.echo_timestamp = 0;
-        send_data.data_len = data_len;
-        send_data.data = payload;
+        /* ASYNC SEND: Send at target Hz rate without waiting for echo */
+        if (hz > 0) {
+            /* Time-based sending */
+            if (now >= next_send_time) {
+                /* Create and send data */
+                LatencyTestData send_data;
+                send_data.seq_num = seq_num;
+                send_data.send_timestamp = now;
+                send_data.echo_timestamp = 0;
+                send_data.data_len = data_len;
+                send_data.data = payload;
 
-        size_t serialized_size = serialize_latency_data(&send_data, send_buffer, send_buffer_size);
-        ret = int2dds_write(writer, send_buffer, serialized_size);
-        if (ret != INT2DDS_RET_OK) {
-            fprintf(stderr, "Failed to write: %d\n", ret);
+                /* Store timestamp for later latency calculation */
+                send_timestamps[seq_num % TIMESTAMP_BUFFER_SIZE] = now;
+
+                size_t serialized_size = serialize_latency_data(&send_data, send_buffer, send_buffer_size);
+                ret = int2dds_write(writer, send_buffer, serialized_size);
+
+                seq_num++;
+                next_send_time += send_interval_ns;
+            }
+        } else {
+            /* Interval-based sending (original behavior for -i option) */
+            LatencyTestData send_data;
+            send_data.seq_num = seq_num;
+            send_data.send_timestamp = now;
+            send_data.echo_timestamp = 0;
+            send_data.data_len = data_len;
+            send_data.data = payload;
+
+            send_timestamps[seq_num % TIMESTAMP_BUFFER_SIZE] = now;
+
+            size_t serialized_size = serialize_latency_data(&send_data, send_buffer, send_buffer_size);
+            ret = int2dds_write(writer, send_buffer, serialized_size);
+
+            seq_num++;
+            sleep_ms(latency_interval_ms);
         }
 
-        seq_num++;
-
-        /* Wait for echo response with timeout */
-        uint64_t echo_timeout = get_current_time_ns() + 1000000000ULL; /* 1 second timeout */
-        while (get_current_time_ns() < echo_timeout) {
+        /* ASYNC RECEIVE: Non-blocking poll for echo responses */
+        for (int poll_count = 0; poll_count < 100; poll_count++) {
             size_t data_size = 0;
             bool valid_data = false;
             ret = int2dds_take(reader, recv_buffer, recv_buffer_size, &data_size, &valid_data);
@@ -779,19 +867,23 @@ static void run_latency_test(int32_t domain_id, size_t data_len, int execution_t
                 uint64_t receive_time = get_current_time_ns();
                 LatencyTestData recv_data;
                 if (deserialize_latency_data(recv_buffer, data_size, &recv_data) == 0) {
-                    uint64_t round_trip_ns = receive_time - recv_data.send_timestamp;
-                    uint64_t latency_ns = round_trip_ns / 2;
-                    stats_add_latency(&stats, latency_ns);
-                    stats.total_samples++;
+                    /* Look up original send timestamp */
+                    uint64_t original_send_time = send_timestamps[recv_data.seq_num % TIMESTAMP_BUFFER_SIZE];
+                    if (original_send_time > 0) {
+                        uint64_t round_trip_ns = receive_time - original_send_time;
+                        uint64_t latency_ns = round_trip_ns / 2;
+                        stats_add_latency(&stats, latency_ns);
+                        stats.total_samples++;
+                    }
                 }
+            } else {
+                /* No more data available */
                 break;
-            } else if (ret == INT2DDS_RET_NO_DATA) {
-                sleep_us(100);
             }
         }
 
         /* Periodic report every 5 seconds */
-        uint64_t now = get_current_time_ns();
+        now = get_current_time_ns();
         if (now - last_report_time >= 5000000000ULL) {
             double elapsed = (double)(now - start_time) / 1000000000.0;
             double interval_elapsed = (double)(now - last_report_time) / 1000000000.0;
@@ -804,15 +896,17 @@ static void run_latency_test(int32_t domain_id, size_t data_len, int execution_t
             stats_calculate_current_latency(&stats, &avg_latency, &min_latency, &max_latency);
 
             if (latency_count > 0) {
-                printf("[%.1fs] Sent: %llu / %d, Avg: %.0f msg/s, Interval: %.0f msg/s, "
+                printf("[%.1fs] Sent: %llu / %d, Echoes: %llu, Avg: %.0f msg/s, Interval: %.0f msg/s, "
                        "Latency: %.2fms (min: %.2fms, max: %.2fms)\n",
                        elapsed, (unsigned long long)seq_num, latency_count,
+                       (unsigned long long)stats.total_samples,
                        avg_rate, interval_rate,
                        avg_latency / 1000000.0, min_latency / 1000000.0, max_latency / 1000000.0);
             } else {
-                printf("[%.1fs] Sent: %llu, Avg: %.0f msg/s, Interval: %.0f msg/s, "
+                printf("[%.1fs] Sent: %llu, Echoes: %llu, Avg: %.0f msg/s, Interval: %.0f msg/s, "
                        "Latency: %.2fms (min: %.2fms, max: %.2fms)\n",
                        elapsed, (unsigned long long)seq_num,
+                       (unsigned long long)stats.total_samples,
                        avg_rate, interval_rate,
                        avg_latency / 1000000.0, min_latency / 1000000.0, max_latency / 1000000.0);
             }
@@ -821,12 +915,68 @@ static void run_latency_test(int32_t domain_id, size_t data_len, int execution_t
             last_report_count = seq_num;
         }
 
-        /* Rate limiting */
+        /* Small sleep to prevent busy-spinning when Hz-limited and waiting for next send time */
         if (hz > 0) {
-            next_send_time += send_interval_ns;
-            sleep_until_ns(next_send_time);
+            uint64_t time_to_next = next_send_time > get_current_time_ns() ?
+                                    next_send_time - get_current_time_ns() : 0;
+            if (time_to_next > 100000) { /* More than 100us */
+                sleep_us(50); /* Short sleep to allow echo processing */
+            }
+        }
+    }
+
+    /* Drain remaining echoes for a short period */
+    printf("Collecting remaining echoes...\n");
+    uint64_t drain_end = get_current_time_ns() + 1000000000ULL; /* 1 second drain */
+    while (get_current_time_ns() < drain_end) {
+        size_t data_size = 0;
+        bool valid_data = false;
+        ret = int2dds_take(reader, recv_buffer, recv_buffer_size, &data_size, &valid_data);
+
+        if (ret == INT2DDS_RET_OK && valid_data) {
+            uint64_t receive_time = get_current_time_ns();
+            LatencyTestData recv_data;
+            if (deserialize_latency_data(recv_buffer, data_size, &recv_data) == 0) {
+                uint64_t original_send_time = send_timestamps[recv_data.seq_num % TIMESTAMP_BUFFER_SIZE];
+                if (original_send_time > 0) {
+                    uint64_t round_trip_ns = receive_time - original_send_time;
+                    uint64_t latency_ns = round_trip_ns / 2;
+                    stats_add_latency(&stats, latency_ns);
+                    stats.total_samples++;
+                }
+            }
+        } else if (ret == INT2DDS_RET_NO_DATA) {
+            sleep_us(1000);
+        }
+    }
+
+    free(send_timestamps);
+
+    /* Final interval report */
+    {
+        uint64_t now = get_current_time_ns();
+        double elapsed = (double)(now - start_time) / 1000000000.0;
+        double interval_elapsed = (double)(now - last_report_time) / 1000000000.0;
+        uint64_t interval_sent = seq_num - last_report_count;
+
+        double avg_rate = seq_num / elapsed;
+        double interval_rate = (interval_elapsed > 0) ? interval_sent / interval_elapsed : 0;
+
+        double avg_latency, min_latency, max_latency;
+        stats_calculate_current_latency(&stats, &avg_latency, &min_latency, &max_latency);
+
+        if (latency_count > 0) {
+            printf("[%.1fs] Sent: %llu / %d, Avg: %.0f msg/s, Interval: %.0f msg/s, "
+                   "Latency: %.2fms (min: %.2fms, max: %.2fms)\n",
+                   elapsed, (unsigned long long)seq_num, latency_count,
+                   avg_rate, interval_rate,
+                   avg_latency / 1000000.0, min_latency / 1000000.0, max_latency / 1000000.0);
         } else {
-            sleep_ms(latency_interval_ms);
+            printf("[%.1fs] Sent: %llu, Avg: %.0f msg/s, Interval: %.0f msg/s, "
+                   "Latency: %.2fms (min: %.2fms, max: %.2fms)\n",
+                   elapsed, (unsigned long long)seq_num,
+                   avg_rate, interval_rate,
+                   avg_latency / 1000000.0, min_latency / 1000000.0, max_latency / 1000000.0);
         }
     }
 
@@ -1005,6 +1155,20 @@ static void run_local_latency_test(int32_t domain_id, size_t data_len, int execu
             last_report_time = now;
             last_report_count = total_sent;
         }
+    }
+
+    /* Final interval report */
+    {
+        uint64_t now = get_current_time_ns();
+        double elapsed_final = (double)(now - start_time) / 1000000000.0;
+        double interval_elapsed = (double)(now - last_report_time) / 1000000000.0;
+        uint64_t interval_sent = total_sent - last_report_count;
+
+        double avg_rate = total_sent / elapsed_final;
+        double interval_rate = (interval_elapsed > 0) ? interval_sent / interval_elapsed : 0;
+
+        printf("[%.1fs] Sent: %llu, Avg: %.0f msg/s, Interval: %.0f msg/s\n",
+               elapsed_final, (unsigned long long)total_sent, avg_rate, interval_rate);
     }
 
     /* Final statistics */
