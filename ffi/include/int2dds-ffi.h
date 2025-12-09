@@ -262,6 +262,18 @@ Int2DdsRet int2dds_participant_get_domain_id(const struct Int2DdsParticipant *pa
                                              int32_t *domain_id_out);
 
 /**
+ * Delete all entities contained by a participant
+ *
+ * This operation deletes all Publisher, Subscriber, Topic, ContentFilteredTopic
+ * and MultiTopic objects created through this participant. It recursively calls
+ * delete_contained_entities on each contained entity.
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ */
+Int2DdsRet int2dds_participant_delete_contained_entities(const struct Int2DdsParticipant *participant);
+
+/**
  * Create a Publisher
  *
  * # Safety
@@ -406,6 +418,16 @@ Int2DdsRet int2dds_dispose(const struct Int2DdsDataWriter *writer,
                            const uint8_t *key,
                            uintptr_t key_size,
                            const uint8_t (*handle)[16]);
+
+/**
+ * Delete all entities contained by a publisher
+ *
+ * This operation deletes all DataWriter objects contained by this Publisher.
+ *
+ * # Safety
+ * - `publisher` must be a valid publisher
+ */
+Int2DdsRet int2dds_publisher_delete_contained_entities(const struct Int2DdsPublisher *publisher);
 
 /**
  * Create default DataWriter QoS
@@ -688,6 +710,17 @@ Int2DdsRet int2dds_delete_datareader(struct Int2DdsDataReader *reader);
 Int2DdsRet int2dds_get_subscription_matched_status(const struct Int2DdsDataReader *reader,
                                                    int32_t *total_count_out,
                                                    int32_t *current_count_out);
+
+/**
+ * Delete all entities contained by a subscriber
+ *
+ * This operation deletes all DataReader objects contained by this Subscriber.
+ * It also recursively calls delete_contained_entities on each DataReader.
+ *
+ * # Safety
+ * - `subscriber` must be a valid subscriber
+ */
+Int2DdsRet int2dds_subscriber_delete_contained_entities(const struct Int2DdsSubscriber *subscriber);
 
 /**
  * Create a Topic

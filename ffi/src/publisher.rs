@@ -371,6 +371,26 @@ pub unsafe extern "C" fn int2dds_dispose(
     }
 }
 
+/// Delete all entities contained by a publisher
+///
+/// This operation deletes all DataWriter objects contained by this Publisher.
+///
+/// # Safety
+/// - `publisher` must be a valid publisher
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publisher_delete_contained_entities(
+    publisher: *const Int2DdsPublisher,
+) -> Int2DdsRet {
+    check_null!(publisher);
+
+    let publisher_ref = &*publisher;
+
+    match publisher_ref.inner.delete_contained_entities() {
+        Ok(()) => INT2DDS_RET_OK,
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -57,6 +57,13 @@ target_link_libraries(keyed_publisher ${INT2DDS_FFI_LIB})
 add_executable(keyed_subscriber hello_world/keyed_subscriber.c)
 target_link_libraries(keyed_subscriber ${INT2DDS_FFI_LIB})
 
+# Performance Test Examples
+add_executable(perftest_publisher performance_test/perftest_publisher.c)
+target_link_libraries(perftest_publisher ${INT2DDS_FFI_LIB})
+
+add_executable(perftest_subscriber performance_test/perftest_subscriber.c)
+target_link_libraries(perftest_subscriber ${INT2DDS_FFI_LIB})
+
 # Copy DLL to output directory on Windows
 if(WIN32 AND EXISTS ${INT2DDS_FFI_DLL})
     add_custom_command(TARGET hello_world_publisher POST_BUILD
@@ -95,6 +102,14 @@ if(WIN32 AND EXISTS ${INT2DDS_FFI_DLL})
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${INT2DDS_FFI_DLL}
         $<TARGET_FILE_DIR:multi_participant_2>)
+    add_custom_command(TARGET perftest_publisher POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${INT2DDS_FFI_DLL}
+        $<TARGET_FILE_DIR:perftest_publisher>)
+    add_custom_command(TARGET perftest_subscriber POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${INT2DDS_FFI_DLL}
+        $<TARGET_FILE_DIR:perftest_subscriber>)
 endif()
 
 # Instructions
@@ -116,4 +131,14 @@ message(STATUS "  ./keyed_subscriber")
 message(STATUS "  ./multi_pub_sub")
 message(STATUS "  ./multi_participant_1")
 message(STATUS "  ./multi_participant_2")
+message(STATUS "  ./perftest_publisher --help")
+message(STATUS "  ./perftest_subscriber --help")
+message(STATUS "")
+message(STATUS "Performance test usage:")
+message(STATUS "  Throughput: ./perftest_publisher -m throughput -s 1024 -t 30")
+message(STATUS "              ./perftest_subscriber -m throughput -s 1024 -t 30")
+message(STATUS "  Latency:    ./perftest_publisher -m latency -s 1024 -t 30")
+message(STATUS "              ./perftest_subscriber -m latency -t 30")
+message(STATUS "  Local lat:  ./perftest_publisher -m local_latency -s 1024 -t 30")
+message(STATUS "              ./perftest_subscriber -m local_latency -s 1024 -t 30")
 message(STATUS "")
