@@ -899,7 +899,7 @@ impl UserLogic {
 
             // Notify Writer that Reader has requested CacheChanges
             let handler = SendingHandler::get_instance(self.participant.clone(), None, None);
-            handler.push_message_and_wake(MessageType::SendRequestedChanges(
+            handler.push_message_and_wake(MessageType::UserRequestedChanges(
                 acknack.writer_id,
                 remote_guid,
             ));

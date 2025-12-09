@@ -381,7 +381,7 @@ impl WlpLogic {
                 Some(start_time),
                 logic_start_time,
                 duration,
-                MessageType::P2p(Some(start_time), duration, participant_message_data),
+                MessageType::P2pData(Some(start_time), duration, participant_message_data),
             );
         }
     }
@@ -529,7 +529,7 @@ impl WlpLogic {
             );
 
             let send_period = lease_duration.to_std_duration() * 2 / 3;
-            handler.push_message_and_wake(MessageType::P2p(None, send_period, Arc::new(data)));
+            handler.push_message_and_wake(MessageType::P2pData(None, send_period, Arc::new(data)));
         } else if let Err(e) = self.send_liveliness_once(&data) {
             error!("Failed to send liveliness: {}", e);
         }
@@ -561,7 +561,7 @@ impl WlpLogic {
 
         if !lease_duration.is_infinite() {
             let send_period = lease_duration.to_std_duration() * 2 / 3;
-            handler.push_message_and_wake(MessageType::P2p(None, send_period, Arc::new(data)));
+            handler.push_message_and_wake(MessageType::P2pData(None, send_period, Arc::new(data)));
         }
     }
     // ManualByParticipant
