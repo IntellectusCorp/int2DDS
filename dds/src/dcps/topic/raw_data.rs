@@ -4,6 +4,7 @@
 //! The RawData type wraps raw bytes that have been pre-serialized by the C application.
 
 use std::any::{Any, TypeId};
+use std::sync::Arc;
 
 use crate::{
     common::instance_handle::InstanceHandle,
@@ -19,23 +20,24 @@ use super::type_support::{DdsType, SerializationFormat, TypeSupport};
 ///
 /// This type wraps pre-serialized bytes from C applications.
 /// The bytes are passed through without additional serialization.
+/// Uses Arc<[u8]> internally to avoid copies during serialization.
 #[derive(Clone, Debug)]
 pub struct RawData {
-    /// The raw serialized bytes
-    pub data: Vec<u8>,
+    /// The raw serialized bytes (Arc for zero-copy serialization)
+    pub data: Arc<[u8]>,
     /// Optional key bytes for keyed types
-    pub key: Option<Vec<u8>>,
+    pub key: Option<Arc<[u8]>>,
 }
 
 impl RawData {
     /// Create new RawData from bytes
     pub fn new(data: Vec<u8>) -> Self {
-        Self { data, key: None }
+        Self { data: data.into(), key: None }
     }
 
     /// Create new RawData with key
     pub fn with_key(data: Vec<u8>, key: Vec<u8>) -> Self {
-        Self { data, key: Some(key) }
+        Self { data: data.into(), key: Some(key.into()) }
     }
 
     /// Get the raw bytes
@@ -102,8 +104,8 @@ impl TypeSupport for RawDataTypeSupport {
             .downcast_ref::<RawData>()
             .ok_or_else(|| DdsError::Error("Expected RawData type".to_string()))?;
 
-        // Return the pre-serialized bytes directly
-        Ok(raw_data.data.clone().into())
+        // Return the pre-serialized bytes directly (Arc clone is cheap - just ref count increment)
+        Ok(raw_data.data.clone())
     }
 
     fn deserialize(&self, data: &[u8]) -> DdsResult<Box<dyn Any>> {
@@ -134,16 +136,19 @@ impl TypeSupport for RawDataTypeSupport {
             .downcast_ref::<RawData>()
             .ok_or_else(|| DdsError::Error("Expected RawData type".to_string()))?;
 
-        // Return key bytes if available, otherwise empty
+        // Return key bytes if available, otherwise empty (Arc clone is cheap)
         match &raw_data.key {
-            Some(key) => Ok(key.clone().into()),
-            None => Ok(Vec::new().into()),
+            Some(key) => Ok(key.clone()),
+            None => Ok(Arc::from(Vec::new())),
         }
     }
 
     fn deserialize_key(&self, serialized_key: &[u8]) -> DdsResult<Box<dyn Any + Send + Sync>> {
         // Create RawData with key only
-        Ok(Box::new(RawData { data: Vec::new(), key: Some(serialized_key.to_vec()) }))
+        Ok(Box::new(RawData {
+            data: Arc::from(Vec::<u8>::new()),
+            key: Some(Arc::from(serialized_key.to_vec())),
+        }))
     }
 
     fn compute_key(&self, data: &dyn Any) -> InstanceHandle {
@@ -167,8 +172,9 @@ impl TypeSupport for RawDataTypeSupport {
     }
 
     fn is_compute_key_provided(&self) -> bool {
-        // RawData supports keys if key bytes are provided
-        true
+        // RawData only supports keys when explicitly provided via with_key()
+        // Return false to skip unnecessary key computation for keyless data
+        false
     }
 
     fn get_extensibility_kind(&self) -> ExtensibilityKind {

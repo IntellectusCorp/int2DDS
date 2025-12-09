@@ -594,10 +594,11 @@ cleanup:
 
 /* ==================== Latency Test (Echo Mode) ==================== */
 
-static void run_latency_subscriber(int32_t domain_id, const char* reliability, int execution_time) {
+static void run_latency_subscriber(int32_t domain_id, const char* reliability, int execution_time, size_t data_len) {
     printf("Starting latency subscriber (echo mode):\n");
     printf("  Reliability: %s\n", reliability);
     printf("  Execution time: %d seconds (from first sample)\n", execution_time);
+    printf("  Data size: %zu bytes\n", data_len);
 
     Int2DdsRet ret;
     Int2DdsParticipantFactory* factory = NULL;
@@ -698,8 +699,8 @@ static void run_latency_subscriber(int32_t domain_id, const char* reliability, i
     printf("Waiting for latency test publisher...\n");
     printf("Ready to echo latency measurements back to publisher\n");
 
-    /* Allocate buffer */
-    size_t buffer_size = 24 + 65536; /* Max payload size */
+    /* Allocate buffer - header (24 bytes) + payload */
+    size_t buffer_size = 24 + data_len;
     uint8_t* buffer = (uint8_t*)malloc(buffer_size);
     if (!buffer) {
         fprintf(stderr, "Failed to allocate buffer\n");
@@ -1048,7 +1049,7 @@ int main(int argc, char* argv[]) {
         run_throughput_subscriber(domain_id, reliability, execution_time, out_of_order, data_len, hz);
     } else if (strcmp(test_mode, "latency") == 0 || strcmp(test_mode, "lat") == 0 || strcmp(test_mode, "2") == 0) {
         printf("Starting latency test mode\n");
-        run_latency_subscriber(domain_id, reliability, execution_time);
+        run_latency_subscriber(domain_id, reliability, execution_time, data_len);
     } else if (strcmp(test_mode, "local_latency") == 0 || strcmp(test_mode, "local") == 0 ||
                strcmp(test_mode, "ll") == 0 || strcmp(test_mode, "3") == 0) {
         printf("Starting local latency test mode\n");
