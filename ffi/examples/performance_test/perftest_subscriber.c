@@ -541,6 +541,29 @@ static void run_throughput_subscriber(int32_t domain_id, const char* reliability
         }
     }
 
+    /* Final interval report */
+    {
+        uint64_t now = get_current_time_ns();
+        stats.end_time_ns = now;
+        if (out_of_order) {
+            stats_calculate_lost_from_hashset(&stats);
+        }
+
+        double elapsed = (double)(now - stats.start_time_ns) / 1000000000.0;
+        double msgs_per_sec_final, mbps_final;
+        stats_calculate_throughput(&stats, data_len, &msgs_per_sec_final, &mbps_final);
+        uint64_t max_seq = stats_get_max_seq(&stats);
+        double loss_rate_final = (max_seq > 0) ? (stats.lost_samples * 100.0 / max_seq) : 0.0;
+
+        printf("[%.1fs] Received: %llu, Rate: %.0f msg/s, %.2f Mbps, Lost: %llu, Last seq: %llu, Loss rate: %.2f%%\n",
+               elapsed,
+               (unsigned long long)stats.total_samples,
+               msgs_per_sec_final, mbps_final,
+               (unsigned long long)stats.lost_samples,
+               (unsigned long long)max_seq,
+               loss_rate_final);
+    }
+
     /* Final statistics */
     stats.end_time_ns = last_message_time;
     if (out_of_order) {
@@ -736,6 +759,15 @@ static void run_latency_subscriber(int32_t domain_id, const char* reliability, i
         }
     }
 
+    /* Final interval report */
+    {
+        uint64_t now = get_current_time_ns();
+        double elapsed = (double)(now - start_time_ns) / 1000000000.0;
+        double rate = (elapsed > 0) ? (total_echoes / elapsed) : 0.0;
+        printf("[%.1fs] Echoes sent: %llu, Rate: %.0f echo/s\n",
+               elapsed, (unsigned long long)total_echoes, rate);
+    }
+
     /* Final statistics */
     uint64_t end_time_ns = get_current_time_ns();
     double duration_sec = (double)(end_time_ns - start_time_ns) / 1000000000.0;
@@ -894,6 +926,21 @@ static void run_local_latency_subscriber(int32_t domain_id, const char* reliabil
             }
             sleep_us(100);
         }
+    }
+
+    /* Final interval report */
+    {
+        uint64_t now = get_current_time_ns();
+        double elapsed = (double)(now - stats.start_time_ns) / 1000000000.0;
+        double avg_latency, min_latency, max_latency;
+        stats_calculate_current_latency(&stats, &avg_latency, &min_latency, &max_latency);
+
+        printf("[%.1fs] Samples: %llu, Avg: %.3f ms, Min: %.3f ms, Max: %.3f ms\n",
+               elapsed,
+               (unsigned long long)stats.latency_count,
+               avg_latency / 1000000.0,
+               min_latency / 1000000.0,
+               max_latency / 1000000.0);
     }
 
     /* Final statistics */
