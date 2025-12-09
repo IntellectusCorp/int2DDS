@@ -69,6 +69,24 @@ impl DataWriterListener for LatencyPubListener {
     }
 }
 
+struct LocalLatencyPubListener;
+
+impl DataWriterListener for LocalLatencyPubListener {
+    type Foo = PerformanceTestData;
+
+    fn on_publication_matched(
+        &self,
+        _writer: &int2dds::publication::data_writer::DataWriter<Self::Foo>,
+        status: &int2dds::infrastructure::status::PublicationMatchedStatus,
+    ) {
+        if status.current_count() > 0 {
+            println!("Local latency test subscriber matched! Starting test...");
+        } else {
+            println!("No subscribers matched.");
+        }
+    }
+}
+
 struct LatencySubListener {
     writer: Arc<Mutex<Option<int2dds::publication::data_writer::DataWriter<LatencyTestData>>>>,
     stats: Arc<Mutex<PerformanceStats>>,
@@ -526,6 +544,175 @@ fn run_latency_test(args: &PublisherArgs) {
     .expect("Failed to write CSV data");
 }
 
+fn run_local_latency_test(args: &PublisherArgs) {
+    let reliability = ReliabilityMode::from(args.common.reliability.as_str());
+
+    println!("Starting local latency test (publisher):");
+    println!("  Data size: {} bytes", args.common.data_len);
+    println!("  Reliability: {}", reliability);
+    println!("  Execution time: {} seconds", args.common.execution_time);
+    if let Some(hz) = args.common.hz {
+        println!("  Rate: {} Hz ({:.3} ms interval)", hz, 1000.0 / hz);
+    } else {
+        println!("  Rate: unlimited");
+    }
+
+    env_logger::builder().filter_level(log::LevelFilter::Error).init();
+
+    let participant_qos = DomainParticipantQos::default();
+    let factory = DomainParticipantFactory::get_instance();
+    let participant = factory
+        .create_participant(args.common.domain_id, participant_qos, None, StatusMask::default())
+        .expect("Failed to create participant");
+
+    // Use same topic as throughput test
+    let topic = participant
+        .create_topic::<PerformanceTestData>(
+            "local_latency_test_topic",
+            "ThroughputTestData",
+            TopicQos::default(),
+            None,
+            StatusMask::default(),
+        )
+        .expect("Failed to create topic");
+
+    let publisher = participant
+        .create_publisher(PublisherQos::default(), None, StatusMask::default())
+        .expect("Failed to create publisher");
+
+    let writer_qos = DataWriterQos {
+        reliability: reliability.to_qos_policy(),
+        history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepLast(100) },
+        resource_limits: ResourceLimitsQosPolicy {
+            max_samples: 200,
+            max_instances: 1,
+            max_samples_per_instance: 200,
+        },
+        ..Default::default()
+    };
+
+    let listener = LocalLatencyPubListener;
+    let writer = publisher
+        .create_datawriter::<PerformanceTestData>(
+            &topic,
+            writer_qos,
+            Some(Arc::new(listener)),
+            StatusMask::default(),
+        )
+        .expect("Failed to create datawriter");
+
+    println!("Waiting for subscriber to connect...");
+    let condition = writer.get_statuscondition().expect("Failed to get status condition").clone();
+    let wait_set = WaitSet::new();
+    wait_set.attach_condition(condition).expect("Failed to attach condition");
+    wait_set.wait(Duration::infinite()).expect("Failed to wait");
+
+    println!("Subscriber connected. Starting local latency test...");
+
+    // Warmup phase
+    if args.common.warmup_time > 0 {
+        println!("Warmup phase: sleeping for {} seconds...", args.common.warmup_time);
+        thread::sleep(StdDuration::from_secs(args.common.warmup_time));
+        println!("Warmup complete. Starting actual measurement...");
+    }
+
+    let start_time = Instant::now();
+    let end_time = start_time + StdDuration::from_secs(args.common.execution_time);
+    let mut seq_num = 0u64;
+    let mut total_sent = 0u64;
+    let mut last_report_time = start_time;
+    let mut last_report_count = 0u64;
+
+    // Hz-based timing
+    let mut next_send_time = if args.common.hz.is_some() { Some(start_time) } else { None };
+
+    while Instant::now() < end_time {
+        let data = create_test_data(args.common.data_len, seq_num);
+
+        writer.write(&data, InstanceHandle::NIL).expect("Failed to write data");
+
+        seq_num += 1;
+        total_sent += 1;
+
+        // Hz-based rate limiting
+        if let Some(hz) = args.common.hz {
+            if let Some(ref mut next_time) = next_send_time {
+                let target_interval = StdDuration::from_secs_f64(1.0 / hz);
+                *next_time += target_interval;
+
+                let now = Instant::now();
+                if *next_time > now {
+                    thread::sleep(*next_time - now);
+                }
+            }
+        }
+
+        let now = Instant::now();
+        if now.duration_since(last_report_time) >= StdDuration::from_secs(5) {
+            let elapsed = now.duration_since(start_time).as_secs_f64();
+            let interval_elapsed = now.duration_since(last_report_time).as_secs_f64();
+            let interval_sent = total_sent - last_report_count;
+
+            let avg_rate = total_sent as f64 / elapsed;
+            let interval_rate = interval_sent as f64 / interval_elapsed;
+
+            println!(
+                "[{:.1}s] Sent: {}, Avg: {:.0} msg/s, Interval: {:.0} msg/s",
+                elapsed, total_sent, avg_rate, interval_rate
+            );
+
+            last_report_time = now;
+            last_report_count = total_sent;
+        }
+    }
+
+    let elapsed = start_time.elapsed().as_secs_f64();
+    let final_rate = total_sent as f64 / elapsed;
+
+    println!("\n=== Local Latency Test Publisher Results ===");
+    println!("[INFO] Total samples sent: {}", total_sent);
+    println!("Test duration: {:.2} seconds", elapsed);
+    println!("[INFO] Send rate: {:.2} msg/s", final_rate);
+
+    let log_content = format!(
+        "Local Latency Test Publisher\nTotal sent: {}\nDuration: {:.2}s\nRate: {:.2} msg/s\n",
+        total_sent, elapsed, final_rate
+    );
+    let timestamp = Local::now().format("%Y%m%dT%H%M%S");
+    let filename = format!("pub_local_lat-{}.log", timestamp);
+    std::fs::write(&filename, log_content).expect("Failed to write log file");
+
+    // CSV output
+    let csv_filename = if let Some(hz) = args.common.hz {
+        format!("publisher_local_latency_results_{}b_{}hz.csv", args.common.data_len, hz)
+    } else {
+        format!("publisher_local_latency_results_{}b.csv", args.common.data_len)
+    };
+    let file_exists = std::path::Path::new(&csv_filename).exists();
+    let mut csv_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&csv_filename)
+        .expect("Failed to open CSV file");
+
+    use std::io::Write;
+
+    if !file_exists {
+        writeln!(csv_file, "Timestamp,Total_Sent_Messages,Duration_Seconds,Messages_Per_Second")
+            .expect("Failed to write CSV header");
+    }
+
+    writeln!(
+        csv_file,
+        "{},{},{:.2},{:.2}",
+        Local::now().format("%Y-%m-%d %H:%M:%S"),
+        total_sent,
+        elapsed,
+        final_rate
+    )
+    .expect("Failed to write CSV data");
+}
+
 fn main() {
     let args = PublisherArgs::parse();
 
@@ -541,9 +728,13 @@ fn main() {
             println!("Starting latency test mode");
             run_latency_test(&args)
         }
+        "local_latency" | "local" | "ll" | "3" => {
+            println!("Starting local latency test mode");
+            run_local_latency_test(&args)
+        }
         _ => {
             println!(
-                "Invalid test mode '{}'. Supported modes: throughput, latency",
+                "Invalid test mode '{}'. Supported modes: throughput, latency, local_latency",
                 args.common.test_mode
             );
             println!("Defaulting to throughput test.");

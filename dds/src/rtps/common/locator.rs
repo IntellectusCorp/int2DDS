@@ -18,6 +18,7 @@ pub const LOCATOR_KIND_UDP_V4: i32 = 1; // LOCATOR_KIND_UDPv4
 pub const LOCATOR_KIND_UDP_V6: i32 = 2; // LOCATOR_KIND_UDPv6
 pub const LOCATOR_KIND_TCP_V4: i32 = 4; // LOCATOR_KIND_TCPv4 (RTPS standard)
 pub const LOCATOR_KIND_TCP_V6: i32 = 8; // LOCATOR_KIND_TCPv6 (RTPS standard)
+pub const LOCATOR_KIND_SHM: i32 = 16; // LOCATOR_KIND_SHM (Shared Memory)
 pub const LOCATOR_PORT_INVALID: u32 = 0;
 
 pub const LOCATOR_ADDRESS_INVALID: [u8; 16] = [0; 16];
@@ -68,6 +69,33 @@ impl Locator {
     pub fn from_ip_v4_addr_and_port(ip_addr: &Ipv4Addr, port: u32) -> Self {
         Self {
             kind: LOCATOR_KIND_UDP_V4,
+            port,
+            address: [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                ip_addr.octets()[0],
+                ip_addr.octets()[1],
+                ip_addr.octets()[2],
+                ip_addr.octets()[3],
+            ],
+        }
+    }
+
+    /// Create a SHM locator from IP address and port
+    /// Uses LOCATOR_KIND_SHM to indicate shared memory transport
+    pub fn from_shm(ip_addr: &Ipv4Addr, port: u32) -> Self {
+        Self {
+            kind: LOCATOR_KIND_SHM,
             port,
             address: [
                 0,
@@ -190,6 +218,14 @@ impl Locator {
     /// ```
     pub fn is_udp(&self) -> bool {
         self.kind == LOCATOR_KIND_UDP_V4 || self.kind == LOCATOR_KIND_UDP_V6
+    }
+
+    /// Check if this locator is a Shared Memory locator
+    ///
+    /// # Returns
+    /// `true` if kind is SHM, `false` otherwise
+    pub fn is_shm(&self) -> bool {
+        self.kind == LOCATOR_KIND_SHM
     }
 
     /// Check if this locator is valid (not INVALID or RESERVED)
