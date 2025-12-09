@@ -73,8 +73,14 @@ pub unsafe extern "C" fn int2dds_delete_subscriber(
         return INT2DDS_RET_NULL_POINTER;
     }
 
-    let subscriber_box = Box::from_raw(subscriber);
-    let subscriber_obj = (*subscriber_box.inner).clone();
+    // Destructure Box to move Arc out
+    let Int2DdsSubscriber { inner: subscriber_arc } = *Box::from_raw(subscriber);
+
+    // Try to unwrap Arc without cloning (succeeds if this is the only reference)
+    let subscriber_obj = match Arc::try_unwrap(subscriber_arc) {
+        Ok(s) => s,
+        Err(arc) => (*arc).clone(), // Fall back to clone if other references exist
+    };
 
     // Get the participant to delete the subscriber
     let participant = match subscriber_obj.get_participant() {
