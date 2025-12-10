@@ -804,89 +804,69 @@ mod tests {
         thread::sleep(std::time::Duration::from_secs(100));
     }
 
+    /// Test that all Logic objects (SpdpLogic, SedpLogic, UserLogic, WlpLogic) are properly cleaned up
     #[test]
-    fn test_drop_order_on_disable() {
-        eprintln!("\n=== TEST: Creating DcpsBridge ===");
+    fn test_all_logic_cleanup() {
         let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(0)));
 
         {
             let mut bridge = dcps_bridge.lock().unwrap();
-
-            // Check Arc counts before init
-            eprintln!(
-                "Before init - sedp_logic Arc count: {}",
-                Arc::strong_count(&bridge.sedp_logic)
-            );
-            eprintln!(
-                "Before init - participant Arc count: {}",
-                Arc::strong_count(&bridge.participant)
-            );
-
             bridge.init().unwrap();
-            eprintln!("=== DcpsBridge initialized ===");
+            thread::sleep(StdDuration::from_millis(50));
 
-            // Check Arc counts after init
-            eprintln!(
-                "After init - sedp_logic Arc count: {}",
-                Arc::strong_count(&bridge.sedp_logic)
-            );
-            eprintln!(
-                "After init - participant Arc count: {}",
-                Arc::strong_count(&bridge.participant)
-            );
+            // All logics should exist after init
+            assert!(bridge.spdp_logic.as_ref().is_some(), "SpdpLogic should exist after init");
+            assert!(bridge.sedp_logic.as_ref().is_some(), "SedpLogic should exist after init");
+            assert!(bridge.user_logic.as_ref().is_some(), "UserLogic should exist after init");
+            assert!(bridge.participant.wlp_logic().is_some(), "WlpLogic should exist after init");
 
-            // Wait a bit for everything to start
-            thread::sleep(StdDuration::from_millis(100));
-
-            eprintln!("\n=== Calling disable() ===");
             let _ = bridge.disable();
-            eprintln!("=== disable() completed ===");
 
-            // Check Arc counts after disable
-            eprintln!(
-                "After disable - sedp_logic Arc count: {}",
-                Arc::strong_count(&bridge.sedp_logic)
-            );
-            eprintln!(
-                "After disable - participant Arc count: {}",
-                Arc::strong_count(&bridge.participant)
-            );
+            // DcpsBridge-owned logics should be None after disable
+            assert!(bridge.spdp_logic.as_ref().is_none(), "SpdpLogic should be None after disable");
+            assert!(bridge.sedp_logic.as_ref().is_none(), "SedpLogic should be None after disable");
+            assert!(bridge.user_logic.as_ref().is_none(), "UserLogic should be None after disable");
+            // WlpLogic is in OnceLock, cleaned up when Participant drops
         }
-
-        eprintln!("\n=== Dropping DcpsBridge Arc ===");
-        drop(dcps_bridge);
-
-        eprintln!("\n=== TEST COMPLETE ===\n");
-
-        // Give some time for async drops
-        thread::sleep(StdDuration::from_millis(100));
     }
 
+    /// Test that all Handler objects (SendingHandler, TimerHandler) are properly cleaned up
     #[test]
-    fn test_multiple_create_delete() {
-        eprintln!("\n=== TEST: Multiple Create/Delete cycles ===");
+    fn test_all_handler_cleanup() {
+        use crate::rtps::task::sending_handler::SendingHandler;
+        use crate::rtps::task::timer_handler::TimerHandler;
 
-        for i in 0..3 {
-            eprintln!("\n--- Cycle {} ---", i + 1);
+        let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(0)));
+        let participant_guid: crate::rtps::common::guid::Guid;
 
-            let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(0)));
-            {
-                let mut bridge = dcps_bridge.lock().unwrap();
-                bridge.init().unwrap();
-            }
-
+        {
+            let mut bridge = dcps_bridge.lock().unwrap();
+            participant_guid = bridge.participant.guid();
+            bridge.init().unwrap();
             thread::sleep(StdDuration::from_millis(50));
 
-            {
-                let mut bridge = dcps_bridge.lock().unwrap();
-                let _ = bridge.disable();
-            }
+            // All handlers should exist in global maps after init
+            assert!(
+                SendingHandler::get_instance_by_participant_guid(participant_guid).is_some(),
+                "SendingHandler should exist after init"
+            );
+            assert!(
+                TimerHandler::get_instance_by_participant_guid(participant_guid).is_some(),
+                "TimerHandler should exist after init"
+            );
 
-            drop(dcps_bridge);
-            thread::sleep(StdDuration::from_millis(50));
+            let _ = bridge.disable();
+
+            // All handlers should be removed from global maps after disable
+            assert!(
+                SendingHandler::get_instance_by_participant_guid(participant_guid).is_none(),
+                "SendingHandler should be removed after disable"
+            );
+            assert!(
+                TimerHandler::get_instance_by_participant_guid(participant_guid).is_none(),
+                "TimerHandler should be removed after disable"
+            );
         }
-
-        eprintln!("\n=== TEST COMPLETE ===\n");
     }
 
     fn change_callback(change: Arc<CacheChange>) {
