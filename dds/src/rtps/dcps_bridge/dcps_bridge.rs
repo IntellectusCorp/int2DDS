@@ -115,7 +115,7 @@ impl DcpsBridge {
                 self.socket.discovery_multicast_listener(),
                 self.socket.discovery_unicast_listener(),
                 self.socket.discovery_tcp_listener(),
-            );
+            )?;
         } else {
             log::error!("sedp_logic is not set");
         }
