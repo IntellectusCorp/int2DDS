@@ -195,4 +195,6 @@ fn test_partition_d_subscriber_fail() {
         Duration::from_seconds(1)
     )
     .is_err());
+
+    assert_eq!(1, 2);
 }
