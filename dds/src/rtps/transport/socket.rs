@@ -386,10 +386,7 @@ impl Socket {
     fn create_shm_listener(&mut self) {
         match ShmListener::new(self.domain_id) {
             Ok(listener) => {
-                log::info!(
-                    "[socket] SHM listener created for domain {}",
-                    self.domain_id
-                );
+                log::info!("[socket] SHM listener created for domain {}", self.domain_id);
                 self.shm_listener = Some(listener);
             }
             Err(e) => {
