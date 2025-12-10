@@ -282,9 +282,3 @@ impl SendingHandler {
         }
     }
 }
-
-impl Drop for SendingHandler {
-    fn drop(&mut self) {
-        eprintln!("[DROP] SendingHandler dropped");
-    }
-}
