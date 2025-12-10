@@ -2397,7 +2397,7 @@ mod tests {
             None,
             Vec::new(), // No initial peers for test
         );
-        spdp_logic.trigger_send_spdp_multicast();
+        spdp_logic.trigger_send_spdp_multicast().unwrap();
         //discovery multicast port : 7400
         //discovery unicast port :  7410
         //user traffic multicast port : 7401

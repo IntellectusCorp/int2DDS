@@ -5,7 +5,7 @@
 //! from remote participants to maintain the participant discovery database.
 
 use std::{
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     time::{Duration as StdDuration, Instant},
 };
 
@@ -33,6 +33,7 @@ use crate::{
                 Locator, LOCATOR_KIND_TCP_V4, LOCATOR_KIND_TCP_V6, LOCATOR_KIND_UDP_V4,
                 LOCATOR_KIND_UDP_V6,
             },
+            rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
             sequence::SequenceNumber,
             time::RtpsDuration,
             types::DomainId,
@@ -57,7 +58,7 @@ use crate::{
 
 #[derive(Clone)]
 pub(crate) struct SpdpLogic {
-    participant: Arc<Participant>,
+    participant: Weak<Participant>,
     sender: Option<Arc<TransportSender>>,
     tcp_sender: Option<Arc<TransportSender>>,
     initial_peers: Vec<std::net::SocketAddr>,
@@ -74,7 +75,7 @@ impl SpdpLogic {
     ) -> Self {
         let timer_handler = TimerHandler::get_instance(participant.clone());
         Self {
-            participant,
+            participant: Arc::downgrade(&participant),
             sender,
             tcp_sender,
             initial_peers,
@@ -83,8 +84,12 @@ impl SpdpLogic {
         }
     }
 
-    pub(crate) fn is_participant_terminated(&self) -> bool {
-        self.participant.is_terminated()
+    pub(crate) fn is_participant_terminated(&self) -> RtpsResult<bool> {
+        Ok(self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?
+            .is_terminated())
     }
 
     pub(crate) fn exist_reader_locator_writer(
@@ -268,7 +273,7 @@ impl SpdpLogic {
     pub(crate) fn handle_multicast_spdp_message(
         &self,
         spdp_discovered_participant_data: SPDPDiscoveredParticipantData,
-    ) {
+    ) -> RtpsResult<()> {
         let participant_guid = spdp_discovered_participant_data.participant_guid();
         log::debug!(
             "handle_multicast_spdp_message {:?} / {:?}",
@@ -276,18 +281,25 @@ impl SpdpLogic {
             spdp_discovered_participant_data.metatraffic_unicast_locator_list()
         );
 
-        if self.participant.domain_id() != spdp_discovered_participant_data.domain_id() {
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
+        let domain_id = participant.domain_id();
+
+        if domain_id != spdp_discovered_participant_data.domain_id() {
             log::trace!(
                 "SPDP message domain ID mismatch: local {}, remote {}. Ignoring.",
-                self.participant.domain_id(),
+                domain_id,
                 spdp_discovered_participant_data.domain_id()
             );
-            return;
+            return Ok(());
         }
 
         let mut datas: Vec<SPDPDiscoveredParticipantData> = Vec::new();
 
-        let result = match self.participant.remote_participant_proxy_datas().lock() {
+        let result = match participant.remote_participant_proxy_datas().lock() {
             Ok(remote_participant_datas) => {
                 remote_participant_datas.iter().any(|remote_participant_data| {
                     if remote_participant_data.participant_guid() == participant_guid {
@@ -309,7 +321,7 @@ impl SpdpLogic {
         };
 
         if result {
-            return;
+            return Ok(());
         }
 
         // Add reader_locator/reader_proxy to writer according to remote endpointset
@@ -319,7 +331,7 @@ impl SpdpLogic {
             .contains(BuiltinEndpointFlag::DISC_BUILTIN_ENDPOINT_PARTICIPANT_DETECTOR)
         {
             self.add_reader_locator_spdp_builtin_participant_writer(
-                self.participant.spdp_builtin_participant_writer(),
+                participant.spdp_builtin_participant_writer(),
                 spdp_discovered_participant_data.clone(),
             );
         }
@@ -329,7 +341,7 @@ impl SpdpLogic {
             .contains(BuiltinEndpointFlag::BUILTIN_ENDPOINT_PARTICIPANT_MESSAGE_DATA_READER)
         {
             self.add_reader_proxy_to_writer(
-                self.participant.builtin_participant_message_writer(),
+                participant.builtin_participant_message_writer(),
                 spdp_discovered_participant_data.clone(),
                 EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_READER,
             );
@@ -340,7 +352,7 @@ impl SpdpLogic {
             .contains(BuiltinEndpointFlag::BUILTIN_ENDPOINT_PARTICIPANT_MESSAGE_DATA_WRITER)
         {
             self.add_writer_proxy_to_reader(
-                self.participant.builtin_participant_message_reader(),
+                participant.builtin_participant_message_reader(),
                 spdp_discovered_participant_data.clone(),
                 EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_READER,
             );
@@ -351,7 +363,7 @@ impl SpdpLogic {
             .contains(BuiltinEndpointFlag::DISC_BUILTIN_ENDPOINT_PUBLICATIONS_DETECTOR)
         {
             self.add_reader_proxy_to_writer(
-                self.participant.sedp_builtin_publications_writer(),
+                participant.sedp_builtin_publications_writer(),
                 spdp_discovered_participant_data.clone(),
                 EntityId::SEDP_BUILTIN_PUBLICATIONS_READER,
             );
@@ -362,7 +374,7 @@ impl SpdpLogic {
             .contains(BuiltinEndpointFlag::DISC_BUILTIN_ENDPOINT_PUBLICATIONS_ANNOUNCER)
         {
             self.add_writer_proxy_to_reader(
-                self.participant.sedp_builtin_publications_reader(),
+                participant.sedp_builtin_publications_reader(),
                 spdp_discovered_participant_data.clone(),
                 EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER,
             );
@@ -373,7 +385,7 @@ impl SpdpLogic {
             .contains(BuiltinEndpointFlag::DISC_BUILTIN_ENDPOINT_SUBSCRIPTIONS_DETECTOR)
         {
             self.add_reader_proxy_to_writer(
-                self.participant.sedp_builtin_subscriptions_writer(),
+                participant.sedp_builtin_subscriptions_writer(),
                 spdp_discovered_participant_data.clone(),
                 EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_READER,
             );
@@ -384,22 +396,23 @@ impl SpdpLogic {
             .contains(BuiltinEndpointFlag::DISC_BUILTIN_ENDPOINT_SUBSCRIPTIONS_ANNOUNCER)
         {
             self.add_writer_proxy_to_reader(
-                self.participant.sedp_builtin_subscriptions_reader(),
+                participant.sedp_builtin_subscriptions_reader(),
                 spdp_discovered_participant_data.clone(),
                 EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_WRITER,
             );
         }
 
-        self.participant
-            .add_remote_participant_proxy_data(spdp_discovered_participant_data.clone());
+        participant.add_remote_participant_proxy_data(spdp_discovered_participant_data.clone());
 
         datas.push(spdp_discovered_participant_data.clone());
         for data in datas {
             // Proceed with SEDP after acquiring remote participant information
             // Send SEDP SPDP Message
-            self.trigger_send_sedp_message(Arc::new(data.clone()));
+            let _ = self.trigger_send_sedp_message(Arc::new(data.clone()));
             //SEDP ...
         }
+
+        Ok(())
     }
 
     // Logic to actually send the data
@@ -410,7 +423,7 @@ impl SpdpLogic {
         duration: StdDuration,
         domain_id: DomainId,
         data: Option<Arc<Vec<u8>>>,
-    ) {
+    ) -> RtpsResult<()> {
         let start = Instant::now();
         match data {
             Some(ref data) => {
@@ -448,7 +461,10 @@ impl SpdpLogic {
             rand::random::<u32>()
         );
 
-        let participant = Arc::new(self.participant.clone());
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
         let data_arc = Arc::new(data);
         if let Ok(timer_handler) = self.timer_handler.lock() {
             timer_handler.add_timer(
@@ -460,7 +476,7 @@ impl SpdpLogic {
                     let data_arc = data_arc.clone();
                     move || {
                         let sending_handler =
-                            SendingHandler::get_instance((*participant).clone(), None, None);
+                            SendingHandler::get_instance(participant.clone(), None, None);
                         sending_handler.push_message_and_wake(MessageType::SpdpMulticast(
                             Some(Instant::now()),
                             duration,
@@ -473,12 +489,19 @@ impl SpdpLogic {
         } else {
             log::error!("Failed to acquire timer handler lock for SPDP multicast sending");
         }
+
+        Ok(())
     }
 
-    pub(crate) fn init_spdp_multicast(&self) -> Option<Arc<Vec<u8>>> {
+    pub(crate) fn init_spdp_multicast(&self) -> RtpsResult<Option<Arc<Vec<u8>>>> {
         // Create broadcasting rtps message for SPDP
 
-        match MessageCreator::create_spdp_msg(self.participant.clone()) {
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
+        let data = match MessageCreator::create_spdp_msg(participant.clone()) {
             Ok(rtps_message) => {
                 match rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian) {
                     Ok(data) => Some(Arc::new(data)),
@@ -492,7 +515,9 @@ impl SpdpLogic {
                 log::error!("Failed to create SPDP message: {:?}", e);
                 None
             }
-        }
+        };
+
+        Ok(data)
     }
 
     /// Send SPDP message to initial peers via TCP unicast
@@ -542,15 +567,20 @@ impl SpdpLogic {
         }
     }
 
-    pub(crate) fn start_spdp(&self) {
-        self.trigger_send_spdp_multicast();
+    pub(crate) fn start_spdp(&self) -> RtpsResult<()> {
+        self.trigger_send_spdp_multicast()
     }
 
     // Trigger SPDP multicast transmission
-    pub(crate) fn trigger_send_spdp_multicast(&self) {
+    pub(crate) fn trigger_send_spdp_multicast(&self) -> RtpsResult<()> {
         // Get necessary data
-        let domain_id = self.participant.domain_id();
-        let heartbeat_period = match self.participant.spdp_builtin_participant_writer().lock() {
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
+        let domain_id = participant.domain_id();
+        let heartbeat_period = match participant.spdp_builtin_participant_writer().lock() {
             Ok(writer) => writer.heartbeat_period(),
             Err(e) => {
                 log::error!("Failed to acquire spdp builtin participant writer lock: {}", e);
@@ -558,29 +588,36 @@ impl SpdpLogic {
             }
         };
         // Actually request SPDP multicast transmission
-        let sending_handler = SendingHandler::get_instance(self.participant.clone(), None, None);
+        let sending_handler = SendingHandler::get_instance(participant.clone(), None, None);
         sending_handler.push_message_and_wake(MessageType::SpdpMulticast(
             None,
             heartbeat_period.to_std_duration(),
             domain_id,
-            self.init_spdp_multicast(),
+            self.init_spdp_multicast()?,
         ));
+
+        Ok(())
     }
 
     // Trigger SEDP
     fn trigger_send_sedp_message(
         &self,
         spdp_discovered_participant_data: Arc<SPDPDiscoveredParticipantData>,
-    ) {
+    ) -> RtpsResult<()> {
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
         // Get necessary data
-        let heartbeat_period = match self.participant.spdp_builtin_participant_writer().lock() {
+        let heartbeat_period = match participant.spdp_builtin_participant_writer().lock() {
             Ok(writer) => writer.heartbeat_period(),
             Err(e) => {
                 log::error!("Failed to acquire spdp builtin participant writer lock: {}", e);
                 RtpsDuration::from_seconds_f64(2.0)
             }
         };
-        let sending_handler = SendingHandler::get_instance(self.participant.clone(), None, None);
+        let sending_handler = SendingHandler::get_instance(participant.clone(), None, None);
         // sending_handler.push_message_and_wake(MessageType::Sedp(
         //     heartbeat_period.to_std_duration(),
         //     spdp_discovered_participant_data.clone(),
@@ -590,7 +627,7 @@ impl SpdpLogic {
             None,
             heartbeat_period.to_std_duration(),
             spdp_discovered_participant_data.clone(),
-            self.init_spdp_multicast(),
+            self.init_spdp_multicast()?,
         ));
         sending_handler.push_message_and_wake(MessageType::SedpPublication(
             None,
@@ -608,7 +645,7 @@ impl SpdpLogic {
         //     spdp_discovered_participant_data.clone(),
         // ));
         // Send initial P2P heartbeat (first=1, last=0, count=1) to indicate empty cache
-        if let Some(wlp_logic) = self.participant.wlp_logic() {
+        if let Some(wlp_logic) = participant.wlp_logic() {
             if let Err(e) = wlp_logic.send_liveliness_heartbeat(
                 false,
                 false,
@@ -618,17 +655,24 @@ impl SpdpLogic {
                 log::error!("Failed to send initial P2P heartbeat: {}", e);
             }
         }
+
+        Ok(())
     }
 
     /// Method to notify the network that the Participant has been terminated after deleting my Participant
-    pub(crate) fn send_participant_termination_message_multicast(&self) {
+    pub(crate) fn send_participant_termination_message_multicast(&self) -> RtpsResult<()> {
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
         if let Ok(rtps_message) =
-            MessageCreator::create_spdp_msg_with_inline_qos(self.participant.clone())
+            MessageCreator::create_spdp_msg_with_inline_qos(participant.clone())
         {
             let buffer = rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian);
             if let Ok(buffer) = buffer {
                 if let Some(ref sender) = self.sender {
-                    let _ = sender.send_multicast(self.participant.domain_id(), &buffer);
+                    let _ = sender.send_multicast(participant.domain_id(), &buffer);
                     log::debug!("discovery multicast packet send");
                 } else {
                     log::debug!("UDP sender not available, skipping SPDP termination multicast");
@@ -637,13 +681,15 @@ impl SpdpLogic {
                 log::error!("Failed to serialize SPDP message with inline qos");
             }
         }
+
+        Ok(())
     }
 
     /// Method to handle remote participant termination
     pub(crate) fn handle_participant_termination_message(
         &self,
         terminated_participant_guid: &Guid,
-    ) {
+    ) -> RtpsResult<()> {
         // Cancel liveliness monitoring before unmatch to prevent spurious LOST events
         if let Ok(monitor) = self.participant_monitor.lock() {
             if let Some(monitor) = monitor.as_ref() {
@@ -651,17 +697,27 @@ impl SpdpLogic {
             }
         }
 
-        self.participant.unmatch_with_remote_participant(terminated_participant_guid);
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
+        participant.unmatch_with_remote_participant(terminated_participant_guid);
+
+        Ok(())
     }
 
     pub(crate) fn handle_participant_liveliness(
         &self,
         spdp_discovered_participant_data: SPDPDiscoveredParticipantData,
-    ) {
+    ) -> RtpsResult<()> {
         let participant_guid = spdp_discovered_participant_data.participant_guid();
         if let Ok(mut monitor) = self.participant_monitor.lock() {
             if monitor.is_none() {
-                let participant = self.participant.clone();
+                let participant = self.participant.upgrade().ok_or(RtpsError::new(
+                    RtpsErrorCode::ArcUpgradeError,
+                    "Participant already dropped",
+                ))?;
                 let callback = Arc::new(move |participant_guid: Guid| {
                     Self::handle_participant_lost(participant.clone(), &participant_guid)
                 });
@@ -675,6 +731,8 @@ impl SpdpLogic {
                 );
             }
         }
+
+        Ok(())
     }
 
     fn handle_participant_lost(participant: Arc<Participant>, guid: &Guid) -> bool {
@@ -725,7 +783,7 @@ mod tests {
             socket.tcp_sender(),
             Vec::new(), // No initial peers for test
         );
-        spdp_logic.trigger_send_spdp_multicast();
+        spdp_logic.trigger_send_spdp_multicast().unwrap();
 
         // Code to verify if it sends multiple times
         thread::sleep(std::time::Duration::from_secs(100));
