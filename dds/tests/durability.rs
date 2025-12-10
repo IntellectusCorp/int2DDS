@@ -147,4 +147,6 @@ fn test_transient_local() {
 
     assert_eq!(samples[0].data().unwrap().value, 0);
     assert_eq!(samples.len(), 6);
+
+    assert_eq!(1, 2);
 }
