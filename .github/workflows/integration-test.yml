@@ -9,12 +9,15 @@ on:
 jobs:
   integration-test:
     runs-on: ubuntu-latest
-    container:
-      image: rust:1.89
-      options: --privileged
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.89.0
+          rustflags: ""
 
       - name: Cache cargo registry and build
         uses: actions/cache@v4
@@ -29,10 +32,10 @@ jobs:
 
       - name: Configure socket buffer size
         run: |
-          sysctl -w net.core.rmem_max=5242880
-          sysctl -w net.core.wmem_max=5242880
-          sysctl -w net.core.rmem_default=5242880
-          sysctl -w net.core.wmem_default=5242880
+          sudo sysctl -w net.core.rmem_max=5242880
+          sudo sysctl -w net.core.wmem_max=5242880
+          sudo sysctl -w net.core.rmem_default=5242880
+          sudo sysctl -w net.core.wmem_default=5242880
 
       - name: Run integration tests
         run: cargo test --test "*" -- --test-threads=1
