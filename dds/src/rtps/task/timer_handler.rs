@@ -220,12 +220,6 @@ impl TimerHandler {
     }
 }
 
-impl Drop for TimerHandler {
-    fn drop(&mut self) {
-        eprintln!("[DROP] TimerHandler dropped");
-    }
-}
-
 #[cfg(test)]
 mod tests {
 
