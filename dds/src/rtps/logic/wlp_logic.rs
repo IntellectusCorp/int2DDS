@@ -136,7 +136,7 @@ impl WlpLogic {
         let participant = self
             .participant
             .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
 
         Self::update_local_liveliness(
             participant.clone(),
@@ -261,7 +261,7 @@ impl WlpLogic {
                             .upgrade()
                             .ok_or(RtpsError::new(
                                 RtpsErrorCode::ArcUpgradeError,
-                                "Participant upgrade"
+                                "Participant already dropped"
                             ))?
                             .guid(),
                     ),
@@ -290,7 +290,7 @@ impl WlpLogic {
         let participant = self
             .participant
             .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
 
         Self::update_remote_liveliness(
             participant.clone(),
@@ -356,7 +356,7 @@ impl WlpLogic {
         let participant = self
             .participant
             .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
 
         Self::update_remote_liveliness(
             participant.clone(),
@@ -416,7 +416,7 @@ impl WlpLogic {
         let participant = self
             .participant
             .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
 
         match writer_guid {
             Some(guid) => {
@@ -479,7 +479,7 @@ impl WlpLogic {
         let participant = self
             .participant
             .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
 
         let remote_datas = participant.remote_participant_proxy_datas().clone();
         let remote_datas_guard = remote_datas
@@ -548,7 +548,7 @@ impl WlpLogic {
         let participant = self
             .participant
             .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
 
         let data = ParticipantMessageData::new(
             participant.guid().prefix(),
@@ -575,7 +575,7 @@ impl WlpLogic {
         let participant = self
             .participant
             .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
         let handler = SendingHandler::get_instance(
             participant.clone(),
             self.sender.lock().ok().and_then(|g| g.clone()),
@@ -594,7 +594,7 @@ impl WlpLogic {
         let participant = self
             .participant
             .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
 
         let data = ParticipantMessageData::new(
             participant.guid().prefix(),
@@ -621,7 +621,7 @@ impl WlpLogic {
         let participant = self
             .participant
             .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
 
         let writer = participant.builtin_participant_message_writer();
 
@@ -739,7 +739,7 @@ impl WlpLogic {
         let participant = self
             .participant
             .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
 
         let data = ParticipantMessageData::new(
             participant.guid().prefix(),
@@ -768,7 +768,7 @@ impl WlpLogic {
         let participant = self
             .participant
             .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
 
         match participant.remote_participant_proxy_datas().clone().lock() {
             Ok(remote_participant_datas) => {
@@ -818,7 +818,7 @@ impl WlpLogic {
         let participant = self
             .participant
             .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
 
         if message_receiver.has_dst_submessage() {
             let local_guid_prefix = participant.guid().prefix();
@@ -915,7 +915,7 @@ impl WlpLogic {
         let participant = self
             .participant
             .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
 
         // 1. Find WriterProxy
         let reader = participant.builtin_participant_message_reader();
@@ -945,7 +945,7 @@ impl WlpLogic {
         let participant = self
             .participant
             .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
 
         if heartbeat.writer_id.entity_kind().is_built_in() {
             // Builtin endpoint (Automatic/ManualByParticipant)
@@ -1124,7 +1124,7 @@ impl WlpLogic {
         let participant = self
             .participant
             .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
 
         let buffer = MessageCreator::create_acknack_message(
             participant.guid(),
@@ -1157,7 +1157,7 @@ impl WlpLogic {
         let participant = self
             .participant
             .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
 
         let builtin_endpoint_pair = match BuiltinEndpointPair::reader_writer_from_entity_id(
             acknack.writer_id,
@@ -1401,10 +1401,10 @@ impl WlpLogic {
 
             // NOT_ALIVE -> ALIVE
             if was_not_alive {
-                let participant = self
-                    .participant
-                    .upgrade()
-                    .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
+                let participant = self.participant.upgrade().ok_or(RtpsError::new(
+                    RtpsErrorCode::ArcUpgradeError,
+                    "Participant already dropped",
+                ))?;
                 if let Ok(readers) = participant.find_readers_matched_with_local_writer(writer_guid)
                 {
                     for reader in readers {
@@ -1489,7 +1489,7 @@ impl WlpLogic {
                 if was_not_alive {
                     let participant = self.participant.upgrade().ok_or(RtpsError::new(
                         RtpsErrorCode::ArcUpgradeError,
-                        "Participant upgrade",
+                        "Participant already dropped",
                     ))?;
                     if let Ok(readers) =
                         participant.find_readers_matched_with_remote_writer(writer_guid)
@@ -1531,7 +1531,7 @@ impl WlpLogic {
         let participant = self
             .participant
             .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant upgrade"))?;
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
 
         let timer_id = format!(
             "wlp_p2p_{:?}_{}",
