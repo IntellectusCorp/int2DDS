@@ -250,6 +250,17 @@ impl SendingHandler {
         if let Some(handle) = handle_guard.take() {
             handle.join().map_err(|_| RtpsError::new(RtpsErrorCode::ThreadJoinError, None))?;
         }
+
+        // Clear sending_task to release Poll and Waker file descriptors
+        if let Ok(mut task_guard) = self.sending_task.lock() {
+            *task_guard = None;
+        }
+
+        // Clear waker reference
+        if let Ok(mut waker_guard) = self.waker.lock() {
+            *waker_guard = None;
+        }
+
         Ok(())
     }
 
