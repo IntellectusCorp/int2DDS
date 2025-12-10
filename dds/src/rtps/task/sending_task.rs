@@ -111,7 +111,7 @@ impl SendingTask {
                         start_time,
                         duration,
                         participant_message_data,
-                    );
+                    )?;
                 }
                 Ok(())
             }

@@ -1390,7 +1390,7 @@ impl UserLogic {
                     }
 
                     if let Some(wlp) = self.participant.wlp_logic() {
-                        wlp.update_remote_writer_liveliness(remote_guid);
+                        wlp.update_remote_writer_liveliness(remote_guid)?;
                     }
                 }
                 TypedSubmessage::Heartbeat(header, heartbeat) => {
