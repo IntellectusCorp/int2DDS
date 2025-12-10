@@ -603,6 +603,7 @@ impl DcpsBridge {
 
         SendingHandler::remove_map_guard(&self.participant.guid());
         TimerHandler::remove_map_guard(&self.participant.guid());
+        self.thread_monitor = None;
         self.socket.close();
         Ok(())
     }
