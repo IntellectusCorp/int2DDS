@@ -26,7 +26,12 @@ use int2dds::{
     publication::qos::PublisherQos, topic::RawData,
 };
 
-use super::{error::*, qos::Int2DdsDataWriterQos, types::*};
+use super::{
+    error::*,
+    listener::{FfiDataWriterListener, Int2DdsDataWriterListener},
+    qos::Int2DdsDataWriterQos,
+    types::*,
+};
 
 /// Create a Publisher
 ///
@@ -130,11 +135,150 @@ pub unsafe extern "C" fn int2dds_create_datawriter(
         StatusMask::default()
     ));
 
-    let writer_handle = Box::new(Int2DdsDataWriter { inner: writer });
+    let writer_handle = Box::new(Int2DdsDataWriter { inner: writer, listener: None });
 
     *writer_out = Box::into_raw(writer_handle);
 
     INT2DDS_RET_OK
+}
+
+/// Create a DataWriter with listener callbacks
+///
+/// # Safety
+/// - `publisher` must be a valid publisher
+/// - `topic` must be a valid topic
+/// - `qos` can be null for default QoS
+/// - `listener` can be null for no listener
+/// - `mask` specifies which status changes trigger callbacks
+/// - `writer_out` must be a valid pointer to a null pointer
+/// - The returned writer must be freed with `int2dds_delete_datawriter`
+/// - Listener callbacks must be thread-safe and remain valid until writer is deleted
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_create_datawriter_with_listener(
+    publisher: *const Int2DdsPublisher,
+    topic: *const Int2DdsTopic,
+    qos: *const Int2DdsDataWriterQos,
+    listener: *const Int2DdsDataWriterListener,
+    mask: u32,
+    writer_out: *mut *mut Int2DdsDataWriter,
+) -> Int2DdsRet {
+    check_null!(publisher);
+    check_null!(topic);
+    check_null!(writer_out);
+
+    let publisher_ref = &*publisher;
+    let topic_ref = &*topic;
+
+    let writer_qos = if qos.is_null() {
+        int2dds::publication::qos::DataWriterQos::default()
+    } else {
+        (*qos).inner.clone()
+    };
+
+    // Create DataWriter<RawData> first without listener
+    let writer = ffi_try!(publisher_ref.inner.create_datawriter::<RawData>(
+        &topic_ref.inner,
+        writer_qos,
+        None,
+        StatusMask::from_bits_truncate(mask)
+    ));
+
+    // Create writer_handle with the actual writer
+    let mut writer_handle = Box::new(Int2DdsDataWriter { inner: writer, listener: None });
+
+    // If listener is provided, set it now
+    if !listener.is_null() {
+        let writer_ptr = &mut *writer_handle as *mut Int2DdsDataWriter;
+        let ffi_listener = FfiDataWriterListener::new(*listener, writer_ptr);
+        let listener_arc = Arc::new(ffi_listener);
+
+        // Set the listener on the writer
+        let listener_clone = listener_arc.clone()
+            as Arc<
+                dyn int2dds::publication::data_writer_listener::DataWriterListener<Foo = RawData>,
+            >;
+        ffi_try!(writer_handle
+            .inner
+            .set_listener(Some(listener_clone), StatusMask::from_bits_truncate(mask)));
+
+        writer_handle.listener = Some(listener_arc);
+    }
+
+    *writer_out = Box::into_raw(writer_handle);
+
+    INT2DDS_RET_OK
+}
+
+/// Set or update the listener for a DataWriter
+///
+/// # Safety
+/// - `writer` must be a valid datawriter
+/// - `listener` can be null to remove the listener
+/// - `mask` specifies which status changes trigger callbacks
+/// - Listener callbacks must be thread-safe
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_set_listener(
+    writer: *mut Int2DdsDataWriter,
+    listener: *const Int2DdsDataWriterListener,
+    mask: u32,
+) -> Int2DdsRet {
+    check_null!(writer);
+
+    let writer_ref = &mut *writer;
+
+    // Create new listener wrapper if provided
+    let listener_arc = if !listener.is_null() {
+        let ffi_listener = FfiDataWriterListener::new(*listener, writer);
+        Some(Arc::new(ffi_listener))
+    } else {
+        None
+    };
+
+    // Set listener on the inner writer
+    let result = writer_ref.inner.set_listener(
+        listener_arc.clone().map(|l| {
+            l as Arc<
+                dyn int2dds::publication::data_writer_listener::DataWriterListener<Foo = RawData>,
+            >
+        }),
+        StatusMask::from_bits_truncate(mask),
+    );
+
+    // Update the stored listener
+    writer_ref.listener = listener_arc;
+
+    match result {
+        Ok(()) => INT2DDS_RET_OK,
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
+/// Get the current listener from a DataWriter
+///
+/// # Safety
+/// - `writer` must be a valid datawriter
+/// - `listener_out` must be a valid pointer to Int2DdsDataWriterListener
+/// - Returns a copy of the listener callbacks and user context
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_get_listener(
+    writer: *const Int2DdsDataWriter,
+    listener_out: *mut Int2DdsDataWriterListener,
+) -> Int2DdsRet {
+    check_null!(writer);
+    check_null!(listener_out);
+
+    let writer_ref = &*writer;
+
+    // Return the stored listener callbacks
+    if let Some(listener_arc) = &writer_ref.listener {
+        // Copy the callbacks struct
+        *listener_out = listener_arc.callbacks;
+        INT2DDS_RET_OK
+    } else {
+        // No listener set - return zeroed callbacks
+        *listener_out = std::mem::zeroed();
+        INT2DDS_RET_OK
+    }
 }
 
 /// Write data to a DataWriter

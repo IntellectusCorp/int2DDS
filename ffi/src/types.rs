@@ -23,6 +23,8 @@ use int2dds::{
     topic::{topic::Topic, RawData},
 };
 
+use crate::listener::{FfiDataReaderListener, FfiDataWriterListener};
+
 /// Opaque handle to a DomainParticipantFactory
 pub struct Int2DdsParticipantFactory {
     // Currently just a placeholder for future expansion
@@ -47,11 +49,13 @@ pub struct Int2DdsSubscriber {
 /// Opaque handle to a DataWriter
 pub struct Int2DdsDataWriter {
     pub(crate) inner: DataWriter<RawData>,
+    pub(crate) listener: Option<Arc<FfiDataWriterListener>>,
 }
 
 /// Opaque handle to a DataReader
 pub struct Int2DdsDataReader {
     pub(crate) inner: DataReader<RawData>,
+    pub(crate) listener: Option<Arc<FfiDataReaderListener>>,
 }
 
 /// Opaque handle to a Topic
