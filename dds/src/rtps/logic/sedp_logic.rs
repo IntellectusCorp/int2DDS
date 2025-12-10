@@ -2412,12 +2412,6 @@ impl SedpLogic {
     }
 }
 
-impl Drop for SedpLogic {
-    fn drop(&mut self) {
-        eprintln!("[DROP] SedpLogic dropped");
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{sync::Arc, thread};
