@@ -10,7 +10,7 @@ use crate::rtps::transport::udp::udp_listener::UdpListener;
 use log::{debug, error, info, warn};
 use mio::{Events, Interest, Poll, Token};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 pub(crate) struct UserUnicastListeningTask {
@@ -18,7 +18,7 @@ pub(crate) struct UserUnicastListeningTask {
     user_unicast_listener: Option<UdpListener>,
     tcp_listener: Option<TcpListener>,
     shm_listener: Option<ShmListener>,
-    participant: Arc<Participant>,
+    participant: Weak<Participant>,
     user_logic: Arc<Option<UserLogic>>,
 }
 
@@ -40,7 +40,7 @@ impl UserUnicastListeningTask {
             user_unicast_listener,
             tcp_listener,
             shm_listener,
-            participant,
+            participant: Arc::downgrade(&participant),
             user_logic,
         }
     }
@@ -99,10 +99,15 @@ impl UserUnicastListeningTask {
             Duration::from_millis(100)
         };
 
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(std::io::Error::new(std::io::ErrorKind::Other, "Participant already dropped"))?;
+
         loop {
             poll.poll(&mut events, Some(poll_timeout))?;
 
-            if self.participant.is_terminated() {
+            if participant.is_terminated() {
                 debug!("Detected global termination flag, user traffic unicast listening loop is terminating...");
                 // deregister before return
                 if let Some(listener) = &mut self.user_unicast_listener {
@@ -124,7 +129,7 @@ impl UserUnicastListeningTask {
                 if Some(event.token()) == udp_token && event.is_readable() {
                     if let Some(listener) = &mut self.user_unicast_listener {
                         while let Some((buffer, from_addr)) = listener.get_message() {
-                            if self.participant.is_terminated() {
+                            if participant.is_terminated() {
                                 debug!("Detected global termination flag during UDP processing");
                                 if let Some(listener) = &mut self.user_unicast_listener {
                                     let _ = poll.registry().deregister(listener.socket());
@@ -216,7 +221,7 @@ impl UserUnicastListeningTask {
             let mut shm_had_data = false;
             if let Some(shm_listener) = &mut self.shm_listener {
                 while let Some((buffer, from_addr)) = shm_listener.get_message() {
-                    if self.participant.is_terminated() {
+                    if participant.is_terminated() {
                         return Ok(());
                     }
                     messages_to_process.push((buffer.to_vec(), from_addr));
