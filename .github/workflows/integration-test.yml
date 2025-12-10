@@ -1,12 +1,10 @@
 name: Library Integration Tests
-run-name: Run integration tests on ${{ github.ref_name }}
+run-name: Run integration tests on ${{ github.head_ref }}
 
 on:
   pull_request:
     branches: [develop]
     types: [opened, synchronize, reopened, ready_for_review]
-  push:
-    branches: [develop]
 
 jobs:
   integration-test:
