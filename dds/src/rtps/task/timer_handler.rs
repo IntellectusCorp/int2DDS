@@ -202,6 +202,10 @@ impl TimerHandler {
         if let Some(handle) = self.timer_thread_join_handle.take() {
             handle.join().map_err(|_| RtpsError::new(RtpsErrorCode::ThreadJoinError, None))?;
         }
+        // Clear timer_task to release Poll and Waker file descriptors
+        self.timer_task = None;
+        // Clear waker reference
+        self.waker = None;
         Ok(())
     }
 

@@ -221,7 +221,7 @@ impl DiscoveryUnicastListeningTask {
             .clone();
         sedp_logic.handle_rtps_message(message_receiver.clone())?;
         if let Some(wlp_logic) = self.participant.wlp_logic() {
-            wlp_logic.handle_rtps_message(message_receiver);
+            wlp_logic.handle_rtps_message(message_receiver)?;
         }
         Ok(())
     }
