@@ -93,7 +93,7 @@ impl SendingTask {
             }
 
             MessageType::Sedp(duration, spdp_discovered_participant_data, data) => {
-                sedp_logic.send_sedp_message(duration, spdp_discovered_participant_data, data);
+                sedp_logic.send_sedp_message(duration, spdp_discovered_participant_data, data)?;
                 Ok(())
             }
 
@@ -219,8 +219,12 @@ impl SendingTask {
             .as_ref()
             .ok_or(RtpsError::new(RtpsErrorCode::NotInitialized, "SpdpLogic is not initialized"))?;
         spdp_logic.send_participant_termination_message_multicast()?;
-        let sedp_logic = self.sedp_logic.as_ref().as_ref().expect("SedpLogic is not initialized");
-        sedp_logic.send_participant_termination_message_unicast();
+        let sedp_logic = self
+            .sedp_logic
+            .as_ref()
+            .as_ref()
+            .ok_or(RtpsError::new(RtpsErrorCode::NotInitialized, "SedpLogic is not initialized"))?;
+        sedp_logic.send_participant_termination_message_unicast()?;
         Ok(())
     }
 
