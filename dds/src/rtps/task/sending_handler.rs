@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::thread;
 use std::time::{Duration as StdDuration, Instant};
 
@@ -56,7 +56,7 @@ pub(crate) static INSTANCE: OnceLock<Mutex<HashMap<Guid, Arc<SendingHandler>>>> 
 
 pub(crate) struct SendingHandler {
     // Immutable fields - no lock needed
-    participant: Arc<Participant>,
+    participant: Weak<Participant>,
     udp_sender: Option<Arc<TransportSender>>,
     tcp_sender: Option<Arc<TransportSender>>,
 
@@ -78,7 +78,7 @@ impl SendingHandler {
         tcp_sender: Option<Arc<TransportSender>>,
     ) -> Self {
         Self {
-            participant: participant.clone(),
+            participant: Arc::downgrade(&participant),
             udp_sender,
             tcp_sender,
             sending_task: Mutex::new(None),
@@ -131,7 +131,7 @@ impl SendingHandler {
         let mut sending_task_guard = self.sending_task.lock().expect("Failed to lock sending_task");
         if sending_task_guard.is_none() {
             let sending_task = SendingTask::new(
-                self.participant.clone(),
+                self.participant.upgrade().expect("Participant already dropped"),
                 self.udp_sender.clone(),
                 self.tcp_sender.clone(),
             );
@@ -210,9 +210,9 @@ impl SendingHandler {
             Err(e) => {
                 error!("Failed to acquire message queue lock (poisoned): {}", e);
                 // If the lock is poisoned, try to get a new instance and retry once
-                if let Some(handler) =
-                    SendingHandler::get_instance_by_participant_guid(self.participant.guid())
-                {
+                if let Some(handler) = SendingHandler::get_instance_by_participant_guid(
+                    self.participant.upgrade().expect("Participant already dropped").guid(),
+                ) {
                     handler.push_message_and_wake(message);
                     return; // Early return to avoid double wake
                 }
@@ -273,7 +273,7 @@ impl SendingHandler {
     }
 
     pub(crate) fn wlp_logic(&self) -> Option<WlpLogic> {
-        self.participant.wlp_logic()
+        self.participant.upgrade().expect("Participant already dropped").wlp_logic()
     }
 
     pub(crate) fn cancel_p2p_messages(&self) {
