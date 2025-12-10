@@ -1,5 +1,5 @@
 name: Library Integration Tests
-run-name: Run integration tests on `${{ github.ref_name }}`
+run-name: Run integration tests on ${{ github.ref_name }}
 
 on:
   pull_request:
