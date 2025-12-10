@@ -8,7 +8,7 @@
 #![allow(unused_variables)]
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::thread;
 use std::time::Duration;
 
@@ -39,7 +39,7 @@ pub(crate) static INSTANCE: OnceLock<Mutex<HashMap<Guid, Arc<Mutex<TimerHandler>
     OnceLock::new();
 
 pub(crate) struct TimerHandler {
-    participant: Arc<Participant>,
+    participant: Weak<Participant>,
     guid_prefix: GuidPrefix,
     timer_task: Option<Arc<Mutex<TimerTask>>>,
     timer_thread_join_handle: Option<thread::JoinHandle<()>>,
@@ -50,7 +50,7 @@ pub(crate) struct TimerHandler {
 impl TimerHandler {
     fn new(participant: Arc<Participant>) -> Self {
         Self {
-            participant: participant.clone(),
+            participant: Arc::downgrade(&participant),
             guid_prefix: participant.guid().prefix(),
             timer_task: None,
             timer_thread_join_handle: None,
@@ -95,7 +95,8 @@ impl TimerHandler {
 
     fn spawn_event_loop(&mut self) {
         if self.timer_task.is_none() {
-            let timer_task = TimerTask::new(self.participant.clone());
+            let participant = self.participant.upgrade().expect("Participant already dropped");
+            let timer_task = TimerTask::new(participant.clone());
             self.waker = Some(timer_task.waker());
             self.timer_task = Some(Arc::new(Mutex::new(timer_task)));
         }
@@ -180,7 +181,8 @@ impl TimerHandler {
             }
             Err(e) => {
                 error!("Failed to acquire timer message queue lock: {}", e);
-                let handler = TimerHandler::get_instance(self.participant.clone());
+                let participant = self.participant.upgrade().expect("Participant already dropped");
+                let handler = TimerHandler::get_instance(participant.clone());
                 match handler.clone().lock() {
                     Ok(handler) => {
                         handler.push_message_and_wake(message);
@@ -215,6 +217,12 @@ impl TimerHandler {
                 map_guard.remove(guid);
             }
         }
+    }
+}
+
+impl Drop for TimerHandler {
+    fn drop(&mut self) {
+        eprintln!("[DROP] TimerHandler dropped");
     }
 }
 
