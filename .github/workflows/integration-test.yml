@@ -23,7 +23,7 @@ jobs:
           toolchain: 1.89.0
           rustflags: ""
 
-      - name: Cache Rust
+      - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
               
       - name: Run integration tests
