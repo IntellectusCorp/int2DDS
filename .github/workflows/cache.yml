@@ -1,0 +1,37 @@
+name: Prepare Develop Cache
+
+on:
+  schedule:
+    - cron: "0 15 * * *"    # 00:00 KST (UTC 15:00)
+
+  workflow_dispatch:
+
+jobs:
+  cache-build:
+    if: github.ref == 'refs/heads/develop'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout develop
+        uses: actions/checkout@v4
+        with:
+          ref: develop
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.89.0
+          rustflags: ""
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-develop
+
+      - name: Build once to populate cache
+        run: cargo build

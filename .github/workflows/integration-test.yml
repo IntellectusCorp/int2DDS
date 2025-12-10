@@ -23,9 +23,12 @@ jobs:
           toolchain: 1.89.0
           rustflags: ""
 
-      - name: Cache cargo registry and build
+      - name: Load cache
         uses: Swatinem/rust-cache@v2
-              
+        with:
+          shared-key: cargo-develop
+          save-if: false
+
       - name: Run integration tests
         env:
           INT2DDS_UDP_SOCKET_BUFFER: 5242880
