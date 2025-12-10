@@ -27,6 +27,8 @@
 //! - [`condition`] - GuardCondition for manual triggering
 //! - [`status_condition`] - StatusCondition for status-based waiting
 //! - [`waitset`] - WaitSet for condition-based waiting
+//! - [`status`] - FFI-compatible status structures
+//! - [`listener`] - Callback-based listener support
 //!
 //! ## Usage Example (C)
 //!
@@ -48,9 +50,11 @@ pub mod error;
 
 pub mod condition;
 pub mod context;
+pub mod listener;
 pub mod participant;
 pub mod publisher;
 pub mod qos;
+pub mod status;
 pub mod status_condition;
 pub mod subscriber;
 pub mod topic;

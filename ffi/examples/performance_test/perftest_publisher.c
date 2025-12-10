@@ -1,11 +1,10 @@
 /**
  * int2dds FFI Performance Test Publisher
  *
- * This example demonstrates performance testing with int2dds FFI.
- * Supports three test modes:
- * - throughput: High-speed data publishing for throughput measurement
- * - latency: Round-trip latency measurement with echo
- * - local_latency: One-way latency measurement using timestamps
+ * This program measures DDS performance by publishing test data in different modes:
+ * - Throughput: Measures message throughput and bandwidth
+ * - Latency: Measures round-trip latency with echo from subscriber
+ * - Local Latency: Measures local loopback latency (one-way)
  */
 
 #include <stdio.h>
@@ -13,376 +12,382 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
-#include <math.h>
 #include <time.h>
 
 #ifdef _WIN32
 #include <windows.h>
 #define sleep_ms(ms) Sleep(ms)
-
-static uint64_t get_current_time_ns(void) {
-    LARGE_INTEGER freq, counter;
-    QueryPerformanceFrequency(&freq);
-    QueryPerformanceCounter(&counter);
-    return (uint64_t)((counter.QuadPart * 1000000000ULL) / freq.QuadPart);
-}
-
-/* High-precision sleep using busy-wait for Windows */
-static void sleep_until_ns(uint64_t target_time_ns) {
-    /* First, sleep coarsely if we have a lot of time */
-    uint64_t now = get_current_time_ns();
-    if (target_time_ns > now + 2000000) { /* More than 2ms */
-        Sleep((DWORD)((target_time_ns - now - 1000000) / 1000000)); /* Sleep until 1ms before */
-    }
-    /* Busy-wait for precise timing */
-    while (get_current_time_ns() < target_time_ns) {
-        /* Spin */
-    }
-}
-
-/* Short busy-wait for polling */
-static void sleep_us(unsigned int us) {
-    if (us == 0) return;
-    uint64_t target = get_current_time_ns() + (uint64_t)us * 1000ULL;
-    while (get_current_time_ns() < target) {
-        /* Spin */
-    }
-}
 #else
 #include <unistd.h>
 #include <sys/time.h>
 #define sleep_ms(ms) usleep((ms) * 1000)
-
-static uint64_t get_current_time_ns(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-}
-
-/* High-precision sleep for Linux/Unix */
-static void sleep_until_ns(uint64_t target_time_ns) {
-    uint64_t now = get_current_time_ns();
-    if (target_time_ns > now) {
-        uint64_t sleep_ns = target_time_ns - now;
-        if (sleep_ns > 1000) {
-            usleep((useconds_t)(sleep_ns / 1000));
-        }
-    }
-}
-
-/* Short sleep for polling */
-static void sleep_us(unsigned int us) {
-    if (us > 0) usleep(us);
-}
 #endif
 
 #include "int2dds-ffi.h"
 
-/* ==================== Data Structures ==================== */
+/* Test mode enumeration */
+typedef enum {
+    MODE_THROUGHPUT,
+    MODE_LATENCY,
+    MODE_LOCAL_LATENCY
+} TestMode;
 
-/* Performance data structure (for throughput and local_latency tests) */
+/* Command-line arguments */
+typedef struct {
+    TestMode mode;
+    size_t data_size;
+    uint64_t execution_time;  /* seconds */
+    double hz;                /* 0 = unlimited */
+    int use_reliable;
+    int32_t domain_id;
+} PerfTestArgs;
+
+/* Performance test data structure */
 typedef struct {
     uint64_t seq_num;
     uint64_t timestamp;
-    size_t data_len;
     uint8_t* data;
-} PerformanceData;
+    size_t data_len;
+} PerformanceTestData;
 
 /* Latency test data structure */
 typedef struct {
     uint64_t seq_num;
     uint64_t send_timestamp;
     uint64_t echo_timestamp;
-    size_t data_len;
     uint8_t* data;
+    size_t data_len;
 } LatencyTestData;
 
-/* Performance statistics */
+/* Statistics tracking */
 typedef struct {
-    uint64_t* latency_samples;
-    size_t latency_count;
-    size_t latency_capacity;
     uint64_t total_samples;
-    uint64_t lost_samples;
+    uint64_t bytes_sent;
     uint64_t start_time_ns;
     uint64_t end_time_ns;
+    double* latency_samples;
+    size_t latency_count;
+    size_t latency_capacity;
 } PerformanceStats;
 
-/* ==================== Serialization Functions ==================== */
+/* Global state for listeners */
+static volatile int g_subscriber_matched = 0;
+static PerformanceStats g_latency_stats = {0};
+static uint8_t* g_latency_buffer = NULL;  /* Dynamic buffer for latency callback */
+static size_t g_latency_buffer_size = 0;
 
-/* Serialize PerformanceData to raw bytes */
-/* Format: seq_num (8 bytes) + timestamp (8 bytes) + data (variable) */
-static size_t serialize_performance_data(const PerformanceData* data, uint8_t* buffer, size_t buffer_size) {
-    size_t total_size = 16 + data->data_len;
+/* ====== Timing Functions ====== */
+
+#ifdef _WIN32
+uint64_t get_current_time_ns() {
+    LARGE_INTEGER frequency, counter;
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&counter);
+    return (uint64_t)((counter.QuadPart * 1000000000ULL) / frequency.QuadPart);
+}
+#else
+uint64_t get_current_time_ns() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)(ts.tv_sec * 1000000000ULL + ts.tv_nsec);
+}
+#endif
+
+/* ====== Serialization Functions ====== */
+
+/* Serialize PerformanceTestData to bytes */
+size_t serialize_performance_data(const PerformanceTestData* data, uint8_t* buffer, size_t buffer_size) {
+    size_t total_size = 8 + 8 + 8 + data->data_len;
+
     if (buffer_size < total_size) {
+        fprintf(stderr, "Buffer too small for serialization\n");
         return 0;
     }
 
-    /* Write seq_num (little-endian) */
-    for (int i = 0; i < 8; i++) {
-        buffer[i] = (uint8_t)((data->seq_num >> (i * 8)) & 0xFF);
-    }
+    size_t offset = 0;
 
-    /* Write timestamp (little-endian) */
-    for (int i = 0; i < 8; i++) {
-        buffer[8 + i] = (uint8_t)((data->timestamp >> (i * 8)) & 0xFF);
-    }
+    /* seq_num (little-endian) */
+    buffer[offset++] = (uint8_t)(data->seq_num & 0xFF);
+    buffer[offset++] = (uint8_t)((data->seq_num >> 8) & 0xFF);
+    buffer[offset++] = (uint8_t)((data->seq_num >> 16) & 0xFF);
+    buffer[offset++] = (uint8_t)((data->seq_num >> 24) & 0xFF);
+    buffer[offset++] = (uint8_t)((data->seq_num >> 32) & 0xFF);
+    buffer[offset++] = (uint8_t)((data->seq_num >> 40) & 0xFF);
+    buffer[offset++] = (uint8_t)((data->seq_num >> 48) & 0xFF);
+    buffer[offset++] = (uint8_t)((data->seq_num >> 56) & 0xFF);
 
-    /* Write payload */
-    if (data->data_len > 0 && data->data != NULL) {
-        memcpy(buffer + 16, data->data, data->data_len);
-    }
+    /* timestamp (little-endian) */
+    buffer[offset++] = (uint8_t)(data->timestamp & 0xFF);
+    buffer[offset++] = (uint8_t)((data->timestamp >> 8) & 0xFF);
+    buffer[offset++] = (uint8_t)((data->timestamp >> 16) & 0xFF);
+    buffer[offset++] = (uint8_t)((data->timestamp >> 24) & 0xFF);
+    buffer[offset++] = (uint8_t)((data->timestamp >> 32) & 0xFF);
+    buffer[offset++] = (uint8_t)((data->timestamp >> 40) & 0xFF);
+    buffer[offset++] = (uint8_t)((data->timestamp >> 48) & 0xFF);
+    buffer[offset++] = (uint8_t)((data->timestamp >> 56) & 0xFF);
 
-    return total_size;
+    /* data_len (little-endian) */
+    uint64_t data_len_64 = data->data_len;
+    buffer[offset++] = (uint8_t)(data_len_64 & 0xFF);
+    buffer[offset++] = (uint8_t)((data_len_64 >> 8) & 0xFF);
+    buffer[offset++] = (uint8_t)((data_len_64 >> 16) & 0xFF);
+    buffer[offset++] = (uint8_t)((data_len_64 >> 24) & 0xFF);
+    buffer[offset++] = (uint8_t)((data_len_64 >> 32) & 0xFF);
+    buffer[offset++] = (uint8_t)((data_len_64 >> 40) & 0xFF);
+    buffer[offset++] = (uint8_t)((data_len_64 >> 48) & 0xFF);
+    buffer[offset++] = (uint8_t)((data_len_64 >> 56) & 0xFF);
+
+    /* data */
+    memcpy(buffer + offset, data->data, data->data_len);
+    offset += data->data_len;
+
+    return offset;
 }
 
-/* Serialize LatencyTestData to raw bytes */
-/* Format: seq_num (8 bytes) + send_timestamp (8 bytes) + echo_timestamp (8 bytes) + data (variable) */
-static size_t serialize_latency_data(const LatencyTestData* data, uint8_t* buffer, size_t buffer_size) {
-    size_t total_size = 24 + data->data_len;
+/* Serialize LatencyTestData to bytes */
+size_t serialize_latency_data(const LatencyTestData* data, uint8_t* buffer, size_t buffer_size) {
+    size_t total_size = 8 + 8 + 8 + 8 + data->data_len;
+
     if (buffer_size < total_size) {
+        fprintf(stderr, "Buffer too small for serialization\n");
         return 0;
     }
 
-    /* Write seq_num (little-endian) */
-    for (int i = 0; i < 8; i++) {
-        buffer[i] = (uint8_t)((data->seq_num >> (i * 8)) & 0xFF);
-    }
+    size_t offset = 0;
 
-    /* Write send_timestamp (little-endian) */
-    for (int i = 0; i < 8; i++) {
-        buffer[8 + i] = (uint8_t)((data->send_timestamp >> (i * 8)) & 0xFF);
-    }
+    /* seq_num */
+    buffer[offset++] = (uint8_t)(data->seq_num & 0xFF);
+    buffer[offset++] = (uint8_t)((data->seq_num >> 8) & 0xFF);
+    buffer[offset++] = (uint8_t)((data->seq_num >> 16) & 0xFF);
+    buffer[offset++] = (uint8_t)((data->seq_num >> 24) & 0xFF);
+    buffer[offset++] = (uint8_t)((data->seq_num >> 32) & 0xFF);
+    buffer[offset++] = (uint8_t)((data->seq_num >> 40) & 0xFF);
+    buffer[offset++] = (uint8_t)((data->seq_num >> 48) & 0xFF);
+    buffer[offset++] = (uint8_t)((data->seq_num >> 56) & 0xFF);
 
-    /* Write echo_timestamp (little-endian) */
-    for (int i = 0; i < 8; i++) {
-        buffer[16 + i] = (uint8_t)((data->echo_timestamp >> (i * 8)) & 0xFF);
-    }
+    /* send_timestamp */
+    buffer[offset++] = (uint8_t)(data->send_timestamp & 0xFF);
+    buffer[offset++] = (uint8_t)((data->send_timestamp >> 8) & 0xFF);
+    buffer[offset++] = (uint8_t)((data->send_timestamp >> 16) & 0xFF);
+    buffer[offset++] = (uint8_t)((data->send_timestamp >> 24) & 0xFF);
+    buffer[offset++] = (uint8_t)((data->send_timestamp >> 32) & 0xFF);
+    buffer[offset++] = (uint8_t)((data->send_timestamp >> 40) & 0xFF);
+    buffer[offset++] = (uint8_t)((data->send_timestamp >> 48) & 0xFF);
+    buffer[offset++] = (uint8_t)((data->send_timestamp >> 56) & 0xFF);
 
-    /* Write payload */
-    if (data->data_len > 0 && data->data != NULL) {
-        memcpy(buffer + 24, data->data, data->data_len);
-    }
+    /* echo_timestamp */
+    buffer[offset++] = (uint8_t)(data->echo_timestamp & 0xFF);
+    buffer[offset++] = (uint8_t)((data->echo_timestamp >> 8) & 0xFF);
+    buffer[offset++] = (uint8_t)((data->echo_timestamp >> 16) & 0xFF);
+    buffer[offset++] = (uint8_t)((data->echo_timestamp >> 24) & 0xFF);
+    buffer[offset++] = (uint8_t)((data->echo_timestamp >> 32) & 0xFF);
+    buffer[offset++] = (uint8_t)((data->echo_timestamp >> 40) & 0xFF);
+    buffer[offset++] = (uint8_t)((data->echo_timestamp >> 48) & 0xFF);
+    buffer[offset++] = (uint8_t)((data->echo_timestamp >> 56) & 0xFF);
 
-    return total_size;
+    /* data_len */
+    uint64_t data_len_64 = data->data_len;
+    buffer[offset++] = (uint8_t)(data_len_64 & 0xFF);
+    buffer[offset++] = (uint8_t)((data_len_64 >> 8) & 0xFF);
+    buffer[offset++] = (uint8_t)((data_len_64 >> 16) & 0xFF);
+    buffer[offset++] = (uint8_t)((data_len_64 >> 24) & 0xFF);
+    buffer[offset++] = (uint8_t)((data_len_64 >> 32) & 0xFF);
+    buffer[offset++] = (uint8_t)((data_len_64 >> 40) & 0xFF);
+    buffer[offset++] = (uint8_t)((data_len_64 >> 48) & 0xFF);
+    buffer[offset++] = (uint8_t)((data_len_64 >> 56) & 0xFF);
+
+    /* data */
+    memcpy(buffer + offset, data->data, data->data_len);
+    offset += data->data_len;
+
+    return offset;
 }
 
-/* Deserialize raw bytes to LatencyTestData */
-static int deserialize_latency_data(const uint8_t* buffer, size_t size, LatencyTestData* data) {
-    if (size < 24) {
+/* Deserialize LatencyTestData from bytes */
+int deserialize_latency_data(const uint8_t* buffer, size_t buffer_size, LatencyTestData* data) {
+    if (buffer_size < 32) {
         return -1;
     }
 
-    /* Read seq_num (little-endian) */
-    data->seq_num = 0;
-    for (int i = 0; i < 8; i++) {
-        data->seq_num |= ((uint64_t)buffer[i] << (i * 8));
+    size_t offset = 0;
+
+    /* seq_num */
+    data->seq_num = (uint64_t)buffer[offset++];
+    data->seq_num |= ((uint64_t)buffer[offset++]) << 8;
+    data->seq_num |= ((uint64_t)buffer[offset++]) << 16;
+    data->seq_num |= ((uint64_t)buffer[offset++]) << 24;
+    data->seq_num |= ((uint64_t)buffer[offset++]) << 32;
+    data->seq_num |= ((uint64_t)buffer[offset++]) << 40;
+    data->seq_num |= ((uint64_t)buffer[offset++]) << 48;
+    data->seq_num |= ((uint64_t)buffer[offset++]) << 56;
+
+    /* send_timestamp */
+    data->send_timestamp = (uint64_t)buffer[offset++];
+    data->send_timestamp |= ((uint64_t)buffer[offset++]) << 8;
+    data->send_timestamp |= ((uint64_t)buffer[offset++]) << 16;
+    data->send_timestamp |= ((uint64_t)buffer[offset++]) << 24;
+    data->send_timestamp |= ((uint64_t)buffer[offset++]) << 32;
+    data->send_timestamp |= ((uint64_t)buffer[offset++]) << 40;
+    data->send_timestamp |= ((uint64_t)buffer[offset++]) << 48;
+    data->send_timestamp |= ((uint64_t)buffer[offset++]) << 56;
+
+    /* echo_timestamp */
+    data->echo_timestamp = (uint64_t)buffer[offset++];
+    data->echo_timestamp |= ((uint64_t)buffer[offset++]) << 8;
+    data->echo_timestamp |= ((uint64_t)buffer[offset++]) << 16;
+    data->echo_timestamp |= ((uint64_t)buffer[offset++]) << 24;
+    data->echo_timestamp |= ((uint64_t)buffer[offset++]) << 32;
+    data->echo_timestamp |= ((uint64_t)buffer[offset++]) << 40;
+    data->echo_timestamp |= ((uint64_t)buffer[offset++]) << 48;
+    data->echo_timestamp |= ((uint64_t)buffer[offset++]) << 56;
+
+    /* data_len */
+    uint64_t data_len = (uint64_t)buffer[offset++];
+    data_len |= ((uint64_t)buffer[offset++]) << 8;
+    data_len |= ((uint64_t)buffer[offset++]) << 16;
+    data_len |= ((uint64_t)buffer[offset++]) << 24;
+    data_len |= ((uint64_t)buffer[offset++]) << 32;
+    data_len |= ((uint64_t)buffer[offset++]) << 40;
+    data_len |= ((uint64_t)buffer[offset++]) << 48;
+    data_len |= ((uint64_t)buffer[offset++]) << 56;
+
+    if (buffer_size < offset + data_len) {
+        return -1;
     }
 
-    /* Read send_timestamp (little-endian) */
-    data->send_timestamp = 0;
-    for (int i = 0; i < 8; i++) {
-        data->send_timestamp |= ((uint64_t)buffer[8 + i] << (i * 8));
+    data->data_len = (size_t)data_len;
+    data->data = (uint8_t*)malloc(data->data_len);
+    if (data->data == NULL) {
+        return -1;
     }
 
-    /* Read echo_timestamp (little-endian) */
-    data->echo_timestamp = 0;
-    for (int i = 0; i < 8; i++) {
-        data->echo_timestamp |= ((uint64_t)buffer[16 + i] << (i * 8));
-    }
-
-    data->data_len = size - 24;
+    memcpy(data->data, buffer + offset, data->data_len);
     return 0;
 }
 
-/* ==================== Statistics Functions ==================== */
+/* ====== Listener Callbacks ====== */
 
-static void stats_init(PerformanceStats* stats, size_t initial_capacity) {
-    stats->latency_samples = NULL;
-    stats->latency_count = 0;
-    stats->latency_capacity = 0;
-    stats->total_samples = 0;
-    stats->lost_samples = 0;
-    stats->start_time_ns = 0;
-    stats->end_time_ns = 0;
+void on_publication_matched(
+    Int2DdsDataWriter* writer,
+    const Int2DdsPublicationMatchedStatus* status,
+    Int2DdsUserContext ctx
+) {
+    (void)writer;
+    (void)ctx;
+    if (status->current_count > 0) {
+        printf("Subscriber matched! (total: %d, current: %d)\n", status->total_count, status->current_count);
+        g_subscriber_matched = 1;
+    } else {
+        printf("Subscriber disconnected.\n");
+        g_subscriber_matched = 0;
+    }
+}
 
-    if (initial_capacity > 0) {
-        stats->latency_samples = (uint64_t*)malloc(initial_capacity * sizeof(uint64_t));
-        if (stats->latency_samples) {
-            stats->latency_capacity = initial_capacity;
+void on_data_available_latency_echo(
+    Int2DdsDataReader* reader,
+    Int2DdsUserContext ctx
+) {
+    (void)ctx;
+
+    if (g_latency_buffer == NULL || g_latency_buffer_size == 0) {
+        fprintf(stderr, "[DEBUG] ERROR: g_latency_buffer not allocated\n");
+        return;
+    }
+
+    /* Use global dynamic buffer */
+    uint8_t* buffer = g_latency_buffer;
+    size_t buffer_size = g_latency_buffer_size;
+    size_t data_size = 0;
+    bool valid_data = false;
+
+    while (1) {
+        Int2DdsRet ret = int2dds_take(reader, buffer, buffer_size, &data_size, &valid_data);
+        if (ret == INT2DDS_RET_NO_DATA) {
+            break;
+        } else if (ret != INT2DDS_RET_OK || !valid_data) {
+            continue;
         }
+
+        /* Deserialize */
+        LatencyTestData echo_data = {0};
+        if (deserialize_latency_data(buffer, data_size, &echo_data) != 0) {
+            continue;
+        }
+
+        /* Calculate RTT */
+        uint64_t now = get_current_time_ns();
+        uint64_t rtt_ns = now - echo_data.send_timestamp;
+
+        /* Store latency sample (one-way = RTT / 2) */
+        if (g_latency_stats.latency_count >= g_latency_stats.latency_capacity) {
+            size_t new_capacity = g_latency_stats.latency_capacity == 0 ? 10000 : g_latency_stats.latency_capacity * 2;
+            double* new_samples = (double*)realloc(g_latency_stats.latency_samples, new_capacity * sizeof(double));
+            if (new_samples == NULL) {
+                fprintf(stderr, "Failed to allocate memory for latency samples\n");
+                free(echo_data.data);
+                break;
+            }
+            g_latency_stats.latency_samples = new_samples;
+            g_latency_stats.latency_capacity = new_capacity;
+        }
+
+        g_latency_stats.latency_samples[g_latency_stats.latency_count++] = (double)rtt_ns;
+
+        free(echo_data.data);
     }
 }
 
-static void stats_free(PerformanceStats* stats) {
-    if (stats->latency_samples) {
-        free(stats->latency_samples);
-        stats->latency_samples = NULL;
-    }
-    stats->latency_capacity = 0;
-    stats->latency_count = 0;
-}
+/* ====== Statistics Functions ====== */
 
-static void stats_add_latency(PerformanceStats* stats, uint64_t latency_ns) {
-    if (stats->latency_count >= stats->latency_capacity) {
-        size_t new_capacity = stats->latency_capacity == 0 ? 1024 : stats->latency_capacity * 2;
-        uint64_t* new_samples = (uint64_t*)realloc(stats->latency_samples, new_capacity * sizeof(uint64_t));
-        if (!new_samples) return;
-        stats->latency_samples = new_samples;
-        stats->latency_capacity = new_capacity;
-    }
-    stats->latency_samples[stats->latency_count++] = latency_ns;
-}
-
-static int compare_uint64(const void* a, const void* b) {
-    uint64_t va = *(const uint64_t*)a;
-    uint64_t vb = *(const uint64_t*)b;
-    if (va < vb) return -1;
-    if (va > vb) return 1;
-    return 0;
-}
-
-static void stats_calculate_latency(PerformanceStats* stats, double* avg, double* min_val, double* max_val) {
+void calculate_latency_stats(const PerformanceStats* stats, double* avg_ns, double* min_ns, double* max_ns) {
     if (stats->latency_count == 0) {
-        *avg = *min_val = *max_val = 0.0;
-        return;
-    }
-
-    qsort(stats->latency_samples, stats->latency_count, sizeof(uint64_t), compare_uint64);
-
-    double sum = 0.0;
-    for (size_t i = 0; i < stats->latency_count; i++) {
-        sum += (double)stats->latency_samples[i];
-    }
-
-    *avg = sum / stats->latency_count;
-    *min_val = (double)stats->latency_samples[0];
-    *max_val = (double)stats->latency_samples[stats->latency_count - 1];
-}
-
-static void stats_calculate_current_latency(PerformanceStats* stats, double* avg, double* min_val, double* max_val) {
-    if (stats->latency_count == 0) {
-        *avg = *min_val = *max_val = 0.0;
+        *avg_ns = 0.0;
+        *min_ns = 0.0;
+        *max_ns = 0.0;
         return;
     }
 
     double sum = 0.0;
-    *min_val = (double)stats->latency_samples[0];
-    *max_val = (double)stats->latency_samples[0];
+    double min_val = stats->latency_samples[0];
+    double max_val = stats->latency_samples[0];
 
     for (size_t i = 0; i < stats->latency_count; i++) {
-        double val = (double)stats->latency_samples[i];
+        double val = stats->latency_samples[i];
         sum += val;
-        if (val < *min_val) *min_val = val;
-        if (val > *max_val) *max_val = val;
+        if (val < min_val) min_val = val;
+        if (val > max_val) max_val = val;
     }
 
-    *avg = sum / stats->latency_count;
+    /* One-way latency = RTT / 2 */
+    *avg_ns = (sum / stats->latency_count) / 2.0;
+    *min_ns = min_val / 2.0;
+    *max_ns = max_val / 2.0;
 }
 
-static void stats_calculate_throughput(PerformanceStats* stats, size_t data_size, double* msgs_per_sec, double* mbps) {
-    double duration_sec = (double)(stats->end_time_ns - stats->start_time_ns) / 1000000000.0;
-    if (duration_sec <= 0) {
-        *msgs_per_sec = 0.0;
-        *mbps = 0.0;
-        return;
-    }
-
-    *msgs_per_sec = (double)stats->total_samples / duration_sec;
-    *mbps = ((double)stats->total_samples * (double)data_size * 8.0) / (duration_sec * 1000000.0);
-}
-
-static void stats_print_summary(PerformanceStats* stats, bool show_latency, size_t data_size) {
-    double msgs_per_sec, mbps;
-    stats_calculate_throughput(stats, data_size, &msgs_per_sec, &mbps);
-
-    printf("\n=== Performance Summary ===\n");
-    printf("Total samples: %llu\n", (unsigned long long)stats->total_samples);
-    printf("Lost samples: %llu\n", (unsigned long long)stats->lost_samples);
-    printf("Rate: %.2f msg/s\n", msgs_per_sec);
-    printf("Throughput: %.2f Mbps\n", mbps);
-
-    if (show_latency && stats->latency_count > 0) {
-        double avg, min_val, max_val;
-        stats_calculate_latency(stats, &avg, &min_val, &max_val);
-        printf("Average latency: %.2f ms\n", avg / 1000000.0);
-        printf("Min latency: %.2f ms\n", min_val / 1000000.0);
-        printf("Max latency: %.2f ms\n", max_val / 1000000.0);
-    }
-}
-
-/* ==================== CSV Export Functions ==================== */
-
-static void save_throughput_csv(const char* prefix, size_t data_len, double hz,
-                                uint64_t total_sent, double msgs_per_sec, double mbps) {
-    char filename[256];
-    snprintf(filename, sizeof(filename), "%s_throughput_results_%zub_%.0fhz.csv",
-             prefix, data_len, hz);
-
-    FILE* file = fopen(filename, "r");
-    bool file_exists = (file != NULL);
-    if (file) fclose(file);
-
-    file = fopen(filename, "a");
-    if (!file) {
+void save_latency_csv(const PerformanceStats* stats, const char* filename) {
+    FILE* fp = fopen(filename, "w");
+    if (fp == NULL) {
         fprintf(stderr, "Failed to open CSV file: %s\n", filename);
         return;
     }
 
-    if (!file_exists) {
-        fprintf(file, "Test_Cycle,Timestamp,Total_Sent_Messages,Messages_Per_Second,Throughput_Mbps\n");
+    fprintf(fp, "sample_num,latency_ns,latency_us,latency_ms\n");
+
+    for (size_t i = 0; i < stats->latency_count; i++) {
+        double rtt = stats->latency_samples[i];
+        double latency_ns = rtt / 2.0;
+        double latency_us = latency_ns / 1000.0;
+        double latency_ms = latency_ns / 1000000.0;
+        fprintf(fp, "%zu,%.2f,%.2f,%.6f\n", i + 1, latency_ns, latency_us, latency_ms);
     }
 
-    uint64_t timestamp_ms = (uint64_t)time(NULL) * 1000;
-    fprintf(file, "1,%llu,%llu,%.0f,%.2f\n",
-            (unsigned long long)timestamp_ms,
-            (unsigned long long)total_sent,
-            msgs_per_sec, mbps);
-
-    fclose(file);
-    printf("Results saved to: %s\n", filename);
+    fclose(fp);
+    printf("Latency data saved to: %s\n", filename);
 }
 
-static void save_latency_csv(const char* prefix, size_t data_len, double hz,
-                             double avg_ms, double min_ms, double max_ms) {
-    char filename[256];
-    snprintf(filename, sizeof(filename), "%s_latency_results_%zub_%.0fhz.csv",
-             prefix, data_len, hz);
+/* ====== Test Functions ====== */
 
-    FILE* file = fopen(filename, "r");
-    bool file_exists = (file != NULL);
-    if (file) fclose(file);
-
-    file = fopen(filename, "a");
-    if (!file) {
-        fprintf(stderr, "Failed to open CSV file: %s\n", filename);
-        return;
-    }
-
-    if (!file_exists) {
-        fprintf(file, "Timestamp,Average_Latency_ms,Min_Latency_ms,Max_Latency_ms\n");
-    }
-
-    uint64_t timestamp_ms = (uint64_t)time(NULL) * 1000;
-    fprintf(file, "%llu,%.2f,%.2f,%.2f\n",
-            (unsigned long long)timestamp_ms, avg_ms, min_ms, max_ms);
-
-    fclose(file);
-    printf("Results saved to: %s\n", filename);
-}
-
-/* ==================== Throughput Test ==================== */
-
-static void run_throughput_test(int32_t domain_id, size_t data_len, int execution_time,
-                                const char* reliability, double hz) {
-    printf("Starting throughput test:\n");
-    printf("  Data size: %zu bytes\n", data_len);
-    printf("  Reliability: %s\n", reliability);
-    printf("  Execution time: %d seconds\n", execution_time);
-    if (hz > 0) {
-        printf("  Rate limit: %.0f Hz\n", hz);
-    }
-
+int run_throughput_test(const PerfTestArgs* args) {
     Int2DdsRet ret;
     Int2DdsParticipantFactory* factory = NULL;
     Int2DdsParticipant* participant = NULL;
@@ -392,15 +397,25 @@ static void run_throughput_test(int32_t domain_id, size_t data_len, int executio
     Int2DdsDataWriterQos* qos = NULL;
     Int2DdsWaitSet* waitset = NULL;
 
+    printf("\n=== Throughput Test (Publisher) ===\n");
+    printf("  Data size: %zu bytes\n", args->data_size);
+    printf("  Reliability: %s\n", args->use_reliable ? "RELIABLE" : "BEST_EFFORT");
+    printf("  Execution time: %llu seconds\n", (unsigned long long)args->execution_time);
+    printf("  Rate: %s\n", args->hz > 0 ? "limited" : "unlimited");
+    if (args->hz > 0) {
+        printf("  Target Hz: %.2f\n", args->hz);
+    }
+    printf("\n");
+
     /* Initialize factory */
     ret = int2dds_domain_participant_factory_get_instance(&factory);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to get participant factory: %d\n", ret);
-        return;
+        return 1;
     }
 
     /* Create participant */
-    ret = int2dds_create_participant(factory, "throughput_publisher", domain_id, &participant);
+    ret = int2dds_create_participant(factory, "perftest_publisher", args->domain_id, &participant);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create participant: %d\n", ret);
         goto cleanup;
@@ -414,13 +429,13 @@ static void run_throughput_test(int32_t domain_id, size_t data_len, int executio
     }
 
     /* Create topic */
-    ret = int2dds_create_topic(participant, "throughput_test_topic", "PerformanceData", NULL, &topic);
+    ret = int2dds_create_topic(participant, "throughput_test_topic", "PerformanceTestData", NULL, &topic);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create topic: %d\n", ret);
         goto cleanup;
     }
 
-    /* Create DataWriter QoS */
+    /* Create QoS */
     ret = int2dds_datawriter_qos_create_default(&qos);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create QoS: %d\n", ret);
@@ -428,11 +443,11 @@ static void run_throughput_test(int32_t domain_id, size_t data_len, int executio
     }
 
     /* Set reliability */
-    if (strcmp(reliability, "reliable") == 0) {
-        ret = int2dds_datawriter_qos_set_reliability(qos, INT2DDS_QOS_RELIABILITY_RELIABLE, 100000000);
-    } else {
-        ret = int2dds_datawriter_qos_set_reliability(qos, INT2DDS_QOS_RELIABILITY_BEST_EFFORT, 0);
-    }
+    ret = int2dds_datawriter_qos_set_reliability(
+        qos,
+        args->use_reliable ? INT2DDS_QOS_RELIABILITY_RELIABLE : INT2DDS_QOS_RELIABILITY_BEST_EFFORT,
+        100000000  /* 100ms */
+    );
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to set reliability: %d\n", ret);
         goto cleanup;
@@ -445,8 +460,17 @@ static void run_throughput_test(int32_t domain_id, size_t data_len, int executio
         goto cleanup;
     }
 
-    /* Create DataWriter */
-    ret = int2dds_create_datawriter(publisher, topic, qos, &writer);
+    /* Create listener */
+    Int2DdsDataWriterListener listener = {
+        .on_publication_matched = on_publication_matched,
+        .on_offered_deadline_missed = NULL,
+        .on_offered_incompatible_qos = NULL,
+        .on_liveliness_lost = NULL,
+        .user_context = NULL
+    };
+
+    /* Create writer with listener */
+    ret = int2dds_create_datawriter_with_listener(publisher, topic, qos, &listener, INT2DDS_STATUS_PUBLICATION_MATCHED, &writer);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create datawriter: %d\n", ret);
         goto cleanup;
@@ -454,7 +478,7 @@ static void run_throughput_test(int32_t domain_id, size_t data_len, int executio
 
     printf("Waiting for subscriber to connect...\n");
 
-    /* Create WaitSet and attach writer for publication matched */
+    /* Wait for subscriber match */
     ret = int2dds_waitset_new(&waitset);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create waitset: %d\n", ret);
@@ -467,130 +491,126 @@ static void run_throughput_test(int32_t domain_id, size_t data_len, int executio
         goto cleanup;
     }
 
-    /* Wait for subscriber using publication matched */
-    while (1) {
-        int32_t total_count = 0, current_count = 0;
-        ret = int2dds_get_publication_matched_status(writer, &total_count, &current_count);
-        if (ret == INT2DDS_RET_OK && current_count > 0) {
-            printf("Subscriber connected. Starting throughput test...\n");
-            break;
-        }
-        sleep_ms(100);
-    }
-
-    /* Allocate buffers */
-    size_t buffer_size = 16 + data_len;
-    uint8_t* buffer = (uint8_t*)malloc(buffer_size);
-    uint8_t* payload = (uint8_t*)malloc(data_len);
-    if (!buffer || !payload) {
-        fprintf(stderr, "Failed to allocate buffers\n");
+    ret = int2dds_waitset_wait(waitset, 60000000000ULL);  /* 60 seconds timeout */
+    if (ret == INT2DDS_RET_TIMEOUT) {
+        fprintf(stderr, "Timeout waiting for subscriber\n");
+        goto cleanup;
+    } else if (ret != INT2DDS_RET_OK) {
+        fprintf(stderr, "WaitSet wait failed: %d\n", ret);
         goto cleanup;
     }
-    memset(payload, 0xAA, data_len);
 
-    /* Test variables */
-    uint64_t start_time = get_current_time_ns();
-    uint64_t end_time = start_time + (uint64_t)execution_time * 1000000000ULL;
+    /* Allocate payload data */
+    uint8_t* payload = (uint8_t*)malloc(args->data_size);
+    if (payload == NULL) {
+        fprintf(stderr, "Failed to allocate payload\n");
+        goto cleanup;
+    }
+    memset(payload, 0xAA, args->data_size);
+
+    /* Allocate serialization buffer */
+    size_t buffer_size = 24 + args->data_size;
+    uint8_t* buffer = (uint8_t*)malloc(buffer_size);
+    if (buffer == NULL) {
+        fprintf(stderr, "Failed to allocate buffer\n");
+        free(payload);
+        goto cleanup;
+    }
+
+    /* Performance statistics */
+    uint64_t total_samples = 0;
+    uint64_t bytes_sent = 0;
     uint64_t seq_num = 0;
-    uint64_t total_sent = 0;
-    uint64_t last_report_time = start_time;
+
+    /* Start test */
+    uint64_t start_time_ns = get_current_time_ns();
+    uint64_t test_end_time = start_time_ns + (args->execution_time * 1000000000ULL);
+    uint64_t last_report_time = start_time_ns;
     uint64_t last_report_count = 0;
 
-    /* Hz-based timing */
-    uint64_t send_interval_ns = (hz > 0) ? (uint64_t)(1000000000.0 / hz) : 0;
-    uint64_t next_send_time = start_time + send_interval_ns;
+    uint64_t next_send_time = start_time_ns;
+    uint64_t interval_ns = args->hz > 0 ? (uint64_t)(1000000000.0 / args->hz) : 0;
 
-    while (get_current_time_ns() < end_time) {
-        /* Hz-based rate limiting - wait until next send time */
-        if (hz > 0) {
-            sleep_until_ns(next_send_time);
+    printf("Starting throughput test...\n");
+
+    while (1) {
+        uint64_t now = get_current_time_ns();
+
+        if (now >= test_end_time) {
+            break;
         }
 
-        /* Create and serialize data */
-        PerformanceData data;
-        data.seq_num = seq_num;
-        data.timestamp = get_current_time_ns();
-        data.data_len = data_len;
-        data.data = payload;
-
-        size_t serialized_size = serialize_performance_data(&data, buffer, buffer_size);
-        if (serialized_size == 0) {
-            fprintf(stderr, "Failed to serialize data\n");
+        /* Rate limiting */
+        if (args->hz > 0 && now < next_send_time) {
             continue;
         }
 
-        /* Write data */
-        uint64_t write_start = get_current_time_ns();
+        /* Create sample */
+        PerformanceTestData sample = {
+            .seq_num = seq_num++,
+            .timestamp = now,
+            .data = payload,
+            .data_len = args->data_size
+        };
+
+        /* Serialize */
+        size_t serialized_size = serialize_performance_data(&sample, buffer, buffer_size);
+        if (serialized_size == 0) {
+            fprintf(stderr, "Serialization failed\n");
+            break;
+        }
+
+        /* Write */
         ret = int2dds_write(writer, buffer, serialized_size);
-        uint64_t write_duration = get_current_time_ns() - write_start;
-
-        if (write_duration >= 1000000000ULL) {
-            printf("[WARNING] write() took %.3f s (seq_num: %llu)\n",
-                   write_duration / 1000000000.0, (unsigned long long)seq_num);
+        if (ret != INT2DDS_RET_OK) {
+            fprintf(stderr, "Write failed: %d\n", ret);
+            break;
         }
 
-        seq_num++;
-        total_sent++;
+        total_samples++;
+        bytes_sent += serialized_size;
 
-        /* Update next send time for Hz limiting */
-        if (hz > 0) {
-            next_send_time += send_interval_ns;
+        /* Update next send time */
+        if (args->hz > 0) {
+            next_send_time += interval_ns;
         }
 
-        /* Periodic report every 5 seconds */
-        uint64_t now = get_current_time_ns();
+        /* Periodic progress (every 5 seconds) */
+        now = get_current_time_ns();
         if (now - last_report_time >= 5000000000ULL) {
-            double elapsed = (double)(now - start_time) / 1000000000.0;
-            double interval_elapsed = (double)(now - last_report_time) / 1000000000.0;
-            uint64_t interval_sent = total_sent - last_report_count;
+            uint64_t elapsed_ns = now - start_time_ns;
+            double elapsed_sec = elapsed_ns / 1e9;
+            uint64_t interval_sent = total_samples - last_report_count;
+            double interval_elapsed = (now - last_report_time) / 1e9;
 
-            double avg_rate = total_sent / elapsed;
+            double avg_rate = total_samples / elapsed_sec;
             double interval_rate = interval_sent / interval_elapsed;
-            double avg_mbps = (total_sent * data_len * 8.0) / (elapsed * 1000000.0);
-            double interval_mbps = (interval_sent * data_len * 8.0) / (interval_elapsed * 1000000.0);
+            double avg_mbps = (bytes_sent * 8.0) / (elapsed_sec * 1e6);
+            double interval_mbps = (interval_sent * args->data_size * 8.0) / (interval_elapsed * 1e6);
 
             printf("[%.1fs] Sent: %llu, Avg: %.0f msg/s (%.2f Mbps), Interval: %.0f msg/s (%.2f Mbps)\n",
-                   elapsed, (unsigned long long)total_sent,
-                   avg_rate, avg_mbps, interval_rate, interval_mbps);
+                   elapsed_sec, (unsigned long long)total_samples, avg_rate, avg_mbps, interval_rate, interval_mbps);
 
             last_report_time = now;
-            last_report_count = total_sent;
+            last_report_count = total_samples;
         }
     }
 
-    /* Final interval report */
-    {
-        uint64_t now = get_current_time_ns();
-        double elapsed_final = (double)(now - start_time) / 1000000000.0;
-        double interval_elapsed = (double)(now - last_report_time) / 1000000000.0;
-        uint64_t interval_sent = total_sent - last_report_count;
+    uint64_t end_time_ns = get_current_time_ns();
 
-        double avg_rate = total_sent / elapsed_final;
-        double interval_rate = (interval_elapsed > 0) ? interval_sent / interval_elapsed : 0;
-        double avg_mbps = (total_sent * data_len * 8.0) / (elapsed_final * 1000000.0);
-        double interval_mbps = (interval_elapsed > 0) ? (interval_sent * data_len * 8.0) / (interval_elapsed * 1000000.0) : 0;
+    /* Print final statistics */
+    double duration_sec = (end_time_ns - start_time_ns) / 1e9;
+    double msgs_per_sec = total_samples / duration_sec;
+    double mbps = (bytes_sent * 8.0) / (duration_sec * 1e6);
 
-        printf("[%.1fs] Sent: %llu, Avg: %.0f msg/s (%.2f Mbps), Interval: %.0f msg/s (%.2f Mbps)\n",
-               elapsed_final, (unsigned long long)total_sent,
-               avg_rate, avg_mbps, interval_rate, interval_mbps);
-    }
+    printf("\n=== Throughput Test Results ===\n");
+    printf("Total samples sent: %llu\n", (unsigned long long)total_samples);
+    printf("Total bytes sent: %llu\n", (unsigned long long)bytes_sent);
+    printf("Duration: %.2f seconds\n", duration_sec);
+    printf("Throughput: %.2f msg/s, %.2f Mbps\n", msgs_per_sec, mbps);
 
-    /* Final statistics */
-    double elapsed = (double)(get_current_time_ns() - start_time) / 1000000000.0;
-    double final_rate = total_sent / elapsed;
-    double mbps = (total_sent * data_len * 8.0) / (elapsed * 1000000.0);
-
-    printf("\n=== Throughput Test Publisher Results ===\n");
-    printf("Total samples sent: %llu\n", (unsigned long long)total_sent);
-    printf("Test duration: %.2f seconds\n", elapsed);
-    printf("Send rate: %.2f msg/s\n", final_rate);
-    printf("Throughput: %.2f Mbps\n", mbps);
-
-    /* Save to CSV */
-    save_throughput_csv("publisher", data_len, hz, total_sent, final_rate, mbps);
-
-    free(buffer);
     free(payload);
+    free(buffer);
 
 cleanup:
     if (participant) {
@@ -598,27 +618,11 @@ cleanup:
         int2dds_delete_participant(participant);
     }
     if (factory) int2dds_domain_participant_factory_finalize(factory);
+
+    return 0;
 }
 
-/* ==================== Latency Test ==================== */
-
-static void run_latency_test(int32_t domain_id, size_t data_len, int execution_time,
-                             const char* reliability, int latency_interval_ms,
-                             int latency_count, double hz) {
-    printf("Starting latency test:\n");
-    printf("  Data size: %zu bytes\n", data_len);
-    printf("  Reliability: %s\n", reliability);
-    if (latency_count > 0) {
-        printf("  Latency count: %d samples\n", latency_count);
-    } else {
-        printf("  Execution time: %d seconds\n", execution_time);
-    }
-    if (hz > 0) {
-        printf("  Rate limit: %.0f Hz\n", hz);
-    } else {
-        printf("  Latency interval: %d ms\n", latency_interval_ms);
-    }
-
+int run_latency_test(const PerfTestArgs* args) {
     Int2DdsRet ret;
     Int2DdsParticipantFactory* factory = NULL;
     Int2DdsParticipant* participant = NULL;
@@ -632,30 +636,59 @@ static void run_latency_test(int32_t domain_id, size_t data_len, int execution_t
     Int2DdsDataReaderQos* reader_qos = NULL;
     Int2DdsWaitSet* waitset = NULL;
 
-    PerformanceStats stats;
-    stats_init(&stats, 10000);
+    printf("\n=== Latency Test (Publisher) ===\n");
+    printf("  Data size: %zu bytes\n", args->data_size);
+    printf("  Reliability: %s\n", args->use_reliable ? "RELIABLE" : "BEST_EFFORT");
+    printf("  Execution time: %llu seconds\n", (unsigned long long)args->execution_time);
+    printf("  Rate: %s\n", args->hz > 0 ? "limited" : "unlimited");
+    if (args->hz > 0) {
+        printf("  Target Hz: %.2f\n", args->hz);
+    }
+    printf("\n");
+
+    /* Reset global latency stats */
+    g_latency_stats.total_samples = 0;
+    g_latency_stats.bytes_sent = 0;
+    g_latency_stats.start_time_ns = 0;
+    g_latency_stats.end_time_ns = 0;
+    g_latency_stats.latency_count = 0;
+    if (g_latency_stats.latency_samples != NULL) {
+        free(g_latency_stats.latency_samples);
+        g_latency_stats.latency_samples = NULL;
+    }
+    g_latency_stats.latency_capacity = 0;
+
+    /* Allocate dynamic buffer for latency callback (header 32 bytes + payload + margin) */
+    g_latency_buffer_size = args->data_size + 64;
+    g_latency_buffer = (uint8_t*)malloc(g_latency_buffer_size);
+    if (g_latency_buffer == NULL) {
+        fprintf(stderr, "Failed to allocate latency buffer (%zu bytes)\n", g_latency_buffer_size);
+        return 1;
+    }
+    printf("Allocated latency buffer: %zu bytes\n", g_latency_buffer_size);
 
     /* Initialize factory */
     ret = int2dds_domain_participant_factory_get_instance(&factory);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to get participant factory: %d\n", ret);
-        return;
+        return 1;
     }
 
     /* Create participant */
-    ret = int2dds_create_participant(factory, "latency_publisher", domain_id, &participant);
+    ret = int2dds_create_participant(factory, "perftest_latency_publisher", args->domain_id, &participant);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create participant: %d\n", ret);
         goto cleanup;
     }
 
-    /* Create publisher and subscriber */
+    /* Create publisher */
     ret = int2dds_create_publisher(participant, &publisher);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create publisher: %d\n", ret);
         goto cleanup;
     }
 
+    /* Create subscriber (for receiving echoes) */
     ret = int2dds_create_subscriber(participant, &subscriber);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create subscriber: %d\n", ret);
@@ -675,42 +708,82 @@ static void run_latency_test(int32_t domain_id, size_t data_len, int execution_t
         goto cleanup;
     }
 
-    /* Create DataWriter QoS */
+    /* Create writer QoS */
     ret = int2dds_datawriter_qos_create_default(&writer_qos);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create writer QoS: %d\n", ret);
         goto cleanup;
     }
 
-    if (strcmp(reliability, "reliable") == 0) {
-        ret = int2dds_datawriter_qos_set_reliability(writer_qos, INT2DDS_QOS_RELIABILITY_RELIABLE, 100000000);
-    } else {
-        ret = int2dds_datawriter_qos_set_reliability(writer_qos, INT2DDS_QOS_RELIABILITY_BEST_EFFORT, 0);
+    ret = int2dds_datawriter_qos_set_reliability(
+        writer_qos,
+        args->use_reliable ? INT2DDS_QOS_RELIABILITY_RELIABLE : INT2DDS_QOS_RELIABILITY_BEST_EFFORT,
+        100000000
+    );
+    if (ret != INT2DDS_RET_OK) {
+        fprintf(stderr, "Failed to set writer reliability: %d\n", ret);
+        goto cleanup;
     }
-    int2dds_datawriter_qos_set_history(writer_qos, INT2DDS_QOS_HISTORY_KEEP_LAST, 1000);
 
-    /* Create DataReader QoS */
+    ret = int2dds_datawriter_qos_set_history(writer_qos, INT2DDS_QOS_HISTORY_KEEP_LAST, 1000);
+    if (ret != INT2DDS_RET_OK) {
+        fprintf(stderr, "Failed to set writer history: %d\n", ret);
+        goto cleanup;
+    }
+
+    /* Create writer listener */
+    Int2DdsDataWriterListener writer_listener = {
+        .on_publication_matched = on_publication_matched,
+        .on_offered_deadline_missed = NULL,
+        .on_offered_incompatible_qos = NULL,
+        .on_liveliness_lost = NULL,
+        .user_context = NULL
+    };
+
+    /* Create writer */
+    ret = int2dds_create_datawriter_with_listener(publisher, topic, writer_qos, &writer_listener,
+                                                   INT2DDS_STATUS_PUBLICATION_MATCHED, &writer);
+    if (ret != INT2DDS_RET_OK) {
+        fprintf(stderr, "Failed to create datawriter: %d\n", ret);
+        goto cleanup;
+    }
+
+    /* Create reader QoS */
     ret = int2dds_datareader_qos_create_default(&reader_qos);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create reader QoS: %d\n", ret);
         goto cleanup;
     }
 
-    if (strcmp(reliability, "reliable") == 0) {
-        ret = int2dds_datareader_qos_set_reliability(reader_qos, INT2DDS_QOS_RELIABILITY_RELIABLE);
-    } else {
-        ret = int2dds_datareader_qos_set_reliability(reader_qos, INT2DDS_QOS_RELIABILITY_BEST_EFFORT);
-    }
-    int2dds_datareader_qos_set_history(reader_qos, INT2DDS_QOS_HISTORY_KEEP_LAST, 1000);
-
-    /* Create DataWriter and DataReader */
-    ret = int2dds_create_datawriter(publisher, topic, writer_qos, &writer);
+    ret = int2dds_datareader_qos_set_reliability(
+        reader_qos,
+        args->use_reliable ? INT2DDS_QOS_RELIABILITY_RELIABLE : INT2DDS_QOS_RELIABILITY_BEST_EFFORT
+    );
     if (ret != INT2DDS_RET_OK) {
-        fprintf(stderr, "Failed to create datawriter: %d\n", ret);
+        fprintf(stderr, "Failed to set reader reliability: %d\n", ret);
         goto cleanup;
     }
 
-    ret = int2dds_create_datareader(subscriber, echo_topic, reader_qos, &reader);
+    ret = int2dds_datareader_qos_set_history(reader_qos, INT2DDS_QOS_HISTORY_KEEP_LAST, 1000);
+    if (ret != INT2DDS_RET_OK) {
+        fprintf(stderr, "Failed to set reader history: %d\n", ret);
+        goto cleanup;
+    }
+
+    /* Create reader listener */
+    Int2DdsDataReaderListener reader_listener = {
+        .on_data_available = on_data_available_latency_echo,
+        .on_subscription_matched = NULL,
+        .on_requested_deadline_missed = NULL,
+        .on_requested_incompatible_qos = NULL,
+        .on_sample_lost = NULL,
+        .on_liveliness_changed = NULL,
+        .user_context = NULL
+    };
+
+    /* Create reader (for echoes) */
+    ret = int2dds_create_datareader_with_listener(subscriber, echo_topic, reader_qos, &reader_listener,
+                                                   INT2DDS_STATUS_DATA_AVAILABLE, &reader);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create datareader: %d\n", ret);
         goto cleanup;
@@ -718,310 +791,191 @@ static void run_latency_test(int32_t domain_id, size_t data_len, int execution_t
 
     printf("Waiting for subscriber to connect...\n");
 
-    /* Wait for subscriber */
-    while (1) {
-        int32_t total_count = 0, current_count = 0;
-        ret = int2dds_get_publication_matched_status(writer, &total_count, &current_count);
-        if (ret == INT2DDS_RET_OK && current_count > 0) {
-            printf("Subscriber connected. Starting latency test...\n");
-            break;
-        }
-        sleep_ms(100);
-    }
-
-    /* Allocate buffers */
-    size_t send_buffer_size = 24 + data_len;
-    size_t recv_buffer_size = 24 + data_len;
-    uint8_t* send_buffer = (uint8_t*)malloc(send_buffer_size);
-    uint8_t* recv_buffer = (uint8_t*)malloc(recv_buffer_size);
-    uint8_t* payload = (uint8_t*)malloc(data_len);
-    if (!send_buffer || !recv_buffer || !payload) {
-        fprintf(stderr, "Failed to allocate buffers\n");
+    /* Wait for subscriber match using waitset */
+    ret = int2dds_waitset_new(&waitset);
+    if (ret != INT2DDS_RET_OK) {
+        fprintf(stderr, "Failed to create waitset: %d\n", ret);
         goto cleanup;
     }
-    memset(payload, 0xAA, data_len);
 
-    /* Warmup phase - send a few messages to ensure subscriber is ready */
-    printf("Warming up (waiting for first echo)...\n");
-    {
-        LatencyTestData warmup_data;
-        warmup_data.seq_num = 0;
-        warmup_data.send_timestamp = get_current_time_ns();
-        warmup_data.echo_timestamp = 0;
-        warmup_data.data_len = data_len;
-        warmup_data.data = payload;
-
-        size_t warmup_size = serialize_latency_data(&warmup_data, send_buffer, send_buffer_size);
-
-        /* Send warmup messages until we get an echo */
-        int warmup_attempts = 0;
-        bool warmup_done = false;
-        while (!warmup_done && warmup_attempts < 50) {
-            ret = int2dds_write(writer, send_buffer, warmup_size);
-            warmup_attempts++;
-
-            /* Wait for echo with short timeout */
-            uint64_t warmup_timeout = get_current_time_ns() + 100000000ULL; /* 100ms timeout */
-            while (get_current_time_ns() < warmup_timeout) {
-                size_t data_size = 0;
-                bool valid_data = false;
-                ret = int2dds_take(reader, recv_buffer, recv_buffer_size, &data_size, &valid_data);
-                if (ret == INT2DDS_RET_OK && valid_data) {
-                    warmup_done = true;
-                    printf("Warmup complete after %d attempts. Starting test...\n", warmup_attempts);
-                    break;
-                }
-                sleep_us(100);
-            }
-        }
-
-        if (!warmup_done) {
-            fprintf(stderr, "Warning: Warmup failed, starting test anyway...\n");
-        }
+    ret = int2dds_waitset_attach_datawriter(waitset, writer);
+    if (ret != INT2DDS_RET_OK) {
+        fprintf(stderr, "Failed to attach writer to waitset: %d\n", ret);
+        goto cleanup;
     }
 
-    /* Test variables - start timer AFTER warmup */
-    uint64_t start_time = get_current_time_ns();
-    uint64_t end_time = start_time + (uint64_t)execution_time * 1000000000ULL;
+    ret = int2dds_waitset_wait(waitset, 60000000000ULL);  /* 60 seconds timeout */
+    if (ret == INT2DDS_RET_TIMEOUT) {
+        fprintf(stderr, "Timeout waiting for subscriber (60 seconds)\n");
+        goto cleanup;
+    } else if (ret != INT2DDS_RET_OK) {
+        fprintf(stderr, "WaitSet wait failed: %d\n", ret);
+        goto cleanup;
+    }
+
+    printf("Subscriber connected!\n");
+
+    /* Allocate payload data */
+    uint8_t* payload = (uint8_t*)malloc(args->data_size);
+    if (payload == NULL) {
+        fprintf(stderr, "Failed to allocate payload\n");
+        goto cleanup;
+    }
+    memset(payload, 0xAA, args->data_size);
+
+    /* Allocate serialization buffer */
+    size_t buffer_size = 32 + args->data_size;
+    uint8_t* buffer = (uint8_t*)malloc(buffer_size);
+    if (buffer == NULL) {
+        fprintf(stderr, "Failed to allocate buffer\n");
+        free(payload);
+        goto cleanup;
+    }
+
+    /* Performance statistics */
     uint64_t seq_num = 0;
-    uint64_t send_interval_ns = (hz > 0) ? (uint64_t)(1000000000.0 / hz) : 0;
-    uint64_t next_send_time = start_time + send_interval_ns;
+
+    /* Start test */
+    uint64_t start_time = get_current_time_ns();
+    uint64_t test_end_time = start_time + (args->execution_time * 1000000000ULL);
     uint64_t last_report_time = start_time;
     uint64_t last_report_count = 0;
 
-    stats.start_time_ns = start_time;
+    uint64_t next_send_time = start_time;
+    uint64_t interval_ns = args->hz > 0 ? (uint64_t)(1000000000.0 / args->hz) : 10000000;  /* Default 10ms */
 
-    /* Ring buffer to store send timestamps for async latency calculation */
-    #define TIMESTAMP_BUFFER_SIZE 100000
-    uint64_t* send_timestamps = (uint64_t*)calloc(TIMESTAMP_BUFFER_SIZE, sizeof(uint64_t));
-    if (!send_timestamps) {
-        fprintf(stderr, "Failed to allocate timestamp buffer\n");
-        goto cleanup;
-    }
+    printf("Starting latency test...\n");
 
-    bool running = true;
-    while (running) {
+    while (1) {
         uint64_t now = get_current_time_ns();
 
-        /* Check termination conditions */
-        if (latency_count > 0) {
-            if (seq_num >= (uint64_t)latency_count || now >= end_time) {
-                if (seq_num < (uint64_t)latency_count) {
-                    printf("Test stopped by execution_time limit. Sent %llu / %d samples.\n",
-                           (unsigned long long)seq_num, latency_count);
-                }
-                break;
-            }
-        } else {
-            if (now >= end_time) {
-                break;
-            }
+        if (now >= test_end_time) {
+            break;
         }
 
-        /* ASYNC SEND: Send at target Hz rate without waiting for echo */
-        if (hz > 0) {
-            /* Time-based sending */
-            if (now >= next_send_time) {
-                /* Create and send data */
-                LatencyTestData send_data;
-                send_data.seq_num = seq_num;
-                send_data.send_timestamp = now;
-                send_data.echo_timestamp = 0;
-                send_data.data_len = data_len;
-                send_data.data = payload;
-
-                /* Store timestamp for later latency calculation */
-                send_timestamps[seq_num % TIMESTAMP_BUFFER_SIZE] = now;
-
-                size_t serialized_size = serialize_latency_data(&send_data, send_buffer, send_buffer_size);
-                ret = int2dds_write(writer, send_buffer, serialized_size);
-
-                seq_num++;
-                next_send_time += send_interval_ns;
-            }
-        } else {
-            /* Interval-based sending (original behavior for -i option) */
-            LatencyTestData send_data;
-            send_data.seq_num = seq_num;
-            send_data.send_timestamp = now;
-            send_data.echo_timestamp = 0;
-            send_data.data_len = data_len;
-            send_data.data = payload;
-
-            send_timestamps[seq_num % TIMESTAMP_BUFFER_SIZE] = now;
-
-            size_t serialized_size = serialize_latency_data(&send_data, send_buffer, send_buffer_size);
-            ret = int2dds_write(writer, send_buffer, serialized_size);
-
-            seq_num++;
-            sleep_ms(latency_interval_ms);
+        /* Rate limiting */
+        if (now < next_send_time) {
+            sleep_ms(1);
+            continue;
         }
 
-        /* ASYNC RECEIVE: Non-blocking poll for echo responses */
-        for (int poll_count = 0; poll_count < 100; poll_count++) {
-            size_t data_size = 0;
-            bool valid_data = false;
-            ret = int2dds_take(reader, recv_buffer, recv_buffer_size, &data_size, &valid_data);
+        /* Create latency sample */
+        LatencyTestData sample = {
+            .seq_num = seq_num++,
+            .send_timestamp = get_current_time_ns(),
+            .echo_timestamp = 0,
+            .data = payload,
+            .data_len = args->data_size
+        };
 
-            if (ret == INT2DDS_RET_OK && valid_data) {
-                uint64_t receive_time = get_current_time_ns();
-                LatencyTestData recv_data;
-                if (deserialize_latency_data(recv_buffer, data_size, &recv_data) == 0) {
-                    /* Look up original send timestamp */
-                    uint64_t original_send_time = send_timestamps[recv_data.seq_num % TIMESTAMP_BUFFER_SIZE];
-                    if (original_send_time > 0) {
-                        uint64_t round_trip_ns = receive_time - original_send_time;
-                        uint64_t latency_ns = round_trip_ns / 2;
-                        stats_add_latency(&stats, latency_ns);
-                        stats.total_samples++;
-                    }
-                }
-            } else {
-                /* No more data available */
-                break;
-            }
+        /* Serialize */
+        size_t serialized_size = serialize_latency_data(&sample, buffer, buffer_size);
+        if (serialized_size == 0) {
+            fprintf(stderr, "Serialization failed\n");
+            break;
         }
 
-        /* Periodic report every 5 seconds */
+        /* Write */
+        ret = int2dds_write(writer, buffer, serialized_size);
+        if (ret != INT2DDS_RET_OK) {
+            fprintf(stderr, "Write failed: %d\n", ret);
+            break;
+        }
+
+        /* Update next send time */
+        next_send_time += interval_ns;
+
+        /* Periodic progress (every 5 seconds) */
         now = get_current_time_ns();
         if (now - last_report_time >= 5000000000ULL) {
-            double elapsed = (double)(now - start_time) / 1000000000.0;
-            double interval_elapsed = (double)(now - last_report_time) / 1000000000.0;
+            double elapsed_sec = (now - start_time) / 1e9;
             uint64_t interval_sent = seq_num - last_report_count;
+            double interval_elapsed = (now - last_report_time) / 1e9;
 
-            double avg_rate = seq_num / elapsed;
+            double avg_rate = seq_num / elapsed_sec;
             double interval_rate = interval_sent / interval_elapsed;
 
-            double avg_latency, min_latency, max_latency;
-            stats_calculate_current_latency(&stats, &avg_latency, &min_latency, &max_latency);
+            /* Calculate current latency stats */
+            if (g_latency_stats.latency_count > 0) {
+                double sum = 0.0;
+                double min_val = g_latency_stats.latency_samples[0];
+                double max_val = g_latency_stats.latency_samples[0];
 
-            if (latency_count > 0) {
-                printf("[%.1fs] Sent: %llu / %d, Echoes: %llu, Avg: %.0f msg/s, Interval: %.0f msg/s, "
-                       "Latency: %.2fms (min: %.2fms, max: %.2fms)\n",
-                       elapsed, (unsigned long long)seq_num, latency_count,
-                       (unsigned long long)stats.total_samples,
-                       avg_rate, interval_rate,
-                       avg_latency / 1000000.0, min_latency / 1000000.0, max_latency / 1000000.0);
+                for (size_t i = 0; i < g_latency_stats.latency_count; i++) {
+                    double val = g_latency_stats.latency_samples[i];
+                    sum += val;
+                    if (val < min_val) min_val = val;
+                    if (val > max_val) max_val = val;
+                }
+
+                double avg_latency = (sum / g_latency_stats.latency_count) / 2.0;  /* One-way */
+                double min_latency = min_val / 2.0;
+                double max_latency = max_val / 2.0;
+
+                printf("[%.1fs] Sent: %llu, Avg: %.0f msg/s, Interval: %.0f msg/s, "
+                       "Latency: %.2f ms (min: %.2f ms, max: %.2f ms)\n",
+                       elapsed_sec, (unsigned long long)seq_num, avg_rate, interval_rate,
+                       avg_latency / 1e6, min_latency / 1e6, max_latency / 1e6);
             } else {
-                printf("[%.1fs] Sent: %llu, Echoes: %llu, Avg: %.0f msg/s, Interval: %.0f msg/s, "
-                       "Latency: %.2fms (min: %.2fms, max: %.2fms)\n",
-                       elapsed, (unsigned long long)seq_num,
-                       (unsigned long long)stats.total_samples,
-                       avg_rate, interval_rate,
-                       avg_latency / 1000000.0, min_latency / 1000000.0, max_latency / 1000000.0);
+                printf("[%.1fs] Sent: %llu, Avg: %.0f msg/s, Interval: %.0f msg/s\n",
+                       elapsed_sec, (unsigned long long)seq_num, avg_rate, interval_rate);
             }
 
             last_report_time = now;
             last_report_count = seq_num;
         }
-
-        /* Small sleep to prevent busy-spinning when Hz-limited and waiting for next send time */
-        if (hz > 0) {
-            uint64_t time_to_next = next_send_time > get_current_time_ns() ?
-                                    next_send_time - get_current_time_ns() : 0;
-            if (time_to_next > 100000) { /* More than 100us */
-                sleep_us(50); /* Short sleep to allow echo processing */
-            }
-        }
     }
 
-    /* Drain remaining echoes for a short period */
-    printf("Collecting remaining echoes...\n");
-    uint64_t drain_end = get_current_time_ns() + 1000000000ULL; /* 1 second drain */
-    while (get_current_time_ns() < drain_end) {
-        size_t data_size = 0;
-        bool valid_data = false;
-        ret = int2dds_take(reader, recv_buffer, recv_buffer_size, &data_size, &valid_data);
+    uint64_t end_time = get_current_time_ns();
 
-        if (ret == INT2DDS_RET_OK && valid_data) {
-            uint64_t receive_time = get_current_time_ns();
-            LatencyTestData recv_data;
-            if (deserialize_latency_data(recv_buffer, data_size, &recv_data) == 0) {
-                uint64_t original_send_time = send_timestamps[recv_data.seq_num % TIMESTAMP_BUFFER_SIZE];
-                if (original_send_time > 0) {
-                    uint64_t round_trip_ns = receive_time - original_send_time;
-                    uint64_t latency_ns = round_trip_ns / 2;
-                    stats_add_latency(&stats, latency_ns);
-                    stats.total_samples++;
-                }
-            }
-        } else if (ret == INT2DDS_RET_NO_DATA) {
-            sleep_us(1000);
-        }
-    }
+    /* Wait a bit for final echoes */
+    printf("Waiting for final echoes...\n");
+    sleep_ms(2000);
 
-    free(send_timestamps);
+    /* Print final statistics */
+    printf("\n=== Latency Test Results ===\n");
+    printf("Latency requests sent: %llu\n", (unsigned long long)seq_num);
+    printf("Latency responses received: %zu\n", g_latency_stats.latency_count);
+    printf("Duration: %.2f seconds\n", (end_time - start_time) / 1e9);
 
-    /* Final interval report */
-    {
-        uint64_t now = get_current_time_ns();
-        double elapsed = (double)(now - start_time) / 1000000000.0;
-        double interval_elapsed = (double)(now - last_report_time) / 1000000000.0;
-        uint64_t interval_sent = seq_num - last_report_count;
+    if (g_latency_stats.latency_count > 0) {
+        double avg_ns, min_ns, max_ns;
+        calculate_latency_stats(&g_latency_stats, &avg_ns, &min_ns, &max_ns);
 
-        double avg_rate = seq_num / elapsed;
-        double interval_rate = (interval_elapsed > 0) ? interval_sent / interval_elapsed : 0;
+        printf("Average latency: %.3f ms (%.2f us)\n", avg_ns / 1e6, avg_ns / 1e3);
+        printf("Min latency: %.3f ms (%.2f us)\n", min_ns / 1e6, min_ns / 1e3);
+        printf("Max latency: %.3f ms (%.2f us)\n", max_ns / 1e6, max_ns / 1e3);
 
-        double avg_latency, min_latency, max_latency;
-        stats_calculate_current_latency(&stats, &avg_latency, &min_latency, &max_latency);
-
-        if (latency_count > 0) {
-            printf("[%.1fs] Sent: %llu / %d, Avg: %.0f msg/s, Interval: %.0f msg/s, "
-                   "Latency: %.2fms (min: %.2fms, max: %.2fms)\n",
-                   elapsed, (unsigned long long)seq_num, latency_count,
-                   avg_rate, interval_rate,
-                   avg_latency / 1000000.0, min_latency / 1000000.0, max_latency / 1000000.0);
-        } else {
-            printf("[%.1fs] Sent: %llu, Avg: %.0f msg/s, Interval: %.0f msg/s, "
-                   "Latency: %.2fms (min: %.2fms, max: %.2fms)\n",
-                   elapsed, (unsigned long long)seq_num,
-                   avg_rate, interval_rate,
-                   avg_latency / 1000000.0, min_latency / 1000000.0, max_latency / 1000000.0);
-        }
-    }
-
-    sleep_ms(1000);
-
-    stats.end_time_ns = get_current_time_ns();
-    stats_print_summary(&stats, true, data_len);
-
-    /* Save to CSV if we have samples */
-    if (stats.latency_count > 0) {
-        double avg, min_val, max_val;
-        stats_calculate_latency(&stats, &avg, &min_val, &max_val);
-        save_latency_csv("publisher", data_len, hz,
-                         avg / 1000000.0, min_val / 1000000.0, max_val / 1000000.0);
+        /* Save to CSV */
+        char filename[256];
+        snprintf(filename, sizeof(filename), "publisher_latency_results_%zub_%.0fhz.csv",
+                 args->data_size, args->hz);
+        save_latency_csv(&g_latency_stats, filename);
     } else {
-        printf("\nNo latency samples collected. Skipping CSV export.\n");
+        printf("No latency responses received!\n");
     }
 
-    free(send_buffer);
-    free(recv_buffer);
     free(payload);
+    free(buffer);
 
 cleanup:
-    stats_free(&stats);
+    /* Free latency buffer */
+    if (g_latency_buffer) {
+        free(g_latency_buffer);
+        g_latency_buffer = NULL;
+        g_latency_buffer_size = 0;
+    }
+
     if (participant) {
         int2dds_participant_delete_contained_entities(participant);
         int2dds_delete_participant(participant);
     }
     if (factory) int2dds_domain_participant_factory_finalize(factory);
+
+    return 0;
 }
 
-/* ==================== Local Latency Test ==================== */
-
-static void run_local_latency_test(int32_t domain_id, size_t data_len, int execution_time,
-                                   const char* reliability, double hz) {
-    printf("Starting local latency test (publisher):\n");
-    printf("  Data size: %zu bytes\n", data_len);
-    printf("  Reliability: %s\n", reliability);
-    printf("  Execution time: %d seconds\n", execution_time);
-    if (hz > 0) {
-        printf("  Rate limit: %.0f Hz\n", hz);
-    } else {
-        printf("  Rate: unlimited\n");
-    }
-
+int run_local_latency_test(const PerfTestArgs* args) {
     Int2DdsRet ret;
     Int2DdsParticipantFactory* factory = NULL;
     Int2DdsParticipant* participant = NULL;
@@ -1031,15 +985,25 @@ static void run_local_latency_test(int32_t domain_id, size_t data_len, int execu
     Int2DdsDataWriterQos* qos = NULL;
     Int2DdsWaitSet* waitset = NULL;
 
+    printf("\n=== Local Latency Test (Publisher) ===\n");
+    printf("  Data size: %zu bytes\n", args->data_size);
+    printf("  Reliability: %s\n", args->use_reliable ? "RELIABLE" : "BEST_EFFORT");
+    printf("  Execution time: %llu seconds\n", (unsigned long long)args->execution_time);
+    printf("  Rate: %s\n", args->hz > 0 ? "limited" : "unlimited");
+    if (args->hz > 0) {
+        printf("  Target Hz: %.2f\n", args->hz);
+    }
+    printf("\n");
+
     /* Initialize factory */
     ret = int2dds_domain_participant_factory_get_instance(&factory);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to get participant factory: %d\n", ret);
-        return;
+        return 1;
     }
 
     /* Create participant */
-    ret = int2dds_create_participant(factory, "local_latency_publisher", domain_id, &participant);
+    ret = int2dds_create_participant(factory, "perftest_local_publisher", args->domain_id, &participant);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create participant: %d\n", ret);
         goto cleanup;
@@ -1053,28 +1017,48 @@ static void run_local_latency_test(int32_t domain_id, size_t data_len, int execu
     }
 
     /* Create topic */
-    ret = int2dds_create_topic(participant, "local_latency_test_topic", "PerformanceData", NULL, &topic);
+    ret = int2dds_create_topic(participant, "local_latency_test_topic", "PerformanceTestData", NULL, &topic);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create topic: %d\n", ret);
         goto cleanup;
     }
 
-    /* Create DataWriter QoS */
+    /* Create QoS */
     ret = int2dds_datawriter_qos_create_default(&qos);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create QoS: %d\n", ret);
         goto cleanup;
     }
 
-    if (strcmp(reliability, "reliable") == 0) {
-        ret = int2dds_datawriter_qos_set_reliability(qos, INT2DDS_QOS_RELIABILITY_RELIABLE, 100000000);
-    } else {
-        ret = int2dds_datawriter_qos_set_reliability(qos, INT2DDS_QOS_RELIABILITY_BEST_EFFORT, 0);
+    /* Set reliability */
+    ret = int2dds_datawriter_qos_set_reliability(
+        qos,
+        args->use_reliable ? INT2DDS_QOS_RELIABILITY_RELIABLE : INT2DDS_QOS_RELIABILITY_BEST_EFFORT,
+        100000000
+    );
+    if (ret != INT2DDS_RET_OK) {
+        fprintf(stderr, "Failed to set reliability: %d\n", ret);
+        goto cleanup;
     }
-    int2dds_datawriter_qos_set_history(qos, INT2DDS_QOS_HISTORY_KEEP_LAST, 1000);
 
-    /* Create DataWriter */
-    ret = int2dds_create_datawriter(publisher, topic, qos, &writer);
+    /* Set history */
+    ret = int2dds_datawriter_qos_set_history(qos, INT2DDS_QOS_HISTORY_KEEP_LAST, 1000);
+    if (ret != INT2DDS_RET_OK) {
+        fprintf(stderr, "Failed to set history: %d\n", ret);
+        goto cleanup;
+    }
+
+    /* Create listener */
+    Int2DdsDataWriterListener listener = {
+        .on_publication_matched = on_publication_matched,
+        .on_offered_deadline_missed = NULL,
+        .on_offered_incompatible_qos = NULL,
+        .on_liveliness_lost = NULL,
+        .user_context = NULL
+    };
+
+    /* Create writer with listener */
+    ret = int2dds_create_datawriter_with_listener(publisher, topic, qos, &listener, INT2DDS_STATUS_PUBLICATION_MATCHED, &writer);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create datawriter: %d\n", ret);
         goto cleanup;
@@ -1082,132 +1066,133 @@ static void run_local_latency_test(int32_t domain_id, size_t data_len, int execu
 
     printf("Waiting for subscriber to connect...\n");
 
-    /* Wait for subscriber */
-    while (1) {
-        int32_t total_count = 0, current_count = 0;
-        ret = int2dds_get_publication_matched_status(writer, &total_count, &current_count);
-        if (ret == INT2DDS_RET_OK && current_count > 0) {
-            printf("Subscriber connected. Starting local latency test...\n");
-            break;
-        }
-        sleep_ms(100);
-    }
-
-    /* Allocate buffers */
-    size_t buffer_size = 16 + data_len;
-    uint8_t* buffer = (uint8_t*)malloc(buffer_size);
-    uint8_t* payload = (uint8_t*)malloc(data_len);
-    if (!buffer || !payload) {
-        fprintf(stderr, "Failed to allocate buffers\n");
+    /* Wait for subscriber match */
+    ret = int2dds_waitset_new(&waitset);
+    if (ret != INT2DDS_RET_OK) {
+        fprintf(stderr, "Failed to create waitset: %d\n", ret);
         goto cleanup;
     }
-    memset(payload, 0xAA, data_len);
 
-    /* Test variables */
-    uint64_t start_time = get_current_time_ns();
-    uint64_t end_time = start_time + (uint64_t)execution_time * 1000000000ULL;
+    ret = int2dds_waitset_attach_datawriter(waitset, writer);
+    if (ret != INT2DDS_RET_OK) {
+        fprintf(stderr, "Failed to attach writer to waitset: %d\n", ret);
+        goto cleanup;
+    }
+
+    ret = int2dds_waitset_wait(waitset, 60000000000ULL);
+    if (ret == INT2DDS_RET_TIMEOUT) {
+        fprintf(stderr, "Timeout waiting for subscriber\n");
+        goto cleanup;
+    } else if (ret != INT2DDS_RET_OK) {
+        fprintf(stderr, "WaitSet wait failed: %d\n", ret);
+        goto cleanup;
+    }
+
+    /* Allocate payload data */
+    uint8_t* payload = (uint8_t*)malloc(args->data_size);
+    if (payload == NULL) {
+        fprintf(stderr, "Failed to allocate payload\n");
+        goto cleanup;
+    }
+    memset(payload, 0xAA, args->data_size);
+
+    /* Allocate serialization buffer */
+    size_t buffer_size = 24 + args->data_size;
+    uint8_t* buffer = (uint8_t*)malloc(buffer_size);
+    if (buffer == NULL) {
+        fprintf(stderr, "Failed to allocate buffer\n");
+        free(payload);
+        goto cleanup;
+    }
+
+    /* Performance statistics */
+    uint64_t total_samples = 0;
     uint64_t seq_num = 0;
-    uint64_t total_sent = 0;
-    uint64_t last_report_time = start_time;
+
+    /* Start test */
+    uint64_t start_time_ns = get_current_time_ns();
+    uint64_t test_end_time = start_time_ns + (args->execution_time * 1000000000ULL);
+    uint64_t last_report_time = start_time_ns;
     uint64_t last_report_count = 0;
 
-    /* Hz-based timing */
-    uint64_t send_interval_ns = (hz > 0) ? (uint64_t)(1000000000.0 / hz) : 0;
-    uint64_t next_send_time = start_time + send_interval_ns;
+    uint64_t next_send_time = start_time_ns;
+    uint64_t interval_ns = args->hz > 0 ? (uint64_t)(1000000000.0 / args->hz) : 0;
 
-    while (get_current_time_ns() < end_time) {
-        /* Hz-based rate limiting - wait until next send time */
-        if (hz > 0) {
-            sleep_until_ns(next_send_time);
-        }
+    printf("Starting local latency test...\n");
 
-        /* Create and serialize data */
-        PerformanceData data;
-        data.seq_num = seq_num;
-        data.timestamp = get_current_time_ns();
-        data.data_len = data_len;
-        data.data = payload;
-
-        size_t serialized_size = serialize_performance_data(&data, buffer, buffer_size);
-        ret = int2dds_write(writer, buffer, serialized_size);
-
-        seq_num++;
-        total_sent++;
-
-        /* Update next send time for Hz limiting */
-        if (hz > 0) {
-            next_send_time += send_interval_ns;
-        }
-
-        /* Periodic report */
+    while (1) {
         uint64_t now = get_current_time_ns();
-        if (now - last_report_time >= 5000000000ULL) {
-            double elapsed = (double)(now - start_time) / 1000000000.0;
-            double interval_elapsed = (double)(now - last_report_time) / 1000000000.0;
-            uint64_t interval_sent = total_sent - last_report_count;
 
-            double avg_rate = total_sent / elapsed;
+        if (now >= test_end_time) {
+            break;
+        }
+
+        /* Rate limiting */
+        if (args->hz > 0 && now < next_send_time) {
+            continue;
+        }
+
+        /* Create sample */
+        PerformanceTestData sample = {
+            .seq_num = seq_num++,
+            .timestamp = now,
+            .data = payload,
+            .data_len = args->data_size
+        };
+
+        /* Serialize */
+        size_t serialized_size = serialize_performance_data(&sample, buffer, buffer_size);
+        if (serialized_size == 0) {
+            fprintf(stderr, "Serialization failed\n");
+            break;
+        }
+
+        /* Write */
+        ret = int2dds_write(writer, buffer, serialized_size);
+        if (ret != INT2DDS_RET_OK) {
+            fprintf(stderr, "Write failed: %d\n", ret);
+            break;
+        }
+
+        total_samples++;
+
+        /* Update next send time */
+        if (args->hz > 0) {
+            next_send_time += interval_ns;
+        }
+
+        /* Periodic progress (every 5 seconds) */
+        now = get_current_time_ns();
+        if (now - last_report_time >= 5000000000ULL) {
+            uint64_t elapsed_ns = now - start_time_ns;
+            double elapsed_sec = elapsed_ns / 1e9;
+            uint64_t interval_sent = total_samples - last_report_count;
+            double interval_elapsed = (now - last_report_time) / 1e9;
+
+            double avg_rate = total_samples / elapsed_sec;
             double interval_rate = interval_sent / interval_elapsed;
 
             printf("[%.1fs] Sent: %llu, Avg: %.0f msg/s, Interval: %.0f msg/s\n",
-                   elapsed, (unsigned long long)total_sent, avg_rate, interval_rate);
+                   elapsed_sec, (unsigned long long)total_samples, avg_rate, interval_rate);
 
             last_report_time = now;
-            last_report_count = total_sent;
+            last_report_count = total_samples;
         }
     }
 
-    /* Final interval report */
-    {
-        uint64_t now = get_current_time_ns();
-        double elapsed_final = (double)(now - start_time) / 1000000000.0;
-        double interval_elapsed = (double)(now - last_report_time) / 1000000000.0;
-        uint64_t interval_sent = total_sent - last_report_count;
+    uint64_t end_time_ns = get_current_time_ns();
 
-        double avg_rate = total_sent / elapsed_final;
-        double interval_rate = (interval_elapsed > 0) ? interval_sent / interval_elapsed : 0;
+    /* Print final statistics */
+    double duration_sec = (end_time_ns - start_time_ns) / 1e9;
+    double msgs_per_sec = total_samples / duration_sec;
 
-        printf("[%.1fs] Sent: %llu, Avg: %.0f msg/s, Interval: %.0f msg/s\n",
-               elapsed_final, (unsigned long long)total_sent, avg_rate, interval_rate);
-    }
+    printf("\n=== Local Latency Test Results ===\n");
+    printf("Total samples sent: %llu\n", (unsigned long long)total_samples);
+    printf("Duration: %.2f seconds\n", duration_sec);
+    printf("Send rate: %.2f msg/s\n", msgs_per_sec);
 
-    /* Final statistics */
-    double elapsed = (double)(get_current_time_ns() - start_time) / 1000000000.0;
-    double final_rate = total_sent / elapsed;
-
-    printf("\n=== Local Latency Test Publisher Results ===\n");
-    printf("Total samples sent: %llu\n", (unsigned long long)total_sent);
-    printf("Test duration: %.2f seconds\n", elapsed);
-    printf("Send rate: %.2f msg/s\n", final_rate);
-
-    /* Save to CSV */
-    char filename[256];
-    if (hz > 0) {
-        snprintf(filename, sizeof(filename), "publisher_local_latency_results_%zub_%.0fhz.csv",
-                 data_len, hz);
-    } else {
-        snprintf(filename, sizeof(filename), "publisher_local_latency_results_%zub.csv", data_len);
-    }
-
-    FILE* file = fopen(filename, "r");
-    bool file_exists = (file != NULL);
-    if (file) fclose(file);
-
-    file = fopen(filename, "a");
-    if (file) {
-        if (!file_exists) {
-            fprintf(file, "Timestamp,Total_Sent_Messages,Duration_Seconds,Messages_Per_Second\n");
-        }
-        uint64_t timestamp_ms = (uint64_t)time(NULL) * 1000;
-        fprintf(file, "%llu,%llu,%.2f,%.2f\n",
-                (unsigned long long)timestamp_ms,
-                (unsigned long long)total_sent, elapsed, final_rate);
-        fclose(file);
-        printf("Results saved to: %s\n", filename);
-    }
-
-    free(buffer);
     free(payload);
+    free(buffer);
 
 cleanup:
     if (participant) {
@@ -1215,95 +1200,113 @@ cleanup:
         int2dds_delete_participant(participant);
     }
     if (factory) int2dds_domain_participant_factory_finalize(factory);
+
+    return 0;
 }
 
-/* ==================== Main ==================== */
+/* ====== Argument Parsing ====== */
 
-static void print_help(const char* program_name) {
-    printf("Usage: %s [options]\n", program_name);
-    printf("Options:\n");
-    printf("  --mode, -m <mode>        Test mode: throughput, latency, local_latency (default: throughput)\n");
-    printf("  --domain-id, -d <id>     Domain ID (default: 0)\n");
-    printf("  --data-size, -s <size>   Data size in bytes (default: 1024)\n");
-    printf("  --time, -t <seconds>     Execution time (default: 30)\n");
-    printf("  --reliability, -r <mode> Reliability: best_effort, reliable (default: best_effort)\n");
-    printf("  --hz, -z <rate>          Rate limit in Hz (default: unlimited)\n");
-    printf("  --interval, -i <ms>      Latency test interval in ms (default: 1000)\n");
-    printf("  --count, -c <num>        Number of latency samples (default: 0 = time-based)\n");
-    printf("  --help, -h               Show this help\n");
+void print_usage(const char* prog_name) {
+    printf("Usage: %s [OPTIONS]\n", prog_name);
+    printf("\nOptions:\n");
+    printf("  --mode <mode>          Test mode: throughput, latency, local_latency (default: throughput)\n");
+    printf("  --size <bytes>         Payload size in bytes (default: 1024)\n");
+    printf("  --time <seconds>       Test duration in seconds (default: 30)\n");
+    printf("  --hz <rate>            Message rate in Hz, 0 for unlimited (default: 0)\n");
+    printf("  --reliability <mode>   QoS reliability: best_effort or reliable (default: best_effort)\n");
+    printf("  --domain <id>          DDS domain ID (default: 0)\n");
+    printf("  --help                 Show this help message\n");
 }
 
-int main(int argc, char* argv[]) {
-    /* Default parameters */
-    char test_mode[64] = "throughput";
-    int32_t domain_id = 17;
-    size_t data_len = 1024;
-    int execution_time = 30;
-    char reliability[64] = "best_effort";
-    double hz = 0.0;
-    int latency_interval_ms = 1000;
-    int latency_count = 0;
+int parse_args(int argc, char** argv, PerfTestArgs* args) {
+    /* Set defaults */
+    args->mode = MODE_THROUGHPUT;
+    args->data_size = 1024;
+    args->execution_time = 30;
+    args->hz = 0.0;
+    args->use_reliable = 0;  /* best_effort is default */
+    args->domain_id = 0;
 
-    /* Parse command line arguments */
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--mode") == 0 || strcmp(argv[i], "-m") == 0) {
-            if (i + 1 < argc) {
-                strncpy(test_mode, argv[++i], sizeof(test_mode) - 1);
-                test_mode[sizeof(test_mode) - 1] = '\0';
+        if (strcmp(argv[i], "--help") == 0) {
+            return -1;
+        } else if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc) {
+            i++;
+            if (strcmp(argv[i], "throughput") == 0) {
+                args->mode = MODE_THROUGHPUT;
+            } else if (strcmp(argv[i], "latency") == 0) {
+                args->mode = MODE_LATENCY;
+            } else if (strcmp(argv[i], "local_latency") == 0) {
+                args->mode = MODE_LOCAL_LATENCY;
+            } else {
+                fprintf(stderr, "Unknown mode: %s\n", argv[i]);
+                return -1;
             }
-        } else if (strcmp(argv[i], "--domain-id") == 0 || strcmp(argv[i], "-d") == 0) {
-            if (i + 1 < argc) {
-                domain_id = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--size") == 0 && i + 1 < argc) {
+            i++;
+            args->data_size = (size_t)atoi(argv[i]);
+        } else if (strcmp(argv[i], "--time") == 0 && i + 1 < argc) {
+            i++;
+            args->execution_time = (uint64_t)atoi(argv[i]);
+        } else if (strcmp(argv[i], "--hz") == 0 && i + 1 < argc) {
+            i++;
+            args->hz = atof(argv[i]);
+        } else if (strcmp(argv[i], "--reliability") == 0 && i + 1 < argc) {
+            i++;
+            if (strcmp(argv[i], "reliable") == 0) {
+                args->use_reliable = 1;
+            } else if (strcmp(argv[i], "best_effort") == 0) {
+                args->use_reliable = 0;
+            } else {
+                fprintf(stderr, "Unknown reliability: %s\n", argv[i]);
+                return -1;
             }
-        } else if (strcmp(argv[i], "--data-size") == 0 || strcmp(argv[i], "-s") == 0) {
-            if (i + 1 < argc) {
-                data_len = (size_t)atoi(argv[++i]);
-            }
-        } else if (strcmp(argv[i], "--time") == 0 || strcmp(argv[i], "-t") == 0) {
-            if (i + 1 < argc) {
-                execution_time = atoi(argv[++i]);
-            }
-        } else if (strcmp(argv[i], "--reliability") == 0 || strcmp(argv[i], "-r") == 0) {
-            if (i + 1 < argc) {
-                strncpy(reliability, argv[++i], sizeof(reliability) - 1);
-                reliability[sizeof(reliability) - 1] = '\0';
-            }
-        } else if (strcmp(argv[i], "--hz") == 0 || strcmp(argv[i], "-z") == 0) {
-            if (i + 1 < argc) {
-                hz = atof(argv[++i]);
-            }
-        } else if (strcmp(argv[i], "--count") == 0 || strcmp(argv[i], "-c") == 0) {
-            if (i + 1 < argc) {
-                latency_count = atoi(argv[++i]);
-            }
-        } else if (strcmp(argv[i], "--interval") == 0 || strcmp(argv[i], "-i") == 0) {
-            if (i + 1 < argc) {
-                latency_interval_ms = atoi(argv[++i]);
-            }
-        } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-            print_help(argv[0]);
-            return 0;
+        } else if (strcmp(argv[i], "--domain") == 0 && i + 1 < argc) {
+            i++;
+            args->domain_id = atoi(argv[i]);
+        } else {
+            fprintf(stderr, "Unknown argument: %s\n", argv[i]);
+            return -1;
         }
     }
 
-    printf("int2dds FFI Performance Test Publisher\n");
-    printf("Test mode: %s\n", test_mode);
+    return 0;
+}
 
-    if (strcmp(test_mode, "throughput") == 0 || strcmp(test_mode, "thr") == 0 || strcmp(test_mode, "1") == 0) {
-        printf("Starting throughput test mode\n");
-        run_throughput_test(domain_id, data_len, execution_time, reliability, hz);
-    } else if (strcmp(test_mode, "latency") == 0 || strcmp(test_mode, "lat") == 0 || strcmp(test_mode, "2") == 0) {
-        printf("Starting latency test mode\n");
-        run_latency_test(domain_id, data_len, execution_time, reliability, latency_interval_ms, latency_count, hz);
-    } else if (strcmp(test_mode, "local_latency") == 0 || strcmp(test_mode, "local") == 0 ||
-               strcmp(test_mode, "ll") == 0 || strcmp(test_mode, "3") == 0) {
-        printf("Starting local latency test mode\n");
-        run_local_latency_test(domain_id, data_len, execution_time, reliability, hz);
-    } else {
-        printf("Invalid test mode '%s'. Supported modes: throughput, latency, local_latency\n", test_mode);
-        printf("Defaulting to throughput test.\n");
-        run_throughput_test(domain_id, data_len, execution_time, reliability, hz);
+/* ====== Main ====== */
+
+int main(int argc, char** argv) {
+    PerfTestArgs args;
+
+    if (parse_args(argc, argv, &args) != 0) {
+        print_usage(argv[0]);
+        return 1;
     }
 
-    return 0;
+    printf("int2dds Performance Test Publisher\n");
+    printf("===================================\n");
+
+    int result = 0;
+    switch (args.mode) {
+        case MODE_THROUGHPUT:
+            result = run_throughput_test(&args);
+            break;
+        case MODE_LATENCY:
+            result = run_latency_test(&args);
+            break;
+        case MODE_LOCAL_LATENCY:
+            result = run_local_latency_test(&args);
+            break;
+        default:
+            fprintf(stderr, "Unknown test mode\n");
+            result = 1;
+            break;
+    }
+
+    /* Cleanup global latency stats */
+    if (g_latency_stats.latency_samples) {
+        free(g_latency_stats.latency_samples);
+    }
+
+    return result;
 }

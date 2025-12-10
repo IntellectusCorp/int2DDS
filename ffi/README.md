@@ -111,6 +111,37 @@ int2dds_delete_datareader()               // Delete data reader
 int2dds_get_subscription_matched_status() // Get matched writers count
 ```
 
+#### DataReader Listener (Callbacks)
+```c
+int2dds_create_datareader_with_listener()   // Create reader with listener callbacks
+int2dds_datareader_set_listener()            // Set/update listener for existing reader
+int2dds_datareader_get_listener()            // Get current listener configuration
+```
+
+**Available callbacks (7):**
+- `on_data_available` - New data arrived
+- `on_subscription_matched` - Publisher discovered/lost
+- `on_sample_rejected` - Sample rejected (resource limits)
+- `on_liveliness_changed` - Writer liveliness state changed
+- `on_requested_deadline_missed` - Deadline QoS violation
+- `on_requested_incompatible_qos` - Incompatible QoS detected
+- `on_sample_lost` - Sample lost (reliability)
+
+#### DataWriter Listener (Callbacks)
+```c
+int2dds_create_datawriter_with_listener()   // Create writer with listener callbacks
+int2dds_datawriter_set_listener()            // Set/update listener for existing writer
+int2dds_datawriter_get_listener()            // Get current listener configuration
+```
+
+**Available callbacks (4):**
+- `on_publication_matched` - Subscriber discovered/lost
+- `on_offered_deadline_missed` - Deadline QoS violation
+- `on_offered_incompatible_qos` - Incompatible QoS detected
+- `on_liveliness_lost` - Liveliness assertion failure
+
+**Note:** Callbacks are invoked asynchronously from DDS background threads. All callbacks must be thread-safe.
+
 #### Topic
 ```c
 int2dds_create_topic()        // Create topic
@@ -271,6 +302,15 @@ All opaque types use `Arc` (atomic reference counting) internally and are marked
 - Multiple threads can safely call functions on the same entities
 - Users must ensure proper synchronization for shared state
 - Follow standard DDS threading patterns
+
+### Listener Callbacks
+
+Listener callbacks are invoked from DDS background threads:
+- Callbacks must be thread-safe
+- Multiple callbacks may execute concurrently
+- Callbacks should return quickly to avoid blocking DDS
+- Do not delete entities inside their own callbacks
+- User context pointer must remain valid until entity deletion
 
 ## Dependencies
 

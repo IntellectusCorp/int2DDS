@@ -24,7 +24,12 @@ use int2dds::{
     infrastructure::status::StatusMask, subscription::qos::SubscriberQos, topic::RawData,
 };
 
-use super::{error::*, qos::Int2DdsDataReaderQos, types::*};
+use super::{
+    error::*,
+    listener::{FfiDataReaderListener, Int2DdsDataReaderListener},
+    qos::Int2DdsDataReaderQos,
+    types::*,
+};
 
 /// Create a Subscriber
 ///
@@ -130,11 +135,150 @@ pub unsafe extern "C" fn int2dds_create_datareader(
         StatusMask::default()
     ));
 
-    let reader_handle = Box::new(Int2DdsDataReader { inner: reader });
+    let reader_handle = Box::new(Int2DdsDataReader { inner: reader, listener: None });
 
     *reader_out = Box::into_raw(reader_handle);
 
     INT2DDS_RET_OK
+}
+
+/// Create a DataReader with listener callbacks
+///
+/// # Safety
+/// - `subscriber` must be a valid subscriber
+/// - `topic` must be a valid topic
+/// - `qos` can be null for default QoS
+/// - `listener` can be null for no listener
+/// - `mask` specifies which status changes trigger callbacks
+/// - `reader_out` must be a valid pointer to a null pointer
+/// - The returned reader must be freed with `int2dds_delete_datareader`
+/// - Listener callbacks must be thread-safe and remain valid until reader is deleted
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_create_datareader_with_listener(
+    subscriber: *const Int2DdsSubscriber,
+    topic: *const Int2DdsTopic,
+    qos: *const Int2DdsDataReaderQos,
+    listener: *const Int2DdsDataReaderListener,
+    mask: u32,
+    reader_out: *mut *mut Int2DdsDataReader,
+) -> Int2DdsRet {
+    check_null!(subscriber);
+    check_null!(topic);
+    check_null!(reader_out);
+
+    let subscriber_ref = &*subscriber;
+    let topic_ref = &*topic;
+
+    let reader_qos = if qos.is_null() {
+        int2dds::subscription::qos::DataReaderQos::default()
+    } else {
+        (*qos).inner.clone()
+    };
+
+    // Create DataReader<RawData> first without listener
+    let reader = ffi_try!(subscriber_ref.inner.create_datareader::<RawData>(
+        &*topic_ref.inner,
+        reader_qos,
+        None,
+        StatusMask::from_bits_truncate(mask)
+    ));
+
+    // Create reader_handle with the actual reader
+    let mut reader_handle = Box::new(Int2DdsDataReader { inner: reader, listener: None });
+
+    // If listener is provided, set it now
+    if !listener.is_null() {
+        let reader_ptr = &mut *reader_handle as *mut Int2DdsDataReader;
+        let ffi_listener = FfiDataReaderListener::new(*listener, reader_ptr);
+        let listener_arc = Arc::new(ffi_listener);
+
+        // Set the listener on the reader
+        let listener_clone = listener_arc.clone()
+            as Arc<
+                dyn int2dds::subscription::data_reader_listener::DataReaderListener<Foo = RawData>,
+            >;
+        ffi_try!(reader_handle
+            .inner
+            .set_listener(Some(listener_clone), StatusMask::from_bits_truncate(mask)));
+
+        reader_handle.listener = Some(listener_arc);
+    }
+
+    *reader_out = Box::into_raw(reader_handle);
+
+    INT2DDS_RET_OK
+}
+
+/// Set or update the listener for a DataReader
+///
+/// # Safety
+/// - `reader` must be a valid datareader
+/// - `listener` can be null to remove the listener
+/// - `mask` specifies which status changes trigger callbacks
+/// - Listener callbacks must be thread-safe
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_set_listener(
+    reader: *mut Int2DdsDataReader,
+    listener: *const Int2DdsDataReaderListener,
+    mask: u32,
+) -> Int2DdsRet {
+    check_null!(reader);
+
+    let reader_ref = &mut *reader;
+
+    // Create new listener wrapper if provided
+    let listener_arc = if !listener.is_null() {
+        let ffi_listener = FfiDataReaderListener::new(*listener, reader);
+        Some(Arc::new(ffi_listener))
+    } else {
+        None
+    };
+
+    // Set listener on the inner reader
+    let result = reader_ref.inner.set_listener(
+        listener_arc.clone().map(|l| {
+            l as Arc<
+                dyn int2dds::subscription::data_reader_listener::DataReaderListener<Foo = RawData>,
+            >
+        }),
+        StatusMask::from_bits_truncate(mask),
+    );
+
+    // Update the stored listener
+    reader_ref.listener = listener_arc;
+
+    match result {
+        Ok(()) => INT2DDS_RET_OK,
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
+/// Get the current listener from a DataReader
+///
+/// # Safety
+/// - `reader` must be a valid datareader
+/// - `listener_out` must be a valid pointer to Int2DdsDataReaderListener
+/// - Returns a copy of the listener callbacks and user context
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_get_listener(
+    reader: *const Int2DdsDataReader,
+    listener_out: *mut Int2DdsDataReaderListener,
+) -> Int2DdsRet {
+    check_null!(reader);
+    check_null!(listener_out);
+
+    let reader_ref = &*reader;
+
+    // Return the stored listener callbacks
+    if let Some(listener_arc) = &reader_ref.listener {
+        // Copy the callbacks struct
+        *listener_out = listener_arc.callbacks;
+        INT2DDS_RET_OK
+    } else {
+        // No listener set - return zeroed callbacks
+        *listener_out = std::mem::zeroed();
+        INT2DDS_RET_OK
+    }
 }
 
 /// Take data from a DataReader (removes from cache)
@@ -178,10 +322,10 @@ pub unsafe extern "C" fn int2dds_take(
         Err(e) => return dds_error_to_code(&e),
     };
 
-    // Get data from sample
-    let raw_data = match sample.data() {
-        Ok(data) => data,
-        Err(_) => {
+    // Get raw bytes directly (zero-copy, bypasses deserialization)
+    let raw_bytes = match sample.raw_bytes() {
+        Some(bytes) => bytes,
+        None => {
             *valid_data_out = false;
             *data_size_out = 0;
             return INT2DDS_RET_NO_DATA;
@@ -191,7 +335,7 @@ pub unsafe extern "C" fn int2dds_take(
     let info = sample.sample_info();
 
     // Check if buffer is large enough
-    let data_len = raw_data.data.len();
+    let data_len = raw_bytes.len();
     *data_size_out = data_len;
 
     if data_len > buffer_size {
@@ -200,7 +344,7 @@ pub unsafe extern "C" fn int2dds_take(
     }
 
     // Copy data to buffer
-    std::ptr::copy_nonoverlapping(raw_data.data.as_ptr(), data_buffer, data_len);
+    std::ptr::copy_nonoverlapping(raw_bytes.as_ptr(), data_buffer, data_len);
     *valid_data_out = info.valid_data;
 
     INT2DDS_RET_OK
@@ -241,10 +385,10 @@ pub unsafe extern "C" fn int2dds_read(
         Err(e) => return dds_error_to_code(&e),
     };
 
-    // Get data from sample
-    let raw_data = match sample.data() {
-        Ok(data) => data,
-        Err(_) => {
+    // Get raw bytes directly (zero-copy, bypasses deserialization)
+    let raw_bytes = match sample.raw_bytes() {
+        Some(bytes) => bytes,
+        None => {
             *valid_data_out = false;
             *data_size_out = 0;
             return INT2DDS_RET_NO_DATA;
@@ -254,7 +398,7 @@ pub unsafe extern "C" fn int2dds_read(
     let info = sample.sample_info();
 
     // Check if buffer is large enough
-    let data_len = raw_data.data.len();
+    let data_len = raw_bytes.len();
     *data_size_out = data_len;
 
     if data_len > buffer_size {
@@ -263,7 +407,7 @@ pub unsafe extern "C" fn int2dds_read(
     }
 
     // Copy data to buffer
-    std::ptr::copy_nonoverlapping(raw_data.data.as_ptr(), data_buffer, data_len);
+    std::ptr::copy_nonoverlapping(raw_bytes.as_ptr(), data_buffer, data_len);
     *valid_data_out = info.valid_data;
 
     INT2DDS_RET_OK

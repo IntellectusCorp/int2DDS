@@ -67,6 +67,13 @@ target_link_libraries(perftest_publisher ${INT2DDS_FFI_LIB})
 add_executable(perftest_subscriber performance_test/perftest_subscriber.c)
 target_link_libraries(perftest_subscriber ${INT2DDS_FFI_LIB})
 
+# Listener Examples
+add_executable(listener_publisher listener/listener_publisher.c)
+target_link_libraries(listener_publisher ${INT2DDS_FFI_LIB})
+
+add_executable(listener_subscriber listener/listener_subscriber.c)
+target_link_libraries(listener_subscriber ${INT2DDS_FFI_LIB})
+
 # Copy DLL to output directory on Windows
 if(WIN32 AND EXISTS ${INT2DDS_FFI_DLL})
     add_custom_command(TARGET hello_world_publisher POST_BUILD
@@ -113,6 +120,14 @@ if(WIN32 AND EXISTS ${INT2DDS_FFI_DLL})
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${INT2DDS_FFI_DLL}
         $<TARGET_FILE_DIR:perftest_subscriber>)
+    add_custom_command(TARGET listener_publisher POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${INT2DDS_FFI_DLL}
+        $<TARGET_FILE_DIR:listener_publisher>)
+    add_custom_command(TARGET listener_subscriber POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${INT2DDS_FFI_DLL}
+        $<TARGET_FILE_DIR:listener_subscriber>)
 endif()
 
 # Instructions
@@ -131,6 +146,8 @@ message(STATUS "  ./waitset_publisher")
 message(STATUS "  ./waitset_subscriber")
 message(STATUS "  ./keyed_publisher")
 message(STATUS "  ./keyed_subscriber")
+message(STATUS "  ./listener_publisher")
+message(STATUS "  ./listener_subscriber")
 message(STATUS "  ./multi_pub_sub")
 message(STATUS "  ./multi_participant_1")
 message(STATUS "  ./multi_participant_2")
