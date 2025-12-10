@@ -108,21 +108,21 @@ impl DcpsBridge {
         }
     }
 
-    pub(crate) fn init(&mut self) {
+    pub(crate) fn init(&mut self) -> RtpsResult<()> {
         // Start SEDP threads
         if let Some(sedp_logic) = self.sedp_logic.as_ref() {
             sedp_logic.start_sedp(
                 self.socket.discovery_multicast_listener(),
                 self.socket.discovery_unicast_listener(),
                 self.socket.discovery_tcp_listener(),
-            );
+            )?;
         } else {
             log::error!("sedp_logic is not set");
         }
 
         // Start SPDP threads
         if let Some(spdp_logic) = self.spdp_logic.as_ref() {
-            spdp_logic.start_spdp();
+            spdp_logic.start_spdp()?;
         } else {
             log::error!("spdp_logic is not set");
         }
@@ -136,7 +136,7 @@ impl DcpsBridge {
                 self.socket.user_traffic_tcp_listener(),
                 self.socket.shm_listener(),
                 self.socket.sender(),
-            );
+            )?;
         } else {
             log::error!("user_logic is not set");
         }
@@ -166,6 +166,8 @@ impl DcpsBridge {
         //         log::error!("background_logic is not set");
         //     }
         // };
+
+        Ok(())
     }
 
     pub(crate) fn next_entity_guid(&self, entity_kind: EntityKind) -> Guid {
@@ -601,6 +603,7 @@ impl DcpsBridge {
 
         SendingHandler::remove_map_guard(&self.participant.guid());
         TimerHandler::remove_map_guard(&self.participant.guid());
+        self.thread_monitor = None;
         self.socket.close();
         Ok(())
     }
@@ -792,13 +795,78 @@ mod tests {
         //initialize dcps_bridge
         let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(10)));
         match dcps_bridge.lock() {
-            Ok(mut dcps_bridge) => dcps_bridge.init(),
+            Ok(mut dcps_bridge) => dcps_bridge.init().unwrap(),
             Err(e) => {
                 log::error!("dcps_bridge lock error: {:?}", e);
             }
         }
 
         thread::sleep(std::time::Duration::from_secs(100));
+    }
+
+    /// Test that all Logic objects (SpdpLogic, SedpLogic, UserLogic, WlpLogic) are properly cleaned up
+    #[test]
+    fn test_all_logic_cleanup() {
+        let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(0)));
+
+        {
+            let mut bridge = dcps_bridge.lock().unwrap();
+            bridge.init().unwrap();
+            thread::sleep(StdDuration::from_millis(50));
+
+            // All logics should exist after init
+            assert!(bridge.spdp_logic.as_ref().is_some(), "SpdpLogic should exist after init");
+            assert!(bridge.sedp_logic.as_ref().is_some(), "SedpLogic should exist after init");
+            assert!(bridge.user_logic.as_ref().is_some(), "UserLogic should exist after init");
+            assert!(bridge.participant.wlp_logic().is_some(), "WlpLogic should exist after init");
+
+            let _ = bridge.disable();
+
+            // DcpsBridge-owned logics should be None after disable
+            assert!(bridge.spdp_logic.as_ref().is_none(), "SpdpLogic should be None after disable");
+            assert!(bridge.sedp_logic.as_ref().is_none(), "SedpLogic should be None after disable");
+            assert!(bridge.user_logic.as_ref().is_none(), "UserLogic should be None after disable");
+            // WlpLogic is in OnceLock, cleaned up when Participant drops
+        }
+    }
+
+    /// Test that all Handler objects (SendingHandler, TimerHandler) are properly cleaned up
+    #[test]
+    fn test_all_handler_cleanup() {
+        use crate::rtps::task::sending_handler::SendingHandler;
+        use crate::rtps::task::timer_handler::TimerHandler;
+
+        let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(0)));
+        let participant_guid: crate::rtps::common::guid::Guid;
+
+        {
+            let mut bridge = dcps_bridge.lock().unwrap();
+            participant_guid = bridge.participant.guid();
+            bridge.init().unwrap();
+            thread::sleep(StdDuration::from_millis(50));
+
+            // All handlers should exist in global maps after init
+            assert!(
+                SendingHandler::get_instance_by_participant_guid(participant_guid).is_some(),
+                "SendingHandler should exist after init"
+            );
+            assert!(
+                TimerHandler::get_instance_by_participant_guid(participant_guid).is_some(),
+                "TimerHandler should exist after init"
+            );
+
+            let _ = bridge.disable();
+
+            // All handlers should be removed from global maps after disable
+            assert!(
+                SendingHandler::get_instance_by_participant_guid(participant_guid).is_none(),
+                "SendingHandler should be removed after disable"
+            );
+            assert!(
+                TimerHandler::get_instance_by_participant_guid(participant_guid).is_none(),
+                "TimerHandler should be removed after disable"
+            );
+        }
     }
 
     fn change_callback(change: Arc<CacheChange>) {
@@ -850,7 +918,7 @@ mod tests {
 
         match dcps_bridge.lock() {
             Ok(mut dcps_bridge) => {
-                dcps_bridge.init();
+                dcps_bridge.init().unwrap();
 
                 let guid = dcps_bridge.next_entity_guid(EntityKind::USER_DEFINED_READER_NO_KEY);
                 subscription_builtin_topic_data.set_endpoint_guid(guid);
@@ -918,7 +986,7 @@ mod tests {
 
         {
             let mut guard = dcps_bridge_test.lock().unwrap();
-            guard.init();
+            guard.init().unwrap();
 
             let guid = guard.next_entity_guid(EntityKind::USER_DEFINED_WRITER_NO_KEY);
             publication_builtin_topic_data.set_endpoint_guid(guid);
@@ -973,7 +1041,7 @@ mod tests {
 
         let (reader_guid, weak_reader, weak_history_cache) = {
             let mut guard = dcps_bridge.lock().unwrap();
-            guard.init();
+            guard.init().unwrap();
 
             let guid1 = guard.next_entity_guid(EntityKind::USER_DEFINED_READER_NO_KEY);
             subscription_builtin_topic_data.set_endpoint_guid(guid1);
@@ -1068,7 +1136,7 @@ mod tests {
 
         let (writer_guid, weak_writer, weak_history_cache) = {
             let mut guard = dcps_bridge.lock().unwrap();
-            guard.init();
+            guard.init().unwrap();
 
             let guid1 = guard.next_entity_guid(EntityKind::USER_DEFINED_WRITER_NO_KEY);
             publication_builtin_topic_data.set_endpoint_guid(guid1);
@@ -1170,7 +1238,7 @@ mod tests {
 
         {
             let mut guard = dcps_bridge_test.lock().unwrap();
-            guard.init();
+            guard.init().unwrap();
 
             let guid = guard.next_entity_guid(EntityKind::USER_DEFINED_WRITER_NO_KEY);
             publication_builtin_topic_data.set_endpoint_guid(guid);
@@ -1225,7 +1293,7 @@ mod tests {
 
         {
             let mut guard = dcps_bridge_test.lock().unwrap();
-            guard.init();
+            guard.init().unwrap();
 
             let guid = guard.next_entity_guid(EntityKind::USER_DEFINED_WRITER_NO_KEY);
             publication_builtin_topic_data.set_endpoint_guid(guid);
@@ -1280,7 +1348,7 @@ mod tests {
 
         match dcps_bridge.lock() {
             Ok(mut dcps_bridge) => {
-                dcps_bridge.init();
+                dcps_bridge.init().unwrap();
 
                 let guid = dcps_bridge.next_entity_guid(EntityKind::USER_DEFINED_READER_NO_KEY);
                 subscription_builtin_topic_data.set_endpoint_guid(guid);
@@ -1338,7 +1406,7 @@ mod tests {
         subscription_builtin_topic_data.set_type_name(test_type_name.to_string());
 
         let mut guard: std::sync::MutexGuard<'_, DcpsBridge> = dcps_bridge.lock().unwrap();
-        guard.init();
+        guard.init().unwrap();
 
         let guid = guard.next_entity_guid(EntityKind::USER_DEFINED_READER_NO_KEY);
         subscription_builtin_topic_data.set_endpoint_guid(guid);
@@ -1406,7 +1474,7 @@ mod tests {
         publication_builtin_topic_data.set_type_name(test_type_name.to_string());
 
         let mut guard = dcps_bridge.lock().unwrap();
-        guard.init();
+        guard.init().unwrap();
 
         let guid = guard.next_entity_guid(EntityKind::USER_DEFINED_WRITER_NO_KEY);
         publication_builtin_topic_data.set_endpoint_guid(guid);
@@ -1471,7 +1539,7 @@ mod tests {
         publication_builtin_topic_data.set_type_name(test_type_name.to_string());
 
         let mut guard = dcps_bridge.lock().unwrap();
-        guard.init();
+        guard.init().unwrap();
 
         let guid = guard.next_entity_guid(EntityKind::USER_DEFINED_WRITER_NO_KEY);
         publication_builtin_topic_data.set_endpoint_guid(guid);
@@ -1539,7 +1607,7 @@ mod tests {
         publication_builtin_topic_data.set_type_name(test_type_name.to_string());
 
         let mut guard = dcps_bridge.lock().unwrap();
-        guard.init();
+        guard.init().unwrap();
 
         let guid1 = guard.next_entity_guid(EntityKind::USER_DEFINED_WRITER_NO_KEY);
         publication_builtin_topic_data.set_endpoint_guid(guid1);
@@ -1674,7 +1742,7 @@ mod tests {
         best_effort_publication_builtin_topic_data.set_type_name(test_type_name.to_string());
 
         let mut guard = dcps_bridge.lock().unwrap();
-        guard.init();
+        guard.init().unwrap();
 
         let guid1 = guard.next_entity_guid(EntityKind::USER_DEFINED_WRITER_NO_KEY);
         reliable_publication_builtin_topic_data.set_endpoint_guid(guid1);
@@ -1869,7 +1937,7 @@ mod tests {
 
         {
             let mut bridge_guard = dcps_bridge_1.lock().unwrap();
-            bridge_guard.init();
+            bridge_guard.init().unwrap();
 
             // Verify initialization
             if let Some(ref sedp_logic) = bridge_guard.sedp_logic.as_ref() {

@@ -50,13 +50,13 @@ use crate::serialize::pl_cdr::InlineQosParameters;
 use dashmap::DashMap;
 
 use std::net::{SocketAddr, SocketAddrV4};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread::{self, JoinHandle};
 
 #[allow(dead_code)]
 #[derive(Clone)]
 pub(crate) struct UserLogic {
-    participant: Arc<Participant>,
+    participant: Weak<Participant>,
     sender: Option<Arc<TransportSender>>,
     tcp_sender: Option<Arc<TransportSender>>,
     shm_sender: Option<Arc<TransportSender>>,
@@ -72,7 +72,7 @@ impl UserLogic {
         shm_sender: Option<Arc<TransportSender>>,
     ) -> Self {
         Self {
-            participant,
+            participant: Arc::downgrade(&participant),
             sender,
             tcp_sender,
             shm_sender,
@@ -90,12 +90,17 @@ impl UserLogic {
         tcp_listener: Option<TcpListener>,
         shm_listener: Option<ShmListener>,
         sender: Arc<TransportSender>,
-    ) {
+    ) -> RtpsResult<()> {
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
         let mut user_unicast_listening_task = UserUnicastListeningTask::new(
             user_unicast_listener,
             tcp_listener,
             shm_listener,
-            self.participant.clone(),
+            participant.clone(),
         );
 
         // unicast listening
@@ -117,6 +122,8 @@ impl UserLogic {
         if let Ok(mut handle_guard) = self.unicast_listening_handle.lock() {
             *handle_guard = Some(unicast_handle);
         }
+
+        Ok(())
     }
 
     fn send_unsent_changes_of_stateful_writer(&self, writer: &StatefulWriter) -> RtpsResult<()> {
@@ -124,6 +131,11 @@ impl UserLogic {
         let mut reader_proxies = reader_proxies_lock.lock().map_err(|_| {
             RtpsError::new(RtpsErrorCode::LockError, "[Data] Failed to acquire reader proxies lock")
         })?;
+
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
 
         // Send unsent CacheChanges to matched readers
         for reader_proxy in reader_proxies.iter_mut() {
@@ -152,7 +164,7 @@ impl UserLogic {
                     && reader_proxy.is_reliable()
                 {
                     let buffer = MessageCreator::create_gap_msg_consecutive(
-                        self.participant.guid(),
+                        participant.guid(),
                         reader_proxy.remote_reader_guid(),
                         reader_proxy.remote_reader_guid().entity_id(),
                         writer.endpoint_id(),
@@ -302,6 +314,11 @@ impl UserLogic {
             return Ok(()); // Nothing to send
         }
 
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
         for (reader_locator, changes) in reader_tasks.iter() {
             let mut prev_sn = reader_locator.highest_sent_change_sn();
 
@@ -311,7 +328,7 @@ impl UserLogic {
                 // RTPS 2.5 - 8.4.8.2.4 Create GAP message
                 if prev_sn != SequenceNumber::UNKNOWN && change_sn > prev_sn + 1 {
                     let buf = MessageCreator::create_gap_msg_consecutive(
-                        self.participant.guid(),
+                        participant.guid(),
                         Guid::new(reader_locator.guid_prefix(), reader_locator.remote_entity_id()),
                         reader_locator.remote_entity_id(),
                         writer.endpoint_id(),
@@ -411,7 +428,12 @@ impl UserLogic {
     }
 
     pub(crate) fn send_unsent_changes(&self, entity_id: EntityId) -> RtpsResult<()> {
-        let writer = self.participant.find_writer_from_entity_id(entity_id);
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
+        let writer = participant.find_writer_from_entity_id(entity_id);
 
         if let Some(writer) = writer {
             if let Some(writer) = writer.as_any().downcast_ref::<StatefulWriter>() {
@@ -433,8 +455,12 @@ impl UserLogic {
         writer_entity_id: EntityId,
         remote_reader_guid: Guid,
     ) -> RtpsResult<()> {
-        let writer = self
+        let participant = self
             .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
+        let writer = participant
             .find_writer_from_entity_id(writer_entity_id)
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::RtpsEntityNotFound, "No writer found"))?;
         let stateful_writer =
@@ -585,7 +611,12 @@ impl UserLogic {
         &self,
         entity_id: EntityId,
     ) -> RtpsResult<()> {
-        let writer = self.participant.find_writer_from_entity_id(entity_id);
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
+        let writer = participant.find_writer_from_entity_id(entity_id);
 
         if let Some(writer) = writer {
             if let Some(writer) = writer.as_any().downcast_ref::<StatefulWriter>() {
@@ -617,8 +648,12 @@ impl UserLogic {
         remote_reader_guid: Guid,
         is_preemptive: bool,
     ) -> RtpsResult<()> {
-        let writer = self
+        let participant = self
             .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
+        let writer = participant
             .find_writer_from_entity_id(writer_entity_id)
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::RtpsEntityNotFound, None))?;
 
@@ -754,12 +789,17 @@ impl UserLogic {
         remote_guid: Guid,
         source_timestamp: Option<RtpsTime>,
     ) -> RtpsResult<()> {
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
         let reader_entity_id = data.reader_id;
         let mut matched_readers: Vec<Arc<dyn Reader + Send + Sync>> = Vec::new();
 
         if reader_entity_id != EntityId::UNKNOWN {
             let reader =
-                self.participant.find_reader_from_entity_id(reader_entity_id).ok_or_else(|| {
+                participant.find_reader_from_entity_id(reader_entity_id).ok_or_else(|| {
                     RtpsError::new(
                         RtpsErrorCode::RtpsEntityNotFound,
                         "No reader found for user data".to_string(),
@@ -776,7 +816,7 @@ impl UserLogic {
             }
         } else {
             matched_readers
-                .extend(self.participant.find_readers_matched_with_remote_writer(remote_guid)?);
+                .extend(participant.find_readers_matched_with_remote_writer(remote_guid)?);
         }
 
         for reader in matched_readers {
@@ -853,8 +893,12 @@ impl UserLogic {
     }
 
     fn handle_acknack_message(&self, acknack: &AckNack, remote_guid: Guid) -> RtpsResult<()> {
-        let writer = self
+        let participant = self
             .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
+        let writer = participant
             .find_writer_from_entity_id(acknack.writer_id)
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::RtpsEntityNotFound, None))?;
         let stateful_writer =
@@ -898,7 +942,7 @@ impl UserLogic {
             reader_proxy.requested_changes_set(missing_seq_numbers);
 
             // Notify Writer that Reader has requested CacheChanges
-            let handler = SendingHandler::get_instance(self.participant.clone(), None, None);
+            let handler = SendingHandler::get_instance(participant.clone(), None, None);
             handler.push_message_and_wake(MessageType::SendRequestedChanges(
                 acknack.writer_id,
                 remote_guid,
@@ -908,8 +952,12 @@ impl UserLogic {
     }
 
     fn handle_preemptive_acknack(&self, acknack: &AckNack, reader_guid: Guid) -> RtpsResult<()> {
-        let writer = self
+        let participant = self
             .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
+        let writer = participant
             .find_writer_from_entity_id(acknack.writer_id)
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::RtpsEntityNotFound, None))?;
 
@@ -938,9 +986,14 @@ impl UserLogic {
         let reader_entity_id = heartbeat.reader_id;
         let mut matched_readers: Vec<Arc<dyn Reader + Send + Sync>> = Vec::new();
 
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
         if reader_entity_id != EntityId::UNKNOWN {
             let reader =
-                self.participant.find_reader_from_entity_id(reader_entity_id).ok_or_else(|| {
+                participant.find_reader_from_entity_id(reader_entity_id).ok_or_else(|| {
                     RtpsError::new(
                         RtpsErrorCode::RtpsEntityNotFound,
                         "No reader found for user heartbeat".to_string(),
@@ -957,7 +1010,7 @@ impl UserLogic {
             }
         } else {
             matched_readers
-                .extend(self.participant.find_readers_matched_with_remote_writer(remote_guid)?);
+                .extend(participant.find_readers_matched_with_remote_writer(remote_guid)?);
         }
 
         for reader in matched_readers {
@@ -1014,8 +1067,8 @@ impl UserLogic {
 
                 if missing_fragments.is_some() {
                     let writer_proxies_clone = writer_proxies.clone();
-                    let participant = self.participant.clone();
                     let stateful_reader_guid = stateful_reader.guid();
+                    let participant = participant.clone();
                     let sender_clone = self.sender.clone(); // Option<Arc<TransportSender>>
                     let last_sn = heartbeat.last_sn;
                     let missing_fragments_clone = missing_fragments.clone();
@@ -1025,7 +1078,7 @@ impl UserLogic {
 
                     let timer_id = format!("nackfrag_{:?}_{:?}", remote_guid, last_sn);
                     if let Ok(locked_timer_handler) =
-                        TimerHandler::get_instance(self.participant.clone()).lock()
+                        TimerHandler::get_instance(participant.clone()).lock()
                     {
                         locked_timer_handler.remove_timer(timer_id.clone());
                         locked_timer_handler.add_timer(
@@ -1108,13 +1161,17 @@ impl UserLogic {
         remote_guid: Guid,
         source_timestamp: Option<RtpsTime>,
     ) -> RtpsResult<()> {
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
         let writer_entity_id = data_frag.writer_id;
-        let writer_guid = Guid::new(self.participant.guid().prefix(), writer_entity_id);
+        let writer_guid = Guid::new(participant.guid().prefix(), writer_entity_id);
         let key = (writer_guid, data_frag.writer_sn);
         let total_size = data_frag.sample_size;
 
-        let reader = self
-            .participant
+        let reader = participant
             .find_reader_from_entity_id(data_frag.reader_id)
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::InvalidEntityKind, "Reader not found"))?;
 
@@ -1227,9 +1284,13 @@ impl UserLogic {
         let writer_sn = nack_frag.writer_sn;
         let frag_state = &nack_frag.fragment_number_state;
 
-        // TODO: RtpsError Code handling needed
-        let writer = self
+        let participant = self
             .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
+        // TODO: RtpsError Code handling needed
+        let writer = participant
             .find_writer_from_entity_id(writer_id)
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::InvalidEntityKind, "Writer not found"))?;
 
@@ -1292,9 +1353,14 @@ impl UserLogic {
         let reader_entity_id = gap.reader_id;
         let mut matched_readers: Vec<Arc<dyn Reader + Send + Sync>> = Vec::new();
 
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
         if reader_entity_id != EntityId::UNKNOWN {
             let reader =
-                self.participant.find_reader_from_entity_id(reader_entity_id).ok_or_else(|| {
+                participant.find_reader_from_entity_id(reader_entity_id).ok_or_else(|| {
                     RtpsError::new(
                         RtpsErrorCode::RtpsEntityNotFound,
                         "No reader found for gap".to_string(),
@@ -1311,7 +1377,7 @@ impl UserLogic {
             }
         } else {
             matched_readers
-                .extend(self.participant.find_readers_matched_with_remote_writer(remote_guid)?);
+                .extend(participant.find_readers_matched_with_remote_writer(remote_guid)?);
         }
 
         for reader in matched_readers {
@@ -1364,8 +1430,13 @@ impl UserLogic {
         message_receiver: MessageReceiver,
     ) -> RtpsResult<()> {
         // If INFO_DST exists, local guid must match
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
         if message_receiver.has_dst_submessage() {
-            let local_guid_prefix = self.participant.guid().prefix();
+            let local_guid_prefix = participant.guid().prefix();
             if !message_receiver.is_dst_me(local_guid_prefix) {
                 return Err(RtpsError::new(
                     RtpsErrorCode::InvalidDestinationGuid,
@@ -1389,13 +1460,13 @@ impl UserLogic {
                         continue;
                     }
 
-                    if let Some(wlp) = self.participant.wlp_logic() {
+                    if let Some(wlp) = participant.wlp_logic() {
                         wlp.update_remote_writer_liveliness(remote_guid)?;
                     }
                 }
                 TypedSubmessage::Heartbeat(header, heartbeat) => {
                     if header.liveliness_flag().unwrap_or(false) {
-                        if let Some(wlp) = self.participant.wlp_logic() {
+                        if let Some(wlp) = participant.wlp_logic() {
                             let _ = wlp.handle_heartbeat_message(
                                 heartbeat,
                                 Guid::new(rtps_header.guid_prefix(), heartbeat.writer_id),
@@ -1573,8 +1644,13 @@ impl UserLogic {
         if !missing_changes.is_empty() || !final_flag || is_preemptive {
             writer_proxy.increase_acknack_count();
 
+            let participant = self.participant.upgrade().ok_or(RtpsError::new(
+                RtpsErrorCode::ArcUpgradeError,
+                "Participant already dropped",
+            ))?;
+
             let buffer = MessageCreator::create_acknack_message(
-                self.participant.guid(),
+                participant.guid(),
                 writer_proxy.remote_writer_guid(),
                 stateful_reader.guid().entity_id(),
                 writer_proxy.remote_writer_guid().entity_id(),
@@ -1606,8 +1682,12 @@ impl UserLogic {
         reader_id: EntityId,
         remote_writer_guid: Guid,
     ) -> RtpsResult<()> {
-        let reader = self
+        let participant = self
             .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
+        let reader = participant
             .find_reader_from_entity_id(reader_id)
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::RtpsEntityNotFound, None))?;
         let stateful_reader = reader
@@ -1704,8 +1784,12 @@ impl UserLogic {
         entity_id: EntityId,
         sequence_number: SequenceNumber,
     ) -> RtpsResult<()> {
-        let writer = self
+        let participant = self
             .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
+        let writer = participant
             .find_writer_from_entity_id(entity_id)
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::RtpsEntityNotFound, None))?;
         let stateful_writer = match writer.as_any().downcast_ref::<StatefulWriter>() {
