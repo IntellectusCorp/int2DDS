@@ -136,7 +136,7 @@ impl DcpsBridge {
                 self.socket.user_traffic_tcp_listener(),
                 self.socket.shm_listener(),
                 self.socket.sender(),
-            );
+            )?;
         } else {
             log::error!("user_logic is not set");
         }
