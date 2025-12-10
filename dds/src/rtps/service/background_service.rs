@@ -96,12 +96,13 @@ impl BackgroundService {
                             SendingHandler::get_instance(Arc::clone(&participant), None, None);
 
                         sending_handler.wake_event_loop();
-                        if let Err(e) = sending_handler.join_sending_thread() {
-                            error!("Failed to join sending thread: {}", e);
-                        }
 
                         // Send termination message over network synchronously
                         let _ = participant.send_termination_message_on_shutdown();
+
+                        if let Err(e) = sending_handler.join_sending_thread() {
+                            error!("Failed to join sending thread: {}", e);
+                        }
                     });
                 }
             });
