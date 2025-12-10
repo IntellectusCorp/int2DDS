@@ -3,10 +3,10 @@ run-name: Run integration tests on ${{ github.ref_name }}
 
 on:
   pull_request:
-    branches: [main, develop]
+    branches: [develop]
     types: [opened, synchronize, reopened, ready_for_review]
   push:
-    branches: [main, develop]
+    branches: [develop]
 
 jobs:
   integration-test:
