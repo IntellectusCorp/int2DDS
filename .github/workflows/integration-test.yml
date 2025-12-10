@@ -8,7 +8,11 @@ on:
 
 jobs:
   integration-test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -29,13 +33,8 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
-
-      - name: Configure socket buffer size
-        run: |
-          sudo sysctl -w net.core.rmem_max=5242880
-          sudo sysctl -w net.core.wmem_max=5242880
-          sudo sysctl -w net.core.rmem_default=5242880
-          sudo sysctl -w net.core.wmem_default=5242880
-
+              
       - name: Run integration tests
+        env:
+          INT2DDS_UDP_SOCKET_BUFFER: 5242880
         run: cargo test --test "*" -- --test-threads=1
