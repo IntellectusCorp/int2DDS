@@ -264,8 +264,10 @@ impl EnableChild for DomainParticipant {
         let dcps_bridge = dcps_bridge
             .as_mut()
             .ok_or(DdsError::Error("DcpsBridge is not initialized".to_string()))?;
-        dcps_bridge.init();
-        Ok(())
+        match dcps_bridge.init() {
+            Ok(()) => Ok(()),
+            Err(e) => Err(DdsError::Error(e.to_string())),
+        }
     }
     fn enable_child_entities(&self) -> DdsResult<()> {
         // Helper macro to reduce repetitive code

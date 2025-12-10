@@ -88,7 +88,7 @@ impl SendingTask {
 
         match message {
             MessageType::SpdpMulticast(start_time, duration, domain_id, data) => {
-                spdp_logic.send_spdp_multicast(start_time, duration, domain_id, data);
+                spdp_logic.send_spdp_multicast(start_time, duration, domain_id, data)?;
                 Ok(())
             }
 
@@ -191,8 +191,8 @@ impl SendingTask {
             }
 
             MessageType::OnSpdpMessageArrival(participant_proxy_data) => {
-                spdp_logic.handle_multicast_spdp_message(participant_proxy_data.clone());
-                spdp_logic.handle_participant_liveliness(participant_proxy_data);
+                spdp_logic.handle_multicast_spdp_message(participant_proxy_data.clone())?;
+                spdp_logic.handle_participant_liveliness(participant_proxy_data)?;
                 Ok(())
             }
 
@@ -212,11 +212,16 @@ impl SendingTask {
         let _ = sedp_logic.send_endpoint_termination_message(builtin_writer_guid, cache_change);
     }
 
-    pub(crate) fn sync_spdp_terminate_participant_task(&self) {
-        let spdp_logic = self.spdp_logic.as_ref().as_ref().expect("SpdpLogic is not initialized");
-        spdp_logic.send_participant_termination_message_multicast();
+    pub(crate) fn sync_spdp_terminate_participant_task(&self) -> RtpsResult<()> {
+        let spdp_logic = self
+            .spdp_logic
+            .as_ref()
+            .as_ref()
+            .ok_or(RtpsError::new(RtpsErrorCode::NotInitialized, "SpdpLogic is not initialized"))?;
+        spdp_logic.send_participant_termination_message_multicast()?;
         let sedp_logic = self.sedp_logic.as_ref().as_ref().expect("SedpLogic is not initialized");
         sedp_logic.send_participant_termination_message_unicast();
+        Ok(())
     }
 
     pub(crate) fn event_loop(&mut self, queue: Arc<Mutex<Vec<MessageType>>>) -> RtpsResult<()> {

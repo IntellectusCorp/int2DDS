@@ -108,7 +108,7 @@ impl DcpsBridge {
         }
     }
 
-    pub(crate) fn init(&mut self) {
+    pub(crate) fn init(&mut self) -> RtpsResult<()> {
         // Start SEDP threads
         if let Some(sedp_logic) = self.sedp_logic.as_ref() {
             sedp_logic.start_sedp(
@@ -122,7 +122,7 @@ impl DcpsBridge {
 
         // Start SPDP threads
         if let Some(spdp_logic) = self.spdp_logic.as_ref() {
-            spdp_logic.start_spdp();
+            spdp_logic.start_spdp()?;
         } else {
             log::error!("spdp_logic is not set");
         }
@@ -166,6 +166,8 @@ impl DcpsBridge {
         //         log::error!("background_logic is not set");
         //     }
         // };
+
+        Ok(())
     }
 
     pub(crate) fn next_entity_guid(&self, entity_kind: EntityKind) -> Guid {
@@ -792,13 +794,98 @@ mod tests {
         //initialize dcps_bridge
         let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(10)));
         match dcps_bridge.lock() {
-            Ok(mut dcps_bridge) => dcps_bridge.init(),
+            Ok(mut dcps_bridge) => dcps_bridge.init().unwrap(),
             Err(e) => {
                 log::error!("dcps_bridge lock error: {:?}", e);
             }
         }
 
         thread::sleep(std::time::Duration::from_secs(100));
+    }
+
+    #[test]
+    fn test_drop_order_on_disable() {
+        eprintln!("\n=== TEST: Creating DcpsBridge ===");
+        let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(0)));
+
+        {
+            let mut bridge = dcps_bridge.lock().unwrap();
+
+            // Check Arc counts before init
+            eprintln!(
+                "Before init - sedp_logic Arc count: {}",
+                Arc::strong_count(&bridge.sedp_logic)
+            );
+            eprintln!(
+                "Before init - participant Arc count: {}",
+                Arc::strong_count(&bridge.participant)
+            );
+
+            bridge.init().unwrap();
+            eprintln!("=== DcpsBridge initialized ===");
+
+            // Check Arc counts after init
+            eprintln!(
+                "After init - sedp_logic Arc count: {}",
+                Arc::strong_count(&bridge.sedp_logic)
+            );
+            eprintln!(
+                "After init - participant Arc count: {}",
+                Arc::strong_count(&bridge.participant)
+            );
+
+            // Wait a bit for everything to start
+            thread::sleep(StdDuration::from_millis(100));
+
+            eprintln!("\n=== Calling disable() ===");
+            let _ = bridge.disable();
+            eprintln!("=== disable() completed ===");
+
+            // Check Arc counts after disable
+            eprintln!(
+                "After disable - sedp_logic Arc count: {}",
+                Arc::strong_count(&bridge.sedp_logic)
+            );
+            eprintln!(
+                "After disable - participant Arc count: {}",
+                Arc::strong_count(&bridge.participant)
+            );
+        }
+
+        eprintln!("\n=== Dropping DcpsBridge Arc ===");
+        drop(dcps_bridge);
+
+        eprintln!("\n=== TEST COMPLETE ===\n");
+
+        // Give some time for async drops
+        thread::sleep(StdDuration::from_millis(100));
+    }
+
+    #[test]
+    fn test_multiple_create_delete() {
+        eprintln!("\n=== TEST: Multiple Create/Delete cycles ===");
+
+        for i in 0..3 {
+            eprintln!("\n--- Cycle {} ---", i + 1);
+
+            let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(0)));
+            {
+                let mut bridge = dcps_bridge.lock().unwrap();
+                bridge.init().unwrap();
+            }
+
+            thread::sleep(StdDuration::from_millis(50));
+
+            {
+                let mut bridge = dcps_bridge.lock().unwrap();
+                let _ = bridge.disable();
+            }
+
+            drop(dcps_bridge);
+            thread::sleep(StdDuration::from_millis(50));
+        }
+
+        eprintln!("\n=== TEST COMPLETE ===\n");
     }
 
     fn change_callback(change: Arc<CacheChange>) {
@@ -850,7 +937,7 @@ mod tests {
 
         match dcps_bridge.lock() {
             Ok(mut dcps_bridge) => {
-                dcps_bridge.init();
+                dcps_bridge.init().unwrap();
 
                 let guid = dcps_bridge.next_entity_guid(EntityKind::USER_DEFINED_READER_NO_KEY);
                 subscription_builtin_topic_data.set_endpoint_guid(guid);
@@ -918,7 +1005,7 @@ mod tests {
 
         {
             let mut guard = dcps_bridge_test.lock().unwrap();
-            guard.init();
+            guard.init().unwrap();
 
             let guid = guard.next_entity_guid(EntityKind::USER_DEFINED_WRITER_NO_KEY);
             publication_builtin_topic_data.set_endpoint_guid(guid);
@@ -973,7 +1060,7 @@ mod tests {
 
         let (reader_guid, weak_reader, weak_history_cache) = {
             let mut guard = dcps_bridge.lock().unwrap();
-            guard.init();
+            guard.init().unwrap();
 
             let guid1 = guard.next_entity_guid(EntityKind::USER_DEFINED_READER_NO_KEY);
             subscription_builtin_topic_data.set_endpoint_guid(guid1);
@@ -1068,7 +1155,7 @@ mod tests {
 
         let (writer_guid, weak_writer, weak_history_cache) = {
             let mut guard = dcps_bridge.lock().unwrap();
-            guard.init();
+            guard.init().unwrap();
 
             let guid1 = guard.next_entity_guid(EntityKind::USER_DEFINED_WRITER_NO_KEY);
             publication_builtin_topic_data.set_endpoint_guid(guid1);
@@ -1170,7 +1257,7 @@ mod tests {
 
         {
             let mut guard = dcps_bridge_test.lock().unwrap();
-            guard.init();
+            guard.init().unwrap();
 
             let guid = guard.next_entity_guid(EntityKind::USER_DEFINED_WRITER_NO_KEY);
             publication_builtin_topic_data.set_endpoint_guid(guid);
@@ -1225,7 +1312,7 @@ mod tests {
 
         {
             let mut guard = dcps_bridge_test.lock().unwrap();
-            guard.init();
+            guard.init().unwrap();
 
             let guid = guard.next_entity_guid(EntityKind::USER_DEFINED_WRITER_NO_KEY);
             publication_builtin_topic_data.set_endpoint_guid(guid);
@@ -1280,7 +1367,7 @@ mod tests {
 
         match dcps_bridge.lock() {
             Ok(mut dcps_bridge) => {
-                dcps_bridge.init();
+                dcps_bridge.init().unwrap();
 
                 let guid = dcps_bridge.next_entity_guid(EntityKind::USER_DEFINED_READER_NO_KEY);
                 subscription_builtin_topic_data.set_endpoint_guid(guid);
@@ -1338,7 +1425,7 @@ mod tests {
         subscription_builtin_topic_data.set_type_name(test_type_name.to_string());
 
         let mut guard: std::sync::MutexGuard<'_, DcpsBridge> = dcps_bridge.lock().unwrap();
-        guard.init();
+        guard.init().unwrap();
 
         let guid = guard.next_entity_guid(EntityKind::USER_DEFINED_READER_NO_KEY);
         subscription_builtin_topic_data.set_endpoint_guid(guid);
@@ -1406,7 +1493,7 @@ mod tests {
         publication_builtin_topic_data.set_type_name(test_type_name.to_string());
 
         let mut guard = dcps_bridge.lock().unwrap();
-        guard.init();
+        guard.init().unwrap();
 
         let guid = guard.next_entity_guid(EntityKind::USER_DEFINED_WRITER_NO_KEY);
         publication_builtin_topic_data.set_endpoint_guid(guid);
@@ -1471,7 +1558,7 @@ mod tests {
         publication_builtin_topic_data.set_type_name(test_type_name.to_string());
 
         let mut guard = dcps_bridge.lock().unwrap();
-        guard.init();
+        guard.init().unwrap();
 
         let guid = guard.next_entity_guid(EntityKind::USER_DEFINED_WRITER_NO_KEY);
         publication_builtin_topic_data.set_endpoint_guid(guid);
@@ -1539,7 +1626,7 @@ mod tests {
         publication_builtin_topic_data.set_type_name(test_type_name.to_string());
 
         let mut guard = dcps_bridge.lock().unwrap();
-        guard.init();
+        guard.init().unwrap();
 
         let guid1 = guard.next_entity_guid(EntityKind::USER_DEFINED_WRITER_NO_KEY);
         publication_builtin_topic_data.set_endpoint_guid(guid1);
@@ -1674,7 +1761,7 @@ mod tests {
         best_effort_publication_builtin_topic_data.set_type_name(test_type_name.to_string());
 
         let mut guard = dcps_bridge.lock().unwrap();
-        guard.init();
+        guard.init().unwrap();
 
         let guid1 = guard.next_entity_guid(EntityKind::USER_DEFINED_WRITER_NO_KEY);
         reliable_publication_builtin_topic_data.set_endpoint_guid(guid1);
@@ -1869,7 +1956,7 @@ mod tests {
 
         {
             let mut bridge_guard = dcps_bridge_1.lock().unwrap();
-            bridge_guard.init();
+            bridge_guard.init().unwrap();
 
             // Verify initialization
             if let Some(ref sedp_logic) = bridge_guard.sedp_logic.as_ref() {
