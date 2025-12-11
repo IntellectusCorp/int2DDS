@@ -12,11 +12,11 @@ pub use xcdr1::{CdrDeserializer, CdrSerializer};
 pub use xcdr2::{Xcdr2Deserializer, Xcdr2Serializer};
 
 // Re-export serializer traits for unified API
-pub use serializer::CdrSerializerCommon;
 pub use serializer::array::ArraySerialize;
 pub use serializer::primitive::PrimitiveSerialize;
 pub use serializer::sequence::SequenceSerialize;
 pub use serializer::string::StringSerialize;
+pub use serializer::CdrSerializerCommon;
 
 /// XCDR v2 extensibility kinds
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
