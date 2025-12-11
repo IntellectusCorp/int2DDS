@@ -16,6 +16,8 @@ pub enum SerializationError {
     // Enum/Union specific errors
     InvalidEnumDiscriminant(i32),
     InvalidUnionDiscriminant(i32),
+    // Slice conversion error
+    SliceConversionError,
 }
 
 impl std::fmt::Display for SerializationError {
@@ -44,6 +46,9 @@ impl std::fmt::Display for SerializationError {
             }
             SerializationError::InvalidUnionDiscriminant(d) => {
                 write!(f, "Invalid union discriminant: {}", d)
+            }
+            SerializationError::SliceConversionError => {
+                write!(f, "Slice conversion error")
             }
         }
     }

@@ -22,7 +22,9 @@ impl<'a> CdrDeserializer<'a> {
         let mut result = Vec::with_capacity(size);
         for _ in 0..size {
             self.check_available(2)?;
-            let bytes: [u8; 2] = self.data[self.position..self.position + 2].try_into().unwrap();
+            let bytes: [u8; 2] = self.data[self.position..self.position + 2]
+                .try_into()
+                .map_err(|_| CdrError::SliceConversionError)?;
             let value = from_bytes_u16(bytes, self.endianness);
             result.push(value);
             self.position += 2;
@@ -36,7 +38,9 @@ impl<'a> CdrDeserializer<'a> {
         let mut result = Vec::with_capacity(size);
         for _ in 0..size {
             self.check_available(4)?;
-            let bytes: [u8; 4] = self.data[self.position..self.position + 4].try_into().unwrap();
+            let bytes: [u8; 4] = self.data[self.position..self.position + 4]
+                .try_into()
+                .map_err(|_| CdrError::SliceConversionError)?;
             let value = from_bytes_u32(bytes, self.endianness);
             result.push(value);
             self.position += 4;
@@ -50,7 +54,9 @@ impl<'a> CdrDeserializer<'a> {
         let mut result = Vec::with_capacity(size);
         for _ in 0..size {
             self.check_available(8)?;
-            let bytes: [u8; 8] = self.data[self.position..self.position + 8].try_into().unwrap();
+            let bytes: [u8; 8] = self.data[self.position..self.position + 8]
+                .try_into()
+                .map_err(|_| CdrError::SliceConversionError)?;
             let value = from_bytes_u64(bytes, self.endianness);
             result.push(value);
             self.position += 8;
@@ -75,7 +81,9 @@ impl<'a> CdrDeserializer<'a> {
         let mut result = Vec::with_capacity(size);
         for _ in 0..size {
             self.check_available(2)?;
-            let bytes: [u8; 2] = self.data[self.position..self.position + 2].try_into().unwrap();
+            let bytes: [u8; 2] = self.data[self.position..self.position + 2]
+                .try_into()
+                .map_err(|_| CdrError::SliceConversionError)?;
             let value = from_bytes_i16(bytes, self.endianness);
             result.push(value);
             self.position += 2;
@@ -89,7 +97,9 @@ impl<'a> CdrDeserializer<'a> {
         let mut result = Vec::with_capacity(size);
         for _ in 0..size {
             self.check_available(4)?;
-            let bytes: [u8; 4] = self.data[self.position..self.position + 4].try_into().unwrap();
+            let bytes: [u8; 4] = self.data[self.position..self.position + 4]
+                .try_into()
+                .map_err(|_| CdrError::SliceConversionError)?;
             let value = from_bytes_i32(bytes, self.endianness);
             result.push(value);
             self.position += 4;
@@ -103,7 +113,9 @@ impl<'a> CdrDeserializer<'a> {
         let mut result = Vec::with_capacity(size);
         for _ in 0..size {
             self.check_available(8)?;
-            let bytes: [u8; 8] = self.data[self.position..self.position + 8].try_into().unwrap();
+            let bytes: [u8; 8] = self.data[self.position..self.position + 8]
+                .try_into()
+                .map_err(|_| CdrError::SliceConversionError)?;
             let value = from_bytes_i64(bytes, self.endianness);
             result.push(value);
             self.position += 8;
@@ -117,7 +129,9 @@ impl<'a> CdrDeserializer<'a> {
         let mut result = Vec::with_capacity(size);
         for _ in 0..size {
             self.check_available(4)?;
-            let bytes: [u8; 4] = self.data[self.position..self.position + 4].try_into().unwrap();
+            let bytes: [u8; 4] = self.data[self.position..self.position + 4]
+                .try_into()
+                .map_err(|_| CdrError::SliceConversionError)?;
             let value = from_bytes_f32(bytes, self.endianness);
             result.push(value);
             self.position += 4;
@@ -131,7 +145,9 @@ impl<'a> CdrDeserializer<'a> {
         let mut result = Vec::with_capacity(size);
         for _ in 0..size {
             self.check_available(8)?;
-            let bytes: [u8; 8] = self.data[self.position..self.position + 8].try_into().unwrap();
+            let bytes: [u8; 8] = self.data[self.position..self.position + 8]
+                .try_into()
+                .map_err(|_| CdrError::SliceConversionError)?;
             let value = from_bytes_f64(bytes, self.endianness);
             result.push(value);
             self.position += 8;
@@ -185,7 +201,9 @@ impl<'a> Xcdr2Deserializer<'a> {
         let mut result = Vec::with_capacity(size);
         for _ in 0..size {
             self.check_available(2)?;
-            let bytes: [u8; 2] = self.data[self.position..self.position + 2].try_into().unwrap();
+            let bytes: [u8; 2] = self.data[self.position..self.position + 2]
+                .try_into()
+                .map_err(|_| CdrError::SliceConversionError)?;
             let value = from_bytes_u16(bytes, self.endianness);
             result.push(value);
             self.position += 2;
@@ -198,7 +216,9 @@ impl<'a> Xcdr2Deserializer<'a> {
         let mut result = Vec::with_capacity(size);
         for _ in 0..size {
             self.check_available(4)?;
-            let bytes: [u8; 4] = self.data[self.position..self.position + 4].try_into().unwrap();
+            let bytes: [u8; 4] = self.data[self.position..self.position + 4]
+                .try_into()
+                .map_err(|_| CdrError::SliceConversionError)?;
             let value = from_bytes_u32(bytes, self.endianness);
             result.push(value);
             self.position += 4;
@@ -211,7 +231,9 @@ impl<'a> Xcdr2Deserializer<'a> {
         let mut result = Vec::with_capacity(size);
         for _ in 0..size {
             self.check_available(8)?;
-            let bytes: [u8; 8] = self.data[self.position..self.position + 8].try_into().unwrap();
+            let bytes: [u8; 8] = self.data[self.position..self.position + 8]
+                .try_into()
+                .map_err(|_| CdrError::SliceConversionError)?;
             let value = from_bytes_u64(bytes, self.endianness);
             result.push(value);
             self.position += 8;
@@ -234,7 +256,9 @@ impl<'a> Xcdr2Deserializer<'a> {
         let mut result = Vec::with_capacity(size);
         for _ in 0..size {
             self.check_available(2)?;
-            let bytes: [u8; 2] = self.data[self.position..self.position + 2].try_into().unwrap();
+            let bytes: [u8; 2] = self.data[self.position..self.position + 2]
+                .try_into()
+                .map_err(|_| CdrError::SliceConversionError)?;
             let value = from_bytes_i16(bytes, self.endianness);
             result.push(value);
             self.position += 2;
@@ -247,7 +271,9 @@ impl<'a> Xcdr2Deserializer<'a> {
         let mut result = Vec::with_capacity(size);
         for _ in 0..size {
             self.check_available(4)?;
-            let bytes: [u8; 4] = self.data[self.position..self.position + 4].try_into().unwrap();
+            let bytes: [u8; 4] = self.data[self.position..self.position + 4]
+                .try_into()
+                .map_err(|_| CdrError::SliceConversionError)?;
             let value = from_bytes_i32(bytes, self.endianness);
             result.push(value);
             self.position += 4;
@@ -260,7 +286,9 @@ impl<'a> Xcdr2Deserializer<'a> {
         let mut result = Vec::with_capacity(size);
         for _ in 0..size {
             self.check_available(8)?;
-            let bytes: [u8; 8] = self.data[self.position..self.position + 8].try_into().unwrap();
+            let bytes: [u8; 8] = self.data[self.position..self.position + 8]
+                .try_into()
+                .map_err(|_| CdrError::SliceConversionError)?;
             let value = from_bytes_i64(bytes, self.endianness);
             result.push(value);
             self.position += 8;
@@ -273,7 +301,9 @@ impl<'a> Xcdr2Deserializer<'a> {
         let mut result = Vec::with_capacity(size);
         for _ in 0..size {
             self.check_available(4)?;
-            let bytes: [u8; 4] = self.data[self.position..self.position + 4].try_into().unwrap();
+            let bytes: [u8; 4] = self.data[self.position..self.position + 4]
+                .try_into()
+                .map_err(|_| CdrError::SliceConversionError)?;
             let value = from_bytes_f32(bytes, self.endianness);
             result.push(value);
             self.position += 4;
@@ -286,7 +316,9 @@ impl<'a> Xcdr2Deserializer<'a> {
         let mut result = Vec::with_capacity(size);
         for _ in 0..size {
             self.check_available(8)?;
-            let bytes: [u8; 8] = self.data[self.position..self.position + 8].try_into().unwrap();
+            let bytes: [u8; 8] = self.data[self.position..self.position + 8]
+                .try_into()
+                .map_err(|_| CdrError::SliceConversionError)?;
             let value = from_bytes_f64(bytes, self.endianness);
             result.push(value);
             self.position += 8;
