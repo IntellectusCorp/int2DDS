@@ -558,12 +558,12 @@ impl DcpsBridge {
         }
         drop(timer_handler);
 
+        // Send termination message before stopping sending thread
+        let _ = self.participant.send_termination_message_on_shutdown();
+
         // Terminate sending task thread
         let sending_handler = SendingHandler::get_instance(self.participant.clone(), None, None);
         let _ = sending_handler.join_sending_thread();
-
-        let _ = self.participant.send_termination_message_on_shutdown();
-
         drop(sending_handler);
 
         // Terminate discovery listening task
