@@ -77,10 +77,9 @@ impl SendingTask {
     }
 
     pub(crate) fn create_worker_task(&self, message: MessageType) -> RtpsResult<()> {
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.participant.upgrade().ok_or_else(|| {
+            RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped")
+        })?;
         let mut spdp_logic = self
             .spdp_logic
             .as_ref()
@@ -250,10 +249,9 @@ impl SendingTask {
     pub(crate) fn event_loop(&mut self, queue: Arc<Mutex<Vec<MessageType>>>) -> RtpsResult<()> {
         log::info!("start sending task thread");
 
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.participant.upgrade().ok_or_else(|| {
+            RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped")
+        })?;
 
         loop {
             if let Err(e) =
