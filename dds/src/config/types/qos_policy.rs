@@ -2,3 +2,441 @@
 //!
 //! These types conform to the OMG DDS-JSON specification and provide
 //! conversion to/from internal QoS types in [`crate::infrastructure::qos_policy`].
+
+use crate::{
+    core::{
+        time::Duration,
+        types::{deserialize_i32_or_unlimited, serialize_i32_or_unlimited, LENGTH_UNLIMITED},
+    },
+    infrastructure::qos_policy,
+};
+use serde::{Deserialize, Serialize};
+
+#[derive(Default, Deserialize, Serialize)]
+pub(crate) struct HistoryQosPolicy {
+    #[serde(default)]
+    pub(crate) kind: HistoryQosPolicyKind,
+    #[serde(deserialize_with = "deserialize_i32_or_unlimited")]
+    #[serde(serialize_with = "serialize_i32_or_unlimited")]
+    #[serde(default = "default_depth")]
+    pub(crate) depth: i32,
+}
+
+fn default_depth() -> i32 {
+    1
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub(crate) enum HistoryQosPolicyKind {
+    #[default]
+    KeepLastHistoryQos,
+    KeepAllHistoryQos,
+}
+
+impl From<HistoryQosPolicy> for qos_policy::HistoryQosPolicy {
+    fn from(external: HistoryQosPolicy) -> Self {
+        match external.kind {
+            HistoryQosPolicyKind::KeepLastHistoryQos => {
+                Self { kind: qos_policy::HistoryQosPolicyKind::KeepLast(external.depth) }
+            }
+            HistoryQosPolicyKind::KeepAllHistoryQos => {
+                Self { kind: qos_policy::HistoryQosPolicyKind::KeepAll }
+            }
+        }
+    }
+}
+
+impl From<qos_policy::HistoryQosPolicy> for HistoryQosPolicy {
+    fn from(internal: qos_policy::HistoryQosPolicy) -> Self {
+        match internal.kind {
+            qos_policy::HistoryQosPolicyKind::KeepLast(depth) => {
+                Self { kind: HistoryQosPolicyKind::KeepLastHistoryQos, depth }
+            }
+            qos_policy::HistoryQosPolicyKind::KeepAll => {
+                Self { kind: HistoryQosPolicyKind::KeepAllHistoryQos, depth: 1 }
+            }
+        }
+    }
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(default)]
+pub(crate) struct OwnershipQosPolicy {
+    pub(crate) kind: OwnershipQosPolicyKind,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub(crate) enum OwnershipQosPolicyKind {
+    #[default]
+    SharedOwnershipQos,
+    ExclusiveOwnershipQos,
+}
+
+impl From<OwnershipQosPolicy> for qos_policy::OwnershipQosPolicy {
+    fn from(external: OwnershipQosPolicy) -> Self {
+        match external.kind {
+            OwnershipQosPolicyKind::SharedOwnershipQos => {
+                Self { kind: qos_policy::OwnershipQosPolicyKind::Shared }
+            }
+            OwnershipQosPolicyKind::ExclusiveOwnershipQos => {
+                Self { kind: qos_policy::OwnershipQosPolicyKind::Exclusive }
+            }
+        }
+    }
+}
+
+impl From<qos_policy::OwnershipQosPolicy> for OwnershipQosPolicy {
+    fn from(internal: qos_policy::OwnershipQosPolicy) -> Self {
+        match internal.kind {
+            qos_policy::OwnershipQosPolicyKind::Shared => {
+                Self { kind: OwnershipQosPolicyKind::SharedOwnershipQos }
+            }
+            qos_policy::OwnershipQosPolicyKind::Exclusive => {
+                Self { kind: OwnershipQosPolicyKind::ExclusiveOwnershipQos }
+            }
+        }
+    }
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(default)]
+pub(crate) struct PresentationQosPolicy {
+    pub(crate) access_scope: PresentationQosAccessScopeKind,
+    pub(crate) coherent_access: bool,
+    pub(crate) ordered_access: bool,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub(crate) enum PresentationQosAccessScopeKind {
+    #[default]
+    InstancePresentationQos,
+    TopicPresentationQos,
+    GroupPresentationQos,
+}
+
+impl From<PresentationQosPolicy> for qos_policy::PresentationQosPolicy {
+    fn from(external: PresentationQosPolicy) -> Self {
+        match external.access_scope {
+            PresentationQosAccessScopeKind::InstancePresentationQos => Self {
+                access_scope: qos_policy::PresentationQosAccessScopeKind::Instance,
+                coherent_access: external.coherent_access,
+                ordered_access: external.ordered_access,
+            },
+            PresentationQosAccessScopeKind::TopicPresentationQos => Self {
+                access_scope: qos_policy::PresentationQosAccessScopeKind::Topic,
+                coherent_access: external.coherent_access,
+                ordered_access: external.ordered_access,
+            },
+            PresentationQosAccessScopeKind::GroupPresentationQos => Self {
+                access_scope: qos_policy::PresentationQosAccessScopeKind::Group,
+                coherent_access: external.coherent_access,
+                ordered_access: external.ordered_access,
+            },
+        }
+    }
+}
+
+impl From<qos_policy::PresentationQosPolicy> for PresentationQosPolicy {
+    fn from(internal: qos_policy::PresentationQosPolicy) -> Self {
+        match internal.access_scope {
+            qos_policy::PresentationQosAccessScopeKind::Instance => Self {
+                access_scope: PresentationQosAccessScopeKind::InstancePresentationQos,
+                coherent_access: internal.coherent_access,
+                ordered_access: internal.ordered_access,
+            },
+            qos_policy::PresentationQosAccessScopeKind::Topic => Self {
+                access_scope: PresentationQosAccessScopeKind::TopicPresentationQos,
+                coherent_access: internal.coherent_access,
+                ordered_access: internal.ordered_access,
+            },
+            qos_policy::PresentationQosAccessScopeKind::Group => Self {
+                access_scope: PresentationQosAccessScopeKind::GroupPresentationQos,
+                coherent_access: internal.coherent_access,
+                ordered_access: internal.ordered_access,
+            },
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct ReliabilityQosPolicy {
+    pub(crate) kind: ReliabilityQosPolicyKind,
+    pub(crate) max_blocking_time: Duration,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub(crate) enum ReliabilityQosPolicyKind {
+    BestEffortReliabilityQos,
+    ReliableReliabilityQos,
+}
+
+impl From<ReliabilityQosPolicy> for qos_policy::ReliabilityQosPolicy {
+    fn from(external: ReliabilityQosPolicy) -> Self {
+        match external.kind {
+            ReliabilityQosPolicyKind::BestEffortReliabilityQos => Self {
+                kind: qos_policy::ReliabilityQosPolicyKind::BestEffort,
+                max_blocking_time: external.max_blocking_time,
+            },
+            ReliabilityQosPolicyKind::ReliableReliabilityQos => Self {
+                kind: qos_policy::ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: external.max_blocking_time,
+            },
+        }
+    }
+}
+
+impl From<qos_policy::ReliabilityQosPolicy> for ReliabilityQosPolicy {
+    fn from(internal: qos_policy::ReliabilityQosPolicy) -> Self {
+        match internal.kind {
+            qos_policy::ReliabilityQosPolicyKind::BestEffort => Self {
+                kind: ReliabilityQosPolicyKind::BestEffortReliabilityQos,
+                max_blocking_time: internal.max_blocking_time,
+            },
+            qos_policy::ReliabilityQosPolicyKind::Reliable => Self {
+                kind: ReliabilityQosPolicyKind::ReliableReliabilityQos,
+                max_blocking_time: internal.max_blocking_time,
+            },
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct LivelinessQosPolicy {
+    pub(crate) kind: LivelinessQosPolicyKind,
+    pub(crate) lease_duration: Duration,
+}
+
+impl Default for LivelinessQosPolicy {
+    fn default() -> Self {
+        Self {
+            kind: LivelinessQosPolicyKind::default(),
+            lease_duration: Duration {
+                sec: Duration::INFINITE_SEC,
+                nanosec: Duration::INFINITE_NSEC,
+            },
+        }
+    }
+}
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub(crate) enum LivelinessQosPolicyKind {
+    #[default]
+    AutomaticLivelinessQos,
+    ManualByParticipantLivelinessQos,
+    ManualByTopicLivelinessQos,
+}
+
+impl From<LivelinessQosPolicy> for qos_policy::LivelinessQosPolicy {
+    fn from(external: LivelinessQosPolicy) -> Self {
+        match external.kind {
+            LivelinessQosPolicyKind::AutomaticLivelinessQos => Self {
+                kind: qos_policy::LivelinessQosPolicyKind::Automatic,
+                lease_duration: external.lease_duration,
+            },
+            LivelinessQosPolicyKind::ManualByParticipantLivelinessQos => Self {
+                kind: qos_policy::LivelinessQosPolicyKind::ManualByParticipant,
+                lease_duration: external.lease_duration,
+            },
+            LivelinessQosPolicyKind::ManualByTopicLivelinessQos => Self {
+                kind: qos_policy::LivelinessQosPolicyKind::ManualByTopic,
+                lease_duration: external.lease_duration,
+            },
+        }
+    }
+}
+
+impl From<qos_policy::LivelinessQosPolicy> for LivelinessQosPolicy {
+    fn from(internal: qos_policy::LivelinessQosPolicy) -> Self {
+        match internal.kind {
+            qos_policy::LivelinessQosPolicyKind::Automatic => Self {
+                kind: LivelinessQosPolicyKind::AutomaticLivelinessQos,
+                lease_duration: internal.lease_duration,
+            },
+            qos_policy::LivelinessQosPolicyKind::ManualByParticipant => Self {
+                kind: LivelinessQosPolicyKind::ManualByParticipantLivelinessQos,
+                lease_duration: internal.lease_duration,
+            },
+            qos_policy::LivelinessQosPolicyKind::ManualByTopic => Self {
+                kind: LivelinessQosPolicyKind::ManualByTopicLivelinessQos,
+                lease_duration: internal.lease_duration,
+            },
+        }
+    }
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(default)]
+pub(crate) struct DurabilityQosPolicy {
+    pub(crate) kind: DurabilityQosPolicyKind,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub(crate) enum DurabilityQosPolicyKind {
+    #[default]
+    VolatileDurabilityQos,
+    TransientLocalDurabilityQos,
+    TransientDurabilityQos,
+    PersistentDurabilityQos,
+}
+
+impl From<DurabilityQosPolicy> for qos_policy::DurabilityQosPolicy {
+    fn from(external: DurabilityQosPolicy) -> Self {
+        match external.kind {
+            DurabilityQosPolicyKind::VolatileDurabilityQos => {
+                Self { kind: qos_policy::DurabilityQosPolicyKind::Volatile }
+            }
+            DurabilityQosPolicyKind::TransientLocalDurabilityQos => {
+                Self { kind: qos_policy::DurabilityQosPolicyKind::TransientLocal }
+            }
+            DurabilityQosPolicyKind::TransientDurabilityQos => {
+                Self { kind: qos_policy::DurabilityQosPolicyKind::Transient }
+            }
+            DurabilityQosPolicyKind::PersistentDurabilityQos => {
+                Self { kind: qos_policy::DurabilityQosPolicyKind::Persistent }
+            }
+        }
+    }
+}
+
+impl From<qos_policy::DurabilityQosPolicy> for DurabilityQosPolicy {
+    fn from(internal: qos_policy::DurabilityQosPolicy) -> Self {
+        match internal.kind {
+            qos_policy::DurabilityQosPolicyKind::Volatile => {
+                Self { kind: DurabilityQosPolicyKind::VolatileDurabilityQos }
+            }
+            qos_policy::DurabilityQosPolicyKind::TransientLocal => {
+                Self { kind: DurabilityQosPolicyKind::TransientLocalDurabilityQos }
+            }
+            qos_policy::DurabilityQosPolicyKind::Transient => {
+                Self { kind: DurabilityQosPolicyKind::TransientDurabilityQos }
+            }
+            qos_policy::DurabilityQosPolicyKind::Persistent => {
+                Self { kind: DurabilityQosPolicyKind::PersistentDurabilityQos }
+            }
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct DurabilityServiceQosPolicy {
+    pub(crate) service_cleanup_delay: Duration,
+    pub(crate) history_kind: HistoryQosPolicyKind,
+    #[serde(deserialize_with = "deserialize_i32_or_unlimited")]
+    #[serde(serialize_with = "serialize_i32_or_unlimited")]
+    pub(crate) max_samples: i32,
+    #[serde(deserialize_with = "deserialize_i32_or_unlimited")]
+    #[serde(serialize_with = "serialize_i32_or_unlimited")]
+    pub(crate) max_instances: i32,
+    #[serde(deserialize_with = "deserialize_i32_or_unlimited")]
+    #[serde(serialize_with = "serialize_i32_or_unlimited")]
+    pub(crate) max_samples_per_instance: i32,
+    #[serde(deserialize_with = "deserialize_i32_or_unlimited")]
+    #[serde(serialize_with = "serialize_i32_or_unlimited")]
+    pub(crate) history_depth: i32,
+}
+
+impl Default for DurabilityServiceQosPolicy {
+    fn default() -> Self {
+        Self {
+            service_cleanup_delay: Duration::default(),
+            history_kind: HistoryQosPolicyKind::KeepLastHistoryQos,
+            max_instances: LENGTH_UNLIMITED,
+            max_samples: LENGTH_UNLIMITED,
+            max_samples_per_instance: LENGTH_UNLIMITED,
+            history_depth: 1,
+        }
+    }
+}
+
+impl From<DurabilityServiceQosPolicy> for qos_policy::DurabilityServiceQosPolicy {
+    fn from(external: DurabilityServiceQosPolicy) -> Self {
+        match external.history_kind {
+            HistoryQosPolicyKind::KeepLastHistoryQos => Self {
+                history_kind: qos_policy::HistoryQosPolicyKind::KeepLast(external.history_depth),
+                service_cleanup_delay: external.service_cleanup_delay,
+                max_instances: external.max_instances,
+                max_samples: external.max_samples,
+                max_samples_per_instance: external.max_samples_per_instance,
+            },
+            HistoryQosPolicyKind::KeepAllHistoryQos => Self {
+                history_kind: qos_policy::HistoryQosPolicyKind::KeepAll,
+                service_cleanup_delay: external.service_cleanup_delay,
+                max_instances: external.max_instances,
+                max_samples: external.max_samples,
+                max_samples_per_instance: external.max_samples_per_instance,
+            },
+        }
+    }
+}
+
+impl From<qos_policy::DurabilityServiceQosPolicy> for DurabilityServiceQosPolicy {
+    fn from(internal: qos_policy::DurabilityServiceQosPolicy) -> Self {
+        match internal.history_kind {
+            qos_policy::HistoryQosPolicyKind::KeepLast(history_depth) => Self {
+                history_kind: HistoryQosPolicyKind::KeepLastHistoryQos,
+                history_depth,
+                service_cleanup_delay: internal.service_cleanup_delay,
+                max_instances: internal.max_instances,
+                max_samples: internal.max_samples,
+                max_samples_per_instance: internal.max_samples_per_instance,
+            },
+            qos_policy::HistoryQosPolicyKind::KeepAll => Self {
+                history_kind: HistoryQosPolicyKind::KeepAllHistoryQos,
+                history_depth: 1,
+                service_cleanup_delay: internal.service_cleanup_delay,
+                max_instances: internal.max_instances,
+                max_samples: internal.max_samples,
+                max_samples_per_instance: internal.max_samples_per_instance,
+            },
+        }
+    }
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(default)]
+pub(crate) struct DestinationOrderQosPolicy {
+    pub(crate) kind: DestinationOrderQosPolicyKind,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+pub(crate) enum DestinationOrderQosPolicyKind {
+    #[default]
+    #[serde(rename = "BY_RECEPTION_TIMESTAMP_DESTINATIONORDER_QOS")]
+    ByReceptionTimestampDestinationOrderQos,
+    #[serde(rename = "BY_SOURCE_TIMESTAMP_DESTINATIONORDER_QOS")]
+    BySourceTimestampDestinationOrderQos,
+}
+
+impl From<DestinationOrderQosPolicy> for qos_policy::DestinationOrderQosPolicy {
+    fn from(external: DestinationOrderQosPolicy) -> Self {
+        match external.kind {
+            DestinationOrderQosPolicyKind::ByReceptionTimestampDestinationOrderQos => {
+                Self { kind: qos_policy::DestinationOrderQosPolicyKind::ByReceptionTimestamp }
+            }
+            DestinationOrderQosPolicyKind::BySourceTimestampDestinationOrderQos => {
+                Self { kind: qos_policy::DestinationOrderQosPolicyKind::BySourceTimestamp }
+            }
+        }
+    }
+}
+
+impl From<qos_policy::DestinationOrderQosPolicy> for DestinationOrderQosPolicy {
+    fn from(internal: qos_policy::DestinationOrderQosPolicy) -> Self {
+        match internal.kind {
+            qos_policy::DestinationOrderQosPolicyKind::ByReceptionTimestamp => Self {
+                kind: DestinationOrderQosPolicyKind::ByReceptionTimestampDestinationOrderQos,
+            },
+            qos_policy::DestinationOrderQosPolicyKind::BySourceTimestamp => {
+                Self { kind: DestinationOrderQosPolicyKind::BySourceTimestampDestinationOrderQos }
+            }
+        }
+    }
+}
