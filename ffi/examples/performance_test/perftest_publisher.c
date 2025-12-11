@@ -37,6 +37,7 @@ typedef struct {
     TestMode mode;
     size_t data_size;
     uint64_t execution_time;  /* seconds */
+    uint64_t warmup_time;     /* warmup seconds (not measured) */
     double hz;                /* 0 = unlimited */
     int use_reliable;
     int32_t domain_id;
@@ -400,6 +401,7 @@ int run_throughput_test(const PerfTestArgs* args) {
     printf("\n=== Throughput Test (Publisher) ===\n");
     printf("  Data size: %zu bytes\n", args->data_size);
     printf("  Reliability: %s\n", args->use_reliable ? "RELIABLE" : "BEST_EFFORT");
+    printf("  Warmup time: %llu seconds\n", (unsigned long long)args->warmup_time);
     printf("  Execution time: %llu seconds\n", (unsigned long long)args->execution_time);
     printf("  Rate: %s\n", args->hz > 0 ? "limited" : "unlimited");
     if (args->hz > 0) {
@@ -522,6 +524,39 @@ int run_throughput_test(const PerfTestArgs* args) {
     uint64_t bytes_sent = 0;
     uint64_t seq_num = 0;
 
+    /* Warmup phase */
+    if (args->warmup_time > 0) {
+        printf("Starting warmup phase (%llu seconds)...\n", (unsigned long long)args->warmup_time);
+        uint64_t warmup_start = get_current_time_ns();
+        uint64_t warmup_end = warmup_start + (args->warmup_time * 1000000000ULL);
+        uint64_t warmup_next_send = warmup_start;
+        uint64_t warmup_interval = args->hz > 0 ? (uint64_t)(1000000000.0 / args->hz) : 0;
+
+        while (1) {
+            uint64_t now = get_current_time_ns();
+            if (now >= warmup_end) break;
+
+            if (args->hz > 0 && now < warmup_next_send) continue;
+
+            PerformanceTestData sample = {
+                .seq_num = seq_num++,
+                .timestamp = now,
+                .data = payload,
+                .data_len = args->data_size
+            };
+
+            size_t serialized_size = serialize_performance_data(&sample, buffer, buffer_size);
+            if (serialized_size == 0) break;
+
+            ret = int2dds_write(writer, buffer, serialized_size);
+            if (ret != INT2DDS_RET_OK) break;
+
+            if (args->hz > 0) warmup_next_send += warmup_interval;
+        }
+        printf("Warmup complete. Sent %llu samples during warmup.\n", (unsigned long long)seq_num);
+        seq_num = 0;  /* Reset for actual test */
+    }
+
     /* Start test */
     uint64_t start_time_ns = get_current_time_ns();
     uint64_t test_end_time = start_time_ns + (args->execution_time * 1000000000ULL);
@@ -598,8 +633,15 @@ int run_throughput_test(const PerfTestArgs* args) {
 
     uint64_t end_time_ns = get_current_time_ns();
 
+    /* Final progress line */
+    double final_elapsed = (end_time_ns - start_time_ns) / 1e9;
+    double final_avg_rate = total_samples / final_elapsed;
+    double final_avg_mbps = (bytes_sent * 8.0) / (final_elapsed * 1e6);
+    printf("[%.1fs] Sent: %llu, Avg: %.0f msg/s (%.2f Mbps)\n",
+           final_elapsed, (unsigned long long)total_samples, final_avg_rate, final_avg_mbps);
+
     /* Print final statistics */
-    double duration_sec = (end_time_ns - start_time_ns) / 1e9;
+    double duration_sec = final_elapsed;
     double msgs_per_sec = total_samples / duration_sec;
     double mbps = (bytes_sent * 8.0) / (duration_sec * 1e6);
 
@@ -639,6 +681,7 @@ int run_latency_test(const PerfTestArgs* args) {
     printf("\n=== Latency Test (Publisher) ===\n");
     printf("  Data size: %zu bytes\n", args->data_size);
     printf("  Reliability: %s\n", args->use_reliable ? "RELIABLE" : "BEST_EFFORT");
+    printf("  Warmup time: %llu seconds\n", (unsigned long long)args->warmup_time);
     printf("  Execution time: %llu seconds\n", (unsigned long long)args->execution_time);
     printf("  Rate: %s\n", args->hz > 0 ? "limited" : "unlimited");
     if (args->hz > 0) {
@@ -835,6 +878,46 @@ int run_latency_test(const PerfTestArgs* args) {
     /* Performance statistics */
     uint64_t seq_num = 0;
 
+    /* Warmup phase */
+    if (args->warmup_time > 0) {
+        printf("Starting warmup phase (%llu seconds)...\n", (unsigned long long)args->warmup_time);
+        uint64_t warmup_start = get_current_time_ns();
+        uint64_t warmup_end = warmup_start + (args->warmup_time * 1000000000ULL);
+        uint64_t warmup_next_send = warmup_start;
+        uint64_t warmup_interval = args->hz > 0 ? (uint64_t)(1000000000.0 / args->hz) : 10000000;
+
+        while (1) {
+            uint64_t now = get_current_time_ns();
+            if (now >= warmup_end) break;
+
+            if (now < warmup_next_send) {
+                sleep_ms(1);
+                continue;
+            }
+
+            LatencyTestData sample = {
+                .seq_num = seq_num++,
+                .send_timestamp = get_current_time_ns(),
+                .echo_timestamp = 0,
+                .data = payload,
+                .data_len = args->data_size
+            };
+
+            size_t serialized_size = serialize_latency_data(&sample, buffer, buffer_size);
+            if (serialized_size == 0) break;
+
+            ret = int2dds_write(writer, buffer, serialized_size);
+            if (ret != INT2DDS_RET_OK) break;
+
+            warmup_next_send += warmup_interval;
+        }
+        printf("Warmup complete. Sent %llu samples during warmup.\n", (unsigned long long)seq_num);
+
+        /* Reset stats for actual test */
+        seq_num = 0;
+        g_latency_stats.latency_count = 0;
+    }
+
     /* Start test */
     uint64_t start_time = get_current_time_ns();
     uint64_t test_end_time = start_time + (args->execution_time * 1000000000ULL);
@@ -928,9 +1011,62 @@ int run_latency_test(const PerfTestArgs* args) {
 
     uint64_t end_time = get_current_time_ns();
 
-    /* Wait a bit for final echoes */
-    printf("Waiting for final echoes...\n");
-    sleep_ms(2000);
+    /* Print [30.0s] progress before collecting echoes */
+    double elapsed_at_end = (end_time - start_time) / 1e9;
+    if (g_latency_stats.latency_count > 0) {
+        double sum = 0.0;
+        double min_val = g_latency_stats.latency_samples[0];
+        double max_val = g_latency_stats.latency_samples[0];
+
+        for (size_t i = 0; i < g_latency_stats.latency_count; i++) {
+            double val = g_latency_stats.latency_samples[i];
+            sum += val;
+            if (val < min_val) min_val = val;
+            if (val > max_val) max_val = val;
+        }
+
+        double avg_latency = (sum / g_latency_stats.latency_count) / 2.0;
+        double min_latency = min_val / 2.0;
+        double max_latency = max_val / 2.0;
+
+        printf("[%.1fs] Sent: %llu, Echoes: %zu, Latency: %.2f ms (min: %.2f ms, max: %.2f ms)\n",
+               elapsed_at_end, (unsigned long long)seq_num, g_latency_stats.latency_count,
+               avg_latency / 1e6, min_latency / 1e6, max_latency / 1e6);
+    } else {
+        printf("[%.1fs] Sent: %llu, Echoes: %zu\n",
+               elapsed_at_end, (unsigned long long)seq_num, g_latency_stats.latency_count);
+    }
+
+    /* Wait 1 second for final echoes and show [31.0s] progress */
+    printf("Collecting final echoes...\n");
+    sleep_ms(1000);
+
+    /* Print [31.0s] progress */
+    uint64_t collect_end = get_current_time_ns();
+    double final_elapsed = (collect_end - start_time) / 1e9;
+    if (g_latency_stats.latency_count > 0) {
+        double sum = 0.0;
+        double min_val = g_latency_stats.latency_samples[0];
+        double max_val = g_latency_stats.latency_samples[0];
+
+        for (size_t i = 0; i < g_latency_stats.latency_count; i++) {
+            double val = g_latency_stats.latency_samples[i];
+            sum += val;
+            if (val < min_val) min_val = val;
+            if (val > max_val) max_val = val;
+        }
+
+        double avg_latency = (sum / g_latency_stats.latency_count) / 2.0;
+        double min_latency = min_val / 2.0;
+        double max_latency = max_val / 2.0;
+
+        printf("[%.1fs] Sent: %llu, Echoes: %zu, Latency: %.2f ms (min: %.2f ms, max: %.2f ms)\n",
+               final_elapsed, (unsigned long long)seq_num, g_latency_stats.latency_count,
+               avg_latency / 1e6, min_latency / 1e6, max_latency / 1e6);
+    } else {
+        printf("[%.1fs] Sent: %llu, Echoes: %zu\n",
+               final_elapsed, (unsigned long long)seq_num, g_latency_stats.latency_count);
+    }
 
     /* Print final statistics */
     printf("\n=== Latency Test Results ===\n");
@@ -988,6 +1124,7 @@ int run_local_latency_test(const PerfTestArgs* args) {
     printf("\n=== Local Latency Test (Publisher) ===\n");
     printf("  Data size: %zu bytes\n", args->data_size);
     printf("  Reliability: %s\n", args->use_reliable ? "RELIABLE" : "BEST_EFFORT");
+    printf("  Warmup time: %llu seconds\n", (unsigned long long)args->warmup_time);
     printf("  Execution time: %llu seconds\n", (unsigned long long)args->execution_time);
     printf("  Rate: %s\n", args->hz > 0 ? "limited" : "unlimited");
     if (args->hz > 0) {
@@ -1109,6 +1246,39 @@ int run_local_latency_test(const PerfTestArgs* args) {
     uint64_t total_samples = 0;
     uint64_t seq_num = 0;
 
+    /* Warmup phase */
+    if (args->warmup_time > 0) {
+        printf("Starting warmup phase (%llu seconds)...\n", (unsigned long long)args->warmup_time);
+        uint64_t warmup_start = get_current_time_ns();
+        uint64_t warmup_end = warmup_start + (args->warmup_time * 1000000000ULL);
+        uint64_t warmup_next_send = warmup_start;
+        uint64_t warmup_interval = args->hz > 0 ? (uint64_t)(1000000000.0 / args->hz) : 0;
+
+        while (1) {
+            uint64_t now = get_current_time_ns();
+            if (now >= warmup_end) break;
+
+            if (args->hz > 0 && now < warmup_next_send) continue;
+
+            PerformanceTestData sample = {
+                .seq_num = seq_num++,
+                .timestamp = now,
+                .data = payload,
+                .data_len = args->data_size
+            };
+
+            size_t serialized_size = serialize_performance_data(&sample, buffer, buffer_size);
+            if (serialized_size == 0) break;
+
+            ret = int2dds_write(writer, buffer, serialized_size);
+            if (ret != INT2DDS_RET_OK) break;
+
+            if (args->hz > 0) warmup_next_send += warmup_interval;
+        }
+        printf("Warmup complete. Sent %llu samples during warmup.\n", (unsigned long long)seq_num);
+        seq_num = 0;  /* Reset for actual test */
+    }
+
     /* Start test */
     uint64_t start_time_ns = get_current_time_ns();
     uint64_t test_end_time = start_time_ns + (args->execution_time * 1000000000ULL);
@@ -1212,6 +1382,7 @@ void print_usage(const char* prog_name) {
     printf("  --mode <mode>          Test mode: throughput, latency, local_latency (default: throughput)\n");
     printf("  --size <bytes>         Payload size in bytes (default: 1024)\n");
     printf("  --time <seconds>       Test duration in seconds (default: 30)\n");
+    printf("  --warmup <seconds>     Warmup duration in seconds, not measured (default: 0)\n");
     printf("  --hz <rate>            Message rate in Hz, 0 for unlimited (default: 0)\n");
     printf("  --reliability <mode>   QoS reliability: best_effort or reliable (default: best_effort)\n");
     printf("  --domain <id>          DDS domain ID (default: 0)\n");
@@ -1223,6 +1394,7 @@ int parse_args(int argc, char** argv, PerfTestArgs* args) {
     args->mode = MODE_THROUGHPUT;
     args->data_size = 1024;
     args->execution_time = 30;
+    args->warmup_time = 0;
     args->hz = 0.0;
     args->use_reliable = 0;  /* best_effort is default */
     args->domain_id = 0;
@@ -1248,6 +1420,9 @@ int parse_args(int argc, char** argv, PerfTestArgs* args) {
         } else if (strcmp(argv[i], "--time") == 0 && i + 1 < argc) {
             i++;
             args->execution_time = (uint64_t)atoi(argv[i]);
+        } else if (strcmp(argv[i], "--warmup") == 0 && i + 1 < argc) {
+            i++;
+            args->warmup_time = (uint64_t)atoi(argv[i]);
         } else if (strcmp(argv[i], "--hz") == 0 && i + 1 < argc) {
             i++;
             args->hz = atof(argv[i]);
