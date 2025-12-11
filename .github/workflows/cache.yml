@@ -9,7 +9,6 @@ on:
 
 jobs:
   cache-build:
-    if: github.ref == 'refs/heads/develop' || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
@@ -26,11 +25,6 @@ jobs:
       - name: Disable Windows Defender realtime monitoring
         if: runner.os == 'Windows'
         run: Set-MpPreference -DisableRealtimeMonitoring $true
-        shell: powershell
-
-      - name: Set cargo target directory to D drive
-        if: runner.os == 'Windows'
-        run: echo "CARGO_TARGET_DIR=D:\cargo-target" >> $env:GITHUB_ENV
         shell: powershell
 
       - name: Install Rust
