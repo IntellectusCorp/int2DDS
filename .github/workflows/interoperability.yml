@@ -251,6 +251,40 @@ jobs:
           sed -i "87i\\        elif 'int2' in product.lower():" generate_xlsx_report.py
           sed -i "88i\\            return 'int2DDS'" generate_xlsx_report.py
           python3 generate_xlsx_report.py --input junit_interoperability_report.xml --output interoperability_report.xlsx
+      - name: Display report in summary
+        run: |
+          source .venv/bin/activate
+          pip install openpyxl
+          python3 << 'EOF'
+          import openpyxl
+          from openpyxl.utils import get_column_letter
+          import os
+
+          wb = openpyxl.load_workbook('interoperability_report.xlsx')
+          ws = wb['int2DDS']
+
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write("## 📊 Interoperability Test Report (int2DDS)\n\n")
+
+              rows = list(ws.iter_rows(values_only=True))
+              if rows:
+                  # Header
+                  header = rows[0]
+                  f.write("| " + " | ".join(str(cell) if cell else "" for cell in header) + " |\n")
+                  f.write("| " + " | ".join("---" for _ in header) + " |\n")
+
+                  # Data rows
+                  for row in rows[1:]:
+                      cells = []
+                      for cell in row:
+                          if cell is None:
+                              cells.append("")
+                          elif cell == "ERROR":
+                              cells.append("❌")
+                          else:
+                              cells.append(str(cell))
+                      f.write("| " + " | ".join(cells) + " |\n")
+          EOF
       - name: XUnit Viewer
         id: xunit-viewer
         uses: AutoModality/action-xunit-viewer@v1
