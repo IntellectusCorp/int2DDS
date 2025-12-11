@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use mio::{Events, Poll, Token, Waker};
 
@@ -15,7 +15,7 @@ use crate::rtps::transport::socket::MAX_EVENTS;
 use crate::rtps::transport::{Transport, TransportSender};
 
 pub(crate) struct SendingTask {
-    participant: Arc<Participant>,
+    participant: Weak<Participant>,
     spdp_logic: Arc<Option<SpdpLogic>>,
     sedp_logic: Arc<Option<SedpLogic>>,
     user_logic: Arc<Option<UserLogic>>,
@@ -61,7 +61,15 @@ impl SendingTask {
         let sending_token = Token(port as usize);
 
         let waker = Arc::new(Waker::new(poll.registry(), sending_token).unwrap());
-        Self { participant, sedp_logic, spdp_logic, user_logic, poll, events, waker }
+        Self {
+            participant: Arc::downgrade(&participant),
+            sedp_logic,
+            spdp_logic,
+            user_logic,
+            poll,
+            events,
+            waker,
+        }
     }
 
     pub(crate) fn waker(&self) -> Arc<Waker> {
@@ -69,6 +77,10 @@ impl SendingTask {
     }
 
     pub(crate) fn create_worker_task(&self, message: MessageType) -> RtpsResult<()> {
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
         let mut spdp_logic = self
             .spdp_logic
             .as_ref()
@@ -86,19 +98,19 @@ impl SendingTask {
 
         match message {
             MessageType::P2pData(start_time, duration, participant_message_data) => {
-                if let Some(wlp_logic) = self.participant.wlp_logic() {
+                if let Some(wlp_logic) = participant.wlp_logic() {
                     wlp_logic.send_participant_message_data(
                         start_time,
                         duration,
                         participant_message_data,
-                    );
+                    )?;
                 }
 
                 Ok(())
             }
 
             MessageType::P2pHeartbeat(target_guid_prefix) => {
-                if let Some(wlp_logic) = self.participant.wlp_logic() {
+                if let Some(wlp_logic) = participant.wlp_logic() {
                     wlp_logic.send_liveliness_heartbeat(false, false, None, target_guid_prefix)?;
                 }
 
@@ -113,7 +125,7 @@ impl SendingTask {
             ) => {
                 spdp_logic.send_periodic_participant_data_multicast(
                     start_time, duration, domain_id, data,
-                );
+                )?;
                 Ok(())
             }
 
@@ -219,15 +231,29 @@ impl SendingTask {
         let _ = sedp_logic.send_endpoint_termination_message(builtin_writer_guid, cache_change);
     }
 
-    pub(crate) fn sync_spdp_terminate_participant_task(&self) {
-        let spdp_logic = self.spdp_logic.as_ref().as_ref().expect("SpdpLogic is not initialized");
-        spdp_logic.send_participant_termination_message_multicast();
-        let sedp_logic = self.sedp_logic.as_ref().as_ref().expect("SedpLogic is not initialized");
-        sedp_logic.send_participant_termination_message_unicast();
+    pub(crate) fn sync_spdp_terminate_participant_task(&self) -> RtpsResult<()> {
+        let spdp_logic = self
+            .spdp_logic
+            .as_ref()
+            .as_ref()
+            .ok_or(RtpsError::new(RtpsErrorCode::NotInitialized, "SpdpLogic is not initialized"))?;
+        spdp_logic.send_participant_termination_message_multicast()?;
+        let sedp_logic = self
+            .sedp_logic
+            .as_ref()
+            .as_ref()
+            .ok_or(RtpsError::new(RtpsErrorCode::NotInitialized, "SedpLogic is not initialized"))?;
+        sedp_logic.send_participant_termination_message_unicast()?;
+        Ok(())
     }
 
     pub(crate) fn event_loop(&mut self, queue: Arc<Mutex<Vec<MessageType>>>) -> RtpsResult<()> {
         log::info!("start sending task thread");
+
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
 
         loop {
             if let Err(e) =
@@ -236,7 +262,7 @@ impl SendingTask {
                 return Err(RtpsError::new(RtpsErrorCode::Io, format!("poll error: {}", e)));
             }
 
-            if self.participant.is_terminated() {
+            if participant.is_terminated() {
                 log::debug!("Detected global termination flag, exiting sending handler loop");
                 return Ok(());
             }

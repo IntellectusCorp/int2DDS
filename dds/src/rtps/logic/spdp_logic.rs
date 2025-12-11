@@ -5,7 +5,7 @@
 //! from remote participants to maintain the participant discovery database.
 
 use std::{
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     time::{Duration as StdDuration, Instant},
 };
 
@@ -13,7 +13,12 @@ use rand;
 use speedy::{Endianness, Writable};
 
 use crate::rtps::{
-    common::{guid::Guid, time::RtpsDuration, types::DomainId},
+    common::{
+        guid::Guid,
+        rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
+        time::RtpsDuration,
+        types::DomainId,
+    },
     entities::{participant::Participant, writer::Writer},
     logic::data::participant_message_processor::ParticipantMessageProcessor,
     messages::message_creator::MessageCreator,
@@ -26,7 +31,7 @@ use crate::rtps::{
 
 #[derive(Clone)]
 pub(crate) struct SpdpLogic {
-    participant: Arc<Participant>,
+    participant: Weak<Participant>,
     sender: Option<Arc<TransportSender>>,
     tcp_sender: Option<Arc<TransportSender>>,
     initial_peers: Vec<std::net::SocketAddr>,
@@ -41,11 +46,21 @@ impl SpdpLogic {
         initial_peers: Vec<std::net::SocketAddr>,
     ) -> Self {
         let timer_handler = TimerHandler::get_instance(participant.clone());
-        Self { participant, sender, tcp_sender, initial_peers, timer_handler }
+        Self {
+            participant: Arc::downgrade(&participant),
+            sender,
+            tcp_sender,
+            initial_peers,
+            timer_handler,
+        }
     }
 
-    pub(crate) fn is_participant_terminated(&self) -> bool {
-        self.participant.is_terminated()
+    pub(crate) fn is_participant_terminated(&self) -> RtpsResult<bool> {
+        Ok(self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?
+            .is_terminated())
     }
 
     // Logic to actually send the data
@@ -56,7 +71,7 @@ impl SpdpLogic {
         duration: StdDuration,
         domain_id: DomainId,
         data: Option<Arc<Vec<u8>>>,
-    ) {
+    ) -> RtpsResult<()> {
         let start = Instant::now();
         match data {
             Some(ref data) => {
@@ -94,7 +109,6 @@ impl SpdpLogic {
             rand::random::<u32>()
         );
 
-        let participant = Arc::new(self.participant.clone());
         let data_arc = Arc::new(data);
         if let Ok(timer_handler) = self.timer_handler.lock() {
             timer_handler.add_timer(
@@ -102,11 +116,11 @@ impl SpdpLogic {
                 remaining_duration,
                 false, // one-shot timer
                 {
-                    let participant = participant.clone();
+                    let participant = self.participant()?;
                     let data_arc = data_arc.clone();
                     move || {
                         let sending_handler =
-                            SendingHandler::get_instance((*participant).clone(), None, None);
+                            SendingHandler::get_instance(participant.clone(), None, None);
                         sending_handler.push_message_and_wake(
                             MessageType::PeriodicParticipantDataMulticast(
                                 Some(Instant::now()),
@@ -121,6 +135,35 @@ impl SpdpLogic {
         } else {
             log::error!("Failed to acquire timer handler lock for SPDP multicast sending");
         }
+
+        Ok(())
+    }
+
+    pub(crate) fn create_spdp_message(&self) -> RtpsResult<Option<Arc<Vec<u8>>>> {
+        // Create broadcasting rtps message for SPDP
+
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
+        let data = match MessageCreator::create_spdp_msg(participant.clone()) {
+            Ok(rtps_message) => {
+                match rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian) {
+                    Ok(data) => Some(Arc::new(data)),
+                    Err(e) => {
+                        log::error!("Failed to write SPDP message: {:?}", e);
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                log::error!("Failed to create SPDP message: {:?}", e);
+                None
+            }
+        };
+
+        Ok(data)
     }
 
     /// Send SPDP message to initial peers via TCP unicast
@@ -170,15 +213,20 @@ impl SpdpLogic {
         }
     }
 
-    pub(crate) fn start_spdp(&self) {
-        self.trigger_send_spdp_multicast();
+    pub(crate) fn start_spdp(&self) -> RtpsResult<()> {
+        self.trigger_send_spdp_multicast()
     }
 
     // Trigger SPDP multicast transmission
-    pub(crate) fn trigger_send_spdp_multicast(&self) {
+    pub(crate) fn trigger_send_spdp_multicast(&self) -> RtpsResult<()> {
         // Get necessary data
-        let domain_id = self.participant.domain_id();
-        let heartbeat_period = match self.participant.spdp_builtin_participant_writer().lock() {
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
+        let domain_id = participant.domain_id();
+        let heartbeat_period = match participant.spdp_builtin_participant_writer().lock() {
             Ok(writer) => writer.heartbeat_period(),
             Err(e) => {
                 log::error!("Failed to acquire spdp builtin participant writer lock: {}", e);
@@ -186,24 +234,31 @@ impl SpdpLogic {
             }
         };
         // Actually request SPDP multicast transmission
-        let sending_handler = SendingHandler::get_instance(self.participant.clone(), None, None);
+        let sending_handler = SendingHandler::get_instance(self.participant()?, None, None);
         sending_handler.push_message_and_wake(MessageType::PeriodicParticipantDataMulticast(
             None,
             heartbeat_period.to_std_duration(),
             domain_id,
-            self.create_spdp_message(),
+            self.create_spdp_message()?,
         ));
+
+        Ok(())
     }
 
     /// Method to notify the network that the Participant has been terminated after deleting my Participant
-    pub(crate) fn send_participant_termination_message_multicast(&self) {
+    pub(crate) fn send_participant_termination_message_multicast(&self) -> RtpsResult<()> {
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
         if let Ok(rtps_message) =
-            MessageCreator::create_spdp_msg_with_inline_qos(self.participant.clone())
+            MessageCreator::create_spdp_msg_with_inline_qos(participant.clone())
         {
             let buffer = rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian);
             if let Ok(buffer) = buffer {
                 if let Some(ref sender) = self.sender {
-                    let _ = sender.send_multicast(self.participant.domain_id(), &buffer);
+                    let _ = sender.send_multicast(participant.domain_id(), &buffer);
                     log::debug!("discovery multicast packet send");
                 } else {
                     log::debug!("UDP sender not available, skipping SPDP termination multicast");
@@ -212,27 +267,38 @@ impl SpdpLogic {
                 log::error!("Failed to serialize SPDP message with inline qos");
             }
         }
+
+        Ok(())
     }
 
     /// Method to handle remote participant termination
     pub(crate) fn handle_participant_termination_message(
         &self,
         terminated_participant_guid: &Guid,
-    ) {
+    ) -> RtpsResult<()> {
         // Cancel liveliness monitoring before unmatch to prevent spurious LOST events
-        if let Ok(monitor) = self.participant.liveliness_monitor().lock() {
+        if let Ok(monitor) = self.participant()?.liveliness_monitor().lock() {
             if let Some(monitor) = monitor.as_ref() {
                 monitor.cancel_writer(*terminated_participant_guid);
             }
         }
 
-        self.participant.unmatch_with_remote_participant(terminated_participant_guid);
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
+        participant.unmatch_with_remote_participant(terminated_participant_guid);
+
+        Ok(())
     }
 }
 
 impl ParticipantMessageProcessor for SpdpLogic {
-    fn participant(&self) -> Arc<Participant> {
-        self.participant.clone()
+    fn participant(&self) -> RtpsResult<Arc<Participant>> {
+        Ok(self.participant.upgrade().ok_or_else(|| {
+            RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped")
+        })?)
     }
 }
 
@@ -268,7 +334,7 @@ mod tests {
             socket.tcp_sender(),
             Vec::new(), // No initial peers for test
         );
-        spdp_logic.trigger_send_spdp_multicast();
+        spdp_logic.trigger_send_spdp_multicast().unwrap();
 
         // Code to verify if it sends multiple times
         thread::sleep(std::time::Duration::from_secs(100));

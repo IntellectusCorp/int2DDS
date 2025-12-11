@@ -10,14 +10,14 @@ use crate::rtps::transport::udp::udp_listener::UdpListener;
 use log::{debug, error, info, warn};
 use mio::{Events, Interest, Poll, Token};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 pub(crate) struct DiscoveryUnicastListeningTask {
     guid_prefix: GuidPrefix,
     discovery_unicast_listener: Option<UdpListener>,
     tcp_listener: Option<TcpListener>,
-    participant: Arc<Participant>,
+    participant: Weak<Participant>,
     sedp_logic: Arc<Option<SedpLogic>>,
 }
 
@@ -29,7 +29,13 @@ impl DiscoveryUnicastListeningTask {
     ) -> Self {
         let (_, sedp_logic, _) = participant.get_logics();
         let guid_prefix = participant.guid().prefix();
-        Self { guid_prefix, discovery_unicast_listener, tcp_listener, participant, sedp_logic }
+        Self {
+            guid_prefix,
+            discovery_unicast_listener,
+            tcp_listener,
+            participant: Arc::downgrade(&participant),
+            sedp_logic,
+        }
     }
 
     pub(crate) fn unicast_listening(&mut self) -> std::io::Result<()> {
@@ -73,10 +79,15 @@ impl DiscoveryUnicastListeningTask {
             ));
         }
 
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(std::io::Error::new(std::io::ErrorKind::Other, "Participant already dropped"))?;
+
         loop {
             poll.poll(&mut events, Some(Duration::from_millis(100)))?;
 
-            if self.participant.is_terminated() {
+            if participant.is_terminated() {
                 debug!("Detected global termination flag, discovery unicast listening loop is terminating...");
                 // deregister before return
                 if let Some(listener) = &mut self.discovery_unicast_listener {
@@ -105,7 +116,7 @@ impl DiscoveryUnicastListeningTask {
                 if Some(event.token()) == udp_token && event.is_readable() {
                     if let Some(listener) = &mut self.discovery_unicast_listener {
                         while let Some((buffer, from_addr)) = listener.get_message() {
-                            if self.participant.is_terminated() {
+                            if participant.is_terminated() {
                                 debug!("Detected global termination flag during UDP processing");
                                 // deregister before return
                                 if let Some(listener) = &mut self.discovery_unicast_listener {
@@ -213,6 +224,11 @@ impl DiscoveryUnicastListeningTask {
             );
             return Ok(());
         }
+
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
         let mut sedp_logic = self
             .sedp_logic
             .as_ref()
@@ -221,9 +237,10 @@ impl DiscoveryUnicastListeningTask {
                 RtpsError::new(RtpsErrorCode::DataNotSet, "SpdpLogic is not initialized")
             })?
             .clone();
+
         sedp_logic.handle_rtps_message(message_receiver.clone())?;
-        if let Some(wlp_logic) = self.participant.wlp_logic() {
-            wlp_logic.handle_rtps_message(message_receiver);
+        if let Some(wlp_logic) = participant.wlp_logic() {
+            wlp_logic.handle_rtps_message(message_receiver)?;
         }
         Ok(())
     }

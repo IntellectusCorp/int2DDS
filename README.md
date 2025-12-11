@@ -228,15 +228,12 @@ examples:
 
 ```bash
 # Basic hello world examples
-cargo run --example hello_world_reliable_publisher
-cargo run --example hello_world_reliable_subscriber
+cargo run --example hello_world_param -- --role pub --domain 0 --reliability reliable
+cargo run --example hello_world_param -- --role sub --domain 0 --reliability reliable
 
 # Performance testing
 cargo run --example perftest_publisher
 cargo run --example perftest_subscriber
-
-# See all examples
-ls dds/examples/
 ```
 
 ## Documentation
@@ -264,10 +261,12 @@ For environment variable documentation and advanced configuration, see the docum
 int2DDS/
 ├── dds/              # Main DDS library implementation
 │   ├── src/
-│   │   ├── dds/      # DDS layer (entities, QoS, topics)
+│   │   ├── dcps/     # DCPS layer (entities, QoS, topics)
 │   │   ├── rtps/     # RTPS protocol layer
 │   │   └── common/   # Shared utilities
-│   └── examples/     # 80+ example programs
+│   ├── examples/     # Example programs
+│   ├── tests/        # Integration tests
+│   └── benches/      # Performance benchmarks
 ├── derive/           # DdsType derive macro
 └── docs/             # Documentation and guides
 ```
@@ -323,14 +322,19 @@ Developed by [Intellectus Corp](https://github.com/IntellectusCorp).
 
 ### 프로젝트 구조
 
-- [Documents](./docs/): 문서(설계 자료, 참고 논문 등)
-  - [guide](./docs/guide/): 개발 관련 가이드
-    - [환경변수](./docs/guide/env.md)
-  - [Rules](./docs/rules/): 개발 관련 그라운드 룰
-    - [Git 사용 방안](./docs/rules/git.md)
-- [dds/](./dds/): DDS 라이브러리 구현
-- [derive/](./derive/): DdsType 매크로
-- [dds/examples/](./dds/examples/): 예제 프로그램
+```
+int2DDS/
+├── dds/              # DDS 라이브러리 구현
+│   ├── src/
+│   │   ├── dcps/     # DCPS 레이어 (엔티티, QoS, 토픽)
+│   │   ├── rtps/     # RTPS 프로토콜 레이어
+│   │   └── common/   # 공통 유틸리티
+│   ├── examples/     # 예제 프로그램
+│   ├── tests/        # 통합 테스트
+│   └── benches/      # 성능 벤치마크
+├── derive/           # DdsType 매크로
+└── docs/             # 문서 및 가이드
+```
 
 ### 라이선스
 
