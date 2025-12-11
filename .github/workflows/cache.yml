@@ -1,4 +1,5 @@
-name: Prepare Develop Cache
+name: Cache Cargo Dependencies Build
+run-name: Cache Cargo Dependencies Build
 
 on:
   push:
