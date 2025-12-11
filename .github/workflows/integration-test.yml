@@ -42,6 +42,7 @@ jobs:
         with:
           shared-key: cargo-develop
           save-if: false
+          env-vars: "RUSTFLAGS"
 
       - name: Run integration tests
         env:

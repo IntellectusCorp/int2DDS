@@ -47,6 +47,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: cargo-develop
+          env-vars: "RUSTFLAGS"
 
       - name: Build once to populate cache
         run: cargo build
