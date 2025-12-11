@@ -1329,8 +1329,10 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                     .as_ref()
                     .ok_or(DdsError::Error("WLP not initialized".to_string()))?;
                 // Update Participant liveliness
-                wlp.update_local_participant_liveliness();
-                Ok(())
+                match wlp.update_local_participant_liveliness() {
+                    Ok(()) => Ok(()),
+                    Err(e) => Err(DdsError::Error(e.to_string())),
+                }
             }
             LivelinessQosPolicyKind::ManualByTopic => {
                 // Update own writer liveliness (LivelinessMonitor)
@@ -1340,8 +1342,10 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                     .ok_or(DdsError::Error("WLP not initialized".to_string()))?;
                 // Update Participant liveliness
                 let writer_guid = self.get_rtps_writer()?.guid();
-                wlp.update_local_writer_liveliness(&writer_guid);
-                Ok(())
+                match wlp.update_local_writer_liveliness(&writer_guid) {
+                    Ok(()) => Ok(()),
+                    Err(e) => Err(DdsError::Error(e.to_string())),
+                }
             }
         }
     }
