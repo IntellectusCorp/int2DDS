@@ -57,7 +57,7 @@ impl DiscoveryMulticastListeningTask {
             // Check for participant termination before processing events
             let spdp_logic =
                 self.spdp_logic.as_ref().as_ref().expect("SpdpLogic is not initialized");
-            if spdp_logic.is_participant_terminated() {
+            if let Ok(true) = spdp_logic.is_participant_terminated() {
                 debug!("Detected global termination flag, discovery multicast listening loop is terminating...");
                 // deregister before close
                 let _ = poll.registry().deregister(listener.socket());
@@ -74,7 +74,7 @@ impl DiscoveryMulticastListeningTask {
                             .as_ref()
                             .as_ref()
                             .expect("SpdpLogic is not initialized");
-                        if spdp_logic.is_participant_terminated() {
+                        if let Ok(true) = spdp_logic.is_participant_terminated() {
                             debug!("Detected global termination flag, discovery multicast listening loop is terminating...");
                             // deregister before return
                             let _ = poll.registry().deregister(listener.socket());
@@ -125,9 +125,10 @@ impl DiscoveryMulticastListeningTask {
                                                 .as_ref()
                                                 .as_ref()
                                                 .expect("SpdpLogic is not initialized");
-                                            spdp_logic.handle_participant_termination_message(
-                                                &terminated_participant_guid.to_guid(),
-                                            );
+                                            let _ = spdp_logic
+                                                .handle_participant_termination_message(
+                                                    &terminated_participant_guid.to_guid(),
+                                                );
 
                                             is_termination_message = true;
                                         }

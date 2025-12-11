@@ -903,7 +903,7 @@ impl Participant {
                 //     log::error!("Failed to join sending task thread for SPDP Terminate participant task: {:?}", e);
                 // }
 
-                sending_task_guard.sync_spdp_terminate_participant_task();
+                sending_task_guard.sync_spdp_terminate_participant_task()?;
             }
         }
 

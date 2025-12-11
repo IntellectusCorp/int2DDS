@@ -36,7 +36,7 @@ fn test_lifespan() {
             ..Default::default()
         },
         durability: DurabilityQosPolicy { kind: DurabilityQosPolicyKind::TransientLocal },
-        lifespan: LifespanQosPolicy { duration: Duration::from_millis(1000) },
+        lifespan: LifespanQosPolicy { duration: Duration::from_millis(500) },
         ..Default::default()
     };
 

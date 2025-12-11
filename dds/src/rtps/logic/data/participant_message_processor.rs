@@ -53,7 +53,7 @@ use crate::{
 /// operations that can be used by both SPDP and SEDP logic components.
 pub trait ParticipantMessageProcessor {
     /// Get the participant instance
-    fn participant(&self) -> Arc<Participant>;
+    fn participant(&self) -> RtpsResult<Arc<Participant>>;
 
     /// Handle discovered participant data (renamed from handle_multicast_spdp_message)
     fn handle_discovered_participant_data(
@@ -68,17 +68,17 @@ pub trait ParticipantMessageProcessor {
         );
 
         // Check domain ID match
-        if self.participant().domain_id() != spdp_discovered_participant_data.domain_id() {
+        if self.participant()?.domain_id() != spdp_discovered_participant_data.domain_id() {
             log::trace!(
                 "SPDP message domain ID mismatch: local {}, remote {}. Ignoring.",
-                self.participant().domain_id(),
+                self.participant()?.domain_id(),
                 spdp_discovered_participant_data.domain_id()
             );
             return Ok(());
         }
 
         // Check for duplicate participant
-        let result = match self.participant().remote_participant_proxy_datas().lock() {
+        let result = match self.participant()?.remote_participant_proxy_datas().lock() {
             Ok(remote_participant_datas) => {
                 remote_participant_datas.iter().any(|remote_participant_data| {
                     if remote_participant_data.participant_guid() == participant_guid {
@@ -104,10 +104,10 @@ pub trait ParticipantMessageProcessor {
         }
 
         // Setup builtin endpoints based on available endpoints
-        self.match_builtin_endpoints(&spdp_discovered_participant_data);
+        self.match_builtin_endpoints(&spdp_discovered_participant_data)?;
 
         // Add remote participant data
-        self.participant()
+        self.participant()?
             .add_remote_participant_proxy_data(spdp_discovered_participant_data.clone());
 
         // Start monitoring liveliness for the discovered participant
@@ -117,7 +117,7 @@ pub trait ParticipantMessageProcessor {
         )?;
 
         // Trigger SEDP message
-        self.trigger_send_sedp_message(Arc::new(spdp_discovered_participant_data));
+        self.trigger_send_sedp_message(Arc::new(spdp_discovered_participant_data))?;
 
         Ok(())
     }
@@ -126,7 +126,7 @@ pub trait ParticipantMessageProcessor {
     fn match_builtin_endpoints(
         &self,
         spdp_discovered_participant_data: &SPDPDiscoveredParticipantData,
-    ) {
+    ) -> RtpsResult<()> {
         // Add reader_locator/reader_proxy to writer according to remote endpointset
         // Create reader proxy and reader locator for builtin writers
         if spdp_discovered_participant_data
@@ -134,7 +134,7 @@ pub trait ParticipantMessageProcessor {
             .contains(BuiltinEndpointFlag::DISC_BUILTIN_ENDPOINT_PARTICIPANT_DETECTOR)
         {
             self.add_reader_locator_to_spdp_builtin_participant_writer(
-                self.participant().spdp_builtin_participant_writer(),
+                self.participant()?.spdp_builtin_participant_writer(),
                 spdp_discovered_participant_data.clone(),
             );
         }
@@ -144,7 +144,7 @@ pub trait ParticipantMessageProcessor {
             .contains(BuiltinEndpointFlag::BUILTIN_ENDPOINT_PARTICIPANT_MESSAGE_DATA_READER)
         {
             self.add_reader_proxy_to_builtin_writer(
-                self.participant().builtin_participant_message_writer(),
+                self.participant()?.builtin_participant_message_writer(),
                 spdp_discovered_participant_data.clone(),
                 EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_READER,
             );
@@ -155,7 +155,7 @@ pub trait ParticipantMessageProcessor {
             .contains(BuiltinEndpointFlag::BUILTIN_ENDPOINT_PARTICIPANT_MESSAGE_DATA_WRITER)
         {
             self.add_writer_proxy_to_builtin_reader(
-                self.participant().builtin_participant_message_reader(),
+                self.participant()?.builtin_participant_message_reader(),
                 spdp_discovered_participant_data.clone(),
                 EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_READER,
             );
@@ -166,7 +166,7 @@ pub trait ParticipantMessageProcessor {
             .contains(BuiltinEndpointFlag::DISC_BUILTIN_ENDPOINT_PUBLICATIONS_DETECTOR)
         {
             self.add_reader_proxy_to_builtin_writer(
-                self.participant().sedp_builtin_publications_writer(),
+                self.participant()?.sedp_builtin_publications_writer(),
                 spdp_discovered_participant_data.clone(),
                 EntityId::SEDP_BUILTIN_PUBLICATIONS_READER,
             );
@@ -177,7 +177,7 @@ pub trait ParticipantMessageProcessor {
             .contains(BuiltinEndpointFlag::DISC_BUILTIN_ENDPOINT_PUBLICATIONS_ANNOUNCER)
         {
             self.add_writer_proxy_to_builtin_reader(
-                self.participant().sedp_builtin_publications_reader(),
+                self.participant()?.sedp_builtin_publications_reader(),
                 spdp_discovered_participant_data.clone(),
                 EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER,
             );
@@ -188,7 +188,7 @@ pub trait ParticipantMessageProcessor {
             .contains(BuiltinEndpointFlag::DISC_BUILTIN_ENDPOINT_SUBSCRIPTIONS_DETECTOR)
         {
             self.add_reader_proxy_to_builtin_writer(
-                self.participant().sedp_builtin_subscriptions_writer(),
+                self.participant()?.sedp_builtin_subscriptions_writer(),
                 spdp_discovered_participant_data.clone(),
                 EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_READER,
             );
@@ -199,19 +199,21 @@ pub trait ParticipantMessageProcessor {
             .contains(BuiltinEndpointFlag::DISC_BUILTIN_ENDPOINT_SUBSCRIPTIONS_ANNOUNCER)
         {
             self.add_writer_proxy_to_builtin_reader(
-                self.participant().sedp_builtin_subscriptions_reader(),
+                self.participant()?.sedp_builtin_subscriptions_reader(),
                 spdp_discovered_participant_data.clone(),
                 EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_WRITER,
             );
         }
+
+        Ok(())
     }
 
     /// Trigger SEDP message sending for a discovered participant
     fn trigger_send_sedp_message(
         &self,
         spdp_discovered_participant_data: Arc<SPDPDiscoveredParticipantData>,
-    ) {
-        let heartbeat_period = match self.participant().spdp_builtin_participant_writer().lock() {
+    ) -> RtpsResult<()> {
+        let heartbeat_period = match self.participant()?.spdp_builtin_participant_writer().lock() {
             Ok(writer) => writer.heartbeat_period(),
             Err(e) => {
                 log::error!("Failed to acquire spdp builtin participant writer lock: {}", e);
@@ -219,13 +221,13 @@ pub trait ParticipantMessageProcessor {
             }
         };
 
-        let sending_handler = SendingHandler::get_instance(self.participant(), None, None);
+        let sending_handler = SendingHandler::get_instance(self.participant()?, None, None);
 
         sending_handler.push_message_and_wake(MessageType::PeriodicParticipantDataUnicast(
             None,
             heartbeat_period.to_std_duration(),
             spdp_discovered_participant_data.clone(),
-            self.create_spdp_message(),
+            self.create_spdp_message()?,
         ));
 
         sending_handler.push_message_and_wake(MessageType::PeriodicPublicationHeartbeat(
@@ -249,11 +251,13 @@ pub trait ParticipantMessageProcessor {
         //     heartbeat_period.to_std_duration().clone(),
         //     spdp_discovered_participant_data.clone(),
         // ));
+
+        Ok(())
     }
 
     // Create broadcasting rtps message for SPDP
-    fn create_spdp_message(&self) -> Option<Arc<Vec<u8>>> {
-        match MessageCreator::create_spdp_msg(self.participant()) {
+    fn create_spdp_message(&self) -> RtpsResult<Option<Arc<Vec<u8>>>> {
+        let data = match MessageCreator::create_spdp_msg(self.participant()?.clone()) {
             Ok(rtps_message) => {
                 match rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian) {
                     Ok(data) => Some(Arc::new(data)),
@@ -267,7 +271,9 @@ pub trait ParticipantMessageProcessor {
                 log::error!("Failed to create SPDP message: {:?}", e);
                 None
             }
-        }
+        };
+
+        Ok(data)
     }
 
     /// Add reader locator to SPDP builtin participant writer
@@ -401,9 +407,9 @@ pub trait ParticipantMessageProcessor {
         remote_participant_guid: &Guid,
         lease_duration: Duration,
     ) -> RtpsResult<()> {
-        if let Ok(mut monitor) = self.participant().liveliness_monitor().lock() {
+        if let Ok(mut monitor) = self.participant()?.liveliness_monitor().lock() {
             if monitor.is_none() {
-                let participant = self.participant();
+                let participant = self.participant()?;
                 let callback = Arc::new(move |participant_guid: Guid| {
                     participant.unmatch_with_remote_participant(&participant_guid);
                     true

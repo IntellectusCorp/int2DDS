@@ -155,9 +155,9 @@ fn test_manual_by_participant() {
     .unwrap();
 
     // Busy writer keeps writing to maintain liveliness
-    std::thread::sleep(std::time::Duration::from_millis(550));
+    std::thread::sleep(std::time::Duration::from_millis(600));
     busy_data_writer.write(&KeyedDataType::default(), InstanceHandle::NIL).unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(550));
+    std::thread::sleep(std::time::Duration::from_millis(600));
     busy_data_writer.write(&KeyedDataType::default(), InstanceHandle::NIL).unwrap();
 
     // Lazy writer never writes within 1 sec but still maintains liveliness
