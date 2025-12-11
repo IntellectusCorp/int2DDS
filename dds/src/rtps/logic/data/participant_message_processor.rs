@@ -35,7 +35,7 @@ use crate::{
         },
         entities::{
             entity::Entity,
-            participant::Participant,
+            participant::{self, Participant},
             reader::{Reader as _, StatefulReader, WriterProxy},
             writer::{
                 has_reader_locator::HasReaderLocator as _, reader_locator::ReaderLocator,
@@ -60,6 +60,8 @@ pub trait ParticipantMessageProcessor {
         &self,
         spdp_discovered_participant_data: SPDPDiscoveredParticipantData,
     ) -> RtpsResult<()> {
+        let participant = self.get_upgraded_participant()?;
+
         let participant_guid = spdp_discovered_participant_data.participant_guid();
         log::debug!(
             "Start handling DiscoveredParticipantData {:?} / {:?}",
@@ -68,20 +70,17 @@ pub trait ParticipantMessageProcessor {
         );
 
         // Check domain ID match
-        if self.get_upgraded_participant()?.domain_id()
-            != spdp_discovered_participant_data.domain_id()
-        {
+        if participant.domain_id() != spdp_discovered_participant_data.domain_id() {
             log::trace!(
                 "SPDP message domain ID mismatch: local {}, remote {}. Ignoring.",
-                self.get_upgraded_participant()?.domain_id(),
+                participant.domain_id(),
                 spdp_discovered_participant_data.domain_id()
             );
             return Ok(());
         }
 
         // Check for duplicate participant
-        let result = match self.get_upgraded_participant()?.remote_participant_proxy_datas().lock()
-        {
+        let result = match participant.remote_participant_proxy_datas().lock() {
             Ok(remote_participant_datas) => {
                 remote_participant_datas.iter().any(|remote_participant_data| {
                     if remote_participant_data.participant_guid() == participant_guid {
@@ -113,14 +112,14 @@ pub trait ParticipantMessageProcessor {
         self.get_upgraded_participant()?
             .add_remote_participant_proxy_data(spdp_discovered_participant_data.clone());
 
+        // Trigger SEDP message
+        self.trigger_send_sedp_message(Arc::new(spdp_discovered_participant_data.clone()))?;
+
         // Start monitoring liveliness for the discovered participant
         self.register_remote_participant_liveliness(
             &spdp_discovered_participant_data.participant_guid(),
             spdp_discovered_participant_data.lease_duration().into(),
         )?;
-
-        // Trigger SEDP message
-        self.trigger_send_sedp_message(Arc::new(spdp_discovered_participant_data))?;
 
         Ok(())
     }
@@ -130,6 +129,8 @@ pub trait ParticipantMessageProcessor {
         &self,
         spdp_discovered_participant_data: &SPDPDiscoveredParticipantData,
     ) -> RtpsResult<()> {
+        let participant = self.get_upgraded_participant()?;
+
         // Add reader_locator/reader_proxy to writer according to remote endpointset
         // Create reader proxy and reader locator for builtin writers
         if spdp_discovered_participant_data
@@ -137,7 +138,7 @@ pub trait ParticipantMessageProcessor {
             .contains(BuiltinEndpointFlag::DISC_BUILTIN_ENDPOINT_PARTICIPANT_DETECTOR)
         {
             self.add_reader_locator_to_spdp_builtin_participant_writer(
-                self.get_upgraded_participant()?.spdp_builtin_participant_writer(),
+                participant.spdp_builtin_participant_writer(),
                 spdp_discovered_participant_data.clone(),
             );
         }
@@ -147,7 +148,7 @@ pub trait ParticipantMessageProcessor {
             .contains(BuiltinEndpointFlag::BUILTIN_ENDPOINT_PARTICIPANT_MESSAGE_DATA_READER)
         {
             self.add_reader_proxy_to_builtin_writer(
-                self.get_upgraded_participant()?.builtin_participant_message_writer(),
+                participant.builtin_participant_message_writer(),
                 spdp_discovered_participant_data.clone(),
                 EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_READER,
             );
@@ -158,9 +159,9 @@ pub trait ParticipantMessageProcessor {
             .contains(BuiltinEndpointFlag::BUILTIN_ENDPOINT_PARTICIPANT_MESSAGE_DATA_WRITER)
         {
             self.add_writer_proxy_to_builtin_reader(
-                self.get_upgraded_participant()?.builtin_participant_message_reader(),
+                participant.builtin_participant_message_reader(),
                 spdp_discovered_participant_data.clone(),
-                EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_READER,
+                EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_WRITER,
             );
         }
 
@@ -169,7 +170,7 @@ pub trait ParticipantMessageProcessor {
             .contains(BuiltinEndpointFlag::DISC_BUILTIN_ENDPOINT_PUBLICATIONS_DETECTOR)
         {
             self.add_reader_proxy_to_builtin_writer(
-                self.get_upgraded_participant()?.sedp_builtin_publications_writer(),
+                participant.sedp_builtin_publications_writer(),
                 spdp_discovered_participant_data.clone(),
                 EntityId::SEDP_BUILTIN_PUBLICATIONS_READER,
             );
@@ -180,7 +181,7 @@ pub trait ParticipantMessageProcessor {
             .contains(BuiltinEndpointFlag::DISC_BUILTIN_ENDPOINT_PUBLICATIONS_ANNOUNCER)
         {
             self.add_writer_proxy_to_builtin_reader(
-                self.get_upgraded_participant()?.sedp_builtin_publications_reader(),
+                participant.sedp_builtin_publications_reader(),
                 spdp_discovered_participant_data.clone(),
                 EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER,
             );
@@ -191,7 +192,7 @@ pub trait ParticipantMessageProcessor {
             .contains(BuiltinEndpointFlag::DISC_BUILTIN_ENDPOINT_SUBSCRIPTIONS_DETECTOR)
         {
             self.add_reader_proxy_to_builtin_writer(
-                self.get_upgraded_participant()?.sedp_builtin_subscriptions_writer(),
+                participant.sedp_builtin_subscriptions_writer(),
                 spdp_discovered_participant_data.clone(),
                 EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_READER,
             );
@@ -202,7 +203,7 @@ pub trait ParticipantMessageProcessor {
             .contains(BuiltinEndpointFlag::DISC_BUILTIN_ENDPOINT_SUBSCRIPTIONS_ANNOUNCER)
         {
             self.add_writer_proxy_to_builtin_reader(
-                self.get_upgraded_participant()?.sedp_builtin_subscriptions_reader(),
+                participant.sedp_builtin_subscriptions_reader(),
                 spdp_discovered_participant_data.clone(),
                 EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_WRITER,
             );
@@ -330,15 +331,17 @@ pub trait ParticipantMessageProcessor {
         &self,
         writer: Arc<StatefulWriter>,
         spdp_discovered_participant_data: SPDPDiscoveredParticipantData,
-        entity_id: EntityId,
+        remote_entity_id: EntityId,
     ) {
-        let reader_guid =
-            Guid::new(spdp_discovered_participant_data.participant_guid().prefix(), entity_id);
+        let reader_guid = Guid::new(
+            spdp_discovered_participant_data.participant_guid().prefix(),
+            remote_entity_id,
+        );
 
         if !writer.matched_reader_is_matched(reader_guid) {
             let reader_proxy = ReaderProxy::new(
                 reader_guid,
-                entity_id,
+                remote_entity_id,
                 spdp_discovered_participant_data.metatraffic_unicast_locator_list().clone(),
                 spdp_discovered_participant_data.metatraffic_multicast_locator_list().clone(),
                 writer.last_change_sequence_number(),
@@ -357,15 +360,17 @@ pub trait ParticipantMessageProcessor {
         &self,
         reader: Arc<StatefulReader>,
         spdp_discovered_participant_data: SPDPDiscoveredParticipantData,
-        entity_id: EntityId,
+        remote_entity_id: EntityId,
     ) {
-        let writer_guid =
-            Guid::new(spdp_discovered_participant_data.participant_guid().prefix(), entity_id);
+        let writer_guid = Guid::new(
+            spdp_discovered_participant_data.participant_guid().prefix(),
+            remote_entity_id,
+        );
 
         if !reader.matched_writer_is_matched(writer_guid) {
             let reader_proxy = WriterProxy::new(
                 writer_guid,
-                entity_id,
+                remote_entity_id,
                 spdp_discovered_participant_data.metatraffic_unicast_locator_list().clone(),
                 spdp_discovered_participant_data.metatraffic_multicast_locator_list().clone(),
                 0,
