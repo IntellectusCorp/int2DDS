@@ -266,6 +266,17 @@ int deserialize_latency_data(const uint8_t* buffer, size_t buffer_size, LatencyT
     return 0;
 }
 
+/* Optimized: Extract only send_timestamp without memory allocation (zero-copy) */
+static inline int deserialize_latency_timestamp_fast(const uint8_t* buffer, size_t buffer_size, uint64_t* send_timestamp) {
+    if (buffer_size < 16) {  /* Only need seq_num(8) + send_timestamp(8) */
+        return -1;
+    }
+
+    /* Skip seq_num (8 bytes), read send_timestamp directly using memcpy (little-endian) */
+    memcpy(send_timestamp, buffer + 8, sizeof(uint64_t));
+    return 0;
+}
+
 /* ====== Listener Callbacks ====== */
 
 void on_publication_matched(
@@ -309,15 +320,15 @@ void on_data_available_latency_echo(
             continue;
         }
 
-        /* Deserialize */
-        LatencyTestData echo_data = {0};
-        if (deserialize_latency_data(buffer, data_size, &echo_data) != 0) {
+        /* Fast path: extract only send_timestamp (no malloc, no memcpy of payload) */
+        uint64_t send_timestamp;
+        if (deserialize_latency_timestamp_fast(buffer, data_size, &send_timestamp) != 0) {
             continue;
         }
 
         /* Calculate RTT */
         uint64_t now = get_current_time_ns();
-        uint64_t rtt_ns = now - echo_data.send_timestamp;
+        uint64_t rtt_ns = now - send_timestamp;
 
         /* Store latency sample (one-way = RTT / 2) */
         if (g_latency_stats.latency_count >= g_latency_stats.latency_capacity) {
@@ -325,7 +336,6 @@ void on_data_available_latency_echo(
             double* new_samples = (double*)realloc(g_latency_stats.latency_samples, new_capacity * sizeof(double));
             if (new_samples == NULL) {
                 fprintf(stderr, "Failed to allocate memory for latency samples\n");
-                free(echo_data.data);
                 break;
             }
             g_latency_stats.latency_samples = new_samples;
@@ -333,8 +343,6 @@ void on_data_available_latency_echo(
         }
 
         g_latency_stats.latency_samples[g_latency_stats.latency_count++] = (double)rtt_ns;
-
-        free(echo_data.data);
     }
 }
 
