@@ -7,7 +7,7 @@ use crate::core::types::LENGTH_UNLIMITED;
 use serde::de;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-fn deserialize_i32_or_unlimited<'de, D>(deserializer: D) -> Result<i32, D::Error>
+pub(crate) fn deserialize_i32_or_unlimited<'de, D>(deserializer: D) -> Result<i32, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -27,7 +27,7 @@ where
     }
 }
 
-fn serialize_i32_or_unlimited<S>(value: &i32, serializer: S) -> Result<S::Ok, S::Error>
+pub(crate) fn serialize_i32_or_unlimited<S>(value: &i32, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
