@@ -117,6 +117,8 @@ static Int2DdsDataWriter* g_echo_writer = NULL;
 static size_t g_data_size = 1024;
 static uint8_t* g_echo_buffer = NULL;
 static size_t g_echo_buffer_size = 0;
+static uint8_t* g_recv_buffer = NULL;
+static size_t g_recv_buffer_size = 0;
 
 /* ====== Signal Handlers ====== */
 
@@ -345,13 +347,19 @@ static void on_data_available_throughput(
         return;
     }
 
-    uint8_t buffer[65536];
+    if (g_recv_buffer == NULL || g_recv_buffer_size == 0) {
+        fprintf(stderr, "ERROR: g_recv_buffer not allocated\n");
+        return;
+    }
+
+    uint8_t* buffer = g_recv_buffer;
+    size_t buffer_size = g_recv_buffer_size;
     size_t data_size = 0;
     bool valid_data = false;
 
     /* Read all available samples */
     while (1) {
-        Int2DdsRet ret = int2dds_take(reader, buffer, sizeof(buffer), &data_size, &valid_data);
+        Int2DdsRet ret = int2dds_take(reader, buffer, buffer_size, &data_size, &valid_data);
 
         if (ret == INT2DDS_RET_NO_DATA) {
             break;
@@ -504,13 +512,19 @@ static void on_data_available_local_latency(
 
     uint64_t receive_time_ns = get_current_time_ns();
 
-    uint8_t buffer[65536];
+    if (g_recv_buffer == NULL || g_recv_buffer_size == 0) {
+        fprintf(stderr, "ERROR: g_recv_buffer not allocated\n");
+        return;
+    }
+
+    uint8_t* buffer = g_recv_buffer;
+    size_t buffer_size = g_recv_buffer_size;
     size_t data_size = 0;
     bool valid_data = false;
 
     /* Read all available samples */
     while (1) {
-        Int2DdsRet ret = int2dds_take(reader, buffer, sizeof(buffer), &data_size, &valid_data);
+        Int2DdsRet ret = int2dds_take(reader, buffer, buffer_size, &data_size, &valid_data);
 
         if (ret == INT2DDS_RET_NO_DATA) {
             break;
@@ -662,11 +676,20 @@ static void run_throughput_test(const subscriber_args_t *args) {
     stats.out_of_order = false;
     g_data_size = args->data_len;
 
+    /* Allocate receive buffer */
+    g_recv_buffer_size = (args->data_len + 64) * 2;
+    g_recv_buffer = (uint8_t*)malloc(g_recv_buffer_size);
+    if (g_recv_buffer == NULL) {
+        fprintf(stderr, "Failed to allocate receive buffer\n");
+        return;
+    }
+    printf("Allocated receive buffer: %zu bytes\n", g_recv_buffer_size);
+
     /* Initialize factory */
     ret = int2dds_domain_participant_factory_get_instance(&factory);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to get participant factory: %d\n", ret);
-        return;
+        goto cleanup;
     }
 
     /* Create participant */
@@ -761,12 +784,11 @@ static void run_throughput_test(const subscriber_args_t *args) {
 
     printf("Publisher connected. Waiting for data...\n");
 
-    /* Run for specified duration, monitor for timeout */
+    /* Run for specified duration */
     struct timespec test_start;
     clock_gettime(CLOCK_MONOTONIC, &test_start);
     uint64_t test_end_time_ns = (uint64_t)test_start.tv_sec * 1000000000ULL + test_start.tv_nsec +
                                 (args->execution_time * 1000000000ULL);
-    uint64_t timeout_threshold = 2000000000ULL;  /* 2 seconds no data = test end */
 
     while (running) {
         struct timespec now;
@@ -777,22 +799,6 @@ static void run_throughput_test(const subscriber_args_t *args) {
         if (now_ns >= test_end_time_ns) {
             printf("\nTest duration reached.\n");
             break;
-        }
-
-        /* Check for data timeout */
-        if (stats.total_received > 0) {
-            uint64_t last_msg_ns = (uint64_t)stats.last_report_time.tv_sec * 1000000000ULL +
-                                   stats.last_report_time.tv_nsec;
-            if ((now_ns - last_msg_ns) > timeout_threshold && stats.total_received > 0) {
-                /* Only timeout if we've received data before */
-                struct timespec last_data_time = stats.start_time;
-                double total_elapsed = (now.tv_sec - stats.start_time.tv_sec) +
-                                       (now.tv_nsec - stats.start_time.tv_nsec) / 1e9;
-                if (total_elapsed > 2.0) {
-                    printf("\nNo data received for 2 seconds. Test complete.\n");
-                    break;
-                }
-            }
         }
 
         sleep_ms(100);
@@ -837,6 +843,12 @@ static void run_throughput_test(const subscriber_args_t *args) {
     }
 
 cleanup:
+    if (g_recv_buffer) {
+        free(g_recv_buffer);
+        g_recv_buffer = NULL;
+        g_recv_buffer_size = 0;
+    }
+
     if (participant) {
         int2dds_participant_delete_contained_entities(participant);
         int2dds_delete_participant(participant);
@@ -1106,11 +1118,20 @@ static void run_local_latency_test(const subscriber_args_t *args) {
     memset(&stats, 0, sizeof(stats));
     g_data_size = args->data_len;
 
+    /* Allocate receive buffer */
+    g_recv_buffer_size = (args->data_len + 64) * 2;
+    g_recv_buffer = (uint8_t*)malloc(g_recv_buffer_size);
+    if (g_recv_buffer == NULL) {
+        fprintf(stderr, "Failed to allocate receive buffer\n");
+        return;
+    }
+    printf("Allocated receive buffer: %zu bytes\n", g_recv_buffer_size);
+
     /* Initialize factory */
     ret = int2dds_domain_participant_factory_get_instance(&factory);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to get participant factory: %d\n", ret);
-        return;
+        goto cleanup;
     }
 
     /* Create participant */
@@ -1284,6 +1305,12 @@ static void run_local_latency_test(const subscriber_args_t *args) {
     }
 
 cleanup:
+    if (g_recv_buffer) {
+        free(g_recv_buffer);
+        g_recv_buffer = NULL;
+        g_recv_buffer_size = 0;
+    }
+
     if (participant) {
         int2dds_participant_delete_contained_entities(participant);
         int2dds_delete_participant(participant);
