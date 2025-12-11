@@ -1046,10 +1046,7 @@ impl QosPolicy for EntityFactoryQosPolicy {
 /// - Concrete names (e.g., "sensors/temperature") match exactly
 /// - Regular expressions (e.g., "sensors/*") match against concrete names
 /// - Two entities match if they share at least one common partition
-#[derive(
-    Debug, Default, ConstDefault, Clone, PartialEq, Eq, Readable, Writable, Deserialize, Serialize,
-)]
-#[serde(default)]
+#[derive(Debug, Default, ConstDefault, Clone, PartialEq, Eq, Readable, Writable)]
 pub struct PartitionQosPolicy {
     /// List of partition names. Can be concrete names or wildcard patterns.
     pub name: Vec<String>,
