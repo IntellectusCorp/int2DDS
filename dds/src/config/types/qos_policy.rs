@@ -161,6 +161,30 @@ impl From<qos_policy::PresentationQosPolicy> for PresentationQosPolicy {
     }
 }
 
+#[derive(Default, Deserialize, Serialize)]
+#[serde(default)]
+pub(crate) struct PartitionQosPolicy {
+    pub(crate) name: StringSeq,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(default)]
+pub(crate) struct StringSeq {
+    pub(crate) element: Vec<String>,
+}
+
+impl From<PartitionQosPolicy> for qos_policy::PartitionQosPolicy {
+    fn from(external: PartitionQosPolicy) -> Self {
+        Self { name: external.name.element }
+    }
+}
+
+impl From<qos_policy::PartitionQosPolicy> for PartitionQosPolicy {
+    fn from(internal: qos_policy::PartitionQosPolicy) -> Self {
+        Self { name: StringSeq { element: internal.name } }
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 pub(crate) struct ReliabilityQosPolicy {
     pub(crate) kind: ReliabilityQosPolicyKind,
