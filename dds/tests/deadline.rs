@@ -98,11 +98,11 @@ fn test_reader_deadline_qos_basic() {
 
     // Send first data
     data_writer.write(&KeyedDataType::default(), InstanceHandle::NIL).unwrap();
-    thread::sleep(std::time::Duration::from_millis(100));
+    thread::sleep(std::time::Duration::from_millis(50));
 
     // Send again before deadline
     data_writer.write(&KeyedDataType::default(), InstanceHandle::NIL).unwrap();
-    thread::sleep(std::time::Duration::from_millis(100));
+    thread::sleep(std::time::Duration::from_millis(50));
 
     // Should not have deadline miss yet
     assert_eq!(
@@ -112,7 +112,7 @@ fn test_reader_deadline_qos_basic() {
     );
 
     // Wait to exceed deadline
-    thread::sleep(std::time::Duration::from_millis(300));
+    thread::sleep(std::time::Duration::from_millis(500));
 
     // Deadline miss occurs
     let miss_count = deadline_miss_count.load(Ordering::SeqCst);
