@@ -35,7 +35,7 @@ use crate::{
         },
         entities::{
             entity::Entity,
-            participant::{self, Participant},
+            participant::Participant,
             reader::{Reader as _, StatefulReader, WriterProxy},
             writer::{
                 has_reader_locator::HasReaderLocator as _, reader_locator::ReaderLocator,
