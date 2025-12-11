@@ -343,6 +343,7 @@ pub use crate::subscription::data_reader::DataReaderBase;
 #[doc(hidden)]
 pub use dcps::*;
 pub mod common;
+mod config;
 pub mod rtps;
 #[doc(hidden)]
 pub mod serialize;
