@@ -941,10 +941,7 @@ impl UserLogic {
         if !missing_seq_numbers.is_empty() {
             reader_proxy.requested_changes_set(missing_seq_numbers);
 
-            let participant = self.participant.upgrade().ok_or(RtpsError::new(
-                RtpsErrorCode::ArcUpgradeError,
-                "Participant already dropped",
-            ))?;
+            let participant = self.get_upgraded_participant()?;
 
             // Notify Writer that Reader has requested CacheChanges
             let handler = SendingHandler::get_instance(participant.clone(), None, None);
@@ -1649,10 +1646,7 @@ impl UserLogic {
         if !missing_changes.is_empty() || !final_flag || is_preemptive {
             writer_proxy.increase_acknack_count();
 
-            let participant = self.participant.upgrade().ok_or(RtpsError::new(
-                RtpsErrorCode::ArcUpgradeError,
-                "Participant already dropped",
-            ))?;
+            let participant = self.get_upgraded_participant()?;
 
             let buffer = MessageCreator::create_acknack_message(
                 participant.guid(),
@@ -1895,5 +1889,11 @@ impl UserLogic {
     #[cfg(test)]
     pub(crate) fn get_unicast_listening_handle(&self) -> Arc<Mutex<Option<JoinHandle<()>>>> {
         Arc::clone(&self.unicast_listening_handle)
+    }
+
+    fn get_upgraded_participant(&self) -> RtpsResult<Arc<Participant>> {
+        Ok(self.participant.upgrade().ok_or_else(|| {
+            RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped")
+        })?)
     }
 }
