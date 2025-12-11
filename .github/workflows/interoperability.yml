@@ -257,33 +257,67 @@ jobs:
           pip install openpyxl
           python3 << 'EOF'
           import openpyxl
-          from openpyxl.utils import get_column_letter
           import os
 
           wb = openpyxl.load_workbook('interoperability_report.xlsx')
           ws = wb['int2DDS']
 
+          rows = list(ws.iter_rows(values_only=True))
+
+          # Find empty columns to remove (columns 0, 9 based on your data)
+          empty_cols = set()
+          for col_idx in range(len(rows[0])):
+              if all(row[col_idx] is None or row[col_idx] == "" for row in rows):
+                  empty_cols.add(col_idx)
+
+          # Remove empty columns from all rows
+          def filter_row(row):
+              return [cell for idx, cell in enumerate(row) if idx not in empty_cols]
+
+          rows = [filter_row(row) for row in rows]
+
+          # Get header info from row 0 and row 2
+          pub_header = rows[0][1] if len(rows[0]) > 1 else "Publisher: int2DDS"
+          sub_header = rows[0][8] if len(rows[0]) > 8 else "Subscriber: int2DDS"
+
+          # Row 2 has DDS names (actual column headers)
+          dds_headers = rows[2] if len(rows) > 2 else []
+
+          # Count columns for each section
+          pub_cols = 7  # Number of DDS implementations
+          sub_cols = 7
+
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
               f.write("## 📊 Interoperability Test Report (int2DDS)\n\n")
+              f.write("<table>\n")
 
-              rows = list(ws.iter_rows(values_only=True))
-              if rows:
-                  # Header
-                  header = rows[0]
-                  f.write("| " + " | ".join(str(cell) if cell else "" for cell in header) + " |\n")
-                  f.write("| " + " | ".join("---" for _ in header) + " |\n")
+              # Header row with merged cells
+              f.write("<tr>")
+              f.write("<th rowspan='2'>Test</th>")
+              f.write(f"<th colspan='{pub_cols}' align='center'>{pub_header}</th>")
+              f.write(f"<th colspan='{sub_cols}' align='center'>{sub_header}</th>")
+              f.write("</tr>\n")
 
-                  # Data rows
-                  for row in rows[1:]:
-                      cells = []
-                      for cell in row:
-                          if cell is None:
-                              cells.append("")
-                          elif cell == "ERROR":
-                              cells.append("❌")
-                          else:
-                              cells.append(str(cell))
-                      f.write("| " + " | ".join(cells) + " |\n")
+              # DDS names row
+              f.write("<tr>")
+              for idx, cell in enumerate(dds_headers[1:]):  # Skip 'Test' column
+                  if cell:
+                      f.write(f"<th>{cell}</th>")
+              f.write("</tr>\n")
+
+              # Data rows (starting from row 3)
+              for row in rows[3:]:
+                  f.write("<tr>")
+                  for idx, cell in enumerate(row):
+                      if cell is None or cell == "":
+                          f.write("<td></td>")
+                      elif cell == "ERROR":
+                          f.write("<td>❌</td>")
+                      else:
+                          f.write(f"<td>{cell}</td>")
+                  f.write("</tr>\n")
+
+              f.write("</table>\n")
           EOF
       - name: XUnit Viewer
         id: xunit-viewer
