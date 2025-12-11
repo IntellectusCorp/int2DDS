@@ -37,6 +37,7 @@ typedef struct {
     TestMode mode;
     size_t data_size;
     uint64_t execution_time;  /* seconds */
+    uint64_t warmup_time;     /* warmup seconds (waits for warmup data) */
     int use_reliable;
     int32_t domain_id;
 } PerfTestArgs;
@@ -581,6 +582,7 @@ int run_throughput_test(const PerfTestArgs* args) {
     printf("\n=== Throughput Test (Subscriber) ===\n");
     printf("  Data size: %zu bytes\n", args->data_size);
     printf("  Reliability: %s\n", args->use_reliable ? "RELIABLE" : "BEST_EFFORT");
+    printf("  Warmup time: %llu seconds\n", (unsigned long long)args->warmup_time);
     printf("  Execution time: %llu seconds\n", (unsigned long long)args->execution_time);
     printf("\n");
 
@@ -686,6 +688,23 @@ int run_throughput_test(const PerfTestArgs* args) {
         goto cleanup;
     }
 
+    /* Warmup phase */
+    if (args->warmup_time > 0) {
+        printf("Starting warmup phase (%llu seconds)...\n", (unsigned long long)args->warmup_time);
+        uint64_t warmup_start = get_current_time_ns();
+        uint64_t warmup_end = warmup_start + (args->warmup_time * 1000000000ULL);
+
+        while (get_current_time_ns() < warmup_end) {
+            sleep_ms(1);
+        }
+
+        printf("Warmup complete. Received %llu samples during warmup. Resetting stats...\n",
+               (unsigned long long)g_stats.total_samples);
+
+        /* Reset stats for actual test */
+        memset(&g_stats, 0, sizeof(g_stats));
+    }
+
     /* Run for specified duration, monitor for timeout */
     uint64_t test_start = get_current_time_ns();
     uint64_t test_end_time = test_start + (args->execution_time * 1000000000ULL);
@@ -719,6 +738,11 @@ int run_throughput_test(const PerfTestArgs* args) {
     double mbps = (g_stats.bytes_received * 8.0) / (duration_sec * 1e6);
     double loss_rate = (g_stats.last_seq_num > 0) ?
                        (g_stats.lost_samples * 100.0 / g_stats.last_seq_num) : 0.0;
+
+    /* Final progress line */
+    printf("[%.1fs] Received: %llu, Avg: %.0f msg/s (%.2f Mbps), Lost: %llu, Loss rate: %.2f%%\n",
+           duration_sec, (unsigned long long)g_stats.total_samples, msgs_per_sec, mbps,
+           (unsigned long long)g_stats.lost_samples, loss_rate);
 
     printf("\n=== Performance Test Results ===\n");
     printf("Test duration: %.2f seconds\n", duration_sec);
@@ -756,6 +780,7 @@ int run_latency_test(const PerfTestArgs* args) {
     printf("\n=== Latency Test (Subscriber/Echo) ===\n");
     printf("  Data size: %zu bytes\n", args->data_size);
     printf("  Reliability: %s\n", args->use_reliable ? "RELIABLE" : "BEST_EFFORT");
+    printf("  Warmup time: %llu seconds\n", (unsigned long long)args->warmup_time);
     printf("  Execution time: %llu seconds\n", (unsigned long long)args->execution_time);
     printf("\n");
 
@@ -914,6 +939,23 @@ int run_latency_test(const PerfTestArgs* args) {
 
     printf("Publisher connected! Echoing latency requests...\n");
 
+    /* Warmup phase */
+    if (args->warmup_time > 0) {
+        printf("Starting warmup phase (%llu seconds)...\n", (unsigned long long)args->warmup_time);
+        uint64_t warmup_start = get_current_time_ns();
+        uint64_t warmup_end = warmup_start + (args->warmup_time * 1000000000ULL);
+
+        while (get_current_time_ns() < warmup_end) {
+            sleep_ms(1);
+        }
+
+        printf("Warmup complete. Echoed %llu samples during warmup. Resetting stats...\n",
+               (unsigned long long)g_stats.total_samples);
+
+        /* Reset stats for actual test */
+        g_stats.total_samples = 0;
+    }
+
     /* Run for specified duration */
     uint64_t start_time = get_current_time_ns();
     uint64_t test_end_time = start_time + (args->execution_time * 1000000000ULL);
@@ -944,6 +986,10 @@ int run_latency_test(const PerfTestArgs* args) {
     /* Print final statistics */
     double duration = (end_time - start_time) / 1e9;
     double rate = g_stats.total_samples / duration;
+
+    /* Final progress line */
+    printf("[%.1fs] Echoes sent: %llu, Rate: %.0f echo/s\n",
+           duration, (unsigned long long)g_stats.total_samples, rate);
 
     printf("\n=== Latency Echo Test Results ===\n");
     printf("Duration: %.2f seconds\n", duration);
@@ -983,6 +1029,7 @@ int run_local_latency_test(const PerfTestArgs* args) {
     printf("\n=== Local Latency Test (Subscriber) ===\n");
     printf("  Data size: %zu bytes\n", args->data_size);
     printf("  Reliability: %s\n", args->use_reliable ? "RELIABLE" : "BEST_EFFORT");
+    printf("  Warmup time: %llu seconds\n", (unsigned long long)args->warmup_time);
     printf("  Execution time: %llu seconds\n", (unsigned long long)args->execution_time);
     printf("\n");
 
@@ -1088,6 +1135,26 @@ int run_local_latency_test(const PerfTestArgs* args) {
         goto cleanup;
     }
 
+    /* Warmup phase */
+    if (args->warmup_time > 0) {
+        printf("Starting warmup phase (%llu seconds)...\n", (unsigned long long)args->warmup_time);
+        uint64_t warmup_start = get_current_time_ns();
+        uint64_t warmup_end = warmup_start + (args->warmup_time * 1000000000ULL);
+
+        while (get_current_time_ns() < warmup_end) {
+            sleep_ms(1);
+        }
+
+        printf("Warmup complete. Received %llu samples during warmup. Resetting stats...\n",
+               (unsigned long long)g_stats.total_samples);
+
+        /* Reset stats for actual test */
+        if (g_stats.latency_samples) {
+            free(g_stats.latency_samples);
+        }
+        memset(&g_stats, 0, sizeof(g_stats));
+    }
+
     /* Run for specified duration, monitor for timeout */
     uint64_t test_start = get_current_time_ns();
     uint64_t test_end_time = test_start + (args->execution_time * 1000000000ULL);
@@ -1117,6 +1184,27 @@ int run_local_latency_test(const PerfTestArgs* args) {
     /* Print final statistics */
     uint64_t end_time_ns = get_current_time_ns();
     double duration_sec = (end_time_ns - test_start) / 1e9;
+
+    /* Final progress line */
+    if (g_stats.latency_count > 0) {
+        double sum = 0.0;
+        double min_val = g_stats.latency_samples[0];
+        double max_val = g_stats.latency_samples[0];
+
+        for (size_t i = 0; i < g_stats.latency_count; i++) {
+            double val = g_stats.latency_samples[i];
+            sum += val;
+            if (val < min_val) min_val = val;
+            if (val > max_val) max_val = val;
+        }
+
+        double avg = sum / g_stats.latency_count;
+
+        printf("[%.1fs] Samples: %zu, Avg: %.3f ms, Min: %.3f ms, Max: %.3f ms\n",
+               duration_sec, g_stats.latency_count, avg / 1e6, min_val / 1e6, max_val / 1e6);
+    } else {
+        printf("[%.1fs] Samples: %zu\n", duration_sec, g_stats.latency_count);
+    }
 
     printf("\n=== Local Latency Test Results ===\n");
     printf("Test duration: %.2f seconds\n", duration_sec);
@@ -1165,6 +1253,7 @@ void print_usage(const char* prog_name) {
     printf("  --mode <mode>          Test mode: throughput, latency, local_latency (default: throughput)\n");
     printf("  --size <bytes>         Payload size in bytes (default: 1024)\n");
     printf("  --time <seconds>       Test duration in seconds (default: 30)\n");
+    printf("  --warmup <seconds>     Warmup duration in seconds, not measured (default: 0)\n");
     printf("  --reliability <mode>   QoS reliability: best_effort or reliable (default: best_effort)\n");
     printf("  --domain <id>          DDS domain ID (default: 0)\n");
     printf("  --help                 Show this help message\n");
@@ -1175,6 +1264,7 @@ int parse_args(int argc, char** argv, PerfTestArgs* args) {
     args->mode = MODE_THROUGHPUT;
     args->data_size = 1024;
     args->execution_time = 30;
+    args->warmup_time = 0;
     args->use_reliable = 0;  /* best_effort is default */
     args->domain_id = 0;
 
@@ -1199,6 +1289,9 @@ int parse_args(int argc, char** argv, PerfTestArgs* args) {
         } else if (strcmp(argv[i], "--time") == 0 && i + 1 < argc) {
             i++;
             args->execution_time = (uint64_t)atoi(argv[i]);
+        } else if (strcmp(argv[i], "--warmup") == 0 && i + 1 < argc) {
+            i++;
+            args->warmup_time = (uint64_t)atoi(argv[i]);
         } else if (strcmp(argv[i], "--reliability") == 0 && i + 1 < argc) {
             i++;
             if (strcmp(argv[i], "reliable") == 0) {
