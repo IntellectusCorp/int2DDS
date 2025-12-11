@@ -254,13 +254,7 @@ impl WlpLogic {
                     RtpsErrorCode::NotInitialized,
                     format!(
                         "Liveliness Monitor for Participant: {:?}",
-                        self.participant
-                            .upgrade()
-                            .ok_or(RtpsError::new(
-                                RtpsErrorCode::ArcUpgradeError,
-                                "Participant already dropped"
-                            ))?
-                            .guid(),
+                        self.get_upgraded_participant()?.guid()
                     ),
                 )),
             },
