@@ -6,7 +6,7 @@
 
 use std::{
     net::{SocketAddr, SocketAddrV4},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     thread::{self, JoinHandle},
     time::{Duration as StdDuration, Instant},
 };
@@ -90,7 +90,7 @@ enum BuiltinTopicData {
 #[derive(Clone)]
 #[allow(dead_code)]
 pub(crate) struct SedpLogic {
-    participant: Arc<Participant>,
+    participant: Weak<Participant>,
     builtin_endpoints: Arc<BuiltinEndpoints>,
     spdp_message: Option<Arc<Vec<u8>>>,
     sender: Option<Arc<TransportSender>>,
@@ -160,7 +160,7 @@ impl SedpLogic {
         let builtin_endpoints = participant.builtin_endpoints();
         let timer_handler = TimerHandler::get_instance(participant.clone());
         Self {
-            participant,
+            participant: Arc::downgrade(&participant),
             builtin_endpoints,
             spdp_message: None,
             sender,
@@ -175,11 +175,14 @@ impl SedpLogic {
         discovery_multicast_listener: Option<UdpListener>,
         discovery_unicast_listener: Option<UdpListener>,
         discovery_tcp_listener: Option<TcpListener>,
-    ) {
-        let mut discovery_multicast_listening_task = DiscoveryMulticastListeningTask::new(
-            discovery_multicast_listener,
-            self.participant.clone(),
-        );
+    ) -> RtpsResult<()> {
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
+        let mut discovery_multicast_listening_task =
+            DiscoveryMulticastListeningTask::new(discovery_multicast_listener, participant.clone());
 
         // multicast listening
         let multicast_handle = thread::Builder::new()
@@ -206,7 +209,7 @@ impl SedpLogic {
         let mut discovery_unicast_listening_task = DiscoveryUnicastListeningTask::new(
             discovery_unicast_listener,
             discovery_tcp_listener,
-            self.participant.clone(),
+            participant.clone(),
         );
 
         // unicast listening
@@ -230,6 +233,8 @@ impl SedpLogic {
         if let Ok(mut handle_guard) = self.unicast_listening_handle.lock() {
             *handle_guard = Some(unicast_handle);
         }
+
+        Ok(())
     }
 
     pub(crate) fn join_multicast_listening_thread(&self) -> RtpsResult<()> {
@@ -271,8 +276,13 @@ impl SedpLogic {
         duration: StdDuration,
         spdp_discovered_participant_data: Arc<SPDPDiscoveredParticipantData>,
         data: Option<Arc<Vec<u8>>>,
-    ) {
-        let handler = SendingHandler::get_instance(self.participant.clone(), None, None);
+    ) -> RtpsResult<()> {
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
+        let handler = SendingHandler::get_instance(participant.clone(), None, None);
         handler.push_message(MessageType::SedpSpdp(
             None,
             duration,
@@ -290,6 +300,8 @@ impl SedpLogic {
             Arc::new(spdp_discovered_participant_data.guid_prefix()),
         ));
         handler.wake_event_loop();
+
+        Ok(())
     }
 
     fn timer_sleep_and_send_message(
@@ -298,7 +310,7 @@ impl SedpLogic {
         logic_start_time: Instant,
         duration: StdDuration,
         message: MessageType,
-    ) {
+    ) -> RtpsResult<()> {
         let elapsed = logic_start_time.elapsed();
         let remaining_duration = match start_time {
             Some(start_time) => {
@@ -308,15 +320,20 @@ impl SedpLogic {
             None => duration.checked_sub(elapsed).unwrap_or(StdDuration::from_millis(0)),
         };
 
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
         // Generate unique timer ID using participant GUID, timestamp and random number
         let timer_id = format!(
             "sedp_send_{:?}_{}_{:?}",
-            self.participant.guid().prefix(),
+            participant.guid().prefix(),
             logic_start_time.elapsed().as_nanos(),
             random_range(0..10000)
         );
 
-        let participant = Arc::new(self.participant.clone());
+        let participant = Arc::new(participant.clone());
         let message = Arc::new(message);
         if let Ok(timer_handler) = self.timer_handler.lock() {
             timer_handler.add_timer(
@@ -336,6 +353,8 @@ impl SedpLogic {
         } else {
             error!("Failed to acquire timer handler lock for SEDP message sending");
         }
+
+        Ok(())
     }
 
     // SEDP SPDP message repeated transmission
@@ -351,7 +370,12 @@ impl SedpLogic {
         match data {
             Some(data) => {
                 let mut list: Vec<SPDPDiscoveredParticipantData> = Vec::new();
-                match self.participant.remote_participant_proxy_datas().lock() {
+                let participant = self.participant.upgrade().ok_or(RtpsError::new(
+                    RtpsErrorCode::ArcUpgradeError,
+                    "Participant already dropped",
+                ))?;
+
+                match participant.remote_participant_proxy_datas().lock() {
                     Ok(remote_participant_datas) => {
                         // Send SPDP message to everyone
                         for remote_participant_data in remote_participant_datas.iter() {
@@ -379,7 +403,7 @@ impl SedpLogic {
                         warn!("Failed to send SPDP discovery message: {:?}", e);
                     }
                     let start_time = Instant::now();
-                    self.timer_sleep_and_send_message(
+                    let _ = self.timer_sleep_and_send_message(
                         Some(start_time),
                         logic_start_time,
                         duration,
@@ -409,8 +433,13 @@ impl SedpLogic {
     ) -> RtpsResult<bool> {
         let logic_start_time = Instant::now();
         // Get reader and writer corresponding to entity
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
         let builtin_endpoint_pair =
-            BuiltinEndpointPair::reader_writer_from_entity_id(entity_id, self.participant.clone())?;
+            BuiltinEndpointPair::reader_writer_from_entity_id(entity_id, participant.clone())?;
         let (reader, writer) = match builtin_endpoint_pair {
             Some(builtin_endpoint_pair) => {
                 (builtin_endpoint_pair.reader(), builtin_endpoint_pair.writer())
@@ -446,7 +475,7 @@ impl SedpLogic {
         let mut retry: bool = false;
 
         let participant_guid = {
-            let local_participant_data = self.participant.local_participant_proxy_data();
+            let local_participant_data = participant.local_participant_proxy_data();
             local_participant_data.participant_guid()
         };
 
@@ -518,26 +547,26 @@ impl SedpLogic {
                     logic_start_time,
                     duration,
                     MessageType::SedpPublication(Some(start_time), duration, guid_prefix.clone()),
-                );
+                )?;
             } else if entity_id == EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_WRITER {
                 self.timer_sleep_and_send_message(
                     Some(start_time),
                     logic_start_time,
                     duration,
                     MessageType::SedpSubscription(Some(start_time), duration, guid_prefix.clone()),
-                );
+                )?;
             } else if entity_id == EntityId::SEDP_BUILTIN_TOPICS_WRITER {
                 self.timer_sleep_and_send_message(
                     Some(start_time),
                     logic_start_time,
                     duration,
                     MessageType::SedpTopic(Some(start_time), duration, guid_prefix.clone()),
-                );
+                )?;
             } else {
                 return Err(RtpsError::new(
                     RtpsErrorCode::InvalidEntityKind,
                     format!("Invalid entity id: {:?}", entity_id),
-                ));
+                ))?;
             }
         }
         Ok(is_sent)
@@ -582,7 +611,12 @@ impl SedpLogic {
         // Get remote participant's locator information and send
         let mut is_sent = false;
 
-        match self.participant.remote_participant_proxy_datas().clone().lock() {
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
+        match participant.remote_participant_proxy_datas().clone().lock() {
             Ok(remote_participant_datas) => {
                 for remote_participant_data in remote_participant_datas.iter() {
                     if remote_participant_data.participant_guid().prefix() == remote_guid.prefix() {
@@ -658,8 +692,13 @@ impl SedpLogic {
         message_receiver: MessageReceiver,
     ) -> RtpsResult<()> {
         // If INFO_DST exists, local guid must match
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
         if message_receiver.has_dst_submessage() {
-            let local_guid_prefix = self.participant.guid().prefix();
+            let local_guid_prefix = participant.guid().prefix();
             if !message_receiver.is_dst_me(local_guid_prefix) {
                 return Err(RtpsError::new(
                     RtpsErrorCode::InvalidDestinationGuid,
@@ -733,7 +772,7 @@ impl SedpLogic {
                         let builtin_endpoint_pair =
                             BuiltinEndpointPair::reader_writer_from_entity_id(
                                 data.writer_id,
-                                self.participant.clone(),
+                                participant.clone(),
                             )?;
 
                         // Check if the builtin reader is matched with the remote writer GUID
@@ -805,7 +844,7 @@ impl SedpLogic {
                                                 "SEDP Logic: DiscoveredWriterData: {:?}",
                                                 writer_data
                                             );
-                                            self.handle_publication_builtin_topic_data(
+                                            let _ = self.handle_publication_builtin_topic_data(
                                                 writer_data.publication_builtin_topic_data,
                                                 inline_qos_params,
                                             );
@@ -827,7 +866,7 @@ impl SedpLogic {
                                                 "SEDP Logic: DiscoveredReaderData: {:?}",
                                                 reader_data
                                             );
-                                            self.handle_subscription_builtin_topic_data(
+                                            let _ = self.handle_subscription_builtin_topic_data(
                                                 reader_data.subscription_builtin_topic_data,
                                                 inline_qos_params,
                                                 reader_data.content_filter,
@@ -850,7 +889,7 @@ impl SedpLogic {
                         || data.writer_id == EntityId::SPDP_BUILTIN_PARTICIPANT_WRITER
                     {
                         let participant_proxy_data = message_receiver
-                            .extract_participant_proxy_data(self.participant.domain_id());
+                            .extract_participant_proxy_data(participant.domain_id());
                         match participant_proxy_data {
                             Some((participant_proxy_data, inline_qos_params)) => {
                                 let mut is_termination_message = false;
@@ -867,7 +906,7 @@ impl SedpLogic {
                                                     )
                                                 });
 
-                                            self.participant.unmatch_with_remote_participant(
+                                            participant.unmatch_with_remote_participant(
                                                 &terminated_participant_guid.to_guid(),
                                             );
 
@@ -878,7 +917,7 @@ impl SedpLogic {
 
                                 if !is_termination_message {
                                     let handler = SendingHandler::get_instance(
-                                        self.participant.clone(),
+                                        participant.clone(),
                                         None,
                                         None,
                                     );
@@ -918,9 +957,14 @@ impl SedpLogic {
     }
 
     fn handle_acknack_message(&self, acknack: AckNack, remote_guid: Guid) -> RtpsResult<()> {
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
         let builtin_endpoint_pair = match BuiltinEndpointPair::reader_writer_from_entity_id(
             acknack.writer_id,
-            self.participant.clone(),
+            participant.clone(),
         )? {
             Some(proxy) => proxy,
             None => {
@@ -997,9 +1041,14 @@ impl SedpLogic {
         remote_guid: Guid,
         final_flag: bool,
     ) -> RtpsResult<()> {
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
         let builtin_endpoint_pair = match BuiltinEndpointPair::reader_writer_from_entity_id(
             heartbeat.writer_id,
-            self.participant.clone(),
+            participant.clone(),
         )? {
             Some(proxy) => proxy,
             None => {
@@ -1087,8 +1136,13 @@ impl SedpLogic {
         acknack_count: i32,
         bitmap_base: SequenceNumber,
     ) -> RtpsResult<()> {
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
         let buffer = MessageCreator::create_acknack_message(
-            self.participant.guid(),
+            participant.guid(),
             remote_guid,
             reader_entity_id,
             writer_entity_id,
@@ -1179,12 +1233,17 @@ impl SedpLogic {
         builtin_topic_data: BuiltinTopicData,
         skip_cross_match: bool, // To prevent infinite recursion during cross-matching
     ) -> RtpsResult<()> {
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
         match (match_type, builtin_topic_data) {
             (MatchType::ReaderPublication, BuiltinTopicData::Publication(mut publication_data)) => {
                 if let Some(stateful_reader) = endpoint.downcast_ref::<StatefulReader>() {
                     self.handle_empty_locator_lists_for_publication(
                         &mut publication_data,
-                        &self.participant,
+                        &participant,
                     );
                     self.handle_stateful_reader_publication(
                         stateful_reader,
@@ -1202,7 +1261,7 @@ impl SedpLogic {
                 } else if let Some(stateless_reader) = endpoint.downcast_ref::<StatelessReader>() {
                     self.handle_empty_locator_lists_for_publication(
                         &mut publication_data,
-                        &self.participant,
+                        &participant,
                     );
                     self.handle_stateless_reader_publication(
                         stateless_reader,
@@ -1232,7 +1291,7 @@ impl SedpLogic {
                 BuiltinTopicData::Subscription(mut subscription_data),
             ) => {
                 if let Some(stateful_writer) = endpoint.downcast_ref::<StatefulWriter>() {
-                    self.handle_empty_locator_lists(&mut subscription_data, &self.participant);
+                    self.handle_empty_locator_lists(&mut subscription_data, &participant);
                     self.handle_stateful_writer_subscription(
                         stateful_writer,
                         subscription_data.clone(),
@@ -1247,7 +1306,7 @@ impl SedpLogic {
                         )?;
                     }
                 } else if let Some(stateless_writer) = endpoint.downcast_ref::<StatelessWriter>() {
-                    self.handle_empty_locator_lists(&mut subscription_data, &self.participant);
+                    self.handle_empty_locator_lists(&mut subscription_data, &participant);
                     self.handle_stateless_writer_subscription(
                         stateless_writer,
                         subscription_data.clone(),
@@ -1284,15 +1343,19 @@ impl SedpLogic {
         endpoint_guid: Guid,
         builtin_topic_data: BuiltinTopicData,
     ) -> RtpsResult<()> {
-        if self.participant.guid().prefix() != endpoint_guid.prefix() {
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
+        if participant.guid().prefix() != endpoint_guid.prefix() {
             debug!("Not local endpoint, skipping matching for GUID: {:?}", endpoint_guid);
             return Ok(());
         }
 
         debug!("Local endpoint detected, proceeding to match for GUID: {:?}", endpoint_guid);
         if let BuiltinTopicData::Publication(publication_builtin_topic_data) = builtin_topic_data {
-            let local_reader = self
-                .participant
+            let local_reader = participant
                 .find_reader_from_entity_id(endpoint_guid.entity_id())
                 .ok_or_else(|| {
                     RtpsError::new(
@@ -1310,8 +1373,7 @@ impl SedpLogic {
         } else if let BuiltinTopicData::Subscription(subscription_builtin_topic_data) =
             builtin_topic_data
         {
-            let local_writer = self
-                .participant
+            let local_writer = participant
                 .find_writer_from_entity_id(endpoint_guid.entity_id())
                 .ok_or_else(|| {
                     RtpsError::new(
@@ -1361,9 +1423,14 @@ impl SedpLogic {
         subscription_builtin_topic_data: SubscriptionBuiltinTopicData,
         inline_qos_params: Option<ParameterList>,
         content_filter: Option<ContentFilterProperty>,
-    ) {
+    ) -> RtpsResult<()> {
         let topic_name = subscription_builtin_topic_data.topic_name();
         let endpoint_guid = subscription_builtin_topic_data.endpoint_guid();
+
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
 
         if let Some(inline_qos_params) = inline_qos_params {
             if let Some(status_info) = inline_qos_params.get_status_info() {
@@ -1377,21 +1444,20 @@ impl SedpLogic {
                         .get_key_hash()
                         .unwrap_or_else(|| InstanceHandle::from_guid(&endpoint_guid));
 
-                    self.participant.remove_unmatched_reader_from_writer(InstanceHandle::to_guid(
+                    participant.remove_unmatched_reader_from_writer(InstanceHandle::to_guid(
                         &terminated_reader_guid,
                     ));
 
-                    if let Some(mut entry) =
-                        self.participant.remote_subscriptions().get_mut(&topic_name)
+                    if let Some(mut entry) = participant.remote_subscriptions().get_mut(&topic_name)
                     {
                         entry.value_mut().remove(&endpoint_guid);
 
                         if entry.value().is_empty() {
                             drop(entry);
-                            self.participant.remote_subscriptions().remove(&topic_name);
+                            participant.remote_subscriptions().remove(&topic_name);
                         }
                     }
-                    return;
+                    return Ok(());
                 }
             } else {
                 error!("Inline qos STATUS_INFO not parsed in SubscriptionBuiltinTopicData");
@@ -1400,7 +1466,7 @@ impl SedpLogic {
 
         // First try to find local writer using exact match (find_writer_from_entry)
         // If no exact match, try finding writer using domain ID and topic name only
-        let writers = self.participant.find_writers_from_topic_name(&topic_name);
+        let writers = participant.find_writers_from_topic_name(&topic_name);
 
         if !writers.is_empty() {
             for writer in writers {
@@ -1431,11 +1497,13 @@ impl SedpLogic {
             );
         }
 
-        self.participant
+        participant
             .remote_subscriptions()
             .entry(topic_name)
             .or_default()
             .insert(endpoint_guid, subscription_builtin_topic_data);
+
+        Ok(())
     }
 
     pub(crate) fn handle_stateful_writer_subscription(
@@ -1544,7 +1612,11 @@ impl SedpLogic {
 
         let writer_guid = writer.guid();
         if writer_guid.entity_id().entity_kind().is_user_defined() {
-            if let Some(wlp_logic) = self.participant.wlp_logic() {
+            let participant = self.participant.upgrade().ok_or(RtpsError::new(
+                RtpsErrorCode::ArcUpgradeError,
+                "Participant already dropped",
+            ))?;
+            if let Some(wlp_logic) = participant.wlp_logic() {
                 let _ = wlp_logic.add_local_writer(writer_guid, writer.liveliness()?);
             }
         }
@@ -1736,9 +1808,14 @@ impl SedpLogic {
         &self,
         publication_builtin_topic_data: PublicationBuiltinTopicData,
         inline_qos_params: Option<ParameterList>,
-    ) {
+    ) -> RtpsResult<()> {
         let topic_name = publication_builtin_topic_data.topic_name().to_string();
         let endpoint_guid = publication_builtin_topic_data.endpoint_guid();
+
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
 
         if let Some(inline_qos_params) = inline_qos_params {
             if let Some(status_info) = inline_qos_params.get_status_info() {
@@ -1753,26 +1830,25 @@ impl SedpLogic {
 
                     let writer_guid = InstanceHandle::to_guid(&terminated_writer_guid);
                     if writer_guid.entity_id().entity_kind().is_user_defined() {
-                        if let Some(wlp_logic) = self.participant.wlp_logic() {
+                        if let Some(wlp_logic) = participant.wlp_logic() {
                             let _ = wlp_logic.remove_remote_writer(writer_guid);
                         }
                     }
 
-                    self.participant.remove_unmatched_writer_from_reader(InstanceHandle::to_guid(
+                    participant.remove_unmatched_writer_from_reader(InstanceHandle::to_guid(
                         &terminated_writer_guid,
                     ));
 
-                    if let Some(mut entry) =
-                        self.participant.remote_publications().get_mut(&topic_name)
+                    if let Some(mut entry) = participant.remote_publications().get_mut(&topic_name)
                     {
                         entry.value_mut().remove(&endpoint_guid);
 
                         if entry.value().is_empty() {
                             drop(entry);
-                            self.participant.remote_publications().remove(&topic_name);
+                            participant.remote_publications().remove(&topic_name);
                         }
                     }
-                    return;
+                    return Ok(());
                 }
             } else {
                 error!("Inline qos STATUS_INFO not parsed in PublicationBuiltinTopicData");
@@ -1780,7 +1856,7 @@ impl SedpLogic {
         }
 
         // First try to find local reader using exact match (find_reader_from_entry)
-        let readers = self.participant.find_readers_from_topic_name(&topic_name);
+        let readers = participant.find_readers_from_topic_name(&topic_name);
 
         if !readers.is_empty() {
             for reader in readers {
@@ -1794,11 +1870,13 @@ impl SedpLogic {
             );
         }
 
-        self.participant
+        participant
             .remote_publications()
             .entry(topic_name)
             .or_default()
             .insert(endpoint_guid, publication_builtin_topic_data);
+
+        Ok(())
     }
 
     pub(crate) fn handle_stateless_reader_publication(
@@ -1893,7 +1971,11 @@ impl SedpLogic {
 
         let writer_guid = endpoint_guid;
         if writer_guid.entity_id().entity_kind().is_user_defined() {
-            if let Some(wlp_logic) = self.participant.wlp_logic() {
+            let participant = self.participant.upgrade().ok_or(RtpsError::new(
+                RtpsErrorCode::ArcUpgradeError,
+                "Participant already dropped",
+            ))?;
+            if let Some(wlp_logic) = participant.wlp_logic() {
                 let _ = wlp_logic
                     .add_remote_writer(writer_guid, *publication_builtin_topic_data.liveliness());
             }
@@ -1998,7 +2080,11 @@ impl SedpLogic {
 
         let writer_guid = endpoint_guid;
         if writer_guid.entity_id().entity_kind().is_user_defined() {
-            if let Some(wlp_logic) = self.participant.wlp_logic() {
+            let participant = self.participant.upgrade().ok_or(RtpsError::new(
+                RtpsErrorCode::ArcUpgradeError,
+                "Participant already dropped",
+            ))?;
+            if let Some(wlp_logic) = participant.wlp_logic() {
                 let _ = wlp_logic
                     .add_remote_writer(writer_guid, *publication_builtin_topic_data.liveliness());
             }
@@ -2026,7 +2112,12 @@ impl SedpLogic {
             stateful_reader_id,
             chrono::Local::now().to_rfc3339()
         );
-        let participant = self.participant.clone();
+
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
         let callback = move || {
             if let Some(sending_handler) =
                 SendingHandler::get_instance_by_participant_guid(participant.guid())
@@ -2062,7 +2153,11 @@ impl SedpLogic {
             chrono::Local::now().to_rfc3339()
         );
 
-        let participant = self.participant.clone();
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
         let callback = move || {
             if let Some(sending_handler) =
                 SendingHandler::get_instance_by_participant_guid(participant.guid())
@@ -2117,9 +2212,13 @@ impl SedpLogic {
         // Get remote builtin reader for corresponding builtin writer
         let mut remote_guid_list = Vec::new();
 
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
         if builtin_writer_guid.entity_id() == EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER {
-            if let Ok(reader_proxies) = self
-                .participant
+            if let Ok(reader_proxies) = participant
                 .builtin_endpoints()
                 .sedp_builtin_publications_writer
                 .reader_proxies()
@@ -2136,8 +2235,7 @@ impl SedpLogic {
                 );
             }
         } else if builtin_writer_guid.entity_id() == EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_WRITER {
-            if let Ok(reader_proxies) = self
-                .participant
+            if let Ok(reader_proxies) = participant
                 .builtin_endpoints()
                 .sedp_builtin_subscriptions_writer
                 .reader_proxies()
@@ -2183,15 +2281,20 @@ impl SedpLogic {
         Ok(())
     }
 
-    pub(crate) fn send_participant_termination_message_unicast(&self) {
+    pub(crate) fn send_participant_termination_message_unicast(&self) -> RtpsResult<()> {
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
         if let Ok(rtps_message) =
-            MessageCreator::create_spdp_msg_with_inline_qos(self.participant.clone())
+            MessageCreator::create_spdp_msg_with_inline_qos(participant.clone())
         {
             // Create Data(p[UD]) RTPS Message
             let buffer = rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian);
             if let Ok(buffer) = buffer {
                 // Send to all remote participants
-                match self.participant.remote_participant_proxy_datas().clone().lock() {
+                match participant.remote_participant_proxy_datas().clone().lock() {
                     Ok(remote_participant_datas) => {
                         for remote_participant_data in remote_participant_datas.iter() {
                             // Send to remote participant's all metatraffic unicast locators
@@ -2221,6 +2324,8 @@ impl SedpLogic {
                 error!("Failed to serialize SPDP message with inline qos");
             }
         }
+
+        Ok(())
     }
 
     /// Apply content filter signature to the most recently added ReaderProxy
@@ -2248,11 +2353,14 @@ impl SedpLogic {
     }
 
     fn handle_gap_message(&self, gap: &Gap, remote_guid: Guid) -> RtpsResult<()> {
-        let builtin_endpoint_pair = BuiltinEndpointPair::reader_writer_from_entity_id(
-            gap.writer_id,
-            self.participant.clone(),
-        )?
-        .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+
+        let builtin_endpoint_pair =
+            BuiltinEndpointPair::reader_writer_from_entity_id(gap.writer_id, participant.clone())?
+                .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
 
         let local_reader = builtin_endpoint_pair.reader();
 
@@ -2397,7 +2505,7 @@ mod tests {
             None,
             Vec::new(), // No initial peers for test
         );
-        spdp_logic.trigger_send_spdp_multicast();
+        spdp_logic.trigger_send_spdp_multicast().unwrap();
         //discovery multicast port : 7400
         //discovery unicast port :  7410
         //user traffic multicast port : 7401
