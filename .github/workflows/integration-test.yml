@@ -12,7 +12,16 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-2022]
+        include:
+          - os: windows-2022
+            rustflags: "-C link-arg=-fuse-ld=lld"
+          - os: ubuntu-latest
+            rustflags: ""
+          - os: macos-latest
+            rustflags: ""
     runs-on: ${{ matrix.os }}
+    env:
+      RUSTFLAGS: ${{ matrix.rustflags }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -37,11 +46,9 @@ jobs:
       - name: Run integration tests
         env:
           INT2DDS_UDP_SOCKET_BUFFER: 5242880
-          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C link-arg=-fuse-ld=lld' || '' }}
         run: cargo test --test "*" -- --test-threads=1
 
       - name: Run cleanup tests
         env:
           INT2DDS_UDP_SOCKET_BUFFER: 5242880
-          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C link-arg=-fuse-ld=lld' || '' }}
         run: cargo test -- test_all_logic_cleanup test_all_handler_cleanup --test-threads=1

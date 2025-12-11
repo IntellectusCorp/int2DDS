@@ -14,8 +14,17 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-2022]
+        include:
+          - os: windows-2022
+            rustflags: "-C link-arg=-fuse-ld=lld"
+          - os: ubuntu-latest
+            rustflags: ""
+          - os: macos-latest
+            rustflags: ""
 
     runs-on: ${{ matrix.os }}
+    env:
+      RUSTFLAGS: ${{ matrix.rustflags }}
 
     steps:
       - name: Checkout develop
@@ -40,6 +49,4 @@ jobs:
           shared-key: cargo-develop
 
       - name: Build once to populate cache
-        env:
-          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C link-arg=-fuse-ld=lld' || '' }}
         run: cargo build
