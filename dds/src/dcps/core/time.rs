@@ -7,16 +7,26 @@
 //! parameters for blocking operations, and timestamping of data samples.
 
 use const_default::ConstDefault;
+use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use speedy::{Context, Readable, Writable, Writer};
-use std::borrow::Borrow;
-use std::cmp::Ordering;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    borrow::Borrow,
+    cmp::Ordering,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use super::error::{DdsError, DdsResult};
 
-#[derive(Debug, Default, ConstDefault, Clone, Copy, PartialEq, Eq, Readable)]
+#[derive(
+    Debug, Default, ConstDefault, Clone, Copy, PartialEq, Eq, Readable, Deserialize, Serialize,
+)]
 pub struct Duration {
+    #[serde(deserialize_with = "deserialize_duration_field")]
+    #[serde(serialize_with = "serialize_duration_sec")]
     pub sec: i32,
+
+    #[serde(deserialize_with = "deserialize_duration_field_u32")]
+    #[serde(serialize_with = "serialize_duration_nsec")]
     pub nanosec: u32,
 }
 impl Duration {
@@ -284,6 +294,72 @@ impl<C: Context> Writable<C> for Duration {
         writer.write_value(&self.nanosec)?;
 
         Ok(())
+    }
+}
+
+fn deserialize_duration_field<'de, D>(deserializer: D) -> Result<i32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum IntOrString {
+        Int(i32),
+        String(String),
+    }
+
+    match IntOrString::deserialize(deserializer)? {
+        IntOrString::Int(v) => Ok(v),
+        IntOrString::String(s) => match s.as_str() {
+            "DURATION_INFINITY" | "DURATION_INFINITE_SEC" => Ok(Duration::INFINITE_SEC),
+            "DURATION_ZERO_SEC" => Ok(Duration::ZERO_SEC),
+            _ => Err(de::Error::custom(format!("invalid duration constant: {}", s))),
+        },
+    }
+}
+
+// u32 필드 역직렬화
+fn deserialize_duration_field_u32<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum IntOrString {
+        Int(u32),
+        String(String),
+    }
+
+    match IntOrString::deserialize(deserializer)? {
+        IntOrString::Int(v) => Ok(v),
+        IntOrString::String(s) => match s.as_str() {
+            "DURATION_INFINITY" | "DURATION_INFINITE_NSEC" => Ok(Duration::INFINITE_NSEC),
+            "DURATION_ZERO_NSEC" => Ok(Duration::ZERO_NSEC),
+            _ => Err(de::Error::custom(format!("invalid duration constant: {}", s))),
+        },
+    }
+}
+
+// 직렬화 (무한 값은 상수 문자열로, 일반 값은 숫자로)
+fn serialize_duration_sec<S>(sec: &i32, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    if *sec == Duration::INFINITE_SEC {
+        serializer.serialize_str("DURATION_INFINITE_SEC")
+    } else {
+        serializer.serialize_i32(*sec)
+    }
+}
+
+fn serialize_duration_nsec<S>(nanosec: &u32, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    if *nanosec == Duration::INFINITE_NSEC {
+        serializer.serialize_str("DURATION_INFINITE_NSEC")
+    } else {
+        serializer.serialize_u32(*nanosec)
     }
 }
 
