@@ -61,15 +61,13 @@ impl CdrSerializer {
 
     /// Serialize wide character string (UTF-16)
     pub fn serialize_wstring16(&mut self, value: &str) -> Result<(), CdrError> {
-        // UTF-16 encoding
-        let utf16_chars: Vec<u16> = value.encode_utf16().collect();
+        // Length (code units, not bytes) - count first without allocating
+        let utf16_len = value.encode_utf16().count();
+        self.serialize_u32(utf16_len as u32)?;
 
-        // Length (code units, not bytes)
-        self.serialize_u32(utf16_chars.len() as u32)?;
-
-        // UTF-16 data
+        // UTF-16 data - iterate directly without intermediate Vec
         self.align(2);
-        for code_unit in utf16_chars {
+        for code_unit in value.encode_utf16() {
             let bytes = to_bytes_u16(code_unit, self.endianness);
             self.buffer.extend_from_slice(&bytes);
         }
@@ -144,13 +142,13 @@ impl Xcdr2Serializer {
 
     /// Serialize wide string (UTF-16)
     pub fn serialize_wstring16(&mut self, value: &str) -> Result<(), CdrError> {
-        let utf16_chars: Vec<u16> = value.encode_utf16().collect();
-        let utf16_len = utf16_chars.len();
-
+        // Length (code units, not bytes) - count first without allocating
+        let utf16_len = value.encode_utf16().count();
         self.serialize_u32(utf16_len as u32)?;
         self.align(2);
 
-        for &code_unit in &utf16_chars {
+        // UTF-16 data - iterate directly without intermediate Vec
+        for code_unit in value.encode_utf16() {
             let bytes = to_bytes_u16(code_unit, self.endianness);
             self.buffer.extend_from_slice(&bytes);
         }
