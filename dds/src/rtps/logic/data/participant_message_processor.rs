@@ -332,13 +332,12 @@ pub trait ParticipantMessageProcessor {
         spdp_discovered_participant_data: SPDPDiscoveredParticipantData,
         entity_id: EntityId,
     ) {
-        // SEDP is stateful and holds a locator list in reader proxy
-        if !self.is_builtin_reader_proxy_matched(
-            writer.clone(),
-            spdp_discovered_participant_data.participant_guid(),
-        ) {
+        let reader_guid =
+            Guid::new(spdp_discovered_participant_data.participant_guid().prefix(), entity_id);
+
+        if !writer.matched_reader_is_matched(reader_guid) {
             let reader_proxy = ReaderProxy::new(
-                Guid::new(spdp_discovered_participant_data.participant_guid().prefix(), entity_id),
+                reader_guid,
                 entity_id,
                 spdp_discovered_participant_data.metatraffic_unicast_locator_list().clone(),
                 spdp_discovered_participant_data.metatraffic_multicast_locator_list().clone(),
@@ -387,23 +386,6 @@ pub trait ParticipantMessageProcessor {
             writer.reader_locator().iter().any(|reader_locator| reader_locator.locator() == locator)
         } else {
             false
-        }
-    }
-
-    /// Check if reader proxy exists in writer
-    fn is_builtin_reader_proxy_matched(
-        &self,
-        writer: Arc<StatefulWriter>,
-        participant_guid: Guid,
-    ) -> bool {
-        match writer.reader_proxies().lock() {
-            Ok(proxies) => proxies.iter().any(|reader_proxy| {
-                reader_proxy.remote_reader_guid().prefix() == participant_guid.prefix()
-            }),
-            Err(e) => {
-                log::error!("Failed to acquire spdp writer lock: {}", e);
-                false
-            }
         }
     }
 
