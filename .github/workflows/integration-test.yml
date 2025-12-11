@@ -22,11 +22,6 @@ jobs:
         run: Set-MpPreference -DisableRealtimeMonitoring $true
         shell: powershell
 
-      - name: Set cargo target directory to D drive
-        if: runner.os == 'Windows'
-        run: echo "CARGO_TARGET_DIR=D:\cargo-target" >> $env:GITHUB_ENV
-        shell: powershell
-
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -42,9 +37,11 @@ jobs:
       - name: Run integration tests
         env:
           INT2DDS_UDP_SOCKET_BUFFER: 5242880
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C link-arg=-fuse-ld=lld' || '' }}
         run: cargo test --test "*" -- --test-threads=1
 
       - name: Run cleanup tests
         env:
           INT2DDS_UDP_SOCKET_BUFFER: 5242880
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C link-arg=-fuse-ld=lld' || '' }}
         run: cargo test -- test_all_logic_cleanup test_all_handler_cleanup --test-threads=1
