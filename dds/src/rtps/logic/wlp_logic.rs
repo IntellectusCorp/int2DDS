@@ -133,10 +133,7 @@ impl WlpLogic {
         let info = WriterInfo::new(liveliness);
         self.local_writers.insert(writer_guid, info);
 
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.get_upgraded_participant()?;
 
         Self::update_local_liveliness(
             participant.clone(),
@@ -287,10 +284,7 @@ impl WlpLogic {
             self.remote_participants.insert(prefix, new_map);
         }
 
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.get_upgraded_participant()?;
 
         Self::update_remote_liveliness(
             participant.clone(),
@@ -353,10 +347,7 @@ impl WlpLogic {
             }
         }
 
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.get_upgraded_participant()?;
 
         Self::update_remote_liveliness(
             participant.clone(),
@@ -413,10 +404,7 @@ impl WlpLogic {
         writer_guid: Option<Guid>,
         target_guid_prefix: Option<GuidPrefix>, // for P2P initial
     ) -> RtpsResult<()> {
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.get_upgraded_participant()?;
 
         match writer_guid {
             Some(guid) => {
@@ -476,10 +464,7 @@ impl WlpLogic {
             )
         })?;
 
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.get_upgraded_participant()?;
 
         let remote_datas = participant.remote_participant_proxy_datas().clone();
         let remote_datas_guard = remote_datas
@@ -545,10 +530,7 @@ impl WlpLogic {
 
     // Automatic
     pub(crate) fn start_periodic_liveliness(&self, lease_duration: RtpsDuration) -> RtpsResult<()> {
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.get_upgraded_participant()?;
 
         let data = ParticipantMessageData::new(
             participant.guid().prefix(),
@@ -572,10 +554,7 @@ impl WlpLogic {
     }
 
     pub(crate) fn stop_periodic_liveliness(&self) -> RtpsResult<()> {
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.get_upgraded_participant()?;
         let handler = SendingHandler::get_instance(
             participant.clone(),
             self.sender.lock().ok().and_then(|g| g.clone()),
@@ -591,10 +570,7 @@ impl WlpLogic {
         &self,
         lease_duration: RtpsDuration,
     ) -> RtpsResult<()> {
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.get_upgraded_participant()?;
 
         let data = ParticipantMessageData::new(
             participant.guid().prefix(),
@@ -618,10 +594,7 @@ impl WlpLogic {
     }
     // ManualByParticipant
     pub(crate) fn send_liveliness_once(&self, data: &ParticipantMessageData) -> RtpsResult<()> {
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.get_upgraded_participant()?;
 
         let writer = participant.builtin_participant_message_writer();
 
@@ -736,10 +709,7 @@ impl WlpLogic {
     pub(crate) fn assert_participant_liveliness(&self) -> RtpsResult<()> {
         self.update_local_participant_liveliness()?;
 
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.get_upgraded_participant()?;
 
         let data = ParticipantMessageData::new(
             participant.guid().prefix(),
@@ -765,10 +735,7 @@ impl WlpLogic {
     ) -> RtpsResult<bool> {
         let mut is_sent = false;
 
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.get_upgraded_participant()?;
 
         match participant.remote_participant_proxy_datas().clone().lock() {
             Ok(remote_participant_datas) => {
@@ -815,10 +782,7 @@ impl WlpLogic {
     pub(crate) fn handle_rtps_message(&self, message_receiver: MessageReceiver) -> RtpsResult<()> {
         debug!("[WlpLogic] handle_rtps_message called");
 
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.get_upgraded_participant()?;
 
         if message_receiver.has_dst_submessage() {
             let local_guid_prefix = participant.guid().prefix();
@@ -912,10 +876,7 @@ impl WlpLogic {
     ) -> RtpsResult<()> {
         debug!("[WlpLogic] handle_liveliness_message called");
 
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.get_upgraded_participant()?;
 
         // 1. Find WriterProxy
         let reader = participant.builtin_participant_message_reader();
@@ -942,10 +903,7 @@ impl WlpLogic {
         final_flag: bool,
         liveliness_flag: bool,
     ) -> RtpsResult<()> {
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.get_upgraded_participant()?;
 
         if heartbeat.writer_id.entity_kind().is_built_in() {
             // Builtin endpoint (Automatic/ManualByParticipant)
@@ -1121,10 +1079,7 @@ impl WlpLogic {
         acknack_count: i32,
         bitmap_base: SequenceNumber,
     ) -> RtpsResult<()> {
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.get_upgraded_participant()?;
 
         let buffer = MessageCreator::create_acknack_message(
             participant.guid(),
@@ -1154,10 +1109,7 @@ impl WlpLogic {
         acknack: AckNack,
         remote_guid: Guid,
     ) -> RtpsResult<()> {
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.get_upgraded_participant()?;
 
         let builtin_endpoint_pair = match BuiltinEndpointPair::reader_writer_from_entity_id(
             acknack.writer_id,
@@ -1522,10 +1474,7 @@ impl WlpLogic {
             None => duration.checked_sub(elapsed).unwrap_or(StdDuration::ZERO),
         };
 
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.get_upgraded_participant()?;
 
         let timer_id = format!(
             "wlp_p2p_{:?}_{}",

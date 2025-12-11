@@ -91,10 +91,7 @@ impl UserLogic {
         shm_listener: Option<ShmListener>,
         sender: Arc<TransportSender>,
     ) -> RtpsResult<()> {
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.get_upgraded_participant()?;
 
         let mut user_unicast_listening_task = UserUnicastListeningTask::new(
             user_unicast_listener,
@@ -132,10 +129,7 @@ impl UserLogic {
             RtpsError::new(RtpsErrorCode::LockError, "[Data] Failed to acquire reader proxies lock")
         })?;
 
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.get_upgraded_participant()?;
 
         // Send unsent CacheChanges to matched readers
         for reader_proxy in reader_proxies.iter_mut() {
@@ -314,10 +308,7 @@ impl UserLogic {
             return Ok(()); // Nothing to send
         }
 
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.get_upgraded_participant()?;
 
         for (reader_locator, changes) in reader_tasks.iter() {
             let mut prev_sn = reader_locator.highest_sent_change_sn();
@@ -428,10 +419,7 @@ impl UserLogic {
     }
 
     pub(crate) fn send_unsent_changes(&self, entity_id: EntityId) -> RtpsResult<()> {
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.get_upgraded_participant()?;
 
         let writer = participant.find_writer_from_entity_id(entity_id);
 
@@ -455,10 +443,7 @@ impl UserLogic {
         writer_entity_id: EntityId,
         remote_reader_guid: Guid,
     ) -> RtpsResult<()> {
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.get_upgraded_participant()?;
 
         let writer = participant
             .find_writer_from_entity_id(writer_entity_id)
@@ -611,10 +596,7 @@ impl UserLogic {
         &self,
         entity_id: EntityId,
     ) -> RtpsResult<()> {
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.get_upgraded_participant()?;
 
         let writer = participant.find_writer_from_entity_id(entity_id);
 
@@ -648,10 +630,7 @@ impl UserLogic {
         remote_reader_guid: Guid,
         is_preemptive: bool,
     ) -> RtpsResult<()> {
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.get_upgraded_participant()?;
 
         let writer = participant
             .find_writer_from_entity_id(writer_entity_id)
@@ -789,10 +768,7 @@ impl UserLogic {
         remote_guid: Guid,
         source_timestamp: Option<RtpsTime>,
     ) -> RtpsResult<()> {
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.get_upgraded_participant()?;
 
         let reader_entity_id = data.reader_id;
         let mut matched_readers: Vec<Arc<dyn Reader + Send + Sync>> = Vec::new();
@@ -893,10 +869,7 @@ impl UserLogic {
     }
 
     fn handle_acknack_message(&self, acknack: &AckNack, remote_guid: Guid) -> RtpsResult<()> {
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.get_upgraded_participant()?;
 
         let writer = participant
             .find_writer_from_entity_id(acknack.writer_id)
@@ -954,10 +927,7 @@ impl UserLogic {
     }
 
     fn handle_preemptive_acknack(&self, acknack: &AckNack, reader_guid: Guid) -> RtpsResult<()> {
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.get_upgraded_participant()?;
 
         let writer = participant
             .find_writer_from_entity_id(acknack.writer_id)
@@ -988,10 +958,7 @@ impl UserLogic {
         let reader_entity_id = heartbeat.reader_id;
         let mut matched_readers: Vec<Arc<dyn Reader + Send + Sync>> = Vec::new();
 
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.get_upgraded_participant()?;
 
         if reader_entity_id != EntityId::UNKNOWN {
             let reader =
@@ -1163,10 +1130,7 @@ impl UserLogic {
         remote_guid: Guid,
         source_timestamp: Option<RtpsTime>,
     ) -> RtpsResult<()> {
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.get_upgraded_participant()?;
 
         let writer_entity_id = data_frag.writer_id;
         let writer_guid = Guid::new(participant.guid().prefix(), writer_entity_id);
@@ -1286,10 +1250,7 @@ impl UserLogic {
         let writer_sn = nack_frag.writer_sn;
         let frag_state = &nack_frag.fragment_number_state;
 
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.get_upgraded_participant()?;
 
         // TODO: RtpsError Code handling needed
         let writer = participant
@@ -1355,10 +1316,7 @@ impl UserLogic {
         let reader_entity_id = gap.reader_id;
         let mut matched_readers: Vec<Arc<dyn Reader + Send + Sync>> = Vec::new();
 
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.get_upgraded_participant()?;
 
         if reader_entity_id != EntityId::UNKNOWN {
             let reader =
@@ -1432,10 +1390,7 @@ impl UserLogic {
         message_receiver: MessageReceiver,
     ) -> RtpsResult<()> {
         // If INFO_DST exists, local guid must match
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.get_upgraded_participant()?;
 
         if message_receiver.has_dst_submessage() {
             let local_guid_prefix = participant.guid().prefix();
@@ -1681,10 +1636,7 @@ impl UserLogic {
         reader_id: EntityId,
         remote_writer_guid: Guid,
     ) -> RtpsResult<()> {
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.get_upgraded_participant()?;
 
         let reader = participant
             .find_reader_from_entity_id(reader_id)
@@ -1783,10 +1735,7 @@ impl UserLogic {
         entity_id: EntityId,
         sequence_number: SequenceNumber,
     ) -> RtpsResult<()> {
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.get_upgraded_participant()?;
 
         let writer = participant
             .find_writer_from_entity_id(entity_id)
