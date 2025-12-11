@@ -39,6 +39,4 @@ jobs:
           shared-key: cargo-develop
 
       - name: Build once to populate cache
-        run: |
-          cargo build
-          cargo test --no-run
+        run: cargo test --no-run
