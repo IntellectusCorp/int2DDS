@@ -1401,10 +1401,7 @@ impl WlpLogic {
 
             // NOT_ALIVE -> ALIVE
             if was_not_alive {
-                let participant = self.participant.upgrade().ok_or(RtpsError::new(
-                    RtpsErrorCode::ArcUpgradeError,
-                    "Participant already dropped",
-                ))?;
+                let participant = self.get_upgraded_participant()?;
                 if let Ok(readers) = participant.find_readers_matched_with_local_writer(writer_guid)
                 {
                     for reader in readers {
@@ -1487,10 +1484,7 @@ impl WlpLogic {
 
                 // NOT_ALIVE -> ALIVE
                 if was_not_alive {
-                    let participant = self.participant.upgrade().ok_or(RtpsError::new(
-                        RtpsErrorCode::ArcUpgradeError,
-                        "Participant already dropped",
-                    ))?;
+                    let participant = self.get_upgraded_participant()?;
                     if let Ok(readers) =
                         participant.find_readers_matched_with_remote_writer(writer_guid)
                     {
@@ -1568,6 +1562,12 @@ impl WlpLogic {
             }
             *monitor = None;
         }
+    }
+
+    fn get_upgraded_participant(&self) -> RtpsResult<Arc<Participant>> {
+        Ok(self.participant.upgrade().ok_or_else(|| {
+            RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped")
+        })?)
     }
 }
 
