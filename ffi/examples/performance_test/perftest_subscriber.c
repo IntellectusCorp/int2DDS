@@ -807,6 +807,7 @@ static void run_throughput_test(const subscriber_args_t *args) {
     /* Print final statistics */
     struct timespec end_time;
     clock_gettime(CLOCK_MONOTONIC, &end_time);
+    sleep_ms(100);
     double duration_sec = (end_time.tv_sec - test_start.tv_sec) +
                          (end_time.tv_nsec - test_start.tv_nsec) / 1e9;
     double msgs_per_sec = duration_sec > 0 ? stats.total_received / duration_sec : 0.0;
