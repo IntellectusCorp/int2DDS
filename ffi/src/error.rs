@@ -1,0 +1,86 @@
+//! # Error Handling
+//!
+//! Converts Rust DdsError types to C-compatible integer error codes.
+//!
+//! ## Error Code Categories
+//!
+//! - **0**: Success (INT2DDS_RET_OK)
+//! - **1-9**: General errors (ERROR, TIMEOUT, UNSUPPORTED)
+//! - **10-19**: Allocation/argument errors (BAD_ALLOC, INVALID_ARGUMENT)
+//! - **20-29**: DDS-specific errors (ALREADY_DELETED, NOT_ENABLED, etc.)
+//! - **100+**: FFI-specific errors (NULL_POINTER)
+
+use int2dds::core::error::DdsError;
+
+/// FFI return codes
+pub type Int2DdsRet = i32;
+
+// Success
+pub const INT2DDS_RET_OK: Int2DdsRet = 0;
+
+// General errors
+pub const INT2DDS_RET_ERROR: Int2DdsRet = 1;
+pub const INT2DDS_RET_TIMEOUT: Int2DdsRet = 2;
+pub const INT2DDS_RET_UNSUPPORTED: Int2DdsRet = 3;
+pub const INT2DDS_RET_BAD_ALLOC: Int2DdsRet = 10;
+pub const INT2DDS_RET_INVALID_ARGUMENT: Int2DdsRet = 11;
+
+// DDS-specific errors
+pub const INT2DDS_RET_ALREADY_DELETED: Int2DdsRet = 20;
+pub const INT2DDS_RET_NOT_ENABLED: Int2DdsRet = 21;
+pub const INT2DDS_RET_IMMUTABLE_POLICY: Int2DdsRet = 22;
+pub const INT2DDS_RET_INCONSISTENT_POLICY: Int2DdsRet = 23;
+pub const INT2DDS_RET_PRECONDITION_NOT_MET: Int2DdsRet = 24;
+pub const INT2DDS_RET_OUT_OF_RESOURCES: Int2DdsRet = 25;
+pub const INT2DDS_RET_ILLEGAL_OPERATION: Int2DdsRet = 26;
+pub const INT2DDS_RET_NO_DATA: Int2DdsRet = 27;
+
+// Null pointer errors
+pub const INT2DDS_RET_NULL_POINTER: Int2DdsRet = 100;
+
+/// Convert DdsResult to FFI return code
+pub fn to_ffi_result<T>(result: int2dds::core::error::DdsResult<T>) -> (Int2DdsRet, Option<T>) {
+    match result {
+        Ok(value) => (INT2DDS_RET_OK, Some(value)),
+        Err(e) => (dds_error_to_code(&e), None),
+    }
+}
+
+/// Convert DdsError to error code
+pub fn dds_error_to_code(error: &DdsError) -> Int2DdsRet {
+    match error {
+        DdsError::Error(_) => INT2DDS_RET_ERROR,
+        DdsError::Timeout => INT2DDS_RET_TIMEOUT,
+        DdsError::AlreadyDeleted => INT2DDS_RET_ALREADY_DELETED,
+        DdsError::NotEnabled => INT2DDS_RET_NOT_ENABLED,
+        DdsError::ImmutablePolicy => INT2DDS_RET_IMMUTABLE_POLICY,
+        DdsError::InconsistentPolicy => INT2DDS_RET_INCONSISTENT_POLICY,
+        DdsError::PreconditionNotMet => INT2DDS_RET_PRECONDITION_NOT_MET,
+        DdsError::OutOfResources => INT2DDS_RET_OUT_OF_RESOURCES,
+        DdsError::IllegalOperation => INT2DDS_RET_ILLEGAL_OPERATION,
+        DdsError::Unsupported => INT2DDS_RET_UNSUPPORTED,
+        DdsError::BadParameter => INT2DDS_RET_INVALID_ARGUMENT,
+        DdsError::NoData => INT2DDS_RET_NO_DATA,
+    }
+}
+
+/// Check if a pointer is null and return error code if so
+#[macro_export]
+macro_rules! check_null {
+    ($ptr:expr) => {
+        if $ptr.is_null() {
+            return $crate::error::INT2DDS_RET_NULL_POINTER;
+        }
+    };
+}
+
+/// Convert DdsResult to FFI return code, returning error code on failure
+#[macro_export]
+macro_rules! ffi_try {
+    ($expr:expr) => {
+        match $expr {
+            Ok(val) => val,
+            Err(e) => return $crate::error::dds_error_to_code(&e),
+        }
+    };
+}
