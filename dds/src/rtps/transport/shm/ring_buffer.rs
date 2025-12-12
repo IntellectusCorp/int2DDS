@@ -4,6 +4,7 @@
 //! ring buffer designed for shared memory communication.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 use log::warn;
 
@@ -33,8 +34,21 @@ pub const RING_BUFFER_MAGIC: u64 = 0x494E54324444535F; // "INT2DDS_" in hex
 /// Current version of ring buffer format
 pub const RING_BUFFER_VERSION: u32 = 1;
 
-/// Default ring buffer size (4MB)
-pub const DEFAULT_BUFFER_SIZE: usize = 4 * 1024 * 1024;
+/// Default ring buffer size (1MB)
+pub const DEFAULT_BUFFER_SIZE: usize = 1024 * 1024;
+
+/// Cached SHM buffer size - read once from environment variable
+static SHM_BUFFER_SIZE: OnceLock<usize> = OnceLock::new();
+
+/// Get SHM buffer size from environment variable or default
+pub fn get_buffer_size() -> usize {
+    *SHM_BUFFER_SIZE.get_or_init(|| {
+        std::env::var("INT2DDS_SHM_BUFFER_SIZE")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_BUFFER_SIZE)
+    })
+}
 
 /// Default maximum message size (64KB)
 pub const DEFAULT_MAX_MESSAGE_SIZE: usize = 64 * 1024;
@@ -323,15 +337,39 @@ impl RingBufferReader {
         let msg_header: MessageHeader =
             unsafe { std::ptr::read(self.data.add(read_offset) as *const MessageHeader) };
 
+        // Validate message header to detect corrupted data
+        let total_len = msg_header.total_len as usize;
+        let data_len = msg_header.data_len as usize;
+
+        // Sanity check: total_len should be reasonable
+        if total_len == 0 || total_len > self.buffer_size {
+            // Corrupted header, skip to current write position
+            warn!(
+                "[RingBuffer] Corrupted header detected (total_len={}), resetting reader",
+                total_len
+            );
+            self.local_read_pos = write_pos;
+            return Ok(None);
+        }
+
         // Check for wrap marker
-        if msg_header.data_len == 0 {
+        if data_len == 0 {
             // Skip wrap marker and continue from beginning
-            let new_read_pos = read_pos + msg_header.total_len as u64;
+            let new_read_pos = read_pos + total_len as u64;
             self.local_read_pos = new_read_pos;
             return self.read(buffer);
         }
 
-        let data_len = msg_header.data_len as usize;
+        // Validate data_len is within total_len
+        if data_len > total_len.saturating_sub(MessageHeader::SIZE) {
+            warn!(
+                "[RingBuffer] Invalid data_len {} for total_len {}, skipping message",
+                data_len, total_len
+            );
+            let total_size = align_up(total_len, 8);
+            self.local_read_pos = read_pos + total_size as u64;
+            return self.read(buffer);
+        }
 
         // Check if output buffer is large enough
         if buffer.len() < data_len {
@@ -360,7 +398,7 @@ impl RingBufferReader {
         self.last_sequence = msg_header.sequence;
 
         // Update local read position only (no shared state update)
-        let total_size = align_up(msg_header.total_len as usize, 8);
+        let total_size = align_up(total_len, 8);
         self.local_read_pos = read_pos + total_size as u64;
 
         Ok(Some((data_len, lost)))

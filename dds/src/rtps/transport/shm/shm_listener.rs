@@ -11,7 +11,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use crate::rtps::transport::shm::platform::{shm_segment_name, SharedMemory};
 use crate::rtps::transport::shm::ring_buffer::{
-    RingBufferHeader, RingBufferReader, DEFAULT_BUFFER_SIZE,
+    RingBufferHeader, RingBufferReader, get_buffer_size,
 };
 use crate::rtps::transport::Listener;
 use log::{debug, info, warn};
@@ -40,7 +40,7 @@ impl ShmListener {
         info!("[ShmListener] Creating SHM listener for domain {}", domain_id);
 
         let segment_name = shm_segment_name(domain_id);
-        let total_size = RingBufferHeader::SIZE + DEFAULT_BUFFER_SIZE;
+        let total_size = RingBufferHeader::SIZE + get_buffer_size();
 
         // Try to attach to existing shared memory segment
         let shm = match SharedMemory::new(&segment_name, total_size, true) {
