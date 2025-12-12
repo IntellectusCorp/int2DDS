@@ -26,7 +26,10 @@ use crate::{
         },
         instance_handle::InstanceHandle,
     },
-    infrastructure::status::{StatusInfo, StatusKind},
+    infrastructure::{
+        liveliness_monitor::LivelinessMonitor,
+        status::{StatusInfo, StatusKind},
+    },
     rtps::{
         builtin::{
             builtin_endpoints::BuiltinEndpoints,
@@ -91,6 +94,7 @@ pub struct Participant {
     remote_publications: Arc<DashMap<String, HashMap<Guid, PublicationBuiltinTopicData>>>,
     remote_subscriptions: Arc<DashMap<String, HashMap<Guid, SubscriptionBuiltinTopicData>>>,
 
+    liveliness_monitor: Arc<Mutex<Option<LivelinessMonitor>>>,
     working_ip: String,
     terminated: Arc<AtomicBool>,
 }
@@ -153,6 +157,7 @@ impl Participant {
             remote_subscriptions: Arc::new(DashMap::new()),
             working_ip,
             terminated: Arc::new(AtomicBool::new(false)),
+            liveliness_monitor: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1162,5 +1167,18 @@ impl Participant {
 
     pub(crate) fn increase_manual_liveliness_count(&self) -> RtpsResult<()> {
         self.local_participant_proxy_data.increase_manual_liveliness_count()
+    }
+
+    pub(crate) fn liveliness_monitor(&self) -> Arc<Mutex<Option<LivelinessMonitor>>> {
+        self.liveliness_monitor.clone()
+    }
+
+    pub(crate) fn shutdown_liveliness_monitor(&self) {
+        if let Ok(mut monitor) = self.liveliness_monitor.lock() {
+            if let Some(ref mut m) = *monitor {
+                m.shutdown();
+            }
+            *monitor = None;
+        }
     }
 }
