@@ -681,10 +681,7 @@ impl QosPolicy for TransportPriorityQosPolicy {
 ///
 /// # Default
 /// Empty byte vector.
-#[derive(
-    Debug, Default, ConstDefault, Clone, PartialEq, Eq, Readable, Writable, Deserialize, Serialize,
-)]
-#[serde(default)]
+#[derive(Debug, Default, ConstDefault, Clone, PartialEq, Eq, Readable, Writable)]
 pub struct UserDataQosPolicy {
     /// Arbitrary user-defined data.
     pub value: Vec<u8>,
@@ -702,10 +699,7 @@ impl QosPolicy for UserDataQosPolicy {
 ///
 /// # Default
 /// Empty byte vector.
-#[derive(
-    Debug, Default, ConstDefault, Clone, PartialEq, Eq, Readable, Writable, Deserialize, Serialize,
-)]
-#[serde(default)]
+#[derive(Debug, Default, ConstDefault, Clone, PartialEq, Eq, Readable, Writable)]
 pub struct TopicDataQosPolicy {
     /// Arbitrary topic-specific data.
     pub value: Vec<u8>,
@@ -723,10 +717,7 @@ impl QosPolicy for TopicDataQosPolicy {
 ///
 /// # Default
 /// Empty byte vector.
-#[derive(
-    Debug, Default, ConstDefault, Clone, PartialEq, Eq, Readable, Writable, Deserialize, Serialize,
-)]
-#[serde(default)]
+#[derive(Debug, Default, ConstDefault, Clone, PartialEq, Eq, Readable, Writable)]
 pub struct GroupDataQosPolicy {
     /// Arbitrary group-specific data.
     pub value: Vec<u8>,

@@ -10,6 +10,7 @@ use crate::{
     },
     infrastructure::qos_policy,
 };
+use log::error;
 use serde::{Deserialize, Serialize};
 
 #[derive(Default, Deserialize, Serialize)]
@@ -157,6 +158,75 @@ impl From<qos_policy::PresentationQosPolicy> for PresentationQosPolicy {
                 coherent_access: internal.coherent_access,
                 ordered_access: internal.ordered_access,
             },
+        }
+    }
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(default)]
+pub(crate) struct UserDataQosPolicy {
+    pub(crate) value: String,
+}
+
+impl From<UserDataQosPolicy> for qos_policy::UserDataQosPolicy {
+    fn from(external: UserDataQosPolicy) -> Self {
+        Self { value: external.value.into() }
+    }
+}
+
+impl From<qos_policy::UserDataQosPolicy> for UserDataQosPolicy {
+    fn from(internal: qos_policy::UserDataQosPolicy) -> Self {
+        Self {
+            value: String::from_utf8(internal.value).unwrap_or_else(|e| {
+                error!("Failed to convert to UTF-8: {}", e);
+                String::new()
+            }),
+        }
+    }
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(default)]
+pub(crate) struct TopicDataQosPolicy {
+    pub(crate) value: String,
+}
+
+impl From<TopicDataQosPolicy> for qos_policy::TopicDataQosPolicy {
+    fn from(external: TopicDataQosPolicy) -> Self {
+        Self { value: external.value.into() }
+    }
+}
+
+impl From<qos_policy::TopicDataQosPolicy> for TopicDataQosPolicy {
+    fn from(internal: qos_policy::TopicDataQosPolicy) -> Self {
+        Self {
+            value: String::from_utf8(internal.value).unwrap_or_else(|e| {
+                error!("Failed to convert to UTF-8: {}", e);
+                String::new()
+            }),
+        }
+    }
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(default)]
+pub(crate) struct GroupDataQosPolicy {
+    pub(crate) value: String,
+}
+
+impl From<GroupDataQosPolicy> for qos_policy::GroupDataQosPolicy {
+    fn from(external: GroupDataQosPolicy) -> Self {
+        Self { value: external.value.into() }
+    }
+}
+
+impl From<qos_policy::GroupDataQosPolicy> for GroupDataQosPolicy {
+    fn from(internal: qos_policy::GroupDataQosPolicy) -> Self {
+        Self {
+            value: String::from_utf8(internal.value).unwrap_or_else(|e| {
+                error!("Failed to convert to UTF-8: {}", e);
+                String::new()
+            }),
         }
     }
 }
