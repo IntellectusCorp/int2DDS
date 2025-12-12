@@ -338,7 +338,10 @@ pub trait ParticipantMessageProcessor {
             remote_entity_id,
         );
 
-        if !writer.matched_reader_is_matched(reader_guid) {
+        if !self.is_builtin_reader_proxy_matched(
+            writer.clone(),
+            spdp_discovered_participant_data.participant_guid(),
+        ) {
             let reader_proxy = ReaderProxy::new(
                 reader_guid,
                 remote_entity_id,
@@ -391,6 +394,28 @@ pub trait ParticipantMessageProcessor {
             writer.reader_locator().iter().any(|reader_locator| reader_locator.locator() == locator)
         } else {
             false
+        }
+    }
+
+    /// Check if reader proxy exists in writer by participant guid prefix
+    fn is_builtin_reader_proxy_matched(
+        &self,
+        writer: Arc<StatefulWriter>,
+        participant_guid: Guid,
+    ) -> bool {
+        match writer.reader_proxies().lock() {
+            Ok(reader_proxies) => {
+                for proxy in reader_proxies.iter() {
+                    if proxy.remote_reader_guid().prefix() == participant_guid.prefix() {
+                        return true;
+                    }
+                }
+                false
+            }
+            Err(e) => {
+                log::error!("Failed to acquire reader proxies lock: {}", e);
+                false
+            }
         }
     }
 
