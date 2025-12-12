@@ -27,6 +27,14 @@ impl<Foo> DataSample<Foo> {
     pub(crate) fn new(data: Option<Arc<[u8]>>, sample_info: SampleInfo) -> Self {
         Self { data, sample_info, phantom: PhantomData }
     }
+
+    /// Get raw bytes directly without deserialization (zero-copy).
+    /// Returns a slice reference to the underlying data, bypassing all
+    /// serialization overhead. Use this for FFI where raw bytes are needed.
+    #[inline]
+    pub fn raw_bytes(&self) -> Option<&[u8]> {
+        self.data.as_deref()
+    }
 }
 
 impl<Foo> DataSample<Foo>
