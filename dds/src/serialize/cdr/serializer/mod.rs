@@ -1,73 +1,76 @@
-mod array;
-mod primitive;
-mod sequence;
-mod string;
+pub mod array;
+pub mod primitive;
+pub mod sequence;
+pub mod string;
 
 use speedy::Endianness;
 
-use super::CdrError;
-use crate::serialize::core::endianness_from_bool;
-use crate::serialize::BufferManager;
+use crate::serialize::align_buffer;
 
-pub struct CdrSerializer {
-    pub(super) endianness: Endianness,
-    pub(super) buffer: Vec<u8>,
-}
+/// Common trait for CDR serializers (CdrSerializer and Xcdr2Serializer)
+/// This trait abstracts the differences between CDR v1 and XCDR v2 serialization,
+/// allowing shared implementation of primitive, array, sequence, and string serialization.
+pub trait CdrSerializerCommon {
+    /// Get the endianness setting
+    fn endianness(&self) -> Endianness;
 
-impl CdrSerializer {
-    /// Create a new CDR serializer
-    pub fn new(little_endian: bool) -> Self {
-        Self { endianness: endianness_from_bool(little_endian), buffer: Vec::new() }
-    }
-
-    /// Create CDR serializer with pre-allocated capacity
-    pub fn with_capacity(little_endian: bool, capacity: usize) -> Self {
-        Self {
-            endianness: endianness_from_bool(little_endian),
-            buffer: Vec::with_capacity(capacity),
-        }
-    }
-
-    /// Write CDR encapsulation header
-    pub fn write_encapsulation_header(&mut self) -> Result<(), CdrError> {
-        // CDR encapsulation identifier
-        let encap_id = match self.endianness {
-            Endianness::LittleEndian => 0x0001u16, // CDR_LE
-            Endianness::BigEndian => 0x0000u16,    // CDR_BE
-        };
-
-        // Always write encapsulation header in big-endian
-        self.buffer.extend_from_slice(&encap_id.to_be_bytes());
-
-        // Options (2 bytes) - reserved, always 0x0000
-        self.buffer.extend_from_slice(&0x0000u16.to_be_bytes());
-
-        // debug!(
-        //     "CDR encapsulation header written: ID=0x{:04X}, endianness={:?}",
-        //     encap_id, self.endianness
-        // );
-        Ok(())
-    }
-}
-
-impl BufferManager for CdrSerializer {
-    /// Get the serialized data
-    fn into_bytes(self) -> Vec<u8> {
-        // debug!(
-        //     "CDR serialization complete: {} bytes total (header: {:02X?})",
-        //     self.buffer.len(),
-        //     &self.buffer[..std::cmp::min(self.buffer.len(), 8)]
-        // );
-        self.buffer
-    }
+    /// Get mutable reference to the internal buffer
+    fn buffer_mut(&mut self) -> &mut Vec<u8>;
 
     /// Get reference to the internal buffer
-    fn as_bytes(&self) -> &[u8] {
+    fn buffer(&self) -> &[u8];
+
+    /// Align buffer to the specified boundary
+    /// Note: CdrSerializer uses standard CDR alignment (up to 8 bytes)
+    ///       Xcdr2Serializer limits alignment to 4 bytes per XCDR2 spec
+    fn align(&mut self, alignment: usize);
+}
+
+// Import serializer types from their definition modules
+use super::{CdrSerializer, Xcdr2Serializer};
+
+impl CdrSerializerCommon for CdrSerializer {
+    #[inline]
+    fn endianness(&self) -> Endianness {
+        self.endianness
+    }
+
+    #[inline]
+    fn buffer_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.buffer
+    }
+
+    #[inline]
+    fn buffer(&self) -> &[u8] {
         &self.buffer
     }
 
-    /// Reset the serializer for reuse
-    fn reset(&mut self) {
-        self.buffer.clear();
+    #[inline]
+    fn align(&mut self, alignment: usize) {
+        align_buffer(&mut self.buffer, alignment);
+    }
+}
+
+impl CdrSerializerCommon for Xcdr2Serializer {
+    #[inline]
+    fn endianness(&self) -> Endianness {
+        self.endianness
+    }
+
+    #[inline]
+    fn buffer_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.buffer
+    }
+
+    #[inline]
+    fn buffer(&self) -> &[u8] {
+        &self.buffer
+    }
+
+    #[inline]
+    fn align(&mut self, alignment: usize) {
+        // XCDR2 standard: limit to 4-byte max alignment to reduce padding
+        let actual_alignment = std::cmp::min(alignment, 4);
+        align_buffer(&mut self.buffer, actual_alignment);
     }
 }

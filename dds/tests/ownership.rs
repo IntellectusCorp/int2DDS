@@ -149,7 +149,7 @@ fn test_ownership_revoked_when_deadline_missed() {
     let res = wait_for_reader_status(
         &data_reader,
         StatusMask::DATA_AVAILABLE,
-        Duration::from_millis(1200),
+        Duration::from_millis(1500),
     );
 
     // Weaker writer's data should not be received

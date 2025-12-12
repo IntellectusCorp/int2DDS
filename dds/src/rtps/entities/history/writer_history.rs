@@ -74,7 +74,7 @@ impl WriterHistoryCache {
                 SendingHandler::get_instance_by_participant_guid(self.participant_guid)
             {
                 let writer_entity_id = a_change.writer_guid().entity_id();
-                handler.push_message_and_wake(MessageType::SendUnsentChanges(writer_entity_id));
+                handler.push_message_and_wake(MessageType::UserUnsentChanges(writer_entity_id));
             }
         } else {
             // Built-in endpoint not connected to DDS entity, Resource limits & History QoS not applied
