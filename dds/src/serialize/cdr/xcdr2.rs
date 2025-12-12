@@ -1,10 +1,9 @@
 use speedy::Endianness;
 
-use super::{CdrError, EncodingKind, ExtensibilityKind, MemberHeader};
+use super::{CdrError, CdrSerializerCommon, EncodingKind, ExtensibilityKind, MemberHeader};
 use crate::serialize::core::endianness_from_bool;
 use crate::serialize::{
-    align_buffer, align_position_with_header_offset, to_bytes_u32, BufferManager,
-    DeserializerReader,
+    align_position_with_header_offset, to_bytes_u32, BufferManager, DeserializerReader,
 };
 
 /// XCDR v2 Serializer supporting PLAIN_CDR2, DELIMITED_CDR, and PL_CDR2
@@ -85,14 +84,6 @@ impl Xcdr2Serializer {
         }
 
         Ok(())
-    }
-
-    /// Align to boundary (XCDR v2 uses 4-byte max alignment)
-    #[inline]
-    pub(super) fn align(&mut self, alignment: usize) {
-        // XCDR2 standard: limit to 4-byte max alignment to reduce padding
-        let actual_alignment = std::cmp::min(alignment, 4);
-        align_buffer(&mut self.buffer, actual_alignment);
     }
 
     /// Write member header for MUTABLE types

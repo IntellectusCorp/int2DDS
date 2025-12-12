@@ -2,9 +2,7 @@ use speedy::Endianness;
 
 use super::CdrError;
 use crate::serialize::core::endianness_from_bool;
-use crate::serialize::{
-    align_buffer, align_position_with_header_offset, BufferManager, DeserializerReader,
-};
+use crate::serialize::{align_position_with_header_offset, BufferManager, DeserializerReader};
 
 /// XCDR v1 (CDR) Serializer
 /// Legacy RTPS 2.x serialization for FINAL types only
@@ -42,12 +40,6 @@ impl CdrSerializer {
         self.buffer.extend_from_slice(&0x0000u16.to_be_bytes());
 
         Ok(())
-    }
-
-    /// Align to boundary (CDR alignment rules)
-    #[inline]
-    pub(super) fn align(&mut self, alignment: usize) {
-        align_buffer(&mut self.buffer, alignment);
     }
 }
 
