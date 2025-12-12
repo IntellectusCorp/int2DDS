@@ -79,10 +79,9 @@ impl DiscoveryUnicastListeningTask {
             ));
         }
 
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(std::io::Error::new(std::io::ErrorKind::Other, "Participant already dropped"))?;
+        let participant = self.participant.upgrade().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::Other, "Participant already dropped")
+        })?;
 
         loop {
             poll.poll(&mut events, Some(Duration::from_millis(100)))?;
@@ -225,15 +224,16 @@ impl DiscoveryUnicastListeningTask {
             return Ok(());
         }
 
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.participant.upgrade().ok_or_else(|| {
+            RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped")
+        })?;
         let mut sedp_logic = self
             .sedp_logic
             .as_ref()
             .as_ref()
-            .ok_or(RtpsError::new(RtpsErrorCode::DataNotSet, "SpdpLogic is not initialized"))?
+            .ok_or_else(|| {
+                RtpsError::new(RtpsErrorCode::DataNotSet, "SpdpLogic is not initialized")
+            })?
             .clone();
 
         sedp_logic.handle_rtps_message(message_receiver.clone())?;
