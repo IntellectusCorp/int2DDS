@@ -211,6 +211,7 @@ fn quote_serialize_with_format_impl(
                 match format {
                     #crate_path::dcps::topic::type_support::SerializationFormat::Cdr => {
                         use #crate_path::serialize::{cdr::CdrSerializer, BufferManager};
+                        use #crate_path::serialize::cdr::{PrimitiveSerialize, StringSerialize, ArraySerialize, SequenceSerialize};
 
                         let mut serializer = CdrSerializer::with_capacity(true, 64);
                         serializer.write_encapsulation_header()
@@ -223,6 +224,7 @@ fn quote_serialize_with_format_impl(
                     },
                     #crate_path::dcps::topic::type_support::SerializationFormat::Xcdr { extensibility_kind, use_delimiters } => {
                         use #crate_path::serialize::{xcdr::Xcdr2Serializer, BufferManager};
+                        use #crate_path::serialize::cdr::{PrimitiveSerialize, StringSerialize, ArraySerialize, SequenceSerialize};
 
                         let effective_extensibility = *extensibility_kind;
                         let use_delimiters = *use_delimiters;
@@ -535,6 +537,7 @@ fn generate_cdr_serialize_impl(
     quote! {
         impl #crate_path::serialize::cdr::CdrSerialize for #name {
             fn serialize_cdr(&self, serializer: &mut #crate_path::serialize::cdr::CdrSerializer) -> #crate_path::serialize::cdr::CdrResult<()> {
+                use #crate_path::serialize::cdr::{PrimitiveSerialize, StringSerialize, ArraySerialize, SequenceSerialize};
                 #(#field_calls)*
                 Ok(())
             }
@@ -598,6 +601,7 @@ fn generate_xcdr_serialize_impl(
         Some(ExtensibilityKind::Appendable) | Some(ExtensibilityKind::Mutable)
     ) {
         quote! {
+            use #crate_path::serialize::cdr::{PrimitiveSerialize, StringSerialize, ArraySerialize, SequenceSerialize};
             let size_pos = serializer.begin_struct()?;
             #(#field_calls)*
             serializer.end_struct(size_pos)?;
@@ -605,6 +609,7 @@ fn generate_xcdr_serialize_impl(
         }
     } else {
         quote! {
+            use #crate_path::serialize::cdr::{PrimitiveSerialize, StringSerialize, ArraySerialize, SequenceSerialize};
             #(#field_calls)*
             Ok(())
         }
