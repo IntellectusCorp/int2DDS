@@ -11,7 +11,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use crate::rtps::transport::shm::platform::{shm_segment_name, SharedMemory};
 use crate::rtps::transport::shm::ring_buffer::{
-    RingBufferHeader, RingBufferReader, get_buffer_size,
+    get_buffer_size, RingBufferHeader, RingBufferReader,
 };
 use crate::rtps::transport::Listener;
 use log::{debug, info, warn};

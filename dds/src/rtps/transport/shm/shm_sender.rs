@@ -12,7 +12,7 @@ use std::sync::Mutex;
 
 use crate::rtps::transport::shm::platform::{shm_segment_name, SharedMemory};
 use crate::rtps::transport::shm::ring_buffer::{
-    RingBufferHeader, RingBufferWriter, get_buffer_size, DEFAULT_MAX_MESSAGE_SIZE,
+    get_buffer_size, RingBufferHeader, RingBufferWriter, DEFAULT_MAX_MESSAGE_SIZE,
 };
 use crate::rtps::transport::{Transport, TransportType};
 use log::{debug, info, warn};
