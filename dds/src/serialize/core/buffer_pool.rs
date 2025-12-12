@@ -104,15 +104,16 @@ thread_local! {
 
 /// RAII guard that automatically returns buffer to pool on drop
 pub struct PooledBuffer {
-    buffer: Option<Vec<u8>>,
+    buffer: Vec<u8>,
     size: BufferSize,
+    taken: bool,
 }
 
 impl PooledBuffer {
     /// Acquire a buffer from the pool with the specified size tier
     pub fn new(size: BufferSize) -> Self {
         let buffer = BUFFER_POOL.with(|pool| pool.borrow_mut().acquire(size));
-        Self { buffer: Some(buffer), size }
+        Self { buffer, size, taken: false }
     }
 
     /// Acquire a buffer sized for the given capacity
@@ -123,32 +124,33 @@ impl PooledBuffer {
     /// Consume the guard and take ownership of the buffer
     /// The buffer will NOT be returned to the pool
     pub fn into_vec(mut self) -> Vec<u8> {
-        self.buffer.take().unwrap()
+        self.taken = true;
+        std::mem::take(&mut self.buffer)
     }
 
     /// Get a reference to the underlying buffer
     pub fn as_slice(&self) -> &[u8] {
-        self.buffer.as_ref().unwrap()
+        &self.buffer
     }
 
     /// Get the length of the buffer content
     pub fn len(&self) -> usize {
-        self.buffer.as_ref().unwrap().len()
+        self.buffer.len()
     }
 
     /// Check if the buffer is empty
     pub fn is_empty(&self) -> bool {
-        self.buffer.as_ref().unwrap().is_empty()
+        self.buffer.is_empty()
     }
 
     /// Clear the buffer content
     pub fn clear(&mut self) {
-        self.buffer.as_mut().unwrap().clear();
+        self.buffer.clear();
     }
 
     /// Reserve additional capacity
     pub fn reserve(&mut self, additional: usize) {
-        self.buffer.as_mut().unwrap().reserve(additional);
+        self.buffer.reserve(additional);
     }
 }
 
@@ -156,19 +158,20 @@ impl Deref for PooledBuffer {
     type Target = Vec<u8>;
 
     fn deref(&self) -> &Self::Target {
-        self.buffer.as_ref().unwrap()
+        &self.buffer
     }
 }
 
 impl DerefMut for PooledBuffer {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.buffer.as_mut().unwrap()
+        &mut self.buffer
     }
 }
 
 impl Drop for PooledBuffer {
     fn drop(&mut self) {
-        if let Some(buffer) = self.buffer.take() {
+        if !self.taken {
+            let buffer = std::mem::take(&mut self.buffer);
             BUFFER_POOL.with(|pool| pool.borrow_mut().release(buffer, self.size));
         }
     }
