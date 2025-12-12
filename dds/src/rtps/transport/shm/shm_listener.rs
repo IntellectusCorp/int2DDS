@@ -65,7 +65,7 @@ impl ShmListener {
         };
 
         // Create ring buffer reader
-        // Each reader maintains its own local read position, initialized to current write_pos
+        // Each reader maintains its own local read position, initialized to current commit_pos
         // This allows multiple readers without interfering with each other
         let header = shm.as_ptr() as *const RingBufferHeader;
         let data = unsafe { shm.as_ptr().add(RingBufferHeader::SIZE) as *const u8 };
