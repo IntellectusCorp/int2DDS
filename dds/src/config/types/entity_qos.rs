@@ -16,6 +16,11 @@ use crate::{
     publication, subscription, topic,
 };
 
+#[allow(dead_code)]
+pub(crate) trait MergeQos {
+    fn merge(&self, base: &Self) -> Self;
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub(crate) struct DataWriterQos {
@@ -51,6 +56,29 @@ pub(crate) struct DataWriterQos {
     pub(crate) ownership_strength: Option<OwnershipStrengthQosPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) writer_data_lifecycle: Option<WriterDataLifecycleQosPolicy>,
+}
+
+impl MergeQos for DataWriterQos {
+    fn merge(&self, base: &Self) -> Self {
+        Self {
+            base_name: self.base_name.clone(),
+            durability: self.durability.clone().or(base.durability.clone()),
+            durability_service: self.durability_service.clone().or(base.durability_service.clone()),
+            deadline: self.deadline.or(base.deadline),
+            latency_budget: self.latency_budget.or(base.latency_budget),
+            liveliness: self.liveliness.clone().or(base.liveliness.clone()),
+            reliability: self.reliability.clone().or(base.reliability.clone()),
+            destination_order: self.destination_order.clone().or(base.destination_order.clone()),
+            history: self.history.clone().or(base.history.clone()),
+            resource_limits: self.resource_limits.or(base.resource_limits),
+            transport_priority: self.transport_priority.or(base.transport_priority),
+            lifespan: self.lifespan.or(base.lifespan),
+            user_data: self.user_data.clone().or(base.user_data.clone()),
+            ownership: self.ownership.clone().or(base.ownership.clone()),
+            ownership_strength: self.ownership_strength.or(base.ownership_strength),
+            writer_data_lifecycle: self.writer_data_lifecycle.or(base.writer_data_lifecycle),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -188,6 +216,26 @@ pub(crate) struct DataReaderQos {
     pub(crate) reader_data_lifecycle: Option<ReaderDataLifecycleQosPolicy>,
 }
 
+impl MergeQos for DataReaderQos {
+    fn merge(&self, base: &Self) -> Self {
+        Self {
+            base_name: self.base_name.clone(),
+            durability: self.durability.clone().or(base.durability.clone()),
+            deadline: self.deadline.or(base.deadline),
+            latency_budget: self.latency_budget.or(base.latency_budget),
+            liveliness: self.liveliness.clone().or(base.liveliness.clone()),
+            reliability: self.reliability.clone().or(base.reliability.clone()),
+            destination_order: self.destination_order.clone().or(base.destination_order.clone()),
+            history: self.history.clone().or(base.history.clone()),
+            resource_limits: self.resource_limits.or(base.resource_limits),
+            user_data: self.user_data.clone().or(base.user_data.clone()),
+            ownership: self.ownership.clone().or(base.ownership.clone()),
+            time_based_filter: self.time_based_filter.or(base.time_based_filter),
+            reader_data_lifecycle: self.reader_data_lifecycle.or(base.reader_data_lifecycle),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct DataReaderQosNamed {
     pub(crate) name: String, // essential
@@ -310,6 +358,27 @@ pub(crate) struct TopicQos {
     pub(crate) ownership: Option<OwnershipQosPolicy>,
 }
 
+impl MergeQos for TopicQos {
+    fn merge(&self, base: &Self) -> Self {
+        Self {
+            base_name: self.base_name.clone(),
+            topic_data: self.topic_data.clone().or(base.topic_data.clone()),
+            durability: self.durability.clone().or(base.durability.clone()),
+            durability_service: self.durability_service.clone().or(base.durability_service.clone()),
+            deadline: self.deadline.or(base.deadline),
+            latency_budget: self.latency_budget.or(base.latency_budget),
+            liveliness: self.liveliness.clone().or(base.liveliness.clone()),
+            reliability: self.reliability.clone().or(base.reliability.clone()),
+            destination_order: self.destination_order.clone().or(base.destination_order.clone()),
+            history: self.history.clone().or(base.history.clone()),
+            resource_limits: self.resource_limits.or(base.resource_limits),
+            transport_priority: self.transport_priority.or(base.transport_priority),
+            lifespan: self.lifespan.or(base.lifespan),
+            ownership: self.ownership.clone().or(base.ownership.clone()),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct TopicQosNamed {
     pub(crate) name: String, // essential
@@ -419,6 +488,18 @@ pub(crate) struct SubscriberQos {
     pub(crate) entity_factory: Option<EntityFactoryQosPolicy>,
 }
 
+impl MergeQos for SubscriberQos {
+    fn merge(&self, base: &Self) -> Self {
+        Self {
+            base_name: self.base_name.clone(),
+            presentation: self.presentation.clone().or(base.presentation.clone()),
+            partition: self.partition.clone().or(base.partition.clone()),
+            group_data: self.group_data.clone().or(base.group_data.clone()),
+            entity_factory: self.entity_factory.or(base.entity_factory),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct SubscriberQosNamed {
     pub(crate) name: String, // essential
@@ -480,6 +561,18 @@ pub(crate) struct PublisherQos {
     pub(crate) entity_factory: Option<EntityFactoryQosPolicy>,
 }
 
+impl MergeQos for PublisherQos {
+    fn merge(&self, base: &Self) -> Self {
+        Self {
+            base_name: self.base_name.clone(),
+            presentation: self.presentation.clone().or(base.presentation.clone()),
+            partition: self.partition.clone().or(base.partition.clone()),
+            group_data: self.group_data.clone().or(base.group_data.clone()),
+            entity_factory: self.entity_factory.or(base.entity_factory),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct PublisherQosNamed {
     pub(crate) name: String, // essential
@@ -535,6 +628,16 @@ pub(crate) struct DomainParticipantQos {
     pub(crate) user_data: Option<UserDataQosPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) entity_factory: Option<EntityFactoryQosPolicy>,
+}
+
+impl MergeQos for DomainParticipantQos {
+    fn merge(&self, base: &Self) -> Self {
+        Self {
+            base_name: self.base_name.clone(),
+            user_data: self.user_data.clone().or(base.user_data.clone()),
+            entity_factory: self.entity_factory.or(base.entity_factory),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
