@@ -235,7 +235,7 @@
 //! - **Discovery**: Automatic endpoint discovery using SPDP and SEDP
 //! - **Type Safety**: Compile-time type checking with `#[derive(DdsType)]`
 //! - **Performance**: Zero-copy serialization with the `speedy` crate
-//! - **Network Flexibility**: UDP multicast, broadcast, and TCP transport support
+//! - **Network Flexibility**: UDP multicast, and TCP transport support
 //!
 //! ## Architecture
 //!
@@ -272,7 +272,7 @@
 //!   - `tcp`: TCP-only discovery and user data (requires `INT2DDS_INITIAL_PEERS`)
 //!   - `hybrid`: UDP discovery + TCP user data
 //! - `INT2DDS_INITIAL_PEERS`: Initial peer addresses for TCP discovery (format: `"ip:port,ip:port"`)
-//! - `INT2DDS_BROADCAST_ENABLED`: Enable UDP broadcast alongside multicast (`true`/`false`) - Default: `false`
+//! - `INT2DDS_EXTENDED_DISCOVERY`: Enable extended discovery (`true`/`false`) - Default: `false`
 //!
 //! ### Logging
 //!

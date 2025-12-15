@@ -99,10 +99,9 @@ impl UserUnicastListeningTask {
             Duration::from_millis(100)
         };
 
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(std::io::Error::new(std::io::ErrorKind::Other, "Participant already dropped"))?;
+        let participant = self.participant.upgrade().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::Other, "Participant already dropped")
+        })?;
 
         loop {
             poll.poll(&mut events, Some(poll_timeout))?;
