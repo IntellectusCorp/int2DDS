@@ -4,25 +4,25 @@ This document describes the environment variables available in int2dds. All envi
 
 ## Environment Variables Summary
 
-| Environment Variable | CLI Argument | Description | Default |
-|---------------------|--------------|-------------|---------|
-| `INT2DDS_TRANSPORT` | `--int2dds-transport` | Transport protocol (udp, tcp, hybrid) | udp |
-| `INT2DDS_DISCOVERY_MODE` | `--int2dds-discovery-mode` | Discovery mode (udp, tcp, hybrid) | udp |
-| `INT2DDS_LOG_TYPE` | `--int2dds-log-type` | Log output type (console, file, all, none) | none |
-| `INT2DDS_CONSOLE_LOG_LEVEL` | `--int2dds-console-log-level` | Console log level | info |
-| `INT2DDS_FILE_LOG_LEVEL` | `--int2dds-file-log-level` | File log level | info |
-| `INT2DDS_NETWORK_INTERFACE` | `--int2dds-network-interface` | Network interface name | auto |
-| `INT2DDS_NETWORK_IP` | `--int2dds-network-ip` | Network IP address | auto |
-| `INT2DDS_UDP_SOCKET_BUFFER` | `--int2dds-udp-socket-buffer` | UDP socket buffer size (bytes) | OS default |
-| `INT2DDS_BROADCAST_ENABLED` | `--int2dds-broadcast-enabled` | Enable broadcast | false |
-| `INT2DDS_TCP_CONNECT_TIMEOUT` | `--int2dds-tcp-connect-timeout` | TCP connection timeout (ms) | 5000 |
-| `INT2DDS_TCP_WRITE_TIMEOUT` | `--int2dds-tcp-write-timeout` | TCP write timeout (ms) | 10000 |
-| `INT2DDS_TCP_NODELAY` | `--int2dds-tcp-nodelay` | Enable TCP Nodelay | true |
-| `INT2DDS_INITIAL_PEERS` | `--int2dds-initial-peers` | Initial peer list | none |
-| `INT2DDS_THREAD_MONITORING` | `--int2dds-thread-monitoring` | Enable thread monitoring | false |
-| `INT2DDS_THREAD_MONITORING_LOG_PATH` | `--int2dds-thread-monitoring-log-path` | Thread monitoring log path | ./thread_monitoring.log |
-| `INT2DDS_FUNCTION_TIMING` | `--int2dds-function-timing` | Enable function timing | false |
-| `INT2DDS_FUNCTION_TIMING_LOG_PATH` | `--int2dds-function-timing-log-path` | Function timing log path | ./function_timing.log |
+| Environment Variable                 | CLI Argument                           | Description                                | Default                 |
+| ------------------------------------ | -------------------------------------- | ------------------------------------------ | ----------------------- |
+| `INT2DDS_TRANSPORT`                  | `--int2dds-transport`                  | Transport protocol (udp, tcp, hybrid)      | udp                     |
+| `INT2DDS_DISCOVERY_MODE`             | `--int2dds-discovery-mode`             | Discovery mode (udp, tcp, hybrid)          | udp                     |
+| `INT2DDS_LOG_TYPE`                   | `--int2dds-log-type`                   | Log output type (console, file, all, none) | none                    |
+| `INT2DDS_CONSOLE_LOG_LEVEL`          | `--int2dds-console-log-level`          | Console log level                          | info                    |
+| `INT2DDS_FILE_LOG_LEVEL`             | `--int2dds-file-log-level`             | File log level                             | info                    |
+| `INT2DDS_NETWORK_INTERFACE`          | `--int2dds-network-interface`          | Network interface name                     | auto                    |
+| `INT2DDS_NETWORK_IP`                 | `--int2dds-network-ip`                 | Network IP address                         | auto                    |
+| `INT2DDS_UDP_SOCKET_BUFFER`          | `--int2dds-udp-socket-buffer`          | UDP socket buffer size (bytes)             | OS default              |
+| `INT2DDS_EXTENDED_DISCOVERY`         | `--int2dds-extended-discovery`         | Enable extended discovery                  | false                   |
+| `INT2DDS_TCP_CONNECT_TIMEOUT`        | `--int2dds-tcp-connect-timeout`        | TCP connection timeout (ms)                | 5000                    |
+| `INT2DDS_TCP_WRITE_TIMEOUT`          | `--int2dds-tcp-write-timeout`          | TCP write timeout (ms)                     | 10000                   |
+| `INT2DDS_TCP_NODELAY`                | `--int2dds-tcp-nodelay`                | Enable TCP Nodelay                         | true                    |
+| `INT2DDS_INITIAL_PEERS`              | `--int2dds-initial-peers`              | Initial peer list                          | none                    |
+| `INT2DDS_THREAD_MONITORING`          | `--int2dds-thread-monitoring`          | Enable thread monitoring                   | false                   |
+| `INT2DDS_THREAD_MONITORING_LOG_PATH` | `--int2dds-thread-monitoring-log-path` | Thread monitoring log path                 | ./thread_monitoring.log |
+| `INT2DDS_FUNCTION_TIMING`            | `--int2dds-function-timing`            | Enable function timing                     | false                   |
+| `INT2DDS_FUNCTION_TIMING_LOG_PATH`   | `--int2dds-function-timing-log-path`   | Function timing log path                   | ./function_timing.log   |
 
 ---
 
@@ -32,10 +32,10 @@ This document describes the environment variables available in int2dds. All envi
 
 Sets the transport protocol type.
 
-| Value | Description |
-|-------|-------------|
-| `udp` | UDP transport (default) |
-| `tcp` | TCP transport |
+| Value    | Description                |
+| -------- | -------------------------- |
+| `udp`    | UDP transport (default)    |
+| `tcp`    | TCP transport              |
 | `hybrid` | UDP + TCP simultaneous use |
 
 #### Configuration
@@ -60,11 +60,11 @@ cargo run --example hello_world -- --int2dds-transport tcp
 
 Sets the DDS Participant Discovery mode.
 
-| Value | Discovery Method | User Data Transport | Initial Peers Required |
-|-------|-----------------|---------------------|----------------------|
-| `udp` | UDP multicast | UDP | No |
-| `tcp` | TCP unicast | TCP | **Yes** |
-| `hybrid` | UDP multicast + TCP unicast | TCP | Optional |
+| Value    | Discovery Method            | User Data Transport | Initial Peers Required |
+| -------- | --------------------------- | ------------------- | ---------------------- |
+| `udp`    | UDP multicast               | UDP                 | No                     |
+| `tcp`    | TCP unicast                 | TCP                 | **Yes**                |
+| `hybrid` | UDP multicast + TCP unicast | TCP                 | Optional               |
 
 #### Configuration
 
@@ -92,12 +92,12 @@ cargo run --example hello_world -- --int2dds-discovery-mode hybrid
 
 Sets the log output type.
 
-| Value | Description |
-|-------|-------------|
-| `none` | Disable logging (default) |
-| `console` | Console output only |
-| `file` | File output only |
-| `all` | Console + file output |
+| Value     | Description               |
+| --------- | ------------------------- |
+| `none`    | Disable logging (default) |
+| `console` | Console output only       |
+| `file`    | File output only          |
+| `all`     | Console + file output     |
 
 #### Configuration
 
@@ -121,13 +121,13 @@ cargo run --example hello_world -- --int2dds-log-type console
 
 Sets the console log level.
 
-| Value | Description |
-|-------|-------------|
-| `error` | Error only |
-| `warn` | Warning and above |
-| `info` | Info and above (default) |
-| `debug` | Debug and above |
-| `trace` | All logs |
+| Value   | Description              |
+| ------- | ------------------------ |
+| `error` | Error only               |
+| `warn`  | Warning and above        |
+| `info`  | Info and above (default) |
+| `debug` | Debug and above          |
+| `trace` | All logs                 |
 
 #### Configuration
 
@@ -239,39 +239,41 @@ export INT2DDS_UDP_SOCKET_BUFFER=1048576
 cargo run --example hello_world -- --int2dds-udp-socket-buffer 1048576
 ```
 
-### INT2DDS_BROADCAST_ENABLED
+### INT2DDS_EXTENDED_DISCOVERY
 
-Controls the ability to send DDS discovery messages via broadcast.
+Controls the ability to send DDS discovery messages via extended discovery.
 
 #### Configuration
 
 ```powershell
 # Windows PowerShell - Environment variable
-$env:INT2DDS_BROADCAST_ENABLED = "true"
+$env:INT2DDS_EXTENDED_DISCOVERY = "true"
 
 # CLI argument (flag type)
-cargo run --example hello_world -- --int2dds-broadcast-enabled
+cargo run --example hello_world -- --int2dds-extended-discovery
 ```
 
 ```bash
 # Linux/macOS - Environment variable
-export INT2DDS_BROADCAST_ENABLED=true
+export INT2DDS_EXTENDED_DISCOVERY=true
 
 # CLI argument (flag type)
-cargo run --example hello_world -- --int2dds-broadcast-enabled
+cargo run --example hello_world -- --int2dds-extended-discovery
 ```
 
 #### Behavior
 
-- **When broadcast is disabled** (default):
+- **When extended discovery is disabled** (default):
+
   - Discovery messages: Sent via multicast only
   - Send interval: 2 seconds
 
-- **When broadcast is enabled**:
-  - Discovery messages: Sent via both multicast and broadcast
+- **When extended discovery is enabled**:
+  - Discovery messages: Sent via both multicast and extended discovery
   - Send interval: Same as multicast (TODO: needs adjustment)
 
 #### Valid Values
+
 - `"true"`, `"1"`: Enabled
 - `"false"`, `"0"`, not set: Disabled (default)
 - Case-insensitive
@@ -485,5 +487,5 @@ cargo run --example hello_world -- --int2dds-function-timing-log-path /var/log/f
 - [dds/src/common/env.rs](../../dds/src/common/env.rs) - Environment variable parsing and application
 - [dds/src/common/log.rs](../../dds/src/common/log.rs) - Logging configuration
 - [dds/src/rtps/transport/mod.rs](../../dds/src/rtps/transport/mod.rs) - Transport type definition
-- [dds/src/rtps/transport/udp/udp_sender.rs](../../dds/src/rtps/transport/udp/udp_sender.rs) - UDP transport and broadcast settings
+- [dds/src/rtps/transport/udp/udp_sender.rs](../../dds/src/rtps/transport/udp/udp_sender.rs) - UDP transport settings
 - [dds/src/rtps/transport/tcp/tcp_sender.rs](../../dds/src/rtps/transport/tcp/tcp_sender.rs) - TCP sender and connection management
