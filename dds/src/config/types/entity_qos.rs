@@ -16,7 +16,7 @@ use crate::{
     publication, subscription, topic,
 };
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub(crate) struct DataWriterQos {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -53,7 +53,7 @@ pub(crate) struct DataWriterQos {
     pub(crate) writer_data_lifecycle: Option<WriterDataLifecycleQosPolicy>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct DataWriterQosNamed {
     pub(crate) name: String, // essential
 
@@ -157,7 +157,7 @@ impl From<publication::qos::DataWriterQos> for DataWriterQos {
     }
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub(crate) struct DataReaderQos {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -188,7 +188,7 @@ pub(crate) struct DataReaderQos {
     pub(crate) reader_data_lifecycle: Option<ReaderDataLifecycleQosPolicy>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct DataReaderQosNamed {
     pub(crate) name: String, // essential
 
@@ -277,7 +277,7 @@ impl From<subscription::qos::DataReaderQos> for DataReaderQos {
     }
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub(crate) struct TopicQos {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -310,7 +310,7 @@ pub(crate) struct TopicQos {
     pub(crate) ownership: Option<OwnershipQosPolicy>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct TopicQosNamed {
     pub(crate) name: String, // essential
 
@@ -404,7 +404,7 @@ impl From<topic::qos::TopicQos> for TopicQos {
     }
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub(crate) struct SubscriberQos {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -419,7 +419,7 @@ pub(crate) struct SubscriberQos {
     pub(crate) entity_factory: Option<EntityFactoryQosPolicy>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct SubscriberQosNamed {
     pub(crate) name: String, // essential
 
@@ -465,7 +465,7 @@ impl From<subscription::qos::SubscriberQos> for SubscriberQos {
     }
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub(crate) struct PublisherQos {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -480,7 +480,7 @@ pub(crate) struct PublisherQos {
     pub(crate) entity_factory: Option<EntityFactoryQosPolicy>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct PublisherQosNamed {
     pub(crate) name: String, // essential
 
@@ -526,7 +526,7 @@ impl From<publication::qos::PublisherQos> for PublisherQos {
     }
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub(crate) struct DomainParticipantQos {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -537,7 +537,7 @@ pub(crate) struct DomainParticipantQos {
     pub(crate) entity_factory: Option<EntityFactoryQosPolicy>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct DomainParticipantQosNamed {
     pub(crate) name: String, // essential
 

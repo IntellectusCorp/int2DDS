@@ -6,14 +6,14 @@ use crate::config::types::entity_qos::{
     TopicQos, TopicQosSeq,
 };
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 pub(crate) enum SingleOrSeq<T, N> {
     Single(T),
     Seq(N),
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct QosProfile {
     pub(crate) name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -33,7 +33,7 @@ pub(crate) struct QosProfile {
     pub(crate) datareader_qos: Option<SingleOrSeq<DataReaderQos, DataReaderQosSeq>>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct QosLibrary {
     pub(crate) name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
