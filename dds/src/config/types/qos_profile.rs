@@ -1,9 +1,17 @@
 use serde::{Deserialize, Serialize};
 
 use crate::config::types::entity_qos::{
-    DataReaderQosSeq, DataWriterQosSeq, DomainParticipantQosSeq, PublisherQosSeq, SubscriberQosSeq,
-    TopicQosSeq,
+    DataReaderQos, DataReaderQosSeq, DataWriterQos, DataWriterQosSeq, DomainParticipantQos,
+    DomainParticipantQosSeq, PublisherQos, PublisherQosSeq, SubscriberQos, SubscriberQosSeq,
+    TopicQos, TopicQosSeq,
 };
+
+#[derive(Deserialize, Serialize)]
+#[serde(untagged)]
+pub(crate) enum SingleOrSeq<T, N> {
+    Single(T),
+    Seq(N),
+}
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct QosProfile {
@@ -11,17 +19,18 @@ pub(crate) struct QosProfile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) base_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) domain_participant_qos: Option<DomainParticipantQosSeq>,
+    pub(crate) domain_participant_qos:
+        Option<SingleOrSeq<DomainParticipantQos, DomainParticipantQosSeq>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) topic_qos: Option<TopicQosSeq>,
+    pub(crate) topic_qos: Option<SingleOrSeq<TopicQos, TopicQosSeq>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) publisher_qos: Option<PublisherQosSeq>,
+    pub(crate) publisher_qos: Option<SingleOrSeq<PublisherQos, PublisherQosSeq>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) subscriber_qos: Option<SubscriberQosSeq>,
+    pub(crate) subscriber_qos: Option<SingleOrSeq<SubscriberQos, SubscriberQosSeq>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) datawriter_qos: Option<DataWriterQosSeq>,
+    pub(crate) datawriter_qos: Option<SingleOrSeq<DataWriterQos, DataWriterQosSeq>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) datareader_qos: Option<DataReaderQosSeq>,
+    pub(crate) datareader_qos: Option<SingleOrSeq<DataReaderQos, DataReaderQosSeq>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -32,15 +41,16 @@ pub(crate) struct QosLibrary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) qos_profiles: Option<Vec<QosProfile>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) domain_participant_qos: Option<DomainParticipantQosSeq>,
+    pub(crate) domain_participant_qos:
+        Option<SingleOrSeq<DomainParticipantQos, DomainParticipantQosSeq>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) topic_qos: Option<TopicQosSeq>,
+    pub(crate) topic_qos: Option<SingleOrSeq<TopicQos, TopicQosSeq>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) publisher_qos: Option<PublisherQosSeq>,
+    pub(crate) publisher_qos: Option<SingleOrSeq<PublisherQos, PublisherQosSeq>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) subscriber_qos: Option<SubscriberQosSeq>,
+    pub(crate) subscriber_qos: Option<SingleOrSeq<SubscriberQos, SubscriberQosSeq>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) datawriter_qos: Option<DataWriterQosSeq>,
+    pub(crate) datawriter_qos: Option<SingleOrSeq<DataWriterQos, DataWriterQosSeq>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) datareader_qos: Option<DataReaderQosSeq>,
+    pub(crate) datareader_qos: Option<SingleOrSeq<DataReaderQos, DataReaderQosSeq>>,
 }
