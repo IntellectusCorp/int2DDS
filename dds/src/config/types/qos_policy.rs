@@ -13,7 +13,7 @@ use crate::{
 use log::error;
 use serde::{Deserialize, Serialize};
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub(crate) struct HistoryQosPolicy {
     #[serde(default)]
     pub(crate) kind: HistoryQosPolicyKind,
@@ -27,7 +27,7 @@ fn default_depth() -> i32 {
     1
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub(crate) enum HistoryQosPolicyKind {
     #[default]
@@ -61,13 +61,13 @@ impl From<qos_policy::HistoryQosPolicy> for HistoryQosPolicy {
     }
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub(crate) struct OwnershipQosPolicy {
     pub(crate) kind: OwnershipQosPolicyKind,
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub(crate) enum OwnershipQosPolicyKind {
     #[default]
@@ -101,7 +101,7 @@ impl From<qos_policy::OwnershipQosPolicy> for OwnershipQosPolicy {
     }
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub(crate) struct PresentationQosPolicy {
     pub(crate) access_scope: PresentationQosAccessScopeKind,
@@ -109,7 +109,7 @@ pub(crate) struct PresentationQosPolicy {
     pub(crate) ordered_access: bool,
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub(crate) enum PresentationQosAccessScopeKind {
     #[default]
@@ -162,7 +162,7 @@ impl From<qos_policy::PresentationQosPolicy> for PresentationQosPolicy {
     }
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub(crate) struct UserDataQosPolicy {
     pub(crate) value: String,
@@ -185,7 +185,7 @@ impl From<qos_policy::UserDataQosPolicy> for UserDataQosPolicy {
     }
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub(crate) struct TopicDataQosPolicy {
     pub(crate) value: String,
@@ -208,7 +208,7 @@ impl From<qos_policy::TopicDataQosPolicy> for TopicDataQosPolicy {
     }
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub(crate) struct GroupDataQosPolicy {
     pub(crate) value: String,
@@ -231,13 +231,13 @@ impl From<qos_policy::GroupDataQosPolicy> for GroupDataQosPolicy {
     }
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub(crate) struct PartitionQosPolicy {
     pub(crate) name: StringSeq,
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub(crate) struct StringSeq {
     pub(crate) element: Vec<String>,
@@ -255,13 +255,13 @@ impl From<qos_policy::PartitionQosPolicy> for PartitionQosPolicy {
     }
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct ReliabilityQosPolicy {
     pub(crate) kind: ReliabilityQosPolicyKind,
     pub(crate) max_blocking_time: Duration,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub(crate) enum ReliabilityQosPolicyKind {
     BestEffortReliabilityQos,
@@ -298,7 +298,7 @@ impl From<qos_policy::ReliabilityQosPolicy> for ReliabilityQosPolicy {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct LivelinessQosPolicy {
     pub(crate) kind: LivelinessQosPolicyKind,
@@ -317,7 +317,7 @@ impl Default for LivelinessQosPolicy {
     }
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub(crate) enum LivelinessQosPolicyKind {
     #[default]
@@ -364,13 +364,13 @@ impl From<qos_policy::LivelinessQosPolicy> for LivelinessQosPolicy {
     }
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub(crate) struct DurabilityQosPolicy {
     pub(crate) kind: DurabilityQosPolicyKind,
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub(crate) enum DurabilityQosPolicyKind {
     #[default]
@@ -418,7 +418,7 @@ impl From<qos_policy::DurabilityQosPolicy> for DurabilityQosPolicy {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct DurabilityServiceQosPolicy {
     pub(crate) service_cleanup_delay: Duration,
@@ -494,13 +494,13 @@ impl From<qos_policy::DurabilityServiceQosPolicy> for DurabilityServiceQosPolicy
     }
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub(crate) struct DestinationOrderQosPolicy {
     pub(crate) kind: DestinationOrderQosPolicyKind,
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub(crate) enum DestinationOrderQosPolicyKind {
     #[default]
     #[serde(rename = "BY_RECEPTION_TIMESTAMP_DESTINATIONORDER_QOS")]
