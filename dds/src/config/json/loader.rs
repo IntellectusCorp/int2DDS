@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     config::types::{
         entity_qos::{
-            DataReaderQos, DataWriterQos, DomainParticipantQos, PublisherQos, SubscriberQos,
-            TopicQos,
+            DataReaderQos, DataWriterQos, DomainParticipantQos, MergeQos, PublisherQos,
+            SubscriberQos, TopicQos,
         },
         qos_profile::{QosLibrary, QosProfile, SingleOrSeq},
     },
@@ -14,26 +14,39 @@ use crate::{
 };
 
 macro_rules! impl_get_qos {
-    ($fn_name:ident, $qos_type:ty, $named_type:ty, $field:ident) => {
+    ($fn_name:ident, $qos_type:ty, $field:ident) => {
         pub(crate) fn $fn_name(
             &self,
             library_name: &str,
             profile_name: Option<&str>,
             qos_name: Option<&str>,
-        ) -> Option<&$qos_type> {
+        ) -> Option<$qos_type> {
             let qos_or_named = if let Some(profile_name) = profile_name {
                 self.get_profile(library_name, profile_name)?.$field.as_ref()?
             } else {
                 self.get_library(library_name)?.$field.as_ref()?
             };
 
-            match qos_or_named {
+            let qos = match qos_or_named {
                 SingleOrSeq::Single(qos) => qos_name.is_none().then_some(qos),
                 SingleOrSeq::Seq(seq) => {
                     let name = qos_name?;
                     seq.iter().find(|q| q.name == name).map(|q| &q.qos)
                 }
+            }?
+            .clone();
+
+            if let Some(base_name) = &qos.base_name {
+                let path = QosPath::parse_base_name(base_name, library_name, profile_name).ok()?;
+                let base = self.$fn_name(
+                    path.library.as_deref()?,
+                    path.profile.as_deref(),
+                    Some(&path.qos_name),
+                )?;
+                return Some(qos.merge(&base));
             }
+
+            Some(qos)
         }
     };
 }
@@ -79,17 +92,46 @@ impl QosLoader {
             .find(|profile| profile.name == profile_name)
     }
 
-    impl_get_qos!(get_datawriter_qos, DataWriterQos, DataWriterQosNamed, datawriter_qos);
-    impl_get_qos!(get_datareader_qos, DataReaderQos, DataReaderQosNamed, datareader_qos);
-    impl_get_qos!(get_topic_qos, TopicQos, TopicQosNamed, topic_qos);
-    impl_get_qos!(get_subscriber_qos, SubscriberQos, SubscriberQosNamed, subscriber_qos);
-    impl_get_qos!(get_publisher_qos, PublisherQos, PublisherQosNamed, publisher_qos);
-    impl_get_qos!(
-        get_domainparticipant_qos,
-        DomainParticipantQos,
-        DomainParticipantQosNamed,
-        domain_participant_qos
-    );
+    impl_get_qos!(get_datawriter_qos, DataWriterQos, datawriter_qos);
+    impl_get_qos!(get_datareader_qos, DataReaderQos, datareader_qos);
+    impl_get_qos!(get_topic_qos, TopicQos, topic_qos);
+    impl_get_qos!(get_subscriber_qos, SubscriberQos, subscriber_qos);
+    impl_get_qos!(get_publisher_qos, PublisherQos, publisher_qos);
+    impl_get_qos!(get_domainparticipant_qos, DomainParticipantQos, domain_participant_qos);
+}
+
+struct QosPath {
+    library: Option<String>,
+    profile: Option<String>,
+    qos_name: String,
+}
+
+impl QosPath {
+    fn parse_base_name(
+        base_name: &str,
+        current_library: &str,
+        current_profile: Option<&str>,
+    ) -> DdsResult<Self> {
+        let parts: Vec<&str> = base_name.split("::").collect();
+        match parts.len() {
+            1 => Ok(QosPath {
+                library: Some(current_library.to_string()),
+                profile: current_profile.map(|s| s.to_string()),
+                qos_name: parts[0].to_string(),
+            }),
+            2 => Ok(QosPath {
+                library: Some(current_library.to_string()),
+                profile: Some(parts[0].to_string()),
+                qos_name: parts[1].to_string(),
+            }),
+            3 => Ok(QosPath {
+                library: Some(parts[0].to_string()),
+                profile: Some(parts[1].to_string()),
+                qos_name: parts[2].to_string(),
+            }),
+            _ => Err(DdsError::Error("Invalid base_name format: expected 'QosName', 'Profile::QosName', or 'Library::Profile::QosName'".to_string())),
+        }
+    }
 }
 
 #[cfg(test)]
