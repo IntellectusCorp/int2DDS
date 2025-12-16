@@ -60,10 +60,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use super::{
-    domain_participant_listener::DomainParticipantListener,
-    qos::{DomainParticipantQos, PARTICIPANT_QOS_DEFAULT},
-};
+use super::{domain_participant_listener::DomainParticipantListener, qos::DomainParticipantQos};
 use crate::{
     common::{
         builtin::topic::{
@@ -419,16 +416,6 @@ impl DomainParticipant {
             //     Err(e) => return Err(e),
             // }
             Ok(false)
-        }
-    }
-
-    fn _reset_default_qos(&self) -> DdsResult<()> {
-        match self.qos.lock() {
-            Ok(mut default_qos) => {
-                *default_qos = PARTICIPANT_QOS_DEFAULT;
-                Ok(())
-            }
-            Err(e) => Err(DdsError::Error(e.to_string())),
         }
     }
 
