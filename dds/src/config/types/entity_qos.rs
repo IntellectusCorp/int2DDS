@@ -7,8 +7,8 @@ use crate::{
         PartitionQosPolicy, PresentationQosPolicy, ReliabilityQosPolicy, TopicDataQosPolicy,
         UserDataQosPolicy, DEFAULT_MAX_BLOCKING_TIME,
     },
-    infrastructure::qos_policy as internal_qos_policy,
     domain,
+    infrastructure::qos_policy as internal_qos_policy,
     infrastructure::qos_policy::{
         DeadlineQosPolicy, EntityFactoryQosPolicy, LatencyBudgetQosPolicy, LifespanQosPolicy,
         OwnershipStrengthQosPolicy, ReaderDataLifecycleQosPolicy, ResourceLimitsQosPolicy,
