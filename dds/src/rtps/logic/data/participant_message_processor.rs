@@ -47,14 +47,15 @@ use crate::{
     },
 };
 
+pub(crate) trait ParticipantAccessor {
+    fn get_upgraded_participant(&self) -> RtpsResult<Arc<Participant>>;
+}
+
 /// Trait for handling participant discovery operations.
 ///
 /// This trait provides default implementations for common participant discovery
 /// operations that can be used by both SPDP and SEDP logic components.
-pub trait ParticipantMessageProcessor {
-    /// Get the participant instance
-    fn get_upgraded_participant(&self) -> RtpsResult<Arc<Participant>>;
-
+pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
     /// Handle discovered participant data (renamed from handle_multicast_spdp_message)
     fn handle_discovered_participant_data(
         &self,
