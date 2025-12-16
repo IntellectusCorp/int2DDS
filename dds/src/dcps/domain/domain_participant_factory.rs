@@ -343,16 +343,6 @@ impl DomainParticipantFactory {
         Ok(self.default_participant_qos.lock().map_err(|e| DdsError::Error(e.to_string()))?.clone())
     }
 
-    pub fn reset_default_qos(&self) -> DdsResult<()> {
-        match self.qos.lock() {
-            Ok(mut default_qos) => {
-                *default_qos = DomainParticipantFactoryQos::default();
-                Ok(())
-            }
-            Err(e) => Err(DdsError::Error(e.to_string())),
-        }
-    }
-
     // ========== QoS Profile methods ==========
 
     /// Loads QoS profiles from one or more JSON files.
