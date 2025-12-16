@@ -28,7 +28,9 @@ use std::{
 use crate::{
     common::instance_handle::InstanceHandle,
     core::error::{DdsError, DdsResult},
-    domain::domain_participant::DomainParticipant,
+    domain::{
+        domain_participant::DomainParticipant, domain_participant_factory::DomainParticipantFactory,
+    },
     infrastructure::{
         domain_entity::DomainEntity,
         entity::{
@@ -290,6 +292,17 @@ impl Subscriber {
         }
 
         Ok(datareader)
+    }
+
+    pub fn create_datareader_with_profile<Foo: DdsType>(
+        &self,
+        topic_description: &dyn TopicDescription,
+        qos_path: &str,
+        listener: Option<Arc<dyn DataReaderListener<Foo = Foo>>>,
+        mask: StatusMask,
+    ) -> DdsResult<DataReader<Foo>> {
+        let qos = self.get_datareader_qos_from_profile(qos_path)?;
+        self.create_datareader::<Foo>(topic_description, qos, listener, mask)
     }
 
     pub fn delete_datareader<Foo: 'static + Clone + Debug>(
@@ -822,6 +835,11 @@ impl Subscriber {
             Ok(default_datareader_qos) => Ok(default_datareader_qos.clone()),
             Err(e) => Err(DdsError::Error(e.to_string())),
         }
+    }
+
+    pub fn get_datareader_qos_from_profile(&self, qos_path: &str) -> DdsResult<DataReaderQos> {
+        self.is_deleted()?;
+        DomainParticipantFactory::get_instance().get_datareader_qos_from_profile(qos_path)
     }
 
     pub fn copy_from_topic_qos(
