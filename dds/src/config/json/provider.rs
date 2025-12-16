@@ -157,7 +157,6 @@ pub struct QosProvider {
     libraries: HashMap<String, QosLibrary>,
 }
 
-#[allow(dead_code)]
 impl QosProvider {
     /// Creates a new empty `QosProvider`.
     ///
@@ -179,12 +178,6 @@ impl QosProvider {
     pub fn from_file(path: &Path) -> DdsResult<Self> {
         let mut provider = Self::new();
         provider.load_file(path)?;
-        Ok(provider)
-    }
-
-    pub(crate) fn from_json(json: &str) -> DdsResult<Self> {
-        let mut provider = Self::new();
-        provider.load_json(json)?;
         Ok(provider)
     }
 
@@ -392,6 +385,14 @@ impl QosPath {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl QosProvider {
+        fn from_json(json: &str) -> DdsResult<Self> {
+            let mut provider = Self::new();
+            provider.load_json(json)?;
+            Ok(provider)
+        }
+    }
 
     #[test]
     fn test_parse_library_with_single_datawriter_qos() {
