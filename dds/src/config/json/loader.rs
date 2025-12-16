@@ -51,29 +51,53 @@ macro_rules! impl_get_qos {
     };
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize)]
 pub(crate) struct QosLoader {
     libraries: HashMap<String, QosLibrary>,
 }
 
 #[allow(dead_code)]
 impl QosLoader {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
     pub(crate) fn from_file(path: &Path) -> DdsResult<Self> {
-        let content = fs::read_to_string(path)
-            .map_err(|e| DdsError::Error(format!("Failed to read QoS file: {:?}", e)))?;
-        Self::from_json(&content)
+        let mut loader = Self::new();
+        loader.load_file(path)?;
+        Ok(loader)
     }
 
     pub(crate) fn from_json(json: &str) -> DdsResult<Self> {
-        serde_json::from_str(json)
-            .or_else(|_| {
-                serde_json::from_str::<QosLibrary>(json).map(|lib| {
-                    let mut libraries = HashMap::new();
-                    libraries.insert(lib.name.clone(), lib);
-                    Self { libraries }
-                })
-            })
-            .map_err(|e| DdsError::Error(format!("Failed to parse QoS JSON: {:?}", e)))
+        let mut loader = Self::new();
+        loader.load_json(json)?;
+        Ok(loader)
+    }
+
+    pub(crate) fn load_file(&mut self, path: &Path) -> DdsResult<()> {
+        let content = fs::read_to_string(path)
+            .map_err(|e| DdsError::Error(format!("Failed to read QoS file: {:?}", e)))?;
+        self.load_json(&content)
+    }
+
+    pub(crate) fn load_json(&mut self, json: &str) -> DdsResult<()> {
+        // Try parsing as { "libraries": { ... } } format first
+        if let Ok(parsed) = serde_json::from_str::<QosLoader>(json) {
+            for (name, lib) in parsed.libraries {
+                self.libraries.insert(name, lib);
+            }
+            return Ok(());
+        }
+
+        // Try parsing as single QosLibrary
+        if let Ok(lib) = serde_json::from_str::<QosLibrary>(json) {
+            self.libraries.insert(lib.name.clone(), lib);
+            return Ok(());
+        }
+
+        Err(DdsError::Error(
+            "Failed to parse QoS JSON: expected QosLibrary or { libraries: {...} }".to_string(),
+        ))
     }
 
     pub(crate) fn get_library(&self, library_name: &str) -> Option<&QosLibrary> {
@@ -908,5 +932,138 @@ mod tests {
         assert_eq!(path.library.as_deref(), Some("MyLib"));
         assert_eq!(path.profile, None);
         assert_eq!(path.qos_name, "BaseQos");
+    }
+
+    // ========== multi-file loading tests ==========
+
+    #[test]
+    fn test_load_multiple_files() {
+        let mut loader = QosLoader::new();
+
+        // Load first file with BaseLibrary
+        let json1 = r#"{
+            "name": "BaseLibrary",
+            "qos_profiles": [
+                {
+                    "name": "BaseProfile",
+                    "datawriter_qos": [
+                        {
+                            "name": "BaseQos",
+                            "reliability": {
+                                "kind": "RELIABLE_RELIABILITY_QOS",
+                                "max_blocking_time": { "sec": 1, "nanosec": 0 }
+                            }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+        loader.load_json(json1).unwrap();
+
+        // Load second file with AppLibrary that references BaseLibrary
+        let json2 = r#"{
+            "name": "AppLibrary",
+            "qos_profiles": [
+                {
+                    "name": "AppProfile",
+                    "datawriter_qos": [
+                        {
+                            "name": "AppQos",
+                            "base_name": "BaseLibrary::BaseProfile::BaseQos",
+                            "durability": {
+                                "kind": "TRANSIENT_LOCAL_DURABILITY_QOS"
+                            }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+        loader.load_json(json2).unwrap();
+
+        // Both libraries should be accessible
+        assert!(loader.get_library("BaseLibrary").is_some());
+        assert!(loader.get_library("AppLibrary").is_some());
+
+        // Cross-library inheritance should work
+        let app_qos = loader
+            .get_datawriter_qos("AppLibrary", Some("AppProfile"), Some("AppQos"))
+            .unwrap();
+
+        assert!(app_qos.durability.is_some());
+        assert!(app_qos.reliability.is_some());
+    }
+
+    #[test]
+    fn test_load_multiple_libraries_in_one_json() {
+        let json = r#"{
+            "libraries": {
+                "Lib1": {
+                    "name": "Lib1",
+                    "datawriter_qos": {
+                        "reliability": {
+                            "kind": "RELIABLE_RELIABILITY_QOS",
+                            "max_blocking_time": { "sec": 1, "nanosec": 0 }
+                        }
+                    }
+                },
+                "Lib2": {
+                    "name": "Lib2",
+                    "datawriter_qos": {
+                        "durability": {
+                            "kind": "TRANSIENT_LOCAL_DURABILITY_QOS"
+                        }
+                    }
+                }
+            }
+        }"#;
+
+        let loader = QosLoader::from_json(json).unwrap();
+
+        assert!(loader.get_library("Lib1").is_some());
+        assert!(loader.get_library("Lib2").is_some());
+
+        let qos1 = loader.get_datawriter_qos("Lib1", None, None).unwrap();
+        assert!(qos1.reliability.is_some());
+
+        let qos2 = loader.get_datawriter_qos("Lib2", None, None).unwrap();
+        assert!(qos2.durability.is_some());
+    }
+
+    #[test]
+    fn test_load_overwrites_existing_library() {
+        let mut loader = QosLoader::new();
+
+        let json1 = r#"{
+            "name": "MyLibrary",
+            "datawriter_qos": {
+                "reliability": {
+                    "kind": "BEST_EFFORT_RELIABILITY_QOS",
+                    "max_blocking_time": { "sec": 0, "nanosec": 0 }
+                }
+            }
+        }"#;
+        loader.load_json(json1).unwrap();
+
+        let json2 = r#"{
+            "name": "MyLibrary",
+            "datawriter_qos": {
+                "durability": {
+                    "kind": "TRANSIENT_LOCAL_DURABILITY_QOS"
+                }
+            }
+        }"#;
+        loader.load_json(json2).unwrap();
+
+        // Second load overwrites first
+        let qos = loader.get_datawriter_qos("MyLibrary", None, None).unwrap();
+        assert!(qos.durability.is_some());
+        assert!(qos.reliability.is_none());
+    }
+
+    #[test]
+    fn test_empty_loader() {
+        let loader = QosLoader::new();
+        assert!(loader.get_library("Any").is_none());
+        assert!(loader.get_datawriter_qos("Any", None, None).is_none());
     }
 }
