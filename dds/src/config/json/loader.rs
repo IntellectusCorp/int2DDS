@@ -985,9 +985,8 @@ mod tests {
         assert!(loader.get_library("AppLibrary").is_some());
 
         // Cross-library inheritance should work
-        let app_qos = loader
-            .get_datawriter_qos("AppLibrary", Some("AppProfile"), Some("AppQos"))
-            .unwrap();
+        let app_qos =
+            loader.get_datawriter_qos("AppLibrary", Some("AppProfile"), Some("AppQos")).unwrap();
 
         assert!(app_qos.durability.is_some());
         assert!(app_qos.reliability.is_some());
