@@ -24,7 +24,7 @@ pub fn init_from_env() {
     // - INT2DDS_THREAD_MONITORING_LOG_PATH: Set thread monitoring log file path - Default: ./thread_monitoring.log
     // - INT2DDS_FUNCTION_TIMING: Enable function execution time measurement (true, false) - Default: false
     // - INT2DDS_FUNCTION_TIMING_LOG_PATH: Set function timing log file path - Default: ./function_timing.log
-    // - INT2DDS_BROADCAST_ENABLED: Enable broadcast (true, false) - Default: false
+    // - INT2DDS_EXTENDED_DISCOVERY: Enable extended discovery (true, false) - Default: false
 
     // - INT2DDS_NETWORK_INTERFACE: Set network interface name to use (e.g., eth0, wlan0) - Default: automatic selection
     // - INT2DDS_NETWORK_IP: Set network IP address directly (e.g., 192.168.1.100) - Default: automatic selection
@@ -113,9 +113,9 @@ fn apply_cli_args_to_env() {
                     .value_hint(ValueHint::FilePath),
             )
             .arg(
-                Arg::new("int2dds_broadcast_enabled")
-                    .long("int2dds-broadcast-enabled")
-                    .help("Enable UDP broadcast")
+                Arg::new("int2dds_extended_discovery")
+                    .long("int2dds-extended-discovery")
+                    .help("Enable extended discovery")
                     .action(ArgAction::SetTrue),
             )
             .arg(
@@ -188,55 +188,55 @@ fn apply_cli_args_to_env() {
 
     if let Some(v) = matches.get_one::<String>("int2dds_transport") {
         log::info!("Environment variable set: INT2DDS_TRANSPORT = {}", v);
-        std::env::set_var("INT2DDS_TRANSPORT", v);
+        unsafe { std::env::set_var("INT2DDS_TRANSPORT", v) };
     }
     if let Some(v) = matches.get_one::<String>("int2dds_discovery_mode") {
         log::info!("Environment variable set: INT2DDS_DISCOVERY_MODE = {}", v);
-        std::env::set_var("INT2DDS_DISCOVERY_MODE", v);
+        unsafe { std::env::set_var("INT2DDS_DISCOVERY_MODE", v) };
     }
     if let Some(v) = matches.get_one::<String>("int2dds_log_type") {
         log::info!("Environment variable set: INT2DDS_LOG_TYPE = {}", v);
-        std::env::set_var("INT2DDS_LOG_TYPE", v);
+        unsafe { std::env::set_var("INT2DDS_LOG_TYPE", v) };
     }
     if let Some(v) = matches.get_one::<String>("int2dds_console_log_level") {
         log::info!("Environment variable set: INT2DDS_CONSOLE_LOG_LEVEL = {}", v);
-        std::env::set_var("INT2DDS_CONSOLE_LOG_LEVEL", v);
+        unsafe { std::env::set_var("INT2DDS_CONSOLE_LOG_LEVEL", v) };
     }
     if let Some(v) = matches.get_one::<String>("int2dds_file_log_level") {
         log::info!("Environment variable set: INT2DDS_FILE_LOG_LEVEL = {}", v);
-        std::env::set_var("INT2DDS_FILE_LOG_LEVEL", v);
+        unsafe { std::env::set_var("INT2DDS_FILE_LOG_LEVEL", v) };
     }
     if matches.get_flag("int2dds_thread_monitoring") {
         log::info!("Environment variable set: INT2DDS_THREAD_MONITORING = true");
-        std::env::set_var("INT2DDS_THREAD_MONITORING", "true");
+        unsafe { std::env::set_var("INT2DDS_THREAD_MONITORING", "true") };
     }
     if let Some(v) = matches.get_one::<String>("int2dds_thread_monitoring_log_path") {
         log::info!("Environment variable set: INT2DDS_THREAD_MONITORING_LOG_PATH = {}", v);
-        std::env::set_var("INT2DDS_THREAD_MONITORING_LOG_PATH", v);
+        unsafe { std::env::set_var("INT2DDS_THREAD_MONITORING_LOG_PATH", v) };
     }
     if matches.get_flag("int2dds_function_timing") {
         log::info!("Environment variable set: INT2DDS_FUNCTION_TIMING = true");
-        std::env::set_var("INT2DDS_FUNCTION_TIMING", "true");
+        unsafe { std::env::set_var("INT2DDS_FUNCTION_TIMING", "true") };
     }
     if let Some(v) = matches.get_one::<String>("int2dds_function_timing_log_path") {
         log::info!("Environment variable set: INT2DDS_FUNCTION_TIMING_LOG_PATH = {}", v);
-        std::env::set_var("INT2DDS_FUNCTION_TIMING_LOG_PATH", v);
+        unsafe { std::env::set_var("INT2DDS_FUNCTION_TIMING_LOG_PATH", v) };
     }
-    if matches.get_flag("int2dds_broadcast_enabled") {
-        log::info!("Environment variable set: INT2DDS_BROADCAST_ENABLED = true");
-        std::env::set_var("INT2DDS_BROADCAST_ENABLED", "true");
+    if matches.get_flag("int2dds_extended_discovery") {
+        log::info!("Environment variable set: INT2DDS_EXTENDED_DISCOVERY = true");
+        unsafe { std::env::set_var("INT2DDS_EXTENDED_DISCOVERY", "true") };
     }
     if let Some(v) = matches.get_one::<String>("int2dds_network_interface") {
         log::info!("Environment variable set: INT2DDS_NETWORK_INTERFACE = {}", v);
-        std::env::set_var("INT2DDS_NETWORK_INTERFACE", v);
+        unsafe { std::env::set_var("INT2DDS_NETWORK_INTERFACE", v) };
     }
     if let Some(v) = matches.get_one::<String>("int2dds_network_ip") {
         log::info!("Environment variable set: INT2DDS_NETWORK_IP = {}", v);
-        std::env::set_var("INT2DDS_NETWORK_IP", v);
+        unsafe { std::env::set_var("INT2DDS_NETWORK_IP", v) };
     }
     if let Some(v) = matches.get_one::<String>("int2dds_udp_socket_buffer") {
         log::info!("Environment variable set: INT2DDS_UDP_SOCKET_BUFFER = {}", v);
-        std::env::set_var("INT2DDS_UDP_SOCKET_BUFFER", v);
+        unsafe { std::env::set_var("INT2DDS_UDP_SOCKET_BUFFER", v) };
     }
     if let Some(v) = matches.get_one::<String>("int2dds_shm_buffer_size") {
         log::info!("Environment variable set: INT2DDS_SHM_BUFFER_SIZE = {}", v);
@@ -244,92 +244,92 @@ fn apply_cli_args_to_env() {
     }
     if let Some(v) = matches.get_one::<String>("int2dds_tcp_connect_timeout") {
         log::info!("Environment variable set: INT2DDS_TCP_CONNECT_TIMEOUT = {}", v);
-        std::env::set_var("INT2DDS_TCP_CONNECT_TIMEOUT", v);
+        unsafe { std::env::set_var("INT2DDS_TCP_CONNECT_TIMEOUT", v) };
     }
     if let Some(v) = matches.get_one::<String>("int2dds_tcp_write_timeout") {
         log::info!("Environment variable set: INT2DDS_TCP_WRITE_TIMEOUT = {}", v);
-        std::env::set_var("INT2DDS_TCP_WRITE_TIMEOUT", v);
+        unsafe { std::env::set_var("INT2DDS_TCP_WRITE_TIMEOUT", v) };
     }
     if matches.get_flag("int2dds_tcp_nodelay") {
         log::info!("Environment variable set: INT2DDS_TCP_NODELAY = true");
-        std::env::set_var("INT2DDS_TCP_NODELAY", "true");
+        unsafe { std::env::set_var("INT2DDS_TCP_NODELAY", "true") };
     }
     if let Some(v) = matches.get_one::<String>("int2dds_initial_peers") {
         log::info!("Environment variable set: INT2DDS_INITIAL_PEERS = {}", v);
-        std::env::set_var("INT2DDS_INITIAL_PEERS", v);
+        unsafe { std::env::set_var("INT2DDS_INITIAL_PEERS", v) };
     }
 }
 
 /// Set the transport type via environment variable
 pub fn set_transport_type(transport_type: TransportType) {
     log::info!("Environment variable set: INT2DDS_TRANSPORT = {}", transport_type);
-    std::env::set_var("INT2DDS_TRANSPORT", transport_type.to_string());
+    unsafe { std::env::set_var("INT2DDS_TRANSPORT", transport_type.to_string()) };
 }
 
 /// Set the log type via environment variable
 pub fn set_log_type(log_type: LogType) {
     log::info!("Environment variable set: INT2DDS_LOG_TYPE = {}", log_type);
-    std::env::set_var("INT2DDS_LOG_TYPE", log_type.to_string());
+    unsafe { std::env::set_var("INT2DDS_LOG_TYPE", log_type.to_string()) };
 }
 
 /// Set the console log level via environment variable
 pub fn set_console_log_level(log_level: LogLevel) {
     log::info!("Environment variable set: INT2DDS_CONSOLE_LOG_LEVEL = {}", log_level);
-    std::env::set_var("INT2DDS_CONSOLE_LOG_LEVEL", log_level.to_string());
+    unsafe { std::env::set_var("INT2DDS_CONSOLE_LOG_LEVEL", log_level.to_string()) };
 }
 
 /// Set the file log level via environment variable
 pub fn set_file_log_level(log_level: LogLevel) {
     log::info!("Environment variable set: INT2DDS_FILE_LOG_LEVEL = {}", log_level);
-    std::env::set_var("INT2DDS_FILE_LOG_LEVEL", log_level.to_string());
+    unsafe { std::env::set_var("INT2DDS_FILE_LOG_LEVEL", log_level.to_string()) };
 }
 
 /// Set the thread monitoring via environment variable
 pub fn set_thread_monitoring(enabled: bool) {
     log::info!("Environment variable set: INT2DDS_THREAD_MONITORING = {}", enabled);
-    std::env::set_var("INT2DDS_THREAD_MONITORING", enabled.to_string());
+    unsafe { std::env::set_var("INT2DDS_THREAD_MONITORING", enabled.to_string()) };
 }
 
 /// Set the thread monitoring log path via environment variable
 pub fn set_thread_monitoring_log_path(path: &str) {
     log::info!("Environment variable set: INT2DDS_THREAD_MONITORING_LOG_PATH = {}", path);
-    std::env::set_var("INT2DDS_THREAD_MONITORING_LOG_PATH", path);
+    unsafe { std::env::set_var("INT2DDS_THREAD_MONITORING_LOG_PATH", path) };
 }
 
 /// Set the function timing via environment variable
 pub fn set_function_timing(enabled: bool) {
     log::info!("Environment variable set: INT2DDS_FUNCTION_TIMING = {}", enabled);
-    std::env::set_var("INT2DDS_FUNCTION_TIMING", enabled.to_string());
+    unsafe { std::env::set_var("INT2DDS_FUNCTION_TIMING", enabled.to_string()) };
 }
 
 /// Set the function timing log path via environment variable
 pub fn set_function_timing_log_path(path: &str) {
     log::info!("Environment variable set: INT2DDS_FUNCTION_TIMING_LOG_PATH = {}", path);
-    std::env::set_var("INT2DDS_FUNCTION_TIMING_LOG_PATH", path);
+    unsafe { std::env::set_var("INT2DDS_FUNCTION_TIMING_LOG_PATH", path) };
 }
 
-/// Set the broadcast enabled via environment variable
-pub fn set_broadcast_enabled(enabled: bool) {
-    log::info!("Environment variable set: INT2DDS_BROADCAST_ENABLED = {}", enabled);
-    std::env::set_var("INT2DDS_BROADCAST_ENABLED", enabled.to_string());
+/// Set the extended discovery via environment variable
+pub fn set_extended_discovery(enabled: bool) {
+    log::info!("Environment variable set: INT2DDS_EXTENDED_DISCOVERY = {}", enabled);
+    unsafe { std::env::set_var("INT2DDS_EXTENDED_DISCOVERY", enabled.to_string()) };
 }
 
 /// Set the network interface via environment variable
 pub fn set_network_interface(interface: &str) {
     log::info!("Environment variable set: INT2DDS_NETWORK_INTERFACE = {}", interface);
-    std::env::set_var("INT2DDS_NETWORK_INTERFACE", interface);
+    unsafe { std::env::set_var("INT2DDS_NETWORK_INTERFACE", interface) };
 }
 
 /// Set the network IP via environment variable
 pub fn set_network_ip(ip: &str) {
     log::info!("Environment variable set: INT2DDS_NETWORK_IP = {}", ip);
-    std::env::set_var("INT2DDS_NETWORK_IP", ip);
+    unsafe { std::env::set_var("INT2DDS_NETWORK_IP", ip) };
 }
 
 /// Set the UDP socket buffer size via environment variable
 pub fn set_udp_socket_buffer_size(size: usize) {
     log::info!("Environment variable set: INT2DDS_UDP_SOCKET_BUFFER = {}", size);
-    std::env::set_var("INT2DDS_UDP_SOCKET_BUFFER", size.to_string());
+    unsafe { std::env::set_var("INT2DDS_UDP_SOCKET_BUFFER", size.to_string()) };
 }
 
 /// Set the shared memory buffer size via environment variable
@@ -341,19 +341,19 @@ pub fn set_shm_buffer_size(size: usize) {
 /// Set the TCP connect timeout via environment variable
 pub fn set_tcp_connect_timeout(timeout_ms: u64) {
     log::info!("Environment variable set: INT2DDS_TCP_CONNECT_TIMEOUT = {}", timeout_ms);
-    std::env::set_var("INT2DDS_TCP_CONNECT_TIMEOUT", timeout_ms.to_string());
+    unsafe { std::env::set_var("INT2DDS_TCP_CONNECT_TIMEOUT", timeout_ms.to_string()) };
 }
 
 /// Set the TCP write timeout via environment variable
 pub fn set_tcp_write_timeout(timeout_ms: u64) {
     log::info!("Environment variable set: INT2DDS_TCP_WRITE_TIMEOUT = {}", timeout_ms);
-    std::env::set_var("INT2DDS_TCP_WRITE_TIMEOUT", timeout_ms.to_string());
+    unsafe { std::env::set_var("INT2DDS_TCP_WRITE_TIMEOUT", timeout_ms.to_string()) };
 }
 
 /// Set the TCP nodelay via environment variable
 pub fn set_tcp_nodelay(enabled: bool) {
     log::info!("Environment variable set: INT2DDS_TCP_NODELAY = {}", enabled);
-    std::env::set_var("INT2DDS_TCP_NODELAY", enabled.to_string());
+    unsafe { std::env::set_var("INT2DDS_TCP_NODELAY", enabled.to_string()) };
 }
 
 /// Discovery mode for DDS participant discovery protocol
@@ -426,7 +426,7 @@ pub fn get_discovery_mode() -> DiscoveryMode {
 /// Set the discovery mode via environment variable
 pub fn set_discovery_mode(mode: DiscoveryMode) {
     log::info!("Environment variable set: INT2DDS_DISCOVERY_MODE = {}", mode.to_string());
-    std::env::set_var("INT2DDS_DISCOVERY_MODE", mode.to_string());
+    unsafe { std::env::set_var("INT2DDS_DISCOVERY_MODE", mode.to_string()) };
 }
 
 /// Get initial peers from environment variable for TCP-only discovery
@@ -477,5 +477,5 @@ pub fn set_initial_peers(peers: &[std::net::SocketAddr]) {
     let peers_str = peers.iter().map(|addr| addr.to_string()).collect::<Vec<_>>().join(",");
 
     log::info!("Environment variable set: INT2DDS_INITIAL_PEERS = {}", peers_str);
-    std::env::set_var("INT2DDS_INITIAL_PEERS", peers_str);
+    unsafe { std::env::set_var("INT2DDS_INITIAL_PEERS", peers_str) };
 }
