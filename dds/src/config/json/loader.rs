@@ -312,4 +312,601 @@ mod tests {
         let result = QosLoader::from_json(json);
         assert!(result.is_err());
     }
+
+    // ========== base_name inheritance tests ==========
+
+    #[test]
+    fn test_base_name_simple_inheritance() {
+        let json = r#"{
+            "name": "TestLibrary",
+            "qos_profiles": [
+                {
+                    "name": "Profile1",
+                    "datawriter_qos": [
+                        {
+                            "name": "BaseQos",
+                            "reliability": {
+                                "kind": "RELIABLE_RELIABILITY_QOS",
+                                "max_blocking_time": { "sec": 5, "nanosec": 0 }
+                            },
+                            "durability": {
+                                "kind": "TRANSIENT_LOCAL_DURABILITY_QOS"
+                            }
+                        },
+                        {
+                            "name": "DerivedQos",
+                            "base_name": "BaseQos",
+                            "history": {
+                                "kind": "KEEP_LAST_HISTORY_QOS",
+                                "depth": 100
+                            }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+
+        let loader = QosLoader::from_json(json).unwrap();
+
+        let derived =
+            loader.get_datawriter_qos("TestLibrary", Some("Profile1"), Some("DerivedQos")).unwrap();
+
+        // derived should have its own history
+        assert!(derived.history.is_some());
+
+        // derived should inherit reliability and durability from base
+        assert!(derived.reliability.is_some());
+        assert!(derived.durability.is_some());
+    }
+
+    #[test]
+    fn test_base_name_override() {
+        let json = r#"{
+            "name": "TestLibrary",
+            "qos_profiles": [
+                {
+                    "name": "Profile1",
+                    "datawriter_qos": [
+                        {
+                            "name": "BaseQos",
+                            "reliability": {
+                                "kind": "BEST_EFFORT_RELIABILITY_QOS",
+                                "max_blocking_time": { "sec": 0, "nanosec": 0 }
+                            },
+                            "history": {
+                                "kind": "KEEP_LAST_HISTORY_QOS",
+                                "depth": 1
+                            }
+                        },
+                        {
+                            "name": "DerivedQos",
+                            "base_name": "BaseQos",
+                            "reliability": {
+                                "kind": "RELIABLE_RELIABILITY_QOS",
+                                "max_blocking_time": { "sec": 10, "nanosec": 0 }
+                            }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+
+        let loader = QosLoader::from_json(json).unwrap();
+
+        let derived =
+            loader.get_datawriter_qos("TestLibrary", Some("Profile1"), Some("DerivedQos")).unwrap();
+
+        // derived should override reliability
+        assert!(derived.reliability.is_some());
+
+        // derived should inherit history from base
+        assert!(derived.history.is_some());
+    }
+
+    #[test]
+    fn test_base_name_chain_inheritance() {
+        let json = r#"{
+            "name": "TestLibrary",
+            "qos_profiles": [
+                {
+                    "name": "Profile1",
+                    "datawriter_qos": [
+                        {
+                            "name": "GrandparentQos",
+                            "reliability": {
+                                "kind": "RELIABLE_RELIABILITY_QOS",
+                                "max_blocking_time": { "sec": 1, "nanosec": 0 }
+                            }
+                        },
+                        {
+                            "name": "ParentQos",
+                            "base_name": "GrandparentQos",
+                            "durability": {
+                                "kind": "TRANSIENT_LOCAL_DURABILITY_QOS"
+                            }
+                        },
+                        {
+                            "name": "ChildQos",
+                            "base_name": "ParentQos",
+                            "history": {
+                                "kind": "KEEP_ALL_HISTORY_QOS"
+                            }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+
+        let loader = QosLoader::from_json(json).unwrap();
+
+        let child =
+            loader.get_datawriter_qos("TestLibrary", Some("Profile1"), Some("ChildQos")).unwrap();
+
+        // child should have its own history
+        assert!(child.history.is_some());
+
+        // child should inherit durability from parent
+        assert!(child.durability.is_some());
+
+        // child should inherit reliability from grandparent
+        assert!(child.reliability.is_some());
+    }
+
+    #[test]
+    fn test_base_name_cross_profile() {
+        let json = r#"{
+            "name": "TestLibrary",
+            "qos_profiles": [
+                {
+                    "name": "BaseProfile",
+                    "datawriter_qos": [
+                        {
+                            "name": "SharedBase",
+                            "reliability": {
+                                "kind": "RELIABLE_RELIABILITY_QOS",
+                                "max_blocking_time": { "sec": 3, "nanosec": 0 }
+                            },
+                            "durability": {
+                                "kind": "VOLATILE_DURABILITY_QOS"
+                            }
+                        }
+                    ]
+                },
+                {
+                    "name": "DerivedProfile",
+                    "datawriter_qos": [
+                        {
+                            "name": "DerivedQos",
+                            "base_name": "BaseProfile::SharedBase",
+                            "history": {
+                                "kind": "KEEP_LAST_HISTORY_QOS",
+                                "depth": 50
+                            }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+
+        let loader = QosLoader::from_json(json).unwrap();
+
+        let derived = loader
+            .get_datawriter_qos("TestLibrary", Some("DerivedProfile"), Some("DerivedQos"))
+            .unwrap();
+
+        // derived should have its own history
+        assert!(derived.history.is_some());
+
+        // derived should inherit from BaseProfile::SharedBase
+        assert!(derived.reliability.is_some());
+        assert!(derived.durability.is_some());
+    }
+
+    #[test]
+    fn test_base_name_cross_library() {
+        let json = r#"{
+            "libraries": {
+                "BaseLibrary": {
+                    "name": "BaseLibrary",
+                    "qos_profiles": [
+                        {
+                            "name": "CommonProfile",
+                            "datawriter_qos": [
+                                {
+                                    "name": "CommonBase",
+                                    "reliability": {
+                                        "kind": "RELIABLE_RELIABILITY_QOS",
+                                        "max_blocking_time": { "sec": 2, "nanosec": 0 }
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+                },
+                "AppLibrary": {
+                    "name": "AppLibrary",
+                    "qos_profiles": [
+                        {
+                            "name": "AppProfile",
+                            "datawriter_qos": [
+                                {
+                                    "name": "AppQos",
+                                    "base_name": "BaseLibrary::CommonProfile::CommonBase",
+                                    "durability": {
+                                        "kind": "TRANSIENT_LOCAL_DURABILITY_QOS"
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        }"#;
+
+        let loader = QosLoader::from_json(json).unwrap();
+
+        let app_qos =
+            loader.get_datawriter_qos("AppLibrary", Some("AppProfile"), Some("AppQos")).unwrap();
+
+        // app_qos should have its own durability
+        assert!(app_qos.durability.is_some());
+
+        // app_qos should inherit reliability from BaseLibrary::CommonProfile::CommonBase
+        assert!(app_qos.reliability.is_some());
+    }
+
+    #[test]
+    fn test_base_name_not_found() {
+        let json = r#"{
+            "name": "TestLibrary",
+            "qos_profiles": [
+                {
+                    "name": "Profile1",
+                    "datawriter_qos": [
+                        {
+                            "name": "DerivedQos",
+                            "base_name": "NonExistentBase",
+                            "history": {
+                                "kind": "KEEP_ALL_HISTORY_QOS"
+                            }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+
+        let loader = QosLoader::from_json(json).unwrap();
+
+        // Should return None because base_name doesn't exist
+        let result = loader.get_datawriter_qos("TestLibrary", Some("Profile1"), Some("DerivedQos"));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_base_name_datareader_inheritance() {
+        let json = r#"{
+            "name": "TestLibrary",
+            "qos_profiles": [
+                {
+                    "name": "Profile1",
+                    "datareader_qos": [
+                        {
+                            "name": "BaseReader",
+                            "reliability": {
+                                "kind": "RELIABLE_RELIABILITY_QOS",
+                                "max_blocking_time": { "sec": 1, "nanosec": 0 }
+                            }
+                        },
+                        {
+                            "name": "DerivedReader",
+                            "base_name": "BaseReader",
+                            "history": {
+                                "kind": "KEEP_LAST_HISTORY_QOS",
+                                "depth": 20
+                            }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+
+        let loader = QosLoader::from_json(json).unwrap();
+
+        let derived = loader
+            .get_datareader_qos("TestLibrary", Some("Profile1"), Some("DerivedReader"))
+            .unwrap();
+
+        assert!(derived.history.is_some());
+        assert!(derived.reliability.is_some());
+    }
+
+    #[test]
+    fn test_base_name_topic_inheritance() {
+        let json = r#"{
+            "name": "TestLibrary",
+            "qos_profiles": [
+                {
+                    "name": "Profile1",
+                    "topic_qos": [
+                        {
+                            "name": "BaseTopic",
+                            "durability": {
+                                "kind": "TRANSIENT_LOCAL_DURABILITY_QOS"
+                            }
+                        },
+                        {
+                            "name": "DerivedTopic",
+                            "base_name": "BaseTopic",
+                            "reliability": {
+                                "kind": "RELIABLE_RELIABILITY_QOS",
+                                "max_blocking_time": { "sec": 2, "nanosec": 0 }
+                            }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+
+        let loader = QosLoader::from_json(json).unwrap();
+
+        let derived =
+            loader.get_topic_qos("TestLibrary", Some("Profile1"), Some("DerivedTopic")).unwrap();
+
+        assert!(derived.reliability.is_some());
+        assert!(derived.durability.is_some());
+    }
+
+    #[test]
+    fn test_base_name_publisher_inheritance() {
+        let json = r#"{
+            "name": "TestLibrary",
+            "qos_profiles": [
+                {
+                    "name": "Profile1",
+                    "publisher_qos": [
+                        {
+                            "name": "BasePublisher",
+                            "partition": {
+                                "name": { "element": ["partition1", "partition2"] }
+                            }
+                        },
+                        {
+                            "name": "DerivedPublisher",
+                            "base_name": "BasePublisher",
+                            "group_data": { "value": "test" }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+
+        let loader = QosLoader::from_json(json).unwrap();
+
+        let derived = loader
+            .get_publisher_qos("TestLibrary", Some("Profile1"), Some("DerivedPublisher"))
+            .unwrap();
+
+        assert!(derived.group_data.is_some());
+        assert!(derived.partition.is_some());
+    }
+
+    #[test]
+    fn test_base_name_subscriber_inheritance() {
+        let json = r#"{
+            "name": "TestLibrary",
+            "qos_profiles": [
+                {
+                    "name": "Profile1",
+                    "subscriber_qos": [
+                        {
+                            "name": "BaseSubscriber",
+                            "partition": {
+                                "name": { "element": ["sub_partition"] }
+                            }
+                        },
+                        {
+                            "name": "DerivedSubscriber",
+                            "base_name": "BaseSubscriber",
+                            "group_data": { "value": "subscriber_data" }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+
+        let loader = QosLoader::from_json(json).unwrap();
+
+        let derived = loader
+            .get_subscriber_qos("TestLibrary", Some("Profile1"), Some("DerivedSubscriber"))
+            .unwrap();
+
+        assert!(derived.group_data.is_some());
+        assert!(derived.partition.is_some());
+    }
+
+    #[test]
+    fn test_base_name_domain_participant_inheritance() {
+        let json = r#"{
+            "name": "TestLibrary",
+            "qos_profiles": [
+                {
+                    "name": "Profile1",
+                    "domain_participant_qos": [
+                        {
+                            "name": "BaseParticipant",
+                            "user_data": { "value": "base_user_data" }
+                        },
+                        {
+                            "name": "DerivedParticipant",
+                            "base_name": "BaseParticipant",
+                            "entity_factory": { "autoenable_created_entities": false }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+
+        let loader = QosLoader::from_json(json).unwrap();
+
+        let derived = loader
+            .get_domainparticipant_qos("TestLibrary", Some("Profile1"), Some("DerivedParticipant"))
+            .unwrap();
+
+        assert!(derived.entity_factory.is_some());
+        assert!(derived.user_data.is_some());
+    }
+
+    #[test]
+    fn test_base_name_library_level_qos() {
+        let json = r#"{
+            "name": "TestLibrary",
+            "datawriter_qos": [
+                {
+                    "name": "LibraryBase",
+                    "reliability": {
+                        "kind": "RELIABLE_RELIABILITY_QOS",
+                        "max_blocking_time": { "sec": 1, "nanosec": 0 }
+                    }
+                },
+                {
+                    "name": "LibraryDerived",
+                    "base_name": "LibraryBase",
+                    "durability": {
+                        "kind": "TRANSIENT_LOCAL_DURABILITY_QOS"
+                    }
+                }
+            ]
+        }"#;
+
+        let loader = QosLoader::from_json(json).unwrap();
+
+        let derived =
+            loader.get_datawriter_qos("TestLibrary", None, Some("LibraryDerived")).unwrap();
+
+        assert!(derived.durability.is_some());
+        assert!(derived.reliability.is_some());
+    }
+
+    #[test]
+    fn test_no_base_name() {
+        let json = r#"{
+            "name": "TestLibrary",
+            "qos_profiles": [
+                {
+                    "name": "Profile1",
+                    "datawriter_qos": {
+                        "reliability": {
+                            "kind": "RELIABLE_RELIABILITY_QOS",
+                            "max_blocking_time": { "sec": 1, "nanosec": 0 }
+                        }
+                    }
+                }
+            ]
+        }"#;
+
+        let loader = QosLoader::from_json(json).unwrap();
+
+        let qos = loader.get_datawriter_qos("TestLibrary", Some("Profile1"), None).unwrap();
+
+        // base_name 없이도 정상 동작
+        assert!(qos.reliability.is_some());
+        assert!(qos.base_name.is_none());
+    }
+
+    #[test]
+    fn test_base_name_multiple_policies_merge() {
+        let json = r#"{
+            "name": "TestLibrary",
+            "qos_profiles": [
+                {
+                    "name": "Profile1",
+                    "datawriter_qos": [
+                        {
+                            "name": "FullBase",
+                            "reliability": {
+                                "kind": "RELIABLE_RELIABILITY_QOS",
+                                "max_blocking_time": { "sec": 5, "nanosec": 0 }
+                            },
+                            "durability": {
+                                "kind": "TRANSIENT_LOCAL_DURABILITY_QOS"
+                            },
+                            "history": {
+                                "kind": "KEEP_LAST_HISTORY_QOS",
+                                "depth": 10
+                            },
+                            "deadline": {
+                                "period": { "sec": 1, "nanosec": 0 }
+                            }
+                        },
+                        {
+                            "name": "PartialOverride",
+                            "base_name": "FullBase",
+                            "reliability": {
+                                "kind": "BEST_EFFORT_RELIABILITY_QOS",
+                                "max_blocking_time": { "sec": 0, "nanosec": 0 }
+                            },
+                            "history": {
+                                "kind": "KEEP_ALL_HISTORY_QOS"
+                            }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+
+        let loader = QosLoader::from_json(json).unwrap();
+
+        let derived = loader
+            .get_datawriter_qos("TestLibrary", Some("Profile1"), Some("PartialOverride"))
+            .unwrap();
+
+        // overridden
+        assert!(derived.reliability.is_some());
+        assert!(derived.history.is_some());
+
+        // inherited
+        assert!(derived.durability.is_some());
+        assert!(derived.deadline.is_some());
+    }
+
+    #[test]
+    fn test_qos_path_parse_single_name() {
+        let path = QosPath::parse_base_name("BaseQos", "MyLib", Some("MyProfile")).unwrap();
+        assert_eq!(path.library.as_deref(), Some("MyLib"));
+        assert_eq!(path.profile.as_deref(), Some("MyProfile"));
+        assert_eq!(path.qos_name, "BaseQos");
+    }
+
+    #[test]
+    fn test_qos_path_parse_profile_and_name() {
+        let path =
+            QosPath::parse_base_name("OtherProfile::BaseQos", "MyLib", Some("MyProfile")).unwrap();
+        assert_eq!(path.library.as_deref(), Some("MyLib"));
+        assert_eq!(path.profile.as_deref(), Some("OtherProfile"));
+        assert_eq!(path.qos_name, "BaseQos");
+    }
+
+    #[test]
+    fn test_qos_path_parse_full_path() {
+        let path =
+            QosPath::parse_base_name("OtherLib::OtherProfile::BaseQos", "MyLib", Some("MyProfile"))
+                .unwrap();
+        assert_eq!(path.library.as_deref(), Some("OtherLib"));
+        assert_eq!(path.profile.as_deref(), Some("OtherProfile"));
+        assert_eq!(path.qos_name, "BaseQos");
+    }
+
+    #[test]
+    fn test_qos_path_parse_invalid() {
+        let result = QosPath::parse_base_name("A::B::C::D", "MyLib", Some("MyProfile"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_qos_path_parse_no_current_profile() {
+        let path = QosPath::parse_base_name("BaseQos", "MyLib", None).unwrap();
+        assert_eq!(path.library.as_deref(), Some("MyLib"));
+        assert_eq!(path.profile, None);
+        assert_eq!(path.qos_name, "BaseQos");
+    }
 }
