@@ -15,7 +15,6 @@ use crate::rtps::common::guid::Guid;
 use crate::rtps::common::locator::Locator;
 use crate::rtps::common::rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult};
 use crate::rtps::common::sequence::SequenceNumber;
-use crate::rtps::common::time::RtpsTime;
 use crate::rtps::common::types::DomainId;
 use crate::rtps::common::types::{ChangeKind, SerializedData};
 use crate::rtps::entities::endpoint::Endpoint;
@@ -28,8 +27,11 @@ use crate::rtps::entities::reader::{
 use crate::rtps::entities::writer::reader_locator::ReaderLocator;
 use crate::rtps::entities::writer::reader_proxy::ReaderProxy;
 use crate::rtps::entities::writer::{StatefulWriter, StatelessWriter, Writer};
+use crate::rtps::logic::message_processor::participant_message_processor::ParticipantAccessor;
+use crate::rtps::logic::message_processor::unicast_message_processor::UnicastMessageProcessor;
+use crate::rtps::messages::header::Header;
 use crate::rtps::messages::message_creator::MessageCreator;
-use crate::rtps::messages::message_receiver::TypedSubmessage;
+use crate::rtps::messages::submessage_header::SubmessageHeader;
 use crate::rtps::messages::submessages::ack_nack::AckNack;
 use crate::rtps::messages::submessages::data::Data;
 use crate::rtps::messages::submessages::data_frag::{DataFrag, FragmentBuffer};
@@ -762,15 +764,12 @@ impl UserLogic {
         Ok(())
     }
 
-    fn handle_data_message(
+    fn get_matched_readers(
         &self,
-        data: &Data,
-        remote_guid: Guid,
-        source_timestamp: Option<RtpsTime>,
-    ) -> RtpsResult<()> {
+        remote_writer_guid: Guid,
+        reader_entity_id: EntityId,
+    ) -> RtpsResult<Vec<Arc<dyn Reader + Send + Sync>>> {
         let participant = self.get_upgraded_participant()?;
-
-        let reader_entity_id = data.reader_id;
         let mut matched_readers: Vec<Arc<dyn Reader + Send + Sync>> = Vec::new();
 
         if reader_entity_id != EntityId::UNKNOWN {
@@ -781,714 +780,15 @@ impl UserLogic {
                         "No reader found for user data".to_string(),
                     )
                 })?;
-            if reader.matched_writer_is_matched(remote_guid) {
+            if reader.matched_writer_is_matched(remote_writer_guid) {
                 matched_readers.push(reader.clone());
-            } else {
-                debug!(
-                    "[DATA] Remote writer is not matched with reader, skipping data handling. Writer's guid: {:?}",
-                    remote_guid,
-                );
-                return Ok(());
             }
         } else {
             matched_readers
-                .extend(participant.find_readers_matched_with_remote_writer(remote_guid)?);
+                .extend(participant.find_readers_matched_with_remote_writer(remote_writer_guid)?);
         }
 
-        for reader in matched_readers {
-            let mut ownership_strength = None;
-            let mut lifespan_duration = None;
-
-            if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
-                let writer = stateful_reader.matched_writer_lookup(remote_guid);
-                if let Some(writer) = writer {
-                    let data = writer.publication_builtin_topic_data();
-                    ownership_strength = Some(data.ownership_strength().value);
-                    lifespan_duration = Some(data.lifespan().duration);
-                }
-            } else if let Some(stateless_reader) = reader.as_any().downcast_ref::<StatelessReader>()
-            {
-                let writer = stateless_reader.matched_writer_lookup(remote_guid);
-                if let Some(writer) = writer {
-                    let data = writer.publication_builtin_topic_data();
-                    ownership_strength = Some(data.ownership_strength().value);
-                    lifespan_duration = Some(data.lifespan().duration);
-                }
-            }
-
-            let mut change = CacheChange::new(
-                ChangeKind::Alive,
-                remote_guid,
-                InstanceHandle::NIL,
-                data.writer_sn,
-                data.serialized_data(),
-                // inline_qos,
-                source_timestamp,
-            );
-
-            change.set_ownership_strength(ownership_strength);
-            change.set_lifespan_duration(lifespan_duration);
-
-            // According to lifespan qos, reception timestamp is checked when source timestamp has abnormal value
-            // Need to verify if it's really necessary and whether checking timestamp for each message affects performance
-            // Current state does not set reception timestamp
-            // if timestamp.is_some()
-            //     && reader.get_lifespan(remote_guid) != LifespanQosPolicy::default()
-            // {
-            //     change.set_reception_timestamp(RtpsTime::now());
-            // }
-
-            if let Some(inline_qos) = data.inline_qos() {
-                if let Some(key_hash) = inline_qos.get_key_hash() {
-                    change.set_instance_handle(key_hash);
-                }
-
-                if let Some(status_info) = inline_qos.get_status_info() {
-                    if status_info.disposed() && status_info.unregistered() {
-                        change.set_kind(ChangeKind::NotAliveDisposed);
-                    } else if status_info.unregistered() {
-                        change.set_kind(ChangeKind::NotAliveUnregistered);
-                    } else if status_info.disposed() {
-                        change.set_kind(ChangeKind::NotAliveDisposed);
-                    } else if status_info.filtered() {
-                        change.set_kind(ChangeKind::AliveFiltered);
-                    }
-                }
-            }
-
-            let _ = self.deliver_change_to_reader(
-                change,
-                reader.as_ref(),
-                data.writer_sn,
-                remote_guid,
-                None,
-            );
-        }
-
-        Ok(())
-    }
-
-    fn handle_acknack_message(&self, acknack: &AckNack, remote_guid: Guid) -> RtpsResult<()> {
-        let participant = self.get_upgraded_participant()?;
-
-        let writer = participant
-            .find_writer_from_entity_id(acknack.writer_id)
-            .ok_or_else(|| RtpsError::new(RtpsErrorCode::RtpsEntityNotFound, None))?;
-        let stateful_writer =
-            writer.as_any().downcast_ref::<StatefulWriter>().ok_or_else(|| {
-                RtpsError::new(RtpsErrorCode::DowncastError, "Writer is not a StatefulWriter")
-            })?;
-        let reader_proxies = stateful_writer.reader_proxies();
-        let mut reader_proxies = reader_proxies.lock().map_err(|e| {
-            RtpsError::new(
-                RtpsErrorCode::LockError,
-                format!("Failed to acquire reader_proxies lock: {}", e),
-            )
-        })?;
-
-        let reader_proxy = reader_proxies
-            .iter_mut()
-            .find(|rp| rp.remote_reader_guid() == remote_guid)
-            .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
-
-        let last_acknack_count = reader_proxy.last_acknack_count();
-
-        if acknack.count <= last_acknack_count {
-            debug!(
-                "[UserLogic] [AckNack] Ignoring old ACKNACK: count={} <= last_count={}",
-                acknack.count, last_acknack_count
-            );
-            return Ok(());
-        }
-
-        let missing_seq_numbers = acknack.reader_sn_state.extract_numbers();
-
-        // ACK
-        // 2.5 - 8.3.8.1.2 All sequence numbers up to the one prior to readerSNState.base are confirmed as received by the reader.
-        reader_proxy.acked_changes_set(SequenceNumber::from_i64(
-            acknack.reader_sn_state.bitmap_base().to_i64() - 1,
-        ));
-        reader_proxy.set_last_acknack_count(acknack.count);
-
-        // NACK
-        if !missing_seq_numbers.is_empty() {
-            reader_proxy.requested_changes_set(missing_seq_numbers);
-
-            let participant = self.get_upgraded_participant()?;
-
-            // Notify Writer that Reader has requested CacheChanges
-            let handler = SendingHandler::get_instance(participant.clone(), None, None);
-            handler.push_message_and_wake(MessageType::UserRequestedChanges(
-                acknack.writer_id,
-                remote_guid,
-            ));
-        }
-        Ok(())
-    }
-
-    fn handle_preemptive_acknack(&self, acknack: &AckNack, reader_guid: Guid) -> RtpsResult<()> {
-        let participant = self.get_upgraded_participant()?;
-
-        let writer = participant
-            .find_writer_from_entity_id(acknack.writer_id)
-            .ok_or_else(|| RtpsError::new(RtpsErrorCode::RtpsEntityNotFound, None))?;
-
-        let stateful_writer =
-            writer.as_any().downcast_ref::<StatefulWriter>().ok_or_else(|| {
-                RtpsError::new(
-                    RtpsErrorCode::DowncastError,
-                    "Only stateful writer can handle acknack",
-                )
-            })?;
-
-        let mut reader_proxy =
-            stateful_writer.matched_reader_lookup(reader_guid).ok_or_else(|| {
-                RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, "ReaderProxy not found")
-            })?;
-
-        self.send_heartbeat_to_a_reader_proxy_inner(stateful_writer, &mut reader_proxy)
-    }
-
-    fn handle_heartbeat_message(
-        &self,
-        heartbeat: &Heartbeat,
-        remote_guid: Guid,
-        final_flag: bool,
-    ) -> RtpsResult<()> {
-        let reader_entity_id = heartbeat.reader_id;
-        let mut matched_readers: Vec<Arc<dyn Reader + Send + Sync>> = Vec::new();
-
-        let participant = self.get_upgraded_participant()?;
-
-        if reader_entity_id != EntityId::UNKNOWN {
-            let reader =
-                participant.find_reader_from_entity_id(reader_entity_id).ok_or_else(|| {
-                    RtpsError::new(
-                        RtpsErrorCode::RtpsEntityNotFound,
-                        "No reader found for user heartbeat".to_string(),
-                    )
-                })?;
-            if reader.matched_writer_is_matched(remote_guid) {
-                matched_readers.push(reader.clone());
-            } else {
-                debug!(
-                    "[HEARTBEAT] Remote writer is not matched with reader, skipping data handling. Writer's guid: {:?}",
-                    remote_guid,
-                );
-                return Ok(());
-            }
-        } else {
-            matched_readers
-                .extend(participant.find_readers_matched_with_remote_writer(remote_guid)?);
-        }
-
-        for reader in matched_readers {
-            let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() else {
-                continue;
-            };
-
-            let writer_proxies = stateful_reader.writer_proxies();
-            let mut matched_writers = writer_proxies.lock().map_err(|e| {
-                RtpsError::new(
-                    RtpsErrorCode::LockError,
-                    format!("Failed to acquire writer_proxies lock: {}", e),
-                )
-            })?;
-
-            let writer_proxy = matched_writers
-                .iter_mut()
-                .find(|proxy| proxy.remote_writer_guid() == remote_guid)
-                .ok_or_else(|| {
-                    RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, "WriterProxy not found")
-                })?;
-
-            let missing_changes =
-                writer_proxy.process_heartbeat(heartbeat.first_sn, heartbeat.last_sn);
-
-            // Case when ACKNACK sending is required: no fragments or
-            // all fragments have been received
-            if !writer_proxy.has_fragmented_changes(heartbeat.first_sn, heartbeat.last_sn)
-                || writer_proxy.all_fragments_received(heartbeat.last_sn)
-            {
-                // This is the first HB for reader
-                if writer_proxy.expected_sn() == SequenceNumber::UNKNOWN {
-                    writer_proxy.set_expected_sn(heartbeat.first_sn);
-                }
-
-                // Always flush buffer after updating sequence number
-                let change_to_add = writer_proxy.flush_buffered_changes();
-                self.add_change_to_reader_cache_and_notify(reader.as_ref(), change_to_add)?;
-
-                let bitmap_base = writer_proxy.expected_sn();
-
-                self.send_acknack_to_writer_proxy_inner(
-                    writer_proxy,
-                    stateful_reader,
-                    missing_changes,
-                    bitmap_base,
-                    final_flag,
-                    false,
-                )?;
-            } else {
-                // Case when fragments are not completely received yet - apply suppression delay
-                let missing_fragments =
-                    writer_proxy.calculate_missing_fragments(heartbeat.first_sn, heartbeat.last_sn);
-
-                if missing_fragments.is_some() {
-                    let writer_proxies_clone = writer_proxies.clone();
-                    let stateful_reader_guid = stateful_reader.guid();
-                    let participant = participant.clone();
-                    let sender_clone = self.sender.clone(); // Option<Arc<TransportSender>>
-                    let last_sn = heartbeat.last_sn;
-                    let missing_fragments_clone = missing_fragments.clone();
-                    let remote_guid = writer_proxy.remote_writer_guid();
-
-                    writer_proxy.increase_nackfrag_count();
-
-                    let timer_id = format!("nackfrag_{:?}_{:?}", remote_guid, last_sn);
-                    if let Ok(locked_timer_handler) =
-                        TimerHandler::get_instance(participant.clone()).lock()
-                    {
-                        locked_timer_handler.remove_timer(timer_id.clone());
-                        locked_timer_handler.add_timer(
-                            timer_id,
-                            Duration::from_millis(5),
-                            false, // not repeating
-                            move || {
-                                let mut writer_proxies_guard = match writer_proxies_clone.lock() {
-                                    Ok(guard) => guard,
-                                    Err(e) => {
-                                        warn!("Failed to acquire writer_proxies lock: {}", e);
-                                        return;
-                                    }
-                                };
-
-                                if let Some(current_writer_proxy) = writer_proxies_guard
-                                    .iter_mut()
-                                    .find(|proxy| proxy.remote_writer_guid() == remote_guid)
-                                {
-                                    let still_missing =
-                                        current_writer_proxy.still_missing_fragments(last_sn);
-
-                                    if still_missing {
-                                        // Create and send NACK_FRAG message
-                                        current_writer_proxy.increase_acknack_count();
-
-                                        let acknack_info = Some((
-                                            current_writer_proxy.acknack_count(),
-                                            last_sn,
-                                            missing_changes.clone(),
-                                        ));
-
-                                        if let Ok(buffer) = MessageCreator::create_nackfrag_msg(
-                                            participant.guid(),
-                                            current_writer_proxy.remote_writer_guid(),
-                                            stateful_reader_guid.entity_id(),
-                                            current_writer_proxy.remote_writer_guid().entity_id(),
-                                            last_sn,
-                                            missing_fragments_clone.as_ref().unwrap().clone(),
-                                            current_writer_proxy.nackfrag_count(),
-                                            acknack_info,
-                                        ) {
-                                            for locator in
-                                                current_writer_proxy.unicast_locator_list()
-                                            {
-                                                if locator.kind() == 1 {
-                                                    let socket_addr = std::net::SocketAddr::V4(
-                                                        std::net::SocketAddrV4::new(
-                                                            locator.to_ip_v4_addr(),
-                                                            locator.port() as u16,
-                                                        ),
-                                                    );
-                                                    if let Some(ref sender) = sender_clone {
-                                                        let _ = sender
-                                                            .send(&socket_addr, &buffer)
-                                                            .map_err(|e| {
-                                                                RtpsError::new(
-                                                                    RtpsErrorCode::Io,
-                                                                    e.to_string(),
-                                                                )
-                                                            });
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            },
-                        );
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn handle_data_frag_message(
-        &self,
-        data_frag: &DataFrag,
-        remote_guid: Guid,
-        source_timestamp: Option<RtpsTime>,
-    ) -> RtpsResult<()> {
-        let participant = self.get_upgraded_participant()?;
-
-        let writer_entity_id = data_frag.writer_id;
-        let writer_guid = Guid::new(participant.guid().prefix(), writer_entity_id);
-        let key = (writer_guid, data_frag.writer_sn);
-        let total_size = data_frag.sample_size;
-
-        let reader = participant
-            .find_reader_from_entity_id(data_frag.reader_id)
-            .ok_or_else(|| RtpsError::new(RtpsErrorCode::InvalidEntityKind, "Reader not found"))?;
-
-        // DashMap is thread-safe, so no explicit lock is needed
-        //println!("[DEBUG] FragmentBuffer count: {}, size: {}", self.fragment_buffers.len(), self.fragment_buffers.iter().map(|entry| entry.value().total_size as usize).sum::<usize>());
-        if self.fragment_buffers.len() > 30 {
-            self.cleanup_old_fragment_buffers(30);
-        }
-
-        // Copy fragment data using DashMap entry API
-        {
-            let mut buffer = self.fragment_buffers.entry(key).or_insert_with(|| {
-                FragmentBuffer::new(data_frag.writer_sn, total_size, data_frag.fragment_size)
-            });
-
-            for i in 0..data_frag.fragments_in_submessage {
-                let fragment_num = data_frag.fragment_starting_num + i as u32;
-                buffer.copy_fragment_data(fragment_num, data_frag.serialized_data());
-            }
-        } // buffer RefMut is automatically dropped here
-          // For StatefulReader case, update WriterProxy's ChangeFromWriter state
-        if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
-            // Query buffer information from DashMap again
-            if let Some(buffer_ref) = self.fragment_buffers.get(&key) {
-                let writer_proxies = stateful_reader.writer_proxies();
-                let mut matched_writers = writer_proxies.lock().map_err(|e| {
-                    RtpsError::new(
-                        RtpsErrorCode::LockError,
-                        format!("Failed to acquire writer_proxies lock: {}", e),
-                    )
-                })?;
-
-                if let Some(writer_proxy) = matched_writers
-                    .iter_mut()
-                    .find(|proxy| proxy.remote_writer_guid() == remote_guid)
-                {
-                    // Update fragment information
-                    writer_proxy.mark_frag_received(
-                        data_frag.writer_sn,
-                        buffer_ref.total_fragments,
-                        buffer_ref.received_fragments.clone(),
-                    );
-                }
-            }
-        }
-
-        // Check if all fragments have been received and process
-        if let Some(buffer_ref) = self.fragment_buffers.get(&key) {
-            if buffer_ref.all_fragments_received() {
-                let total_fragments = buffer_ref.total_fragments;
-                let received_fragments = buffer_ref.received_fragments.clone();
-                let is_complete = buffer_ref.all_fragments_received();
-
-                // Drop buffer_ref to release DashMap lock
-                drop(buffer_ref);
-
-                // Move payload from buffer without cloning
-                let (_, mut buffer) = self.fragment_buffers.remove(&key).unwrap();
-                let assembled_payload = std::mem::take(&mut buffer.payload);
-                let serialized_data: SerializedData = Arc::<[u8]>::from(assembled_payload);
-
-                // Get ownership strength
-                let mut ownership_strength = None;
-
-                if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
-                    let writer = stateful_reader.matched_writer_lookup(remote_guid);
-                    if let Some(writer) = writer {
-                        let data = writer.publication_builtin_topic_data();
-                        ownership_strength = Some(data.ownership_strength().value);
-                    }
-                } else if let Some(stateless_reader) =
-                    reader.as_any().downcast_ref::<StatelessReader>()
-                {
-                    let writer = stateless_reader.matched_writer_lookup(remote_guid);
-                    if let Some(writer) = writer {
-                        let data = writer.publication_builtin_topic_data();
-                        ownership_strength = Some(data.ownership_strength().value);
-                    }
-                }
-
-                let mut assembled_change = CacheChange::new(
-                    ChangeKind::Alive,
-                    writer_guid,
-                    InstanceHandle::NIL,
-                    data_frag.writer_sn,
-                    serialized_data,
-                    source_timestamp,
-                );
-
-                assembled_change.set_ownership_strength(ownership_strength);
-
-                let _ = self.deliver_change_to_reader(
-                    assembled_change,
-                    reader.as_ref(),
-                    data_frag.writer_sn,
-                    remote_guid,
-                    Some(FragmentInfo { total_fragments, received_fragments, is_complete }),
-                );
-
-                // Remove completed fragment buffer
-                self.fragment_buffers.remove(&key);
-            }
-        }
-
-        Ok(())
-    }
-
-    fn handle_nack_frag_message(&self, nack_frag: &NackFrag, remote_guid: Guid) -> RtpsResult<()> {
-        let writer_id = nack_frag.writer_id;
-        let writer_sn = nack_frag.writer_sn;
-        let frag_state = &nack_frag.fragment_number_state;
-
-        let participant = self.get_upgraded_participant()?;
-
-        // TODO: RtpsError Code handling needed
-        let writer = participant
-            .find_writer_from_entity_id(writer_id)
-            .ok_or_else(|| RtpsError::new(RtpsErrorCode::InvalidEntityKind, "Writer not found"))?;
-
-        let stateful_writer =
-            writer.as_any().downcast_ref::<StatefulWriter>().ok_or_else(|| {
-                RtpsError::new(RtpsErrorCode::InvalidEntityKind, "Writer is not a StatefulWriter")
-            })?;
-
-        // Lock acquisition order to prevent deadlock: reader_proxies -> history_cache
-        let reader_proxies = stateful_writer.reader_proxies();
-        let reader_proxies_guard = reader_proxies.lock().map_err(|_| {
-            RtpsError::new(RtpsErrorCode::LockError, "Failed to acquire reader_proxies lock")
-        })?;
-
-        let reader_proxy = reader_proxies_guard
-            .iter()
-            .find(|proxy| proxy.remote_reader_guid() == remote_guid)
-            .ok_or_else(|| {
-                RtpsError::new(RtpsErrorCode::InvalidEntityKind, "Reader proxy not found")
-            })?;
-
-        let writer_cache = stateful_writer.writer_cache();
-        let history_cache_guard = writer_cache.lock().map_err(|_| {
-            RtpsError::new(RtpsErrorCode::LockError, "Failed to acquire history cache lock")
-        })?;
-
-        let change = history_cache_guard.get_change(writer_sn).ok_or_else(|| {
-            warn!("NACK_FRAG requested missing change SN={:?}", writer_sn);
-            RtpsError::new(RtpsErrorCode::InvalidSubmessageBody, "Change not found")
-        })?;
-
-        if !change.is_fragmented() {
-            return Ok(()); // No processing needed for non-fragment case
-        }
-
-        let total_frags = change.total_fragments();
-        let requested_fragments = frag_state.extract_numbers();
-        let heartbeat_count = stateful_writer.heartbeat_count();
-        let heartbeat_info =
-            Some((heartbeat_count, writer_sn, history_cache_guard.get_seq_num_max(), false, false));
-
-        let timestamp = Utc::now();
-        for fragment_num in requested_fragments {
-            if fragment_num >= 1 && fragment_num <= total_frags {
-                self.send_data_frag_to_reader_proxy(
-                    &change,
-                    reader_proxy,
-                    writer_id,
-                    fragment_num,
-                    heartbeat_info,
-                    timestamp,
-                );
-            }
-        }
-
-        Ok(())
-    }
-
-    fn handle_gap_message(&self, gap: &Gap, remote_guid: Guid) -> RtpsResult<()> {
-        let reader_entity_id = gap.reader_id;
-        let mut matched_readers: Vec<Arc<dyn Reader + Send + Sync>> = Vec::new();
-
-        let participant = self.get_upgraded_participant()?;
-
-        if reader_entity_id != EntityId::UNKNOWN {
-            let reader =
-                participant.find_reader_from_entity_id(reader_entity_id).ok_or_else(|| {
-                    RtpsError::new(
-                        RtpsErrorCode::RtpsEntityNotFound,
-                        "No reader found for gap".to_string(),
-                    )
-                })?;
-            if reader.matched_writer_is_matched(remote_guid) {
-                matched_readers.push(reader.clone());
-            } else {
-                debug!(
-                    "[GAP] Remote writer is not matched with reader, skipping data handling. Writer's guid: {:?}",
-                    remote_guid,
-                );
-                return Ok(());
-            }
-        } else {
-            matched_readers
-                .extend(participant.find_readers_matched_with_remote_writer(remote_guid)?);
-        }
-
-        for reader in matched_readers {
-            if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
-                let writer_proxies_arc = stateful_reader.writer_proxies();
-                let mut writer_proxies = writer_proxies_arc.lock().map_err(|_| {
-                    RtpsError::new(
-                        RtpsErrorCode::LockError,
-                        "[GAP] Failed to acquire writer proxies lock",
-                    )
-                })?;
-
-                let writer_proxy = writer_proxies
-                    .iter_mut()
-                    .find(|proxy| proxy.remote_writer_guid() == remote_guid)
-                    .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
-
-                // Collect irrelevant changes from GAP message
-                let mut irrelevant_changes = Vec::new();
-
-                for sn in gap.gap_start.to_i64()..gap.gap_list.bitmap_base().to_i64() {
-                    irrelevant_changes.push(SequenceNumber::from_i64(sn));
-                }
-
-                irrelevant_changes.extend(gap.gap_list.extract_numbers().iter());
-
-                // Flush buffered changes if expected_sn is affected
-                if irrelevant_changes.last().unwrap_or(&SequenceNumber::new(0, 0))
-                    >= &writer_proxy.expected_sn()
-                {
-                    writer_proxy.set_expected_sn(SequenceNumber::from_i64(
-                        irrelevant_changes.last().unwrap().to_i64() + 1,
-                    ));
-
-                    let flushed_changes = writer_proxy.flush_buffered_changes();
-                    self.add_change_to_reader_cache_and_notify(stateful_reader, flushed_changes)?;
-                }
-
-                for seq_num in irrelevant_changes {
-                    writer_proxy.irrelevant_change_set(seq_num);
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    pub(crate) fn handle_rtps_message(
-        &mut self,
-        message_receiver: MessageReceiver,
-    ) -> RtpsResult<()> {
-        // If INFO_DST exists, local guid must match
-        let participant = self.get_upgraded_participant()?;
-
-        if message_receiver.has_dst_submessage() {
-            let local_guid_prefix = participant.guid().prefix();
-            if !message_receiver.is_dst_me(local_guid_prefix) {
-                return Err(RtpsError::new(
-                    RtpsErrorCode::InvalidDestinationGuid,
-                    "SEDP Logic: INFO_DST is not me",
-                ));
-            }
-        }
-        let rtps_header = *message_receiver.rtps_message_header().unwrap();
-        let submessages = message_receiver.parse_submessages();
-        for submessage in submessages {
-            match submessage {
-                TypedSubmessage::Data(_, data) => {
-                    // Extract endianness from submessage header
-                    let remote_guid = Guid::new(rtps_header.guid_prefix(), data.writer_id);
-                    if let Err(e) = self.handle_data_message(
-                        data,
-                        remote_guid,
-                        message_receiver.get_source_timestamp(),
-                    ) {
-                        warn!("Failed to handle DATA message: {:?}", e);
-                        continue;
-                    }
-
-                    if let Some(wlp) = participant.wlp_logic() {
-                        wlp.update_remote_writer_liveliness(remote_guid)?;
-                    }
-                }
-                TypedSubmessage::Heartbeat(header, heartbeat) => {
-                    if header.liveliness_flag().unwrap_or(false) {
-                        if let Some(wlp) = participant.wlp_logic() {
-                            let _ = wlp.handle_heartbeat_message(
-                                heartbeat,
-                                Guid::new(rtps_header.guid_prefix(), heartbeat.writer_id),
-                                header.final_flag().unwrap_or(false),
-                                true,
-                            );
-                        }
-                    } else if let Err(e) = self.handle_heartbeat_message(
-                        heartbeat,
-                        Guid::new(rtps_header.guid_prefix(), heartbeat.writer_id),
-                        header.final_flag().unwrap_or(false),
-                    ) {
-                        warn!("Failed to handle HEARTBEAT message: {:?}", e);
-                        continue;
-                    }
-                }
-                TypedSubmessage::AckNack(_header, acknack) => {
-                    if acknack.reader_sn_state.bitmap_base() == SequenceNumber::from_i64(0)
-                        && acknack.reader_sn_state.num_bits() == 0
-                    {
-                        self.handle_preemptive_acknack(
-                            acknack,
-                            Guid::new(rtps_header.guid_prefix(), acknack.reader_id),
-                        )?;
-                    } else {
-                        if let Err(e) = self.handle_acknack_message(
-                            acknack,
-                            Guid::new(rtps_header.guid_prefix(), acknack.reader_id),
-                        ) {
-                            warn!("Failed to handle ACKNACK message: {:?}", e);
-                            continue;
-                        }
-                    }
-                }
-                TypedSubmessage::DataFrag(_header, data_frag) => {
-                    if let Err(e) = self.handle_data_frag_message(
-                        data_frag,
-                        Guid::new(rtps_header.guid_prefix(), data_frag.writer_id),
-                        message_receiver.get_source_timestamp(),
-                    ) {
-                        warn!("Failed to handle DATA_FRAG message: {:?}", e);
-                        continue;
-                    }
-                }
-                TypedSubmessage::NackFrag(_header, nack_frag) => {
-                    if let Err(e) = self.handle_nack_frag_message(
-                        nack_frag,
-                        Guid::new(rtps_header.guid_prefix(), nack_frag.reader_id),
-                    ) {
-                        warn!("Failed to handle NACK_FRAG message: {:?}", e);
-                        continue;
-                    }
-                }
-                TypedSubmessage::Gap(_header, gap) => {
-                    if let Err(e) = self.handle_gap_message(
-                        gap,
-                        Guid::new(rtps_header.guid_prefix(), gap.writer_id),
-                    ) {
-                        warn!("Failed to handle GAP message: {:?}", e);
-                        continue;
-                    }
-                }
-            }
-        }
-        Ok(())
+        Ok(matched_readers)
     }
 
     fn send_rtps_message_to_locators<T>(&self, locators: T, buffer: &[u8]) -> RtpsResult<()>
@@ -1839,10 +1139,642 @@ impl UserLogic {
     pub(crate) fn get_unicast_listening_handle(&self) -> Arc<Mutex<Option<JoinHandle<()>>>> {
         Arc::clone(&self.unicast_listening_handle)
     }
+}
 
+impl ParticipantAccessor for UserLogic {
     fn get_upgraded_participant(&self) -> RtpsResult<Arc<Participant>> {
         Ok(self.participant.upgrade().ok_or_else(|| {
             RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped")
         })?)
+    }
+}
+
+impl UnicastMessageProcessor for UserLogic {
+    fn handle_data_message(
+        &mut self,
+        rtps_header: &Header,
+        data: &Data,
+        message_receiver: &MessageReceiver,
+    ) -> RtpsResult<()> {
+        let remote_writer_guid = Guid::new(rtps_header.guid_prefix(), data.writer_id);
+
+        let matched_readers: Vec<Arc<dyn Reader + Send + Sync>> =
+            self.get_matched_readers(remote_writer_guid, data.reader_id)?;
+
+        if matched_readers.is_empty() {
+            debug!(
+                "[DATA] No matched readers found for remote writer: {:?}, skipping data handling.",
+                remote_writer_guid
+            );
+            return Ok(());
+        }
+
+        for reader in matched_readers {
+            let mut ownership_strength = None;
+            let mut lifespan_duration = None;
+
+            if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
+                let writer = stateful_reader.matched_writer_lookup(remote_writer_guid);
+                if let Some(writer) = writer {
+                    let data = writer.publication_builtin_topic_data();
+                    ownership_strength = Some(data.ownership_strength().value);
+                    lifespan_duration = Some(data.lifespan().duration);
+                }
+            } else if let Some(stateless_reader) = reader.as_any().downcast_ref::<StatelessReader>()
+            {
+                let writer = stateless_reader.matched_writer_lookup(remote_writer_guid);
+                if let Some(writer) = writer {
+                    let data = writer.publication_builtin_topic_data();
+                    ownership_strength = Some(data.ownership_strength().value);
+                    lifespan_duration = Some(data.lifespan().duration);
+                }
+            }
+
+            let mut change = CacheChange::new(
+                ChangeKind::Alive,
+                remote_writer_guid,
+                InstanceHandle::NIL,
+                data.writer_sn,
+                data.serialized_data(),
+                // inline_qos,
+                message_receiver.get_source_timestamp(),
+            );
+
+            change.set_ownership_strength(ownership_strength);
+            change.set_lifespan_duration(lifespan_duration);
+
+            // According to lifespan qos, reception timestamp is checked when source timestamp has abnormal value
+            // Need to verify if it's really necessary and whether checking timestamp for each message affects performance
+            // Current state does not set reception timestamp
+            // if timestamp.is_some()
+            //     && reader.get_lifespan(remote_guid) != LifespanQosPolicy::default()
+            // {
+            //     change.set_reception_timestamp(RtpsTime::now());
+            // }
+
+            if let Some(inline_qos) = data.inline_qos() {
+                if let Some(key_hash) = inline_qos.get_key_hash() {
+                    change.set_instance_handle(key_hash);
+                }
+
+                if let Some(status_info) = inline_qos.get_status_info() {
+                    if status_info.disposed() && status_info.unregistered() {
+                        change.set_kind(ChangeKind::NotAliveDisposed);
+                    } else if status_info.unregistered() {
+                        change.set_kind(ChangeKind::NotAliveUnregistered);
+                    } else if status_info.disposed() {
+                        change.set_kind(ChangeKind::NotAliveDisposed);
+                    } else if status_info.filtered() {
+                        change.set_kind(ChangeKind::AliveFiltered);
+                    }
+                }
+            }
+
+            let _ = self.deliver_change_to_reader(
+                change,
+                reader.as_ref(),
+                data.writer_sn,
+                remote_writer_guid,
+                None,
+            );
+        }
+
+        if let Some(wlp) = self.get_upgraded_participant()?.wlp_logic() {
+            wlp.update_remote_writer_liveliness(remote_writer_guid)?;
+        }
+
+        Ok(())
+    }
+
+    fn handle_heartbeat_message(
+        &mut self,
+        rtps_header: &Header,
+        submessage_header: &SubmessageHeader,
+        heartbeat: &Heartbeat,
+    ) -> RtpsResult<()> {
+        let participant = self.get_upgraded_participant()?;
+        let is_liveliness_heartbeat = submessage_header.liveliness_flag().unwrap_or(false);
+
+        if is_liveliness_heartbeat {
+            if let Some(wlp) = participant.wlp_logic() {
+                let _ = wlp.handle_heartbeat_message(
+                    heartbeat,
+                    Guid::new(rtps_header.guid_prefix(), heartbeat.writer_id),
+                    submessage_header.final_flag().unwrap_or(false),
+                    true,
+                );
+            }
+        } else {
+            let final_flag = submessage_header.final_flag().unwrap_or(false);
+            let remote_writer_guid = Guid::new(rtps_header.guid_prefix(), heartbeat.writer_id);
+
+            let participant = self.get_upgraded_participant()?;
+            let matched_readers =
+                self.get_matched_readers(remote_writer_guid, heartbeat.reader_id)?;
+
+            if matched_readers.is_empty() {
+                debug!(
+                "[Heartbeat] No matched readers found for remote writer: {:?}, skipping data handling.",
+                remote_writer_guid
+            );
+                return Ok(());
+            }
+
+            for reader in matched_readers {
+                let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() else {
+                    continue;
+                };
+
+                let writer_proxies = stateful_reader.writer_proxies();
+                let mut matched_writers = writer_proxies.lock().map_err(|e| {
+                    RtpsError::new(
+                        RtpsErrorCode::LockError,
+                        format!("Failed to acquire writer_proxies lock: {}", e),
+                    )
+                })?;
+
+                let writer_proxy = matched_writers
+                    .iter_mut()
+                    .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
+                    .ok_or_else(|| {
+                        RtpsError::new(
+                            RtpsErrorCode::MatchedEntityNotFound,
+                            "WriterProxy not found",
+                        )
+                    })?;
+
+                let missing_changes =
+                    writer_proxy.process_heartbeat(heartbeat.first_sn, heartbeat.last_sn);
+
+                // Case when ACKNACK sending is required: no fragments or
+                // all fragments have been received
+                if !writer_proxy.has_fragmented_changes(heartbeat.first_sn, heartbeat.last_sn)
+                    || writer_proxy.all_fragments_received(heartbeat.last_sn)
+                {
+                    // This is the first HB for reader
+                    if writer_proxy.expected_sn() == SequenceNumber::UNKNOWN {
+                        writer_proxy.set_expected_sn(heartbeat.first_sn);
+                    }
+
+                    // Always flush buffer after updating sequence number
+                    let change_to_add = writer_proxy.flush_buffered_changes();
+                    self.add_change_to_reader_cache_and_notify(reader.as_ref(), change_to_add)?;
+
+                    let bitmap_base = writer_proxy.expected_sn();
+
+                    self.send_acknack_to_writer_proxy_inner(
+                        writer_proxy,
+                        stateful_reader,
+                        missing_changes,
+                        bitmap_base,
+                        final_flag,
+                        false,
+                    )?;
+                } else {
+                    // Case when fragments are not completely received yet - apply suppression delay
+                    let missing_fragments = writer_proxy
+                        .calculate_missing_fragments(heartbeat.first_sn, heartbeat.last_sn);
+
+                    if missing_fragments.is_some() {
+                        let writer_proxies_clone = writer_proxies.clone();
+                        let stateful_reader_guid = stateful_reader.guid();
+                        let participant = participant.clone();
+                        let sender_clone = self.sender.clone(); // Option<Arc<TransportSender>>
+                        let last_sn = heartbeat.last_sn;
+                        let missing_fragments_clone = missing_fragments.clone();
+                        let remote_writer_guid = writer_proxy.remote_writer_guid();
+
+                        writer_proxy.increase_nackfrag_count();
+
+                        let timer_id = format!("nackfrag_{:?}_{:?}", remote_writer_guid, last_sn);
+                        if let Ok(locked_timer_handler) =
+                            TimerHandler::get_instance(participant.clone()).lock()
+                        {
+                            locked_timer_handler.remove_timer(timer_id.clone());
+                            locked_timer_handler.add_timer(
+                                timer_id,
+                                Duration::from_millis(5),
+                                false, // not repeating
+                                move || {
+                                    let mut writer_proxies_guard = match writer_proxies_clone.lock()
+                                    {
+                                        Ok(guard) => guard,
+                                        Err(e) => {
+                                            warn!("Failed to acquire writer_proxies lock: {}", e);
+                                            return;
+                                        }
+                                    };
+
+                                    if let Some(current_writer_proxy) =
+                                        writer_proxies_guard.iter_mut().find(|proxy| {
+                                            proxy.remote_writer_guid() == remote_writer_guid
+                                        })
+                                    {
+                                        let still_missing =
+                                            current_writer_proxy.still_missing_fragments(last_sn);
+
+                                        if still_missing {
+                                            // Create and send NACK_FRAG message
+                                            current_writer_proxy.increase_acknack_count();
+
+                                            let acknack_info = Some((
+                                                current_writer_proxy.acknack_count(),
+                                                last_sn,
+                                                missing_changes.clone(),
+                                            ));
+
+                                            if let Ok(buffer) = MessageCreator::create_nackfrag_msg(
+                                                participant.guid(),
+                                                current_writer_proxy.remote_writer_guid(),
+                                                stateful_reader_guid.entity_id(),
+                                                current_writer_proxy
+                                                    .remote_writer_guid()
+                                                    .entity_id(),
+                                                last_sn,
+                                                missing_fragments_clone.as_ref().unwrap().clone(),
+                                                current_writer_proxy.nackfrag_count(),
+                                                acknack_info,
+                                            ) {
+                                                for locator in
+                                                    current_writer_proxy.unicast_locator_list()
+                                                {
+                                                    if locator.kind() == 1 {
+                                                        let socket_addr = std::net::SocketAddr::V4(
+                                                            std::net::SocketAddrV4::new(
+                                                                locator.to_ip_v4_addr(),
+                                                                locator.port() as u16,
+                                                            ),
+                                                        );
+                                                        if let Some(ref sender) = sender_clone {
+                                                            let _ = sender
+                                                                .send(&socket_addr, &buffer)
+                                                                .map_err(|e| {
+                                                                    RtpsError::new(
+                                                                        RtpsErrorCode::Io,
+                                                                        e.to_string(),
+                                                                    )
+                                                                });
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn handle_acknack_message(
+        &mut self,
+        rtps_header: &Header,
+        acknack: &AckNack,
+    ) -> RtpsResult<()> {
+        if acknack.reader_sn_state.bitmap_base() == SequenceNumber::from_i64(0)
+            && acknack.reader_sn_state.num_bits() == 0
+        {
+            self.handle_preemptive_acknack_message(rtps_header, acknack)?;
+            return Ok(());
+        }
+
+        let remote_reader_guid = Guid::new(rtps_header.guid_prefix(), acknack.reader_id);
+        let participant = self.get_upgraded_participant()?;
+
+        let writer = participant
+            .find_writer_from_entity_id(acknack.writer_id)
+            .ok_or_else(|| RtpsError::new(RtpsErrorCode::RtpsEntityNotFound, None))?;
+        let stateful_writer =
+            writer.as_any().downcast_ref::<StatefulWriter>().ok_or_else(|| {
+                RtpsError::new(RtpsErrorCode::DowncastError, "Writer is not a StatefulWriter")
+            })?;
+        let reader_proxies = stateful_writer.reader_proxies();
+        let mut reader_proxies = reader_proxies.lock().map_err(|e| {
+            RtpsError::new(
+                RtpsErrorCode::LockError,
+                format!("Failed to acquire reader_proxies lock: {}", e),
+            )
+        })?;
+
+        let reader_proxy = reader_proxies
+            .iter_mut()
+            .find(|rp| rp.remote_reader_guid() == remote_reader_guid)
+            .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
+
+        let last_acknack_count = reader_proxy.last_acknack_count();
+
+        if acknack.count <= last_acknack_count {
+            debug!(
+                "[UserLogic] [AckNack] Ignoring old ACKNACK: count={} <= last_count={}",
+                acknack.count, last_acknack_count
+            );
+            return Ok(());
+        }
+
+        let missing_seq_numbers = acknack.reader_sn_state.extract_numbers();
+
+        // ACK
+        // 2.5 - 8.3.8.1.2 All sequence numbers up to the one prior to readerSNState.base are confirmed as received by the reader.
+        reader_proxy.acked_changes_set(SequenceNumber::from_i64(
+            acknack.reader_sn_state.bitmap_base().to_i64() - 1,
+        ));
+        reader_proxy.set_last_acknack_count(acknack.count);
+
+        // NACK
+        if !missing_seq_numbers.is_empty() {
+            reader_proxy.requested_changes_set(missing_seq_numbers);
+
+            let participant = self.get_upgraded_participant()?;
+
+            // Notify Writer that Reader has requested CacheChanges
+            let handler = SendingHandler::get_instance(participant.clone(), None, None);
+            handler.push_message_and_wake(MessageType::UserRequestedChanges(
+                acknack.writer_id,
+                remote_reader_guid,
+            ));
+        }
+        Ok(())
+    }
+
+    fn handle_preemptive_acknack_message(
+        &mut self,
+        rtps_header: &Header,
+        acknack: &AckNack,
+    ) -> RtpsResult<()> {
+        let participant = self.get_upgraded_participant()?;
+        let remote_reader_guid = Guid::new(rtps_header.guid_prefix(), acknack.reader_id);
+
+        let writer = participant
+            .find_writer_from_entity_id(acknack.writer_id)
+            .ok_or_else(|| RtpsError::new(RtpsErrorCode::RtpsEntityNotFound, None))?;
+
+        let stateful_writer =
+            writer.as_any().downcast_ref::<StatefulWriter>().ok_or_else(|| {
+                RtpsError::new(
+                    RtpsErrorCode::DowncastError,
+                    "Only stateful writer can handle acknack",
+                )
+            })?;
+
+        let mut reader_proxy =
+            stateful_writer.matched_reader_lookup(remote_reader_guid).ok_or_else(|| {
+                RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, "ReaderProxy not found")
+            })?;
+
+        self.send_heartbeat_to_a_reader_proxy_inner(stateful_writer, &mut reader_proxy)
+    }
+
+    fn handle_datafrag_message(
+        &mut self,
+        rtps_header: &Header,
+        data_frag: &DataFrag,
+        message_receiver: &MessageReceiver,
+    ) -> RtpsResult<()> {
+        let participant = self.get_upgraded_participant()?;
+        let source_timestamp = message_receiver.get_source_timestamp();
+        let remote_writer_guid = Guid::new(rtps_header.guid_prefix(), data_frag.writer_id);
+
+        let key = (remote_writer_guid, data_frag.writer_sn);
+        let total_size = data_frag.sample_size;
+
+        let reader = participant
+            .find_reader_from_entity_id(data_frag.reader_id)
+            .ok_or_else(|| RtpsError::new(RtpsErrorCode::InvalidEntityKind, "Reader not found"))?;
+
+        // DashMap is thread-safe, so no explicit lock is needed
+        //println!("[DEBUG] FragmentBuffer count: {}, size: {}", self.fragment_buffers.len(), self.fragment_buffers.iter().map(|entry| entry.value().total_size as usize).sum::<usize>());
+        if self.fragment_buffers.len() > 30 {
+            self.cleanup_old_fragment_buffers(30);
+        }
+
+        // Copy fragment data using DashMap entry API
+        {
+            let mut buffer = self.fragment_buffers.entry(key).or_insert_with(|| {
+                FragmentBuffer::new(data_frag.writer_sn, total_size, data_frag.fragment_size)
+            });
+
+            for i in 0..data_frag.fragments_in_submessage {
+                let fragment_num = data_frag.fragment_starting_num + i as u32;
+                buffer.copy_fragment_data(fragment_num, data_frag.serialized_data());
+            }
+        } // buffer RefMut is automatically dropped here
+          // For StatefulReader case, update WriterProxy's ChangeFromWriter state
+        if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
+            // Query buffer information from DashMap again
+            if let Some(buffer_ref) = self.fragment_buffers.get(&key) {
+                let writer_proxies = stateful_reader.writer_proxies();
+                let mut matched_writers = writer_proxies.lock().map_err(|e| {
+                    RtpsError::new(
+                        RtpsErrorCode::LockError,
+                        format!("Failed to acquire writer_proxies lock: {}", e),
+                    )
+                })?;
+
+                if let Some(writer_proxy) = matched_writers
+                    .iter_mut()
+                    .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
+                {
+                    // Update fragment information
+                    writer_proxy.mark_frag_received(
+                        data_frag.writer_sn,
+                        buffer_ref.total_fragments,
+                        buffer_ref.received_fragments.clone(),
+                    );
+                }
+            }
+        }
+
+        // Check if all fragments have been received and process
+        if let Some(buffer_ref) = self.fragment_buffers.get(&key) {
+            if buffer_ref.all_fragments_received() {
+                let total_fragments = buffer_ref.total_fragments;
+                let received_fragments = buffer_ref.received_fragments.clone();
+                let is_complete = buffer_ref.all_fragments_received();
+
+                // Drop buffer_ref to release DashMap lock
+                drop(buffer_ref);
+
+                // Move payload from buffer without cloning
+                let (_, mut buffer) = self.fragment_buffers.remove(&key).unwrap();
+                let assembled_payload = std::mem::take(&mut buffer.payload);
+                let serialized_data: SerializedData = Arc::<[u8]>::from(assembled_payload);
+
+                // Get ownership strength
+                let mut ownership_strength = None;
+
+                if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
+                    let writer = stateful_reader.matched_writer_lookup(remote_writer_guid);
+                    if let Some(writer) = writer {
+                        let data = writer.publication_builtin_topic_data();
+                        ownership_strength = Some(data.ownership_strength().value);
+                    }
+                } else if let Some(stateless_reader) =
+                    reader.as_any().downcast_ref::<StatelessReader>()
+                {
+                    let writer = stateless_reader.matched_writer_lookup(remote_writer_guid);
+                    if let Some(writer) = writer {
+                        let data = writer.publication_builtin_topic_data();
+                        ownership_strength = Some(data.ownership_strength().value);
+                    }
+                }
+
+                let mut assembled_change = CacheChange::new(
+                    ChangeKind::Alive,
+                    remote_writer_guid,
+                    InstanceHandle::NIL,
+                    data_frag.writer_sn,
+                    serialized_data,
+                    source_timestamp,
+                );
+
+                assembled_change.set_ownership_strength(ownership_strength);
+
+                let _ = self.deliver_change_to_reader(
+                    assembled_change,
+                    reader.as_ref(),
+                    data_frag.writer_sn,
+                    remote_writer_guid,
+                    Some(FragmentInfo { total_fragments, received_fragments, is_complete }),
+                );
+
+                // Remove completed fragment buffer
+                self.fragment_buffers.remove(&key);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn handle_nackfrag_message(
+        &mut self,
+        rtps_header: &Header,
+        nack_frag: &NackFrag,
+    ) -> RtpsResult<()> {
+        let remote_reader_guid = Guid::new(rtps_header.guid_prefix(), nack_frag.reader_id);
+        let writer_id = nack_frag.writer_id;
+        let writer_sn = nack_frag.writer_sn;
+        let frag_state = &nack_frag.fragment_number_state;
+
+        let participant = self.get_upgraded_participant()?;
+
+        let writer = participant
+            .find_writer_from_entity_id(writer_id)
+            .ok_or_else(|| RtpsError::new(RtpsErrorCode::InvalidEntityKind, "Writer not found"))?;
+
+        let stateful_writer =
+            writer.as_any().downcast_ref::<StatefulWriter>().ok_or_else(|| {
+                RtpsError::new(RtpsErrorCode::InvalidEntityKind, "Writer is not a StatefulWriter")
+            })?;
+
+        // Lock acquisition order to prevent deadlock: reader_proxies -> history_cache
+        let reader_proxies = stateful_writer.reader_proxies();
+        let reader_proxies_guard = reader_proxies.lock().map_err(|_| {
+            RtpsError::new(RtpsErrorCode::LockError, "Failed to acquire reader_proxies lock")
+        })?;
+
+        let reader_proxy = reader_proxies_guard
+            .iter()
+            .find(|proxy| proxy.remote_reader_guid() == remote_reader_guid)
+            .ok_or_else(|| {
+                RtpsError::new(RtpsErrorCode::InvalidEntityKind, "Reader proxy not found")
+            })?;
+
+        let writer_cache = stateful_writer.writer_cache();
+        let history_cache_guard = writer_cache.lock().map_err(|_| {
+            RtpsError::new(RtpsErrorCode::LockError, "Failed to acquire history cache lock")
+        })?;
+
+        let change = history_cache_guard.get_change(writer_sn).ok_or_else(|| {
+            warn!("NACK_FRAG requested missing change SN={:?}", writer_sn);
+            RtpsError::new(RtpsErrorCode::InvalidSubmessageBody, "Change not found")
+        })?;
+
+        if !change.is_fragmented() {
+            return Ok(()); // No processing needed for non-fragment case
+        }
+
+        let total_frags = change.total_fragments();
+        let requested_fragments = frag_state.extract_numbers();
+        let heartbeat_count = stateful_writer.heartbeat_count();
+        let heartbeat_info =
+            Some((heartbeat_count, writer_sn, history_cache_guard.get_seq_num_max(), false, false));
+
+        let timestamp = Utc::now();
+        for fragment_num in requested_fragments {
+            if fragment_num >= 1 && fragment_num <= total_frags {
+                self.send_data_frag_to_reader_proxy(
+                    &change,
+                    reader_proxy,
+                    writer_id,
+                    fragment_num,
+                    heartbeat_info,
+                    timestamp,
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    fn handle_gap_message(&mut self, rtps_header: &Header, gap: &Gap) -> RtpsResult<()> {
+        let remote_writer_guid = Guid::new(rtps_header.guid_prefix(), gap.writer_id);
+        let matched_readers = self.get_matched_readers(remote_writer_guid, gap.reader_id)?;
+
+        if matched_readers.is_empty() {
+            debug!(
+                "[Gap] No matched readers found for remote writer: {:?}, skipping data handling.",
+                remote_writer_guid
+            );
+            return Ok(());
+        }
+
+        for reader in matched_readers {
+            if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
+                let writer_proxies_arc = stateful_reader.writer_proxies();
+                let mut writer_proxies = writer_proxies_arc.lock().map_err(|_| {
+                    RtpsError::new(
+                        RtpsErrorCode::LockError,
+                        "[GAP] Failed to acquire writer proxies lock",
+                    )
+                })?;
+
+                let writer_proxy = writer_proxies
+                    .iter_mut()
+                    .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
+                    .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
+
+                // Collect irrelevant changes from GAP message
+                let mut irrelevant_changes = Vec::new();
+
+                for sn in gap.gap_start.to_i64()..gap.gap_list.bitmap_base().to_i64() {
+                    irrelevant_changes.push(SequenceNumber::from_i64(sn));
+                }
+
+                irrelevant_changes.extend(gap.gap_list.extract_numbers().iter());
+
+                // Flush buffered changes if expected_sn is affected
+                if irrelevant_changes.last().unwrap_or(&SequenceNumber::new(0, 0))
+                    >= &writer_proxy.expected_sn()
+                {
+                    writer_proxy.set_expected_sn(SequenceNumber::from_i64(
+                        irrelevant_changes.last().unwrap().to_i64() + 1,
+                    ));
+
+                    let flushed_changes = writer_proxy.flush_buffered_changes();
+                    self.add_change_to_reader_cache_and_notify(stateful_reader, flushed_changes)?;
+                }
+
+                for seq_num in irrelevant_changes {
+                    writer_proxy.irrelevant_change_set(seq_num);
+                }
+            }
+        }
+
+        Ok(())
     }
 }

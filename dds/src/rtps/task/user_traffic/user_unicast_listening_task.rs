@@ -1,6 +1,7 @@
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::entities::entity::Entity;
 use crate::rtps::entities::participant::Participant;
+use crate::rtps::logic::message_processor::unicast_message_processor::UnicastMessageProcessor as _;
 use crate::rtps::logic::user_logic::UserLogic;
 use crate::rtps::messages::message_receiver::MessageReceiver;
 use crate::rtps::transport::shm::ShmListener;

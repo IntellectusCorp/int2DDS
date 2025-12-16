@@ -3,7 +3,7 @@ use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::types::DomainId;
 use crate::rtps::entities::entity::Entity;
 use crate::rtps::entities::participant::Participant;
-use crate::rtps::logic::data::participant_message_processor::ParticipantMessageProcessor as _;
+use crate::rtps::logic::message_processor::participant_message_processor::ParticipantMessageProcessor as _;
 use crate::rtps::logic::spdp_logic::SpdpLogic;
 use crate::rtps::messages::message_receiver::MessageReceiver;
 use crate::rtps::transport::socket::MAX_EVENTS;
