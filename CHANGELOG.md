@@ -48,7 +48,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### Transport Layer
 
 - UDP multicast transport
-- UDP broadcast support (configurable)
 - TCP transport support
 - Hybrid transport (UDP + TCP)
 - Network interface and IP address selection

@@ -58,13 +58,13 @@ impl Socket {
 
             //UDP listeners
             //discovery listener(spdp + sedp)
-            //discodery broadcast
+            //discodery extended discovery
             discovery_traffic_multicast_listener: None,
             //spdp + sedp
             discovery_traffic_unicast_listener: None,
 
             //user_traffic(data)
-            //broadcast data
+            //extended discovery data
             user_traffic_multicast_listener: None, // Haven't seen a case where this is used
             //data
             user_traffic_unicast_listener: None,
@@ -206,7 +206,7 @@ impl Socket {
         let transport_type = get_transport_type();
         match transport_type {
             TransportType::TCP => {
-                // TCP does not support multicast/broadcast
+                // TCP does not support multicast/extended discovery
                 // Create only TCP listeners for discovery and user traffic
                 self.create_tcp_listeners();
                 log::info!("[socket] TCP listeners created");
@@ -249,7 +249,7 @@ impl Socket {
     }
 
     //discovery multicast listener
-    //discodery broadcast
+    //discodery extended discovery
     fn create_discovery_multicast_listener(&mut self, domain_id: u32) {
         let udp_listener: Option<UdpListener> = UdpListener::new_multicast(
             PortManager::get_discovery_traffic_multicast_port(domain_id),
@@ -280,7 +280,7 @@ impl Socket {
     }
 
     //user traffic multicast listener
-    //user data broadcast
+    //user data extended discovery
     fn create_user_traffic_multicast_listener(&mut self, domain_id: u32) {
         let udp_listener: Option<UdpListener> = UdpListener::new_multicast(
             PortManager::get_user_traffic_multicast_port(domain_id),
