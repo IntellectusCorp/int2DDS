@@ -43,9 +43,14 @@
 //! | [`DurabilityServiceQosPolicy`] | Transient/Persistent service config | DataWriter, Topic |
 
 use const_default::ConstDefault;
+use serde::{Deserialize, Serialize};
 use speedy::{Readable, Writable};
 
-use crate::core::{error::DdsResult, time::Duration, types::LENGTH_UNLIMITED};
+use crate::core::{
+    error::DdsResult,
+    time::Duration,
+    types::{deserialize_i32_or_unlimited, serialize_i32_or_unlimited, LENGTH_UNLIMITED},
+};
 
 pub trait QosPolicy {
     fn name(&self) -> &str;
@@ -177,8 +182,8 @@ impl QosPolicyId {
             QosPolicyId::WriterDataLifecycle => WRITERDATALIFECYCLE_QOS_POLICY_NAME,
             QosPolicyId::ReaderDataLifecycle => READERDATALIFECYCLE_QOS_POLICY_NAME,
             QosPolicyId::TopicData => TOPICDATA_QOS_POLICY_NAME,
-            QosPolicyId::GroupData => TRANSPORTPRIORITY_QOS_POLICY_NAME,
-            QosPolicyId::TransportPriority => GROUPDATA_QOS_POLICY_NAME,
+            QosPolicyId::GroupData => GROUPDATA_QOS_POLICY_NAME,
+            QosPolicyId::TransportPriority => TRANSPORTPRIORITY_QOS_POLICY_NAME,
             QosPolicyId::Lifespan => LIFESPAN_QOS_POLICY_NAME,
             QosPolicyId::DurabilityService => DURABILITYSERVICE_QOS_POLICY_NAME,
             QosPolicyId::DataRepresentation => DATAREPRESENTATION_QOS_POLICY_NAME,
@@ -343,9 +348,10 @@ impl HistoryQosPolicy {
 ///     .create_datawriter::<HelloWorldType>(&topic, writer_qos, None, StatusMask::default())
 ///     .unwrap();
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Readable, Writable)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Readable, Writable, Deserialize, Serialize)]
 pub struct LifespanQosPolicy {
     /// Maximum validity duration for samples.
+    #[serde(default)]
     pub duration: Duration,
 }
 impl Default for LifespanQosPolicy {
@@ -477,7 +483,20 @@ impl QosPolicy for OwnershipQosPolicy {
 ///
 /// # Default
 /// `0`
-#[derive(Debug, Default, ConstDefault, Clone, Copy, PartialEq, Eq, Readable, Writable)]
+#[derive(
+    Debug,
+    Default,
+    ConstDefault,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Readable,
+    Writable,
+    Deserialize,
+    Serialize,
+)]
+#[serde(default)]
 pub struct OwnershipStrengthQosPolicy {
     /// The ownership strength value. Higher values win ownership.
     pub value: i32,
@@ -494,9 +513,10 @@ impl QosPolicy for OwnershipStrengthQosPolicy {
 ///
 /// # Default
 /// `autodispose_unregistered_instances: true`
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Readable, Writable)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Readable, Writable, Deserialize, Serialize)]
 pub struct WriterDataLifecycleQosPolicy {
     /// Whether to automatically dispose instances when unregistered.
+    #[serde(default)]
     pub autodispose_unregistered_instances: bool,
 }
 
@@ -522,11 +542,13 @@ impl QosPolicy for WriterDataLifecycleQosPolicy {
 ///
 /// # Default
 /// Both delays are `Duration::INFINITE` - samples are never automatically purged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Readable, Writable)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Readable, Writable, Deserialize, Serialize)]
 pub struct ReaderDataLifecycleQosPolicy {
     /// Delay before purging samples from instances with no writers.
+    #[serde(default)]
     pub autopurge_nowriter_samples_delay: Duration,
     /// Delay before purging samples from disposed instances.
+    #[serde(default)]
     pub autopurge_disposed_samples_delay: Duration,
 }
 
@@ -625,7 +647,20 @@ impl QosPolicy for PresentationQosPolicy {
 ///
 /// # Default
 /// `0`
-#[derive(Debug, Default, ConstDefault, Clone, Copy, PartialEq, Eq, Readable, Writable)]
+#[derive(
+    Debug,
+    Default,
+    ConstDefault,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Readable,
+    Writable,
+    Deserialize,
+    Serialize,
+)]
+#[serde(default)]
 pub struct TransportPriorityQosPolicy {
     /// The transport priority value.
     pub value: i32,
@@ -705,7 +740,20 @@ impl QosPolicy for GroupDataQosPolicy {
 ///
 /// # Default
 /// `Duration::ZERO`
-#[derive(Debug, Default, ConstDefault, Clone, Copy, PartialEq, Eq, Readable, Writable)]
+#[derive(
+    Debug,
+    Default,
+    ConstDefault,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Readable,
+    Writable,
+    Deserialize,
+    Serialize,
+)]
+#[serde(default)]
 pub struct LatencyBudgetQosPolicy {
     /// Maximum acceptable delay for data delivery.
     pub duration: Duration,
@@ -782,7 +830,8 @@ impl QosPolicy for LatencyBudgetQosPolicy {
 ///     .create_datareader::<HelloWorldType>(&topic, reader_qos, None, StatusMask::default())
 ///     .unwrap();
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Readable, Writable)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Readable, Writable, Deserialize, Serialize)]
+#[serde(default)]
 pub struct DeadlineQosPolicy {
     /// Maximum expected period between data updates.
     pub period: Duration,
@@ -814,7 +863,20 @@ impl QosPolicy for DeadlineQosPolicy {
 ///
 /// # Default
 /// `Duration::ZERO` - No filtering.
-#[derive(Debug, Default, ConstDefault, Clone, Copy, PartialEq, Eq, Readable, Writable)]
+#[derive(
+    Debug,
+    Default,
+    ConstDefault,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Readable,
+    Writable,
+    Deserialize,
+    Serialize,
+)]
+#[serde(default)]
 pub struct TimeBasedFilterQosPolicy {
     /// Minimum time between received samples.
     pub minimum_separation: Duration,
@@ -876,7 +938,8 @@ impl QosPolicy for TimeBasedFilterQosPolicy {
 /// // Manually enable when ready to communicate
 /// writer.enable().unwrap();
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Readable, Writable)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Readable, Writable, Deserialize, Serialize)]
+#[serde(default)]
 pub struct EntityFactoryQosPolicy {
     /// Whether created entities are automatically enabled.
     pub autoenable_created_entities: bool,
@@ -1379,13 +1442,20 @@ impl QosPolicy for DurabilityQosPolicy {
 ///     .create_datareader::<HelloWorldType>(&topic, reader_qos, None, StatusMask::default())
 ///     .unwrap();
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Readable, Writable)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Readable, Writable, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ResourceLimitsQosPolicy {
     /// Maximum total number of samples that can be stored.
+    #[serde(deserialize_with = "deserialize_i32_or_unlimited")]
+    #[serde(serialize_with = "serialize_i32_or_unlimited")]
     pub max_samples: i32,
     /// Maximum number of instances.
+    #[serde(deserialize_with = "deserialize_i32_or_unlimited")]
+    #[serde(serialize_with = "serialize_i32_or_unlimited")]
     pub max_instances: i32,
     /// Maximum number of samples per instance.
+    #[serde(deserialize_with = "deserialize_i32_or_unlimited")]
+    #[serde(serialize_with = "serialize_i32_or_unlimited")]
     pub max_samples_per_instance: i32,
 }
 
