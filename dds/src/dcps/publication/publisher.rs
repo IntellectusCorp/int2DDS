@@ -38,7 +38,9 @@ use crate::{
         error::{DdsError, DdsResult},
         time::Duration,
     },
-    domain::domain_participant::DomainParticipant,
+    domain::{
+        domain_participant::DomainParticipant, domain_participant_factory::DomainParticipantFactory,
+    },
     infrastructure::{
         domain_entity::DomainEntity,
         entity::{
@@ -300,6 +302,17 @@ impl Publisher {
         }
 
         Ok(datawriter)
+    }
+
+    pub fn create_datawriter_with_profile<Foo: 'static + Clone>(
+        &self,
+        topic: &Topic,
+        qos_path: &str,
+        listener: Option<Arc<dyn DataWriterListener<Foo = Foo>>>,
+        mask: StatusMask,
+    ) -> DdsResult<DataWriter<Foo>> {
+        let qos = self.get_datawriter_qos_from_profile(qos_path)?;
+        self.create_datawriter::<Foo>(topic, qos, listener, mask)
     }
 
     pub fn delete_datawriter<Foo: 'static + Clone>(
@@ -782,6 +795,11 @@ impl Publisher {
             Ok(default_datawriter_qos) => Ok(default_datawriter_qos.clone()),
             Err(e) => Err(DdsError::Error(e.to_string())),
         }
+    }
+
+    pub fn get_datawriter_qos_from_profile(&self, qos_path: &str) -> DdsResult<DataWriterQos> {
+        self.is_deleted()?;
+        DomainParticipantFactory::get_instance().get_datawriter_qos_from_profile(qos_path)
     }
 
     pub fn copy_from_topic_qos(
