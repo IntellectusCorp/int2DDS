@@ -44,16 +44,21 @@
 
 use std::{
     collections::HashMap,
+    path::Path,
     sync::{Arc, LazyLock, Mutex, Weak},
 };
 
 use crate::{
     common::{env::init_from_env, instance_handle::InstanceHandle},
+    config::json::QosProvider,
     core::{
         error::{DdsError, DdsResult},
         types::DomainId,
     },
     infrastructure::{qos_policy::Qos, status::StatusMask},
+    publication::qos::{DataWriterQos, PublisherQos},
+    subscription::qos::{DataReaderQos, SubscriberQos},
+    topic::qos::TopicQos,
 };
 
 use super::{
@@ -68,6 +73,7 @@ pub struct DomainParticipantFactory {
     orphaned_participants: Arc<Mutex<Vec<Arc<DomainParticipant>>>>,
     qos: Mutex<DomainParticipantFactoryQos>,
     default_participant_qos: Mutex<DomainParticipantQos>,
+    qos_provider: Mutex<QosProvider>,
 }
 
 impl DomainParticipantFactory {
@@ -345,6 +351,137 @@ impl DomainParticipantFactory {
             }
             Err(e) => Err(DdsError::Error(e.to_string())),
         }
+    }
+
+    // ========== QoS Profile methods ==========
+
+    /// Loads QoS profiles from one or more JSON files.
+    ///
+    /// The loaded profiles can be used with `create_participant_with_profile` and
+    /// `get_*_qos_from_profile` methods to create entities with predefined QoS settings.
+    ///
+    /// Multiple files can be loaded incrementally. If a library with the same name
+    /// already exists, it will be replaced by the new one.
+    ///
+    /// # Arguments
+    /// * `paths` - Slice of file paths to load QoS profiles from
+    ///
+    /// # Errors
+    /// Returns an error if any file cannot be read or parsed.
+    pub fn load_profiles<P: AsRef<Path>>(&self, paths: &[P]) -> DdsResult<()> {
+        let mut provider = self.qos_provider.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        for path in paths {
+            provider.load_file(path.as_ref())?;
+        }
+        Ok(())
+    }
+
+    /// Creates a new `DomainParticipant` using QoS settings from a loaded profile.
+    ///
+    /// # Arguments
+    /// * `domain_id` - The domain ID to join
+    /// * `qos_path` - QoS path in the format `"Library::Profile"` or `"Library::Profile::QosName"`
+    /// * `listener` - Optional listener for status notifications
+    /// * `mask` - Status mask indicating which status changes trigger listener callbacks
+    ///
+    /// # Errors
+    /// Returns an error if the profile is not found or participant creation fails.
+    pub fn create_participant_with_profile(
+        &self,
+        domain_id: DomainId,
+        qos_path: &str,
+        listener: Option<Arc<dyn DomainParticipantListener>>,
+        mask: StatusMask,
+    ) -> DdsResult<DomainParticipant> {
+        let qos = self.get_participant_qos_from_profile(qos_path)?;
+        self.create_participant(domain_id, qos, listener, mask)
+    }
+
+    /// Retrieves `DomainParticipantQos` from a loaded profile.
+    ///
+    /// # Arguments
+    /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    ///
+    /// # Errors
+    /// Returns an error if the profile is not found.
+    pub fn get_participant_qos_from_profile(
+        &self,
+        qos_path: &str,
+    ) -> DdsResult<DomainParticipantQos> {
+        let provider = self.qos_provider.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        provider
+            .get_domainparticipant_qos(qos_path)
+            .ok_or_else(|| DdsError::Error(format!("QoS profile not found: {}", qos_path)))
+    }
+
+    /// Retrieves `PublisherQos` from a loaded profile.
+    ///
+    /// # Arguments
+    /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    ///
+    /// # Errors
+    /// Returns an error if the profile is not found.
+    pub fn get_publisher_qos_from_profile(&self, qos_path: &str) -> DdsResult<PublisherQos> {
+        let provider = self.qos_provider.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        provider
+            .get_publisher_qos(qos_path)
+            .ok_or_else(|| DdsError::Error(format!("QoS profile not found: {}", qos_path)))
+    }
+
+    /// Retrieves `SubscriberQos` from a loaded profile.
+    ///
+    /// # Arguments
+    /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    ///
+    /// # Errors
+    /// Returns an error if the profile is not found.
+    pub fn get_subscriber_qos_from_profile(&self, qos_path: &str) -> DdsResult<SubscriberQos> {
+        let provider = self.qos_provider.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        provider
+            .get_subscriber_qos(qos_path)
+            .ok_or_else(|| DdsError::Error(format!("QoS profile not found: {}", qos_path)))
+    }
+
+    /// Retrieves `TopicQos` from a loaded profile.
+    ///
+    /// # Arguments
+    /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    ///
+    /// # Errors
+    /// Returns an error if the profile is not found.
+    pub fn get_topic_qos_from_profile(&self, qos_path: &str) -> DdsResult<TopicQos> {
+        let provider = self.qos_provider.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        provider
+            .get_topic_qos(qos_path)
+            .ok_or_else(|| DdsError::Error(format!("QoS profile not found: {}", qos_path)))
+    }
+
+    /// Retrieves `DataWriterQos` from a loaded profile.
+    ///
+    /// # Arguments
+    /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    ///
+    /// # Errors
+    /// Returns an error if the profile is not found.
+    pub fn get_datawriter_qos_from_profile(&self, qos_path: &str) -> DdsResult<DataWriterQos> {
+        let provider = self.qos_provider.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        provider
+            .get_datawriter_qos(qos_path)
+            .ok_or_else(|| DdsError::Error(format!("QoS profile not found: {}", qos_path)))
+    }
+
+    /// Retrieves `DataReaderQos` from a loaded profile.
+    ///
+    /// # Arguments
+    /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    ///
+    /// # Errors
+    /// Returns an error if the profile is not found.
+    pub fn get_datareader_qos_from_profile(&self, qos_path: &str) -> DdsResult<DataReaderQos> {
+        let provider = self.qos_provider.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        provider
+            .get_datareader_qos(qos_path)
+            .ok_or_else(|| DdsError::Error(format!("QoS profile not found: {}", qos_path)))
     }
 }
 
