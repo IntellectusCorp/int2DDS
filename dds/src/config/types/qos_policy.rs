@@ -255,10 +255,13 @@ impl From<qos_policy::PartitionQosPolicy> for PartitionQosPolicy {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
 pub(crate) struct ReliabilityQosPolicy {
-    pub(crate) kind: ReliabilityQosPolicyKind,
-    pub(crate) max_blocking_time: Duration,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) kind: Option<ReliabilityQosPolicyKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) max_blocking_time: Option<Duration>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -268,33 +271,39 @@ pub(crate) enum ReliabilityQosPolicyKind {
     ReliableReliabilityQos,
 }
 
-impl From<ReliabilityQosPolicy> for qos_policy::ReliabilityQosPolicy {
-    fn from(external: ReliabilityQosPolicy) -> Self {
-        match external.kind {
-            ReliabilityQosPolicyKind::BestEffortReliabilityQos => Self {
-                kind: qos_policy::ReliabilityQosPolicyKind::BestEffort,
-                max_blocking_time: external.max_blocking_time,
-            },
-            ReliabilityQosPolicyKind::ReliableReliabilityQos => Self {
-                kind: qos_policy::ReliabilityQosPolicyKind::Reliable,
-                max_blocking_time: external.max_blocking_time,
-            },
-        }
+/// Default max_blocking_time: 100ms
+pub(crate) const DEFAULT_MAX_BLOCKING_TIME: Duration = Duration { sec: 0, nanosec: 100_000_000 };
+
+impl ReliabilityQosPolicy {
+    /// Returns true if either kind or max_blocking_time is specified.
+    pub(crate) fn has_any_field(&self) -> bool {
+        self.kind.is_some() || self.max_blocking_time.is_some()
+    }
+
+    /// Converts kind to internal representation if present.
+    pub(crate) fn into_internal_kind(&self) -> Option<qos_policy::ReliabilityQosPolicyKind> {
+        self.kind.as_ref().map(|k| match k {
+            ReliabilityQosPolicyKind::BestEffortReliabilityQos => {
+                qos_policy::ReliabilityQosPolicyKind::BestEffort
+            }
+            ReliabilityQosPolicyKind::ReliableReliabilityQos => {
+                qos_policy::ReliabilityQosPolicyKind::Reliable
+            }
+        })
     }
 }
 
 impl From<qos_policy::ReliabilityQosPolicy> for ReliabilityQosPolicy {
     fn from(internal: qos_policy::ReliabilityQosPolicy) -> Self {
-        match internal.kind {
-            qos_policy::ReliabilityQosPolicyKind::BestEffort => Self {
-                kind: ReliabilityQosPolicyKind::BestEffortReliabilityQos,
-                max_blocking_time: internal.max_blocking_time,
-            },
-            qos_policy::ReliabilityQosPolicyKind::Reliable => Self {
-                kind: ReliabilityQosPolicyKind::ReliableReliabilityQos,
-                max_blocking_time: internal.max_blocking_time,
-            },
-        }
+        let kind = match internal.kind {
+            qos_policy::ReliabilityQosPolicyKind::BestEffort => {
+                ReliabilityQosPolicyKind::BestEffortReliabilityQos
+            }
+            qos_policy::ReliabilityQosPolicyKind::Reliable => {
+                ReliabilityQosPolicyKind::ReliableReliabilityQos
+            }
+        };
+        Self { kind: Some(kind), max_blocking_time: Some(internal.max_blocking_time) }
     }
 }
 

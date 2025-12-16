@@ -5,8 +5,9 @@ use crate::{
         DestinationOrderQosPolicy, DurabilityQosPolicy, DurabilityServiceQosPolicy,
         GroupDataQosPolicy, HistoryQosPolicy, LivelinessQosPolicy, OwnershipQosPolicy,
         PartitionQosPolicy, PresentationQosPolicy, ReliabilityQosPolicy, TopicDataQosPolicy,
-        UserDataQosPolicy,
+        UserDataQosPolicy, DEFAULT_MAX_BLOCKING_TIME,
     },
+    infrastructure::qos_policy as internal_qos_policy,
     domain,
     infrastructure::qos_policy::{
         DeadlineQosPolicy, EntityFactoryQosPolicy, LatencyBudgetQosPolicy, LifespanQosPolicy,
@@ -118,7 +119,16 @@ impl From<DataWriterQos> for publication::qos::DataWriterQos {
         }
 
         if let Some(reliability) = external.reliability {
-            qos.reliability = reliability.into();
+            if reliability.has_any_field() {
+                // DataWriter default: Reliable
+                let kind = reliability
+                    .into_internal_kind()
+                    .unwrap_or(internal_qos_policy::ReliabilityQosPolicyKind::Reliable);
+                let max_blocking_time =
+                    reliability.max_blocking_time.unwrap_or(DEFAULT_MAX_BLOCKING_TIME);
+                qos.reliability =
+                    internal_qos_policy::ReliabilityQosPolicy { kind, max_blocking_time };
+            }
         }
 
         if let Some(destination_order) = external.destination_order {
@@ -269,7 +279,16 @@ impl From<DataReaderQos> for subscription::qos::DataReaderQos {
         }
 
         if let Some(reliability) = external.reliability {
-            qos.reliability = reliability.into();
+            if reliability.has_any_field() {
+                // DataReader default: BestEffort
+                let kind = reliability
+                    .into_internal_kind()
+                    .unwrap_or(internal_qos_policy::ReliabilityQosPolicyKind::BestEffort);
+                let max_blocking_time =
+                    reliability.max_blocking_time.unwrap_or(DEFAULT_MAX_BLOCKING_TIME);
+                qos.reliability =
+                    internal_qos_policy::ReliabilityQosPolicy { kind, max_blocking_time };
+            }
         }
 
         if let Some(destination_order) = external.destination_order {
@@ -420,7 +439,16 @@ impl From<TopicQos> for topic::qos::TopicQos {
         }
 
         if let Some(reliability) = external.reliability {
-            qos.reliability = reliability.into();
+            if reliability.has_any_field() {
+                // Topic default: BestEffort
+                let kind = reliability
+                    .into_internal_kind()
+                    .unwrap_or(internal_qos_policy::ReliabilityQosPolicyKind::BestEffort);
+                let max_blocking_time =
+                    reliability.max_blocking_time.unwrap_or(DEFAULT_MAX_BLOCKING_TIME);
+                qos.reliability =
+                    internal_qos_policy::ReliabilityQosPolicy { kind, max_blocking_time };
+            }
         }
 
         if let Some(destination_order) = external.destination_order {
