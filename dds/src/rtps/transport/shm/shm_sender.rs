@@ -12,7 +12,7 @@ use std::sync::Mutex;
 
 use crate::rtps::transport::shm::platform::{shm_segment_name, SharedMemory};
 use crate::rtps::transport::shm::ring_buffer::{
-    RingBufferHeader, RingBufferWriter, DEFAULT_BUFFER_SIZE, DEFAULT_MAX_MESSAGE_SIZE,
+    get_buffer_size, RingBufferHeader, RingBufferWriter, DEFAULT_MAX_MESSAGE_SIZE,
 };
 use crate::rtps::transport::{Transport, TransportType};
 use log::{debug, info, warn};
@@ -37,7 +37,8 @@ impl ShmSender {
         info!("[ShmSender] Creating SHM sender for domain {}", domain_id);
 
         let segment_name = shm_segment_name(domain_id);
-        let total_size = RingBufferHeader::SIZE + DEFAULT_BUFFER_SIZE;
+        let buffer_size = get_buffer_size();
+        let total_size = RingBufferHeader::SIZE + buffer_size;
 
         // Create or attach to shared memory segment
         let shm = match SharedMemory::new(&segment_name, total_size, true) {
@@ -52,7 +53,7 @@ impl ShmSender {
                 if shm.is_creator() {
                     let header = shm.as_ptr() as *mut RingBufferHeader;
                     unsafe {
-                        (*header).init(DEFAULT_BUFFER_SIZE as u32, DEFAULT_MAX_MESSAGE_SIZE as u32);
+                        (*header).init(buffer_size as u32, DEFAULT_MAX_MESSAGE_SIZE as u32);
                     }
                     info!("[ShmSender] Ring buffer header initialized");
                 }
