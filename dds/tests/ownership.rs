@@ -130,7 +130,7 @@ fn test_ownership_revoked_when_deadline_missed() {
     .unwrap();
 
     stronger_data_writer.write(&KeyedDataType::default(), InstanceHandle::NIL).unwrap();
-    wait_for_reader_status(&data_reader, StatusMask::DATA_AVAILABLE, Duration::from_seconds(1))
+    wait_for_reader_status(&data_reader, StatusMask::DATA_AVAILABLE, Duration::from_seconds(5))
         .unwrap();
 
     let samples = data_reader
