@@ -81,11 +81,11 @@ path = "examples/hello_world/hello_world_param.rs"
 
 [[example]]
 name = "perftest_publisher"
-path = "examples/performace_test/perftest_publisher.rs"
+path = "examples/performance_test/perftest_publisher.rs"
 
 [[example]]
 name = "perftest_subscriber"
-path = "examples/performace_test/perftest_subscriber.rs"
+path = "examples/performance_test/perftest_subscriber.rs"
 
 [dev-dependencies]
 husky-rs = "0.1.5"
