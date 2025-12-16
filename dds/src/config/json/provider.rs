@@ -90,7 +90,9 @@ macro_rules! impl_get_qos {
                     .and_then(|lib| lib.qos_profiles.as_ref())
                     .map(|profiles| profiles.iter().map(|p| p.name.as_str()).collect())
                     .unwrap_or_default();
-                let path = QosPath::parse_base_name(base_name, library_name, profile_name, &profile_names).ok()?;
+                let path =
+                    QosPath::parse_base_name(base_name, library_name, profile_name, &profile_names)
+                        .ok()?;
                 let base = self.$internal_fn_name(
                     &path.library,
                     path.profile.as_deref(),
@@ -575,9 +577,7 @@ mod tests {
 
         let provider = QosProvider::from_json(json).unwrap();
 
-        let derived = provider
-            .get_datawriter_qos("TestLibrary::Profile1::DerivedQos")
-            .unwrap();
+        let derived = provider.get_datawriter_qos("TestLibrary::Profile1::DerivedQos").unwrap();
 
         // derived should have its own history
         assert!(derived.history.is_some());
@@ -621,9 +621,7 @@ mod tests {
 
         let provider = QosProvider::from_json(json).unwrap();
 
-        let derived = provider
-            .get_datawriter_qos("TestLibrary::Profile1::DerivedQos")
-            .unwrap();
+        let derived = provider.get_datawriter_qos("TestLibrary::Profile1::DerivedQos").unwrap();
 
         // derived should override reliability
         assert!(derived.reliability.is_some());
@@ -668,9 +666,7 @@ mod tests {
 
         let provider = QosProvider::from_json(json).unwrap();
 
-        let child = provider
-            .get_datawriter_qos("TestLibrary::Profile1::ChildQos")
-            .unwrap();
+        let child = provider.get_datawriter_qos("TestLibrary::Profile1::ChildQos").unwrap();
 
         // child should have its own history
         assert!(child.history.is_some());
@@ -720,9 +716,8 @@ mod tests {
 
         let provider = QosProvider::from_json(json).unwrap();
 
-        let derived = provider
-            .get_datawriter_qos("TestLibrary::DerivedProfile::DerivedQos")
-            .unwrap();
+        let derived =
+            provider.get_datawriter_qos("TestLibrary::DerivedProfile::DerivedQos").unwrap();
 
         // derived should have its own history
         assert!(derived.history.is_some());
@@ -775,9 +770,7 @@ mod tests {
 
         let provider = QosProvider::from_json(json).unwrap();
 
-        let app_qos = provider
-            .get_datawriter_qos("AppLibrary::AppProfile::AppQos")
-            .unwrap();
+        let app_qos = provider.get_datawriter_qos("AppLibrary::AppProfile::AppQos").unwrap();
 
         // app_qos should have its own durability
         assert!(app_qos.durability.is_some());
@@ -843,9 +836,7 @@ mod tests {
 
         let provider = QosProvider::from_json(json).unwrap();
 
-        let derived = provider
-            .get_datareader_qos("TestLibrary::Profile1::DerivedReader")
-            .unwrap();
+        let derived = provider.get_datareader_qos("TestLibrary::Profile1::DerivedReader").unwrap();
 
         assert!(derived.history.is_some());
         assert!(derived.reliability.is_some());
@@ -880,9 +871,7 @@ mod tests {
 
         let provider = QosProvider::from_json(json).unwrap();
 
-        let derived = provider
-            .get_topic_qos("TestLibrary::Profile1::DerivedTopic")
-            .unwrap();
+        let derived = provider.get_topic_qos("TestLibrary::Profile1::DerivedTopic").unwrap();
 
         assert!(derived.reliability.is_some());
         assert!(derived.durability.is_some());
@@ -914,9 +903,8 @@ mod tests {
 
         let provider = QosProvider::from_json(json).unwrap();
 
-        let derived = provider
-            .get_publisher_qos("TestLibrary::Profile1::DerivedPublisher")
-            .unwrap();
+        let derived =
+            provider.get_publisher_qos("TestLibrary::Profile1::DerivedPublisher").unwrap();
 
         assert!(derived.group_data.is_some());
         assert!(derived.partition.is_some());
@@ -948,9 +936,8 @@ mod tests {
 
         let provider = QosProvider::from_json(json).unwrap();
 
-        let derived = provider
-            .get_subscriber_qos("TestLibrary::Profile1::DerivedSubscriber")
-            .unwrap();
+        let derived =
+            provider.get_subscriber_qos("TestLibrary::Profile1::DerivedSubscriber").unwrap();
 
         assert!(derived.group_data.is_some());
         assert!(derived.partition.is_some());
@@ -1007,9 +994,7 @@ mod tests {
 
         let provider = QosProvider::from_json(json).unwrap();
 
-        let qos = provider
-            .get_datawriter_qos("TestLibrary::Profile1")
-            .unwrap();
+        let qos = provider.get_datawriter_qos("TestLibrary::Profile1").unwrap();
 
         // base_name 없이도 정상 동작
         assert!(qos.reliability.is_some());
@@ -1059,9 +1044,8 @@ mod tests {
 
         let provider = QosProvider::from_json(json).unwrap();
 
-        let derived = provider
-            .get_datawriter_qos("TestLibrary::Profile1::PartialOverride")
-            .unwrap();
+        let derived =
+            provider.get_datawriter_qos("TestLibrary::Profile1::PartialOverride").unwrap();
 
         // overridden
         assert!(derived.reliability.is_some());
@@ -1118,9 +1102,8 @@ mod tests {
         let provider = QosProvider::from_json(json).unwrap();
 
         // Profile2::DerivedWriterQos should inherit from Profile1's first QoS (FirstWriterQos)
-        let derived = provider
-            .get_datawriter_qos("TestLibrary::Profile2::DerivedWriterQos")
-            .unwrap();
+        let derived =
+            provider.get_datawriter_qos("TestLibrary::Profile2::DerivedWriterQos").unwrap();
 
         // own setting
         assert!(derived.history.is_some());
@@ -1145,7 +1128,13 @@ mod tests {
     #[test]
     fn test_qos_path_parse_single_name_as_profile() {
         // "BaseProfile" matches a profile name, so it's treated as profile reference
-        let path = QosPath::parse_base_name("BaseProfile", "MyLib", Some("MyProfile"), &["BaseProfile", "OtherProfile"]).unwrap();
+        let path = QosPath::parse_base_name(
+            "BaseProfile",
+            "MyLib",
+            Some("MyProfile"),
+            &["BaseProfile", "OtherProfile"],
+        )
+        .unwrap();
         assert_eq!(path.library.as_str(), "MyLib");
         assert_eq!(path.profile.as_deref(), Some("BaseProfile"));
         assert_eq!(path.qos_name, None); // Will resolve to first QoS in BaseProfile
@@ -1154,7 +1143,8 @@ mod tests {
     #[test]
     fn test_qos_path_parse_profile_and_name() {
         let path =
-            QosPath::parse_base_name("OtherProfile::BaseQos", "MyLib", Some("MyProfile"), &[]).unwrap();
+            QosPath::parse_base_name("OtherProfile::BaseQos", "MyLib", Some("MyProfile"), &[])
+                .unwrap();
         assert_eq!(path.library.as_str(), "MyLib");
         assert_eq!(path.profile.as_deref(), Some("OtherProfile"));
         assert_eq!(path.qos_name.as_deref(), Some("BaseQos"));
@@ -1162,9 +1152,13 @@ mod tests {
 
     #[test]
     fn test_qos_path_parse_full_path() {
-        let path =
-            QosPath::parse_base_name("OtherLib::OtherProfile::BaseQos", "MyLib", Some("MyProfile"), &[])
-                .unwrap();
+        let path = QosPath::parse_base_name(
+            "OtherLib::OtherProfile::BaseQos",
+            "MyLib",
+            Some("MyProfile"),
+            &[],
+        )
+        .unwrap();
         assert_eq!(path.library.as_str(), "OtherLib");
         assert_eq!(path.profile.as_deref(), Some("OtherProfile"));
         assert_eq!(path.qos_name.as_deref(), Some("BaseQos"));
@@ -1235,9 +1229,7 @@ mod tests {
         assert!(provider.get_library("AppLibrary").is_some());
 
         // Cross-library inheritance should work
-        let app_qos = provider
-            .get_datawriter_qos("AppLibrary::AppProfile::AppQos")
-            .unwrap();
+        let app_qos = provider.get_datawriter_qos("AppLibrary::AppProfile::AppQos").unwrap();
 
         assert!(app_qos.durability.is_some());
         assert!(app_qos.reliability.is_some());
