@@ -1,18 +1,12 @@
-use std::{
-    sync::{Arc, Mutex},
-    thread::JoinHandle,
-};
-
 use log::trace;
 
 use crate::rtps::{
     common::{
-        guid::Guid,
         locator::Locator,
         rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
     },
     entities::entity::Entity as _,
-    logic::data::participant_message_processor::ParticipantAccessor,
+    logic::message_processor::participant_message_processor::ParticipantAccessor,
     messages::{
         header::Header,
         message_receiver::{MessageReceiver, TypedSubmessage},
@@ -30,7 +24,7 @@ pub(crate) trait UnicastMessageSender: ParticipantAccessor {
         T: IntoIterator<Item = Locator>;
 }
 
-pub(crate) trait UnicastMessageHandler: ParticipantAccessor {
+pub(crate) trait UnicastMessageProcessor: ParticipantAccessor {
     fn handle_rtps_message(&mut self, message_receiver: MessageReceiver) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
 
@@ -49,23 +43,23 @@ pub(crate) trait UnicastMessageHandler: ParticipantAccessor {
 
         for submessage in submessages {
             match submessage {
-                TypedSubmessage::Data(header, data) => {
-                    self.handle_data_message(&rtps_header, &header, &data)?;
+                TypedSubmessage::Data(_header, data) => {
+                    self.handle_data_message(&rtps_header, &data, &message_receiver)?;
                 }
                 TypedSubmessage::Heartbeat(header, heartbeat) => {
                     self.handle_heartbeat_message(&rtps_header, &header, &heartbeat)?;
                 }
-                TypedSubmessage::AckNack(header, acknack) => {
-                    self.handle_acknack_message(&rtps_header, &header, &acknack)?;
+                TypedSubmessage::AckNack(_header, acknack) => {
+                    self.handle_acknack_message(&rtps_header, &acknack)?;
                 }
-                TypedSubmessage::DataFrag(header, data_frag) => {
-                    self.handle_datafrag_message(&rtps_header, &header, &data_frag)?;
+                TypedSubmessage::DataFrag(_header, data_frag) => {
+                    self.handle_datafrag_message(&rtps_header, &data_frag, &message_receiver)?;
                 }
-                TypedSubmessage::NackFrag(header, nack_frag) => {
-                    self.handle_nackfrag_message(&rtps_header, &header, &nack_frag)?;
+                TypedSubmessage::NackFrag(_header, nack_frag) => {
+                    self.handle_nackfrag_message(&rtps_header, &nack_frag)?;
                 }
-                TypedSubmessage::Gap(header, gap) => {
-                    self.handle_gap_message(&rtps_header, &header, &gap)?;
+                TypedSubmessage::Gap(_header, gap) => {
+                    self.handle_gap_message(&rtps_header, &gap)?;
                 }
             }
         }
@@ -76,8 +70,8 @@ pub(crate) trait UnicastMessageHandler: ParticipantAccessor {
     fn handle_data_message(
         &mut self,
         rtps_header: &Header,
-        submessage_header: &SubmessageHeader,
         data: &Data,
+        message_receiver: &MessageReceiver,
     ) -> RtpsResult<()>;
 
     fn handle_heartbeat_message(
@@ -87,18 +81,23 @@ pub(crate) trait UnicastMessageHandler: ParticipantAccessor {
         heartbeat: &Heartbeat,
     ) -> RtpsResult<()>;
 
-    fn handle_acknack_message(
+    fn handle_acknack_message(&mut self, rtps_header: &Header, acknack: &AckNack)
+        -> RtpsResult<()>;
+
+    fn handle_preemptive_acknack_message(
         &mut self,
-        rtps_header: &Header,
-        submessage_header: &SubmessageHeader,
-        acknack: &AckNack,
-    ) -> RtpsResult<()>;
+        _rtps_header: &Header,
+        _acknack: &AckNack,
+    ) -> RtpsResult<()> {
+        trace!("Preemptive AckNack is not to be handled here.");
+        Ok(())
+    }
 
     fn handle_datafrag_message(
         &mut self,
         _rtps_header: &Header,
-        _submessage_header: &SubmessageHeader,
         _data_frag: &DataFrag,
+        _message_receiver: &MessageReceiver,
     ) -> RtpsResult<()> {
         trace!("Unsupported message type: DataFrag");
         Ok(())
@@ -107,19 +106,13 @@ pub(crate) trait UnicastMessageHandler: ParticipantAccessor {
     fn handle_nackfrag_message(
         &mut self,
         _rtps_header: &Header,
-        _submessage_header: &SubmessageHeader,
         _nack_frag: &NackFrag,
     ) -> RtpsResult<()> {
         trace!("Unsupported message type: NackFrag");
         Ok(())
     }
 
-    fn handle_gap_message(
-        &mut self,
-        _rtps_header: &Header,
-        _submessage_header: &SubmessageHeader,
-        _gap: &Gap,
-    ) -> RtpsResult<()> {
+    fn handle_gap_message(&mut self, _rtps_header: &Header, _gap: &Gap) -> RtpsResult<()> {
         trace!("Unsupported message type: Gap");
         Ok(())
     }

@@ -56,7 +56,9 @@ use crate::{
             },
         },
         logic::data::builtin_endpoint_pair::BuiltinEndpointPair,
-        logic::data::participant_message_processor::ParticipantMessageProcessor,
+        logic::message_processor::participant_message_processor::{
+            ParticipantAccessor, ParticipantMessageProcessor,
+        },
         messages::{
             message_creator::MessageCreator,
             message_receiver::{MessageReceiver, TypedSubmessage},
@@ -2331,13 +2333,15 @@ impl SedpLogic {
     }
 }
 
-impl ParticipantMessageProcessor for SedpLogic {
+impl ParticipantAccessor for SedpLogic {
     fn get_upgraded_participant(&self) -> RtpsResult<Arc<Participant>> {
         Ok(self.participant.upgrade().ok_or_else(|| {
             RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped")
         })?)
     }
 }
+
+impl ParticipantMessageProcessor for SedpLogic {}
 
 #[cfg(test)]
 mod tests {
