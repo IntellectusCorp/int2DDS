@@ -1132,7 +1132,7 @@ mod tests {
         // inherited from Profile1's first QoS (FirstWriterQos)
         // Reliability should be RELIABLE (from FirstWriterQos) with max_blocking_time of 5 sec
         let reliability = derived.reliability.as_ref().unwrap();
-        assert_eq!(reliability.max_blocking_time.sec, 5);
+        assert_eq!(reliability.max_blocking_time.as_ref().unwrap().sec, 5);
         // Durability should be inherited from FirstWriterQos
         assert!(derived.durability.is_some());
     }
