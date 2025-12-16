@@ -109,17 +109,9 @@ impl ConstDefault for TopicQos {
 impl Qos for TopicQos {
     fn check_unsupported_policies(&self) -> DdsResult<()> {
         if self.topic_data != TopicDataQosPolicy::default()
-            || self.durability != DurabilityQosPolicy::default()
             || self.durability_service != DurabilityServiceQosPolicy::default()
-            || self.deadline != DeadlineQosPolicy::default()
             || self.latency_budget != LatencyBudgetQosPolicy::default()
-            || self.liveliness != LivelinessQosPolicy::default()
-            || self.reliability.kind != ReliabilityQosPolicyKind::BestEffort
-            || self.history != HistoryQosPolicy::default()
-            || self.resource_limits != ResourceLimitsQosPolicy::default()
             || self.transport_priority != TransportPriorityQosPolicy::default()
-            || self.lifespan != LifespanQosPolicy::default()
-            || self.ownership != OwnershipQosPolicy::default()
         {
             return Err(DdsError::Unsupported);
         }
