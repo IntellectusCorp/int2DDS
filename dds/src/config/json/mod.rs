@@ -1,1 +1,3 @@
-pub(crate) mod provider;
+mod provider;
+
+pub use provider::QosProvider;
