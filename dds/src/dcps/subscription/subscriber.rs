@@ -294,6 +294,22 @@ impl Subscriber {
         Ok(datareader)
     }
 
+    /// Creates a new `DataReader` using QoS settings from a loaded profile.
+    ///
+    /// This is a convenience method that retrieves QoS from the profile and delegates
+    /// to [`create_datareader`](Self::create_datareader).
+    ///
+    /// # Arguments
+    ///
+    /// * `topic_description` - The topic description to read data from.
+    /// * `qos_path` - QoS path in the format `"Library::Profile"` or `"Library::Profile::QosName"`.
+    ///   See [`QosProvider`](crate::config::json::QosProvider) for supported path formats.
+    /// * `listener` - Optional listener for status notifications.
+    /// * `mask` - Status mask indicating which status changes trigger listener callbacks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the profile is not found or datareader creation fails.
     pub fn create_datareader_with_profile<Foo: DdsType>(
         &self,
         topic_description: &dyn TopicDescription,
@@ -837,6 +853,15 @@ impl Subscriber {
         }
     }
 
+    /// Retrieves `DataReaderQos` from a loaded profile.
+    ///
+    /// # Arguments
+    ///
+    /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscriber is deleted or the profile is not found.
     pub fn get_datareader_qos_from_profile(&self, qos_path: &str) -> DdsResult<DataReaderQos> {
         self.is_deleted()?;
         DomainParticipantFactory::get_instance().get_datareader_qos_from_profile(qos_path)
