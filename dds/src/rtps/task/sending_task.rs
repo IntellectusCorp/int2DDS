@@ -77,47 +77,26 @@ impl SendingTask {
     }
 
     pub(crate) fn create_worker_task(&self, message: MessageType) -> RtpsResult<()> {
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.participant.upgrade().ok_or_else(|| {
+            RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped")
+        })?;
         let mut spdp_logic = self
             .spdp_logic
             .as_ref()
             .as_ref()
-            .ok_or(RtpsError::new(RtpsErrorCode::DataNotSet, "SpdpLogic is not initialized"))?
+            .ok_or_else(|| {
+                RtpsError::new(RtpsErrorCode::DataNotSet, "SpdpLogic is not initialized")
+            })?
             .clone();
-        let sedp_logic = self
-            .sedp_logic
-            .as_ref()
-            .as_ref()
-            .ok_or(RtpsError::new(RtpsErrorCode::DataNotSet, "SedpLogic is not initialized"))?;
-        let user_logic = self
-            .user_logic
-            .as_ref()
-            .as_ref()
-            .ok_or(RtpsError::new(RtpsErrorCode::DataNotSet, "UserLogic is not initialized"))?;
+        let sedp_logic = self.sedp_logic.as_ref().as_ref().ok_or_else(|| {
+            RtpsError::new(RtpsErrorCode::DataNotSet, "SedpLogic is not initialized")
+        })?;
+        let user_logic = self.user_logic.as_ref().as_ref().ok_or_else(|| {
+            RtpsError::new(RtpsErrorCode::DataNotSet, "UserLogic is not initialized")
+        })?;
 
         match message {
-            MessageType::SpdpMulticast(start_time, duration, domain_id, data) => {
-                spdp_logic.send_spdp_multicast(start_time, duration, domain_id, data)?;
-                Ok(())
-            }
-
-            MessageType::Sedp(duration, spdp_discovered_participant_data, data) => {
-                sedp_logic.send_sedp_message(duration, spdp_discovered_participant_data, data)?;
-                Ok(())
-            }
-
-            MessageType::SedpSpdp(start_time, duration, spdp_discovered_participant_data, data) => {
-                sedp_logic.send_sedp_spdp_message(
-                    start_time,
-                    duration,
-                    spdp_discovered_participant_data,
-                    data,
-                )
-            }
-            MessageType::P2p(start_time, duration, participant_message_data) => {
+            MessageType::P2pData(start_time, duration, participant_message_data) => {
                 if let Some(wlp_logic) = participant.wlp_logic() {
                     wlp_logic.send_participant_message_data(
                         start_time,
@@ -125,11 +104,44 @@ impl SendingTask {
                         participant_message_data,
                     )?;
                 }
+
                 Ok(())
             }
 
-            MessageType::SedpPublication(start_time, duration, guid_prefix) => {
-                sedp_logic.send_sedp_heartbeat_message(
+            MessageType::P2pHeartbeat(target_guid_prefix) => {
+                if let Some(wlp_logic) = participant.wlp_logic() {
+                    wlp_logic.send_liveliness_heartbeat(false, false, None, target_guid_prefix)?;
+                }
+
+                Ok(())
+            }
+
+            MessageType::PeriodicParticipantDataMulticast(
+                start_time,
+                duration,
+                domain_id,
+                data,
+            ) => {
+                spdp_logic.send_periodic_participant_data_multicast(
+                    start_time, duration, domain_id, data,
+                )?;
+                Ok(())
+            }
+
+            MessageType::PeriodicParticipantDataUnicast(
+                start_time,
+                duration,
+                spdp_discovered_participant_data,
+                data,
+            ) => sedp_logic.send_periodic_participant_data_unicast(
+                start_time,
+                duration,
+                spdp_discovered_participant_data,
+                data,
+            ),
+
+            MessageType::PeriodicPublicationHeartbeat(start_time, duration, guid_prefix) => {
+                sedp_logic.send_sedp_periodic_heartbeat_message(
                     start_time,
                     duration,
                     guid_prefix,
@@ -138,8 +150,8 @@ impl SendingTask {
                 Ok(())
             }
 
-            MessageType::SedpSubscription(start_time, duration, guid_prefix) => {
-                sedp_logic.send_sedp_heartbeat_message(
+            MessageType::PeriodicSubscriptionHeartbeat(start_time, duration, guid_prefix) => {
+                sedp_logic.send_sedp_periodic_heartbeat_message(
                     start_time,
                     duration,
                     guid_prefix,
@@ -148,8 +160,8 @@ impl SendingTask {
                 Ok(())
             }
 
-            MessageType::SedpTopic(start_time, duration, guid_prefix) => {
-                sedp_logic.send_sedp_heartbeat_message(
+            MessageType::PeriodicSedpTopicHeartbeat(start_time, duration, guid_prefix) => {
+                sedp_logic.send_sedp_periodic_heartbeat_message(
                     start_time,
                     duration,
                     guid_prefix,
@@ -158,12 +170,18 @@ impl SendingTask {
                 Ok(())
             }
 
-            MessageType::SendHeartbeatMessageToAll(entity_id) => {
+            MessageType::SedpTerminateEndpoint(builtin_writer_guid, cache_change) => {
+                let sedp_logic = sedp_logic;
+                sedp_logic.send_endpoint_termination_message(builtin_writer_guid, cache_change)?;
+                Ok(())
+            }
+
+            MessageType::UserHeartbeatToAll(entity_id) => {
                 user_logic.send_heartbeat_message_to_all_reader_proxies(entity_id)?;
                 Ok(())
             }
 
-            MessageType::SendHeartbeatMessageToOne(
+            MessageType::UserHeartbeatToOne(
                 writer_entity_id,
                 remote_reader_guid,
                 is_preemptive,
@@ -176,19 +194,18 @@ impl SendingTask {
                 Ok(())
             }
 
-            MessageType::SendUnsentChanges(writer_entity_id) => {
+            MessageType::UserUnsentChanges(writer_entity_id) => {
                 user_logic.send_unsent_changes(writer_entity_id)?;
                 Ok(())
             }
 
-            MessageType::SendRequestedChanges(writer_entity_id, remote_reader_guid) => {
+            MessageType::UserRequestedChanges(writer_entity_id, remote_reader_guid) => {
                 user_logic.send_requested_changes(writer_entity_id, remote_reader_guid)?;
                 Ok(())
             }
 
-            MessageType::SedpTerminateEndpoint(builtin_writer_guid, cache_change) => {
-                let sedp_logic = sedp_logic;
-                sedp_logic.send_endpoint_termination_message(builtin_writer_guid, cache_change)?;
+            MessageType::UserPreemptiveAcknack(reader_id, remote_writer_guid) => {
+                user_logic.send_preemptive_acknack(reader_id, remote_writer_guid)?;
                 Ok(())
             }
 
@@ -199,17 +216,6 @@ impl SendingTask {
                     // user_logic
                     //     .on_reader_cache_change_removal(entity_id, sequence_number);
                 }
-                Ok(())
-            }
-
-            MessageType::OnSpdpMessageArrival(participant_proxy_data) => {
-                spdp_logic.handle_multicast_spdp_message(participant_proxy_data.clone())?;
-                spdp_logic.handle_participant_liveliness(participant_proxy_data)?;
-                Ok(())
-            }
-
-            MessageType::SendPreemptiveAcknack(reader_id, remote_writer_guid) => {
-                user_logic.send_preemptive_acknack(reader_id, remote_writer_guid)?;
                 Ok(())
             }
         }
@@ -243,10 +249,9 @@ impl SendingTask {
     pub(crate) fn event_loop(&mut self, queue: Arc<Mutex<Vec<MessageType>>>) -> RtpsResult<()> {
         log::info!("start sending task thread");
 
-        let participant = self
-            .participant
-            .upgrade()
-            .ok_or(RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped"))?;
+        let participant = self.participant.upgrade().ok_or_else(|| {
+            RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped")
+        })?;
 
         loop {
             if let Err(e) =

@@ -22,7 +22,7 @@ A **Rust implementation** of the [Data Distribution Service (DDS)](https://www.o
 - **QoS Policies**: Comprehensive Quality of Service support (Reliability, Durability, History, Liveliness, etc.)
 - **Automatic Discovery**: Built-in SPDP and SEDP for automatic endpoint discovery
 - **Type Safety**: Compile-time type checking with `#[derive(DdsType)]` macro
-- **Transport Flexibility**: UDP multicast, broadcast, and TCP transport support
+- **Transport Flexibility**: UDP multicast, and TCP transport support
 - **Data Fragmentation**: Automatic handling of large messages
 - **XCDR2 Serialization**: Support for extensible data representation
 - **Cross-Platform**: Works on Windows, Linux, and macOS
@@ -248,7 +248,7 @@ int2DDS supports various environment variables for configuration:
 
 - `INT2DDS_NETWORK_INTERFACE`: Specify network interface (e.g., "eth0")
 - `INT2DDS_NETWORK_IP`: Specify network IP address directly
-- `INT2DDS_BROADCAST_ENABLED`: Enable broadcast discovery alongside multicast
+- `INT2DDS_EXTENDED_DISCOVERY`: Enable extended discovery alongside multicast
 - `INT2DDS_THREAD_MONITORING`: Enable thread monitoring and logging
 - `INT2DDS_FUNCTION_TIMING`: Enable function performance profiling
 - `RUST_LOG`: Control logging level (error, warn, info, debug, trace)
