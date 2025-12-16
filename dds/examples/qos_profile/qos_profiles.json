@@ -1,0 +1,71 @@
+{
+    "name": "HelloWorldLibrary",
+    "qos_profiles": [
+        {
+            "name": "ReliableProfile",
+            "publisher_qos": {
+                "partition": {
+                    "name": { "element": ["HelloWorldPartition"] }
+                }
+            },
+            "subscriber_qos": {
+                "partition": {
+                    "name": { "element": ["HelloWorldPartition"] }
+                }
+            },
+            "topic_qos": {
+                "reliability": {
+                    "kind": "RELIABLE_RELIABILITY_QOS"
+                },
+                "durability": {
+                    "kind": "TRANSIENT_LOCAL_DURABILITY_QOS"
+                }
+            },
+            "datawriter_qos": {
+                "reliability": {
+                    "kind": "RELIABLE_RELIABILITY_QOS"
+                },
+                "durability": {
+                    "kind": "TRANSIENT_LOCAL_DURABILITY_QOS"
+                },
+                "history": {
+                    "kind": "KEEP_LAST_HISTORY_QOS",
+                    "depth": 10
+                }
+            },
+            "datareader_qos": {
+                "reliability": {
+                    "kind": "RELIABLE_RELIABILITY_QOS"
+                },
+                "durability": {
+                    "kind": "TRANSIENT_LOCAL_DURABILITY_QOS"
+                },
+                "history": {
+                    "kind": "KEEP_LAST_HISTORY_QOS",
+                    "depth": 10
+                }
+            }
+        },
+        {
+            "name": "BestEffortProfile",
+            "datawriter_qos": {
+                "reliability": {
+                    "kind": "BEST_EFFORT_RELIABILITY_QOS"
+                },
+                "history": {
+                    "kind": "KEEP_LAST_HISTORY_QOS",
+                    "depth": 1
+                }
+            },
+            "datareader_qos": {
+                "reliability": {
+                    "kind": "BEST_EFFORT_RELIABILITY_QOS"
+                },
+                "history": {
+                    "kind": "KEEP_LAST_HISTORY_QOS",
+                    "depth": 1
+                }
+            }
+        }
+    ]
+}
