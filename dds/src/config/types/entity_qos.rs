@@ -16,7 +16,6 @@ use crate::{
     publication, subscription, topic,
 };
 
-#[allow(dead_code)]
 pub(crate) trait MergeQos {
     fn merge(&self, base: &Self) -> Self;
 }
