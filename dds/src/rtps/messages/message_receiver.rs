@@ -363,18 +363,9 @@ impl MessageReceiver {
     }
 
     pub(crate) fn is_dst_me(&self, guid_prefix: GuidPrefix) -> bool {
-        let mut dst_me = false;
-
-        if let Some(rtps_message) = &self.rtps_message {
-            for submessage in &rtps_message.submessages {
-                if let SubmessageBody::InfoDestination(info_destination) = &submessage.body {
-                    if info_destination.guid_prefix() == guid_prefix {
-                        dst_me = true;
-                    }
-                }
-            }
-        }
-        dst_me
+        // self.dest_guid_prefix is set from InfoDestination submessage,
+        // check from_destination()
+        self.dest_guid_prefix == guid_prefix
     }
 
     fn process_discovery_parameters(
