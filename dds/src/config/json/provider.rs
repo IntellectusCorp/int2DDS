@@ -5,18 +5,30 @@ use serde::{Deserialize, Serialize};
 use crate::{
     config::types::{
         entity_qos::{
-            DataReaderQos, DataWriterQos, DomainParticipantQos, MergeQos, PublisherQos,
-            SubscriberQos, TopicQos,
+            DataReaderQos as ConfigDataReaderQos, DataWriterQos as ConfigDataWriterQos,
+            DomainParticipantQos as ConfigDomainParticipantQos, MergeQos,
+            PublisherQos as ConfigPublisherQos, SubscriberQos as ConfigSubscriberQos,
+            TopicQos as ConfigTopicQos,
         },
         qos_profile::{QosLibrary, QosProfile, SingleOrSeq},
     },
     core::error::{DdsError, DdsResult},
+    dcps::{
+        domain::qos::DomainParticipantQos,
+        publication::qos::{DataWriterQos, PublisherQos},
+        subscription::qos::{DataReaderQos, SubscriberQos},
+        topic::qos::TopicQos,
+    },
 };
 
 macro_rules! impl_get_qos {
-    ($fn_name:ident, $internal_fn_name:ident, $qos_type:ty, $field:ident, $doc:expr) => {
+    ($fn_name:ident, $internal_fn_name:ident, $config_qos_type:ty, $dcps_qos_type:ty, $field:ident, $doc:expr) => {
         #[doc = $doc]
-        pub fn $fn_name(&self, path: &str) -> Option<$qos_type> {
+        pub fn $fn_name(&self, path: &str) -> Option<$dcps_qos_type> {
+            self.$internal_fn_name(path).map(|qos| qos.into())
+        }
+
+        pub(crate) fn $internal_fn_name(&self, path: &str) -> Option<$config_qos_type> {
             // Empty path: return first available QoS
             if path.is_empty() {
                 for lib in self.libraries.values() {
@@ -52,19 +64,10 @@ macro_rules! impl_get_qos {
             }
 
             let parsed = QosPath::parse(path).ok()?;
-            self.$internal_fn_name(
-                &parsed.library,
-                parsed.profile.as_deref(),
-                parsed.qos_name.as_deref(),
-            )
-        }
+            let library_name = &parsed.library;
+            let profile_name = parsed.profile.as_deref();
+            let qos_name = parsed.qos_name.as_deref();
 
-        fn $internal_fn_name(
-            &self,
-            library_name: &str,
-            profile_name: Option<&str>,
-            qos_name: Option<&str>,
-        ) -> Option<$qos_type> {
             let qos_or_named = if let Some(profile_name) = profile_name {
                 self.get_profile(library_name, profile_name)?.$field.as_ref()?
             } else {
@@ -90,14 +93,16 @@ macro_rules! impl_get_qos {
                     .and_then(|lib| lib.qos_profiles.as_ref())
                     .map(|profiles| profiles.iter().map(|p| p.name.as_str()).collect())
                     .unwrap_or_default();
-                let path =
+                let base_path =
                     QosPath::parse_base_name(base_name, library_name, profile_name, &profile_names)
                         .ok()?;
-                let base = self.$internal_fn_name(
-                    &path.library,
-                    path.profile.as_deref(),
-                    path.qos_name.as_deref(),
-                )?;
+                let base_path_str = match (&base_path.profile, &base_path.qos_name) {
+                    (Some(p), Some(q)) => format!("{}::{}::{}", base_path.library, p, q),
+                    (Some(p), None) => format!("{}::{}", base_path.library, p),
+                    (None, Some(q)) => format!("{}::{}", base_path.library, q),
+                    (None, None) => base_path.library.clone(),
+                };
+                let base = self.$internal_fn_name(&base_path_str)?;
                 return Some(qos.merge(&base));
             }
 
@@ -238,6 +243,7 @@ impl QosProvider {
     impl_get_qos!(
         get_datawriter_qos,
         get_datawriter_qos_internal,
+        ConfigDataWriterQos,
         DataWriterQos,
         datawriter_qos,
         "Retrieves a `DataWriterQos` from the provider.\n\n\
@@ -255,6 +261,7 @@ impl QosProvider {
     impl_get_qos!(
         get_datareader_qos,
         get_datareader_qos_internal,
+        ConfigDataReaderQos,
         DataReaderQos,
         datareader_qos,
         "Retrieves a `DataReaderQos` from the provider. See `get_datawriter_qos` for argument details."
@@ -263,6 +270,7 @@ impl QosProvider {
     impl_get_qos!(
         get_topic_qos,
         get_topic_qos_internal,
+        ConfigTopicQos,
         TopicQos,
         topic_qos,
         "Retrieves a `TopicQos` from the provider. See `get_datawriter_qos` for argument details."
@@ -271,6 +279,7 @@ impl QosProvider {
     impl_get_qos!(
         get_subscriber_qos,
         get_subscriber_qos_internal,
+        ConfigSubscriberQos,
         SubscriberQos,
         subscriber_qos,
         "Retrieves a `SubscriberQos` from the provider. See `get_datawriter_qos` for argument details."
@@ -279,6 +288,7 @@ impl QosProvider {
     impl_get_qos!(
         get_publisher_qos,
         get_publisher_qos_internal,
+        ConfigPublisherQos,
         PublisherQos,
         publisher_qos,
         "Retrieves a `PublisherQos` from the provider. See `get_datawriter_qos` for argument details."
@@ -287,6 +297,7 @@ impl QosProvider {
     impl_get_qos!(
         get_domainparticipant_qos,
         get_domainparticipant_qos_internal,
+        ConfigDomainParticipantQos,
         DomainParticipantQos,
         domain_participant_qos,
         "Retrieves a `DomainParticipantQos` from the provider. See `get_datawriter_qos` for argument details."
@@ -401,7 +412,7 @@ mod tests {
         assert!(provider.get_library("NonExistent").is_none());
 
         // 단일 QoS 조회
-        let qos = provider.get_datawriter_qos("TestLibrary");
+        let qos = provider.get_datawriter_qos_internal("TestLibrary");
         assert!(qos.is_some());
     }
 
@@ -430,7 +441,7 @@ mod tests {
         let provider = QosProvider::from_json(json).unwrap();
 
         // Library만 지정하면 seq의 첫 번째 QoS 반환
-        let qos = provider.get_datawriter_qos("TestLibrary");
+        let qos = provider.get_datawriter_qos_internal("TestLibrary");
         assert!(qos.is_some());
     }
 
@@ -457,7 +468,7 @@ mod tests {
         assert!(provider.get_profile("TestLibrary", "NonExistent").is_none());
 
         // profile 내 단일 QoS 조회
-        let qos = provider.get_datawriter_qos("TestLibrary::DefaultProfile");
+        let qos = provider.get_datawriter_qos_internal("TestLibrary::DefaultProfile");
         assert!(qos.is_some());
     }
 
@@ -490,13 +501,13 @@ mod tests {
         let provider = QosProvider::from_json(json).unwrap();
 
         // profile 내 Seq QoS 조회
-        let qos = provider.get_datareader_qos("TestLibrary::MyProfile::Reader1");
+        let qos = provider.get_datareader_qos_internal("TestLibrary::MyProfile::Reader1");
         assert!(qos.is_some());
 
-        let qos = provider.get_datareader_qos("TestLibrary::MyProfile::Reader2");
+        let qos = provider.get_datareader_qos_internal("TestLibrary::MyProfile::Reader2");
         assert!(qos.is_some());
 
-        let qos = provider.get_datareader_qos("TestLibrary::MyProfile::NonExistent");
+        let qos = provider.get_datareader_qos_internal("TestLibrary::MyProfile::NonExistent");
         assert!(qos.is_none());
     }
 
@@ -520,10 +531,10 @@ mod tests {
 
         let provider = QosProvider::from_json(json).unwrap();
 
-        assert!(provider.get_topic_qos("TestLibrary").is_some());
-        assert!(provider.get_publisher_qos("TestLibrary").is_some());
-        assert!(provider.get_subscriber_qos("TestLibrary").is_some());
-        assert!(provider.get_domainparticipant_qos("TestLibrary").is_some());
+        assert!(provider.get_topic_qos_internal("TestLibrary").is_some());
+        assert!(provider.get_publisher_qos_internal("TestLibrary").is_some());
+        assert!(provider.get_subscriber_qos_internal("TestLibrary").is_some());
+        assert!(provider.get_domainparticipant_qos_internal("TestLibrary").is_some());
     }
 
     #[test]
@@ -577,7 +588,8 @@ mod tests {
 
         let provider = QosProvider::from_json(json).unwrap();
 
-        let derived = provider.get_datawriter_qos("TestLibrary::Profile1::DerivedQos").unwrap();
+        let derived =
+            provider.get_datawriter_qos_internal("TestLibrary::Profile1::DerivedQos").unwrap();
 
         // derived should have its own history
         assert!(derived.history.is_some());
@@ -621,7 +633,8 @@ mod tests {
 
         let provider = QosProvider::from_json(json).unwrap();
 
-        let derived = provider.get_datawriter_qos("TestLibrary::Profile1::DerivedQos").unwrap();
+        let derived =
+            provider.get_datawriter_qos_internal("TestLibrary::Profile1::DerivedQos").unwrap();
 
         // derived should override reliability
         assert!(derived.reliability.is_some());
@@ -666,7 +679,8 @@ mod tests {
 
         let provider = QosProvider::from_json(json).unwrap();
 
-        let child = provider.get_datawriter_qos("TestLibrary::Profile1::ChildQos").unwrap();
+        let child =
+            provider.get_datawriter_qos_internal("TestLibrary::Profile1::ChildQos").unwrap();
 
         // child should have its own history
         assert!(child.history.is_some());
@@ -716,8 +730,9 @@ mod tests {
 
         let provider = QosProvider::from_json(json).unwrap();
 
-        let derived =
-            provider.get_datawriter_qos("TestLibrary::DerivedProfile::DerivedQos").unwrap();
+        let derived = provider
+            .get_datawriter_qos_internal("TestLibrary::DerivedProfile::DerivedQos")
+            .unwrap();
 
         // derived should have its own history
         assert!(derived.history.is_some());
@@ -770,7 +785,8 @@ mod tests {
 
         let provider = QosProvider::from_json(json).unwrap();
 
-        let app_qos = provider.get_datawriter_qos("AppLibrary::AppProfile::AppQos").unwrap();
+        let app_qos =
+            provider.get_datawriter_qos_internal("AppLibrary::AppProfile::AppQos").unwrap();
 
         // app_qos should have its own durability
         assert!(app_qos.durability.is_some());
@@ -802,7 +818,7 @@ mod tests {
         let provider = QosProvider::from_json(json).unwrap();
 
         // Should return None because base_name doesn't exist
-        let result = provider.get_datawriter_qos("TestLibrary::Profile1::DerivedQos");
+        let result = provider.get_datawriter_qos_internal("TestLibrary::Profile1::DerivedQos");
         assert!(result.is_none());
     }
 
@@ -836,7 +852,8 @@ mod tests {
 
         let provider = QosProvider::from_json(json).unwrap();
 
-        let derived = provider.get_datareader_qos("TestLibrary::Profile1::DerivedReader").unwrap();
+        let derived =
+            provider.get_datareader_qos_internal("TestLibrary::Profile1::DerivedReader").unwrap();
 
         assert!(derived.history.is_some());
         assert!(derived.reliability.is_some());
@@ -871,7 +888,8 @@ mod tests {
 
         let provider = QosProvider::from_json(json).unwrap();
 
-        let derived = provider.get_topic_qos("TestLibrary::Profile1::DerivedTopic").unwrap();
+        let derived =
+            provider.get_topic_qos_internal("TestLibrary::Profile1::DerivedTopic").unwrap();
 
         assert!(derived.reliability.is_some());
         assert!(derived.durability.is_some());
@@ -904,7 +922,7 @@ mod tests {
         let provider = QosProvider::from_json(json).unwrap();
 
         let derived =
-            provider.get_publisher_qos("TestLibrary::Profile1::DerivedPublisher").unwrap();
+            provider.get_publisher_qos_internal("TestLibrary::Profile1::DerivedPublisher").unwrap();
 
         assert!(derived.group_data.is_some());
         assert!(derived.partition.is_some());
@@ -936,8 +954,9 @@ mod tests {
 
         let provider = QosProvider::from_json(json).unwrap();
 
-        let derived =
-            provider.get_subscriber_qos("TestLibrary::Profile1::DerivedSubscriber").unwrap();
+        let derived = provider
+            .get_subscriber_qos_internal("TestLibrary::Profile1::DerivedSubscriber")
+            .unwrap();
 
         assert!(derived.group_data.is_some());
         assert!(derived.partition.is_some());
@@ -968,7 +987,7 @@ mod tests {
         let provider = QosProvider::from_json(json).unwrap();
 
         let derived = provider
-            .get_domainparticipant_qos("TestLibrary::Profile1::DerivedParticipant")
+            .get_domainparticipant_qos_internal("TestLibrary::Profile1::DerivedParticipant")
             .unwrap();
 
         assert!(derived.entity_factory.is_some());
@@ -994,7 +1013,7 @@ mod tests {
 
         let provider = QosProvider::from_json(json).unwrap();
 
-        let qos = provider.get_datawriter_qos("TestLibrary::Profile1").unwrap();
+        let qos = provider.get_datawriter_qos_internal("TestLibrary::Profile1").unwrap();
 
         // base_name 없이도 정상 동작
         assert!(qos.reliability.is_some());
@@ -1045,7 +1064,7 @@ mod tests {
         let provider = QosProvider::from_json(json).unwrap();
 
         let derived =
-            provider.get_datawriter_qos("TestLibrary::Profile1::PartialOverride").unwrap();
+            provider.get_datawriter_qos_internal("TestLibrary::Profile1::PartialOverride").unwrap();
 
         // overridden
         assert!(derived.reliability.is_some());
@@ -1102,8 +1121,9 @@ mod tests {
         let provider = QosProvider::from_json(json).unwrap();
 
         // Profile2::DerivedWriterQos should inherit from Profile1's first QoS (FirstWriterQos)
-        let derived =
-            provider.get_datawriter_qos("TestLibrary::Profile2::DerivedWriterQos").unwrap();
+        let derived = provider
+            .get_datawriter_qos_internal("TestLibrary::Profile2::DerivedWriterQos")
+            .unwrap();
 
         // own setting
         assert!(derived.history.is_some());
@@ -1229,7 +1249,8 @@ mod tests {
         assert!(provider.get_library("AppLibrary").is_some());
 
         // Cross-library inheritance should work
-        let app_qos = provider.get_datawriter_qos("AppLibrary::AppProfile::AppQos").unwrap();
+        let app_qos =
+            provider.get_datawriter_qos_internal("AppLibrary::AppProfile::AppQos").unwrap();
 
         assert!(app_qos.durability.is_some());
         assert!(app_qos.reliability.is_some());
@@ -1264,10 +1285,10 @@ mod tests {
         assert!(provider.get_library("Lib1").is_some());
         assert!(provider.get_library("Lib2").is_some());
 
-        let qos1 = provider.get_datawriter_qos("Lib1").unwrap();
+        let qos1 = provider.get_datawriter_qos_internal("Lib1").unwrap();
         assert!(qos1.reliability.is_some());
 
-        let qos2 = provider.get_datawriter_qos("Lib2").unwrap();
+        let qos2 = provider.get_datawriter_qos_internal("Lib2").unwrap();
         assert!(qos2.durability.is_some());
     }
 
@@ -1297,7 +1318,7 @@ mod tests {
         provider.load_json(json2).unwrap();
 
         // Second load overwrites first
-        let qos = provider.get_datawriter_qos("MyLibrary").unwrap();
+        let qos = provider.get_datawriter_qos_internal("MyLibrary").unwrap();
         assert!(qos.durability.is_some());
         assert!(qos.reliability.is_none());
     }
@@ -1306,7 +1327,7 @@ mod tests {
     fn test_empty_loader() {
         let provider = QosProvider::new();
         assert!(provider.get_library("Any").is_none());
-        assert!(provider.get_datawriter_qos("Any").is_none());
+        assert!(provider.get_datawriter_qos_internal("Any").is_none());
     }
 
     #[test]
@@ -1324,7 +1345,7 @@ mod tests {
         let provider = QosProvider::from_json(json).unwrap();
 
         // Empty path returns first available QoS
-        let qos = provider.get_datawriter_qos("");
+        let qos = provider.get_datawriter_qos_internal("");
         assert!(qos.is_some());
         assert!(qos.unwrap().reliability.is_some());
     }
@@ -1334,7 +1355,7 @@ mod tests {
         let provider = QosProvider::new();
 
         // Empty path on empty provider returns None
-        let qos = provider.get_datawriter_qos("");
+        let qos = provider.get_datawriter_qos_internal("");
         assert!(qos.is_none());
     }
 
@@ -1357,7 +1378,7 @@ mod tests {
         let provider = QosProvider::from_json(json).unwrap();
 
         // Empty path returns first QoS from profile when no library-level QoS exists
-        let qos = provider.get_datawriter_qos("");
+        let qos = provider.get_datawriter_qos_internal("");
         assert!(qos.is_some());
         assert!(qos.unwrap().durability.is_some());
     }
