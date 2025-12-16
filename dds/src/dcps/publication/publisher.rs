@@ -304,6 +304,22 @@ impl Publisher {
         Ok(datawriter)
     }
 
+    /// Creates a new `DataWriter` using QoS settings from a loaded profile.
+    ///
+    /// This is a convenience method that retrieves QoS from the profile and delegates
+    /// to [`create_datawriter`](Self::create_datawriter).
+    ///
+    /// # Arguments
+    ///
+    /// * `topic` - The topic to write data to.
+    /// * `qos_path` - QoS path in the format `"Library::Profile"` or `"Library::Profile::QosName"`.
+    ///   See [`QosProvider`](crate::config::json::QosProvider) for supported path formats.
+    /// * `listener` - Optional listener for status notifications.
+    /// * `mask` - Status mask indicating which status changes trigger listener callbacks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the profile is not found or datawriter creation fails.
     pub fn create_datawriter_with_profile<Foo: 'static + Clone>(
         &self,
         topic: &Topic,
@@ -797,6 +813,15 @@ impl Publisher {
         }
     }
 
+    /// Retrieves `DataWriterQos` from a loaded profile.
+    ///
+    /// # Arguments
+    ///
+    /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the publisher is deleted or the profile is not found.
     pub fn get_datawriter_qos_from_profile(&self, qos_path: &str) -> DdsResult<DataWriterQos> {
         self.is_deleted()?;
         DomainParticipantFactory::get_instance().get_datawriter_qos_from_profile(qos_path)
