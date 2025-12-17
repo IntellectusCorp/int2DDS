@@ -2282,7 +2282,7 @@ impl DomainParticipant {
         Ok(false)
     }
 
-    pub(crate) fn guid(&self) -> DdsResult<Guid> {
+    pub fn guid(&self) -> DdsResult<Guid> {
         Ok(*self.guid)
     }
 
