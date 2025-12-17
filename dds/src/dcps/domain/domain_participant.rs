@@ -60,10 +60,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use super::{
-    domain_participant_listener::DomainParticipantListener,
-    qos::{DomainParticipantQos, PARTICIPANT_QOS_DEFAULT},
-};
+use super::{domain_participant_listener::DomainParticipantListener, qos::DomainParticipantQos};
 use crate::{
     common::{
         builtin::topic::{
@@ -422,16 +419,6 @@ impl DomainParticipant {
         }
     }
 
-    fn _reset_default_qos(&self) -> DdsResult<()> {
-        match self.qos.lock() {
-            Ok(mut default_qos) => {
-                *default_qos = PARTICIPANT_QOS_DEFAULT;
-                Ok(())
-            }
-            Err(e) => Err(DdsError::Error(e.to_string())),
-        }
-    }
-
     // TODO: RTPS layer implementation must be completed first (Built-in)
     pub fn ignore_participant(&self, _handle: InstanceHandle) -> DdsResult<()> {
         /*
@@ -597,6 +584,31 @@ impl DomainParticipant {
         }
 
         Ok(publisher)
+    }
+
+    /// Creates a new `Publisher` using QoS settings from a loaded profile.
+    ///
+    /// This is a convenience method that retrieves QoS from the profile and delegates
+    /// to [`create_publisher`](Self::create_publisher).
+    ///
+    /// # Arguments
+    ///
+    /// * `qos_path` - QoS path in the format `"Library::Profile"` or `"Library::Profile::QosName"`.
+    ///   See [`QosProvider`](crate::config::json::QosProvider) for supported path formats.
+    /// * `listener` - Optional listener for status notifications.
+    /// * `mask` - Status mask indicating which status changes trigger listener callbacks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the profile is not found or publisher creation fails.
+    pub fn create_publisher_with_profile(
+        &self,
+        qos_path: &str,
+        listener: Option<Arc<dyn PublisherListener>>,
+        mask: StatusMask,
+    ) -> DdsResult<Publisher> {
+        let qos = self.get_publisher_qos_from_profile(qos_path)?;
+        self.create_publisher(qos, listener, mask)
     }
 
     pub fn delete_publisher(&self, mut publisher: Publisher) -> DdsResult<()> {
@@ -765,6 +777,31 @@ impl DomainParticipant {
         }
 
         Ok(subscriber)
+    }
+
+    /// Creates a new `Subscriber` using QoS settings from a loaded profile.
+    ///
+    /// This is a convenience method that retrieves QoS from the profile and delegates
+    /// to [`create_subscriber`](Self::create_subscriber).
+    ///
+    /// # Arguments
+    ///
+    /// * `qos_path` - QoS path in the format `"Library::Profile"` or `"Library::Profile::QosName"`.
+    ///   See [`QosProvider`](crate::config::json::QosProvider) for supported path formats.
+    /// * `listener` - Optional listener for status notifications.
+    /// * `mask` - Status mask indicating which status changes trigger listener callbacks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the profile is not found or subscriber creation fails.
+    pub fn create_subscriber_with_profile(
+        &self,
+        qos_path: &str,
+        listener: Option<Arc<dyn SubscriberListener>>,
+        mask: StatusMask,
+    ) -> DdsResult<Subscriber> {
+        let qos = self.get_subscriber_qos_from_profile(qos_path)?;
+        self.create_subscriber(qos, listener, mask)
     }
 
     pub fn delete_subscriber(&self, mut subscriber: Subscriber) -> DdsResult<()> {
@@ -1337,6 +1374,38 @@ impl DomainParticipant {
         Ok(topic)
     }
 
+    /// Creates a new `Topic` using QoS settings from a loaded profile.
+    ///
+    /// This is a convenience method that retrieves QoS from the profile and delegates
+    /// to [`create_topic`](Self::create_topic).
+    ///
+    /// # Arguments
+    ///
+    /// * `topic_name` - The name of the topic.
+    /// * `type_name` - The registered type name for this topic.
+    /// * `qos_path` - QoS path in the format `"Library::Profile"` or `"Library::Profile::QosName"`.
+    ///   See [`QosProvider`](crate::config::json::QosProvider) for supported path formats.
+    /// * `listener` - Optional listener for status notifications.
+    /// * `mask` - Status mask indicating which status changes trigger listener callbacks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the profile is not found or topic creation fails.
+    pub fn create_topic_with_profile<Foo>(
+        &self,
+        topic_name: &str,
+        type_name: &str,
+        qos_path: &str,
+        listener: Option<Arc<dyn TopicListener>>,
+        mask: StatusMask,
+    ) -> DdsResult<Topic>
+    where
+        Foo: DdsType,
+    {
+        let qos = self.get_topic_qos_from_profile(qos_path)?;
+        self.create_topic::<Foo>(topic_name, type_name, qos, listener, mask)
+    }
+
     pub fn delete_topic(&self, mut topic: Topic) -> DdsResult<()> {
         self.is_deleted()?;
 
@@ -1701,6 +1770,20 @@ impl DomainParticipant {
         Ok(self.default_publisher_qos.lock().map_err(|e| DdsError::Error(e.to_string()))?.clone())
     }
 
+    /// Retrieves `PublisherQos` from a loaded profile.
+    ///
+    /// # Arguments
+    ///
+    /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the participant is deleted or the profile is not found.
+    pub fn get_publisher_qos_from_profile(&self, qos_path: &str) -> DdsResult<PublisherQos> {
+        self.is_deleted()?;
+        DomainParticipantFactory::get_instance().get_publisher_qos_from_profile(qos_path)
+    }
+
     pub fn set_default_subscriber_qos(&self, qos: SubscriberQos) -> DdsResult<()> {
         self.is_deleted()?;
 
@@ -1735,6 +1818,20 @@ impl DomainParticipant {
         Ok(self.default_subscriber_qos.lock().map_err(|e| DdsError::Error(e.to_string()))?.clone())
     }
 
+    /// Retrieves `SubscriberQos` from a loaded profile.
+    ///
+    /// # Arguments
+    ///
+    /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the participant is deleted or the profile is not found.
+    pub fn get_subscriber_qos_from_profile(&self, qos_path: &str) -> DdsResult<SubscriberQos> {
+        self.is_deleted()?;
+        DomainParticipantFactory::get_instance().get_subscriber_qos_from_profile(qos_path)
+    }
+
     pub fn set_default_topic_qos(&self, qos: TopicQos) -> DdsResult<()> {
         self.is_deleted()?;
 
@@ -1767,6 +1864,20 @@ impl DomainParticipant {
         self.is_deleted()?;
 
         Ok(self.default_topic_qos.lock().map_err(|e| DdsError::Error(e.to_string()))?.clone())
+    }
+
+    /// Retrieves `TopicQos` from a loaded profile.
+    ///
+    /// # Arguments
+    ///
+    /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the participant is deleted or the profile is not found.
+    pub fn get_topic_qos_from_profile(&self, qos_path: &str) -> DdsResult<TopicQos> {
+        self.is_deleted()?;
+        DomainParticipantFactory::get_instance().get_topic_qos_from_profile(qos_path)
     }
 
     pub fn get_domain_id(&self) -> DdsResult<DomainId> {
