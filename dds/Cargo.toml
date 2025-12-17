@@ -87,9 +87,18 @@ path = "examples/performance_test/perftest_publisher.rs"
 name = "perftest_subscriber"
 path = "examples/performance_test/perftest_subscriber.rs"
 
+[[example]]
+name = "qos_profile_publisher"
+path = "examples/qos_profile/publisher.rs"
+
+[[example]]
+name = "qos_profile_subscriber"
+path = "examples/qos_profile/subscriber.rs"
+
 [dev-dependencies]
 husky-rs = "0.1.5"
 criterion = { version = "0.7.0", features = ["html_reports"] }
+tempfile = "3"
 
 # Faster than opt-level = 0 and still reasonably debuggable
 # opt-level = 1: keeps most of the code structure while applying light optimizations → much faster debugging

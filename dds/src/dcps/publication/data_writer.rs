@@ -99,7 +99,6 @@ pub trait DataWriterBase: DomainEntity + Send + Any {
 
 pub(crate) trait DataWriterInternal: DataWriterBase {
     fn disable(&self) -> DdsResult<()>;
-    // fn reset_default_qos(&self) -> DdsResult<()>;
     fn clone_boxed(&self) -> Box<dyn DataWriterInternal<Qos = DataWriterQos> + Send>;
     fn as_any(&self) -> &dyn Any;
     fn get_type_id(&self) -> TypeId;
