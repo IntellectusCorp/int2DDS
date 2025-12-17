@@ -13,7 +13,6 @@ pub struct ParticipantBuiltinTopicData {
 }
 
 impl ParticipantBuiltinTopicData {
-    #[allow(dead_code)]
     pub(crate) fn new(participant_guid: Guid, user_data: UserDataQosPolicy) -> Self {
         Self {
             key: BuiltinTopicKey {
