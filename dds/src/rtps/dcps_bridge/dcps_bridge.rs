@@ -44,7 +44,12 @@ use crate::{
             reader::{Reader, StatefulReader, StatelessReader},
             writer::{StatefulWriter, StatelessWriter, Writer},
         },
-        logic::{sedp_logic::SedpLogic, spdp_logic::SpdpLogic, user_logic::UserLogic},
+        logic::{
+            common::{JoinAllThread as _, UnicastThreadHandler as _},
+            sedp_logic::SedpLogic,
+            spdp_logic::SpdpLogic,
+            user_logic::UserLogic,
+        },
         messages::sedp_message::SEDPMessage,
         service::background_service::BackgroundService,
         task::{

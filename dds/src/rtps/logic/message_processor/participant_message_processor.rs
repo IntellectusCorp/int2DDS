@@ -35,21 +35,17 @@ use crate::{
         },
         entities::{
             entity::Entity,
-            participant::Participant,
             reader::{Reader as _, StatefulReader, WriterProxy},
             writer::{
                 has_reader_locator::HasReaderLocator as _, reader_locator::ReaderLocator,
                 reader_proxy::ReaderProxy, StatefulWriter, Writer as _,
             },
         },
+        logic::common::ParticipantAccessor,
         messages::message_creator::MessageCreator,
         task::sending_handler::{MessageType, SendingHandler},
     },
 };
-
-pub(crate) trait ParticipantAccessor {
-    fn get_upgraded_participant(&self) -> RtpsResult<Arc<Participant>>;
-}
 
 /// Trait for handling participant discovery operations.
 ///

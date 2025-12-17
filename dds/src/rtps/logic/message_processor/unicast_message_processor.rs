@@ -6,7 +6,7 @@ use crate::rtps::{
         rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
     },
     entities::entity::Entity as _,
-    logic::message_processor::participant_message_processor::ParticipantAccessor,
+    logic::common::ParticipantAccessor,
     messages::{
         header::Header,
         message_receiver::{MessageReceiver, TypedSubmessage},
