@@ -2,7 +2,11 @@ mod common;
 
 use common::*;
 use int2dds::{
-    common::instance_handle::InstanceHandle,
+    common::{
+        env::{set_file_log_level, set_log_type},
+        instance_handle::InstanceHandle,
+        log::{LogLevel, LogType},
+    },
     dcps::{
         core::time::Duration,
         domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
@@ -23,6 +27,7 @@ use int2dds::{
         topic::qos::TopicQos,
     },
 };
+use log::debug;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -52,7 +57,10 @@ impl DataReaderListener for ReaderDeadlineListener {
 
 #[test]
 fn test_ownership_revoked_when_deadline_missed() {
-    let domain_id = next_domain_id();
+    set_log_type(LogType::File);
+    set_file_log_level(LogLevel::Debug);
+
+    let domain_id = 81;
     let factory = DomainParticipantFactory::get_instance();
     let participant = factory
         .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
@@ -178,7 +186,10 @@ fn test_ownership_revoked_when_deadline_missed() {
 
 #[test]
 fn test_ownership_revoked_when_liveliness_lost() {
-    let domain_id = next_domain_id();
+    set_log_type(LogType::File);
+    set_file_log_level(LogLevel::Debug);
+
+    let domain_id = 81;
     let factory = DomainParticipantFactory::get_instance();
     let participant = factory
         .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
@@ -278,8 +289,14 @@ fn test_ownership_revoked_when_liveliness_lost() {
     // Wait for stronger writer's liveliness to be lost
     assert!(res.is_ok(), "Liveliness was not lost in time: {:?}", res);
 
+    debug!("Stronger writer lost liveliness.");
+
     // Now weaker writer should become owner
+    debug!("Weaker writer trying to write data...");
     weaker_data_writer.write(&KeyedDataType::new(0, 3), InstanceHandle::NIL).unwrap();
+    debug!("Weaker writer wrote data after stronger writer lost liveliness.");
+
+    debug!("Waiting for data to be available on reader...");
     wait_for_reader_status(&data_reader, StatusMask::DATA_AVAILABLE, Duration::from_seconds(1))
         .unwrap();
 

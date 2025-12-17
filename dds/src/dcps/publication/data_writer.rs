@@ -29,6 +29,8 @@ use std::{
     },
 };
 
+use log::debug;
+
 use crate::{
     common::{
         builtin::topic::{
@@ -830,7 +832,11 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             Some(timestamp.into()),
         )?;
 
+        debug!("add change completed in datawriter");
+
         self.update_liveliness()?;
+
+        debug!("liveliness updated in datawriter");
 
         Ok(())
     }
@@ -1041,6 +1047,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                 self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
             datawriter_cache.add_change_with_cleanup(Arc::new(change))?;
         }
+        debug!("Added change to DataWriterHistoryCache");
         Ok(())
     }
 
