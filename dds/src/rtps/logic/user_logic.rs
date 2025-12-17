@@ -9,6 +9,7 @@ use std::cmp::max;
 use std::ops::Add;
 use std::time::Duration;
 
+use crate::common::builtin::topic::publication_builtin_topic_data::PublicationBuiltinTopicData;
 use crate::common::instance_handle::InstanceHandle;
 use crate::rtps::common::entity_id::EntityId;
 use crate::rtps::common::guid::Guid;
@@ -449,15 +450,8 @@ impl UserLogic {
         writer_entity_id: EntityId,
         remote_reader_guid: Guid,
     ) -> RtpsResult<()> {
-        let participant = self.get_upgraded_participant()?;
-
-        let writer = participant
-            .find_writer_from_entity_id(writer_entity_id)
-            .ok_or_else(|| RtpsError::new(RtpsErrorCode::RtpsEntityNotFound, "No writer found"))?;
-        let stateful_writer =
-            writer.as_any().downcast_ref::<StatefulWriter>().ok_or_else(|| {
-                RtpsError::new(RtpsErrorCode::DowncastError, "Failed to downcast writer")
-            })?;
+        let writer = self.find_stateful_writer(writer_entity_id)?;
+        let stateful_writer = writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
 
         let reader_proxies = stateful_writer.reader_proxies();
         let mut reader_proxies_guard = reader_proxies.lock().map_err(|e| {
@@ -636,16 +630,8 @@ impl UserLogic {
         remote_reader_guid: Guid,
         is_preemptive: bool,
     ) -> RtpsResult<()> {
-        let participant = self.get_upgraded_participant()?;
-
-        let writer = participant
-            .find_writer_from_entity_id(writer_entity_id)
-            .ok_or_else(|| RtpsError::new(RtpsErrorCode::RtpsEntityNotFound, None))?;
-
-        let stateful_writer =
-            writer.as_any().downcast_ref::<StatefulWriter>().ok_or_else(|| {
-                RtpsError::new(RtpsErrorCode::DowncastError, "Failed to downcast writer")
-            })?;
+        let writer = self.find_stateful_writer(writer_entity_id)?;
+        let stateful_writer = writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
 
         let reader_proxies_lock = stateful_writer.reader_proxies();
         let mut reader_proxies = reader_proxies_lock.lock().map_err(|e| {
@@ -795,33 +781,50 @@ impl UserLogic {
         Ok(matched_readers)
     }
 
+    fn find_stateful_writer(
+        &self,
+        entity_id: EntityId,
+    ) -> RtpsResult<Arc<dyn Writer + Send + Sync>> {
+        let participant = self.get_upgraded_participant()?;
+        let writer = participant
+            .find_writer_from_entity_id(entity_id)
+            .ok_or_else(|| RtpsError::new(RtpsErrorCode::RtpsEntityNotFound, None))?;
+        // Type check
+        writer
+            .as_any()
+            .downcast_ref::<StatefulWriter>()
+            .ok_or_else(|| RtpsError::new(RtpsErrorCode::DowncastError, "Not a StatefulWriter"))?;
+        Ok(writer)
+    }
+
+    fn get_remote_writer_attributes(
+        &self,
+        reader: &dyn Reader,
+        remote_writer_guid: Guid,
+    ) -> Option<PublicationBuiltinTopicData> {
+        if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
+            stateful_reader
+                .matched_writer_lookup(remote_writer_guid)
+                .map(|w| w.publication_builtin_topic_data())
+        } else if let Some(stateless_reader) = reader.as_any().downcast_ref::<StatelessReader>() {
+            stateless_reader
+                .matched_writer_lookup(remote_writer_guid)
+                .map(|w| w.publication_builtin_topic_data())
+        } else {
+            None
+        }
+    }
+
     fn apply_writer_attributes_to_change(
         &self,
         reader: Arc<dyn Reader + Send + Sync>,
         remote_writer_guid: Guid,
         cache_change: &mut CacheChange,
     ) -> RtpsResult<()> {
-        let mut ownership_strength = None;
-        let mut lifespan_duration = None;
-
-        if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
-            let writer = stateful_reader.matched_writer_lookup(remote_writer_guid);
-            if let Some(writer) = writer {
-                let data = writer.publication_builtin_topic_data();
-                ownership_strength = Some(data.ownership_strength().value);
-                lifespan_duration = Some(data.lifespan().duration);
-            }
-        } else if let Some(stateless_reader) = reader.as_any().downcast_ref::<StatelessReader>() {
-            let writer = stateless_reader.matched_writer_lookup(remote_writer_guid);
-            if let Some(writer) = writer {
-                let data = writer.publication_builtin_topic_data();
-                ownership_strength = Some(data.ownership_strength().value);
-                lifespan_duration = Some(data.lifespan().duration);
-            }
+        if let Some(data) = self.get_remote_writer_attributes(reader.as_ref(), remote_writer_guid) {
+            cache_change.set_ownership_strength(Some(data.ownership_strength().value));
+            cache_change.set_lifespan_duration(Some(data.lifespan().duration));
         }
-
-        cache_change.set_ownership_strength(ownership_strength);
-        cache_change.set_lifespan_duration(lifespan_duration);
 
         // According to lifespan qos, reception timestamp is checked when source timestamp has abnormal value
         // Need to verify if it's really necessary and whether checking timestamp for each message affects performance
@@ -1453,15 +1456,9 @@ impl UnicastMessageProcessor for UserLogic {
         }
 
         let remote_reader_guid = Guid::new(rtps_header.guid_prefix(), acknack.reader_id);
-        let participant = self.get_upgraded_participant()?;
 
-        let writer = participant
-            .find_writer_from_entity_id(acknack.writer_id)
-            .ok_or_else(|| RtpsError::new(RtpsErrorCode::RtpsEntityNotFound, None))?;
-        let stateful_writer =
-            writer.as_any().downcast_ref::<StatefulWriter>().ok_or_else(|| {
-                RtpsError::new(RtpsErrorCode::DowncastError, "Writer is not a StatefulWriter")
-            })?;
+        let writer = self.find_stateful_writer(acknack.writer_id)?;
+        let stateful_writer = writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
         let reader_proxies = stateful_writer.reader_proxies();
         let mut reader_proxies = reader_proxies.lock().map_err(|e| {
             RtpsError::new(
@@ -1515,20 +1512,10 @@ impl UnicastMessageProcessor for UserLogic {
         rtps_header: &Header,
         acknack: &AckNack,
     ) -> RtpsResult<()> {
-        let participant = self.get_upgraded_participant()?;
         let remote_reader_guid = Guid::new(rtps_header.guid_prefix(), acknack.reader_id);
 
-        let writer = participant
-            .find_writer_from_entity_id(acknack.writer_id)
-            .ok_or_else(|| RtpsError::new(RtpsErrorCode::RtpsEntityNotFound, None))?;
-
-        let stateful_writer =
-            writer.as_any().downcast_ref::<StatefulWriter>().ok_or_else(|| {
-                RtpsError::new(
-                    RtpsErrorCode::DowncastError,
-                    "Only stateful writer can handle acknack",
-                )
-            })?;
+        let writer = self.find_stateful_writer(acknack.writer_id)?;
+        let stateful_writer = writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
 
         let mut reader_proxy =
             stateful_writer.matched_reader_lookup(remote_reader_guid).ok_or_else(|| {
@@ -1613,24 +1600,9 @@ impl UnicastMessageProcessor for UserLogic {
                 let assembled_payload = std::mem::take(&mut buffer.payload);
                 let serialized_data: SerializedData = Arc::<[u8]>::from(assembled_payload);
 
-                // Get ownership strength
-                let mut ownership_strength = None;
-
-                if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
-                    let writer = stateful_reader.matched_writer_lookup(remote_writer_guid);
-                    if let Some(writer) = writer {
-                        let data = writer.publication_builtin_topic_data();
-                        ownership_strength = Some(data.ownership_strength().value);
-                    }
-                } else if let Some(stateless_reader) =
-                    reader.as_any().downcast_ref::<StatelessReader>()
-                {
-                    let writer = stateless_reader.matched_writer_lookup(remote_writer_guid);
-                    if let Some(writer) = writer {
-                        let data = writer.publication_builtin_topic_data();
-                        ownership_strength = Some(data.ownership_strength().value);
-                    }
-                }
+                let ownership_strength = self
+                    .get_remote_writer_attributes(reader.as_ref(), remote_writer_guid)
+                    .map(|data| data.ownership_strength().value);
 
                 let mut assembled_change = CacheChange::new(
                     ChangeKind::Alive,
@@ -1669,16 +1641,8 @@ impl UnicastMessageProcessor for UserLogic {
         let writer_sn = nack_frag.writer_sn;
         let frag_state = &nack_frag.fragment_number_state;
 
-        let participant = self.get_upgraded_participant()?;
-
-        let writer = participant
-            .find_writer_from_entity_id(writer_id)
-            .ok_or_else(|| RtpsError::new(RtpsErrorCode::InvalidEntityKind, "Writer not found"))?;
-
-        let stateful_writer =
-            writer.as_any().downcast_ref::<StatefulWriter>().ok_or_else(|| {
-                RtpsError::new(RtpsErrorCode::InvalidEntityKind, "Writer is not a StatefulWriter")
-            })?;
+        let writer = self.find_stateful_writer(writer_id)?;
+        let stateful_writer = writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
 
         // Lock acquisition order to prevent deadlock: reader_proxies -> history_cache
         let reader_proxies = stateful_writer.reader_proxies();
