@@ -1609,26 +1609,33 @@ impl DomainParticipant {
     }
 
     // TODO: RTPS layer implementation must precede this (Built-in)
-    pub fn get_discovered_participants(
-        &self,
-        _participant_handles: Vec<InstanceHandle>,
-    ) -> DdsResult<Vec<InstanceHandle>> {
+    pub fn get_discovered_participants(&self) -> DdsResult<Vec<InstanceHandle>> {
         /*
             Among the DomainParticipants discovered in the domain,
             Retrieves a list of DomainParticipants that the application has not specified to "ignore" through the ignore_participant operation.
             If the infrastructure does not maintain connectivity information locally
-            This operation may fail, in which case it returns UNSUPPORTED.
         */
+        // TODO: Filter out participants ignored via ignore_participant operation
         self.is_deleted()?;
-        Err(DdsError::Unsupported)
+        let rtps_participant = self.get_rtps_participant()?;
+        let proxy_datas = rtps_participant.remote_participant_proxy_datas();
+        let result = match proxy_datas.lock() {
+            Ok(datas) => {
+                let handles = datas
+                    .iter()
+                    .map(|data| InstanceHandle::from_guid(&data.participant_guid()))
+                    .collect();
+                Ok(handles)
+            }
+            Err(e) => Err(DdsError::Error(e.to_string())),
+        };
+        result
     }
 
-    // TODO: RTPS layer implementation must precede this (Built-in)
     pub fn get_discovered_participant_data(
         &self,
-        _participant_data: ParticipantBuiltinTopicData,
-        _participant_handles: Vec<InstanceHandle>,
-    ) -> DdsResult<TopicBuiltinTopicData> {
+        participant_handle: InstanceHandle,
+    ) -> DdsResult<ParticipantBuiltinTopicData> {
         /*
             This operation retrieves information about DomainParticipants discovered on the network.
             The Participant must belong to the same domain as the DomainParticipant on which this operation is called,
@@ -1637,17 +1644,22 @@ impl DomainParticipant {
             Otherwise the operation fails and returns PRECONDITION_NOT_MET.
             The get_discovered_participants operation can be used to find currently discovered DomainParticipants.
             If the infrastructure does not maintain the information needed to fill participant_data,
-            This operation may fail and return UNSUPPORTED.
         */
+        // TODO: Filter out participants ignored via ignore_participant operation
         self.is_deleted()?;
-        Err(DdsError::Unsupported)
+        let participant_guid = participant_handle.to_guid();
+        let rtps_participant = self.get_rtps_participant()?;
+        let proxy_datas = rtps_participant.remote_participant_proxy_datas();
+        let datas_guard = proxy_datas.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        let proxy_data = datas_guard
+            .iter()
+            .find(|data| data.participant_guid() == participant_guid)
+            .ok_or(DdsError::PreconditionNotMet)?;
+        Ok(ParticipantBuiltinTopicData::new(participant_guid, proxy_data.user_data().clone()))
     }
 
     // TODO: RTPS layer implementation must precede this (Built-in)
-    pub fn get_discovered_topics(
-        &self,
-        _topic_handles: Vec<InstanceHandle>,
-    ) -> DdsResult<Vec<InstanceHandle>> {
+    pub fn get_discovered_topics(&self) -> DdsResult<Vec<InstanceHandle>> {
         /*
             Among the Topics discovered in the domain,
             retrieves a list of Topics that the application has not specified to "ignore" through the ignore_topic operation.
@@ -1659,8 +1671,7 @@ impl DomainParticipant {
     // TODO: RTPS layer implementation must precede this (Built-in)
     pub fn get_discovered_topic_data(
         &self,
-        _topic_data: TopicBuiltinTopicData,
-        _topic_handles: Vec<InstanceHandle>,
+        _topic_handle: InstanceHandle,
     ) -> DdsResult<TopicBuiltinTopicData> {
         /*
             This operation retrieves information about Topics discovered on the network.
