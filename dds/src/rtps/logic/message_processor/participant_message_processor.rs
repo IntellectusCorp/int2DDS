@@ -258,7 +258,7 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
         Ok(())
     }
 
-    // Create broadcasting rtps message for SPDP
+    // Create extended discovery rtps message for SPDP
     fn create_spdp_message(&self) -> RtpsResult<Option<Arc<Vec<u8>>>> {
         let data = match MessageCreator::create_spdp_msg(self.get_upgraded_participant()?.clone()) {
             Ok(rtps_message) => {
