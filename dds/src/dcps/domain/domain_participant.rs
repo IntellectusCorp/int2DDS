@@ -922,7 +922,7 @@ impl DomainParticipant {
         Err(DdsError::Unsupported)
     }
 
-    // TODO: In the future, when ContentFilteredTopic and MultiTopic are implemented, extend this function to
+    // TODO: In the future, when MultiTopic are implemented, extend this function to
     // TODO: Should enable searching for TopicDescription of this type.
     pub fn lookup_topicdescription(
         &self,
