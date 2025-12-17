@@ -259,7 +259,7 @@ impl SpdpLogic {
     }
 
     pub(crate) fn create_spdp_message(&self) -> RtpsResult<Option<Arc<Vec<u8>>>> {
-        // Create broadcasting rtps message for SPDP
+        // Create extended discovery rtps message for SPDP
         let data = match MessageCreator::create_spdp_msg(self.get_upgraded_participant()?.clone()) {
             Ok(rtps_message) => {
                 match rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian) {

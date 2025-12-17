@@ -6,8 +6,8 @@
 //!
 //! If the library is not found, fallback behavior is used:
 //! - `get_working_ip()` uses UDP socket to detect local IP (fallback)
-//! - `init_broadcast()` returns `Ok(())` (no-op)
-//! - `send_broadcast()` returns `Ok(())` (no-op)
+//! - `init_extended_discovery()` returns `Ok(())` (no-op)
+//! - `send_extended_discovery()` returns `Ok(())` (no-op)
 //! - `get_heartbeat_period_seconds()` returns the default period
 
 use libloading::{Library, Symbol};
@@ -49,8 +49,8 @@ const LIBRARY_NAME: &str = "libint2dds_feature.dylib";
 // ============================================================================
 
 type GetWorkingIpFn = unsafe extern "C" fn(*mut c_char, usize) -> i32;
-type InitBroadcastFn = unsafe extern "C" fn(RawSocket) -> i32;
-type SendBroadcastFn = unsafe extern "C" fn(RawSocket, u16, *const u8, usize, u32) -> i32;
+type InitExtendedDiscoveryFn = unsafe extern "C" fn(RawSocket) -> i32;
+type SendExtendedDiscoveryFn = unsafe extern "C" fn(RawSocket, u16, *const u8, usize, u32) -> i32;
 type GetHeartbeatPeriodFn = unsafe extern "C" fn(f64) -> f64;
 
 // ============================================================================
@@ -60,11 +60,11 @@ type GetHeartbeatPeriodFn = unsafe extern "C" fn(f64) -> f64;
 /// Cached function pointers from the dynamic library
 struct FeatureFunctions {
     /// HOT PATH: Called on every multicast send - placed first for cache efficiency
-    send_broadcast: SendBroadcastFn,
+    send_extended_discovery: SendExtendedDiscoveryFn,
     /// Cold: Called once at startup
     get_working_ip: GetWorkingIpFn,
     /// Cold: Called once per socket creation
-    init_broadcast: InitBroadcastFn,
+    init_extended_discovery: InitExtendedDiscoveryFn,
     /// Cold: Called once at startup
     get_heartbeat_period: GetHeartbeatPeriodFn,
 }
@@ -109,11 +109,11 @@ fn try_load_library() -> std::io::Result<FeatureLib> {
 
     // Load all function pointers
     unsafe {
-        let send_broadcast: Symbol<SendBroadcastFn> =
-            library.get(b"int2dds_feature_send_broadcast").map_err(|e| {
+        let send_extended_discovery: Symbol<SendExtendedDiscoveryFn> =
+            library.get(b"int2dds_feature_send_extended_discovery").map_err(|e| {
                 std::io::Error::new(
                     std::io::ErrorKind::NotFound,
-                    format!("Symbol int2dds_feature_send_broadcast not found: {}", e),
+                    format!("Symbol int2dds_feature_send_extended_discovery not found: {}", e),
                 )
             })?;
 
@@ -125,11 +125,11 @@ fn try_load_library() -> std::io::Result<FeatureLib> {
                 )
             })?;
 
-        let init_broadcast: Symbol<InitBroadcastFn> =
-            library.get(b"int2dds_feature_init_broadcast").map_err(|e| {
+        let init_extended_discovery: Symbol<InitExtendedDiscoveryFn> =
+            library.get(b"int2dds_feature_init_extended_discovery").map_err(|e| {
                 std::io::Error::new(
                     std::io::ErrorKind::NotFound,
-                    format!("Symbol int2dds_feature_init_broadcast not found: {}", e),
+                    format!("Symbol int2dds_feature_init_extended_discovery not found: {}", e),
                 )
             })?;
 
@@ -143,9 +143,9 @@ fn try_load_library() -> std::io::Result<FeatureLib> {
 
         // Copy function pointers (they remain valid as long as library is loaded)
         let functions = FeatureFunctions {
-            send_broadcast: *send_broadcast,
+            send_extended_discovery: *send_extended_discovery,
             get_working_ip: *get_working_ip,
-            init_broadcast: *init_broadcast,
+            init_extended_discovery: *init_extended_discovery,
             get_heartbeat_period: *get_heartbeat_period,
         };
 
@@ -236,30 +236,30 @@ pub fn get_heartbeat_period_seconds(default_period: f64) -> f64 {
     }
 }
 
-/// Initialize broadcast on a socket
+/// Initialize extended discovery on a socket
 ///
 /// Safe wrapper around the FFI function.
 /// If the library is not available, returns Ok(()) (no-op).
-pub fn init_broadcast(socket: &Socket) -> std::io::Result<()> {
+pub fn init_extended_discovery(socket: &Socket) -> std::io::Result<()> {
     let lib = match get_feature_lib() {
         Some(lib) => lib,
         None => return Ok(()), // Fallback: no-op
     };
 
     let raw = socket_to_raw(socket);
-    let ret = unsafe { (lib.functions.init_broadcast)(raw) };
+    let ret = unsafe { (lib.functions.init_extended_discovery)(raw) };
 
     if ret == INT2DDS_FEATURE_OK {
         Ok(())
     } else {
         Err(std::io::Error::new(
             std::io::ErrorKind::Other,
-            format!("int2dds_feature_init_broadcast failed with code {}", ret),
+            format!("int2dds_feature_init_extended_discovery failed with code {}", ret),
         ))
     }
 }
 
-/// Send broadcast message - HOT PATH
+/// Send extended discovery message - HOT PATH
 ///
 /// This function is called on every multicast send.
 /// Performance characteristics after initialization:
@@ -267,9 +267,9 @@ pub fn init_broadcast(socket: &Socket) -> std::io::Result<()> {
 /// - 1 Option check (branch prediction friendly)
 /// - 1 indirect function call through cached pointer
 ///
-/// If the library is not available, returns Ok(()) (no-op, broadcast disabled).
+/// If the library is not available, returns Ok(()) (no-op, extended discovery disabled).
 #[inline]
-pub fn send_broadcast(
+pub fn send_extended_discovery(
     socket: &Socket,
     port: u16,
     data: &[u8],
@@ -278,19 +278,20 @@ pub fn send_broadcast(
     // Fast path check
     let lib = match get_feature_lib() {
         Some(lib) => lib,
-        None => return Ok(()), // Fallback: broadcast not available
+        None => return Ok(()), // Fallback: extended discovery not available
     };
 
     let raw = socket_to_raw(socket);
-    let ret =
-        unsafe { (lib.functions.send_broadcast)(raw, port, data.as_ptr(), data.len(), domain_id) };
+    let ret = unsafe {
+        (lib.functions.send_extended_discovery)(raw, port, data.as_ptr(), data.len(), domain_id)
+    };
 
     if ret == INT2DDS_FEATURE_OK {
         Ok(())
     } else {
         Err(std::io::Error::new(
             std::io::ErrorKind::Other,
-            format!("int2dds_feature_send_broadcast failed with code {}", ret),
+            format!("int2dds_feature_send_extended_discovery failed with code {}", ret),
         ))
     }
 }

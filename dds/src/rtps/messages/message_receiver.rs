@@ -71,7 +71,7 @@ pub(crate) struct MessageReceiver {
     have_timestamp: bool,
     timestamp: RtpsTime,
     rtps_message: Option<Arc<RtpsMessage>>,
-    sender_addr: SocketAddr, // for broadcast message
+    sender_addr: SocketAddr, // for extended discovery message
 }
 
 #[allow(dead_code)]
