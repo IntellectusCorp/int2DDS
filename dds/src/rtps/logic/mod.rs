@@ -15,6 +15,7 @@
 //! - [`user_logic`] - User data exchange logic
 //! - [`wlp_logic`] - Writer Liveliness Protocol logic
 
+pub(crate) mod common;
 pub(crate) mod data;
 pub(crate) mod message_processor;
 pub(crate) mod sedp_logic;

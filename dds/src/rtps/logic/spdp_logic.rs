@@ -20,9 +20,8 @@ use crate::rtps::{
         types::DomainId,
     },
     entities::{participant::Participant, writer::Writer},
-    logic::message_processor::participant_message_processor::{
-        ParticipantAccessor, ParticipantMessageProcessor,
-    },
+    logic::common::{impl_participant_accessor, ParticipantAccessor},
+    logic::message_processor::participant_message_processor::ParticipantMessageProcessor,
     messages::message_creator::MessageCreator,
     task::{
         sending_handler::{MessageType, SendingHandler},
@@ -40,13 +39,7 @@ pub(crate) struct SpdpLogic {
     timer_handler: Arc<Mutex<TimerHandler>>,
 }
 
-impl ParticipantAccessor for SpdpLogic {
-    fn get_upgraded_participant(&self) -> RtpsResult<Arc<Participant>> {
-        Ok(self.participant.upgrade().ok_or_else(|| {
-            RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped")
-        })?)
-    }
-}
+impl_participant_accessor!(SpdpLogic);
 
 impl ParticipantMessageProcessor for SpdpLogic {}
 

@@ -55,9 +55,14 @@ use crate::{
                 StatelessWriter, Writer,
             },
         },
-        logic::data::builtin_endpoint_pair::BuiltinEndpointPair,
-        logic::message_processor::participant_message_processor::{
-            ParticipantAccessor, ParticipantMessageProcessor,
+        logic::{
+            common::{
+                impl_multicast_thread_handler, impl_participant_accessor,
+                impl_unicast_thread_handler, JoinAllThread, MulticastThreadHandler,
+                ParticipantAccessor, UnicastThreadHandler,
+            },
+            data::builtin_endpoint_pair::BuiltinEndpointPair,
+            message_processor::participant_message_processor::ParticipantMessageProcessor,
         },
         messages::{
             message_creator::MessageCreator,
@@ -236,40 +241,6 @@ impl SedpLogic {
         }
 
         Ok(())
-    }
-
-    pub(crate) fn join_multicast_listening_thread(&self) -> RtpsResult<()> {
-        if let Ok(mut handle_guard) = self.multicast_listening_handle.lock() {
-            if let Some(handle) = handle_guard.take() {
-                handle.join().map_err(|_| RtpsError::new(RtpsErrorCode::ThreadJoinError, None))?;
-            }
-        }
-        Ok(())
-    }
-
-    pub(crate) fn join_unicast_listening_thread(&self) -> RtpsResult<()> {
-        if let Ok(mut handle_guard) = self.unicast_listening_handle.lock() {
-            if let Some(handle) = handle_guard.take() {
-                handle.join().map_err(|_| RtpsError::new(RtpsErrorCode::ThreadJoinError, None))?;
-            }
-        }
-        Ok(())
-    }
-
-    pub(crate) fn join_all_listening_threads(&self) -> RtpsResult<()> {
-        self.join_multicast_listening_thread()?;
-        self.join_unicast_listening_thread()?;
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn get_multicast_listening_handle(&self) -> Arc<Mutex<Option<JoinHandle<()>>>> {
-        Arc::clone(&self.multicast_listening_handle)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn get_unicast_listening_handle(&self) -> Arc<Mutex<Option<JoinHandle<()>>>> {
-        Arc::clone(&self.unicast_listening_handle)
     }
 
     fn timer_sleep_and_send_message(
@@ -2333,15 +2304,12 @@ impl SedpLogic {
     }
 }
 
-impl ParticipantAccessor for SedpLogic {
-    fn get_upgraded_participant(&self) -> RtpsResult<Arc<Participant>> {
-        Ok(self.participant.upgrade().ok_or_else(|| {
-            RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped")
-        })?)
-    }
-}
+impl_participant_accessor!(SedpLogic);
+impl_unicast_thread_handler!(SedpLogic);
+impl_multicast_thread_handler!(SedpLogic);
 
 impl ParticipantMessageProcessor for SedpLogic {}
+impl JoinAllThread for SedpLogic {}
 
 #[cfg(test)]
 mod tests {

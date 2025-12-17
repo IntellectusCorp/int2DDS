@@ -13,6 +13,7 @@ use crate::common::instance_handle::InstanceHandle;
 use crate::rtps::common::entity_id::EntityId;
 use crate::rtps::common::guid::Guid;
 use crate::rtps::common::locator::Locator;
+use crate::rtps::common::parameters::ParameterList;
 use crate::rtps::common::rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult};
 use crate::rtps::common::sequence::SequenceNumber;
 use crate::rtps::common::types::DomainId;
@@ -27,7 +28,10 @@ use crate::rtps::entities::reader::{
 use crate::rtps::entities::writer::reader_locator::ReaderLocator;
 use crate::rtps::entities::writer::reader_proxy::ReaderProxy;
 use crate::rtps::entities::writer::{StatefulWriter, StatelessWriter, Writer};
-use crate::rtps::logic::message_processor::participant_message_processor::ParticipantAccessor;
+use crate::rtps::logic::common::{
+    impl_participant_accessor, impl_unicast_thread_handler, ParticipantAccessor,
+    UnicastThreadHandler,
+};
 use crate::rtps::logic::message_processor::unicast_message_processor::UnicastMessageProcessor;
 use crate::rtps::messages::header::Header;
 use crate::rtps::messages::message_creator::MessageCreator;
@@ -791,6 +795,70 @@ impl UserLogic {
         Ok(matched_readers)
     }
 
+    fn apply_writer_attributes_to_change(
+        &self,
+        reader: Arc<dyn Reader + Send + Sync>,
+        remote_writer_guid: Guid,
+        cache_change: &mut CacheChange,
+    ) -> RtpsResult<()> {
+        let mut ownership_strength = None;
+        let mut lifespan_duration = None;
+
+        if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
+            let writer = stateful_reader.matched_writer_lookup(remote_writer_guid);
+            if let Some(writer) = writer {
+                let data = writer.publication_builtin_topic_data();
+                ownership_strength = Some(data.ownership_strength().value);
+                lifespan_duration = Some(data.lifespan().duration);
+            }
+        } else if let Some(stateless_reader) = reader.as_any().downcast_ref::<StatelessReader>() {
+            let writer = stateless_reader.matched_writer_lookup(remote_writer_guid);
+            if let Some(writer) = writer {
+                let data = writer.publication_builtin_topic_data();
+                ownership_strength = Some(data.ownership_strength().value);
+                lifespan_duration = Some(data.lifespan().duration);
+            }
+        }
+
+        cache_change.set_ownership_strength(ownership_strength);
+        cache_change.set_lifespan_duration(lifespan_duration);
+
+        // According to lifespan qos, reception timestamp is checked when source timestamp has abnormal value
+        // Need to verify if it's really necessary and whether checking timestamp for each message affects performance
+        // Current state does not set reception timestamp
+        // if timestamp.is_some()
+        //     && reader.get_lifespan(remote_guid) != LifespanQosPolicy::default()
+        // {
+        //     change.set_reception_timestamp(RtpsTime::now());
+        // }
+
+        Ok(())
+    }
+
+    fn apply_inline_qos_to_change(
+        &self,
+        inline_qos: &ParameterList,
+        cache_change: &mut CacheChange,
+    ) -> RtpsResult<()> {
+        if let Some(key_hash) = inline_qos.get_key_hash() {
+            cache_change.set_instance_handle(key_hash);
+        }
+
+        if let Some(status_info) = inline_qos.get_status_info() {
+            if status_info.disposed() && status_info.unregistered() {
+                cache_change.set_kind(ChangeKind::NotAliveDisposed);
+            } else if status_info.unregistered() {
+                cache_change.set_kind(ChangeKind::NotAliveUnregistered);
+            } else if status_info.disposed() {
+                cache_change.set_kind(ChangeKind::NotAliveDisposed);
+            } else if status_info.filtered() {
+                cache_change.set_kind(ChangeKind::AliveFiltered);
+            }
+        }
+
+        Ok(())
+    }
+
     fn send_rtps_message_to_locators<T>(&self, locators: T, buffer: &[u8]) -> RtpsResult<()>
     where
         T: IntoIterator<Item = Locator>,
@@ -1125,29 +1193,10 @@ impl UserLogic {
             // );
         }
     }
-
-    pub(crate) fn join_unicast_listening_thread(&self) -> RtpsResult<()> {
-        if let Ok(mut handle_guard) = self.unicast_listening_handle.lock() {
-            if let Some(handle) = handle_guard.take() {
-                handle.join().map_err(|_| RtpsError::new(RtpsErrorCode::ThreadJoinError, None))?;
-            }
-        }
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn get_unicast_listening_handle(&self) -> Arc<Mutex<Option<JoinHandle<()>>>> {
-        Arc::clone(&self.unicast_listening_handle)
-    }
 }
 
-impl ParticipantAccessor for UserLogic {
-    fn get_upgraded_participant(&self) -> RtpsResult<Arc<Participant>> {
-        Ok(self.participant.upgrade().ok_or_else(|| {
-            RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped")
-        })?)
-    }
-}
+impl_participant_accessor!(UserLogic);
+impl_unicast_thread_handler!(UserLogic);
 
 impl UnicastMessageProcessor for UserLogic {
     fn handle_data_message(
@@ -1170,26 +1219,6 @@ impl UnicastMessageProcessor for UserLogic {
         }
 
         for reader in matched_readers {
-            let mut ownership_strength = None;
-            let mut lifespan_duration = None;
-
-            if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
-                let writer = stateful_reader.matched_writer_lookup(remote_writer_guid);
-                if let Some(writer) = writer {
-                    let data = writer.publication_builtin_topic_data();
-                    ownership_strength = Some(data.ownership_strength().value);
-                    lifespan_duration = Some(data.lifespan().duration);
-                }
-            } else if let Some(stateless_reader) = reader.as_any().downcast_ref::<StatelessReader>()
-            {
-                let writer = stateless_reader.matched_writer_lookup(remote_writer_guid);
-                if let Some(writer) = writer {
-                    let data = writer.publication_builtin_topic_data();
-                    ownership_strength = Some(data.ownership_strength().value);
-                    lifespan_duration = Some(data.lifespan().duration);
-                }
-            }
-
             let mut change = CacheChange::new(
                 ChangeKind::Alive,
                 remote_writer_guid,
@@ -1200,43 +1229,23 @@ impl UnicastMessageProcessor for UserLogic {
                 message_receiver.get_source_timestamp(),
             );
 
-            change.set_ownership_strength(ownership_strength);
-            change.set_lifespan_duration(lifespan_duration);
-
-            // According to lifespan qos, reception timestamp is checked when source timestamp has abnormal value
-            // Need to verify if it's really necessary and whether checking timestamp for each message affects performance
-            // Current state does not set reception timestamp
-            // if timestamp.is_some()
-            //     && reader.get_lifespan(remote_guid) != LifespanQosPolicy::default()
-            // {
-            //     change.set_reception_timestamp(RtpsTime::now());
-            // }
+            self.apply_writer_attributes_to_change(
+                reader.clone(),
+                remote_writer_guid,
+                &mut change,
+            )?;
 
             if let Some(inline_qos) = data.inline_qos() {
-                if let Some(key_hash) = inline_qos.get_key_hash() {
-                    change.set_instance_handle(key_hash);
-                }
-
-                if let Some(status_info) = inline_qos.get_status_info() {
-                    if status_info.disposed() && status_info.unregistered() {
-                        change.set_kind(ChangeKind::NotAliveDisposed);
-                    } else if status_info.unregistered() {
-                        change.set_kind(ChangeKind::NotAliveUnregistered);
-                    } else if status_info.disposed() {
-                        change.set_kind(ChangeKind::NotAliveDisposed);
-                    } else if status_info.filtered() {
-                        change.set_kind(ChangeKind::AliveFiltered);
-                    }
-                }
+                self.apply_inline_qos_to_change(&inline_qos, &mut change)?;
             }
 
-            let _ = self.deliver_change_to_reader(
+            self.deliver_change_to_reader(
                 change,
                 reader.as_ref(),
                 data.writer_sn,
                 remote_writer_guid,
                 None,
-            );
+            )?;
         }
 
         if let Some(wlp) = self.get_upgraded_participant()?.wlp_logic() {
