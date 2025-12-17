@@ -69,6 +69,12 @@ pub trait ParticipantMessageProcessor {
             spdp_discovered_participant_data.metatraffic_unicast_locator_list()
         );
 
+        // Start monitoring liveliness for the discovered participant
+        self.register_remote_participant_liveliness(
+            &spdp_discovered_participant_data.participant_guid(),
+            spdp_discovered_participant_data.lease_duration().into(),
+        )?;
+
         // Check domain ID match
         if participant.domain_id() != spdp_discovered_participant_data.domain_id() {
             log::trace!(
@@ -114,12 +120,6 @@ pub trait ParticipantMessageProcessor {
 
         // Trigger SEDP message
         self.trigger_send_sedp_message(Arc::new(spdp_discovered_participant_data.clone()))?;
-
-        // Start monitoring liveliness for the discovered participant
-        self.register_remote_participant_liveliness(
-            &spdp_discovered_participant_data.participant_guid(),
-            spdp_discovered_participant_data.lease_duration().into(),
-        )?;
 
         Ok(())
     }

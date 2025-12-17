@@ -240,7 +240,7 @@ fn apply_cli_args_to_env() {
     }
     if let Some(v) = matches.get_one::<String>("int2dds_shm_buffer_size") {
         log::info!("Environment variable set: INT2DDS_SHM_BUFFER_SIZE = {}", v);
-        std::env::set_var("INT2DDS_SHM_BUFFER_SIZE", v);
+        unsafe { std::env::set_var("INT2DDS_SHM_BUFFER_SIZE", v) };
     }
     if let Some(v) = matches.get_one::<String>("int2dds_tcp_connect_timeout") {
         log::info!("Environment variable set: INT2DDS_TCP_CONNECT_TIMEOUT = {}", v);
@@ -335,7 +335,7 @@ pub fn set_udp_socket_buffer_size(size: usize) {
 /// Set the shared memory buffer size via environment variable
 pub fn set_shm_buffer_size(size: usize) {
     log::info!("Environment variable set: INT2DDS_SHM_BUFFER_SIZE = {}", size);
-    std::env::set_var("INT2DDS_SHM_BUFFER_SIZE", size.to_string());
+    unsafe { std::env::set_var("INT2DDS_SHM_BUFFER_SIZE", size.to_string()) };
 }
 
 /// Set the TCP connect timeout via environment variable
