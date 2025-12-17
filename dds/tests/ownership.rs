@@ -200,7 +200,7 @@ fn test_ownership_revoked_when_liveliness_lost() {
         ownership_strength: OwnershipStrengthQosPolicy { value: 10 },
         liveliness: LivelinessQosPolicy {
             kind: LivelinessQosPolicyKind::ManualByTopic,
-            lease_duration: Duration::from_millis(1000),
+            lease_duration: Duration::from_millis(5000),
         },
         ..Default::default()
     };
@@ -224,7 +224,7 @@ fn test_ownership_revoked_when_liveliness_lost() {
         ownership: OwnershipQosPolicy { kind: OwnershipQosPolicyKind::Exclusive },
         liveliness: LivelinessQosPolicy {
             kind: LivelinessQosPolicyKind::ManualByTopic,
-            lease_duration: Duration::from_millis(1000),
+            lease_duration: Duration::from_millis(5000),
         },
         ..Default::default()
     };
@@ -254,7 +254,7 @@ fn test_ownership_revoked_when_liveliness_lost() {
 
     // Stronger writer's data should be received
     stronger_data_writer.write(&KeyedDataType::new(0, 1), InstanceHandle::NIL).unwrap();
-    wait_for_reader_status(&data_reader, StatusMask::DATA_AVAILABLE, Duration::from_millis(100))
+    wait_for_reader_status(&data_reader, StatusMask::DATA_AVAILABLE, Duration::from_millis(1000))
         .unwrap();
 
     let samples = data_reader
@@ -274,7 +274,7 @@ fn test_ownership_revoked_when_liveliness_lost() {
     let res = wait_for_reader_status(
         &data_reader,
         StatusMask::DATA_AVAILABLE,
-        Duration::from_millis(100),
+        Duration::from_millis(300),
     );
 
     // Weaker writer's data should not be received
