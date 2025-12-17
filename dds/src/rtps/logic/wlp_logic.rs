@@ -1341,6 +1341,7 @@ impl WlpLogic {
     }
 
     pub(crate) fn update_local_writer_liveliness(&self, writer_guid: &Guid) -> RtpsResult<()> {
+        debug!("update local writer liveliness");
         if let Some(mut info) = self.local_writers.get_mut(&writer_guid) {
             let was_not_alive = info.alive_state() == WriterAliveState::NotAlive;
             info.set_alive();
@@ -1364,6 +1365,7 @@ impl WlpLogic {
             }
         }
 
+        debug!("update local writer liveliness done");
         Ok(())
     }
 
