@@ -55,12 +55,25 @@ impl Submessage {
         let submessage_len = submessage_header.submessage_length() as usize;
 
         let actual_body = if submessage_len == 0 {
-            all_submessages_bytes.len() - 4 // Everything except the header
+            all_submessages_bytes.len().saturating_sub(4) // Everything except the header
         } else {
             submessage_len
         };
 
-        let mut curr_submessage_bytes = all_submessages_bytes.split_to(4 + actual_body);
+        // Bounds check to prevent panic
+        let required_len = 4 + actual_body;
+        if all_submessages_bytes.len() < required_len {
+            return Err(RtpsError::new(
+                RtpsErrorCode::InvalidSubmessageBody,
+                format!(
+                    "Submessage length {} exceeds available bytes {}",
+                    required_len,
+                    all_submessages_bytes.len()
+                ),
+            ));
+        }
+
+        let mut curr_submessage_bytes = all_submessages_bytes.split_to(required_len);
         // Handle RTPS 2.5 case where submessageLength == 0 - end
 
         // Separate header and body from current submessage
