@@ -29,6 +29,8 @@ use std::{
     },
 };
 
+use log::debug;
+
 use crate::{
     common::{
         builtin::topic::{
@@ -829,8 +831,10 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             instance_handle,
             Some(timestamp.into()),
         )?;
+        debug!("add_change completed in datawriter");
 
         self.update_liveliness()?;
+        debug!("update_liveliness completed in datawriter");
 
         Ok(())
     }
