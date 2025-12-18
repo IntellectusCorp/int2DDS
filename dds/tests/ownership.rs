@@ -57,10 +57,10 @@ impl DataReaderListener for ReaderDeadlineListener {
 
 #[test]
 fn test_ownership_revoked_when_deadline_missed() {
-    set_log_type(LogType::File);
-    set_file_log_level(LogLevel::Debug);
+    // set_log_type(LogType::File);
+    // set_file_log_level(LogLevel::Debug);
 
-    let domain_id = 81;
+    let domain_id = next_domain_id();
     let factory = DomainParticipantFactory::get_instance();
     let participant = factory
         .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
@@ -186,10 +186,10 @@ fn test_ownership_revoked_when_deadline_missed() {
 
 #[test]
 fn test_ownership_revoked_when_liveliness_lost() {
-    set_log_type(LogType::File);
-    set_file_log_level(LogLevel::Debug);
+    // set_log_type(LogType::File);
+    // set_file_log_level(LogLevel::Debug);
 
-    let domain_id = 81;
+    let domain_id = next_domain_id();
     let factory = DomainParticipantFactory::get_instance();
     let participant = factory
         .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
@@ -200,7 +200,7 @@ fn test_ownership_revoked_when_liveliness_lost() {
         ownership_strength: OwnershipStrengthQosPolicy { value: 10 },
         liveliness: LivelinessQosPolicy {
             kind: LivelinessQosPolicyKind::ManualByTopic,
-            lease_duration: Duration::from_millis(5000),
+            lease_duration: Duration::from_millis(1000),
         },
         ..Default::default()
     };
@@ -224,7 +224,7 @@ fn test_ownership_revoked_when_liveliness_lost() {
         ownership: OwnershipQosPolicy { kind: OwnershipQosPolicyKind::Exclusive },
         liveliness: LivelinessQosPolicy {
             kind: LivelinessQosPolicyKind::ManualByTopic,
-            lease_duration: Duration::from_millis(5000),
+            lease_duration: Duration::from_millis(1000),
         },
         ..Default::default()
     };
@@ -249,8 +249,6 @@ fn test_ownership_revoked_when_liveliness_lost() {
         Duration::from_seconds(1),
     )
     .unwrap();
-
-    println!("Both writers matched. Starting test...");
 
     // Stronger writer's data should be received
     stronger_data_writer.write(&KeyedDataType::new(0, 1), InstanceHandle::NIL).unwrap();
@@ -288,8 +286,10 @@ fn test_ownership_revoked_when_liveliness_lost() {
 
     // Wait for stronger writer's liveliness to be lost
     assert!(res.is_ok(), "Liveliness was not lost in time: {:?}", res);
-
     debug!("Stronger writer lost liveliness.");
+
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    debug!("Stronger writer may have lost ownership by now.");
 
     // Now weaker writer should become owner
     debug!("Weaker writer trying to write data...");
