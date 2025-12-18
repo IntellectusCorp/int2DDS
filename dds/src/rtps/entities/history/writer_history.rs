@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-use log::debug;
-
 use crate::{
     common::instance_handle::InstanceHandle,
     rtps::{
@@ -68,7 +66,6 @@ impl WriterHistoryCache {
     }
 
     pub(crate) fn add_change(&mut self, a_change: Arc<CacheChange>) -> RtpsResult<()> {
-        debug!("Adding change with seq num {:?} to WriterHistoryCache", a_change.sequence_number());
         if !self.is_builtin() {
             self.changes.push(a_change.clone());
 

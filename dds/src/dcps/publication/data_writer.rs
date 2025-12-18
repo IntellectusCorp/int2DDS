@@ -831,12 +831,10 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             instance_handle,
             Some(timestamp.into()),
         )?;
-
-        debug!("add change completed in datawriter");
+        debug!("add_change completed in datawriter");
 
         self.update_liveliness()?;
-
-        debug!("liveliness updated in datawriter");
+        debug!("update_liveliness completed in datawriter");
 
         Ok(())
     }
@@ -1047,7 +1045,6 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                 self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
             datawriter_cache.add_change_with_cleanup(Arc::new(change))?;
         }
-        debug!("Added change to DataWriterHistoryCache");
         Ok(())
     }
 
