@@ -180,7 +180,7 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
         self.add_change_to_instance_map(a_change.clone())?;
         self.add_change_to_rtps_writer_cache(a_change)?;
 
-        debug!("Added change. Current history size");
+        debug!("add_change_with_cleanup completed");
         Ok(removed)
     }
 
