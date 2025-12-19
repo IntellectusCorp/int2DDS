@@ -1854,6 +1854,8 @@ impl UnicastMessageProcessor for SedpLogic {
         let inline_qos_params = data.inline_qos();
 
         if self.is_sedp_publication_data(data) || self.is_sedp_subscription_data(data) {
+            debug!("SEDP endpoint data received");
+
             let builtin_endpoint_pair = BuiltinEndpointPair::reader_writer_from_entity_id(
                 data.writer_id,
                 participant.clone(),
@@ -2069,10 +2071,7 @@ impl UnicastMessageProcessor for SedpLogic {
         if !local_writer.matched_reader_is_matched(remote_reader_guid) {
             return Err(RtpsError::new(
                 RtpsErrorCode::RtpsEntityNotFound,
-                format!(
-                    "[acknack] Failed to create ReaderProxy for GUID: {:?}",
-                    remote_reader_guid
-                ),
+                "Failed to find matched SEDP reader for AckNack",
             ));
         }
 
