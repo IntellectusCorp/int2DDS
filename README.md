@@ -38,7 +38,8 @@ int2DDS-derive = "0.0.1"
 
 ### Basic Example
 
-**Publisher:**
+<details>
+<summary><strong>Publisher:</strong></summary>
 
 ```rust
 use int2DDS::{
@@ -106,7 +107,10 @@ fn main() {
 }
 ```
 
-**Subscriber:**
+</details>
+
+<details>
+<summary><strong>Subscriber:</strong></summary>
 
 ```rust
 use int2DDS::{
@@ -193,6 +197,8 @@ fn main() {
     }
 }
 ```
+
+</details>
 
 ## Building from Source
 
