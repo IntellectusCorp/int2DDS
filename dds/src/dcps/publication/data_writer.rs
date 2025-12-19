@@ -1918,7 +1918,9 @@ impl<Foo: 'static + Clone> DataWriterInternal for DataWriter<Foo> {
         };
         drop(monitor_to_drop);
 
-        self.self_ref.lock().ok().map(|mut guard| *guard = None);
+        let value_to_drop = self.self_ref.lock().ok().and_then(|mut guard| guard.take());
+        drop(value_to_drop);
+
         self.deleted.store(true, Ordering::SeqCst);
     }
 
