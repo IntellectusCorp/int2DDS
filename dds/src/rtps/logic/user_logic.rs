@@ -71,6 +71,7 @@ pub(crate) struct UserLogic {
     unicast_listening_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
+/// Initialization
 impl UserLogic {
     pub(crate) fn new(
         participant: Arc<Participant>,
@@ -126,6 +127,175 @@ impl UserLogic {
         if let Ok(mut handle_guard) = self.unicast_listening_handle.lock() {
             *handle_guard = Some(unicast_handle);
         }
+
+        Ok(())
+    }
+}
+
+/// Writer Message Sending (Local Writer -> Remote Reader)
+impl UserLogic {
+    pub(crate) fn send_unsent_changes(&self, entity_id: EntityId) -> RtpsResult<()> {
+        let participant = self.get_upgraded_participant()?;
+
+        let writer = participant.find_writer_from_entity_id(entity_id);
+
+        if let Some(writer) = writer {
+            if let Some(writer) = writer.as_any().downcast_ref::<StatefulWriter>() {
+                self.send_unsent_changes_of_stateful_writer(writer)?;
+            } else if let Some(writer) = writer.as_any().downcast_ref::<StatelessWriter>() {
+                self.send_unsent_changes_of_stateless_writer(writer)?;
+            } else {
+                return Err(RtpsError::new(
+                    RtpsErrorCode::DowncastError,
+                    "Failed to downcast writer",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn send_requested_changes(
+        &self,
+        writer_entity_id: EntityId,
+        remote_reader_guid: Guid,
+    ) -> RtpsResult<()> {
+        let writer = self.find_stateful_writer(writer_entity_id)?;
+        let stateful_writer = writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
+
+        let reader_proxies = stateful_writer.reader_proxies();
+        let mut reader_proxies_guard = reader_proxies.lock().map_err(|e| {
+            RtpsError::new(
+                RtpsErrorCode::LockError,
+                format!("Failed to acquire reader_proxies lock: {}", e),
+            )
+        })?;
+
+        let reader_proxy = reader_proxies_guard
+            .iter_mut()
+            .find(|rp| rp.remote_reader_guid() == remote_reader_guid)
+            .ok_or_else(|| {
+                RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, "ReaderProxy not found")
+            })?;
+
+        // If requested change is not in HistoryCache or did not pass DDS FILTER, send GAP message
+        let mut gap_list: Vec<SequenceNumber> = Vec::new();
+
+        // Send RequestedChanges that ReaderProxy requested via Nack
+        for requested_change_sn in reader_proxy.requested_changes().iter() {
+            let writer_cache = stateful_writer.writer_cache();
+            let cache_guard = writer_cache.lock().map_err(|e| {
+                RtpsError::new(
+                    RtpsErrorCode::LockError,
+                    format!("Failed to acquire writer cache lock: {}", e),
+                )
+            })?;
+
+            if let Some(a_change) = cache_guard.get_change(*requested_change_sn) {
+                // ACK may have been received in the meantime, so check first
+                if reader_proxy.max_acked_sn() >= *requested_change_sn {
+                    continue;
+                }
+
+                // TODO: Filter message according to Reader Proxy's request (time based filter, content filtered topic, etc)
+                // Send DATA message or GAP message depending on filter result
+
+                // In case of fragment, fragment state is checked via last seq number, so
+                // use current seq number in previous heartbeat to get ack from reader for retransmitted message
+                // In case of data retransmission, decide whether to send heartbeat
+                let heartbeat_info = Some((
+                    stateful_writer.heartbeat_count(),
+                    *requested_change_sn,
+                    *requested_change_sn,
+                    false, // final_flag
+                    false, // liveliness_flag = false for retransmission
+                ));
+
+                if a_change.is_fragmented() {
+                    debug!(
+                        "[UserLogic] [RequestedChanges] Fragmented change: {:?}",
+                        a_change.sequence_number()
+                    );
+
+                    let timestamp = Utc::now();
+                    for fragment_num in 1..=a_change.total_fragments() {
+                        if let Some(fragment_data) = a_change.get_fragment_data(fragment_num) {
+                            let buffer = MessageCreator::create_data_frag_msg(
+                                a_change.clone(),
+                                reader_proxy.remote_reader_guid(),
+                                reader_proxy.remote_group_entity_id(),
+                                writer.endpoint_id(),
+                                fragment_num,
+                                1,
+                                a_change.fragment_size() as u16,
+                                a_change.data_value().len() as u32,
+                                fragment_data,
+                                heartbeat_info,
+                                timestamp,
+                            );
+
+                            if let Ok(buf) = buffer {
+                                if let Err(e) = self.send_rtps_message_to_locators(
+                                    reader_proxy.unicast_locator_list(),
+                                    buf.as_slice(),
+                                ) {
+                                    warn!("Failed to send DATA_FRAG for requested change: {:?}", e);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // No fragment case - send regular DATA message
+                    let buffer = MessageCreator::create_data_msg(
+                        a_change.clone(),
+                        reader_proxy.remote_reader_guid(),
+                        reader_proxy.remote_group_entity_id(),
+                        writer.endpoint_id(),
+                        None, // No heartbeat
+                        true, // Use inline QoS (default)
+                        None, // No content filter for retransmission (TODO: consider adding filter)
+                    );
+
+                    if let Ok(buf) = buffer {
+                        if let Err(e) = self.send_rtps_message_to_locators(
+                            reader_proxy.unicast_locator_list(),
+                            buf.as_slice(),
+                        ) {
+                            warn!("Failed to send DATA for requested change: {:?}", e);
+                        }
+                    }
+                }
+            } else {
+                gap_list.push(*requested_change_sn);
+
+                debug!(
+                    "[UserLogic] [AckNack] CacheChange not found for sequence number: {:?}",
+                    requested_change_sn
+                );
+            }
+        }
+
+        if !gap_list.is_empty() {
+            let buffer_list = MessageCreator::create_multiple_gap_msgs(
+                writer.guid(),
+                reader_proxy.remote_reader_guid(),
+                reader_proxy.remote_group_entity_id(),
+                writer.endpoint_id(),
+                &mut gap_list,
+            )
+            .map_err(|e| RtpsError::new(RtpsErrorCode::Io, e.to_string()))?;
+
+            for buf in buffer_list {
+                if let Err(e) = self.send_rtps_message_to_locators(
+                    reader_proxy.unicast_locator_list(),
+                    buf.as_slice(),
+                ) {
+                    warn!("Failed to send GAP for requested changes: {:?}", e);
+                }
+            }
+        }
+
+        // Clear after sending all requested changes to prevent duplicate transmission. Can safely clear since Lock has been acquired.
+        reader_proxy.empty_requested_changes();
 
         Ok(())
     }
@@ -425,170 +595,40 @@ impl UserLogic {
         Ok(())
     }
 
-    pub(crate) fn send_unsent_changes(&self, entity_id: EntityId) -> RtpsResult<()> {
-        let participant = self.get_upgraded_participant()?;
-
-        let writer = participant.find_writer_from_entity_id(entity_id);
-
-        if let Some(writer) = writer {
-            if let Some(writer) = writer.as_any().downcast_ref::<StatefulWriter>() {
-                self.send_unsent_changes_of_stateful_writer(writer)?;
-            } else if let Some(writer) = writer.as_any().downcast_ref::<StatelessWriter>() {
-                self.send_unsent_changes_of_stateless_writer(writer)?;
-            } else {
-                return Err(RtpsError::new(
-                    RtpsErrorCode::DowncastError,
-                    "Failed to downcast writer",
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    pub(crate) fn send_requested_changes(
+    fn send_data_frag_to_reader_proxy(
         &self,
-        writer_entity_id: EntityId,
-        remote_reader_guid: Guid,
-    ) -> RtpsResult<()> {
-        let writer = self.find_stateful_writer(writer_entity_id)?;
-        let stateful_writer = writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
-
-        let reader_proxies = stateful_writer.reader_proxies();
-        let mut reader_proxies_guard = reader_proxies.lock().map_err(|e| {
-            RtpsError::new(
-                RtpsErrorCode::LockError,
-                format!("Failed to acquire reader_proxies lock: {}", e),
-            )
-        })?;
-
-        let reader_proxy = reader_proxies_guard
-            .iter_mut()
-            .find(|rp| rp.remote_reader_guid() == remote_reader_guid)
-            .ok_or_else(|| {
-                RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, "ReaderProxy not found")
-            })?;
-
-        // If requested change is not in HistoryCache or did not pass DDS FILTER, send GAP message
-        let mut gap_list: Vec<SequenceNumber> = Vec::new();
-
-        // Send RequestedChanges that ReaderProxy requested via Nack
-        for requested_change_sn in reader_proxy.requested_changes().iter() {
-            let writer_cache = stateful_writer.writer_cache();
-            let cache_guard = writer_cache.lock().map_err(|e| {
-                RtpsError::new(
-                    RtpsErrorCode::LockError,
-                    format!("Failed to acquire writer cache lock: {}", e),
-                )
-            })?;
-
-            if let Some(a_change) = cache_guard.get_change(*requested_change_sn) {
-                // ACK may have been received in the meantime, so check first
-                if reader_proxy.max_acked_sn() >= *requested_change_sn {
-                    continue;
-                }
-
-                // TODO: Filter message according to Reader Proxy's request (time based filter, content filtered topic, etc)
-                // Send DATA message or GAP message depending on filter result
-
-                // In case of fragment, fragment state is checked via last seq number, so
-                // use current seq number in previous heartbeat to get ack from reader for retransmitted message
-                // In case of data retransmission, decide whether to send heartbeat
-                let heartbeat_info = Some((
-                    stateful_writer.heartbeat_count(),
-                    *requested_change_sn,
-                    *requested_change_sn,
-                    false, // final_flag
-                    false, // liveliness_flag = false for retransmission
-                ));
-
-                if a_change.is_fragmented() {
-                    debug!(
-                        "[UserLogic] [RequestedChanges] Fragmented change: {:?}",
-                        a_change.sequence_number()
-                    );
-
-                    let timestamp = Utc::now();
-                    for fragment_num in 1..=a_change.total_fragments() {
-                        if let Some(fragment_data) = a_change.get_fragment_data(fragment_num) {
-                            let buffer = MessageCreator::create_data_frag_msg(
-                                a_change.clone(),
-                                reader_proxy.remote_reader_guid(),
-                                reader_proxy.remote_group_entity_id(),
-                                writer.endpoint_id(),
-                                fragment_num,
-                                1,
-                                a_change.fragment_size() as u16,
-                                a_change.data_value().len() as u32,
-                                fragment_data,
-                                heartbeat_info,
-                                timestamp,
-                            );
-
-                            if let Ok(buf) = buffer {
-                                if let Err(e) = self.send_rtps_message_to_locators(
-                                    reader_proxy.unicast_locator_list(),
-                                    buf.as_slice(),
-                                ) {
-                                    warn!("Failed to send DATA_FRAG for requested change: {:?}", e);
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    // No fragment case - send regular DATA message
-                    let buffer = MessageCreator::create_data_msg(
-                        a_change.clone(),
-                        reader_proxy.remote_reader_guid(),
-                        reader_proxy.remote_group_entity_id(),
-                        writer.endpoint_id(),
-                        None, // No heartbeat
-                        true, // Use inline QoS (default)
-                        None, // No content filter for retransmission (TODO: consider adding filter)
-                    );
-
-                    if let Ok(buf) = buffer {
-                        if let Err(e) = self.send_rtps_message_to_locators(
-                            reader_proxy.unicast_locator_list(),
-                            buf.as_slice(),
-                        ) {
-                            warn!("Failed to send DATA for requested change: {:?}", e);
-                        }
-                    }
-                }
-            } else {
-                gap_list.push(*requested_change_sn);
-
-                debug!(
-                    "[UserLogic] [AckNack] CacheChange not found for sequence number: {:?}",
-                    requested_change_sn
-                );
-            }
-        }
-
-        if !gap_list.is_empty() {
-            let buffer_list = MessageCreator::create_multiple_gap_msgs(
-                writer.guid(),
+        change: &CacheChange,
+        reader_proxy: &ReaderProxy,
+        writer_id: EntityId,
+        fragment_num: u32,
+        heartbeat_info: Option<(i32, SequenceNumber, SequenceNumber, bool, bool)>,
+        timestamp: DateTime<Utc>,
+    ) -> bool {
+        if let Some(fragment_data) = change.get_fragment_data(fragment_num) {
+            let buffer = MessageCreator::create_data_frag_msg(
+                Arc::new(change.clone()),
                 reader_proxy.remote_reader_guid(),
                 reader_proxy.remote_group_entity_id(),
-                writer.endpoint_id(),
-                &mut gap_list,
-            )
-            .map_err(|e| RtpsError::new(RtpsErrorCode::Io, e.to_string()))?;
+                writer_id,
+                fragment_num,
+                1,
+                change.fragment_size() as u16,
+                change.data_value().len() as u32,
+                fragment_data,
+                heartbeat_info,
+                timestamp,
+            );
 
-            for buf in buffer_list {
-                if let Err(e) = self.send_rtps_message_to_locators(
-                    reader_proxy.unicast_locator_list(),
-                    buf.as_slice(),
-                ) {
-                    warn!("Failed to send GAP for requested changes: {:?}", e);
-                }
+            if let Ok(buffer) = buffer {
+                return self
+                    .send_rtps_message_to_locators(
+                        reader_proxy.unicast_locator_list(),
+                        buffer.as_slice(),
+                    )
+                    .is_ok();
             }
         }
-
-        // Clear after sending all requested changes to prevent duplicate transmission. Can safely clear since Lock has been acquired.
-        reader_proxy.empty_requested_changes();
-
-        Ok(())
+        false
     }
 
     // Heartbeat message sending is done from stateful writer, check reader proxy
@@ -711,7 +751,97 @@ impl UserLogic {
             ));
         }
     }
+}
 
+/// Reader ACKNACK Sending (Local Reader -> Remote Writer)
+impl UserLogic {
+    pub(crate) fn send_preemptive_acknack(
+        &self,
+        reader_id: EntityId,
+        remote_writer_guid: Guid,
+    ) -> RtpsResult<()> {
+        let participant = self.get_upgraded_participant()?;
+
+        let reader = participant
+            .find_reader_from_entity_id(reader_id)
+            .ok_or_else(|| RtpsError::new(RtpsErrorCode::RtpsEntityNotFound, None))?;
+        let stateful_reader = reader
+            .as_any()
+            .downcast_ref::<StatefulReader>()
+            .ok_or_else(|| RtpsError::new(RtpsErrorCode::DowncastError, "Not a StatefulReader"))?;
+        let writer_proxies = stateful_reader.writer_proxies();
+        let mut writer_proxies_guard = writer_proxies.lock().map_err(|e| {
+            RtpsError::new(
+                RtpsErrorCode::LockError,
+                format!("Failed to acquire writer_proxies lock: {}", e),
+            )
+        })?;
+        let mut writer_proxy = writer_proxies_guard
+            .iter_mut()
+            .find(|wp| wp.remote_writer_guid() == remote_writer_guid)
+            .ok_or_else(|| {
+                RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, "WriterProxy not found")
+            })?;
+
+        if writer_proxy.expected_sn() == SequenceNumber::UNKNOWN {
+            self.send_acknack_to_writer_proxy_inner(
+                &mut writer_proxy,
+                stateful_reader,
+                vec![],
+                SequenceNumber::from_i64(0),
+                false,
+                true,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn send_acknack_to_writer_proxy_inner(
+        &self,
+        writer_proxy: &mut WriterProxy,
+        stateful_reader: &StatefulReader,
+        missing_changes: Vec<SequenceNumber>,
+        bitmap_base: SequenceNumber,
+        final_flag: bool,
+        is_preemptive: bool,
+    ) -> RtpsResult<()> {
+        if !missing_changes.is_empty() || !final_flag || is_preemptive {
+            writer_proxy.increase_acknack_count();
+
+            let participant = self.get_upgraded_participant()?;
+
+            let buffer = MessageCreator::create_acknack_message(
+                participant.guid(),
+                writer_proxy.remote_writer_guid(),
+                stateful_reader.guid().entity_id(),
+                writer_proxy.remote_writer_guid().entity_id(),
+                missing_changes,
+                writer_proxy.acknack_count(),
+                bitmap_base,
+                is_preemptive,
+            )
+            .map_err(|e| {
+                RtpsError::new(
+                    RtpsErrorCode::SerializationError,
+                    format!("Failed to create ACKNACK message: {}", e),
+                )
+            })?;
+
+            self.send_rtps_message_to_locators(writer_proxy.unicast_locator_list(), &buffer)
+                .map_err(|e| {
+                    RtpsError::new(
+                        RtpsErrorCode::SerializationError,
+                        format!("Failed to send ACKNACK message: {}", e),
+                    )
+                })?
+        }
+        Ok(())
+    }
+}
+
+/// Reader Data Delivery (Received Data -> Local Reader)
+impl UserLogic {
     fn deliver_change_to_reader(
         &self,
         change: CacheChange,
@@ -749,6 +879,224 @@ impl UserLogic {
             }
         } else if let Some(_stateless_reader) = reader.as_any().downcast_ref::<StatelessReader>() {
             self.add_change_to_reader_cache_and_notify(reader, vec![change])?;
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn add_change_to_reader_cache_and_notify(
+        &self,
+        reader: &dyn Reader,
+        changes: Vec<CacheChange>,
+    ) -> RtpsResult<()> {
+        let reader_cache = reader.reader_cache();
+
+        for change in changes.iter() {
+            let mut res: Option<RtpsResult<Arc<CacheChange>>> = None;
+            if let Ok(mut cache_guard) = reader_cache.lock() {
+                res = Some(cache_guard.add_change(change.clone()));
+            }
+
+            if let Some(Ok(change)) = res {
+                reader.on_change(change.clone());
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Utilities
+impl UserLogic {
+    pub(crate) fn on_writer_cache_change_removal(
+        &self,
+        entity_id: EntityId,
+        sequence_number: SequenceNumber,
+    ) -> RtpsResult<()> {
+        let participant = self.get_upgraded_participant()?;
+
+        let writer = participant
+            .find_writer_from_entity_id(entity_id)
+            .ok_or_else(|| RtpsError::new(RtpsErrorCode::RtpsEntityNotFound, None))?;
+        let stateful_writer = match writer.as_any().downcast_ref::<StatefulWriter>() {
+            Some(writer) => writer,
+            None => return Ok(()),
+        };
+        let reader_proxies = stateful_writer.reader_proxies();
+        let mut reader_proxies_guard = reader_proxies.lock().map_err(|e| {
+            RtpsError::new(
+                RtpsErrorCode::LockError,
+                format!("Failed to acquire reader_proxies lock: {}", e),
+            )
+        })?;
+        for reader_proxy in reader_proxies_guard.iter_mut() {
+            reader_proxy.remove_cached_sn_on_cache_change_removal(sequence_number);
+        }
+        Ok(())
+    }
+
+    fn cleanup_old_fragment_buffers(&self, max_size: usize) {
+        // DashMap allows direct access without lock
+        if self.fragment_buffers.len() <= max_size {
+            return;
+        }
+
+        // Sort incomplete fragment buffers by created_at and remove oldest ones
+        let mut incomplete_buffers: Vec<_> = self
+            .fragment_buffers
+            .iter()
+            .filter(|entry| !entry.value().all_fragments_received())
+            .map(|entry| (*entry.key(), entry.value().created_at))
+            .collect();
+
+        // Sort in ascending order by creation time (oldest first)
+        incomplete_buffers.sort_by_key(|(_, created_at)| *created_at);
+
+        let buffers_to_remove = self.fragment_buffers.len() - max_size;
+        let mut removed_count = 0;
+
+        for (key, _) in incomplete_buffers.iter().take(buffers_to_remove) {
+            if let Some((_, _removed_buffer)) = self.fragment_buffers.remove(key) {
+                // warn!(
+                //     "Cleaned up incomplete fragment buffer: writer_guid={:?}, seq_num={:?}, \
+                //      received_fragments={}/{}, age={:.2}s",
+                //     key.0,
+                //     key.1,
+                //     removed_buffer.received_fragments.len(),
+                //     removed_buffer.total_fragments,
+                //     removed_buffer.created_at.elapsed().as_secs_f64()
+                // );
+                removed_count += 1;
+            }
+        }
+
+        // If not enough removed yet, also remove completed buffers (remove oldest ones)
+        if removed_count < buffers_to_remove {
+            let mut complete_buffers: Vec<_> = self
+                .fragment_buffers
+                .iter()
+                .filter(|entry| entry.value().all_fragments_received())
+                .map(|entry| (*entry.key(), entry.value().created_at))
+                .collect();
+
+            complete_buffers.sort_by_key(|(_, created_at)| *created_at);
+
+            let remaining_to_remove = buffers_to_remove - removed_count;
+            for (key, _) in complete_buffers.iter().take(remaining_to_remove) {
+                if let Some((_, removed_buffer)) = self.fragment_buffers.remove(key) {
+                    debug!(
+                        "Cleaned up complete fragment buffer: writer_guid={:?}, seq_num={:?}, age={:.2}s",
+                        key.0,
+                        key.1,
+                        removed_buffer.created_at.elapsed().as_secs_f64()
+                    );
+                    removed_count += 1;
+                }
+            }
+        }
+
+        if removed_count > 0 {
+            // warn!(
+            //     "Fragment buffer cleanup completed: removed {} buffers, remaining {} buffers",
+            //     removed_count,
+            //     self.fragment_buffers.len()
+            // );
+        }
+    }
+
+    fn send_rtps_message_to_locators<T>(&self, locators: T, buffer: &[u8]) -> RtpsResult<()>
+    where
+        T: IntoIterator<Item = Locator>,
+    {
+        let mut is_sent = false;
+        let mut last_error = None;
+
+        for locator in locators {
+            // Check if this is a SHM locator
+            if locator.is_shm() {
+                // Use SHM sender if available
+                if let Some(shm_sender) = &self.shm_sender {
+                    // SHM doesn't use socket addresses, but Transport trait requires it
+                    // Use a dummy address - the actual routing is done via shared memory
+                    let dummy_addr =
+                        SocketAddr::V4(SocketAddrV4::new(std::net::Ipv4Addr::new(127, 0, 0, 1), 0));
+                    match shm_sender.send(&dummy_addr, buffer) {
+                        Ok(_) => {
+                            is_sent = true;
+                        }
+                        Err(e) => {
+                            warn!("[UserLogic] Failed to send SHM message: {:?}", e);
+                            last_error = Some(e);
+                            continue;
+                        }
+                    }
+                } else {
+                    warn!("[UserLogic] SHM locator found but no SHM sender available");
+                    continue;
+                }
+            }
+            // Check if this is a TCP locator
+            else if locator.is_tcp() {
+                // Use TCP sender if available
+                if let Some(tcp_sender) = &self.tcp_sender {
+                    let socket_addr = SocketAddr::V4(SocketAddrV4::new(
+                        locator.to_ip_v4_addr(),
+                        locator.port() as u16,
+                    ));
+                    match tcp_sender.send(&socket_addr, buffer) {
+                        Ok(_) => {
+                            is_sent = true;
+                            debug!("[UserLogic] Sent message via TCP to {:?}", socket_addr);
+                        }
+                        Err(e) => {
+                            warn!(
+                                "[UserLogic] Failed to send TCP message to {:?}: {:?}",
+                                socket_addr, e
+                            );
+                            last_error = Some(e);
+                            continue;
+                        }
+                    }
+                } else {
+                    warn!(
+                        "[UserLogic] TCP locator found but no TCP sender available: {:?}",
+                        locator
+                    );
+                    continue;
+                }
+            } else if locator.is_udp() {
+                // Use UDP sender
+                let socket_addr = SocketAddr::V4(SocketAddrV4::new(
+                    locator.to_ip_v4_addr(),
+                    locator.port() as u16,
+                ));
+                if let Some(ref sender) = self.sender {
+                    match sender.send(&socket_addr, buffer) {
+                        Ok(_) => {
+                            is_sent = true;
+                        }
+                        Err(e) => {
+                            warn!("Failed to send message to locator {:?}: {:?}", socket_addr, e);
+                            last_error = Some(e);
+                            continue;
+                        }
+                    }
+                } else {
+                    debug!("UDP sender not available, skipping UDP locator");
+                    continue;
+                }
+            }
+        }
+
+        if !is_sent {
+            if let Some(err) = last_error {
+                return Err(RtpsError::new(RtpsErrorCode::Io, err.to_string()));
+            } else {
+                return Err(RtpsError::new(
+                    RtpsErrorCode::InvalidEntityKind,
+                    "No valid locators found",
+                ));
+            }
         }
 
         Ok(())
@@ -860,341 +1208,6 @@ impl UserLogic {
         }
 
         Ok(())
-    }
-
-    fn send_rtps_message_to_locators<T>(&self, locators: T, buffer: &[u8]) -> RtpsResult<()>
-    where
-        T: IntoIterator<Item = Locator>,
-    {
-        let mut is_sent = false;
-        let mut last_error = None;
-
-        for locator in locators {
-            // Check if this is a SHM locator
-            if locator.is_shm() {
-                // Use SHM sender if available
-                if let Some(shm_sender) = &self.shm_sender {
-                    // SHM doesn't use socket addresses, but Transport trait requires it
-                    // Use a dummy address - the actual routing is done via shared memory
-                    let dummy_addr =
-                        SocketAddr::V4(SocketAddrV4::new(std::net::Ipv4Addr::new(127, 0, 0, 1), 0));
-                    match shm_sender.send(&dummy_addr, buffer) {
-                        Ok(_) => {
-                            is_sent = true;
-                        }
-                        Err(e) => {
-                            warn!("[UserLogic] Failed to send SHM message: {:?}", e);
-                            last_error = Some(e);
-                            continue;
-                        }
-                    }
-                } else {
-                    warn!("[UserLogic] SHM locator found but no SHM sender available");
-                    continue;
-                }
-            }
-            // Check if this is a TCP locator
-            else if locator.is_tcp() {
-                // Use TCP sender if available
-                if let Some(tcp_sender) = &self.tcp_sender {
-                    let socket_addr = SocketAddr::V4(SocketAddrV4::new(
-                        locator.to_ip_v4_addr(),
-                        locator.port() as u16,
-                    ));
-                    match tcp_sender.send(&socket_addr, buffer) {
-                        Ok(_) => {
-                            is_sent = true;
-                            debug!("[UserLogic] Sent message via TCP to {:?}", socket_addr);
-                        }
-                        Err(e) => {
-                            warn!(
-                                "[UserLogic] Failed to send TCP message to {:?}: {:?}",
-                                socket_addr, e
-                            );
-                            last_error = Some(e);
-                            continue;
-                        }
-                    }
-                } else {
-                    warn!(
-                        "[UserLogic] TCP locator found but no TCP sender available: {:?}",
-                        locator
-                    );
-                    continue;
-                }
-            } else if locator.is_udp() {
-                // Use UDP sender
-                let socket_addr = SocketAddr::V4(SocketAddrV4::new(
-                    locator.to_ip_v4_addr(),
-                    locator.port() as u16,
-                ));
-                if let Some(ref sender) = self.sender {
-                    match sender.send(&socket_addr, buffer) {
-                        Ok(_) => {
-                            is_sent = true;
-                        }
-                        Err(e) => {
-                            warn!("Failed to send message to locator {:?}: {:?}", socket_addr, e);
-                            last_error = Some(e);
-                            continue;
-                        }
-                    }
-                } else {
-                    debug!("UDP sender not available, skipping UDP locator");
-                    continue;
-                }
-            }
-        }
-
-        if !is_sent {
-            if let Some(err) = last_error {
-                return Err(RtpsError::new(RtpsErrorCode::Io, err.to_string()));
-            } else {
-                return Err(RtpsError::new(
-                    RtpsErrorCode::InvalidEntityKind,
-                    "No valid locators found",
-                ));
-            }
-        }
-
-        Ok(())
-    }
-
-    fn send_acknack_to_writer_proxy_inner(
-        &self,
-        writer_proxy: &mut WriterProxy,
-        stateful_reader: &StatefulReader,
-        missing_changes: Vec<SequenceNumber>,
-        bitmap_base: SequenceNumber,
-        final_flag: bool,
-        is_preemptive: bool,
-    ) -> RtpsResult<()> {
-        if !missing_changes.is_empty() || !final_flag || is_preemptive {
-            writer_proxy.increase_acknack_count();
-
-            let participant = self.get_upgraded_participant()?;
-
-            let buffer = MessageCreator::create_acknack_message(
-                participant.guid(),
-                writer_proxy.remote_writer_guid(),
-                stateful_reader.guid().entity_id(),
-                writer_proxy.remote_writer_guid().entity_id(),
-                missing_changes,
-                writer_proxy.acknack_count(),
-                bitmap_base,
-                is_preemptive,
-            )
-            .map_err(|e| {
-                RtpsError::new(
-                    RtpsErrorCode::SerializationError,
-                    format!("Failed to create ACKNACK message: {}", e),
-                )
-            })?;
-
-            self.send_rtps_message_to_locators(writer_proxy.unicast_locator_list(), &buffer)
-                .map_err(|e| {
-                    RtpsError::new(
-                        RtpsErrorCode::SerializationError,
-                        format!("Failed to send ACKNACK message: {}", e),
-                    )
-                })?
-        }
-        Ok(())
-    }
-
-    pub(crate) fn send_preemptive_acknack(
-        &self,
-        reader_id: EntityId,
-        remote_writer_guid: Guid,
-    ) -> RtpsResult<()> {
-        let participant = self.get_upgraded_participant()?;
-
-        let reader = participant
-            .find_reader_from_entity_id(reader_id)
-            .ok_or_else(|| RtpsError::new(RtpsErrorCode::RtpsEntityNotFound, None))?;
-        let stateful_reader = reader
-            .as_any()
-            .downcast_ref::<StatefulReader>()
-            .ok_or_else(|| RtpsError::new(RtpsErrorCode::DowncastError, "Not a StatefulReader"))?;
-        let writer_proxies = stateful_reader.writer_proxies();
-        let mut writer_proxies_guard = writer_proxies.lock().map_err(|e| {
-            RtpsError::new(
-                RtpsErrorCode::LockError,
-                format!("Failed to acquire writer_proxies lock: {}", e),
-            )
-        })?;
-        let mut writer_proxy = writer_proxies_guard
-            .iter_mut()
-            .find(|wp| wp.remote_writer_guid() == remote_writer_guid)
-            .ok_or_else(|| {
-                RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, "WriterProxy not found")
-            })?;
-
-        if writer_proxy.expected_sn() == SequenceNumber::UNKNOWN {
-            self.send_acknack_to_writer_proxy_inner(
-                &mut writer_proxy,
-                stateful_reader,
-                vec![],
-                SequenceNumber::from_i64(0),
-                false,
-                true,
-            )?;
-        }
-
-        Ok(())
-    }
-
-    fn send_data_frag_to_reader_proxy(
-        &self,
-        change: &CacheChange,
-        reader_proxy: &ReaderProxy,
-        writer_id: EntityId,
-        fragment_num: u32,
-        heartbeat_info: Option<(i32, SequenceNumber, SequenceNumber, bool, bool)>,
-        timestamp: DateTime<Utc>,
-    ) -> bool {
-        if let Some(fragment_data) = change.get_fragment_data(fragment_num) {
-            let buffer = MessageCreator::create_data_frag_msg(
-                Arc::new(change.clone()),
-                reader_proxy.remote_reader_guid(),
-                reader_proxy.remote_group_entity_id(),
-                writer_id,
-                fragment_num,
-                1,
-                change.fragment_size() as u16,
-                change.data_value().len() as u32,
-                fragment_data,
-                heartbeat_info,
-                timestamp,
-            );
-
-            if let Ok(buffer) = buffer {
-                return self
-                    .send_rtps_message_to_locators(
-                        reader_proxy.unicast_locator_list(),
-                        buffer.as_slice(),
-                    )
-                    .is_ok();
-            }
-        }
-        false
-    }
-
-    pub(crate) fn add_change_to_reader_cache_and_notify(
-        &self,
-        reader: &dyn Reader,
-        changes: Vec<CacheChange>,
-    ) -> RtpsResult<()> {
-        let reader_cache = reader.reader_cache();
-
-        for change in changes.iter() {
-            let mut res: Option<RtpsResult<Arc<CacheChange>>> = None;
-            if let Ok(mut cache_guard) = reader_cache.lock() {
-                res = Some(cache_guard.add_change(change.clone()));
-            }
-
-            if let Some(Ok(change)) = res {
-                reader.on_change(change.clone());
-            }
-        }
-
-        Ok(())
-    }
-
-    pub(crate) fn on_writer_cache_change_removal(
-        &self,
-        entity_id: EntityId,
-        sequence_number: SequenceNumber,
-    ) -> RtpsResult<()> {
-        let participant = self.get_upgraded_participant()?;
-
-        let writer = participant
-            .find_writer_from_entity_id(entity_id)
-            .ok_or_else(|| RtpsError::new(RtpsErrorCode::RtpsEntityNotFound, None))?;
-        let stateful_writer = match writer.as_any().downcast_ref::<StatefulWriter>() {
-            Some(writer) => writer,
-            None => return Ok(()),
-        };
-        let reader_proxies = stateful_writer.reader_proxies();
-        let mut reader_proxies_guard = reader_proxies.lock().map_err(|e| {
-            RtpsError::new(
-                RtpsErrorCode::LockError,
-                format!("Failed to acquire reader_proxies lock: {}", e),
-            )
-        })?;
-        for reader_proxy in reader_proxies_guard.iter_mut() {
-            reader_proxy.remove_cached_sn_on_cache_change_removal(sequence_number);
-        }
-        Ok(())
-    }
-
-    fn cleanup_old_fragment_buffers(&self, max_size: usize) {
-        // DashMap allows direct access without lock
-        if self.fragment_buffers.len() <= max_size {
-            return;
-        }
-
-        // Sort incomplete fragment buffers by created_at and remove oldest ones
-        let mut incomplete_buffers: Vec<_> = self
-            .fragment_buffers
-            .iter()
-            .filter(|entry| !entry.value().all_fragments_received())
-            .map(|entry| (*entry.key(), entry.value().created_at))
-            .collect();
-
-        // Sort in ascending order by creation time (oldest first)
-        incomplete_buffers.sort_by_key(|(_, created_at)| *created_at);
-
-        let buffers_to_remove = self.fragment_buffers.len() - max_size;
-        let mut removed_count = 0;
-
-        for (key, _) in incomplete_buffers.iter().take(buffers_to_remove) {
-            if let Some((_, _removed_buffer)) = self.fragment_buffers.remove(key) {
-                // warn!(
-                //     "Cleaned up incomplete fragment buffer: writer_guid={:?}, seq_num={:?}, \
-                //      received_fragments={}/{}, age={:.2}s",
-                //     key.0,
-                //     key.1,
-                //     removed_buffer.received_fragments.len(),
-                //     removed_buffer.total_fragments,
-                //     removed_buffer.created_at.elapsed().as_secs_f64()
-                // );
-                removed_count += 1;
-            }
-        }
-
-        // If not enough removed yet, also remove completed buffers (remove oldest ones)
-        if removed_count < buffers_to_remove {
-            let mut complete_buffers: Vec<_> = self
-                .fragment_buffers
-                .iter()
-                .filter(|entry| entry.value().all_fragments_received())
-                .map(|entry| (*entry.key(), entry.value().created_at))
-                .collect();
-
-            complete_buffers.sort_by_key(|(_, created_at)| *created_at);
-
-            let remaining_to_remove = buffers_to_remove - removed_count;
-            for (key, _) in complete_buffers.iter().take(remaining_to_remove) {
-                if let Some((_, removed_buffer)) = self.fragment_buffers.remove(key) {
-                    debug!(
-                        "Cleaned up complete fragment buffer: writer_guid={:?}, seq_num={:?}, age={:.2}s",
-                        key.0,
-                        key.1,
-                        removed_buffer.created_at.elapsed().as_secs_f64()
-                    );
-                    removed_count += 1;
-                }
-            }
-        }
-
-        if removed_count > 0 {
-            // warn!(
-            //     "Fragment buffer cleanup completed: removed {} buffers, remaining {} buffers",
-            //     removed_count,
-            //     self.fragment_buffers.len()
-            // );
-        }
     }
 }
 
