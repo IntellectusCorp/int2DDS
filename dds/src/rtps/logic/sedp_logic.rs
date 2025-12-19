@@ -169,6 +169,7 @@ fn is_partition_compatible(requested: &[String], offered: &[String]) -> bool {
     false
 }
 
+/// Initialization
 impl SedpLogic {
     pub(crate) fn new(participant: Arc<Participant>, sender: Option<Arc<TransportSender>>) -> Self {
         let builtin_endpoints = participant.builtin_endpoints();
@@ -247,426 +248,34 @@ impl SedpLogic {
 
         Ok(())
     }
+}
 
-    fn timer_sleep_and_send_message(
+/// Endpoint Matching
+impl SedpLogic {
+    pub(crate) fn match_writer_with_subscription(
         &self,
-        start_time: Option<Instant>,
-        logic_start_time: Instant,
-        duration: StdDuration,
-        message: MessageType,
+        writer: Arc<dyn Writer + Send + Sync>,
+        subscription_builtin_topic_data: SubscriptionBuiltinTopicData,
     ) -> RtpsResult<()> {
-        let elapsed = logic_start_time.elapsed();
-        let remaining_duration = match start_time {
-            Some(start_time) => {
-                let elapsed = start_time.elapsed();
-                duration.checked_sub(elapsed).unwrap_or(StdDuration::from_millis(0))
-            }
-            None => duration.checked_sub(elapsed).unwrap_or(StdDuration::from_millis(0)),
-        };
-
-        let participant = self.get_upgraded_participant()?;
-
-        // Generate unique timer ID using participant GUID, timestamp and random number
-        let timer_id = format!(
-            "sedp_send_{:?}_{}_{:?}",
-            participant.guid().prefix(),
-            logic_start_time.elapsed().as_nanos(),
-            random_range(0..10000)
-        );
-
-        let participant = Arc::new(participant.clone());
-        let message = Arc::new(message);
-        if let Ok(timer_handler) = self.timer_handler.lock() {
-            timer_handler.add_timer(
-                timer_id,
-                remaining_duration,
-                false, // one-shot timer
-                {
-                    let participant = participant.clone();
-                    let message = message.clone();
-                    move || {
-                        let sending_handler =
-                            SendingHandler::get_instance((*participant).clone(), None, None);
-                        sending_handler.push_message_and_wake((*message).clone());
-                    }
-                },
-            );
-        } else {
-            error!("Failed to acquire timer handler lock for SEDP message sending");
-        }
-
-        Ok(())
+        self.match_endpoint(
+            MatchType::WriterSubscription,
+            writer.as_any(),
+            BuiltinTopicData::Subscription(subscription_builtin_topic_data),
+            false,
+        )
     }
 
-    // Sends periodic SPDP Data & SEDP Heartbeat
-    #[allow(unused_variables)]
-    pub(crate) fn send_periodic_participant_data_unicast(
+    pub(crate) fn match_reader_with_publication(
         &self,
-        start_time: Option<Instant>,
-        duration: StdDuration,
-        spdp_discovered_participant_data: Arc<SPDPDiscoveredParticipantData>,
-        data: Option<Arc<Vec<u8>>>,
-    ) -> RtpsResult<()> {
-        let logic_start_time = Instant::now();
-        match data {
-            Some(data) => {
-                let mut list: Vec<SPDPDiscoveredParticipantData> = Vec::new();
-                let participant = self.get_upgraded_participant()?;
-
-                match participant.remote_participant_proxy_datas().lock() {
-                    Ok(remote_participant_datas) => {
-                        // Send SPDP message to everyone
-                        for remote_participant_data in remote_participant_datas.iter() {
-                            if spdp_discovered_participant_data.guid_prefix()
-                                != remote_participant_data.guid_prefix()
-                            {
-                                continue;
-                            }
-                            list.push(remote_participant_data.clone());
-                        }
-                    }
-                    Err(e) => {
-                        return Err(RtpsError::new(
-                            RtpsErrorCode::LockError,
-                            format!("Failed to lock remote_participant_datas: {:?}", e),
-                        ));
-                    }
-                }
-                for remote_participant_data in list.iter() {
-                    if let Err(e) = self.send_message_to_discovery_traffic(
-                        &data,
-                        remote_participant_data.participant_guid(),
-                        "spdp",
-                    ) {
-                        warn!("Failed to send SPDP discovery message: {:?}", e);
-                    }
-                    let start_time = Instant::now();
-                    let _ = self.timer_sleep_and_send_message(
-                        Some(start_time),
-                        logic_start_time,
-                        duration,
-                        MessageType::PeriodicParticipantDataUnicast(
-                            Some(start_time),
-                            duration,
-                            spdp_discovered_participant_data.clone(),
-                            Some(data.clone()),
-                        ),
-                    );
-                }
-            }
-            None => return Err(RtpsError::new(RtpsErrorCode::DataNotSet, "Data is not set")),
-        };
-        Ok(())
-    }
-
-    // SEDP HEARTBEAT message connection and unsent / reader proxy check unsent
-    #[allow(unused_variables)]
-    pub(crate) fn send_sedp_periodic_heartbeat_message(
-        &self,
-        start_time: Option<Instant>,
-        duration: StdDuration,
-        // spdp_discovered_participant_data: Arc<SPDPDiscoveredParticipantData>,
-        guid_prefix: Arc<GuidPrefix>,
-        entity_id: EntityId,
-    ) -> RtpsResult<bool> {
-        let logic_start_time = Instant::now();
-        // Get reader and writer corresponding to entity
-        let participant = self.get_upgraded_participant()?;
-
-        let builtin_endpoint_pair =
-            BuiltinEndpointPair::reader_writer_from_entity_id(entity_id, participant.clone())?;
-        let (reader, writer) = match builtin_endpoint_pair {
-            Some(builtin_endpoint_pair) => {
-                (builtin_endpoint_pair.reader(), builtin_endpoint_pair.writer())
-            }
-            None => {
-                return Err(RtpsError::new(
-                    RtpsErrorCode::BuiltinEndpointNotFound,
-                    "Failed to get reader and writer proxy",
-                ))
-            }
-        };
-
-        let reader_entity_id = reader.guid().entity_id();
-        let writer_entity_id = writer.guid().entity_id();
-
-        let (first_sn, last_sn, heartbeat_count) = {
-            match writer.writer_cache().lock() {
-                Ok(writer_cache) => (
-                    writer_cache.get_seq_num_min(),
-                    writer_cache.get_seq_num_max(),
-                    writer.heartbeat_count(),
-                ),
-                Err(e) => {
-                    return Err(RtpsError::new(
-                        RtpsErrorCode::WriterCacheNotSet,
-                        format!("Failed to get writer cache: {}", e),
-                    ));
-                }
-            }
-        };
-
-        let mut is_sent = false;
-        let mut retry: bool = false;
-
-        let participant_guid = {
-            let local_participant_data = participant.local_participant_proxy_data();
-            local_participant_data.participant_guid()
-        };
-
-        match writer.reader_proxies().lock() {
-            Ok(reader_proxies) => {
-                for reader_proxy in reader_proxies.iter() {
-                    if reader_proxy.remote_reader_guid().prefix() != *guid_prefix {
-                        continue;
-                    }
-                    if !reader_proxy.is_active() {
-                        continue;
-                    }
-                    let buffer = MessageCreator::create_heartbeat_message(
-                        participant_guid,
-                        Guid::new(reader_proxy.remote_reader_guid().prefix(), EntityId::UNKNOWN),
-                        heartbeat_count,
-                        reader_entity_id,
-                        writer_entity_id,
-                        first_sn,
-                        last_sn,
-                        false,
-                        false,
-                    );
-                    match buffer {
-                        Ok(buffer) => {
-                            for locator in reader_proxy.unicast_locator_list() {
-                                if locator.kind() == 1 {
-                                    //UDPv4
-                                    let socket_addr = SocketAddr::V4(SocketAddrV4::new(
-                                        locator.to_ip_v4_addr(),
-                                        locator.port() as u16,
-                                    ));
-                                    if let Some(ref sender) = self.sender {
-                                        if let Err(e) = sender.send(&socket_addr, &buffer) {
-                                            warn!("Failed to send SEDP heartbeat: {:?}", e);
-                                        } else {
-                                            is_sent = true;
-                                        }
-                                    } else {
-                                        debug!("UDP sender not available, skipping SEDP heartbeat");
-                                    }
-                                };
-                            }
-                            writer.increase_heartbeat_count();
-                            if writer.last_change_sequence_number() != SequenceNumber::ZERO {
-                                retry = true;
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Failed to create SEDP heartbeat message: {:?}", e);
-                            // Continue to next reader proxy instead of failing entirely
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                return Err(RtpsError::new(
-                    RtpsErrorCode::LockError,
-                    format!("Failed to get reader proxies: {}", e),
-                ));
-            }
-        }
-
-        if retry {
-            let start_time = Instant::now();
-            if entity_id == EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER {
-                self.timer_sleep_and_send_message(
-                    Some(start_time),
-                    logic_start_time,
-                    duration,
-                    MessageType::PeriodicPublicationHeartbeat(
-                        Some(start_time),
-                        duration,
-                        guid_prefix.clone(),
-                    ),
-                )?;
-            } else if entity_id == EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_WRITER {
-                self.timer_sleep_and_send_message(
-                    Some(start_time),
-                    logic_start_time,
-                    duration,
-                    MessageType::PeriodicSubscriptionHeartbeat(
-                        Some(start_time),
-                        duration,
-                        guid_prefix.clone(),
-                    ),
-                )?;
-            } else if entity_id == EntityId::SEDP_BUILTIN_TOPICS_WRITER {
-                self.timer_sleep_and_send_message(
-                    Some(start_time),
-                    logic_start_time,
-                    duration,
-                    MessageType::PeriodicSedpTopicHeartbeat(
-                        Some(start_time),
-                        duration,
-                        guid_prefix.clone(),
-                    ),
-                )?;
-            } else {
-                return Err(RtpsError::new(
-                    RtpsErrorCode::InvalidEntityKind,
-                    format!("Invalid entity id: {:?}", entity_id),
-                ))?;
-            }
-        }
-        Ok(is_sent)
-    }
-
-    pub(crate) fn send_sedp_data_message(
-        &self,
-        cache_change: Arc<CacheChange>,
-        remote_guid: Guid,
-        reader_entity_id: EntityId,
-        writer_entity_id: EntityId,
-    ) -> RtpsResult<()> {
-        let buffer = MessageCreator::create_data_msg(
-            cache_change,
-            remote_guid,
-            reader_entity_id,
-            writer_entity_id,
-            None, // No heartbeat
-            true, // Use inline QoS (default)
-            None, // No content filter for SEDP messages
-        );
-
-        match buffer {
-            Ok(buffer) => self.send_message_to_discovery_traffic(&buffer, remote_guid, "data")?,
-            Err(e) => {
-                return Err(RtpsError::new(
-                    RtpsErrorCode::SerializationError,
-                    format!("Failed to create SEDP DATA message: {}", e),
-                ));
-            }
-        };
-
-        Ok(())
-    }
-
-    fn send_message_to_discovery_traffic(
-        &self,
-        buffer: &[u8],
-        remote_guid: Guid,
-        message_type: &str,
-    ) -> RtpsResult<bool> {
-        // Get remote participant's locator information and send
-        let mut is_sent = false;
-
-        let participant = self.get_upgraded_participant()?;
-
-        match participant.remote_participant_proxy_datas().clone().lock() {
-            Ok(remote_participant_datas) => {
-                for remote_participant_data in remote_participant_datas.iter() {
-                    if remote_participant_data.participant_guid().prefix() == remote_guid.prefix() {
-                        for locator in remote_participant_data.metatraffic_unicast_locator_list() {
-                            // Handle both UDP and TCP locators
-                            match locator.kind() {
-                                LOCATOR_KIND_UDP_V4 | LOCATOR_KIND_TCP_V4 => {
-                                    // Both UDP and TCP use IPv4 addressing
-                                    let socket_addr = SocketAddr::V4(SocketAddrV4::new(
-                                        locator.to_ip_v4_addr(),
-                                        locator.port() as u16,
-                                    ));
-                                    if let Some(ref sender) = self.sender {
-                                        let _ = sender.send(&socket_addr, buffer);
-                                        debug!(
-                                            "[{}] SEDP Logic: {} message sent to {} (transport: {})",
-                                            message_type,
-                                            message_type,
-                                            socket_addr,
-                                            if locator.kind() == LOCATOR_KIND_TCP_V4 {
-                                                "TCP"
-                                            } else {
-                                                "UDP"
-                                            }
-                                        );
-                                        is_sent = true;
-                                    } else {
-                                        debug!("UDP sender not available, skipping SEDP message");
-                                    }
-                                }
-                                LOCATOR_KIND_UDP_V6 | LOCATOR_KIND_TCP_V6 => {
-                                    // IPv6 support can be added here in the future
-                                    warn!(
-                                        "[{}] SEDP Logic: IPv6 locator not yet supported (kind: {})",
-                                        message_type, locator.kind()
-                                    );
-                                }
-                                _ => {
-                                    warn!(
-                                        "[{}] SEDP Logic: Unsupported locator kind: {}",
-                                        message_type,
-                                        locator.kind()
-                                    );
-                                }
-                            }
-                        }
-                        break; // Found the participant, exit loop
-                    }
-                }
-            }
-            Err(e) => {
-                return Err(RtpsError::new(
-                    RtpsErrorCode::LockError,
-                    format!("Failed to lock remote_participant_datas: {:?}", e),
-                ));
-            }
-        }
-
-        if !is_sent {
-            return Err(RtpsError::new(
-                RtpsErrorCode::RtpsEntityNotFound,
-                format!(
-                    "[{}] SEDP Logic: Failed to find remote participant for GUID: {:?}",
-                    message_type, remote_guid
-                ),
-            ));
-        }
-        Ok(is_sent)
-    }
-
-    fn send_sedp_acknack_message(
-        &self,
-        remote_guid: Guid,
-        reader_entity_id: EntityId,
-        writer_entity_id: EntityId,
-        missing_changes: Vec<SequenceNumber>,
-        acknack_count: i32,
-        bitmap_base: SequenceNumber,
-    ) -> RtpsResult<()> {
-        let participant = self.get_upgraded_participant()?;
-
-        let buffer = MessageCreator::create_acknack_message(
-            participant.guid(),
-            remote_guid,
-            reader_entity_id,
-            writer_entity_id,
-            missing_changes,
-            acknack_count,
-            bitmap_base,
+        reader: Arc<dyn Reader + Send + Sync>,
+        publication_builtin_topic_data: PublicationBuiltinTopicData,
+    ) {
+        let _ = self.match_endpoint(
+            MatchType::ReaderPublication,
+            reader.as_any(),
+            BuiltinTopicData::Publication(publication_builtin_topic_data),
             false,
         );
-
-        match buffer {
-            Ok(buffer) => {
-                if let Err(e) =
-                    self.send_message_to_discovery_traffic(&buffer, remote_guid, "AckNack")
-                {
-                    warn!("Failed to send SEDP AckNack message: {:?}", e);
-                }
-            }
-            Err(e) => {
-                warn!("Failed to create SEDP AckNack message: {:?}", e);
-            }
-        }
-
-        Ok(())
     }
 
     fn match_endpoint(
@@ -829,32 +438,10 @@ impl SedpLogic {
 
         Ok(())
     }
+}
 
-    pub(crate) fn match_writer_with_subscription(
-        &self,
-        writer: Arc<dyn Writer + Send + Sync>,
-        subscription_builtin_topic_data: SubscriptionBuiltinTopicData,
-    ) -> RtpsResult<()> {
-        self.match_endpoint(
-            MatchType::WriterSubscription,
-            writer.as_any(),
-            BuiltinTopicData::Subscription(subscription_builtin_topic_data),
-            false,
-        )
-    }
-    pub(crate) fn match_reader_with_publication(
-        &self,
-        reader: Arc<dyn Reader + Send + Sync>,
-        publication_builtin_topic_data: PublicationBuiltinTopicData,
-    ) {
-        let _ = self.match_endpoint(
-            MatchType::ReaderPublication,
-            reader.as_any(),
-            BuiltinTopicData::Publication(publication_builtin_topic_data),
-            false,
-        );
-    }
-
+/// Subscription Handling (Local Writer <-> Remote Reader)
+impl SedpLogic {
     fn handle_subscription_builtin_topic_data(
         &self,
         subscription_builtin_topic_data: SubscriptionBuiltinTopicData,
@@ -870,7 +457,7 @@ impl SedpLogic {
             if let Some(status_info) = inline_qos_params.get_status_info() {
                 // According to RTPS spec, entity termination requires both
                 // DISPOSED and UNREGISTERED status flags to be set
-                if status_info.disposed() && status_info.unregistered() {
+                if status_info.disposed() || status_info.unregistered() {
                     debug!("Received Data(r[UD])");
 
                     // Terminating endpoint provides GUID via KeyHash, but sometimes sends DATA message without SerializedData payload
@@ -1234,7 +821,10 @@ impl SedpLogic {
             }
         }
     }
+}
 
+/// Publication Handling (Local Reader <-> Remote Writer)
+impl SedpLogic {
     fn handle_publication_builtin_topic_data(
         &self,
         publication_builtin_topic_data: PublicationBuiltinTopicData,
@@ -1249,7 +839,7 @@ impl SedpLogic {
             if let Some(status_info) = inline_qos_params.get_status_info() {
                 // According to RTPS spec, entity termination requires both
                 // DISPOSED and UNREGISTERED status flags to be set
-                if status_info.disposed() && status_info.unregistered() {
+                if status_info.disposed() || status_info.unregistered() {
                     debug!("Received Data(w[UD])");
                     // Terminating endpoint provides GUID via KeyHash, but sometimes sends DATA message without SerializedData payload
                     let terminated_writer_guid = inline_qos_params
@@ -1303,110 +893,6 @@ impl SedpLogic {
             .entry(topic_name)
             .or_default()
             .insert(endpoint_guid, publication_builtin_topic_data);
-
-        Ok(())
-    }
-
-    pub(crate) fn handle_stateless_reader_publication(
-        &self,
-        reader: &StatelessReader,
-        publication_builtin_topic_data: PublicationBuiltinTopicData,
-    ) -> RtpsResult<()> {
-        let endpoint_guid = publication_builtin_topic_data.endpoint_guid();
-
-        // Check if writer is already matched to avoid duplicates
-        if reader.matched_writer_is_matched(endpoint_guid) {
-            // Check QoS compatibility in case of QoS change of writer itself or remote reader
-            if let Err(e) = validate_endpoint_compatibility(
-                reader,
-                &reader.subscription_builtin_topic_data()?,
-                &publication_builtin_topic_data,
-                |r, pid| r.update_requested_incompatible_qos_status(pid),
-                "reader->writer",
-            ) {
-                // Incompatible - remove matching
-                debug!(
-                    "QoS changed for remote writer {:?}, now incompatible - removing matching",
-                    endpoint_guid
-                );
-                reader
-                    .writer_locators()
-                    .lock()
-                    .map_err(|lock_err| {
-                        RtpsError::new(
-                            RtpsErrorCode::LockError,
-                            format!("Failed to lock WriterLocators: {}", lock_err),
-                        )
-                    })?
-                    .retain(|writer_locator| writer_locator.remote_writer_guid() != endpoint_guid);
-
-                reader.update_subscription_matched_status(
-                    -1,
-                    InstanceHandle::from_guid(&endpoint_guid),
-                );
-                return Err(e);
-            }
-
-            // Still compatible - just update builtin_topic_data
-            if reader
-                .matched_writer_lookup(endpoint_guid)
-                .ok_or(RtpsError::new(
-                    RtpsErrorCode::MatchedEntityNotFound,
-                    "There is no writer locator for reader",
-                ))?
-                .publication_builtin_topic_data()
-                .changeable_qos_equals(&publication_builtin_topic_data)
-            {
-                debug!(
-                    "QoS changed for remote writer {:?}, still compatible - updating builtin_topic_data",
-                    endpoint_guid
-                );
-
-                reader
-                    .writer_locators()
-                    .lock()
-                    .map_err(|e| {
-                        RtpsError::new(
-                            RtpsErrorCode::LockError,
-                            format!("Failed to lock WriterLocators: {}", e),
-                        )
-                    })?
-                    .iter_mut()
-                    .find(|locator| locator.remote_writer_guid() == endpoint_guid)
-                    .map(|locator| {
-                        locator.set_publication_builtin_topic_data(publication_builtin_topic_data)
-                    });
-            }
-
-            return Ok(());
-        }
-
-        validate_endpoint_compatibility(
-            reader,
-            &reader.subscription_builtin_topic_data()?,
-            &publication_builtin_topic_data,
-            |r, pid| r.update_requested_incompatible_qos_status(pid),
-            "reader->writer",
-        )?;
-
-        let writer_locator = WriterLocator::new(
-            endpoint_guid,
-            publication_builtin_topic_data.unicast_locator_list(),
-            publication_builtin_topic_data.multicast_locator_list(),
-            publication_builtin_topic_data.clone(),
-        );
-        reader.matched_writer_add(writer_locator);
-
-        let writer_guid = endpoint_guid;
-        if writer_guid.entity_id().entity_kind().is_user_defined() {
-            let participant = self.get_upgraded_participant()?;
-            if let Some(wlp_logic) = participant.wlp_logic() {
-                let _ = wlp_logic
-                    .add_remote_writer(writer_guid, *publication_builtin_topic_data.liveliness());
-            }
-        }
-
-        reader.update_subscription_matched_status(1, InstanceHandle::from_guid(&endpoint_guid));
 
         Ok(())
     }
@@ -1522,77 +1008,106 @@ impl SedpLogic {
         Ok(())
     }
 
-    fn register_preemptive_acknack_timer(
+    pub(crate) fn handle_stateless_reader_publication(
         &self,
-        stateful_reader: &StatefulReader,
-        remote_writer_guid: Guid,
+        reader: &StatelessReader,
+        publication_builtin_topic_data: PublicationBuiltinTopicData,
     ) -> RtpsResult<()> {
-        let stateful_reader_id = stateful_reader.guid().entity_id();
-        let timer_id = format!(
-            "preemptive_acknack_{:?}_{:?}",
-            stateful_reader_id,
-            chrono::Local::now().to_rfc3339()
-        );
+        let endpoint_guid = publication_builtin_topic_data.endpoint_guid();
 
-        let participant = self.get_upgraded_participant()?;
+        // Check if writer is already matched to avoid duplicates
+        if reader.matched_writer_is_matched(endpoint_guid) {
+            // Check QoS compatibility in case of QoS change of writer itself or remote reader
+            if let Err(e) = validate_endpoint_compatibility(
+                reader,
+                &reader.subscription_builtin_topic_data()?,
+                &publication_builtin_topic_data,
+                |r, pid| r.update_requested_incompatible_qos_status(pid),
+                "reader->writer",
+            ) {
+                // Incompatible - remove matching
+                debug!(
+                    "QoS changed for remote writer {:?}, now incompatible - removing matching",
+                    endpoint_guid
+                );
+                reader
+                    .writer_locators()
+                    .lock()
+                    .map_err(|lock_err| {
+                        RtpsError::new(
+                            RtpsErrorCode::LockError,
+                            format!("Failed to lock WriterLocators: {}", lock_err),
+                        )
+                    })?
+                    .retain(|writer_locator| writer_locator.remote_writer_guid() != endpoint_guid);
 
-        let callback = move || {
-            if let Some(sending_handler) =
-                SendingHandler::get_instance_by_participant_guid(participant.guid())
-            {
-                sending_handler.push_message_and_wake(MessageType::UserPreemptiveAcknack(
-                    stateful_reader_id,
-                    remote_writer_guid,
-                ));
+                reader.update_subscription_matched_status(
+                    -1,
+                    InstanceHandle::from_guid(&endpoint_guid),
+                );
+                return Err(e);
             }
-        };
 
-        if let Ok(timer_handler) = self.timer_handler.lock() {
-            timer_handler.add_timer(
-                timer_id,
-                stateful_reader.preemptive_acknack_delay().to_std_duration(),
-                false,
-                callback,
-            );
+            // Still compatible - just update builtin_topic_data
+            if reader
+                .matched_writer_lookup(endpoint_guid)
+                .ok_or(RtpsError::new(
+                    RtpsErrorCode::MatchedEntityNotFound,
+                    "There is no writer locator for reader",
+                ))?
+                .publication_builtin_topic_data()
+                .changeable_qos_equals(&publication_builtin_topic_data)
+            {
+                debug!(
+                    "QoS changed for remote writer {:?}, still compatible - updating builtin_topic_data",
+                    endpoint_guid
+                );
+
+                reader
+                    .writer_locators()
+                    .lock()
+                    .map_err(|e| {
+                        RtpsError::new(
+                            RtpsErrorCode::LockError,
+                            format!("Failed to lock WriterLocators: {}", e),
+                        )
+                    })?
+                    .iter_mut()
+                    .find(|locator| locator.remote_writer_guid() == endpoint_guid)
+                    .map(|locator| {
+                        locator.set_publication_builtin_topic_data(publication_builtin_topic_data)
+                    });
+            }
+
+            return Ok(());
         }
 
-        Ok(())
-    }
+        validate_endpoint_compatibility(
+            reader,
+            &reader.subscription_builtin_topic_data()?,
+            &publication_builtin_topic_data,
+            |r, pid| r.update_requested_incompatible_qos_status(pid),
+            "reader->writer",
+        )?;
 
-    fn register_preemptive_heartbeat_timer(
-        &self,
-        stateful_writer: &StatefulWriter,
-        remote_reader_guid: Guid,
-    ) -> RtpsResult<()> {
-        let stateful_writer_id = stateful_writer.guid().entity_id();
-        let timer_id = format!(
-            "preemptive_heartbeat_{:?}_{:?}",
-            stateful_writer_id,
-            chrono::Local::now().to_rfc3339()
+        let writer_locator = WriterLocator::new(
+            endpoint_guid,
+            publication_builtin_topic_data.unicast_locator_list(),
+            publication_builtin_topic_data.multicast_locator_list(),
+            publication_builtin_topic_data.clone(),
         );
+        reader.matched_writer_add(writer_locator);
 
-        let participant = self.get_upgraded_participant()?;
-
-        let callback = move || {
-            if let Some(sending_handler) =
-                SendingHandler::get_instance_by_participant_guid(participant.guid())
-            {
-                sending_handler.push_message_and_wake(MessageType::UserHeartbeatToOne(
-                    stateful_writer_id,
-                    remote_reader_guid,
-                    true,
-                ));
+        let writer_guid = endpoint_guid;
+        if writer_guid.entity_id().entity_kind().is_user_defined() {
+            let participant = self.get_upgraded_participant()?;
+            if let Some(wlp_logic) = participant.wlp_logic() {
+                let _ = wlp_logic
+                    .add_remote_writer(writer_guid, *publication_builtin_topic_data.liveliness());
             }
-        };
-
-        if let Ok(timer_handler) = self.timer_handler.lock() {
-            timer_handler.add_timer(
-                timer_id,
-                stateful_writer.preemptive_heartbeat_delay().to_std_duration(),
-                false,
-                callback,
-            );
         }
+
+        reader.update_subscription_matched_status(1, InstanceHandle::from_guid(&endpoint_guid));
 
         Ok(())
     }
@@ -1617,6 +1132,351 @@ impl SedpLogic {
                 }
             }
         }
+    }
+}
+
+/// Periodic Message Sending
+impl SedpLogic {
+    // Sends periodic SPDP Data & SEDP Heartbeat
+    #[allow(unused_variables)]
+    pub(crate) fn send_periodic_participant_data_unicast(
+        &self,
+        start_time: Option<Instant>,
+        duration: StdDuration,
+        spdp_discovered_participant_data: Arc<SPDPDiscoveredParticipantData>,
+        data: Option<Arc<Vec<u8>>>,
+    ) -> RtpsResult<()> {
+        let logic_start_time = Instant::now();
+        match data {
+            Some(data) => {
+                let mut list: Vec<SPDPDiscoveredParticipantData> = Vec::new();
+                let participant = self.get_upgraded_participant()?;
+
+                match participant.remote_participant_proxy_datas().lock() {
+                    Ok(remote_participant_datas) => {
+                        // Send SPDP message to everyone
+                        for remote_participant_data in remote_participant_datas.iter() {
+                            if spdp_discovered_participant_data.guid_prefix()
+                                != remote_participant_data.guid_prefix()
+                            {
+                                continue;
+                            }
+                            list.push(remote_participant_data.clone());
+                        }
+                    }
+                    Err(e) => {
+                        return Err(RtpsError::new(
+                            RtpsErrorCode::LockError,
+                            format!("Failed to lock remote_participant_datas: {:?}", e),
+                        ));
+                    }
+                }
+                for remote_participant_data in list.iter() {
+                    if let Err(e) = self.send_message_to_discovery_traffic(
+                        &data,
+                        remote_participant_data.participant_guid(),
+                        "spdp",
+                    ) {
+                        warn!("Failed to send SPDP discovery message: {:?}", e);
+                    }
+                    let start_time = Instant::now();
+                    let _ = self.timer_sleep_and_send_message(
+                        Some(start_time),
+                        logic_start_time,
+                        duration,
+                        MessageType::PeriodicParticipantDataUnicast(
+                            Some(start_time),
+                            duration,
+                            spdp_discovered_participant_data.clone(),
+                            Some(data.clone()),
+                        ),
+                    );
+                }
+            }
+            None => return Err(RtpsError::new(RtpsErrorCode::DataNotSet, "Data is not set")),
+        };
+        Ok(())
+    }
+
+    // SEDP HEARTBEAT message connection and unsent / reader proxy check unsent
+    #[allow(unused_variables)]
+    pub(crate) fn send_sedp_periodic_heartbeat_message(
+        &self,
+        start_time: Option<Instant>,
+        duration: StdDuration,
+        // spdp_discovered_participant_data: Arc<SPDPDiscoveredParticipantData>,
+        guid_prefix: Arc<GuidPrefix>,
+        entity_id: EntityId,
+    ) -> RtpsResult<bool> {
+        let logic_start_time = Instant::now();
+        // Get reader and writer corresponding to entity
+        let participant = self.get_upgraded_participant()?;
+
+        let builtin_endpoint_pair =
+            BuiltinEndpointPair::reader_writer_from_entity_id(entity_id, participant.clone())?;
+        let (reader, writer) = match builtin_endpoint_pair {
+            Some(builtin_endpoint_pair) => {
+                (builtin_endpoint_pair.reader(), builtin_endpoint_pair.writer())
+            }
+            None => {
+                return Err(RtpsError::new(
+                    RtpsErrorCode::BuiltinEndpointNotFound,
+                    "Failed to get reader and writer proxy",
+                ))
+            }
+        };
+
+        let reader_entity_id = reader.guid().entity_id();
+        let writer_entity_id = writer.guid().entity_id();
+
+        let (first_sn, last_sn, heartbeat_count) = {
+            match writer.writer_cache().lock() {
+                Ok(writer_cache) => (
+                    writer_cache.get_seq_num_min(),
+                    writer_cache.get_seq_num_max(),
+                    writer.heartbeat_count(),
+                ),
+                Err(e) => {
+                    return Err(RtpsError::new(
+                        RtpsErrorCode::WriterCacheNotSet,
+                        format!("Failed to get writer cache: {}", e),
+                    ));
+                }
+            }
+        };
+
+        let mut is_sent = false;
+        let mut retry: bool = false;
+
+        let participant_guid = {
+            let local_participant_data = participant.local_participant_proxy_data();
+            local_participant_data.participant_guid()
+        };
+
+        match writer.reader_proxies().lock() {
+            Ok(reader_proxies) => {
+                for reader_proxy in reader_proxies.iter() {
+                    if reader_proxy.remote_reader_guid().prefix() != *guid_prefix {
+                        continue;
+                    }
+                    if !reader_proxy.is_active() {
+                        continue;
+                    }
+                    let buffer = MessageCreator::create_heartbeat_message(
+                        participant_guid,
+                        Guid::new(reader_proxy.remote_reader_guid().prefix(), EntityId::UNKNOWN),
+                        heartbeat_count,
+                        reader_entity_id,
+                        writer_entity_id,
+                        first_sn,
+                        last_sn,
+                        false,
+                        false,
+                    );
+                    match buffer {
+                        Ok(buffer) => {
+                            for locator in reader_proxy.unicast_locator_list() {
+                                if locator.kind() == 1 {
+                                    //UDPv4
+                                    let socket_addr = SocketAddr::V4(SocketAddrV4::new(
+                                        locator.to_ip_v4_addr(),
+                                        locator.port() as u16,
+                                    ));
+                                    if let Some(ref sender) = self.sender {
+                                        if let Err(e) = sender.send(&socket_addr, &buffer) {
+                                            warn!("Failed to send SEDP heartbeat: {:?}", e);
+                                        } else {
+                                            is_sent = true;
+                                        }
+                                    } else {
+                                        debug!("UDP sender not available, skipping SEDP heartbeat");
+                                    }
+                                };
+                            }
+                            writer.increase_heartbeat_count();
+                            if writer.last_change_sequence_number() != SequenceNumber::ZERO {
+                                retry = true;
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to create SEDP heartbeat message: {:?}", e);
+                            // Continue to next reader proxy instead of failing entirely
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                return Err(RtpsError::new(
+                    RtpsErrorCode::LockError,
+                    format!("Failed to get reader proxies: {}", e),
+                ));
+            }
+        }
+
+        if retry {
+            let start_time = Instant::now();
+            if entity_id == EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER {
+                self.timer_sleep_and_send_message(
+                    Some(start_time),
+                    logic_start_time,
+                    duration,
+                    MessageType::PeriodicPublicationHeartbeat(
+                        Some(start_time),
+                        duration,
+                        guid_prefix.clone(),
+                    ),
+                )?;
+            } else if entity_id == EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_WRITER {
+                self.timer_sleep_and_send_message(
+                    Some(start_time),
+                    logic_start_time,
+                    duration,
+                    MessageType::PeriodicSubscriptionHeartbeat(
+                        Some(start_time),
+                        duration,
+                        guid_prefix.clone(),
+                    ),
+                )?;
+            } else if entity_id == EntityId::SEDP_BUILTIN_TOPICS_WRITER {
+                self.timer_sleep_and_send_message(
+                    Some(start_time),
+                    logic_start_time,
+                    duration,
+                    MessageType::PeriodicSedpTopicHeartbeat(
+                        Some(start_time),
+                        duration,
+                        guid_prefix.clone(),
+                    ),
+                )?;
+            } else {
+                return Err(RtpsError::new(
+                    RtpsErrorCode::InvalidEntityKind,
+                    format!("Invalid entity id: {:?}", entity_id),
+                ))?;
+            }
+        }
+        Ok(is_sent)
+    }
+
+    fn timer_sleep_and_send_message(
+        &self,
+        start_time: Option<Instant>,
+        logic_start_time: Instant,
+        duration: StdDuration,
+        message: MessageType,
+    ) -> RtpsResult<()> {
+        let elapsed = logic_start_time.elapsed();
+        let remaining_duration = match start_time {
+            Some(start_time) => {
+                let elapsed = start_time.elapsed();
+                duration.checked_sub(elapsed).unwrap_or(StdDuration::from_millis(0))
+            }
+            None => duration.checked_sub(elapsed).unwrap_or(StdDuration::from_millis(0)),
+        };
+
+        let participant = self.get_upgraded_participant()?;
+
+        // Generate unique timer ID using participant GUID, timestamp and random number
+        let timer_id = format!(
+            "sedp_send_{:?}_{}_{:?}",
+            participant.guid().prefix(),
+            logic_start_time.elapsed().as_nanos(),
+            random_range(0..10000)
+        );
+
+        let participant = Arc::new(participant.clone());
+        let message = Arc::new(message);
+        if let Ok(timer_handler) = self.timer_handler.lock() {
+            timer_handler.add_timer(
+                timer_id,
+                remaining_duration,
+                false, // one-shot timer
+                {
+                    let participant = participant.clone();
+                    let message = message.clone();
+                    move || {
+                        let sending_handler =
+                            SendingHandler::get_instance((*participant).clone(), None, None);
+                        sending_handler.push_message_and_wake((*message).clone());
+                    }
+                },
+            );
+        } else {
+            error!("Failed to acquire timer handler lock for SEDP message sending");
+        }
+
+        Ok(())
+    }
+}
+
+/// General Message Sending
+impl SedpLogic {
+    pub(crate) fn send_sedp_data_message(
+        &self,
+        cache_change: Arc<CacheChange>,
+        remote_guid: Guid,
+        reader_entity_id: EntityId,
+        writer_entity_id: EntityId,
+    ) -> RtpsResult<()> {
+        let buffer = MessageCreator::create_data_msg(
+            cache_change,
+            remote_guid,
+            reader_entity_id,
+            writer_entity_id,
+            None, // No heartbeat
+            true, // Use inline QoS (default)
+            None, // No content filter for SEDP messages
+        );
+
+        match buffer {
+            Ok(buffer) => self.send_message_to_discovery_traffic(&buffer, remote_guid, "data")?,
+            Err(e) => {
+                return Err(RtpsError::new(
+                    RtpsErrorCode::SerializationError,
+                    format!("Failed to create SEDP DATA message: {}", e),
+                ));
+            }
+        };
+
+        Ok(())
+    }
+
+    fn send_sedp_acknack_message(
+        &self,
+        remote_guid: Guid,
+        reader_entity_id: EntityId,
+        writer_entity_id: EntityId,
+        missing_changes: Vec<SequenceNumber>,
+        acknack_count: i32,
+        bitmap_base: SequenceNumber,
+    ) -> RtpsResult<()> {
+        let participant = self.get_upgraded_participant()?;
+
+        let buffer = MessageCreator::create_acknack_message(
+            participant.guid(),
+            remote_guid,
+            reader_entity_id,
+            writer_entity_id,
+            missing_changes,
+            acknack_count,
+            bitmap_base,
+            false,
+        );
+
+        match buffer {
+            Ok(buffer) => {
+                if let Err(e) =
+                    self.send_message_to_discovery_traffic(&buffer, remote_guid, "AckNack")
+                {
+                    warn!("Failed to send SEDP AckNack message: {:?}", e);
+                }
+            }
+            Err(e) => {
+                warn!("Failed to create SEDP AckNack message: {:?}", e);
+            }
+        }
+
+        Ok(())
     }
 
     pub(crate) fn send_endpoint_termination_message(
@@ -1733,6 +1593,166 @@ impl SedpLogic {
             } else {
                 error!("Failed to serialize SPDP message with inline qos");
             }
+        }
+
+        Ok(())
+    }
+
+    fn send_message_to_discovery_traffic(
+        &self,
+        buffer: &[u8],
+        remote_guid: Guid,
+        message_type: &str,
+    ) -> RtpsResult<bool> {
+        // Get remote participant's locator information and send
+        let mut is_sent = false;
+
+        let participant = self.get_upgraded_participant()?;
+
+        match participant.remote_participant_proxy_datas().clone().lock() {
+            Ok(remote_participant_datas) => {
+                for remote_participant_data in remote_participant_datas.iter() {
+                    if remote_participant_data.participant_guid().prefix() == remote_guid.prefix() {
+                        for locator in remote_participant_data.metatraffic_unicast_locator_list() {
+                            // Handle both UDP and TCP locators
+                            match locator.kind() {
+                                LOCATOR_KIND_UDP_V4 | LOCATOR_KIND_TCP_V4 => {
+                                    // Both UDP and TCP use IPv4 addressing
+                                    let socket_addr = SocketAddr::V4(SocketAddrV4::new(
+                                        locator.to_ip_v4_addr(),
+                                        locator.port() as u16,
+                                    ));
+                                    if let Some(ref sender) = self.sender {
+                                        let _ = sender.send(&socket_addr, buffer);
+                                        debug!(
+                                            "[{}] SEDP Logic: {} message sent to {} (transport: {})",
+                                            message_type,
+                                            message_type,
+                                            socket_addr,
+                                            if locator.kind() == LOCATOR_KIND_TCP_V4 {
+                                                "TCP"
+                                            } else {
+                                                "UDP"
+                                            }
+                                        );
+                                        is_sent = true;
+                                    } else {
+                                        debug!("UDP sender not available, skipping SEDP message");
+                                    }
+                                }
+                                LOCATOR_KIND_UDP_V6 | LOCATOR_KIND_TCP_V6 => {
+                                    // IPv6 support can be added here in the future
+                                    warn!(
+                                        "[{}] SEDP Logic: IPv6 locator not yet supported (kind: {})",
+                                        message_type, locator.kind()
+                                    );
+                                }
+                                _ => {
+                                    warn!(
+                                        "[{}] SEDP Logic: Unsupported locator kind: {}",
+                                        message_type,
+                                        locator.kind()
+                                    );
+                                }
+                            }
+                        }
+                        break; // Found the participant, exit loop
+                    }
+                }
+            }
+            Err(e) => {
+                return Err(RtpsError::new(
+                    RtpsErrorCode::LockError,
+                    format!("Failed to lock remote_participant_datas: {:?}", e),
+                ));
+            }
+        }
+
+        if !is_sent {
+            return Err(RtpsError::new(
+                RtpsErrorCode::RtpsEntityNotFound,
+                format!(
+                    "[{}] SEDP Logic: Failed to find remote participant for GUID: {:?}",
+                    message_type, remote_guid
+                ),
+            ));
+        }
+        Ok(is_sent)
+    }
+}
+
+/// Utilities
+impl SedpLogic {
+    fn register_preemptive_acknack_timer(
+        &self,
+        stateful_reader: &StatefulReader,
+        remote_writer_guid: Guid,
+    ) -> RtpsResult<()> {
+        let stateful_reader_id = stateful_reader.guid().entity_id();
+        let timer_id = format!(
+            "preemptive_acknack_{:?}_{:?}",
+            stateful_reader_id,
+            chrono::Local::now().to_rfc3339()
+        );
+
+        let participant = self.get_upgraded_participant()?;
+
+        let callback = move || {
+            if let Some(sending_handler) =
+                SendingHandler::get_instance_by_participant_guid(participant.guid())
+            {
+                sending_handler.push_message_and_wake(MessageType::UserPreemptiveAcknack(
+                    stateful_reader_id,
+                    remote_writer_guid,
+                ));
+            }
+        };
+
+        if let Ok(timer_handler) = self.timer_handler.lock() {
+            timer_handler.add_timer(
+                timer_id,
+                stateful_reader.preemptive_acknack_delay().to_std_duration(),
+                false,
+                callback,
+            );
+        }
+
+        Ok(())
+    }
+
+    fn register_preemptive_heartbeat_timer(
+        &self,
+        stateful_writer: &StatefulWriter,
+        remote_reader_guid: Guid,
+    ) -> RtpsResult<()> {
+        let stateful_writer_id = stateful_writer.guid().entity_id();
+        let timer_id = format!(
+            "preemptive_heartbeat_{:?}_{:?}",
+            stateful_writer_id,
+            chrono::Local::now().to_rfc3339()
+        );
+
+        let participant = self.get_upgraded_participant()?;
+
+        let callback = move || {
+            if let Some(sending_handler) =
+                SendingHandler::get_instance_by_participant_guid(participant.guid())
+            {
+                sending_handler.push_message_and_wake(MessageType::UserHeartbeatToOne(
+                    stateful_writer_id,
+                    remote_reader_guid,
+                    true,
+                ));
+            }
+        };
+
+        if let Ok(timer_handler) = self.timer_handler.lock() {
+            timer_handler.add_timer(
+                timer_id,
+                stateful_writer.preemptive_heartbeat_delay().to_std_duration(),
+                false,
+                callback,
+            );
         }
 
         Ok(())
