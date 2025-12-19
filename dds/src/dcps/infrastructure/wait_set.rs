@@ -276,9 +276,6 @@ impl WaitSet {
             if self.trigger_flag.load(Ordering::Acquire) {
                 debug!("[WaitSet-{}] trigger_flag detected, checking conditions", self.instance_id);
 
-                // Reset trigger_flag
-                self.trigger_flag.store(false, Ordering::Release);
-
                 // Check conditions
                 let triggered_conditions = self.check_triggered_conditions()?;
                 if !triggered_conditions.is_empty() {
@@ -287,8 +284,11 @@ impl WaitSet {
                         self.instance_id,
                         triggered_conditions.len()
                     );
+                    self.trigger_flag.store(false, Ordering::Release);
                     return Ok(triggered_conditions);
                 }
+                // No conditions triggered, continue loop to re-check trigger_flag
+                continue;
             }
 
             let conditions = self
@@ -296,6 +296,7 @@ impl WaitSet {
                 .lock()
                 .map_err(|e| DdsError::Error(format!("Failed to lock conditions: {}", e)))?;
 
+            // trigger_flag is false, wait for notification
             match deadline {
                 None => {
                     let _conditions = self.condvar.wait(conditions).map_err(|e| {
@@ -316,7 +317,14 @@ impl WaitSet {
                 }
             };
 
-            // Final check if timeout exists
+            // After waking, check trigger_flag first before checking timeout
+            // This handles the race condition where notification was sent
+            // between trigger_flag check and condvar.wait() entry
+            if self.trigger_flag.load(Ordering::Acquire) {
+                continue;
+            }
+
+            // Only return timeout if trigger_flag is still false
             if let Some(deadline_time) = deadline {
                 if Instant::now() >= deadline_time {
                     debug!("[WaitSet-{}] Wait timeout reached", self.instance_id);
@@ -379,17 +387,13 @@ impl WaitSet {
 
     pub(crate) fn get_notify(&self) -> Arc<dyn Fn() + Send + Sync> {
         let condvar = self.condvar.clone();
-        let waiting_count = self.waiting_count.clone();
         let trigger_flag = self.trigger_flag.clone();
         let instance_id = self.instance_id;
 
         Arc::new(move || {
-            let waiting_threads = waiting_count.load(Ordering::Acquire);
-            if waiting_threads > 0 {
-                debug!("[WaitSet-{}] Notifying {} waiting threads", instance_id, waiting_threads);
-                condvar.notify_all();
-            }
             trigger_flag.store(true, Ordering::Release);
+            debug!("[WaitSet-{}] Notifying waiting threads", instance_id);
+            condvar.notify_all();
         })
     }
 }
