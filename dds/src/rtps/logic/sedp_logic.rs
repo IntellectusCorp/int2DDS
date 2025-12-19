@@ -1886,7 +1886,7 @@ impl UnicastMessageProcessor for SedpLogic {
                     )
                 })?;
 
-            if data.reader_id == EntityId::SEDP_BUILTIN_PUBLICATIONS_READER {
+            if data.writer_id == EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER {
                 let writer_data = SEDPMessage::<DiscoveredWriterData>::from_serialized_payload(
                     payload.as_ref(),
                     is_big_endian,
@@ -1903,7 +1903,7 @@ impl UnicastMessageProcessor for SedpLogic {
                     writer_data.publication_builtin_topic_data,
                     inline_qos_params,
                 );
-            } else if data.reader_id == EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_READER {
+            } else if data.writer_id == EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_WRITER {
                 let reader_data = SEDPMessage::<DiscoveredReaderData>::from_serialized_payload(
                     payload.as_ref(),
                     is_big_endian,
@@ -2034,7 +2034,7 @@ impl UnicastMessageProcessor for SedpLogic {
 
     fn handle_acknack_message(
         &mut self,
-        rtps_header: &crate::rtps::messages::header::Header,
+        rtps_header: &Header,
         acknack: &AckNack,
     ) -> RtpsResult<()> {
         if acknack.writer_id == EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_WRITER {
