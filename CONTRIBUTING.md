@@ -2,6 +2,20 @@
 
 Thank you for your interest in contributing to int2DDS! We welcome contributions from the community.
 
+int2DDS is an open-source real-time DDS middleware core.
+All contributions are governed by the Apache License 2.0 and a Contributor License Agreement (CLA).
+
+- License: Apache License 2.0 (see `LICENSE`)
+- CLA:
+  - Individual contributors: `CLA-Individual.md`
+  - Corporate / organizational contributors: `CLA-Corporate.md`
+
+**Contribution Acceptance Notice**
+
+By submitting a pull request or otherwise contributing to this repository,
+you agree to the terms of the applicable Contributor License Agreement (CLA).
+No additional signature is required unless explicitly requested.
+
 ## Table of Contents
 
 - [Code of Conduct](#code-of-conduct)

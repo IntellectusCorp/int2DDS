@@ -2,15 +2,11 @@
 
 <div align="center">
 
-A **Rust implementation** of the [Data Distribution Service (DDS)](https://www.omg.org/spec/DDS/) middleware standard, following the Real-Time Publish-Subscribe (RTPS) protocol.
-
-[English](#english) | [한국어](#korean)
+A **Rust implementation** of the [Data Distribution Service (DDS)](https://www.omg.org/spec/DDS/) middleware standard, following the Real-Time Publish-Subscribe (RTPS)
 
 </div>
 
 ---
-
-<a name="english"></a>
 
 ## Overview
 
@@ -280,6 +276,11 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 - Submitting pull requests
 - Reporting issues
 
+All contributors must agree to a **Contributor License Agreement (CLA)** before contributions can be merged.
+
+- Individual contributors: [`CLA-Individual.md`](./CLA-Individual.md)
+- Corporate / organizational contributors: [`CLA-Corporate.md`](./CLA-Corporate.md)
+
 ## License
 
 This project is licensed under the [Apache License 2.0](LICENSE).
@@ -287,59 +288,3 @@ This project is licensed under the [Apache License 2.0](LICENSE).
 ## Acknowledgments
 
 Developed by [Intellectus Corp](https://github.com/IntellectusCorp).
-
----
-
-<a name="korean"></a>
-
-## 한국어
-
-### 개요
-
-**int2DDS**는 인텔렉투스에서 개발한 Rust 기반 DDS(Data Distribution Service) 미들웨어 구현체입니다. 실시간 분산 시스템을 위한 고성능 pub-sub 통신을 RTPS 프로토콜로 제공합니다.
-
-### 주요 기능
-
-- **RTPS 프로토콜**: OMG RTPS 2.5 와이어 프로토콜 구현
-- **QoS 정책**: 신뢰성, 내구성, 히스토리, 생존성 등 포괄적인 QoS 지원
-- **자동 검색**: SPDP 및 SEDP를 통한 자동 엔드포인트 검색
-- **타입 안전성**: `#[derive(DdsType)]` 매크로로 컴파일 타임 타입 체킹
-- **전송 유연성**: UDP 멀티캐스트, 브로드캐스트, TCP 전송 지원
-- **데이터 단편화**: 대용량 메시지 자동 처리
-- **XCDR2 직렬화**: 확장 가능한 데이터 표현 지원
-- **크로스 플랫폼**: Windows, Linux, macOS 지원
-- **상호운용성**: 다른 RTPS/DDS 구현체와 상호운용 가능
-
-### 빠른 시작
-
-설치 및 사용 방법은 위의 영어 섹션을 참고하세요.
-
-### 문서
-
-- **API 문서**: `cargo doc --open` 실행
-- **기여 가이드**: [CONTRIBUTING.md](CONTRIBUTING.md)
-- **예제**: [dds/examples/](dds/examples/) 디렉토리
-
-### 프로젝트 구조
-
-```
-int2DDS/
-├── dds/              # DDS 라이브러리 구현
-│   ├── src/
-│   │   ├── dcps/     # DCPS 레이어 (엔티티, QoS, 토픽)
-│   │   ├── rtps/     # RTPS 프로토콜 레이어
-│   │   └── common/   # 공통 유틸리티
-│   ├── examples/     # 예제 프로그램
-│   ├── tests/        # 통합 테스트
-│   └── benches/      # 성능 벤치마크
-├── derive/           # DdsType 매크로
-└── docs/             # 문서 및 가이드
-```
-
-### 라이선스
-
-이 프로젝트는 [Apache License 2.0](./LICENSE) 라이선스로 배포됩니다.
-
-### 문의
-
-인텔렉투스 (Intellectus Corp)에서 개발했습니다.
