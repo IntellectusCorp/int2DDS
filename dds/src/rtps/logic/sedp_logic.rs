@@ -37,8 +37,8 @@ use crate::{
             entity_id::EntityId,
             guid::{Guid, GuidPrefix},
             locator::{
-                LOCATOR_KIND_SHM, LOCATOR_KIND_TCP_V4, LOCATOR_KIND_TCP_V6, LOCATOR_KIND_UDP_V4,
-                LOCATOR_KIND_UDP_V6,
+                Locator, LOCATOR_KIND_SHM, LOCATOR_KIND_TCP_V4, LOCATOR_KIND_TCP_V6,
+                LOCATOR_KIND_UDP_V4, LOCATOR_KIND_UDP_V6,
             },
             parameters::ParameterList,
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
@@ -1172,7 +1172,7 @@ impl SedpLogic {
                     }
                 }
                 for remote_participant_data in list.iter() {
-                    if let Err(e) = self.send_message_to_discovery_traffic(
+                    if let Err(e) = self.send_to_participant_metatraffic_locators(
                         &data,
                         remote_participant_data.participant_guid(),
                         "spdp",
@@ -1180,7 +1180,7 @@ impl SedpLogic {
                         warn!("Failed to send SPDP discovery message: {:?}", e);
                     }
                     let start_time = Instant::now();
-                    let _ = self.timer_sleep_and_send_message(
+                    let _ = self.register_send_timer(
                         Some(start_time),
                         logic_start_time,
                         duration,
@@ -1316,7 +1316,7 @@ impl SedpLogic {
         if retry {
             let start_time = Instant::now();
             if entity_id == EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER {
-                self.timer_sleep_and_send_message(
+                self.register_send_timer(
                     Some(start_time),
                     logic_start_time,
                     duration,
@@ -1327,7 +1327,7 @@ impl SedpLogic {
                     ),
                 )?;
             } else if entity_id == EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_WRITER {
-                self.timer_sleep_and_send_message(
+                self.register_send_timer(
                     Some(start_time),
                     logic_start_time,
                     duration,
@@ -1338,7 +1338,7 @@ impl SedpLogic {
                     ),
                 )?;
             } else if entity_id == EntityId::SEDP_BUILTIN_TOPICS_WRITER {
-                self.timer_sleep_and_send_message(
+                self.register_send_timer(
                     Some(start_time),
                     logic_start_time,
                     duration,
@@ -1358,7 +1358,7 @@ impl SedpLogic {
         Ok(is_sent)
     }
 
-    fn timer_sleep_and_send_message(
+    fn register_send_timer(
         &self,
         start_time: Option<Instant>,
         logic_start_time: Instant,
@@ -1429,7 +1429,9 @@ impl SedpLogic {
         );
 
         match buffer {
-            Ok(buffer) => self.send_message_to_discovery_traffic(&buffer, remote_guid, "data")?,
+            Ok(buffer) => {
+                self.send_to_participant_metatraffic_locators(&buffer, remote_guid, "data")?
+            }
             Err(e) => {
                 return Err(RtpsError::new(
                     RtpsErrorCode::SerializationError,
@@ -1466,7 +1468,7 @@ impl SedpLogic {
         match buffer {
             Ok(buffer) => {
                 if let Err(e) =
-                    self.send_message_to_discovery_traffic(&buffer, remote_guid, "AckNack")
+                    self.send_to_participant_metatraffic_locators(&buffer, remote_guid, "AckNack")
                 {
                     warn!("Failed to send SEDP AckNack message: {:?}", e);
                 }
@@ -1540,9 +1542,11 @@ impl SedpLogic {
 
             match buffer {
                 Ok(buffer) => {
-                    if let Err(e) =
-                        self.send_message_to_discovery_traffic(&buffer, remote_guid, "termination")
-                    {
+                    if let Err(e) = self.send_to_participant_metatraffic_locators(
+                        &buffer,
+                        remote_guid,
+                        "termination",
+                    ) {
                         warn!("Failed to send SEDP termination message: {:?}", e);
                     }
                 }
@@ -1556,128 +1560,110 @@ impl SedpLogic {
 
     pub(crate) fn send_participant_termination_message_unicast(&self) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
+        let rtps_message = MessageCreator::create_spdp_msg_with_inline_qos(participant.clone())?;
+        let buffer = rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian).map_err(|e| {
+            RtpsError::new(
+                RtpsErrorCode::SerializationError,
+                format!("Failed to serialize SPDP message: {:?}", e),
+            )
+        })?;
 
-        if let Ok(rtps_message) =
-            MessageCreator::create_spdp_msg_with_inline_qos(participant.clone())
-        {
-            // Create Data(p[UD]) RTPS Message
-            let buffer = rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian);
-            if let Ok(buffer) = buffer {
-                // Send to all remote participants
-                match participant.remote_participant_proxy_datas().clone().lock() {
-                    Ok(remote_participant_datas) => {
-                        for remote_participant_data in remote_participant_datas.iter() {
-                            // Send to remote participant's all metatraffic unicast locators
-                            for locator in
-                                remote_participant_data.metatraffic_unicast_locator_list()
-                            {
-                                if locator.kind() == 1 {
-                                    // UDPv4
-                                    let socket_addr = SocketAddr::V4(SocketAddrV4::new(
-                                        locator.to_ip_v4_addr(),
-                                        locator.port() as u16,
-                                    ));
-                                    if let Some(ref sender) = self.sender {
-                                        let _ = sender.send(&socket_addr, &buffer);
-                                    } else {
-                                        debug!("UDP sender not available, skipping endpoint termination message");
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!("Failed to lock remote_participant_datas: {:?}", e);
-                    }
-                }
-            } else {
-                error!("Failed to serialize SPDP message with inline qos");
+        self.send_to_all_participants_metatraffic_locators(&buffer, "SPDP Termination")?;
+
+        Ok(())
+    }
+
+    fn send_to_participant_metatraffic_locators(
+        &self,
+        buffer: &[u8],
+        remote_guid: Guid,
+        message_type: &str,
+    ) -> RtpsResult<bool> {
+        let participant = self.get_upgraded_participant()?;
+
+        let Some(remote_participant_data) =
+            participant.find_remote_participant_proxy_data(remote_guid.prefix())
+        else {
+            debug!(
+                "[{}] SEDP Logic: Remote participant data not found for GUID prefix: {:?}",
+                message_type,
+                remote_guid.prefix()
+            );
+            return Ok(false);
+        };
+
+        for locator in remote_participant_data.metatraffic_unicast_locator_list() {
+            self.send_to_single_locator(buffer, locator.clone(), message_type)?;
+        }
+        Ok(true)
+    }
+
+    fn send_to_all_participants_metatraffic_locators(
+        &self,
+        buffer: &[u8],
+        message_type: &str,
+    ) -> RtpsResult<()> {
+        let participant = self.get_upgraded_participant()?;
+
+        let remote_participant_datas = participant.remote_participant_proxy_datas();
+        let remote_participant_datas_guard = remote_participant_datas
+            .lock()
+            .map_err(|_| RtpsError::new(RtpsErrorCode::LockError, None))?;
+
+        for remote_participant_data in remote_participant_datas_guard.iter() {
+            for locator in remote_participant_data.metatraffic_unicast_locator_list() {
+                self.send_to_single_locator(&buffer, locator.clone(), message_type)?;
             }
         }
 
         Ok(())
     }
 
-    fn send_message_to_discovery_traffic(
+    fn send_to_single_locator(
         &self,
         buffer: &[u8],
-        remote_guid: Guid,
+        locator: Locator,
         message_type: &str,
-    ) -> RtpsResult<bool> {
-        // Get remote participant's locator information and send
-        let mut is_sent = false;
+    ) -> RtpsResult<()> {
+        match locator.kind() {
+            // Both UDP and TCP use IPv4 addressing
+            LOCATOR_KIND_UDP_V4 | LOCATOR_KIND_TCP_V4 => {
+                let socket_addr = SocketAddr::V4(SocketAddrV4::new(
+                    locator.to_ip_v4_addr(),
+                    locator.port() as u16,
+                ));
 
-        let participant = self.get_upgraded_participant()?;
-
-        match participant.remote_participant_proxy_datas().clone().lock() {
-            Ok(remote_participant_datas) => {
-                for remote_participant_data in remote_participant_datas.iter() {
-                    if remote_participant_data.participant_guid().prefix() == remote_guid.prefix() {
-                        for locator in remote_participant_data.metatraffic_unicast_locator_list() {
-                            // Handle both UDP and TCP locators
-                            match locator.kind() {
-                                LOCATOR_KIND_UDP_V4 | LOCATOR_KIND_TCP_V4 => {
-                                    // Both UDP and TCP use IPv4 addressing
-                                    let socket_addr = SocketAddr::V4(SocketAddrV4::new(
-                                        locator.to_ip_v4_addr(),
-                                        locator.port() as u16,
-                                    ));
-                                    if let Some(ref sender) = self.sender {
-                                        let _ = sender.send(&socket_addr, buffer);
-                                        debug!(
-                                            "[{}] SEDP Logic: {} message sent to {} (transport: {})",
-                                            message_type,
-                                            message_type,
-                                            socket_addr,
-                                            if locator.kind() == LOCATOR_KIND_TCP_V4 {
-                                                "TCP"
-                                            } else {
-                                                "UDP"
-                                            }
-                                        );
-                                        is_sent = true;
-                                    } else {
-                                        debug!("UDP sender not available, skipping SEDP message");
-                                    }
-                                }
-                                LOCATOR_KIND_UDP_V6 | LOCATOR_KIND_TCP_V6 => {
-                                    // IPv6 support can be added here in the future
-                                    warn!(
-                                        "[{}] SEDP Logic: IPv6 locator not yet supported (kind: {})",
-                                        message_type, locator.kind()
-                                    );
-                                }
-                                _ => {
-                                    warn!(
-                                        "[{}] SEDP Logic: Unsupported locator kind: {}",
-                                        message_type,
-                                        locator.kind()
-                                    );
-                                }
-                            }
-                        }
-                        break; // Found the participant, exit loop
-                    }
+                if let Some(ref sender) = self.sender {
+                    sender.send(&socket_addr, buffer).map_err(|e| {
+                        RtpsError::new(
+                            RtpsErrorCode::NotSent,
+                            format!(
+                                "[{}] SEDP Logic: Failed to send message to {}: {}",
+                                message_type, socket_addr, e
+                            ),
+                        )
+                    })?;
+                    debug!(
+                        "[{}] SEDP Logic: {} message sent to {} (transport: {})",
+                        message_type,
+                        message_type,
+                        socket_addr,
+                        if locator.kind() == LOCATOR_KIND_TCP_V4 { "TCP" } else { "UDP" }
+                    );
+                } else {
+                    debug!("UDP sender not available, skipping SEDP message");
                 }
             }
-            Err(e) => {
-                return Err(RtpsError::new(
-                    RtpsErrorCode::LockError,
-                    format!("Failed to lock remote_participant_datas: {:?}", e),
-                ));
+            _ => {
+                warn!(
+                    "[{}] SEDP Logic: Unsupported locator kind: {}",
+                    message_type,
+                    locator.kind()
+                );
             }
         }
 
-        if !is_sent {
-            return Err(RtpsError::new(
-                RtpsErrorCode::RtpsEntityNotFound,
-                format!(
-                    "[{}] SEDP Logic: Failed to find remote participant for GUID: {:?}",
-                    message_type, remote_guid
-                ),
-            ));
-        }
-        Ok(is_sent)
+        Ok(())
     }
 }
 

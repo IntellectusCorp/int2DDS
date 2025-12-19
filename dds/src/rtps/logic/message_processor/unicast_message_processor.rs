@@ -1,10 +1,7 @@
 use log::trace;
 
 use crate::rtps::{
-    common::{
-        locator::Locator,
-        rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
-    },
+    common::rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
     entities::entity::Entity as _,
     logic::common::ParticipantAccessor,
     messages::{
@@ -17,12 +14,6 @@ use crate::rtps::{
         },
     },
 };
-
-pub(crate) trait UnicastMessageSender: ParticipantAccessor {
-    fn send_message_to_network<T>(buffer: &[u8], locators: T) -> RtpsResult<()>
-    where
-        T: IntoIterator<Item = Locator>;
-}
 
 pub(crate) trait UnicastMessageProcessor: ParticipantAccessor {
     fn handle_rtps_message(&mut self, message_receiver: MessageReceiver) -> RtpsResult<()> {
