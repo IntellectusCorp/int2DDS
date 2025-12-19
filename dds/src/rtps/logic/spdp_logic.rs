@@ -60,12 +60,12 @@ impl SpdpLogic {
         }
     }
 
-    pub(crate) fn is_participant_terminated(&self) -> RtpsResult<bool> {
-        Ok(self.get_upgraded_participant()?.is_terminated())
-    }
-
     pub(crate) fn start_spdp(&self) -> RtpsResult<()> {
         self.trigger_send_spdp_multicast()
+    }
+
+    pub(crate) fn is_participant_terminated(&self) -> RtpsResult<bool> {
+        Ok(self.get_upgraded_participant()?.is_terminated())
     }
 
     // Trigger SPDP multicast transmission
