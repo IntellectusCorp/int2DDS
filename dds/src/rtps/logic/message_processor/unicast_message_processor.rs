@@ -43,8 +43,8 @@ pub(crate) trait UnicastMessageProcessor: ParticipantAccessor {
 
         for submessage in submessages {
             match submessage {
-                TypedSubmessage::Data(_header, data) => {
-                    self.handle_data_message(&rtps_header, &data, &message_receiver)?;
+                TypedSubmessage::Data(header, data) => {
+                    self.handle_data_message(&rtps_header, &header, &data, &message_receiver)?;
                 }
                 TypedSubmessage::Heartbeat(header, heartbeat) => {
                     self.handle_heartbeat_message(&rtps_header, &header, &heartbeat)?;
@@ -70,6 +70,7 @@ pub(crate) trait UnicastMessageProcessor: ParticipantAccessor {
     fn handle_data_message(
         &mut self,
         rtps_header: &Header,
+        submessage_header: &SubmessageHeader,
         data: &Data,
         message_receiver: &MessageReceiver,
     ) -> RtpsResult<()>;

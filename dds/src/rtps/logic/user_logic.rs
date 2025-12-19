@@ -1205,6 +1205,7 @@ impl UnicastMessageProcessor for UserLogic {
     fn handle_data_message(
         &mut self,
         rtps_header: &Header,
+        _submessage_header: &SubmessageHeader,
         data: &Data,
         message_receiver: &MessageReceiver,
     ) -> RtpsResult<()> {
