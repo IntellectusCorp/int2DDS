@@ -12,8 +12,8 @@
 //! # Basic Usage
 //!
 //! ```no_run
-//! use int2dds::dcps::domain::DomainParticipantFactory;
-//! use int2dds::dcps::domain::qos::DomainParticipantQos;
+//! use int2dds::domain::domain_participant_factory::DomainParticipantFactory;
+//! use int2dds::domain::qos::DomainParticipantQos;
 //! use int2dds::infrastructure::status::StatusMask;
 //!
 //! // Get the factory singleton
