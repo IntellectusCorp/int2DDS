@@ -2933,7 +2933,12 @@ mod domain_participant_tests {
         let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
-            .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
             .unwrap();
 
         // Create a topic
@@ -2986,7 +2991,12 @@ mod domain_participant_tests {
         let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
-            .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
             .unwrap();
 
         let topic = participant
@@ -3029,7 +3039,12 @@ mod domain_participant_tests {
         let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
-            .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
             .unwrap();
 
         {
@@ -3054,7 +3069,12 @@ mod domain_participant_tests {
         let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
-            .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
             .unwrap();
 
         let topic = participant
@@ -3118,7 +3138,12 @@ mod domain_participant_tests {
         let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
-            .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
             .unwrap();
 
         // Create a Topic
@@ -3166,11 +3191,15 @@ mod domain_participant_tests {
 
     #[test]
     fn test_datareader_with_contentfilteredtopic() {
-
         let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
-            .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
             .unwrap();
 
         let topic = participant
@@ -3465,7 +3494,12 @@ mod domain_participant_tests {
         let domain_id = unique_domain_id();
         let domain_participant_factory = DomainParticipantFactory::get_instance();
         let domain_participant = domain_participant_factory
-            .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
             .unwrap();
 
         let topic = domain_participant
@@ -3533,7 +3567,12 @@ mod domain_participant_tests {
         let domain_id = unique_domain_id();
         let domain_participant_factory = DomainParticipantFactory::get_instance();
         let domain_participant = domain_participant_factory
-            .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
             .unwrap();
         let type_name = "TestType";
 
@@ -3563,7 +3602,12 @@ mod domain_participant_tests {
         let domain_id = unique_domain_id();
         let domain_participant_factory = DomainParticipantFactory::get_instance();
         let domain_participant = domain_participant_factory
-            .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
             .unwrap();
         let type_name = "TestMultipleType";
 
