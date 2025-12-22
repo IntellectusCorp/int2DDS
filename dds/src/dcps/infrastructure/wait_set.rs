@@ -433,15 +433,7 @@ mod tests {
             .try_init();
         let domain_id = 13;
         let factory = DomainParticipantFactory::get_instance();
-        let participant_sub = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let participant_pub = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -450,7 +442,7 @@ mod tests {
             )
             .unwrap();
 
-        let topic_sub = participant_sub
+        let topic = participant
             .create_topic::<HelloWorldType>(
                 "topic",
                 "HelloWorld",
@@ -460,34 +452,24 @@ mod tests {
             )
             .unwrap();
 
-        let topic_pub = participant_pub
-            .create_topic::<HelloWorldType>(
-                "topic",
-                "HelloWorld",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = participant_sub
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
         let reader = subscriber
             .create_datareader::<HelloWorldType>(
-                &topic_sub,
+                &topic,
                 DataReaderQos::default(),
                 None,
                 StatusMask::default(),
             )
             .unwrap();
 
-        let publisher = participant_pub
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
         let _writer = publisher
             .create_datawriter::<HelloWorldType>(
-                &topic_pub,
+                &topic,
                 DataWriterQos::default(),
                 None,
                 StatusMask::default(),
@@ -499,7 +481,9 @@ mod tests {
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition).unwrap();
-        wait_set.wait(Duration::infinite()).unwrap();
+        let res = wait_set.wait(Duration::from_seconds(10));
+
+        assert!(res.is_ok());
     }
 
     #[test]
@@ -554,15 +538,7 @@ mod tests {
 
         let domain_id = 23;
         let factory = DomainParticipantFactory::get_instance();
-        let participant_sub = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let participant_pub = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -571,7 +547,7 @@ mod tests {
             )
             .unwrap();
 
-        let topic_sub = participant_sub
+        let topic = participant
             .create_topic::<HelloWorldType>(
                 "topic",
                 "HelloWorld",
@@ -581,34 +557,24 @@ mod tests {
             )
             .unwrap();
 
-        let topic_pub = participant_pub
-            .create_topic::<HelloWorldType>(
-                "topic",
-                "HelloWorld",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = participant_sub
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
         let reader = subscriber
             .create_datareader::<HelloWorldType>(
-                &topic_sub,
+                &topic,
                 DataReaderQos::default(),
                 None,
                 StatusMask::default(),
             )
             .unwrap();
 
-        let publisher = participant_pub
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
         let writer = publisher
             .create_datawriter::<HelloWorldType>(
-                &topic_pub,
+                &topic,
                 DataWriterQos::default(),
                 None,
                 StatusMask::default(),
@@ -644,15 +610,7 @@ mod tests {
 
         let domain_id = 23;
         let factory = DomainParticipantFactory::get_instance();
-        let participant_sub = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let participant_pub = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -661,7 +619,7 @@ mod tests {
             )
             .unwrap();
 
-        let topic_sub = participant_sub
+        let topic = participant
             .create_topic::<HelloWorldType>(
                 "topic",
                 "HelloWorld",
@@ -671,34 +629,24 @@ mod tests {
             )
             .unwrap();
 
-        let topic_pub = participant_pub
-            .create_topic::<HelloWorldType>(
-                "topic",
-                "HelloWorld",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = participant_sub
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
         let reader = subscriber
             .create_datareader::<HelloWorldType>(
-                &topic_sub,
+                &topic,
                 DataReaderQos::default(),
                 None,
                 StatusMask::default(),
             )
             .unwrap();
 
-        let publisher = participant_pub
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
         let writer = publisher
             .create_datawriter::<HelloWorldType>(
-                &topic_pub,
+                &topic,
                 DataWriterQos::default(),
                 None,
                 StatusMask::default(),
@@ -743,15 +691,7 @@ mod tests {
 
         let domain_id = 33;
         let factory = DomainParticipantFactory::get_instance();
-        let participant_sub = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let participant_pub = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -760,7 +700,7 @@ mod tests {
             )
             .unwrap();
 
-        let topic_sub = participant_sub
+        let topic = participant
             .create_topic::<HelloWorldType>(
                 "topic",
                 "HelloWorld",
@@ -770,34 +710,24 @@ mod tests {
             )
             .unwrap();
 
-        let topic_pub = participant_pub
-            .create_topic::<HelloWorldType>(
-                "topic",
-                "HelloWorld",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = participant_sub
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
         let reader = subscriber
             .create_datareader::<HelloWorldType>(
-                &topic_sub,
+                &topic,
                 DataReaderQos::default(),
                 None,
                 StatusMask::default(),
             )
             .unwrap();
 
-        let publisher = participant_pub
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
         let _writer = publisher
             .create_datawriter::<HelloWorldType>(
-                &topic_pub,
+                &topic,
                 DataWriterQos::default(),
                 None,
                 StatusMask::default(),
@@ -828,7 +758,8 @@ mod tests {
     fn test_waitset_reuse_functionality() {
         let domain_id = 34;
         let factory = DomainParticipantFactory::get_instance();
-        let participant_sub1 = factory
+
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -837,34 +768,7 @@ mod tests {
             )
             .unwrap();
 
-        let participant_sub2 = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let participant_pub = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let topic_sub1 = participant_sub1
-            .create_topic::<HelloWorldType>(
-                "reuse_topic",
-                "HelloWorldReuse",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let topic_sub2 = participant_sub2
+        let topic = participant
             .create_topic::<HelloWorldType>(
                 "reuse_topic",
                 "HelloWorldReuse",
@@ -874,29 +778,19 @@ mod tests {
             )
             .unwrap();
 
-        let topic_pub = participant_pub
-            .create_topic::<HelloWorldType>(
-                "reuse_topic",
-                "HelloWorldReuse",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber1 = participant_sub1
+        let subscriber1 = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let subscriber2 = participant_sub2
+        let subscriber2 = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let publisher = participant_pub
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
         let reader1 = subscriber1
             .create_datareader::<HelloWorldType>(
-                &topic_sub1,
+                &topic,
                 DataReaderQos::default(),
                 None,
                 StatusMask::default(),
@@ -905,7 +799,7 @@ mod tests {
 
         let reader2 = subscriber2
             .create_datareader::<HelloWorldType>(
-                &topic_sub2,
+                &topic,
                 DataReaderQos {
                     reliability: ReliabilityQosPolicy {
                         kind: ReliabilityQosPolicyKind::Reliable,
@@ -920,7 +814,7 @@ mod tests {
 
         let _writer = publisher
             .create_datawriter::<HelloWorldType>(
-                &topic_pub,
+                &topic,
                 DataWriterQos {
                     reliability: ReliabilityQosPolicy {
                         kind: ReliabilityQosPolicyKind::BestEffort,
@@ -1091,15 +985,7 @@ mod tests {
 
         let domain_id = 57;
         let factory = DomainParticipantFactory::get_instance();
-        let participant_sub = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let participant_pub = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -1108,7 +994,7 @@ mod tests {
             )
             .unwrap();
 
-        let topic_sub = participant_sub
+        let topic = participant
             .create_topic::<HelloWorldType>(
                 "read_topic",
                 "HelloWorld",
@@ -1118,34 +1004,24 @@ mod tests {
             )
             .unwrap();
 
-        let topic_pub = participant_pub
-            .create_topic::<HelloWorldType>(
-                "read_topic",
-                "HelloWorld",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = participant_sub
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
         let reader = subscriber
             .create_datareader::<HelloWorldType>(
-                &topic_sub,
+                &topic,
                 DataReaderQos::default(),
                 None,
                 StatusMask::default(),
             )
             .unwrap();
 
-        let publisher = participant_pub
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
         let writer = publisher
             .create_datawriter::<HelloWorldType>(
-                &topic_pub,
+                &topic,
                 DataWriterQos::default(),
                 None,
                 StatusMask::default(),
@@ -1217,15 +1093,7 @@ mod tests {
 
         let domain_id = 67;
         let factory = DomainParticipantFactory::get_instance();
-        let participant_sub = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let participant_pub = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -1234,7 +1102,7 @@ mod tests {
             )
             .unwrap();
 
-        let topic_sub = participant_sub
+        let topic = participant
             .create_topic::<HelloWorldType>(
                 "query_topic",
                 "HelloWorld",
@@ -1244,34 +1112,24 @@ mod tests {
             )
             .unwrap();
 
-        let topic_pub = participant_pub
-            .create_topic::<HelloWorldType>(
-                "query_topic",
-                "HelloWorld",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = participant_sub
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
         let reader = subscriber
             .create_datareader::<HelloWorldType>(
-                &topic_sub,
+                &topic,
                 DataReaderQos::default(),
                 None,
                 StatusMask::default(),
             )
             .unwrap();
 
-        let publisher = participant_pub
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
         let writer = publisher
             .create_datawriter::<HelloWorldType>(
-                &topic_pub,
+                &topic,
                 DataWriterQos::default(),
                 None,
                 StatusMask::default(),
@@ -1351,15 +1209,7 @@ mod tests {
 
         let domain_id = 77;
         let factory = DomainParticipantFactory::get_instance();
-        let participant_sub = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let participant_pub = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -1368,7 +1218,7 @@ mod tests {
             )
             .unwrap();
 
-        let topic_sub = participant_sub
+        let topic = participant
             .create_topic::<HelloWorldType>(
                 "order_topic",
                 "HelloWorld",
@@ -1378,34 +1228,24 @@ mod tests {
             )
             .unwrap();
 
-        let topic_pub = participant_pub
-            .create_topic::<HelloWorldType>(
-                "order_topic",
-                "HelloWorld",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = participant_sub
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
         let reader = subscriber
             .create_datareader::<HelloWorldType>(
-                &topic_sub,
+                &topic,
                 DataReaderQos::default(),
                 None,
                 StatusMask::default(),
             )
             .unwrap();
 
-        let publisher = participant_pub
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
         let writer = publisher
             .create_datawriter::<HelloWorldType>(
-                &topic_pub,
+                &topic,
                 DataWriterQos::default(),
                 None,
                 StatusMask::default(),
