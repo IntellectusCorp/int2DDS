@@ -469,6 +469,15 @@ impl<Foo: 'static + Clone + Debug> UpdateStatus for DataReader<Foo> {
                 let info =
                     Arc::downcast::<LivelinessChangedStatus>(info.ok_or(DdsError::BadParameter)?)
                         .map_err(|_| DdsError::BadParameter)?;
+
+                if info.alive_count_change() == -1 && info.not_alive_count_change() == 1 {
+                    if let Ok(datareader_cache) = self.datareader_cache.lock() {
+                        datareader_cache.remove_writer_from_owner_candidates(
+                            info.last_publication_handle().to_guid(),
+                        )?;
+                    }
+                }
+
                 self.handle_liveliness_changed_status(info)
             }
             StatusKind::SUBSCRIPTION_MATCHED => {
@@ -1231,15 +1240,6 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
         // StatusCondition
         self.set_communication_status_propagation(&StatusKind::LIVELINESS_CHANGED, true)?;
-
-        // Not alive writer cleanup
-        if info.alive_count == 0 || info.not_alive_count() < 0 {
-            if let Ok(datareader_cache) = self.datareader_cache.lock() {
-                datareader_cache.remove_writer_from_owner_candidates(
-                    info.last_publication_handle().to_guid(),
-                )?;
-            }
-        }
 
         Ok(())
     }
@@ -2883,7 +2883,9 @@ impl<Foo: 'static + Clone + Debug> DataReaderInternal for DataReader<Foo> {
         // Lock is released here, then monitor drops (triggering shutdown and join)
         drop(monitor_to_drop);
 
-        self.self_ref.lock().ok().map(|mut guard| *guard = None);
+        let value_to_drop = self.self_ref.lock().ok().and_then(|mut guard| guard.take());
+        drop(value_to_drop);
+
         self.deleted.store(true, Ordering::SeqCst);
     }
 
