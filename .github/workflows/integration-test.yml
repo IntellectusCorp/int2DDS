@@ -38,6 +38,7 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Run integration tests
+        shell: bash
         env:
           SCCACHE_GHA_ENABLED: "true"
           RUSTC_WRAPPER: sccache
@@ -48,6 +49,7 @@ jobs:
           cargo test --test "*" -- --test-threads=1
 
       - name: Run cleanup tests
+        shell: bash
         env:
           SCCACHE_GHA_ENABLED: "true"
           RUSTC_WRAPPER: sccache
