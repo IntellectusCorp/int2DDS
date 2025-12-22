@@ -197,6 +197,7 @@ mod tests {
         domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
         infrastructure::status::{StatusKind, StatusMask},
         subscription::qos::{DataReaderQos, SubscriberQos},
+        test_utils::unique_domain_id,
         topic::qos::TopicQos,
         DdsType,
     };
@@ -211,7 +212,7 @@ mod tests {
     #[test]
     // test with 31_hello_world_best_effort_publisher
     fn test_status_condition() {
-        let domain_id = 31;
+        let domain_id = unique_domain_id();
         let participant_qos = DomainParticipantQos::default();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
