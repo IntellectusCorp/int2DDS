@@ -196,6 +196,7 @@ mod tests {
             qos::{DataReaderQos, SubscriberQos},
             sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind},
         },
+        test_utils::unique_domain_id,
         topic::qos::TopicQos,
         DdsType,
     };
@@ -208,7 +209,7 @@ mod tests {
 
     #[test]
     fn test_waitset_with_querycondition_order_by() {
-        let domain_id = 77;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
             .create_participant(

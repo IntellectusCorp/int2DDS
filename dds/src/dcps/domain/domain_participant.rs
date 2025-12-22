@@ -2364,6 +2364,7 @@ mod domain_participant_tests {
     use crate::subscription::data_reader::DataReaderInternal;
     use crate::subscription::qos::DataReaderQos;
     use crate::subscription::sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind};
+    use crate::test_utils::unique_domain_id;
     use std::time::{Duration as StdDuration, Instant};
     use std::{sync::Arc, thread};
 
@@ -2458,7 +2459,7 @@ mod domain_participant_tests {
 
     #[test]
     fn autoenable_created_entities_false() {
-        let domain_id = 87;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
 
         let mut domain_participant_qos = DomainParticipantQos::default();
@@ -2929,9 +2930,10 @@ mod domain_participant_tests {
 
     #[test]
     fn test_contentfilteredtopic_lifecycle() {
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
-            .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
             .unwrap();
 
         // Create a topic
@@ -2981,9 +2983,10 @@ mod domain_participant_tests {
 
     #[test]
     fn test_contentfilteredtopic_drop_without_explicit_delete() {
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
-            .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
             .unwrap();
 
         let topic = participant
@@ -3023,9 +3026,10 @@ mod domain_participant_tests {
 
     #[test]
     fn test_topic_drop_without_explicit_delete() {
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
-            .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
             .unwrap();
 
         {
@@ -3047,9 +3051,10 @@ mod domain_participant_tests {
 
     #[test]
     fn test_multiple_contentfilteredtopics_on_same_topic() {
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
-            .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
             .unwrap();
 
         let topic = participant
@@ -3110,9 +3115,10 @@ mod domain_participant_tests {
 
     #[test]
     fn test_lookup_topicdescription() {
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
-            .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
             .unwrap();
 
         // Create a Topic
@@ -3160,9 +3166,11 @@ mod domain_participant_tests {
 
     #[test]
     fn test_datareader_with_contentfilteredtopic() {
+
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
-            .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
             .unwrap();
 
         let topic = participant
@@ -3202,12 +3210,17 @@ mod domain_participant_tests {
         let topic_desc = reader.get_topicdescription().unwrap();
         assert_eq!(topic_desc.get_name(), "filtered_topic");
         assert_eq!(topic_desc.get_type_name(), "HelloWorld");
-
+        println!("1");
         subscriber.delete_datareader(reader).unwrap();
+        println!("2");
         participant.delete_contentfilteredtopic(cft).unwrap();
+        println!("3");
         participant.delete_topic(topic).unwrap();
+        println!("4");
         participant.delete_subscriber(subscriber).unwrap();
+        println!("5");
         factory.delete_participant(participant).unwrap();
+        println!("6");
     }
 
     impl DomainParticipant {
@@ -3449,9 +3462,10 @@ mod domain_participant_tests {
 
     #[test]
     fn test_get_entity_guid() {
+        let domain_id = unique_domain_id();
         let domain_participant_factory = DomainParticipantFactory::get_instance();
         let domain_participant = domain_participant_factory
-            .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
             .unwrap();
 
         let topic = domain_participant
@@ -3516,9 +3530,10 @@ mod domain_participant_tests {
 
     #[test]
     fn test_type_unregistered_when_last_topic_deleted() {
+        let domain_id = unique_domain_id();
         let domain_participant_factory = DomainParticipantFactory::get_instance();
         let domain_participant = domain_participant_factory
-            .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
             .unwrap();
         let type_name = "TestType";
 
@@ -3545,9 +3560,10 @@ mod domain_participant_tests {
 
     #[test]
     fn test_multiple_types_independent_cleanup() {
+        let domain_id = unique_domain_id();
         let domain_participant_factory = DomainParticipantFactory::get_instance();
         let domain_participant = domain_participant_factory
-            .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
             .unwrap();
         let type_name = "TestMultipleType";
 

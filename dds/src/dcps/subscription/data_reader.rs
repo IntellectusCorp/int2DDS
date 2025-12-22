@@ -2976,6 +2976,7 @@ pub(crate) mod tests {
     use crate::subscription::qos::SubscriberQos;
     use crate::subscription::sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind};
     use crate::subscription::subscriber_listener::SubscriberListener;
+    use crate::test_utils::unique_domain_id;
     use crate::topic::qos::TopicQos;
     use std::sync::mpsc::{sync_channel, SyncSender};
     use std::sync::Arc;
@@ -3001,9 +3002,15 @@ pub(crate) mod tests {
 
     #[test]
     fn test_reader_statuscondition() {
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
-            .create_participant(18, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
             .unwrap();
 
         let topic = participant
@@ -3056,7 +3063,7 @@ pub(crate) mod tests {
     fn test_read_samples_change_in_order() {
         // let _ = env_logger::builder().filter_level(log::LevelFilter::Info).try_init();
 
-        let domain_id = 19;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
 
         let participant = factory
@@ -3166,7 +3173,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_read_only_first_sample() {
-        let domain_id = 19;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
             .create_participant(
@@ -3287,7 +3294,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_take_samples() {
-        let domain_id = 19;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
             .create_participant(
@@ -3405,7 +3412,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_take_samples_in_order() {
-        let domain_id = 39;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
             .create_participant(
@@ -3524,7 +3531,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_read_next_samples() {
-        let domain_id = 19;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
             .create_participant(
@@ -3627,7 +3634,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_take_next_samples() {
-        let domain_id = 19;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
             .create_participant(
@@ -3784,7 +3791,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_read_instance_with_specific_handle() {
-        let domain_id = 84;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
             .create_participant(
@@ -3909,7 +3916,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_take_instance_with_specific_handle() {
-        let domain_id = 9;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
             .create_participant(
@@ -4054,7 +4061,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_read_instance_with_nil_handle() {
-        let domain_id = 29;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
             .create_participant(
@@ -4134,7 +4141,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_take_instance_with_nonexistent_handle() {
-        let domain_id = 29;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
             .create_participant(
@@ -4249,7 +4256,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_read_instance_with_sample_state_filter() {
-        let domain_id = 39;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
             .create_participant(
@@ -4379,7 +4386,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_read_next_instance_basic() {
-        let domain_id = 29;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
             .create_participant(
@@ -4520,7 +4527,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_read_next_instance_no_next_instance() {
-        let domain_id = 17;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
             .create_participant(
@@ -4634,7 +4641,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_take_next_instance_basic() {
-        let domain_id = 9;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
             .create_participant(
@@ -4782,7 +4789,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_read_next_instance_with_view_state_filter() {
-        let domain_id = 37;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
             .create_participant(
@@ -4915,7 +4922,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_take_next_instance_with_multiple_samples_per_instance() {
-        let domain_id = 9;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
             .create_participant(
@@ -5063,7 +5070,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_read_next_instance_with_nonexistent_previous_handle() {
-        let domain_id = 9;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
             .create_participant(
@@ -5177,7 +5184,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_take_next_instance_with_max_samples_limit() {
-        let domain_id = 29;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
             .create_participant(
@@ -5298,9 +5305,15 @@ pub(crate) mod tests {
 
     #[test]
     fn test_delete_contained_entities_reader() {
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
-            .create_participant(18, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
             .unwrap();
 
         let topic = participant
@@ -5349,9 +5362,15 @@ pub(crate) mod tests {
 
     #[test]
     fn test_delete_reader() {
+        let domain_id = unique_domain_id();
         let domain_participant_factory = DomainParticipantFactory::get_instance();
         let domain_participant = domain_participant_factory
-            .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
             .unwrap();
 
         let topic = domain_participant
@@ -5432,9 +5451,15 @@ pub(crate) mod tests {
         let (sender, _receiver) = sync_channel(0);
         let listener = SubscriberListenerStructure { _sender: sender };
 
+        let domain_id = unique_domain_id();
         let domain_participant_factory = DomainParticipantFactory::get_instance();
         let domain_participant = domain_participant_factory
-            .create_participant(10, DomainParticipantQos::default(), None, StatusMask::default())
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
             .unwrap();
         let topic = domain_participant
             .create_topic::<HelloWorld>(
