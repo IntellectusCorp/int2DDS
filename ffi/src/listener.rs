@@ -422,6 +422,7 @@ mod tests {
         assert!(ffi_listener.callbacks.on_subscription_matched.is_none());
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn test_panic_catching() {
         // Callback that panics
