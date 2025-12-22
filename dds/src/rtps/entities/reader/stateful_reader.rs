@@ -392,6 +392,8 @@ impl Reader for StatefulReader {
                 log::error!("Failed to lock callback: {:?}", e);
             }
         };
+
+        debug!("StatefulReader on_change completed.");
     }
 
     fn get_next_sequence_number(&self) -> SequenceNumber {

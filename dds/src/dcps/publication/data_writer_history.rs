@@ -16,7 +16,7 @@ use std::{
     thread,
 };
 
-use log::debug;
+use ::log::debug;
 
 use crate::{
     common::instance_handle::InstanceHandle,
@@ -98,8 +98,6 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
         lifespan_duration: Duration,
         timer_id_prefix: &str,
     ) -> DdsResult<()> {
-        use log::debug;
-
         let data_writer_weak = if let Some(data_writer) = self.data_writer.upgrade() {
             Arc::downgrade(&data_writer)
         } else {
@@ -181,6 +179,8 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
         }
         self.add_change_to_instance_map(a_change.clone())?;
         self.add_change_to_rtps_writer_cache(a_change)?;
+
+        debug!("add_change_with_cleanup completed");
         Ok(removed)
     }
 

@@ -172,47 +172,52 @@ impl LivelinessMonitor {
                 };
                 thread::sleep(sleep_duration.try_into().unwrap());
 
-                // Check liveliness
-                if let Ok(mut writer_trackers) = writer_trackers.lock() {
-                    let now = Time::now();
-                    let mut to_remove = Vec::new();
-
-                    for (guid, tracker_info) in writer_trackers.iter_mut() {
-                        let last_update = tracker_info.last_update();
-                        let lease_duration = tracker_info.lease_duration();
-                        let elapsed = now - last_update;
-
-                        if elapsed > lease_duration {
-                            // Only trigger LOST event once (when transitioning from alive to lost)
-                            if tracker_info.is_alive {
-                                warn!(
-                                  "[LivelinessMonitor] Entity {:?} LOST (elapsed: {:?} > lease: {:?})",
-                                  guid, elapsed, lease_duration
-                              );
-
-                                let result = callback.as_ref()(*guid);
-                                tracker_info.is_alive = false; // Mark as lost to prevent duplicate events
-
-                                if result {
-                                    to_remove.push(*guid);
-                                }
+                // Check liveliness - collect expired guids first (without holding lock during callback)
+                let expired_guids: Vec<(Guid, Duration, Duration)> = {
+                    if let Ok(mut writer_trackers) = writer_trackers.lock() {
+                        let now = Time::now();
+                        let mut expired = Vec::new();
+                        for (guid, tracker_info) in writer_trackers.iter_mut() {
+                            let elapsed = now - tracker_info.last_update();
+                            let lease_duration = tracker_info.lease_duration();
+                            if elapsed > lease_duration && tracker_info.is_alive {
+                                tracker_info.is_alive = false; // Mark as lost before releasing lock
+                                expired.push((*guid, elapsed, lease_duration));
+                            } else if elapsed <= lease_duration {
+                                trace!(
+                                    "[LivelinessMontitor Thread] Entity Guid {:?} OK - elapsed: {:?}, remaining: {:?}",
+                                    guid, elapsed, lease_duration - elapsed
+                                );
                             }
-                        } else {
-                            trace!(
-                                "[LivelinessMontitor Thread] Entity Guid {:?} OK - elapsed: {:?}, remaining: {:?}",
-                                guid, elapsed, lease_duration - elapsed
-                            );
+                        }
+                        expired
+                    } else {
+                        warn!("[LivelinessMontitor Thread] Failed to acquire lock for liveliness check");
+                        Vec::new()
+                    }
+                };
+
+                // Execute callbacks without holding the lock to prevent deadlock
+                let mut to_remove = Vec::new();
+                for (guid, elapsed, lease_duration) in expired_guids {
+                    warn!(
+                        "[LivelinessMonitor] Entity {:?} LOST (elapsed: {:?} > lease: {:?})",
+                        guid, elapsed, lease_duration
+                    );
+                    let result = callback.as_ref()(guid);
+                    if result {
+                        to_remove.push(guid);
+                    }
+                }
+
+                // Remove trackers that should be removed
+                if !to_remove.is_empty() {
+                    if let Ok(mut writer_trackers) = writer_trackers.lock() {
+                        for guid in to_remove {
+                            writer_trackers.remove(&guid);
+                            debug!("[LivelinessMonitor] Removed tracker for {:?}", guid);
                         }
                     }
-
-                    for guid in to_remove {
-                        writer_trackers.remove(&guid);
-                        debug!("[LivelinessMonitor] Removed tracker for {:?}", guid);
-                    }
-                } else {
-                    warn!(
-                        "[LivelinessMontitor Thread] Failed to acquire lock for liveliness check"
-                    );
                 }
             }
 
