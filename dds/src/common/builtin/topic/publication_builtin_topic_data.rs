@@ -54,22 +54,11 @@ impl PublicationBuiltinTopicData {
         topic_qos: &TopicQos,
     ) -> Self {
         let empty_guid = Guid::from_bytes([0u8; 16]);
+        let prefix = empty_guid.prefix();
         Self {
             endpoint_guid: empty_guid,
-            key: BuiltinTopicKey {
-                value: [
-                    empty_guid.prefix()[0] as i32,
-                    empty_guid.prefix()[1] as i32,
-                    empty_guid.prefix()[2] as i32,
-                ],
-            },
-            participant_key: BuiltinTopicKey {
-                value: [
-                    empty_guid.prefix()[0] as i32,
-                    empty_guid.prefix()[1] as i32,
-                    empty_guid.prefix()[2] as i32,
-                ],
-            },
+            key: BuiltinTopicKey { value: Self::convert_u8_to_i32_array(prefix) },
+            participant_key: BuiltinTopicKey { value: Self::convert_u8_to_i32_array(prefix) },
             topic_name: String::new(),
             type_name: String::new(),
             durability: datawriter_qos.durability,
@@ -263,9 +252,9 @@ impl PublicationBuiltinTopicData {
 
     pub fn convert_u8_to_i32_array(data: [u8; 12]) -> [i32; 3] {
         [
-            i32::from_ne_bytes([data[0], data[1], data[2], data[3]]),
-            i32::from_ne_bytes([data[4], data[5], data[6], data[7]]),
-            i32::from_ne_bytes([data[8], data[9], data[10], data[11]]),
+            i32::from_be_bytes([data[0], data[1], data[2], data[3]]),
+            i32::from_be_bytes([data[4], data[5], data[6], data[7]]),
+            i32::from_be_bytes([data[8], data[9], data[10], data[11]]),
         ]
     }
 
