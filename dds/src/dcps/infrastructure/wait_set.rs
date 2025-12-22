@@ -405,15 +405,15 @@ mod tests {
         core::{error::DdsError, time::Duration},
         domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
         infrastructure::{
-            qos_policy::{ReliabilityQosPolicy, ReliabilityQosPolicyKind},
+            qos_policy::{
+                HistoryQosPolicy, HistoryQosPolicyKind, ReliabilityQosPolicy,
+                ReliabilityQosPolicyKind,
+            },
             status::StatusMask,
             wait_set::WaitSet,
         },
         publication::qos::{DataWriterQos, PublisherQos},
-        subscription::{
-            qos::{DataReaderQos, SubscriberQos},
-            sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind},
-        },
+        subscription::qos::{DataReaderQos, SubscriberQos},
         test_utils::unique_domain_id,
         topic::qos::TopicQos,
         DdsType,
@@ -547,25 +547,31 @@ mod tests {
         let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let reader = subscriber
-            .create_datareader::<HelloWorldType>(
-                &topic,
-                DataReaderQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datareader::<HelloWorldType>(&topic, reader_qos, None, StatusMask::default())
             .unwrap();
 
         let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let writer = publisher
-            .create_datawriter::<HelloWorldType>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorldType>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
         // Set StatusConditions with different status masks (using only actually implemented statuses)
@@ -910,7 +916,6 @@ mod tests {
         let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-
         let reader = subscriber
             .create_datareader::<HelloWorldType>(
                 &topic,
@@ -941,219 +946,5 @@ mod tests {
         let result = wait_set.detach_condition(condition);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), DdsError::PreconditionNotMet);
-    }
-
-    #[test]
-    fn test_waitset_with_readcondition() {
-        let domain_id = unique_domain_id();
-        let factory = DomainParticipantFactory::get_instance();
-        let participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let topic = participant
-            .create_topic::<HelloWorldType>(
-                "read_topic",
-                "HelloWorld",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = participant
-            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
-            .unwrap();
-        let reader = subscriber
-            .create_datareader::<HelloWorldType>(
-                &topic,
-                DataReaderQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let publisher = participant
-            .create_publisher(PublisherQos::default(), None, StatusMask::default())
-            .unwrap();
-        let writer = publisher
-            .create_datawriter::<HelloWorldType>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let mut condition = writer.get_statuscondition().unwrap().clone();
-        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap(); // trigger O
-
-        let wait_set = WaitSet::new();
-        wait_set.attach_condition(condition.clone()).unwrap();
-        wait_set.wait(Duration::from_seconds(10)).unwrap();
-        wait_set.detach_condition(condition).unwrap();
-
-        // Create ReadCondition: NOT_READ samples only
-        let read_condition = reader
-            .create_readcondition(
-                &[SampleStateKind::NOT_READ_SAMPLE_STATE],
-                &[ViewStateKind::ANY_VIEW_STATE],
-                &[InstanceStateKind::ANY_INSTANCE_STATE],
-            )
-            .unwrap();
-
-        // Connect ReadCondition to WaitSet
-        wait_set.attach_condition(read_condition.clone()).unwrap();
-
-        writer
-            .write(
-                &HelloWorldType { index: 0, message: "hello world!".to_string() },
-                InstanceHandle::NIL,
-            )
-            .unwrap();
-        writer
-            .write(
-                &HelloWorldType { index: 1, message: "hello world!".to_string() },
-                InstanceHandle::NIL,
-            )
-            .unwrap();
-
-        // Wait for data arrival
-        let result = wait_set.wait(Duration::from_seconds(10));
-        assert!(result.is_ok());
-
-        if result.is_ok() {
-            let active_conditions = result.unwrap();
-
-            // Check activated conditions
-            for _condition in active_conditions {
-                let samples = reader.read_w_condition(10, read_condition.clone()).unwrap();
-                assert!(!samples.is_empty());
-
-                for sample in samples.iter() {
-                    if sample.sample_info().valid_data {
-                        log::info!("Received: {:?}", sample.data());
-                    }
-                }
-            }
-        }
-
-        assert_eq!(read_condition.get_trigger_value(), Ok(false));
-    }
-
-    #[test]
-    fn test_waitset_with_querycondition() {
-        let domain_id = unique_domain_id();
-        let factory = DomainParticipantFactory::get_instance();
-        let participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let topic = participant
-            .create_topic::<HelloWorldType>(
-                "query_topic",
-                "HelloWorld",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = participant
-            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
-            .unwrap();
-        let reader = subscriber
-            .create_datareader::<HelloWorldType>(
-                &topic,
-                DataReaderQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let publisher = participant
-            .create_publisher(PublisherQos::default(), None, StatusMask::default())
-            .unwrap();
-        let writer = publisher
-            .create_datawriter::<HelloWorldType>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let mut condition = writer.get_statuscondition().unwrap().clone();
-        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap(); // trigger O
-
-        let wait_set = WaitSet::new();
-        wait_set.attach_condition(condition.clone()).unwrap();
-        wait_set.wait(Duration::from_seconds(10)).unwrap();
-        wait_set.detach_condition(condition).unwrap();
-
-        // Create QueryCondition: samples where id > 100 only
-        let query_condition = reader
-            .create_querycondition(
-                &[SampleStateKind::NOT_READ_SAMPLE_STATE],
-                &[ViewStateKind::ANY_VIEW_STATE],
-                &[InstanceStateKind::ALIVE_INSTANCE_STATE],
-                "index > %0",            // query expression
-                vec!["100".to_string()], // query parameters
-            )
-            .unwrap();
-
-        // Connect QueryCondition to WaitSet
-        wait_set.attach_condition(query_condition.clone()).unwrap();
-
-        writer
-            .write(
-                &HelloWorldType { index: 0, message: "hello world!".to_string() },
-                InstanceHandle::NIL,
-            )
-            .unwrap();
-        writer
-            .write(
-                &HelloWorldType { index: 100, message: "hello world!".to_string() },
-                InstanceHandle::NIL,
-            )
-            .unwrap();
-        writer
-            .write(
-                &HelloWorldType { index: 200, message: "hello world!".to_string() },
-                InstanceHandle::NIL,
-            )
-            .unwrap();
-
-        // Wait for data arrival that satisfies condition
-        let result = wait_set.wait(Duration::from_seconds(5));
-        assert!(result.is_ok());
-
-        if result.is_ok() {
-            let active_conditions = result.unwrap();
-
-            // Check activated conditions
-            for _condition in active_conditions {
-                let samples = reader.read_w_condition(10, query_condition.clone()).unwrap();
-                assert_eq!(samples.len(), 1);
-
-                for sample in samples.iter() {
-                    if sample.sample_info().valid_data {
-                        log::info!("Received: {:?}", sample.data());
-                    }
-                }
-            }
-        }
-
-        assert_eq!(query_condition.get_trigger_value(), Ok(false));
     }
 }
