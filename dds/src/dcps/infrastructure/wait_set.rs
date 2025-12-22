@@ -826,11 +826,6 @@ mod tests {
 
     #[test]
     fn test_waitset_reuse_functionality() {
-        let _ = env_logger::builder()
-            .filter_module("int2dds::dds::infrastructure::wait_set", log::LevelFilter::Debug)
-            .filter_level(log::LevelFilter::Error)
-            .try_init();
-
         let domain_id = 34;
         let factory = DomainParticipantFactory::get_instance();
         let participant_sub1 = factory
