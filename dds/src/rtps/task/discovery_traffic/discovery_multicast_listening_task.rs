@@ -3,7 +3,7 @@ use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::types::DomainId;
 use crate::rtps::entities::entity::Entity;
 use crate::rtps::entities::participant::Participant;
-use crate::rtps::logic::data::participant_message_processor::ParticipantMessageProcessor as _;
+use crate::rtps::logic::message_processor::participant_message_processor::ParticipantMessageProcessor as _;
 use crate::rtps::logic::spdp_logic::SpdpLogic;
 use crate::rtps::messages::message_receiver::MessageReceiver;
 use crate::rtps::transport::socket::MAX_EVENTS;
@@ -104,44 +104,37 @@ impl DiscoveryMulticastListeningTask {
 
                         match participant_proxy_data {
                             Some((participant_proxy_data, inline_qos_params)) => {
-                                let mut is_termination_message = false;
+                                let spdp_logic = self
+                                    .spdp_logic
+                                    .as_ref()
+                                    .as_ref()
+                                    .expect("SpdpLogic is not initialized");
 
-                                if let Some(inline_qos_params) = inline_qos_params {
-                                    if let Some(status_info) = inline_qos_params.get_status_info() {
-                                        // According to RTPS spec, entity termination requires both
-                                        // DISPOSED and UNREGISTERED status flags to be set
-                                        if status_info.disposed() && status_info.unregistered() {
-                                            // Sometimes terminated Participant GUID is provided as KeyHash, sometimes sent in DATA message SerializedData payload
-                                            let terminated_participant_guid = inline_qos_params
-                                                .get_key_hash()
-                                                .unwrap_or_else(|| {
-                                                    InstanceHandle::from_guid(
-                                                        &participant_proxy_data.participant_guid(),
-                                                    )
-                                                });
+                                let is_termination = inline_qos_params
+                                    .as_ref()
+                                    .and_then(|qos| qos.get_status_info())
+                                    .is_some_and(|status| {
+                                        status.disposed() || status.unregistered()
+                                    });
 
-                                            let spdp_logic = self
-                                                .spdp_logic
-                                                .as_ref()
-                                                .as_ref()
-                                                .expect("SpdpLogic is not initialized");
-                                            let _ = spdp_logic
-                                                .handle_participant_termination_message(
-                                                    &terminated_participant_guid.to_guid(),
-                                                );
+                                if is_termination {
+                                    let terminated_participant_guid = inline_qos_params
+                                        .as_ref()
+                                        .and_then(|qos| qos.get_key_hash())
+                                        .unwrap_or_else(|| {
+                                            InstanceHandle::from_guid(
+                                                &participant_proxy_data.participant_guid(),
+                                            )
+                                        });
 
-                                            is_termination_message = true;
-                                        }
+                                    if let Err(e) = spdp_logic
+                                        .handle_participant_termination_message(
+                                            &terminated_participant_guid.to_guid(),
+                                        )
+                                    {
+                                        error!("Failed to handle participant termination message: {:?}", e);
                                     }
-                                }
-
-                                if !is_termination_message {
-                                    let spdp_logic = self
-                                        .spdp_logic
-                                        .as_ref()
-                                        .as_ref()
-                                        .expect("SpdpLogic is not initialized");
-
+                                } else {
                                     if let Err(e) = spdp_logic
                                         .handle_discovered_participant_data(participant_proxy_data)
                                     {
