@@ -35,13 +35,13 @@ use crate::{
         },
         entities::{
             entity::Entity,
-            participant::Participant,
             reader::{Reader as _, StatefulReader, WriterProxy},
             writer::{
                 has_reader_locator::HasReaderLocator as _, reader_locator::ReaderLocator,
                 reader_proxy::ReaderProxy, StatefulWriter, Writer as _,
             },
         },
+        logic::common::ParticipantAccessor,
         messages::message_creator::MessageCreator,
         task::sending_handler::{MessageType, SendingHandler},
     },
@@ -51,10 +51,7 @@ use crate::{
 ///
 /// This trait provides default implementations for common participant discovery
 /// operations that can be used by both SPDP and SEDP logic components.
-pub trait ParticipantMessageProcessor {
-    /// Get the participant instance
-    fn get_upgraded_participant(&self) -> RtpsResult<Arc<Participant>>;
-
+pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
     /// Handle discovered participant data (renamed from handle_multicast_spdp_message)
     fn handle_discovered_participant_data(
         &self,
