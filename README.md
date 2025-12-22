@@ -10,7 +10,7 @@ A **Rust implementation** of the [Data Distribution Service (DDS)](https://www.o
 
 ## Overview
 
-**int2DDS** is a production-grade DDS middleware implementation in Rust, developed by Intellectus Corp. It provides high-performance, real-time pub-sub communication for distributed systems with full RTPS protocol support.
+**int2DDS** is an open-source, real-time DDS / RTPS middleware core. It provides high-performance, real-time pub-sub communication for distributed systems with RTPS protocol support. It provides a standards-based foundation for building reliable, low-latency distributed systems in domains such as autonomous driving, robotics, industrial automation, and defense.
 
 ### Key Features
 
@@ -204,7 +204,7 @@ fn main() {
 
 ### Prerequisites
 
-- Rust 1.70 or later
+- Rust 1.88 or later
 - Cargo
 
 ### Build
@@ -292,6 +292,27 @@ All contributors must agree to a **Contributor License Agreement (CLA)** before 
 
 - Individual contributors: [`CLA-Individual.md`](./CLA-Individual.md)
 - Corporate / organizational contributors: [`CLA-Corporate.md`](./CLA-Corporate.md)
+
+## Scope of int2DDS
+
+int2DDS focuses on the **core runtime and communication layer** of a DDS middleware implementation.
+It is designed to be embedded and reused by higher-level systems, including commercial products such as **int2ConneX**, without imposing strong copyleft obligations.
+
+## Scope of the Open-Source Core
+
+### Included
+
+- OMG DDS / RTPS standard-based core functionality
+- Discovery, transport, topics, and essential QoS mechanisms
+- Minimal tooling required to build, run, and test the middleware
+
+### Not Included
+
+- Centralized management or monitoring dashboards
+- Fleet or cluster orchestration
+- Domain-specific bridges, UIs, analytics, or data pipelines
+
+These advanced capabilities are provided through commercial products such as **int2ConneX**.
 
 ## License
 
