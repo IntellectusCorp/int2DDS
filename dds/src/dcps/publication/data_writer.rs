@@ -2207,12 +2207,12 @@ mod tests {
         println!("First write completed");
 
         // Write again before deadline - miss should not occur
-        thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(200));
         writer.write(&data, InstanceHandle::NIL).unwrap();
         println!("Second write completed (within deadline)");
 
         // Verify after short wait
-        thread::sleep(std::time::Duration::from_millis(50));
+        thread::sleep(std::time::Duration::from_millis(100));
         assert_eq!(
             deadline_miss_count.load(Ordering::SeqCst),
             0,
@@ -2221,7 +2221,7 @@ mod tests {
 
         // Wait to exceed deadline - miss should occur
         println!("Waiting for deadline to expire...");
-        thread::sleep(std::time::Duration::from_millis(250));
+        thread::sleep(std::time::Duration::from_millis(500));
 
         // Verify deadline miss
         let miss_count = deadline_miss_count.load(Ordering::SeqCst);
