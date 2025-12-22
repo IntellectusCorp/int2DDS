@@ -871,10 +871,10 @@ mod tests {
             let handler = timer_handler.lock().unwrap();
 
             // Add timers with large intervals for CI stability
-            // Timers: 100ms, 200ms, 300ms, 400ms, 500ms
+            // Timers: 200ms, 400ms, 600ms, 800ms, 1000ms
             for i in 1..=5 {
                 let timer_id = format!("fast_timer_{}", i);
-                let delay_ms = i * 100; // 100ms, 200ms, 300ms, 400ms, 500ms
+                let delay_ms = i * 200; // 200ms, 400ms, 600ms, 800ms, 1000ms
                 let results_clone = execution_results.clone();
 
                 handler.add_timer(
@@ -888,26 +888,26 @@ mod tests {
             }
         }
 
-        // Delete timers 4 and 5 after 350ms (after 100, 200, 300ms execute, before 400, 500ms)
-        thread::sleep(Duration::from_millis(350));
+        // Delete timers 4 and 5 after 700ms (after 200, 400, 600ms execute, before 800, 1000ms)
+        thread::sleep(Duration::from_millis(700));
 
         {
             let handler = timer_handler.lock().unwrap();
-            handler.remove_timer("fast_timer_4".to_string()); // Delete 400ms timer
-            handler.remove_timer("fast_timer_5".to_string()); // Delete 500ms timer
+            handler.remove_timer("fast_timer_4".to_string()); // Delete 800ms timer
+            handler.remove_timer("fast_timer_5".to_string()); // Delete 1000ms timer
         }
 
-        // Wait an additional 200ms
-        thread::sleep(Duration::from_millis(200));
+        // Wait an additional 400ms
+        thread::sleep(Duration::from_millis(400));
 
         let results = execution_results.lock().unwrap();
 
         // Verify timers 1, 2, 3 executed and 4, 5 did not
-        assert!(results.contains(&1)); // 100ms
-        assert!(results.contains(&2)); // 200ms
-        assert!(results.contains(&3)); // 300ms
-        assert!(!results.contains(&4)); // 400ms (deleted before execution)
-        assert!(!results.contains(&5)); // 500ms (deleted before execution)
+        assert!(results.contains(&1)); // 200ms
+        assert!(results.contains(&2)); // 400ms
+        assert!(results.contains(&3)); // 600ms
+        assert!(!results.contains(&4)); // 800ms (deleted before execution)
+        assert!(!results.contains(&5)); // 1000ms (deleted before execution)
 
         assert_eq!(results.len(), 3);
 
