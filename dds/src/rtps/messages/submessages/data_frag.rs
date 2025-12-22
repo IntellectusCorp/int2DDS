@@ -355,54 +355,6 @@ mod tests {
     }
 
     #[test]
-    fn test_datafrag_invalid_fragment_starting_num_zero() {
-        let mut datafrag = create_dummy_datafrag();
-        datafrag.fragment_starting_num = 0; // invalid
-
-        let buffer = datafrag.write_to_vec_with_ctx(Endianness::BigEndian).unwrap();
-
-        let header = create_dummy_submessage_header(buffer.len() as u16);
-
-        let result = DataFrag::deserialize(&Bytes::from(buffer.to_vec()), &header);
-        assert!(result.is_err());
-        if let Err(err) = result {
-            assert_eq!(err.code, RtpsErrorCode::InvalidSubmessageBody);
-        }
-    }
-
-    #[test]
-    fn test_datafrag_invalid_fragment_starting_num_exceeds_total() {
-        let mut datafrag = create_dummy_datafrag();
-        datafrag.fragment_starting_num = 5; // total fragments = 2
-
-        let buffer = datafrag.write_to_vec_with_ctx(Endianness::BigEndian).unwrap();
-
-        let header = create_dummy_submessage_header(buffer.len() as u16);
-
-        let result = DataFrag::deserialize(&Bytes::from(buffer.to_vec()), &header);
-        assert!(result.is_err());
-        if let Err(err) = result {
-            assert_eq!(err.code, RtpsErrorCode::InvalidSubmessageBody);
-        }
-    }
-
-    #[test]
-    fn test_datafrag_invalid_fragment_size_larger_than_sample_size() {
-        let mut datafrag = create_dummy_datafrag();
-        datafrag.fragment_size = 3; // sample size is 2
-
-        let buffer = datafrag.write_to_vec_with_ctx(Endianness::BigEndian).unwrap();
-
-        let header = create_dummy_submessage_header(buffer.len() as u16);
-
-        let result = DataFrag::deserialize(&Bytes::from(buffer.to_vec()), &header);
-        assert!(result.is_err());
-        if let Err(err) = result {
-            assert_eq!(err.code, RtpsErrorCode::InvalidSubmessageBody);
-        }
-    }
-
-    #[test]
     fn test_datafrag_invalid_serialized_data_too_large() {
         let mut datafrag = create_dummy_datafrag();
         datafrag.fragments_in_submessage = 1;

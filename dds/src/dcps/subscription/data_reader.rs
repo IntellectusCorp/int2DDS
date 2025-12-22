@@ -521,32 +521,32 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     /// # Examples
     ///
     /// ```no_run
-    /// # use int2dds::dcps::domain::DomainParticipantFactory;
+    /// # use int2dds::domain::domain_participant_factory::DomainParticipantFactory;
     /// # use int2dds::topic::type_support::DdsType;
     /// # use int2dds::subscription::sample_info::SampleStateKind;
     /// # use int2dds::subscription::sample_info::ViewStateKind;
     /// # use int2dds::subscription::sample_info::InstanceStateKind;
     /// # use int2dds::core::types::LENGTH_UNLIMITED;
-    /// # #[derive(Clone, DdsType, Debug)]
+    /// # #[derive(DdsType)]
     /// # struct MyData { #[dds(key)] id: u32, message: String }
     /// # let factory = DomainParticipantFactory::get_instance();
-    /// # let participant = factory.create_participant(0, Default::default(), None, Default::default())?;
-    /// # let topic = participant.create_topic::<MyData>("MyTopic", "MyData", Default::default(), None, Default::default())?;
-    /// # let subscriber = participant.create_subscriber(Default::default(), None, Default::default())?;
-    /// # let reader = subscriber.create_datareader::<MyData>(&topic, Default::default(), None, Default::default())?;
+    /// # let participant = factory.create_participant(0, Default::default(), None, Default::default()).unwrap();
+    /// # let topic = participant.create_topic::<MyData>("MyTopic", "MyData", Default::default(), None, Default::default()).unwrap();
+    /// # let subscriber = participant.create_subscriber(Default::default(), None, Default::default()).unwrap();
+    /// # let reader = subscriber.create_datareader::<MyData>(&topic, Default::default(), None, Default::default()).unwrap();
     /// // Take some samples
     /// let samples = reader.take(
     ///     LENGTH_UNLIMITED,
     ///     &[SampleStateKind::ANY_SAMPLE_STATE],
     ///     &[ViewStateKind::ANY_VIEW_STATE],
     ///     &[InstanceStateKind::ANY_INSTANCE_STATE]
-    /// )?;
+    /// ).unwrap();
     ///
     /// for sample in samples {
     ///     let handle = sample.sample_info().instance_handle;
     ///
     ///     // Get the key values for this instance
-    ///     let key_holder = reader.get_key_value(handle)?;
+    ///     let key_holder = reader.get_key_value(handle).unwrap();
     ///     println!("Instance key: {:?}", key_holder.id);
     /// }
     /// ```
@@ -603,20 +603,20 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     /// # Examples
     ///
     /// ```no_run
-    /// # use int2dds::dcps::domain::DomainParticipantFactory;
+    /// # use int2dds::domain::domain_participant_factory::DomainParticipantFactory;
     /// # use int2dds::topic::type_support::DdsType;
     /// # use int2dds::common::instance_handle::InstanceHandle;
-    /// # #[derive(Clone, DdsType)]
+    /// # #[derive(DdsType)]
     /// # struct MyData { #[dds(key)] id: u32, message: String }
     /// # let factory = DomainParticipantFactory::get_instance();
-    /// # let participant = factory.create_participant(0, Default::default(), None, Default::default())?;
-    /// # let topic = participant.create_topic::<MyData>("MyTopic", "MyData", Default::default(), None, Default::default())?;
-    /// # let subscriber = participant.create_subscriber(Default::default(), None, Default::default())?;
-    /// # let reader = subscriber.create_datareader::<MyData>(&topic, Default::default(), None, Default::default())?;
+    /// # let participant = factory.create_participant(0, Default::default(), None, Default::default()).unwrap();
+    /// # let topic = participant.create_topic::<MyData>("MyTopic", "MyData", Default::default(), None, Default::default()).unwrap();
+    /// # let subscriber = participant.create_subscriber(Default::default(), None, Default::default()).unwrap();
+    /// # let reader = subscriber.create_datareader::<MyData>(&topic, Default::default(), None, Default::default()).unwrap();
     /// let instance = MyData { id: 1, message: String::new() };
     ///
     /// // Look up the handle for this instance
-    /// let handle = reader.lookup_instance(&instance)?;
+    /// let handle = reader.lookup_instance(&instance).unwrap();
     ///
     /// if handle == InstanceHandle::NIL {
     ///     println!("Instance not known to this reader");
