@@ -232,7 +232,6 @@ examples:
 # Basic hello world examples
 cargo run --example hello_world_param -- --role pub --domain 0 --reliability reliable
 cargo run --example hello_world_param -- --role sub --domain 0 --reliability reliable
-
 ```
 
 ## Documentation
@@ -245,14 +244,24 @@ cargo run --example hello_world_param -- --role sub --domain 0 --reliability rel
 
 int2DDS supports various environment variables for configuration:
 
-- `INT2DDS_NETWORK_INTERFACE`: Specify network interface (e.g., "eth0")
+### Basic Environment Variables
+
+- `INT2DDS_LOG_TYPE`: Log output type (console, file, all, none)
+- `INT2DDS_CONSOLE_LOG_LEVEL`: Console log level (error, warn, info, debug, trace)
+- `INT2DDS_FILE_LOG_LEVEL`: File log level (error, warn, info, debug, trace)
+- `INT2DDS_UDP_SOCKET_BUFFER`: UDP socket buffer size (bytes), increase up to 8388608(8MB) for large payloads
+
+### int2DDS-feature dependent Environment Variables
+
+These variables require [int2DDS-feature](https://github.com/IntellectusCorp/int2DDS-feature-releases) binary. Place the binary in the same directory as your executable.
+
+- `INT2DDS_NETWORK_INTERFACE`: Specify network interface (e.g., "eth0", "Ethernet")
 - `INT2DDS_NETWORK_IP`: Specify network IP address directly
 - `INT2DDS_EXTENDED_DISCOVERY`: Enable extended discovery alongside multicast
-- `INT2DDS_THREAD_MONITORING`: Enable thread monitoring and logging
-- `INT2DDS_FUNCTION_TIMING`: Enable function performance profiling
-- `RUST_LOG`: Control logging level (error, warn, info, debug, trace)
 
-For environment variable documentation and advanced configuration, see the documentation in the repository.
+### Additional Environment Variables
+
+- For detailed environment variable documentation, see [docs/guide/env.md](docs/guide/env.md).
 
 ## Project Structure
 
