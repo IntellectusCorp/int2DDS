@@ -2,11 +2,7 @@ mod common;
 
 use common::*;
 use int2dds::{
-    common::{
-        // env::{set_file_log_level, set_log_type},
-        instance_handle::InstanceHandle,
-        // log::{LogLevel, LogType},
-    },
+    common::instance_handle::InstanceHandle,
     dcps::{
         core::time::Duration,
         domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
@@ -57,9 +53,6 @@ impl DataReaderListener for ReaderDeadlineListener {
 
 #[test]
 fn test_ownership_revoked_when_deadline_missed() {
-    // set_log_type(LogType::File);
-    // set_file_log_level(LogLevel::Debug);
-
     let domain_id = next_domain_id();
     let factory = DomainParticipantFactory::get_instance();
     let participant = factory
