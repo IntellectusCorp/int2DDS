@@ -39,12 +39,13 @@ pub struct TopicBuiltinTopicData {
 impl TopicBuiltinTopicData {
     #[allow(dead_code)]
     pub(crate) fn new(topic_guid: Guid, name: String, type_name: String, qos: TopicQos) -> Self {
+        let prefix = topic_guid.prefix();
         Self {
             key: BuiltinTopicKey {
                 value: [
-                    topic_guid.prefix()[0] as i32,
-                    topic_guid.prefix()[1] as i32,
-                    topic_guid.prefix()[2] as i32,
+                    i32::from_be_bytes([prefix[0], prefix[1], prefix[2], prefix[3]]),
+                    i32::from_be_bytes([prefix[4], prefix[5], prefix[6], prefix[7]]),
+                    i32::from_be_bytes([prefix[8], prefix[9], prefix[10], prefix[11]]),
                 ],
             },
             name,
