@@ -751,10 +751,12 @@ impl Participant {
 
         let topic_name = writer
             .get_publication_builtin_topic_data()?
-            .ok_or(RtpsError::new(
-                RtpsErrorCode::NotInitialized,
-                format!("Publication builtin topic data not set for writer: {:?}", writer_guid),
-            ))?
+            .ok_or_else(|| {
+                RtpsError::new(
+                    RtpsErrorCode::NotInitialized,
+                    format!("Publication builtin topic data not set for writer: {:?}", writer_guid),
+                )
+            })?
             .topic_name();
 
         Ok(self.find_readers_from_topic_name(&topic_name))

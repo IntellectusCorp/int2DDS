@@ -311,9 +311,9 @@ impl ParsedBuiltinTopicData {
     /// Convert u8 array to i32 array for BuiltinTopicKey
     fn convert_u8_to_i32_array(data: [u8; 12]) -> [i32; 3] {
         [
-            i32::from_ne_bytes([data[0], data[1], data[2], data[3]]),
-            i32::from_ne_bytes([data[4], data[5], data[6], data[7]]),
-            i32::from_ne_bytes([data[8], data[9], data[10], data[11]]),
+            i32::from_be_bytes([data[0], data[1], data[2], data[3]]),
+            i32::from_be_bytes([data[4], data[5], data[6], data[7]]),
+            i32::from_be_bytes([data[8], data[9], data[10], data[11]]),
         ]
     }
 }

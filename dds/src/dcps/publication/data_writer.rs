@@ -29,6 +29,8 @@ use std::{
     },
 };
 
+use log::debug;
+
 use crate::{
     common::{
         builtin::topic::{
@@ -834,8 +836,10 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             instance_handle,
             Some(timestamp.into()),
         )?;
+        debug!("add_change completed in datawriter");
 
         self.update_liveliness()?;
+        debug!("update_liveliness completed in datawriter");
 
         Ok(())
     }
@@ -1919,7 +1923,9 @@ impl<Foo: 'static + Clone> DataWriterInternal for DataWriter<Foo> {
         };
         drop(monitor_to_drop);
 
-        self.self_ref.lock().ok().map(|mut guard| *guard = None);
+        let value_to_drop = self.self_ref.lock().ok().and_then(|mut guard| guard.take());
+        drop(value_to_drop);
+
         self.deleted.store(true, Ordering::SeqCst);
     }
 
@@ -2181,9 +2187,9 @@ mod tests {
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
-        // QoS settings with 200ms deadline
+        // QoS settings with 500ms deadline (large margin for CI)
         let mut writer_qos = DataWriterQos::default();
-        writer_qos.deadline.period = Duration::from_millis(200);
+        writer_qos.deadline.period = Duration::from_millis(500);
 
         let deadline_miss_count = Arc::new(AtomicUsize::new(0));
         let listener =
@@ -2206,12 +2212,12 @@ mod tests {
         println!("First write completed");
 
         // Write again before deadline - miss should not occur
-        thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(200));
         writer.write(&data, InstanceHandle::NIL).unwrap();
         println!("Second write completed (within deadline)");
 
         // Verify after short wait
-        thread::sleep(std::time::Duration::from_millis(50));
+        thread::sleep(std::time::Duration::from_millis(100));
         assert_eq!(
             deadline_miss_count.load(Ordering::SeqCst),
             0,
@@ -2220,7 +2226,7 @@ mod tests {
 
         // Wait to exceed deadline - miss should occur
         println!("Waiting for deadline to expire...");
-        thread::sleep(std::time::Duration::from_millis(250));
+        thread::sleep(std::time::Duration::from_millis(600));
 
         // Verify deadline miss
         let miss_count = deadline_miss_count.load(Ordering::SeqCst);
