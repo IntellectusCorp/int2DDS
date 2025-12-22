@@ -21,32 +21,6 @@
 
 #include "int2dds-ffi.h"
 
-/* Simple HelloWorld data structure */
-typedef struct {
-    uint32_t index;
-    char message[256];
-} HelloWorld;
-
-/* Serialize HelloWorld to raw bytes */
-static size_t serialize_hello_world(const HelloWorld* data, uint8_t* buffer, size_t buffer_size) {
-    size_t msg_len = strlen(data->message) + 1;
-    size_t total_size = sizeof(uint32_t) + msg_len;
-
-    if (buffer_size < total_size) {
-        return 0;
-    }
-
-    /* Write index (little-endian) */
-    buffer[0] = (uint8_t)(data->index & 0xFF);
-    buffer[1] = (uint8_t)((data->index >> 8) & 0xFF);
-    buffer[2] = (uint8_t)((data->index >> 16) & 0xFF);
-    buffer[3] = (uint8_t)((data->index >> 24) & 0xFF);
-
-    /* Write message */
-    memcpy(buffer + 4, data->message, msg_len);
-
-    return total_size;
-}
 
 /**
  * Callback: Invoked when subscribers are discovered or lost
@@ -79,6 +53,8 @@ int main(int argc, char* argv[]) {
     Int2DdsTopic* topic = NULL;
     Int2DdsDataWriter* writer = NULL;
     Int2DdsDataWriterQos* qos = NULL;
+    Int2DdsTypeDescriptor* type_desc = NULL;
+    Int2DdsData* data = NULL;
 
     int32_t domain_id = 0;
     int use_reliable = 1;  /* Use reliable for better demonstration */
@@ -120,11 +96,31 @@ int main(int argc, char* argv[]) {
         goto cleanup_participant;
     }
 
-    /* Create topic */
-    ret = int2dds_create_topic(participant, "HelloWorldTopic", "HelloWorld", NULL, &topic);
+    /* Create type descriptor for HelloWorld */
+    ret = int2dds_type_descriptor_create("HelloWorld", &type_desc);
+    if (ret != INT2DDS_RET_OK) {
+        fprintf(stderr, "Failed to create type descriptor: %d\n", ret);
+        goto cleanup_publisher;
+    }
+
+    /* Add fields to type descriptor */
+    ret = int2dds_type_descriptor_add_u32(type_desc, "index", false);
+    if (ret != INT2DDS_RET_OK) {
+        fprintf(stderr, "Failed to add index field: %d\n", ret);
+        goto cleanup_type_desc;
+    }
+
+    ret = int2dds_type_descriptor_add_string(type_desc, "message", 256, false);
+    if (ret != INT2DDS_RET_OK) {
+        fprintf(stderr, "Failed to add message field: %d\n", ret);
+        goto cleanup_type_desc;
+    }
+
+    /* Create topic with type descriptor */
+    ret = int2dds_create_topic(participant, "HelloWorldTopic", type_desc, NULL, &topic);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create topic: %d\n", ret);
-        goto cleanup_publisher;
+        goto cleanup_type_desc;
     }
 
     /* Configure QoS */
@@ -174,25 +170,39 @@ int main(int argc, char* argv[]) {
     /* Give some time for discovery */
     sleep_ms(2000);
 
+    /* Create data container */
+    ret = int2dds_data_create(type_desc, &data);
+    if (ret != INT2DDS_RET_OK) {
+        fprintf(stderr, "Failed to create data: %d\n", ret);
+        goto cleanup;
+    }
+
     /* Publish 10 messages */
     printf("Publishing 10 messages...\n");
-    for (uint32_t i = 1; i <= 10; i++) {
-        HelloWorld data;
-        data.index = i;
-        snprintf(data.message, sizeof(data.message), "Hello World from Publisher! Message #%u", i);
+    char message[256];
 
-        uint8_t buffer[512];
-        size_t size = serialize_hello_world(&data, buffer, sizeof(buffer));
-        if (size == 0) {
-            fprintf(stderr, "Serialization failed\n");
+    for (uint32_t i = 1; i <= 10; i++) {
+        snprintf(message, sizeof(message), "Hello World from Publisher! Message #%u", i);
+
+        /* Set field values */
+        ret = int2dds_data_set_u32(data, "index", i);
+        if (ret != INT2DDS_RET_OK) {
+            fprintf(stderr, "Failed to set index: %d\n", ret);
             continue;
         }
 
-        ret = int2dds_write(writer, buffer, size);
+        ret = int2dds_data_set_string(data, "message", message);
+        if (ret != INT2DDS_RET_OK) {
+            fprintf(stderr, "Failed to set message: %d\n", ret);
+            continue;
+        }
+
+        /* Write data (automatic CDR serialization) */
+        ret = int2dds_write(writer, data);
         if (ret != INT2DDS_RET_OK) {
             fprintf(stderr, "Write failed: %d\n", ret);
         } else {
-            printf("[%u] Published message: '%s'\n", i, data.message);
+            printf("[%u] Published message: '%s'\n", i, message);
         }
 
         sleep_ms(1000);  /* 1 second between messages */
@@ -204,6 +214,7 @@ int main(int argc, char* argv[]) {
 
 cleanup:
     /* Cleanup */
+    if (data) int2dds_data_delete(data);
     if (writer) {
         printf("\nCleaning up...\n");
         int2dds_delete_datawriter(writer);
@@ -214,6 +225,9 @@ cleanup_qos:
 
 cleanup_topic:
     if (topic) int2dds_delete_topic(topic);
+
+cleanup_type_desc:
+    if (type_desc) int2dds_type_descriptor_delete(type_desc);
 
 cleanup_publisher:
     if (publisher) int2dds_delete_publisher(publisher);
