@@ -16,10 +16,10 @@ use int2dds::{
     rtps::common::types::SerializedData,
     serialize::{
         cdr::{
-            CdrDeserializer, CdrSerializer, ExtensibilityKind, PrimitiveSerialize, StringSerialize,
-            Xcdr2Deserializer, Xcdr2Serializer,
+            CdrDeserializer, CdrSerializer, CdrSerializerCommon, ExtensibilityKind,
+            PrimitiveSerialize, StringSerialize, Xcdr2Deserializer, Xcdr2Serializer,
         },
-        core::BufferManager,
+        core::{BufferManager, DeserializerReader},
     },
     topic::{
         sql::ast::Parameter,
@@ -124,25 +124,23 @@ impl DynamicTypeSupport {
                     self.serialize_value_cdr(serializer, item, element_type)?;
                 }
             }
-            // Optimized Bytes serialization - direct byte sequence without per-element overhead
+            // Optimized Bytes serialization - bulk write without per-element overhead
             (FieldValue::Bytes(bytes), FieldTypeInfo::Bytes { .. }) => {
                 serializer
                     .serialize_u32(bytes.len() as u32)
                     .map_err(|e| DdsError::Error(e.to_string()))?;
-                for &byte in bytes.iter() {
-                    serializer.serialize_u8(byte).map_err(|e| DdsError::Error(e.to_string()))?;
-                }
+                // Bulk write: directly extend buffer instead of per-byte serialization
+                serializer.buffer_mut().extend_from_slice(bytes);
             }
-            // Allow Bytes for Sequence<UInt8> for backward compatibility
+            // Allow Bytes for Sequence<UInt8> for backward compatibility - bulk write
             (FieldValue::Bytes(bytes), FieldTypeInfo::Sequence { element_type, .. })
                 if matches!(element_type.as_ref(), FieldTypeInfo::UInt8) =>
             {
                 serializer
                     .serialize_u32(bytes.len() as u32)
                     .map_err(|e| DdsError::Error(e.to_string()))?;
-                for &byte in bytes.iter() {
-                    serializer.serialize_u8(byte).map_err(|e| DdsError::Error(e.to_string()))?;
-                }
+                // Bulk write: directly extend buffer instead of per-byte serialization
+                serializer.buffer_mut().extend_from_slice(bytes);
             }
             (FieldValue::Array(v), FieldTypeInfo::Array { element_type, .. }) => {
                 for item in v {
@@ -255,6 +253,18 @@ impl DynamicTypeSupport {
                 let len =
                     deserializer.deserialize_u32().map_err(|e| DdsError::Error(e.to_string()))?
                         as usize;
+
+                // Optimization: bulk read for Sequence<UInt8>
+                if matches!(element_type.as_ref(), FieldTypeInfo::UInt8) {
+                    deserializer
+                        .check_available(len)
+                        .map_err(|e| DdsError::Error(e.to_string()))?;
+                    let start = deserializer.get_position();
+                    let bytes = deserializer.get_data()[start..start + len].to_vec();
+                    deserializer.set_position(start + len);
+                    return Ok(FieldValue::Bytes(Arc::from(bytes)));
+                }
+
                 let mut items = Vec::with_capacity(len);
                 for _ in 0..len {
                     items.push(self.deserialize_field_cdr(deserializer, element_type)?);
@@ -278,19 +288,16 @@ impl DynamicTypeSupport {
                 }
                 Ok(FieldValue::Struct(Box::new(nested_data)))
             }
-            // Optimized Bytes deserialization - direct into Arc<[u8]>
+            // Optimized Bytes deserialization - bulk read directly into Arc<[u8]>
             FieldTypeInfo::Bytes { .. } => {
                 let len =
                     deserializer.deserialize_u32().map_err(|e| DdsError::Error(e.to_string()))?
                         as usize;
-                let mut bytes = Vec::with_capacity(len);
-                for _ in 0..len {
-                    bytes.push(
-                        deserializer
-                            .deserialize_u8()
-                            .map_err(|e| DdsError::Error(e.to_string()))?,
-                    );
-                }
+                // Bulk read: directly copy slice instead of per-byte deserialization
+                deserializer.check_available(len).map_err(|e| DdsError::Error(e.to_string()))?;
+                let start = deserializer.get_position();
+                let bytes = deserializer.get_data()[start..start + len].to_vec();
+                deserializer.set_position(start + len);
                 Ok(FieldValue::Bytes(Arc::from(bytes)))
             }
         }
@@ -377,25 +384,23 @@ impl DynamicTypeSupport {
                     self.serialize_value_xcdr2(serializer, item, element_type)?;
                 }
             }
-            // Optimized Bytes serialization - direct byte sequence
+            // Optimized Bytes serialization - bulk write without per-element overhead
             (FieldValue::Bytes(bytes), FieldTypeInfo::Bytes { .. }) => {
                 serializer
                     .serialize_u32(bytes.len() as u32)
                     .map_err(|e| DdsError::Error(e.to_string()))?;
-                for &byte in bytes.iter() {
-                    serializer.serialize_u8(byte).map_err(|e| DdsError::Error(e.to_string()))?;
-                }
+                // Bulk write: directly extend buffer instead of per-byte serialization
+                serializer.buffer_mut().extend_from_slice(bytes);
             }
-            // Allow Bytes for Sequence<UInt8> for backward compatibility
+            // Allow Bytes for Sequence<UInt8> for backward compatibility - bulk write
             (FieldValue::Bytes(bytes), FieldTypeInfo::Sequence { element_type, .. })
                 if matches!(element_type.as_ref(), FieldTypeInfo::UInt8) =>
             {
                 serializer
                     .serialize_u32(bytes.len() as u32)
                     .map_err(|e| DdsError::Error(e.to_string()))?;
-                for &byte in bytes.iter() {
-                    serializer.serialize_u8(byte).map_err(|e| DdsError::Error(e.to_string()))?;
-                }
+                // Bulk write: directly extend buffer instead of per-byte serialization
+                serializer.buffer_mut().extend_from_slice(bytes);
             }
             (FieldValue::Array(v), FieldTypeInfo::Array { element_type, .. }) => {
                 for item in v {
@@ -507,6 +512,18 @@ impl DynamicTypeSupport {
                 let len =
                     deserializer.deserialize_u32().map_err(|e| DdsError::Error(e.to_string()))?
                         as usize;
+
+                // Optimization: bulk read for Sequence<UInt8>
+                if matches!(element_type.as_ref(), FieldTypeInfo::UInt8) {
+                    deserializer
+                        .check_available(len)
+                        .map_err(|e| DdsError::Error(e.to_string()))?;
+                    let start = deserializer.get_position();
+                    let bytes = deserializer.get_data()[start..start + len].to_vec();
+                    deserializer.set_position(start + len);
+                    return Ok(FieldValue::Bytes(Arc::from(bytes)));
+                }
+
                 let mut items = Vec::with_capacity(len);
                 for _ in 0..len {
                     items.push(self.deserialize_field_xcdr2(deserializer, element_type)?);
@@ -530,19 +547,16 @@ impl DynamicTypeSupport {
                 }
                 Ok(FieldValue::Struct(Box::new(nested_data)))
             }
-            // Optimized Bytes deserialization - direct into Arc<[u8]>
+            // Optimized Bytes deserialization - bulk read directly into Arc<[u8]>
             FieldTypeInfo::Bytes { .. } => {
                 let len =
                     deserializer.deserialize_u32().map_err(|e| DdsError::Error(e.to_string()))?
                         as usize;
-                let mut bytes = Vec::with_capacity(len);
-                for _ in 0..len {
-                    bytes.push(
-                        deserializer
-                            .deserialize_u8()
-                            .map_err(|e| DdsError::Error(e.to_string()))?,
-                    );
-                }
+                // Bulk read: directly copy slice instead of per-byte deserialization
+                deserializer.check_available(len).map_err(|e| DdsError::Error(e.to_string()))?;
+                let start = deserializer.get_position();
+                let bytes = deserializer.get_data()[start..start + len].to_vec();
+                deserializer.set_position(start + len);
                 Ok(FieldValue::Bytes(Arc::from(bytes)))
             }
         }
