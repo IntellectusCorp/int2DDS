@@ -45,68 +45,88 @@ pub type Int2DdsUserContext = *mut c_void;
 
 // DataReader callback types
 pub type Int2DdsOnDataAvailableCallback =
-    unsafe extern "C" fn(reader: *mut Int2DdsDataReader, user_context: Int2DdsUserContext);
+    Option<unsafe extern "C" fn(reader: *mut Int2DdsDataReader, user_context: Int2DdsUserContext)>;
 
-pub type Int2DdsOnSubscriptionMatchedCallback = unsafe extern "C" fn(
-    reader: *mut Int2DdsDataReader,
-    status: *const Int2DdsSubscriptionMatchedStatus,
-    user_context: Int2DdsUserContext,
-);
+pub type Int2DdsOnSubscriptionMatchedCallback = Option<
+    unsafe extern "C" fn(
+        reader: *mut Int2DdsDataReader,
+        status: *const Int2DdsSubscriptionMatchedStatus,
+        user_context: Int2DdsUserContext,
+    ),
+>;
 
-pub type Int2DdsOnSampleRejectedCallback = unsafe extern "C" fn(
-    reader: *mut Int2DdsDataReader,
-    status: *const Int2DdsSampleRejectedStatus,
-    user_context: Int2DdsUserContext,
-);
+pub type Int2DdsOnSampleRejectedCallback = Option<
+    unsafe extern "C" fn(
+        reader: *mut Int2DdsDataReader,
+        status: *const Int2DdsSampleRejectedStatus,
+        user_context: Int2DdsUserContext,
+    ),
+>;
 
-pub type Int2DdsOnLivelinessChangedCallback = unsafe extern "C" fn(
-    reader: *mut Int2DdsDataReader,
-    status: *const Int2DdsLivelinessChangedStatus,
-    user_context: Int2DdsUserContext,
-);
+pub type Int2DdsOnLivelinessChangedCallback = Option<
+    unsafe extern "C" fn(
+        reader: *mut Int2DdsDataReader,
+        status: *const Int2DdsLivelinessChangedStatus,
+        user_context: Int2DdsUserContext,
+    ),
+>;
 
-pub type Int2DdsOnRequestedDeadlineMissedCallback = unsafe extern "C" fn(
-    reader: *mut Int2DdsDataReader,
-    status: *const Int2DdsRequestedDeadlineMissedStatus,
-    user_context: Int2DdsUserContext,
-);
+pub type Int2DdsOnRequestedDeadlineMissedCallback = Option<
+    unsafe extern "C" fn(
+        reader: *mut Int2DdsDataReader,
+        status: *const Int2DdsRequestedDeadlineMissedStatus,
+        user_context: Int2DdsUserContext,
+    ),
+>;
 
-pub type Int2DdsOnRequestedIncompatibleQosCallback = unsafe extern "C" fn(
-    reader: *mut Int2DdsDataReader,
-    status: *const Int2DdsRequestedIncompatibleQosStatus,
-    user_context: Int2DdsUserContext,
-);
+pub type Int2DdsOnRequestedIncompatibleQosCallback = Option<
+    unsafe extern "C" fn(
+        reader: *mut Int2DdsDataReader,
+        status: *const Int2DdsRequestedIncompatibleQosStatus,
+        user_context: Int2DdsUserContext,
+    ),
+>;
 
-pub type Int2DdsOnSampleLostCallback = unsafe extern "C" fn(
-    reader: *mut Int2DdsDataReader,
-    status: *const Int2DdsSampleLostStatus,
-    user_context: Int2DdsUserContext,
-);
+pub type Int2DdsOnSampleLostCallback = Option<
+    unsafe extern "C" fn(
+        reader: *mut Int2DdsDataReader,
+        status: *const Int2DdsSampleLostStatus,
+        user_context: Int2DdsUserContext,
+    ),
+>;
 
 // DataWriter callback types
-pub type Int2DdsOnPublicationMatchedCallback = unsafe extern "C" fn(
-    writer: *mut Int2DdsDataWriter,
-    status: *const Int2DdsPublicationMatchedStatus,
-    user_context: Int2DdsUserContext,
-);
+pub type Int2DdsOnPublicationMatchedCallback = Option<
+    unsafe extern "C" fn(
+        writer: *mut Int2DdsDataWriter,
+        status: *const Int2DdsPublicationMatchedStatus,
+        user_context: Int2DdsUserContext,
+    ),
+>;
 
-pub type Int2DdsOnOfferedDeadlineMissedCallback = unsafe extern "C" fn(
-    writer: *mut Int2DdsDataWriter,
-    status: *const Int2DdsOfferedDeadlineMissedStatus,
-    user_context: Int2DdsUserContext,
-);
+pub type Int2DdsOnOfferedDeadlineMissedCallback = Option<
+    unsafe extern "C" fn(
+        writer: *mut Int2DdsDataWriter,
+        status: *const Int2DdsOfferedDeadlineMissedStatus,
+        user_context: Int2DdsUserContext,
+    ),
+>;
 
-pub type Int2DdsOnOfferedIncompatibleQosCallback = unsafe extern "C" fn(
-    writer: *mut Int2DdsDataWriter,
-    status: *const Int2DdsOfferedIncompatibleQosStatus,
-    user_context: Int2DdsUserContext,
-);
+pub type Int2DdsOnOfferedIncompatibleQosCallback = Option<
+    unsafe extern "C" fn(
+        writer: *mut Int2DdsDataWriter,
+        status: *const Int2DdsOfferedIncompatibleQosStatus,
+        user_context: Int2DdsUserContext,
+    ),
+>;
 
-pub type Int2DdsOnLivelinessLostCallback = unsafe extern "C" fn(
-    writer: *mut Int2DdsDataWriter,
-    status: *const Int2DdsLivelinessLostStatus,
-    user_context: Int2DdsUserContext,
-);
+pub type Int2DdsOnLivelinessLostCallback = Option<
+    unsafe extern "C" fn(
+        writer: *mut Int2DdsDataWriter,
+        status: *const Int2DdsLivelinessLostStatus,
+        user_context: Int2DdsUserContext,
+    ),
+>;
 
 // ============================================================================
 // C-Compatible Listener Structs
@@ -172,8 +192,7 @@ impl DataReaderListener for FfiDataReaderListener {
     type Foo = RawData;
 
     fn on_data_available(&self, _reader: &DataReader<RawData>) {
-        if self.callbacks.on_data_available as usize != 0 {
-            let callback = self.callbacks.on_data_available;
+        if let Some(callback) = self.callbacks.on_data_available {
             let reader_handle = self.reader_handle;
             let user_context = self.callbacks.user_context;
             invoke_callback(AssertUnwindSafe(move || unsafe {
@@ -187,8 +206,7 @@ impl DataReaderListener for FfiDataReaderListener {
         _reader: &DataReader<RawData>,
         status: &SubscriptionMatchedStatus,
     ) {
-        if self.callbacks.on_subscription_matched as usize != 0 {
-            let callback = self.callbacks.on_subscription_matched;
+        if let Some(callback) = self.callbacks.on_subscription_matched {
             let ffi_status: Int2DdsSubscriptionMatchedStatus = status.into();
             let reader_handle = self.reader_handle;
             let user_context = self.callbacks.user_context;
@@ -199,8 +217,7 @@ impl DataReaderListener for FfiDataReaderListener {
     }
 
     fn on_sample_rejected(&self, _reader: &DataReader<RawData>, status: &SampleRejectedStatus) {
-        if self.callbacks.on_sample_rejected as usize != 0 {
-            let callback = self.callbacks.on_sample_rejected;
+        if let Some(callback) = self.callbacks.on_sample_rejected {
             let ffi_status: Int2DdsSampleRejectedStatus = status.into();
             let reader_handle = self.reader_handle;
             let user_context = self.callbacks.user_context;
@@ -215,8 +232,7 @@ impl DataReaderListener for FfiDataReaderListener {
         _reader: &DataReader<RawData>,
         status: &LivelinessChangedStatus,
     ) {
-        if self.callbacks.on_liveliness_changed as usize != 0 {
-            let callback = self.callbacks.on_liveliness_changed;
+        if let Some(callback) = self.callbacks.on_liveliness_changed {
             let ffi_status: Int2DdsLivelinessChangedStatus = status.into();
             let reader_handle = self.reader_handle;
             let user_context = self.callbacks.user_context;
@@ -231,8 +247,7 @@ impl DataReaderListener for FfiDataReaderListener {
         _reader: &DataReader<RawData>,
         status: &RequestedDeadlineMissedStatus,
     ) {
-        if self.callbacks.on_requested_deadline_missed as usize != 0 {
-            let callback = self.callbacks.on_requested_deadline_missed;
+        if let Some(callback) = self.callbacks.on_requested_deadline_missed {
             let ffi_status: Int2DdsRequestedDeadlineMissedStatus = status.into();
             let reader_handle = self.reader_handle;
             let user_context = self.callbacks.user_context;
@@ -247,8 +262,7 @@ impl DataReaderListener for FfiDataReaderListener {
         _reader: &DataReader<RawData>,
         status: &RequestedIncompatibleQosStatus,
     ) {
-        if self.callbacks.on_requested_incompatible_qos as usize != 0 {
-            let callback = self.callbacks.on_requested_incompatible_qos;
+        if let Some(callback) = self.callbacks.on_requested_incompatible_qos {
             let ffi_status: Int2DdsRequestedIncompatibleQosStatus = status.into();
             let reader_handle = self.reader_handle;
             let user_context = self.callbacks.user_context;
@@ -259,8 +273,7 @@ impl DataReaderListener for FfiDataReaderListener {
     }
 
     fn on_sample_lost(&self, _reader: &DataReader<RawData>, status: &SampleLostStatus) {
-        if self.callbacks.on_sample_lost as usize != 0 {
-            let callback = self.callbacks.on_sample_lost;
+        if let Some(callback) = self.callbacks.on_sample_lost {
             let ffi_status: Int2DdsSampleLostStatus = status.into();
             let reader_handle = self.reader_handle;
             let user_context = self.callbacks.user_context;
@@ -300,8 +313,7 @@ impl DataWriterListener for FfiDataWriterListener {
         _writer: &DataWriter<RawData>,
         status: &PublicationMatchedStatus,
     ) {
-        if self.callbacks.on_publication_matched as usize != 0 {
-            let callback = self.callbacks.on_publication_matched;
+        if let Some(callback) = self.callbacks.on_publication_matched {
             let ffi_status: Int2DdsPublicationMatchedStatus = status.into();
             let writer_handle = self.writer_handle;
             let user_context = self.callbacks.user_context;
@@ -316,8 +328,7 @@ impl DataWriterListener for FfiDataWriterListener {
         _writer: &DataWriter<RawData>,
         status: &OfferedDeadlineMissedStatus,
     ) {
-        if self.callbacks.on_offered_deadline_missed as usize != 0 {
-            let callback = self.callbacks.on_offered_deadline_missed;
+        if let Some(callback) = self.callbacks.on_offered_deadline_missed {
             let ffi_status: Int2DdsOfferedDeadlineMissedStatus = status.into();
             let writer_handle = self.writer_handle;
             let user_context = self.callbacks.user_context;
@@ -332,8 +343,7 @@ impl DataWriterListener for FfiDataWriterListener {
         _writer: &DataWriter<RawData>,
         status: &OfferedIncompatibleQosStatus,
     ) {
-        if self.callbacks.on_offered_incompatible_qos as usize != 0 {
-            let callback = self.callbacks.on_offered_incompatible_qos;
+        if let Some(callback) = self.callbacks.on_offered_incompatible_qos {
             let ffi_status: Int2DdsOfferedIncompatibleQosStatus = status.into();
             let writer_handle = self.writer_handle;
             let user_context = self.callbacks.user_context;
@@ -344,8 +354,7 @@ impl DataWriterListener for FfiDataWriterListener {
     }
 
     fn on_liveliness_lost(&self, _writer: &DataWriter<RawData>, status: &LivelinessLostStatus) {
-        if self.callbacks.on_liveliness_lost as usize != 0 {
-            let callback = self.callbacks.on_liveliness_lost;
+        if let Some(callback) = self.callbacks.on_liveliness_lost {
             let ffi_status: Int2DdsLivelinessLostStatus = status.into();
             let writer_handle = self.writer_handle;
             let user_context = self.callbacks.user_context;
@@ -394,13 +403,13 @@ mod tests {
     #[test]
     fn test_data_reader_listener_creation() {
         let listener = Int2DdsDataReaderListener {
-            on_data_available: test_on_data_available,
-            on_subscription_matched: unsafe { std::mem::transmute(0usize) },
-            on_sample_rejected: unsafe { std::mem::transmute(0usize) },
-            on_liveliness_changed: unsafe { std::mem::transmute(0usize) },
-            on_requested_deadline_missed: unsafe { std::mem::transmute(0usize) },
-            on_requested_incompatible_qos: unsafe { std::mem::transmute(0usize) },
-            on_sample_lost: unsafe { std::mem::transmute(0usize) },
+            on_data_available: Some(test_on_data_available),
+            on_subscription_matched: None,
+            on_sample_rejected: None,
+            on_liveliness_changed: None,
+            on_requested_deadline_missed: None,
+            on_requested_incompatible_qos: None,
+            on_sample_lost: None,
             user_context: std::ptr::null_mut(),
         };
 
@@ -409,8 +418,8 @@ mod tests {
         let ffi_listener = FfiDataReaderListener::new(listener, reader_handle);
 
         // Verify listener was created successfully
-        assert!(ffi_listener.callbacks.on_data_available as usize != 0);
-        assert!(ffi_listener.callbacks.on_subscription_matched as usize == 0);
+        assert!(ffi_listener.callbacks.on_data_available.is_some());
+        assert!(ffi_listener.callbacks.on_subscription_matched.is_none());
     }
 
     #[test]
