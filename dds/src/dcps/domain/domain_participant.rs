@@ -21,10 +21,10 @@
 //! # Basic Usage
 //!
 //! ```no_run
-//! use int2dds::dcps::domain::DomainParticipantFactory;
+//! use int2dds::domain::domain_participant_factory::DomainParticipantFactory;
 //! use int2dds::topic::type_support::DdsType;
 //!
-//! #[derive(Clone, DdsType)]
+//! #[derive(DdsType)]
 //! struct MyData {
 //!     id: u32,
 //!     value: String,
@@ -32,22 +32,22 @@
 //!
 //! // Get factory and create participant
 //! let factory = DomainParticipantFactory::get_instance();
-//! let participant = factory.create_participant(0, Default::default(), None, Default::default())?;
+//! let participant = factory.create_participant(0, Default::default(), None, Default::default()).unwrap();
 //!
 //! // Create topic
-//! let topic = participant.create_topic::<MyData>("MyTopic", "MyData", Default::default(), None, Default::default())?;
+//! let topic = participant.create_topic::<MyData>("MyTopic", "MyData", Default::default(), None, Default::default()).unwrap();
 //!
 //! // Create publisher and subscriber
-//! let publisher = participant.create_publisher(Default::default(), None, Default::default())?;
-//! let subscriber = participant.create_subscriber(Default::default(), None, Default::default())?;
+//! let publisher = participant.create_publisher(Default::default(), None, Default::default()).unwrap();
+//! let subscriber = participant.create_subscriber(Default::default(), None, Default::default()).unwrap();
 //!
 //! // Clean up
-//! participant.delete_subscriber(subscriber)?;
-//! participant.delete_publisher(publisher)?;
-//! participant.delete_topic(topic)?;
+//! participant.delete_subscriber(subscriber).unwrap();
+//! participant.delete_publisher(publisher).unwrap();
+//! participant.delete_topic(topic).unwrap();
 //! // or
-//! participant.delete_contained_entities()?;
-//! factory.delete_participant(participant)?;
+//! participant.delete_contained_entities().unwrap();
+//! factory.delete_participant(participant).unwrap();
 //! ```
 
 use std::{
