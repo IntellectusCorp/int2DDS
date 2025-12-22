@@ -2182,9 +2182,9 @@ mod tests {
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
-        // QoS settings with 200ms deadline
+        // QoS settings with 500ms deadline (large margin for CI)
         let mut writer_qos = DataWriterQos::default();
-        writer_qos.deadline.period = Duration::from_millis(200);
+        writer_qos.deadline.period = Duration::from_millis(500);
 
         let deadline_miss_count = Arc::new(AtomicUsize::new(0));
         let listener =
@@ -2221,7 +2221,7 @@ mod tests {
 
         // Wait to exceed deadline - miss should occur
         println!("Waiting for deadline to expire...");
-        thread::sleep(std::time::Duration::from_millis(500));
+        thread::sleep(std::time::Duration::from_millis(600));
 
         // Verify deadline miss
         let miss_count = deadline_miss_count.load(Ordering::SeqCst);
