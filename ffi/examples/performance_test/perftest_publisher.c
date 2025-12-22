@@ -744,7 +744,7 @@ static void run_latency_test(const publisher_args_t *args) {
         goto cleanup;
     }
 
-    ret = int2dds_create_topic(participant, "latency_echo_topic", type_desc, NULL, &echo_topic);
+    ret = int2dds_create_topic(participant, "latency_test_topic_echo", type_desc, NULL, &echo_topic);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create echo topic: %d\n", ret);
         goto cleanup;
