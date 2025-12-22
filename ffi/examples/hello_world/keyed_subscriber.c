@@ -19,26 +19,6 @@
 #define sleep_ms(ms) usleep((ms) * 1000)
 #endif
 
-// Deserialize KeyedData: key (u32) + value (String)
-int deserialize_keyed_data(const uint8_t* data, size_t data_size,
-                           uint32_t* key, char* value, size_t value_buf_size) {
-    if (data_size < 8) return -1;  // minimum: 4 (key) + 4 (string length)
-
-    // Read key (little-endian u32)
-    *key = data[0] | (data[1] << 8) | (data[2] << 16) | (data[3] << 24);
-
-    // Read string length (little-endian u32)
-    uint32_t str_len = data[4] | (data[5] << 8) | (data[6] << 16) | (data[7] << 24);
-
-    if (data_size < 8 + str_len) return -1;
-
-    // Copy string (truncate if necessary)
-    size_t copy_len = (str_len < value_buf_size - 1) ? str_len : value_buf_size - 1;
-    memcpy(value, data + 8, copy_len);
-    value[copy_len] = '\0';
-
-    return 0;
-}
 
 int main(int argc, char* argv[]) {
     Int2DdsRet ret;
@@ -48,6 +28,8 @@ int main(int argc, char* argv[]) {
     Int2DdsTopic* topic = NULL;
     Int2DdsDataReader* reader = NULL;
     Int2DdsWaitSet* waitset = NULL;
+    Int2DdsTypeDescriptor* type_desc = NULL;
+    Int2DdsData* data = NULL;
 
     int domain_id = 0;
 
@@ -76,8 +58,28 @@ int main(int argc, char* argv[]) {
         goto cleanup;
     }
 
-    // Create Topic
-    ret = int2dds_create_topic(participant, "KeyedDataTopic", "KeyedData", NULL, &topic);
+    // Create type descriptor for KeyedData
+    ret = int2dds_type_descriptor_create("KeyedData", &type_desc);
+    if (ret != INT2DDS_RET_OK) {
+        printf("Failed to create type descriptor: %d\n", ret);
+        goto cleanup;
+    }
+
+    // Add fields to type descriptor (key field marked as is_key=true)
+    ret = int2dds_type_descriptor_add_u32(type_desc, "key", true);  // key field
+    if (ret != INT2DDS_RET_OK) {
+        printf("Failed to add key field: %d\n", ret);
+        goto cleanup;
+    }
+
+    ret = int2dds_type_descriptor_add_string(type_desc, "value", 256, false);
+    if (ret != INT2DDS_RET_OK) {
+        printf("Failed to add value field: %d\n", ret);
+        goto cleanup;
+    }
+
+    // Create Topic with type descriptor
+    ret = int2dds_create_topic(participant, "KeyedDataTopic", type_desc, NULL, &topic);
     if (ret != INT2DDS_RET_OK) {
         printf("Failed to create topic: %d\n", ret);
         goto cleanup;
@@ -123,6 +125,13 @@ int main(int argc, char* argv[]) {
     }
     printf("Publisher matched! Waiting for keyed data...\n\n");
 
+    // Create data container
+    ret = int2dds_data_create(type_desc, &data);
+    if (ret != INT2DDS_RET_OK) {
+        printf("Failed to create data: %d\n", ret);
+        goto cleanup;
+    }
+
     // Main loop
     int timeout_count = 0;
     int max_timeouts = 10;  // Exit after 10 consecutive timeouts
@@ -144,12 +153,9 @@ int main(int argc, char* argv[]) {
         timeout_count = 0;
 
         // Read all available samples
-        uint8_t data[4096];
-        size_t data_size = 0;
-
         while (1) {
             bool valid_data = false;
-            ret = int2dds_take(reader, data, sizeof(data), &data_size, &valid_data);
+            ret = int2dds_take(reader, data, &valid_data);
 
             if (ret == INT2DDS_RET_NO_DATA) {
                 break;
@@ -160,15 +166,24 @@ int main(int argc, char* argv[]) {
 
             if (!valid_data) continue;
 
-            // Deserialize and display
+            // Get field values
             uint32_t key;
             char value[256];
+            size_t value_len;
 
-            if (deserialize_keyed_data(data, data_size, &key, value, sizeof(value)) == 0) {
-                printf("Received: key=%u, value=\"%s\"\n", key, value);
-            } else {
-                printf("Failed to deserialize keyed data\n");
+            ret = int2dds_data_get_u32(data, "key", &key);
+            if (ret != INT2DDS_RET_OK) {
+                printf("Failed to get key: %d\n", ret);
+                continue;
             }
+
+            ret = int2dds_data_get_string(data, "value", value, sizeof(value), &value_len);
+            if (ret != INT2DDS_RET_OK) {
+                printf("Failed to get value: %d\n", ret);
+                continue;
+            }
+
+            printf("Received: key=%u, value=\"%s\"\n", key, value);
         }
     }
 
@@ -180,8 +195,10 @@ cleanup:
         int2dds_waitset_detach_datareader(waitset, reader);
         int2dds_waitset_delete(waitset);
     }
+    if (data) int2dds_data_delete(data);
     if (reader) int2dds_delete_datareader(reader);
     if (topic) int2dds_delete_topic(topic);
+    if (type_desc) int2dds_type_descriptor_delete(type_desc);
     if (subscriber) int2dds_delete_subscriber(subscriber);
     if (participant) int2dds_delete_participant(participant);
     if (factory) int2dds_domain_participant_factory_finalize(factory);
