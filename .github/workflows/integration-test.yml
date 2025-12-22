@@ -37,7 +37,7 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
 
-      - name: Run integration tests
+      - name: Run all tests
         shell: bash
         env:
           SCCACHE_GHA_ENABLED: "true"
@@ -46,13 +46,4 @@ jobs:
           RUSTFLAGS: ${{ runner.os == 'Windows' && '-C linker=lld-link' || '' }}
         run: |
           echo "RUSTFLAGS=$RUSTFLAGS"
-          cargo test --test "*" -- --test-threads=1
-
-      - name: Run cleanup tests
-        shell: bash
-        env:
-          SCCACHE_GHA_ENABLED: "true"
-          RUSTC_WRAPPER: sccache
-          INT2DDS_UDP_SOCKET_BUFFER: 5242880
-          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C linker=lld-link' || '' }}
-        run: cargo test -- test_all_logic_cleanup test_all_handler_cleanup --test-threads=1
+          cargo test -- --test-threads=1
