@@ -89,6 +89,65 @@ typedef enum Int2DdsSampleRejectedStatusKind {
 } Int2DdsSampleRejectedStatusKind;
 
 /**
+ * Extensibility kind for XCDR encoding
+ */
+typedef enum Int2DdsExtensibilityKind {
+  /**
+   * No extensibility - fastest encoding (XCDR2 PlainCDR2)
+   */
+  Final = 0,
+  /**
+   * Can append new members at end (XCDR2 Delimited)
+   */
+  Appendable = 1,
+  /**
+   * Full extensibility with member headers (XCDR2 PL_CDR2)
+   */
+  Mutable = 2,
+} Int2DdsExtensibilityKind;
+
+/**
+ * XCDR version for serialization
+ */
+typedef enum Int2DdsXcdrVersion {
+  /**
+   * XCDR v1 (CDR) - compatible with legacy DDS implementations
+   * Encapsulation IDs: 0x0000 (CDR_BE), 0x0001 (CDR_LE)
+   */
+  Xcdr1 = 0,
+  /**
+   * XCDR v2 - extended CDR with better extensibility support
+   * Encapsulation IDs: 0x0006 (CDR2_BE), 0x0007 (CDR2_LE), etc.
+   */
+  Xcdr2 = 1,
+} Int2DdsXcdrVersion;
+
+/**
+ * Field type enumeration for C API
+ */
+typedef enum Int2DdsFieldType {
+  Bool = 0,
+  Int8 = 1,
+  UInt8 = 2,
+  Int16 = 3,
+  UInt16 = 4,
+  Int32 = 5,
+  UInt32 = 6,
+  Int64 = 7,
+  UInt64 = 8,
+  Float32 = 9,
+  Float64 = 10,
+  String = 11,
+  Sequence = 12,
+  Array = 13,
+  Struct = 14,
+  /**
+   * Optimized byte sequence - zero-copy for large payloads (1KB-1MB)
+   */
+  Bytes = 15,
+} Int2DdsFieldType;
+
+/**
  * Generic condition handle for use with WaitSet
  */
 typedef struct Int2DdsCondition Int2DdsCondition;
@@ -97,6 +156,11 @@ typedef struct Int2DdsCondition Int2DdsCondition;
  * Sequence of conditions returned from WaitSet::wait
  */
 typedef struct Int2DdsConditionSeq Int2DdsConditionSeq;
+
+/**
+ * Dynamic data container - holds field values by name
+ */
+typedef struct Int2DdsData Int2DdsData;
 
 /**
  * Opaque handle to a DataReader
@@ -158,6 +222,11 @@ typedef struct Int2DdsTopic Int2DdsTopic;
  * Opaque QoS handle for Topic
  */
 typedef struct Int2DdsTopicQos Int2DdsTopicQos;
+
+/**
+ * Type descriptor - describes a complete DDS type
+ */
+typedef struct Int2DdsTypeDescriptor Int2DdsTypeDescriptor;
 
 /**
  * Opaque handle to a WaitSet
@@ -542,6 +611,194 @@ Int2DdsRet int2dds_domain_participant_factory_get_instance(struct Int2DdsPartici
 Int2DdsRet int2dds_domain_participant_factory_finalize(struct Int2DdsParticipantFactory *factory);
 
 /**
+ * Create a new data instance from type descriptor
+ *
+ * # Safety
+ * - `desc` must be a valid type descriptor
+ * - `out` must be a valid pointer to a null pointer
+ * - The returned data must be freed with `int2dds_data_delete`
+ */
+Int2DdsRet int2dds_data_create(const struct Int2DdsTypeDescriptor *desc, struct Int2DdsData **out);
+
+/**
+ * Delete a data instance
+ *
+ * # Safety
+ * - `data` must be a valid data instance or null
+ * - `data` must not be used after this call
+ */
+Int2DdsRet int2dds_data_delete(struct Int2DdsData *data);
+
+/**
+ * Clear all values in the data instance
+ *
+ * # Safety
+ * - `data` must be a valid data instance
+ */
+Int2DdsRet int2dds_data_clear(struct Int2DdsData *data);
+
+/**
+ * Set a bool field value
+ */
+Int2DdsRet int2dds_data_set_bool(struct Int2DdsData *data, const char *field, bool value);
+
+/**
+ * Set an i8 field value
+ */
+Int2DdsRet int2dds_data_set_i8(struct Int2DdsData *data, const char *field, int8_t value);
+
+/**
+ * Set a u8 field value
+ */
+Int2DdsRet int2dds_data_set_u8(struct Int2DdsData *data, const char *field, uint8_t value);
+
+/**
+ * Set an i16 field value
+ */
+Int2DdsRet int2dds_data_set_i16(struct Int2DdsData *data, const char *field, int16_t value);
+
+/**
+ * Set a u16 field value
+ */
+Int2DdsRet int2dds_data_set_u16(struct Int2DdsData *data, const char *field, uint16_t value);
+
+/**
+ * Set an i32 field value
+ */
+Int2DdsRet int2dds_data_set_i32(struct Int2DdsData *data, const char *field, int32_t value);
+
+/**
+ * Set a u32 field value
+ */
+Int2DdsRet int2dds_data_set_u32(struct Int2DdsData *data, const char *field, uint32_t value);
+
+/**
+ * Set an i64 field value
+ */
+Int2DdsRet int2dds_data_set_i64(struct Int2DdsData *data, const char *field, int64_t value);
+
+/**
+ * Set a u64 field value
+ */
+Int2DdsRet int2dds_data_set_u64(struct Int2DdsData *data, const char *field, uint64_t value);
+
+/**
+ * Set an f32 field value
+ */
+Int2DdsRet int2dds_data_set_f32(struct Int2DdsData *data, const char *field, float value);
+
+/**
+ * Set an f64 field value
+ */
+Int2DdsRet int2dds_data_set_f64(struct Int2DdsData *data, const char *field, double value);
+
+/**
+ * Set a string field value
+ */
+Int2DdsRet int2dds_data_set_string(struct Int2DdsData *data, const char *field, const char *value);
+
+/**
+ * Get a bool field value
+ */
+Int2DdsRet int2dds_data_get_bool(const struct Int2DdsData *data, const char *field, bool *out);
+
+/**
+ * Get an i8 field value
+ */
+Int2DdsRet int2dds_data_get_i8(const struct Int2DdsData *data, const char *field, int8_t *out);
+
+/**
+ * Get a u8 field value
+ */
+Int2DdsRet int2dds_data_get_u8(const struct Int2DdsData *data, const char *field, uint8_t *out);
+
+/**
+ * Get an i16 field value
+ */
+Int2DdsRet int2dds_data_get_i16(const struct Int2DdsData *data, const char *field, int16_t *out);
+
+/**
+ * Get a u16 field value
+ */
+Int2DdsRet int2dds_data_get_u16(const struct Int2DdsData *data, const char *field, uint16_t *out);
+
+/**
+ * Get an i32 field value
+ */
+Int2DdsRet int2dds_data_get_i32(const struct Int2DdsData *data, const char *field, int32_t *out);
+
+/**
+ * Get a u32 field value
+ */
+Int2DdsRet int2dds_data_get_u32(const struct Int2DdsData *data, const char *field, uint32_t *out);
+
+/**
+ * Get an i64 field value
+ */
+Int2DdsRet int2dds_data_get_i64(const struct Int2DdsData *data, const char *field, int64_t *out);
+
+/**
+ * Get a u64 field value
+ */
+Int2DdsRet int2dds_data_get_u64(const struct Int2DdsData *data, const char *field, uint64_t *out);
+
+/**
+ * Get an f32 field value
+ */
+Int2DdsRet int2dds_data_get_f32(const struct Int2DdsData *data, const char *field, float *out);
+
+/**
+ * Get an f64 field value
+ */
+Int2DdsRet int2dds_data_get_f64(const struct Int2DdsData *data, const char *field, double *out);
+
+/**
+ * Set a byte sequence field value (sequence of u8)
+ *
+ * Uses optimized FieldValue::Bytes for zero-copy storage.
+ * For 1MB data, this avoids creating 1 million individual FieldValue::UInt8 instances.
+ *
+ * # Safety
+ * - `data` must be a valid data instance
+ * - `field` must be a valid null-terminated C string
+ * - `bytes` must point to a buffer of at least `len` bytes
+ */
+Int2DdsRet int2dds_data_set_bytes(struct Int2DdsData *data,
+                                  const char *field,
+                                  const uint8_t *bytes,
+                                  uint32_t len);
+
+/**
+ * Get a byte sequence field value (sequence of u8)
+ *
+ * Handles both optimized FieldValue::Bytes and legacy FieldValue::Sequence<UInt8>.
+ *
+ * # Safety
+ * - `data` must be a valid data instance
+ * - `field` must be a valid null-terminated C string
+ * - `buf` must point to a buffer of at least `buf_size` bytes
+ * - `out_len` will be set to the actual length of the byte sequence
+ */
+Int2DdsRet int2dds_data_get_bytes(const struct Int2DdsData *data,
+                                  const char *field,
+                                  uint8_t *buf,
+                                  uint32_t buf_size,
+                                  uint32_t *out_len);
+
+/**
+ * Get a string field value
+ *
+ * # Safety
+ * - `buf` must point to a buffer of at least `buf_size` bytes
+ * - `out_len` will be set to the actual length of the string
+ */
+Int2DdsRet int2dds_data_get_string(const struct Int2DdsData *data,
+                                   const char *field,
+                                   char *buf,
+                                   uintptr_t buf_size,
+                                   uintptr_t *out_len);
+
+/**
  * Create a DomainParticipant
  *
  * # Safety
@@ -680,32 +937,12 @@ Int2DdsRet int2dds_datawriter_get_listener(const struct Int2DdsDataWriter *write
  *
  * # Safety
  * - `writer` must be a valid datawriter
- * - `data` must point to valid serialized data
- * - `data_size` must be the correct size of the data
+ * - `data` must be a valid Int2DdsData created from a compatible TypeDescriptor
  *
- * Note: The data must be pre-serialized using CDR format.
+ * The data is automatically serialized using CDR format by the DDS core.
+ * The registered DynamicTypeSupport handles all serialization.
  */
-Int2DdsRet int2dds_write(const struct Int2DdsDataWriter *writer,
-                         const uint8_t *data,
-                         uintptr_t data_size);
-
-/**
- * Write data to a DataWriter with key
- *
- * # Safety
- * - `writer` must be a valid datawriter
- * - `data` must point to valid serialized data
- * - `data_size` must be the correct size of the data
- * - `key` must point to valid serialized key data
- * - `key_size` must be the correct size of the key
- *
- * Note: The data and key must be pre-serialized using CDR format.
- */
-Int2DdsRet int2dds_write_with_key(const struct Int2DdsDataWriter *writer,
-                                  const uint8_t *data,
-                                  uintptr_t data_size,
-                                  const uint8_t *key,
-                                  uintptr_t key_size);
+Int2DdsRet int2dds_write(const struct Int2DdsDataWriter *writer, const struct Int2DdsData *data);
 
 /**
  * Delete a DataWriter
@@ -738,16 +975,14 @@ Int2DdsRet int2dds_get_publication_matched_status(const struct Int2DdsDataWriter
  *
  * # Safety
  * - `writer` must be a valid datawriter
- * - `key` must point to valid serialized key data
- * - `key_size` must be the correct size of the key
+ * - `data` must be a valid Int2DdsData with key fields set
  * - `handle_out` must be a valid pointer to 16-byte array for the instance handle
  *
  * # Returns
  * Returns the instance handle (16 bytes) that can be used in subsequent write/dispose operations
  */
 Int2DdsRet int2dds_register_instance(const struct Int2DdsDataWriter *writer,
-                                     const uint8_t *key,
-                                     uintptr_t key_size,
+                                     const struct Int2DdsData *data,
                                      uint8_t (*handle_out)[16]);
 
 /**
@@ -758,13 +993,11 @@ Int2DdsRet int2dds_register_instance(const struct Int2DdsDataWriter *writer,
  *
  * # Safety
  * - `writer` must be a valid datawriter
- * - `key` must point to valid serialized key data
- * - `key_size` must be the correct size of the key
+ * - `data` must be a valid Int2DdsData with key fields set
  * - `handle` is a pointer to 16-byte instance handle (use all zeros for NIL)
  */
 Int2DdsRet int2dds_unregister_instance(const struct Int2DdsDataWriter *writer,
-                                       const uint8_t *key,
-                                       uintptr_t key_size,
+                                       const struct Int2DdsData *data,
                                        const uint8_t (*handle)[16]);
 
 /**
@@ -775,13 +1008,11 @@ Int2DdsRet int2dds_unregister_instance(const struct Int2DdsDataWriter *writer,
  *
  * # Safety
  * - `writer` must be a valid datawriter
- * - `key` must point to valid serialized key data
- * - `key_size` must be the correct size of the key
+ * - `data` must be a valid Int2DdsData with key fields set
  * - `handle` is a pointer to 16-byte instance handle (use all zeros for NIL)
  */
 Int2DdsRet int2dds_dispose(const struct Int2DdsDataWriter *writer,
-                           const uint8_t *key,
-                           uintptr_t key_size,
+                           const struct Int2DdsData *data,
                            const uint8_t (*handle)[16]);
 
 /**
@@ -1060,41 +1291,36 @@ Int2DdsRet int2dds_datareader_get_listener(const struct Int2DdsDataReader *reade
 /**
  * Take data from a DataReader (removes from cache)
  *
- * Returns the raw bytes of the next sample, removing it from the cache.
- * The C application must allocate the buffer and provide the buffer size.
+ * Returns the next sample, removing it from the cache.
+ * The data is automatically deserialized from CDR format using the registered TypeSupport.
  *
  * # Safety
  * - `reader` must be a valid datareader
- * - `data_buffer` must point to a buffer of at least `buffer_size` bytes
- * - `data_size_out` will be set to the actual size of the data read
+ * - `data_out` must be a valid Int2DdsData created from a compatible TypeDescriptor
  * - `valid_data_out` will be set to true if valid data was read
  *
  * # Returns
  * - INT2DDS_RET_OK if data was successfully read
  * - INT2DDS_RET_NO_DATA if no data is available
- * - INT2DDS_RET_ERROR if buffer is too small (data_size_out will contain required size)
+ * - INT2DDS_RET_ERROR if deserialization failed
  */
 Int2DdsRet int2dds_take(const struct Int2DdsDataReader *reader,
-                        uint8_t *data_buffer,
-                        uintptr_t buffer_size,
-                        uintptr_t *data_size_out,
+                        struct Int2DdsData *data_out,
                         bool *valid_data_out);
 
 /**
  * Read data from a DataReader (keeps in cache)
  *
- * Returns the raw bytes of the next sample without removing it from the cache.
+ * Returns the next sample without removing it from the cache.
+ * The data is automatically deserialized from CDR format using the registered TypeSupport.
  *
  * # Safety
  * - `reader` must be a valid datareader
- * - `data_buffer` must point to a buffer of at least `buffer_size` bytes
- * - `data_size_out` will be set to the actual size of the data read
+ * - `data_out` must be a valid Int2DdsData created from a compatible TypeDescriptor
  * - `valid_data_out` will be set to true if valid data was read
  */
 Int2DdsRet int2dds_read(const struct Int2DdsDataReader *reader,
-                        uint8_t *data_buffer,
-                        uintptr_t buffer_size,
-                        uintptr_t *data_size_out,
+                        struct Int2DdsData *data_out,
                         bool *valid_data_out);
 
 /**
@@ -1134,20 +1360,20 @@ Int2DdsRet int2dds_subscriber_delete_contained_entities(const struct Int2DdsSubs
 /**
  * Create a Topic
  *
- * Creates a topic using RawData type for FFI. The C application is responsible
- * for serializing/deserializing data in CDR format.
+ * Creates a topic with Int2DdsData type and registers the DynamicTypeSupport
+ * for CDR serialization/deserialization.
  *
  * # Safety
  * - `participant` must be a valid participant
  * - `topic_name` must be a valid null-terminated C string
- * - `type_name` must be a valid null-terminated C string
+ * - `type_desc` must be a valid type descriptor
  * - `qos` can be null for default QoS
  * - `topic_out` must be a valid pointer to a null pointer
  * - The returned topic must be freed with `int2dds_delete_topic`
  */
 Int2DdsRet int2dds_create_topic(const struct Int2DdsParticipant *participant,
                                 const char *topic_name,
-                                const char *type_name,
+                                const struct Int2DdsTypeDescriptor *type_desc,
                                 const struct Int2DdsTopicQos *qos,
                                 struct Int2DdsTopic **topic_out);
 
@@ -1185,6 +1411,222 @@ Int2DdsRet int2dds_topic_get_name(const struct Int2DdsTopic *topic,
 Int2DdsRet int2dds_topic_get_type_name(const struct Int2DdsTopic *topic,
                                        char *type_name_out,
                                        uintptr_t type_name_size);
+
+/**
+ * Get the type descriptor of a Topic
+ *
+ * Returns a pointer to the type descriptor. The returned pointer is valid
+ * as long as the topic is not deleted.
+ *
+ * # Safety
+ * - `topic` must be a valid topic
+ * - `desc_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_topic_get_type_descriptor(const struct Int2DdsTopic *topic,
+                                             const struct Int2DdsTypeDescriptor **desc_out);
+
+/**
+ * Create a new type descriptor
+ *
+ * # Safety
+ * - `type_name` must be a valid null-terminated C string
+ * - `out` must be a valid pointer to a null pointer
+ * - The returned descriptor must be freed with `int2dds_type_descriptor_delete`
+ */
+Int2DdsRet int2dds_type_descriptor_create(const char *type_name,
+                                          struct Int2DdsTypeDescriptor **out);
+
+/**
+ * Delete a type descriptor
+ *
+ * # Safety
+ * - `desc` must be a valid type descriptor or null
+ * - `desc` must not be used after this call
+ */
+Int2DdsRet int2dds_type_descriptor_delete(struct Int2DdsTypeDescriptor *desc);
+
+/**
+ * Set extensibility kind for the type
+ *
+ * # Safety
+ * - `desc` must be a valid type descriptor
+ */
+Int2DdsRet int2dds_type_descriptor_set_extensibility(struct Int2DdsTypeDescriptor *desc,
+                                                     enum Int2DdsExtensibilityKind kind);
+
+/**
+ * Set XCDR version for serialization
+ *
+ * Controls the CDR encoding version used for serialization:
+ * - `Xcdr1` (0): XCDR v1 (CDR) - compatible with legacy DDS implementations
+ * - `Xcdr2` (1): XCDR v2 - extended CDR with better extensibility support
+ *
+ * Default is XCDR v1 for maximum compatibility.
+ *
+ * # Safety
+ * - `desc` must be a valid type descriptor
+ */
+Int2DdsRet int2dds_type_descriptor_set_xcdr_version(struct Int2DdsTypeDescriptor *desc,
+                                                    enum Int2DdsXcdrVersion version);
+
+/**
+ * Get XCDR version for serialization
+ *
+ * # Safety
+ * - `desc` must be a valid type descriptor
+ * - `version` must be a valid pointer
+ */
+Int2DdsRet int2dds_type_descriptor_get_xcdr_version(const struct Int2DdsTypeDescriptor *desc,
+                                                    enum Int2DdsXcdrVersion *version);
+
+/**
+ * Get the type name
+ *
+ * # Safety
+ * - `desc` must be a valid type descriptor
+ * - `buf` must point to a buffer of at least `buf_size` bytes
+ * - `out_len` will be set to the actual length of the type name
+ */
+Int2DdsRet int2dds_type_descriptor_get_name(const struct Int2DdsTypeDescriptor *desc,
+                                            char *buf,
+                                            uintptr_t buf_size,
+                                            uintptr_t *out_len);
+
+/**
+ * Get number of fields
+ *
+ * # Safety
+ * - `desc` must be a valid type descriptor
+ */
+Int2DdsRet int2dds_type_descriptor_get_field_count(const struct Int2DdsTypeDescriptor *desc,
+                                                   uintptr_t *count);
+
+/**
+ * Add a bool field
+ */
+Int2DdsRet int2dds_type_descriptor_add_bool(struct Int2DdsTypeDescriptor *desc,
+                                            const char *name,
+                                            bool is_key);
+
+/**
+ * Add an i8 field
+ */
+Int2DdsRet int2dds_type_descriptor_add_i8(struct Int2DdsTypeDescriptor *desc,
+                                          const char *name,
+                                          bool is_key);
+
+/**
+ * Add a u8 field
+ */
+Int2DdsRet int2dds_type_descriptor_add_u8(struct Int2DdsTypeDescriptor *desc,
+                                          const char *name,
+                                          bool is_key);
+
+/**
+ * Add an i16 field
+ */
+Int2DdsRet int2dds_type_descriptor_add_i16(struct Int2DdsTypeDescriptor *desc,
+                                           const char *name,
+                                           bool is_key);
+
+/**
+ * Add a u16 field
+ */
+Int2DdsRet int2dds_type_descriptor_add_u16(struct Int2DdsTypeDescriptor *desc,
+                                           const char *name,
+                                           bool is_key);
+
+/**
+ * Add an i32 field
+ */
+Int2DdsRet int2dds_type_descriptor_add_i32(struct Int2DdsTypeDescriptor *desc,
+                                           const char *name,
+                                           bool is_key);
+
+/**
+ * Add a u32 field
+ */
+Int2DdsRet int2dds_type_descriptor_add_u32(struct Int2DdsTypeDescriptor *desc,
+                                           const char *name,
+                                           bool is_key);
+
+/**
+ * Add an i64 field
+ */
+Int2DdsRet int2dds_type_descriptor_add_i64(struct Int2DdsTypeDescriptor *desc,
+                                           const char *name,
+                                           bool is_key);
+
+/**
+ * Add a u64 field
+ */
+Int2DdsRet int2dds_type_descriptor_add_u64(struct Int2DdsTypeDescriptor *desc,
+                                           const char *name,
+                                           bool is_key);
+
+/**
+ * Add an f32 field
+ */
+Int2DdsRet int2dds_type_descriptor_add_f32(struct Int2DdsTypeDescriptor *desc,
+                                           const char *name,
+                                           bool is_key);
+
+/**
+ * Add an f64 field
+ */
+Int2DdsRet int2dds_type_descriptor_add_f64(struct Int2DdsTypeDescriptor *desc,
+                                           const char *name,
+                                           bool is_key);
+
+/**
+ * Add a string field with max length
+ */
+Int2DdsRet int2dds_type_descriptor_add_string(struct Int2DdsTypeDescriptor *desc,
+                                              const char *name,
+                                              uint32_t max_length,
+                                              bool is_key);
+
+/**
+ * Add a sequence field with element type and max length
+ */
+Int2DdsRet int2dds_type_descriptor_add_sequence(struct Int2DdsTypeDescriptor *desc,
+                                                const char *name,
+                                                enum Int2DdsFieldType element_type,
+                                                uint32_t max_length,
+                                                bool is_key);
+
+/**
+ * Add an array field with element type and fixed length
+ */
+Int2DdsRet int2dds_type_descriptor_add_array(struct Int2DdsTypeDescriptor *desc,
+                                             const char *name,
+                                             enum Int2DdsFieldType element_type,
+                                             uint32_t length,
+                                             bool is_key);
+
+/**
+ * Add a nested struct field
+ */
+Int2DdsRet int2dds_type_descriptor_add_struct(struct Int2DdsTypeDescriptor *desc,
+                                              const char *name,
+                                              const struct Int2DdsTypeDescriptor *nested_desc,
+                                              bool is_key);
+
+/**
+ * Add a bytes field (optimized byte sequence for large payloads)
+ *
+ * This creates a field that stores byte data efficiently using Arc<[u8]>,
+ * avoiding the overhead of individual FieldValue::UInt8 allocations.
+ * Ideal for payloads 1KB-1MB where performance is critical.
+ *
+ * # Safety
+ * - `desc` must be a valid type descriptor
+ * - `name` must be a valid null-terminated C string
+ */
+Int2DdsRet int2dds_type_descriptor_add_bytes(struct Int2DdsTypeDescriptor *desc,
+                                             const char *name,
+                                             uint32_t max_length,
+                                             bool is_key);
 
 /**
  * Create a new WaitSet
