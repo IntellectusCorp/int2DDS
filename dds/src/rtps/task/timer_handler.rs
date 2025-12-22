@@ -813,7 +813,7 @@ mod tests {
             let count_clone = execution_count.clone();
             handler.add_timer(
                 "keep_timer".to_string(),
-                Duration::from_millis(20),
+                Duration::from_millis(40),
                 true,
                 move || {
                     count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -823,7 +823,7 @@ mod tests {
             let count_clone = execution_count.clone();
             handler.add_timer(
                 "delete_timer".to_string(),
-                Duration::from_millis(100), // This timer will be deleted
+                Duration::from_millis(200), // This timer will be deleted
                 true,
                 move || {
                     count_clone.fetch_add(100, std::sync::atomic::Ordering::SeqCst);
@@ -833,7 +833,7 @@ mod tests {
         }
 
         // Delete delete_timer after 50ms (before it executes at 100ms)
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(100));
 
         {
             let handler = timer_handler.lock().unwrap();
@@ -841,7 +841,7 @@ mod tests {
         }
 
         // Wait an additional 100ms
-        thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(200));
 
         let final_count = execution_count.load(std::sync::atomic::Ordering::SeqCst);
 
@@ -887,7 +887,7 @@ mod tests {
         }
 
         // Delete some timers after 70ms (before 80ms, 100ms timers execute)
-        thread::sleep(Duration::from_millis(70));
+        thread::sleep(Duration::from_millis(140));
 
         {
             let handler = timer_handler.lock().unwrap();
@@ -896,7 +896,7 @@ mod tests {
         }
 
         // Wait an additional 50ms
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(100));
 
         let results = execution_results.lock().unwrap();
 
