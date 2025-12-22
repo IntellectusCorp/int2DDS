@@ -1283,7 +1283,7 @@ impl UnicastMessageProcessor for UserLogic {
 
         if is_liveliness_heartbeat {
             if let Some(wlp) = participant.wlp_logic() {
-                let _ = wlp.handle_heartbeat_message(
+                let _ = wlp.handle_heartbeat_message_inner(
                     heartbeat,
                     Guid::new(rtps_header.guid_prefix(), heartbeat.writer_id),
                     submessage_header.final_flag().unwrap_or(false),
