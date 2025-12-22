@@ -1133,7 +1133,10 @@ impl WlpLogic {
                 guid
             );
             for reader in readers {
-                notify_reader_liveliness_changed(&reader, &guid, is_alive);
+                // is_alive=false means ALIVE->NOT_ALIVE, was_alive=Some(true)
+                // is_alive=true means NOT_ALIVE->ALIVE, was_alive=Some(false)
+                let was_alive = Some(!is_alive);
+                notify_reader_liveliness_changed(&reader, &guid, is_alive, was_alive);
             }
 
             if !is_alive {
@@ -1163,7 +1166,8 @@ impl WlpLogic {
                 guid
             );
             for reader in readers {
-                notify_reader_liveliness_changed(&reader, &guid, is_alive);
+                let was_alive = Some(!is_alive);
+                notify_reader_liveliness_changed(&reader, &guid, is_alive, was_alive);
             }
 
             if !is_alive {
@@ -1193,7 +1197,8 @@ impl WlpLogic {
                 if let Ok(readers) = participant.find_readers_matched_with_local_writer(writer_guid)
                 {
                     for reader in readers {
-                        notify_reader_liveliness_changed(&reader, &writer_guid, false);
+                        // Recovery: was NOT_ALIVE, now ALIVE
+                        notify_reader_liveliness_changed(&reader, writer_guid, true, Some(false));
                     }
                 }
             }
@@ -1277,7 +1282,13 @@ impl WlpLogic {
                         participant.find_readers_matched_with_remote_writer(writer_guid)
                     {
                         for reader in readers {
-                            notify_reader_liveliness_changed(&reader, &writer_guid, false);
+                            // Recovery: was NOT_ALIVE, now ALIVE
+                            notify_reader_liveliness_changed(
+                                &reader,
+                                &writer_guid,
+                                true,
+                                Some(false),
+                            );
                         }
                     }
                 }
@@ -1295,12 +1306,27 @@ impl WlpLogic {
     }
 }
 
+/// Notify reader about liveliness change
+/// - `is_alive`: Current liveliness state (true = alive, false = not alive)
+/// - `was_alive`: Previous state if this is a transition, None if first discovery
 fn notify_reader_liveliness_changed(
     reader: &Arc<dyn Reader + Send + Sync>,
     guid: &Guid,
     is_alive: bool,
+    was_alive: Option<bool>,
 ) {
-    let (alive_change, not_alive_change) = if is_alive { (1, 0) } else { (-1, 1) };
+    let (alive_change, not_alive_change) = match (was_alive, is_alive) {
+        // First discovery of alive writer
+        (None, true) => (1, 0),
+        // First discovery of not-alive writer (shouldn't happen normally)
+        (None, false) => (0, 1),
+        // ALIVE -> NOT_ALIVE transition
+        (Some(true), false) => (-1, 1),
+        // NOT_ALIVE -> ALIVE transition (recovery)
+        (Some(false), true) => (1, -1),
+        // No change (shouldn't happen)
+        (Some(true), true) | (Some(false), false) => (0, 0),
+    };
     reader.update_status(
         StatusKind::LIVELINESS_CHANGED,
         Some(Arc::new(LivelinessChangedStatus {

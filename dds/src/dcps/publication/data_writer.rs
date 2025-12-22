@@ -29,6 +29,8 @@ use std::{
     },
 };
 
+use log::debug;
+
 use crate::{
     common::{
         builtin::topic::{
@@ -829,8 +831,10 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             instance_handle,
             Some(timestamp.into()),
         )?;
+        debug!("add_change completed in datawriter");
 
         self.update_liveliness()?;
+        debug!("update_liveliness completed in datawriter");
 
         Ok(())
     }
@@ -1914,7 +1918,9 @@ impl<Foo: 'static + Clone> DataWriterInternal for DataWriter<Foo> {
         };
         drop(monitor_to_drop);
 
-        self.self_ref.lock().ok().map(|mut guard| *guard = None);
+        let value_to_drop = self.self_ref.lock().ok().and_then(|mut guard| guard.take());
+        drop(value_to_drop);
+
         self.deleted.store(true, Ordering::SeqCst);
     }
 
