@@ -1197,10 +1197,13 @@ impl SedpLogic {
                         &mut publication_data,
                         &participant,
                     );
-                    self.handle_stateful_reader_publication(
+
+                    if let Err(e) = self.handle_stateful_reader_publication(
                         stateful_reader,
                         publication_data.clone(),
-                    )?;
+                    ) {
+                        debug!("match_endpoint failed: {:?}", e);
+                    }
 
                     if !skip_cross_match {
                         self.check_if_local_and_cross_match(
@@ -1215,10 +1218,13 @@ impl SedpLogic {
                         &mut publication_data,
                         &participant,
                     );
-                    self.handle_stateless_reader_publication(
+
+                    if let Err(e) = self.handle_stateless_reader_publication(
                         stateless_reader,
                         publication_data.clone(),
-                    )?;
+                    ) {
+                        debug!("match_endpoint failed: {:?}", e);
+                    }
 
                     if !skip_cross_match {
                         self.check_if_local_and_cross_match(
@@ -1244,10 +1250,13 @@ impl SedpLogic {
             ) => {
                 if let Some(stateful_writer) = endpoint.downcast_ref::<StatefulWriter>() {
                     self.handle_empty_locator_lists(&mut subscription_data, &participant);
-                    self.handle_stateful_writer_subscription(
+
+                    if let Err(e) = self.handle_stateful_writer_subscription(
                         stateful_writer,
                         subscription_data.clone(),
-                    )?;
+                    ) {
+                        debug!("match_endpoint failed: {:?}", e);
+                    }
 
                     if !skip_cross_match {
                         self.check_if_local_and_cross_match(
@@ -1259,10 +1268,13 @@ impl SedpLogic {
                     }
                 } else if let Some(stateless_writer) = endpoint.downcast_ref::<StatelessWriter>() {
                     self.handle_empty_locator_lists(&mut subscription_data, &participant);
-                    self.handle_stateless_writer_subscription(
+
+                    if let Err(e) = self.handle_stateless_writer_subscription(
                         stateless_writer,
                         subscription_data.clone(),
-                    )?;
+                    ) {
+                        debug!("match_endpoint failed: {:?}", e);
+                    }
 
                     if !skip_cross_match {
                         self.check_if_local_and_cross_match(
