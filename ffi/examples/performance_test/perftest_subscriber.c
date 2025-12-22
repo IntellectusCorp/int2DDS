@@ -51,7 +51,7 @@ static int clock_gettime(int clock_id, struct timespec *ts) {
 /* Note: With the new TypeDescriptor API, we don't need to manually define
  * data structures. The types are defined at runtime using TypeDescriptor.
  *
- * PerformanceData type:
+ * ThroughputTestData type:
  *   - seq_num: uint64
  *   - timestamp: uint64
  *   - data: sequence<uint8>
@@ -150,12 +150,12 @@ static uint64_t get_current_time_ns(void) {
 
 /* ====== TypeDescriptor Helper Functions ====== */
 
-/* Create TypeDescriptor for PerformanceData (throughput and local_latency tests) */
+/* Create TypeDescriptor for ThroughputTestData (throughput and local_latency tests) */
 static Int2DdsTypeDescriptor* create_performance_type_descriptor(uint32_t max_data_size) {
     Int2DdsTypeDescriptor* type_desc = NULL;
     Int2DdsRet ret;
 
-    ret = int2dds_type_descriptor_create("PerformanceData", &type_desc);
+    ret = int2dds_type_descriptor_create("ThroughputTestData", &type_desc);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create performance type descriptor: %d\n", ret);
         return NULL;
@@ -814,7 +814,7 @@ static void run_latency_test(const subscriber_args_t *args) {
         goto cleanup;
     }
 
-    ret = int2dds_create_topic(participant, "latency_echo_topic", type_desc, NULL, &echo_topic);
+    ret = int2dds_create_topic(participant, "latency_test_topic_echo", type_desc, NULL, &echo_topic);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create echo topic: %d\n", ret);
         goto cleanup;
