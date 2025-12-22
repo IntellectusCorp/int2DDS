@@ -34,17 +34,15 @@ jobs:
           shared-key: cargo-develop
           save-if: false
 
-      - name: Run all tests
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
 
-      - name: Run integration tests
+      - name: Run all tests
         shell: bash
         env:
           SCCACHE_GHA_ENABLED: "true"
           RUSTC_WRAPPER: sccache
           INT2DDS_UDP_SOCKET_BUFFER: 5242880
-        run: cargo test -- --test-threads=1
           RUSTFLAGS: ${{ runner.os == 'Windows' && '-C linker=lld-link' || '' }}
         run: |
           echo "RUSTFLAGS=$RUSTFLAGS"
