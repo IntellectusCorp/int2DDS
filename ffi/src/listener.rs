@@ -15,6 +15,7 @@
 use std::ffi::c_void;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
+use crate::data::Int2DdsData;
 use int2dds::infrastructure::status::{
     LivelinessChangedStatus, LivelinessLostStatus, OfferedDeadlineMissedStatus,
     OfferedIncompatibleQosStatus, PublicationMatchedStatus, RequestedDeadlineMissedStatus,
@@ -25,7 +26,6 @@ use int2dds::publication::data_writer::DataWriter;
 use int2dds::publication::data_writer_listener::DataWriterListener;
 use int2dds::subscription::data_reader::DataReader;
 use int2dds::subscription::data_reader_listener::DataReaderListener;
-use int2dds::topic::RawData;
 
 use crate::status::{
     Int2DdsLivelinessChangedStatus, Int2DdsLivelinessLostStatus,
@@ -169,9 +169,9 @@ unsafe impl Send for FfiDataReaderListener {}
 unsafe impl Sync for FfiDataReaderListener {}
 
 impl DataReaderListener for FfiDataReaderListener {
-    type Foo = RawData;
+    type Foo = Int2DdsData;
 
-    fn on_data_available(&self, _reader: &DataReader<RawData>) {
+    fn on_data_available(&self, _reader: &DataReader<Int2DdsData>) {
         if self.callbacks.on_data_available as usize != 0 {
             let callback = self.callbacks.on_data_available;
             let reader_handle = self.reader_handle;
@@ -184,7 +184,7 @@ impl DataReaderListener for FfiDataReaderListener {
 
     fn on_subscription_matched(
         &self,
-        _reader: &DataReader<RawData>,
+        _reader: &DataReader<Int2DdsData>,
         status: &SubscriptionMatchedStatus,
     ) {
         if self.callbacks.on_subscription_matched as usize != 0 {
@@ -198,7 +198,7 @@ impl DataReaderListener for FfiDataReaderListener {
         }
     }
 
-    fn on_sample_rejected(&self, _reader: &DataReader<RawData>, status: &SampleRejectedStatus) {
+    fn on_sample_rejected(&self, _reader: &DataReader<Int2DdsData>, status: &SampleRejectedStatus) {
         if self.callbacks.on_sample_rejected as usize != 0 {
             let callback = self.callbacks.on_sample_rejected;
             let ffi_status: Int2DdsSampleRejectedStatus = status.into();
@@ -212,7 +212,7 @@ impl DataReaderListener for FfiDataReaderListener {
 
     fn on_liveliness_changed(
         &self,
-        _reader: &DataReader<RawData>,
+        _reader: &DataReader<Int2DdsData>,
         status: &LivelinessChangedStatus,
     ) {
         if self.callbacks.on_liveliness_changed as usize != 0 {
@@ -228,7 +228,7 @@ impl DataReaderListener for FfiDataReaderListener {
 
     fn on_requested_deadline_missed(
         &self,
-        _reader: &DataReader<RawData>,
+        _reader: &DataReader<Int2DdsData>,
         status: &RequestedDeadlineMissedStatus,
     ) {
         if self.callbacks.on_requested_deadline_missed as usize != 0 {
@@ -244,7 +244,7 @@ impl DataReaderListener for FfiDataReaderListener {
 
     fn on_requested_incompatible_qos(
         &self,
-        _reader: &DataReader<RawData>,
+        _reader: &DataReader<Int2DdsData>,
         status: &RequestedIncompatibleQosStatus,
     ) {
         if self.callbacks.on_requested_incompatible_qos as usize != 0 {
@@ -258,7 +258,7 @@ impl DataReaderListener for FfiDataReaderListener {
         }
     }
 
-    fn on_sample_lost(&self, _reader: &DataReader<RawData>, status: &SampleLostStatus) {
+    fn on_sample_lost(&self, _reader: &DataReader<Int2DdsData>, status: &SampleLostStatus) {
         if self.callbacks.on_sample_lost as usize != 0 {
             let callback = self.callbacks.on_sample_lost;
             let ffi_status: Int2DdsSampleLostStatus = status.into();
@@ -293,11 +293,11 @@ unsafe impl Send for FfiDataWriterListener {}
 unsafe impl Sync for FfiDataWriterListener {}
 
 impl DataWriterListener for FfiDataWriterListener {
-    type Foo = RawData;
+    type Foo = Int2DdsData;
 
     fn on_publication_matched(
         &self,
-        _writer: &DataWriter<RawData>,
+        _writer: &DataWriter<Int2DdsData>,
         status: &PublicationMatchedStatus,
     ) {
         if self.callbacks.on_publication_matched as usize != 0 {
@@ -313,7 +313,7 @@ impl DataWriterListener for FfiDataWriterListener {
 
     fn on_offered_deadline_missed(
         &self,
-        _writer: &DataWriter<RawData>,
+        _writer: &DataWriter<Int2DdsData>,
         status: &OfferedDeadlineMissedStatus,
     ) {
         if self.callbacks.on_offered_deadline_missed as usize != 0 {
@@ -329,7 +329,7 @@ impl DataWriterListener for FfiDataWriterListener {
 
     fn on_offered_incompatible_qos(
         &self,
-        _writer: &DataWriter<RawData>,
+        _writer: &DataWriter<Int2DdsData>,
         status: &OfferedIncompatibleQosStatus,
     ) {
         if self.callbacks.on_offered_incompatible_qos as usize != 0 {
@@ -343,7 +343,7 @@ impl DataWriterListener for FfiDataWriterListener {
         }
     }
 
-    fn on_liveliness_lost(&self, _writer: &DataWriter<RawData>, status: &LivelinessLostStatus) {
+    fn on_liveliness_lost(&self, _writer: &DataWriter<Int2DdsData>, status: &LivelinessLostStatus) {
         if self.callbacks.on_liveliness_lost as usize != 0 {
             let callback = self.callbacks.on_liveliness_lost;
             let ffi_status: Int2DdsLivelinessLostStatus = status.into();
