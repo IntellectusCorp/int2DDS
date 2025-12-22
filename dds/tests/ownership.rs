@@ -3,9 +3,9 @@ mod common;
 use common::*;
 use int2dds::{
     common::{
-        env::{set_file_log_level, set_log_type},
+        // env::{set_file_log_level, set_log_type},
         instance_handle::InstanceHandle,
-        log::{LogLevel, LogType},
+        // log::{LogLevel, LogType},
     },
     dcps::{
         core::time::Duration,
