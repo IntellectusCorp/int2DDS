@@ -779,6 +779,7 @@ mod tests {
                 reader::WriterProxy,
                 writer::{reader_locator::ReaderLocator, reader_proxy::ReaderProxy},
             },
+            logic::common::MulticastThreadHandler as _,
         },
         subscription::qos::{DataReaderQos, SubscriberQos},
         topic::{qos::TopicQos, type_support::DdsType},
@@ -1944,12 +1945,27 @@ mod tests {
 
             // Verify initialization
             if let Some(ref sedp_logic) = bridge_guard.sedp_logic.as_ref() {
-                assert!(sedp_logic.get_multicast_listening_handle().lock().unwrap().is_some());
-                assert!(sedp_logic.get_unicast_listening_handle().lock().unwrap().is_some());
+                assert!(sedp_logic
+                    .get_multicast_listening_handle()
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .is_some());
+                assert!(sedp_logic
+                    .get_unicast_listening_handle()
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .is_some());
             }
 
             if let Some(ref user_logic) = bridge_guard.user_logic.as_ref() {
-                assert!(user_logic.get_unicast_listening_handle().lock().unwrap().is_some());
+                assert!(user_logic
+                    .get_unicast_listening_handle()
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .is_some());
             }
 
             // Explicitly call disable
@@ -1958,12 +1974,27 @@ mod tests {
 
             // Verify termination
             if let Some(ref sedp_logic) = bridge_guard.sedp_logic.as_ref() {
-                assert!(sedp_logic.get_multicast_listening_handle().lock().unwrap().is_none());
-                assert!(sedp_logic.get_unicast_listening_handle().lock().unwrap().is_none());
+                assert!(sedp_logic
+                    .get_multicast_listening_handle()
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .is_none());
+                assert!(sedp_logic
+                    .get_unicast_listening_handle()
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .is_none());
             }
 
             if let Some(ref user_logic) = bridge_guard.user_logic.as_ref() {
-                assert!(user_logic.get_unicast_listening_handle().lock().unwrap().is_none());
+                assert!(user_logic
+                    .get_unicast_listening_handle()
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .is_none());
             }
         }
     }
