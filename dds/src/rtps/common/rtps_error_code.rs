@@ -76,6 +76,9 @@ pub enum RtpsErrorCode {
     // Error propagated from DDS layer
     DdsError = 600,
 
+    // Transport send error
+    NotSent = 700,
+
     // For unexpected error
     Unknown = 999,
 }
@@ -126,6 +129,9 @@ impl RtpsErrorCode {
             // Resource shortage
             600 => Some(RtpsErrorCode::DdsError),
 
+            // Transport send error
+            700 => Some(RtpsErrorCode::NotSent),
+
             999 => Some(RtpsErrorCode::Unknown),
 
             _ => None,
@@ -161,6 +167,7 @@ impl RtpsErrorCode {
             RtpsErrorCode::NotInitialized => "Not Initialized",
             RtpsErrorCode::DdsError => "DDS error",
             RtpsErrorCode::ArcUpgradeError => "Failed to upgrade Weak reference to Arc",
+            RtpsErrorCode::NotSent => "Message not sent",
             RtpsErrorCode::Unknown => "Unknown",
         }
     }
