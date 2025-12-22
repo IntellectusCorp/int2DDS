@@ -297,7 +297,7 @@ impl Transport for TcpSender {
         self.close_all();
     }
 }
-
+#[cfg(target_os = "windows")]
 #[cfg(test)]
 mod tests {
     use super::*;
