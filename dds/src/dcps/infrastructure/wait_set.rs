@@ -414,6 +414,7 @@ mod tests {
             qos::{DataReaderQos, SubscriberQos},
             sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind},
         },
+        test_utils::unique_domain_id,
         topic::qos::TopicQos,
         DdsType,
     };
@@ -426,7 +427,7 @@ mod tests {
 
     #[test]
     fn test_waitset_matching() {
-        let domain_id = 13;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
             .create_participant(
@@ -483,7 +484,7 @@ mod tests {
 
     #[test]
     fn test_waitset_timeout() {
-        let domain_id = 31;
+        let domain_id = unique_domain_id();
         let participant_qos = DomainParticipantQos::default();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
@@ -522,7 +523,7 @@ mod tests {
 
     #[test]
     fn test_waitset_multiple_status_conditions_different_entities_1() {
-        let domain_id = 23;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
             .create_participant(
@@ -589,7 +590,7 @@ mod tests {
 
     #[test]
     fn test_waitset_multiple_status_conditions_different_entities_2() {
-        let domain_id = 23;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
             .create_participant(
@@ -665,7 +666,7 @@ mod tests {
 
     #[test]
     fn test_waitset_status_condition_multiple_masks() {
-        let domain_id = 33;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
             .create_participant(
@@ -732,7 +733,7 @@ mod tests {
 
     #[test]
     fn test_waitset_reuse_functionality() {
-        let domain_id = 34;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
 
         let participant = factory
@@ -832,7 +833,7 @@ mod tests {
 
     #[test]
     fn test_waitset_duplicate_condition_attach() {
-        let domain_id = 35;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
             .create_participant(
@@ -885,7 +886,7 @@ mod tests {
 
     #[test]
     fn test_waitset_detach_nonexistent_condition() {
-        let domain_id = 36;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
             .create_participant(
@@ -944,7 +945,7 @@ mod tests {
 
     #[test]
     fn test_waitset_with_readcondition() {
-        let domain_id = 57;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
             .create_participant(
@@ -1047,7 +1048,7 @@ mod tests {
 
     #[test]
     fn test_waitset_with_querycondition() {
-        let domain_id = 67;
+        let domain_id = unique_domain_id();
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
             .create_participant(

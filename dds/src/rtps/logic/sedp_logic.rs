@@ -2355,6 +2355,7 @@ mod tests {
         },
         transport::socket::Socket,
     };
+    use crate::test_utils::unique_domain_id;
 
     // Remote DDS must be running
     // For sedp_send test, need sedp-related writer's reader locator, reader proxy
@@ -2366,7 +2367,7 @@ mod tests {
     fn test_send_sedp_message() {
         env_logger::builder().filter_level(log::LevelFilter::Debug).init();
 
-        let domain_id = 10;
+        let domain_id = unique_domain_id() as u32;
         let mut socket = Socket::new(domain_id); //domain_id 0
         socket.create_socket();
         let participant =
@@ -2417,7 +2418,7 @@ mod tests {
     fn test_process_sedp() {
         env_logger::builder().filter_level(log::LevelFilter::Info).init();
 
-        let domain_id = 5;
+        let domain_id = unique_domain_id() as u32;
         let mut socket = Socket::new(domain_id); //domain_id 0
         socket.create_socket();
         let participant =
