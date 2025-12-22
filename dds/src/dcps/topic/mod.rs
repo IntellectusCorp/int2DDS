@@ -21,7 +21,7 @@
 //! ```
 //! use int2dds::topic::type_support::DdsType;
 //!
-//! #[derive(DdsType, Clone)]
+//! #[derive(DdsType)]
 //! #[dds_type(crate_path = "int2dds")]
 //! struct MyData {
 //!     #[dds(key)]
