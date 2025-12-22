@@ -2,6 +2,7 @@ use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult};
 use crate::rtps::entities::entity::Entity;
 use crate::rtps::entities::participant::Participant;
+use crate::rtps::logic::message_processor::unicast_message_processor::UnicastMessageProcessor as _;
 use crate::rtps::logic::sedp_logic::SedpLogic;
 use crate::rtps::messages::message_receiver::MessageReceiver;
 use crate::rtps::transport::socket::MAX_EVENTS;
@@ -237,7 +238,7 @@ impl DiscoveryUnicastListeningTask {
             .clone();
 
         sedp_logic.handle_rtps_message(message_receiver.clone())?;
-        if let Some(wlp_logic) = participant.wlp_logic() {
+        if let Some(mut wlp_logic) = participant.wlp_logic() {
             wlp_logic.handle_rtps_message(message_receiver)?;
         }
         Ok(())

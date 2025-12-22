@@ -20,7 +20,8 @@ use crate::rtps::{
         types::DomainId,
     },
     entities::{participant::Participant, writer::Writer},
-    logic::data::participant_message_processor::ParticipantMessageProcessor,
+    logic::common::{impl_participant_accessor, ParticipantAccessor},
+    logic::message_processor::participant_message_processor::ParticipantMessageProcessor,
     messages::message_creator::MessageCreator,
     task::{
         sending_handler::{MessageType, SendingHandler},
@@ -38,13 +39,9 @@ pub(crate) struct SpdpLogic {
     timer_handler: Arc<Mutex<TimerHandler>>,
 }
 
-impl ParticipantMessageProcessor for SpdpLogic {
-    fn get_upgraded_participant(&self) -> RtpsResult<Arc<Participant>> {
-        Ok(self.participant.upgrade().ok_or_else(|| {
-            RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped")
-        })?)
-    }
-}
+impl_participant_accessor!(SpdpLogic);
+
+impl ParticipantMessageProcessor for SpdpLogic {}
 
 impl SpdpLogic {
     pub(crate) fn new(
@@ -63,12 +60,12 @@ impl SpdpLogic {
         }
     }
 
-    pub(crate) fn is_participant_terminated(&self) -> RtpsResult<bool> {
-        Ok(self.get_upgraded_participant()?.is_terminated())
-    }
-
     pub(crate) fn start_spdp(&self) -> RtpsResult<()> {
         self.trigger_send_spdp_multicast()
+    }
+
+    pub(crate) fn is_participant_terminated(&self) -> RtpsResult<bool> {
+        Ok(self.get_upgraded_participant()?.is_terminated())
     }
 
     // Trigger SPDP multicast transmission
