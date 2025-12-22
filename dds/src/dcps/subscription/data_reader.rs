@@ -2966,6 +2966,9 @@ pub(crate) mod tests {
     use crate::dcps::topic::type_support::DdsType;
     use crate::domain::domain_participant_factory::DomainParticipantFactory;
     use crate::domain::qos::DomainParticipantQos;
+    use crate::infrastructure::qos_policy::{
+        HistoryQosPolicy, ReliabilityQosPolicy, ReliabilityQosPolicyKind,
+    };
     use crate::infrastructure::wait_set::WaitSet;
     use crate::publication::data_writer_listener::DataWriterListener;
     use crate::publication::qos::{DataWriterQos, PublisherQos};
@@ -3056,7 +3059,7 @@ pub(crate) mod tests {
         let domain_id = 19;
         let factory = DomainParticipantFactory::get_instance();
 
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -3065,7 +3068,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorld>(
                 "hello_world_order",
                 "HelloWorldType",
@@ -3075,42 +3078,34 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+
         let writer = publisher
-            .create_datawriter::<HelloWorld>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorld>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let topic = sub_participant
-            .create_topic::<HelloWorld>(
-                "hello_world_order",
-                "HelloWorldType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -3173,7 +3168,7 @@ pub(crate) mod tests {
     fn test_read_only_first_sample() {
         let domain_id = 19;
         let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -3182,7 +3177,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorld>(
                 "hello_world_first",
                 "HelloWorldType",
@@ -3192,42 +3187,34 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+
         let writer = publisher
-            .create_datawriter::<HelloWorld>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorld>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let topic = sub_participant
-            .create_topic::<HelloWorld>(
-                "hello_world_first",
-                "HelloWorldType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -3302,7 +3289,7 @@ pub(crate) mod tests {
     fn test_take_samples() {
         let domain_id = 19;
         let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -3311,7 +3298,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorld>(
                 "hello_world_takes",
                 "HelloWorldType",
@@ -3321,41 +3308,34 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+
         let writer = publisher
-            .create_datawriter::<HelloWorld>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorld>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let topic = sub_participant
-            .create_topic::<HelloWorld>(
-                "hello_world_takes",
-                "HelloWorldType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -3427,7 +3407,7 @@ pub(crate) mod tests {
     fn test_take_samples_in_order() {
         let domain_id = 39;
         let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -3436,7 +3416,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorld>(
                 "hello_world",
                 "HelloWorldType",
@@ -3446,41 +3426,34 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+
         let writer = publisher
-            .create_datawriter::<HelloWorld>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorld>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let topic = sub_participant
-            .create_topic::<HelloWorld>(
-                "hello_world",
-                "HelloWorldType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -3553,7 +3526,7 @@ pub(crate) mod tests {
     fn test_read_next_samples() {
         let domain_id = 19;
         let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -3562,7 +3535,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorld>(
                 "hello_world",
                 "HelloWorldType",
@@ -3572,41 +3545,34 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+
         let writer = publisher
-            .create_datawriter::<HelloWorld>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorld>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let topic = sub_participant
-            .create_topic::<HelloWorld>(
-                "hello_world",
-                "HelloWorldType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -3663,7 +3629,7 @@ pub(crate) mod tests {
     fn test_take_next_samples() {
         let domain_id = 19;
         let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -3672,7 +3638,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorld>(
                 "hello_world",
                 "HelloWorldType",
@@ -3682,41 +3648,34 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+
         let writer = publisher
-            .create_datawriter::<HelloWorld>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorld>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let topic = sub_participant
-            .create_topic::<HelloWorld>(
-                "hello_world",
-                "HelloWorldType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -3825,9 +3784,9 @@ pub(crate) mod tests {
 
     #[test]
     fn test_read_instance_with_specific_handle() {
-        let domain_id = 39;
+        let domain_id = 84;
         let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -3836,7 +3795,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorldWithKey>(
                 "HelloWorldWithKeySpec",
                 "HelloWorldWithKeyType",
@@ -3846,43 +3805,35 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
         let (sender, _receiver) = sync_channel(0);
         let _listener = PubKeyListener { sender };
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let writer = publisher
-            .create_datawriter::<HelloWorldWithKey>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorldWithKey>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let topic = sub_participant
-            .create_topic::<HelloWorldWithKey>(
-                "HelloWorldWithKeySpec",
-                "HelloWorldWithKeyType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubKeyListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -3923,7 +3874,7 @@ pub(crate) mod tests {
         while let Ok(_) = counter_receiver.recv() {
             count += 1;
             println!("Data received count: {}", count);
-            if count == 3 {
+            if count == 4 {
                 break;
             }
         }
@@ -3960,7 +3911,7 @@ pub(crate) mod tests {
     fn test_take_instance_with_specific_handle() {
         let domain_id = 9;
         let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -3969,7 +3920,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorldWithKey>(
                 "HelloWorldWithKeyHandle",
                 "HelloWorldWithKeyType",
@@ -3979,43 +3930,35 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
         let (sender, _receiver) = sync_channel(0);
         let _listener = PubKeyListener { sender };
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let writer = publisher
-            .create_datawriter::<HelloWorldWithKey>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorldWithKey>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let topic = sub_participant
-            .create_topic::<HelloWorldWithKey>(
-                "HelloWorldWithKeyHandle",
-                "HelloWorldWithKeyType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubKeyListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -4057,7 +4000,7 @@ pub(crate) mod tests {
         while let Ok(_) = counter_receiver.recv() {
             count += 1;
             println!("Data received count: {}", count);
-            if count == 3 {
+            if count == 4 {
                 break;
             }
         }
@@ -4113,7 +4056,7 @@ pub(crate) mod tests {
     fn test_read_instance_with_nil_handle() {
         let domain_id = 29;
         let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -4122,7 +4065,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorldWithKey>(
                 "HelloWorldWithKey",
                 "HelloWorldWithKeyType",
@@ -4132,43 +4075,37 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
         let (sender, _receiver) = sync_channel(0);
         let _listener = PubKeyListener { sender };
+
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+
         let _writer = publisher
-            .create_datawriter::<HelloWorldWithKey>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorldWithKey>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let topic = sub_participant
-            .create_topic::<HelloWorldWithKey>(
-                "HelloWorldWithKey",
-                "HelloWorldWithKeyType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, _counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubKeyListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -4199,7 +4136,7 @@ pub(crate) mod tests {
     fn test_take_instance_with_nonexistent_handle() {
         let domain_id = 29;
         let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -4208,7 +4145,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorldWithKey>(
                 "HelloWorldWithKeyNon",
                 "HelloWorldWithKeyType",
@@ -4218,43 +4155,35 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
         let (sender, _receiver) = sync_channel(0);
         let _listener = PubKeyListener { sender };
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let writer = publisher
-            .create_datawriter::<HelloWorldWithKey>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorldWithKey>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let topic = sub_participant
-            .create_topic::<HelloWorldWithKey>(
-                "HelloWorldWithKeyNon",
-                "HelloWorldWithKeyType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubKeyListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -4296,7 +4225,7 @@ pub(crate) mod tests {
         while let Ok(_) = counter_receiver.recv() {
             count += 1;
             println!("Data received count: {}", count);
-            if count == 1 {
+            if count == 4 {
                 break;
             }
         }
@@ -4322,7 +4251,7 @@ pub(crate) mod tests {
     fn test_read_instance_with_sample_state_filter() {
         let domain_id = 39;
         let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -4331,7 +4260,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorldWithKey>(
                 "HelloWorldWithKeySample",
                 "HelloWorldWithKeyType",
@@ -4341,43 +4270,35 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
         let (sender, _receiver) = sync_channel(0);
         let _listener = PubKeyListener { sender };
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let writer = publisher
-            .create_datawriter::<HelloWorldWithKey>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorldWithKey>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let topic = sub_participant
-            .create_topic::<HelloWorldWithKey>(
-                "HelloWorldWithKeySample",
-                "HelloWorldWithKeyType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubKeyListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -4419,7 +4340,7 @@ pub(crate) mod tests {
         while let Ok(_) = counter_receiver.recv() {
             count += 1;
             println!("Data received count: {}", count);
-            if count == 2 {
+            if count == 4 {
                 break;
             }
         }
@@ -4460,7 +4381,7 @@ pub(crate) mod tests {
     fn test_read_next_instance_basic() {
         let domain_id = 29;
         let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -4469,7 +4390,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorldWithKey>(
                 "HelloWorldWithKeyBasic",
                 "HelloWorldWithKeyType",
@@ -4479,43 +4400,35 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
         let (sender, _receiver) = sync_channel(0);
         let _listener = PubKeyListener { sender };
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let writer = publisher
-            .create_datawriter::<HelloWorldWithKey>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorldWithKey>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let topic = sub_participant
-            .create_topic::<HelloWorldWithKey>(
-                "HelloWorldWithKeyBasic",
-                "HelloWorldWithKeyType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubKeyListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -4609,7 +4522,7 @@ pub(crate) mod tests {
     fn test_read_next_instance_no_next_instance() {
         let domain_id = 17;
         let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -4618,7 +4531,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorldWithKey>(
                 "HelloWorldWithKeyNoNext",
                 "HelloWorldWithKeyType",
@@ -4628,43 +4541,35 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
         let (sender, _receiver) = sync_channel(0);
         let _listener = PubKeyListener { sender };
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let writer = publisher
-            .create_datawriter::<HelloWorldWithKey>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorldWithKey>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let topic = sub_participant
-            .create_topic::<HelloWorldWithKey>(
-                "HelloWorldWithKeyNoNext",
-                "HelloWorldWithKeyType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubKeyListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -4731,7 +4636,7 @@ pub(crate) mod tests {
     fn test_take_next_instance_basic() {
         let domain_id = 9;
         let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -4740,7 +4645,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorldWithKey>(
                 "HelloWorldWithKey",
                 "HelloWorldWithKeyType",
@@ -4750,43 +4655,35 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
         let (sender, _receiver) = sync_channel(0);
         let _listener = PubKeyListener { sender };
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let writer = publisher
-            .create_datawriter::<HelloWorldWithKey>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorldWithKey>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let topic = sub_participant
-            .create_topic::<HelloWorldWithKey>(
-                "HelloWorldWithKey",
-                "HelloWorldWithKeyType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubKeyListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -4887,7 +4784,7 @@ pub(crate) mod tests {
     fn test_read_next_instance_with_view_state_filter() {
         let domain_id = 37;
         let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -4896,7 +4793,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorldWithKey>(
                 "HelloWorldWithKeyView",
                 "HelloWorldWithKeyType",
@@ -4906,43 +4803,35 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
         let (sender, _receiver) = sync_channel(0);
         let _listener = PubKeyListener { sender };
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let writer = publisher
-            .create_datawriter::<HelloWorldWithKey>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorldWithKey>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let topic = sub_participant
-            .create_topic::<HelloWorldWithKey>(
-                "HelloWorldWithKeyView",
-                "HelloWorldWithKeyType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubKeyListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -5028,7 +4917,7 @@ pub(crate) mod tests {
     fn test_take_next_instance_with_multiple_samples_per_instance() {
         let domain_id = 9;
         let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -5037,7 +4926,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorldWithKey>(
                 "HelloWorldWithKeyMulti",
                 "HelloWorldWithKeyType",
@@ -5047,43 +4936,35 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
         let (sender, _receiver) = sync_channel(0);
         let _listener = PubKeyListener { sender };
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let writer = publisher
-            .create_datawriter::<HelloWorldWithKey>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorldWithKey>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let topic = sub_participant
-            .create_topic::<HelloWorldWithKey>(
-                "HelloWorldWithKeyMulti",
-                "HelloWorldWithKeyType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubKeyListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -5184,7 +5065,7 @@ pub(crate) mod tests {
     fn test_read_next_instance_with_nonexistent_previous_handle() {
         let domain_id = 9;
         let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -5193,7 +5074,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorldWithKey>(
                 "HelloWorldWithKeyNext",
                 "HelloWorldWithKeyType",
@@ -5203,43 +5084,35 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
         let (sender, _receiver) = sync_channel(0);
         let _listener = PubKeyListener { sender };
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let writer = publisher
-            .create_datawriter::<HelloWorldWithKey>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorldWithKey>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let topic = sub_participant
-            .create_topic::<HelloWorldWithKey>(
-                "HelloWorldWithKeyNext",
-                "HelloWorldWithKeyType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubKeyListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -5306,7 +5179,7 @@ pub(crate) mod tests {
     fn test_take_next_instance_with_max_samples_limit() {
         let domain_id = 29;
         let factory = DomainParticipantFactory::get_instance();
-        let pub_participant = factory
+        let participant = factory
             .create_participant(
                 domain_id,
                 DomainParticipantQos::default(),
@@ -5315,7 +5188,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let topic = pub_participant
+        let topic = participant
             .create_topic::<HelloWorldWithKey>(
                 "HelloWorldWithKeyTakeMax",
                 "HelloWorldWithKeyType",
@@ -5325,43 +5198,35 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let publisher = pub_participant
+        let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
         let (sender, _receiver) = sync_channel(0);
         let _listener = PubKeyListener { sender };
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let writer = publisher
-            .create_datawriter::<HelloWorldWithKey>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-        let sub_participant = factory
-            .create_participant(
-                domain_id,
-                DomainParticipantQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorldWithKey>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let topic = sub_participant
-            .create_topic::<HelloWorldWithKey>(
-                "HelloWorldWithKeyTakeMax",
-                "HelloWorldWithKeyType",
-                TopicQos::default(),
-                None,
-                StatusMask::default(),
-            )
-            .unwrap();
-
-        let subscriber = sub_participant
+        let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        let reader_qos = DataReaderQos::default();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let (counter_sender, counter_receiver) = std::sync::mpsc::sync_channel::<()>(100);
         let read_listener = SubKeyListener { counter_sender: counter_sender };
         let data_reader = subscriber
@@ -5566,7 +5431,6 @@ pub(crate) mod tests {
 
         let (sender, _receiver) = sync_channel(0);
         let listener = SubscriberListenerStructure { _sender: sender };
-        let _ = env_logger::builder().filter_level(log::LevelFilter::Info).try_init();
 
         let domain_participant_factory = DomainParticipantFactory::get_instance();
         let domain_participant = domain_participant_factory
