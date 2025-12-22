@@ -30,11 +30,17 @@ use crate::{
             reader::{Reader, StatefulReader, WriterProxy},
             writer::{StatefulWriter, Writer},
         },
-        logic::data::builtin_endpoint_pair::BuiltinEndpointPair,
+        logic::{
+            common::{impl_participant_accessor, ParticipantAccessor},
+            data::builtin_endpoint_pair::BuiltinEndpointPair,
+            message_processor::unicast_message_processor::UnicastMessageProcessor,
+        },
         messages::{
+            header::Header,
             message_creator::MessageCreator,
-            message_receiver::{MessageReceiver, TypedSubmessage},
-            submessages::{ack_nack::AckNack, heartbeat::Heartbeat},
+            message_receiver::MessageReceiver,
+            submessage_header::SubmessageHeader,
+            submessages::{ack_nack::AckNack, data::Data, heartbeat::Heartbeat},
         },
         task::{
             sending_handler::{MessageType, SendingHandler},
@@ -97,6 +103,7 @@ pub(crate) struct WlpLogic {
     liveliness_monitor: Arc<Mutex<Option<LivelinessMonitor>>>,
 }
 
+// Constructor and lifecycle management
 impl WlpLogic {
     pub(crate) fn new(participant: Arc<Participant>, sender: Arc<TransportSender>) -> Self {
         let timer_handler = TimerHandler::get_instance(participant.clone());
@@ -119,6 +126,19 @@ impl WlpLogic {
         }
     }
 
+    /// Shutdown liveliness monitor and join its thread
+    pub(crate) fn shutdown(&self) {
+        if let Ok(mut monitor) = self.liveliness_monitor.lock() {
+            if let Some(ref mut m) = *monitor {
+                m.shutdown();
+            }
+            *monitor = None;
+        }
+    }
+}
+
+// Writer management (add/remove local and remote writers)
+impl WlpLogic {
     pub(crate) fn add_local_writer(
         &self,
         writer_guid: Guid,
@@ -364,7 +384,10 @@ impl WlpLogic {
             Err(e) => Err(RtpsError::new(RtpsErrorCode::LockError, e.to_string())),
         }
     }
+}
 
+// Sending liveliness and heartbeat messages
+impl WlpLogic {
     // for Automatic/ManualByParticipant
     pub(crate) fn send_participant_message_data(
         &self,
@@ -522,70 +545,6 @@ impl WlpLogic {
         Ok(())
     }
 
-    // Automatic
-    pub(crate) fn start_periodic_liveliness(&self, lease_duration: RtpsDuration) -> RtpsResult<()> {
-        let participant = self.get_upgraded_participant()?;
-
-        let data = ParticipantMessageData::new(
-            participant.guid().prefix(),
-            LivelinessQosPolicyKind::Automatic,
-        );
-
-        if !lease_duration.is_infinite() {
-            let handler = SendingHandler::get_instance(
-                participant.clone(),
-                self.sender.lock().ok().and_then(|g| g.clone()),
-                None,
-            );
-
-            let send_period = lease_duration.to_std_duration() * 2 / 3;
-            handler.push_message_and_wake(MessageType::P2pData(None, send_period, Arc::new(data)));
-        } else if let Err(e) = self.send_liveliness_once(&data) {
-            error!("Failed to send liveliness: {}", e);
-        }
-
-        Ok(())
-    }
-
-    pub(crate) fn stop_periodic_liveliness(&self) -> RtpsResult<()> {
-        let participant = self.get_upgraded_participant()?;
-        let handler = SendingHandler::get_instance(
-            participant.clone(),
-            self.sender.lock().ok().and_then(|g| g.clone()),
-            None,
-        );
-
-        handler.cancel_p2p_messages();
-
-        Ok(())
-    }
-
-    pub(crate) fn update_automatic_lease_duration(
-        &self,
-        lease_duration: RtpsDuration,
-    ) -> RtpsResult<()> {
-        let participant = self.get_upgraded_participant()?;
-
-        let data = ParticipantMessageData::new(
-            participant.guid().prefix(),
-            LivelinessQosPolicyKind::Automatic,
-        );
-
-        let handler = SendingHandler::get_instance(
-            participant.clone(),
-            self.sender.lock().ok().and_then(|g| g.clone()),
-            None,
-        );
-
-        handler.cancel_p2p_messages();
-
-        if !lease_duration.is_infinite() {
-            let send_period = lease_duration.to_std_duration() * 2 / 3;
-            handler.push_message_and_wake(MessageType::P2pData(None, send_period, Arc::new(data)));
-        }
-
-        Ok(())
-    }
     // ManualByParticipant
     pub(crate) fn send_liveliness_once(&self, data: &ParticipantMessageData) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
@@ -699,27 +658,6 @@ impl WlpLogic {
 
         Ok(())
     }
-    // ManualByParticipant
-    pub(crate) fn assert_participant_liveliness(&self) -> RtpsResult<()> {
-        self.update_local_participant_liveliness()?;
-
-        let participant = self.get_upgraded_participant()?;
-
-        let data = ParticipantMessageData::new(
-            participant.guid().prefix(),
-            LivelinessQosPolicyKind::ManualByParticipant,
-        );
-
-        participant.increase_manual_liveliness_count()?;
-
-        self.send_liveliness_once(&data)
-    }
-    // ManualByTopic
-    pub(crate) fn assert_writer_liveliness(&self, writer_guid: Guid) -> RtpsResult<()> {
-        self.update_local_writer_liveliness(&writer_guid)?;
-
-        self.send_liveliness_heartbeat(true, true, Some(writer_guid), None)
-    }
 
     fn send_discovery_message(
         &self,
@@ -773,94 +711,88 @@ impl WlpLogic {
         Ok(is_sent)
     }
 
-    pub(crate) fn handle_rtps_message(&self, message_receiver: MessageReceiver) -> RtpsResult<()> {
-        debug!("[WlpLogic] handle_rtps_message called");
-
+    fn send_liveliness_acknack_message(
+        &self,
+        remote_guid: Guid,
+        reader_entity_id: EntityId,
+        writer_entity_id: EntityId,
+        missing_changes: Vec<SequenceNumber>,
+        acknack_count: i32,
+        bitmap_base: SequenceNumber,
+    ) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
 
-        if message_receiver.has_dst_submessage() {
-            let local_guid_prefix = participant.guid().prefix();
-            if !message_receiver.is_dst_me(local_guid_prefix) {
-                debug!("WLP Logic: INFO_DST is not me");
-                return Ok(());
+        let buffer = MessageCreator::create_acknack_message(
+            participant.guid(),
+            remote_guid,
+            reader_entity_id,
+            writer_entity_id,
+            missing_changes,
+            acknack_count,
+            bitmap_base,
+            false,
+        );
+
+        match buffer {
+            Ok(buffer) => {
+                self.send_discovery_message(&buffer, remote_guid, "AckNack")?;
             }
-        }
-
-        let rtps_header = *message_receiver.rtps_message_header().unwrap();
-
-        let submessages = message_receiver.parse_submessages();
-        for submessage in submessages {
-            match submessage {
-                TypedSubmessage::Heartbeat(header, heartbeat) => {
-                    let final_flag = header.final_flag().unwrap_or(false);
-                    let liveliness_flag = header.liveliness_flag().unwrap_or(false);
-                    if heartbeat.writer_id == EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_WRITER {
-                        debug!("[WLP Logic] P2P HEARTBEAT matched - final_flag: {}, liveliness_flag: {}", final_flag, liveliness_flag);
-
-                        let _ = self.handle_heartbeat_message(
-                            heartbeat,
-                            Guid::new(rtps_header.guid_prefix(), heartbeat.writer_id),
-                            final_flag,
-                            liveliness_flag,
-                        );
-                    } else if liveliness_flag {
-                        debug!("[WLP Logic] User HEARTBEAT matched - final_flag: {}, liveliness_flag: {}", final_flag, liveliness_flag);
-
-                        let _ = self.handle_heartbeat_message(
-                            heartbeat,
-                            Guid::new(rtps_header.guid_prefix(), heartbeat.writer_id),
-                            final_flag,
-                            liveliness_flag,
-                        );
-                    }
-                }
-                TypedSubmessage::AckNack(_header, acknack) => {
-                    if acknack.writer_id == EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_WRITER {
-                        let _ = self.handle_acknack_message(
-                            acknack.clone(),
-                            Guid::new(rtps_header.guid_prefix(), acknack.writer_id),
-                        );
-                        debug!("[WlpLogic] handle_acknack_message should be called");
-                    }
-                }
-                TypedSubmessage::Data(_header, data) => {
-                    if data.writer_id == EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_WRITER {
-                        let payload =
-                            message_receiver.payload_from_data(data.reader_id, data.writer_id);
-
-                        match payload {
-                            Some(payload) => {
-                                match ParticipantMessageData::from_serialized_data(payload) {
-                                    Ok(pmd) => {
-                                        self.handle_liveliness_message(
-                                            pmd,
-                                            Guid::new(
-                                                rtps_header.guid_prefix(),
-                                                EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_WRITER,
-                                            ),
-                                            data.writer_sn,
-                                        )?;
-                                    }
-                                    Err(e) => {
-                                        error!("WLP Logic: failed to deserialize data: {}", e);
-                                    }
-                                }
-                            }
-                            None => {
-                                debug!("WLP Logic: No payload found");
-                            }
-                        }
-                    }
-                }
-                _ => {
-                    // debug!("Wlp Logic: Unsupported submessage type: {:?}", submessage);
-                }
+            Err(e) => {
+                warn!("Failed to create WLP AckNack message: {:?}", e);
             }
         }
 
         Ok(())
     }
 
+    fn timer_sleep_and_send_message(
+        &self,
+        start_time: Option<Instant>,
+        logic_start_time: Instant,
+        duration: StdDuration,
+        message: MessageType,
+    ) -> RtpsResult<()> {
+        let elapsed = logic_start_time.elapsed();
+        let remaining_duration = match start_time {
+            Some(start) => {
+                let time_until_start = start.saturating_duration_since(logic_start_time);
+                time_until_start + duration
+            }
+            None => duration.checked_sub(elapsed).unwrap_or(StdDuration::ZERO),
+        };
+
+        let participant = self.get_upgraded_participant()?;
+
+        let timer_id = format!(
+            "wlp_p2p_{:?}_{}",
+            participant.guid().prefix(),
+            logic_start_time.elapsed().as_nanos(),
+        );
+
+        let message = Arc::new(message);
+        if let Ok(handler) = self.timer_handler.lock() {
+            handler.add_timer(
+                timer_id,
+                remaining_duration,
+                false, // one-shot
+                {
+                    let participant = participant.clone();
+                    let message = message.clone();
+                    move || {
+                        let sending_handler =
+                            SendingHandler::get_instance(participant.clone(), None, None);
+                        sending_handler.push_message_and_wake((*message).clone());
+                    }
+                },
+            );
+        }
+
+        Ok(())
+    }
+}
+
+// Receiving and handling liveliness messages
+impl WlpLogic {
     // Automatic, ManualByParticipant
     pub(crate) fn handle_liveliness_message(
         &self,
@@ -890,7 +822,7 @@ impl WlpLogic {
         Ok(())
     }
     // ManualByTopic
-    pub(crate) fn handle_heartbeat_message(
+    pub(crate) fn handle_heartbeat_message_inner(
         &self,
         heartbeat: &Heartbeat,
         remote_guid: Guid,
@@ -1063,185 +995,95 @@ impl WlpLogic {
         local_reader.matched_writer_add(new_writer_proxy);
         true
     }
+}
 
-    fn send_liveliness_acknack_message(
-        &self,
-        remote_guid: Guid,
-        reader_entity_id: EntityId,
-        writer_entity_id: EntityId,
-        missing_changes: Vec<SequenceNumber>,
-        acknack_count: i32,
-        bitmap_base: SequenceNumber,
-    ) -> RtpsResult<()> {
+// Liveliness assertion and update
+impl WlpLogic {
+    // Automatic
+    pub(crate) fn start_periodic_liveliness(&self, lease_duration: RtpsDuration) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
 
-        let buffer = MessageCreator::create_acknack_message(
-            participant.guid(),
-            remote_guid,
-            reader_entity_id,
-            writer_entity_id,
-            missing_changes,
-            acknack_count,
-            bitmap_base,
-            false,
+        let data = ParticipantMessageData::new(
+            participant.guid().prefix(),
+            LivelinessQosPolicyKind::Automatic,
         );
 
-        match buffer {
-            Ok(buffer) => {
-                self.send_discovery_message(&buffer, remote_guid, "AckNack")?;
-            }
-            Err(e) => {
-                warn!("Failed to create WLP AckNack message: {:?}", e);
-            }
+        if !lease_duration.is_infinite() {
+            let handler = SendingHandler::get_instance(
+                participant.clone(),
+                self.sender.lock().ok().and_then(|g| g.clone()),
+                None,
+            );
+
+            let send_period = lease_duration.to_std_duration() * 2 / 3;
+            handler.push_message_and_wake(MessageType::P2pData(None, send_period, Arc::new(data)));
+        } else if let Err(e) = self.send_liveliness_once(&data) {
+            error!("Failed to send liveliness: {}", e);
         }
 
         Ok(())
     }
 
-    pub(crate) fn handle_acknack_message(
+    pub(crate) fn stop_periodic_liveliness(&self) -> RtpsResult<()> {
+        let participant = self.get_upgraded_participant()?;
+        let handler = SendingHandler::get_instance(
+            participant.clone(),
+            self.sender.lock().ok().and_then(|g| g.clone()),
+            None,
+        );
+
+        handler.cancel_p2p_messages();
+
+        Ok(())
+    }
+
+    pub(crate) fn update_automatic_lease_duration(
         &self,
-        acknack: AckNack,
-        remote_guid: Guid,
+        lease_duration: RtpsDuration,
     ) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
 
-        let builtin_endpoint_pair = match BuiltinEndpointPair::reader_writer_from_entity_id(
-            acknack.writer_id,
+        let data = ParticipantMessageData::new(
+            participant.guid().prefix(),
+            LivelinessQosPolicyKind::Automatic,
+        );
+
+        let handler = SendingHandler::get_instance(
             participant.clone(),
-        )? {
-            Some(proxy) => proxy,
-            None => {
-                warn!(
-                    "[acknack] No matching P2P builtin reader found for reader entity ID: {:?}",
-                    acknack.reader_id
-                );
-                return Ok(());
-            }
-        };
-
-        let writer = builtin_endpoint_pair.writer();
-
-        let missing_sequence_numbers = acknack.reader_sn_state.extract_numbers();
-
-        debug!(
-            "Missing sequence numbers {:?} from remote: {:?}",
-            missing_sequence_numbers, remote_guid
+            self.sender.lock().ok().and_then(|g| g.clone()),
+            None,
         );
 
-        if missing_sequence_numbers.is_empty() {
-            return Ok(());
-        }
+        handler.cancel_p2p_messages();
 
-        let missing_changes = {
-            let writer_cache = writer.writer_cache();
-            let writer_cache_guard = match writer_cache.lock() {
-                Ok(guard) => guard,
-                Err(e) => {
-                    error!("[acknack] Failed to acquire writer cache lock: {}", e);
-                    return Ok(());
-                }
-            };
-
-            let mut missing_changes = Vec::new();
-            let all_changes = writer_cache_guard.get_changes();
-            for seq_num in missing_sequence_numbers {
-                if let Some(change) =
-                    all_changes.iter().find(|c| c.sequence_number() == seq_num).cloned()
-                {
-                    missing_changes.push(change);
-                }
-            }
-            missing_changes
-        };
-
-        if missing_changes.is_empty() {
-            return Ok(());
-        }
-
-        debug!(
-            "Retransmitting {} missing changes from remote: {:?}",
-            missing_changes.len(),
-            remote_guid
-        );
-
-        let reader_proxies = writer.reader_proxies();
-        let proxies_guard = reader_proxies.lock().map_err(|e| {
-            RtpsError::new(
-                RtpsErrorCode::LockError,
-                format!("Failed to lock reader proxies: {}", e),
-            )
-        })?;
-
-        // If no reader proxies, don't add to cache and don't send
-        if proxies_guard.is_empty() {
-            debug!("[WLP] No reader proxies, skipping");
-            return Ok(());
-        }
-
-        for change in missing_changes {
-            let heartbeat_info = {
-                let writer_cache = writer.writer_cache();
-                let cache_guard = match writer_cache.lock() {
-                    Ok(guard) => guard,
-                    Err(e) => {
-                        warn!("[WLP] Failed to acquire writer cache lock for change, skipping this change: {}", e);
-                        continue; // Skip this change and process next change
-                    }
-                };
-
-                Some((
-                    writer.heartbeat_count(),
-                    cache_guard.get_seq_num_min(),
-                    cache_guard.get_seq_num_max(),
-                    false,
-                    false,
-                ))
-            };
-
-            for reader_proxy in proxies_guard.iter() {
-                // Get heartbeat info to include in the same RTPS message as Data
-                let buffer = match MessageCreator::create_data_msg(
-                    change.clone(),
-                    reader_proxy.remote_reader_guid(),
-                    EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_READER,
-                    EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_WRITER,
-                    heartbeat_info, // Include heartbeat in the same message
-                    false,
-                    None,
-                ) {
-                    Ok(buf) => buf,
-                    Err(e) => {
-                        warn!("[WLP] Failed to create DATA message for reader_proxy: {:?}", e);
-                        continue; // Skip this reader_proxy and process next reader_proxy
-                    }
-                };
-
-                for locator in reader_proxy.unicast_locator_list() {
-                    if locator.kind() == 1 {
-                        //UDPv4
-                        let socket_addr = SocketAddr::V4(SocketAddrV4::new(
-                            locator.to_ip_v4_addr(),
-                            locator.port() as u16,
-                        ));
-
-                        if let Ok(guard) = self.sender.lock() {
-                            if let Some(sender) = guard.as_ref() {
-                                if let Err(e) = sender.send(&socket_addr, &buffer) {
-                                    warn!(
-                                        "[WLP] Failed to send DATA message to locator {:?}: {:?}",
-                                        socket_addr, e
-                                    );
-                                    // Even if error occurs, continue trying other locators
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            writer.increase_heartbeat_count();
+        if !lease_duration.is_infinite() {
+            let send_period = lease_duration.to_std_duration() * 2 / 3;
+            handler.push_message_and_wake(MessageType::P2pData(None, send_period, Arc::new(data)));
         }
 
         Ok(())
+    }
+
+    // ManualByParticipant
+    pub(crate) fn assert_participant_liveliness(&self) -> RtpsResult<()> {
+        self.update_local_participant_liveliness()?;
+
+        let participant = self.get_upgraded_participant()?;
+
+        let data = ParticipantMessageData::new(
+            participant.guid().prefix(),
+            LivelinessQosPolicyKind::ManualByParticipant,
+        );
+
+        participant.increase_manual_liveliness_count()?;
+
+        self.send_liveliness_once(&data)
+    }
+    // ManualByTopic
+    pub(crate) fn assert_writer_liveliness(&self, writer_guid: Guid) -> RtpsResult<()> {
+        self.update_local_writer_liveliness(&writer_guid)?;
+
+        self.send_liveliness_heartbeat(true, true, Some(writer_guid), None)
     }
 
     fn update_liveliness(
@@ -1451,67 +1293,6 @@ impl WlpLogic {
 
         Ok(())
     }
-
-    fn timer_sleep_and_send_message(
-        &self,
-        start_time: Option<Instant>,
-        logic_start_time: Instant,
-        duration: StdDuration,
-        message: MessageType,
-    ) -> RtpsResult<()> {
-        let elapsed = logic_start_time.elapsed();
-        let remaining_duration = match start_time {
-            Some(start) => {
-                let time_until_start = start.saturating_duration_since(logic_start_time);
-                time_until_start + duration
-            }
-            None => duration.checked_sub(elapsed).unwrap_or(StdDuration::ZERO),
-        };
-
-        let participant = self.get_upgraded_participant()?;
-
-        let timer_id = format!(
-            "wlp_p2p_{:?}_{}",
-            participant.guid().prefix(),
-            logic_start_time.elapsed().as_nanos(),
-        );
-
-        let message = Arc::new(message);
-        if let Ok(handler) = self.timer_handler.lock() {
-            handler.add_timer(
-                timer_id,
-                remaining_duration,
-                false, // one-shot
-                {
-                    let participant = participant.clone();
-                    let message = message.clone();
-                    move || {
-                        let sending_handler =
-                            SendingHandler::get_instance(participant.clone(), None, None);
-                        sending_handler.push_message_and_wake((*message).clone());
-                    }
-                },
-            );
-        }
-
-        Ok(())
-    }
-
-    /// Shutdown liveliness monitor and join its thread
-    pub(crate) fn shutdown(&self) {
-        if let Ok(mut monitor) = self.liveliness_monitor.lock() {
-            if let Some(ref mut m) = *monitor {
-                m.shutdown();
-            }
-            *monitor = None;
-        }
-    }
-
-    fn get_upgraded_participant(&self) -> RtpsResult<Arc<Participant>> {
-        Ok(self.participant.upgrade().ok_or_else(|| {
-            RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped")
-        })?)
-    }
 }
 
 fn notify_reader_liveliness_changed(
@@ -1530,4 +1311,237 @@ fn notify_reader_liveliness_changed(
             last_publication_handle: InstanceHandle::from_guid(guid),
         })),
     );
+}
+
+impl_participant_accessor!(WlpLogic);
+
+impl UnicastMessageProcessor for WlpLogic {
+    fn handle_data_message(
+        &mut self,
+        rtps_header: &Header,
+        _submessage_header: &SubmessageHeader,
+        data: &Data,
+        message_receiver: &MessageReceiver,
+    ) -> RtpsResult<()> {
+        if data.writer_id == EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_WRITER {
+            let payload = message_receiver.payload_from_data(data.reader_id, data.writer_id);
+
+            match payload {
+                Some(payload) => match ParticipantMessageData::from_serialized_data(payload) {
+                    Ok(pmd) => {
+                        return self.handle_liveliness_message(
+                            pmd,
+                            Guid::new(
+                                rtps_header.guid_prefix(),
+                                EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_WRITER,
+                            ),
+                            data.writer_sn,
+                        );
+                    }
+                    Err(e) => {
+                        return Err(RtpsError::new(
+                            RtpsErrorCode::DeserializationError,
+                            format!("WLP Logic: failed to deserialize data: {}", e),
+                        ));
+                    }
+                },
+                None => {
+                    debug!("WLP Logic: No payload found");
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn handle_heartbeat_message(
+        &mut self,
+        rtps_header: &Header,
+        submessage_header: &SubmessageHeader,
+        heartbeat: &Heartbeat,
+    ) -> RtpsResult<()> {
+        let final_flag = submessage_header.final_flag().unwrap_or(false);
+        let liveliness_flag = submessage_header.liveliness_flag().unwrap_or(false);
+
+        if heartbeat.writer_id == EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_WRITER {
+            debug!(
+                "[WLP Logic] P2P HEARTBEAT matched - final_flag: {}, liveliness_flag: {}",
+                final_flag, liveliness_flag
+            );
+
+            let _ = self.handle_heartbeat_message_inner(
+                heartbeat,
+                Guid::new(rtps_header.guid_prefix(), heartbeat.writer_id),
+                final_flag,
+                liveliness_flag,
+            );
+        } else if liveliness_flag {
+            debug!(
+                "[WLP Logic] User HEARTBEAT matched - final_flag: {}, liveliness_flag: {}",
+                final_flag, liveliness_flag
+            );
+
+            let _ = self.handle_heartbeat_message_inner(
+                heartbeat,
+                Guid::new(rtps_header.guid_prefix(), heartbeat.writer_id),
+                final_flag,
+                liveliness_flag,
+            );
+        }
+
+        Ok(())
+    }
+
+    fn handle_acknack_message(
+        &mut self,
+        rtps_header: &Header,
+        acknack: &AckNack,
+    ) -> RtpsResult<()> {
+        if acknack.writer_id != EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_WRITER {
+            return Ok(());
+        }
+
+        debug!("[WlpLogic] handle_acknack_message should be called");
+
+        let participant = self.get_upgraded_participant()?;
+        let remote_guid = Guid::new(rtps_header.guid_prefix(), acknack.writer_id);
+
+        let builtin_endpoint_pair = match BuiltinEndpointPair::reader_writer_from_entity_id(
+            acknack.writer_id,
+            participant.clone(),
+        )? {
+            Some(proxy) => proxy,
+            None => {
+                warn!(
+                    "[acknack] No matching P2P builtin reader found for reader entity ID: {:?}",
+                    acknack.reader_id
+                );
+                return Ok(());
+            }
+        };
+
+        let writer = builtin_endpoint_pair.writer();
+
+        let missing_sequence_numbers = acknack.reader_sn_state.extract_numbers();
+
+        debug!(
+            "Missing sequence numbers {:?} from remote: {:?}",
+            missing_sequence_numbers, remote_guid
+        );
+
+        if missing_sequence_numbers.is_empty() {
+            return Ok(());
+        }
+
+        let missing_changes = {
+            let writer_cache = writer.writer_cache();
+            let writer_cache_guard = match writer_cache.lock() {
+                Ok(guard) => guard,
+                Err(e) => {
+                    error!("[acknack] Failed to acquire writer cache lock: {}", e);
+                    return Ok(());
+                }
+            };
+
+            let mut missing_changes = Vec::new();
+            let all_changes = writer_cache_guard.get_changes();
+            for seq_num in missing_sequence_numbers {
+                if let Some(change) =
+                    all_changes.iter().find(|c| c.sequence_number() == seq_num).cloned()
+                {
+                    missing_changes.push(change);
+                }
+            }
+            missing_changes
+        };
+
+        if missing_changes.is_empty() {
+            return Ok(());
+        }
+
+        debug!(
+            "Retransmitting {} missing changes from remote: {:?}",
+            missing_changes.len(),
+            remote_guid
+        );
+
+        let reader_proxies = writer.reader_proxies();
+        let proxies_guard = reader_proxies.lock().map_err(|e| {
+            RtpsError::new(
+                RtpsErrorCode::LockError,
+                format!("Failed to lock reader proxies: {}", e),
+            )
+        })?;
+
+        // If no reader proxies, don't add to cache and don't send
+        if proxies_guard.is_empty() {
+            debug!("[WLP] No reader proxies, skipping");
+            return Ok(());
+        }
+
+        for change in missing_changes {
+            let heartbeat_info = {
+                let writer_cache = writer.writer_cache();
+                let cache_guard = match writer_cache.lock() {
+                    Ok(guard) => guard,
+                    Err(e) => {
+                        warn!("[WLP] Failed to acquire writer cache lock for change, skipping this change: {}", e);
+                        continue; // Skip this change and process next change
+                    }
+                };
+
+                Some((
+                    writer.heartbeat_count(),
+                    cache_guard.get_seq_num_min(),
+                    cache_guard.get_seq_num_max(),
+                    false,
+                    false,
+                ))
+            };
+
+            for reader_proxy in proxies_guard.iter() {
+                // Get heartbeat info to include in the same RTPS message as Data
+                let buffer = match MessageCreator::create_data_msg(
+                    change.clone(),
+                    reader_proxy.remote_reader_guid(),
+                    EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_READER,
+                    EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_WRITER,
+                    heartbeat_info, // Include heartbeat in the same message
+                    false,
+                    None,
+                ) {
+                    Ok(buf) => buf,
+                    Err(e) => {
+                        warn!("[WLP] Failed to create DATA message for reader_proxy: {:?}", e);
+                        continue; // Skip this reader_proxy and process next reader_proxy
+                    }
+                };
+
+                for locator in reader_proxy.unicast_locator_list() {
+                    if locator.kind() == 1 {
+                        //UDPv4
+                        let socket_addr = SocketAddr::V4(SocketAddrV4::new(
+                            locator.to_ip_v4_addr(),
+                            locator.port() as u16,
+                        ));
+
+                        if let Ok(guard) = self.sender.lock() {
+                            if let Some(sender) = guard.as_ref() {
+                                if let Err(e) = sender.send(&socket_addr, &buffer) {
+                                    warn!(
+                                        "[WLP] Failed to send DATA message to locator {:?}: {:?}",
+                                        socket_addr, e
+                                    );
+                                    // Even if error occurs, continue trying other locators
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            writer.increase_heartbeat_count();
+        }
+
+        Ok(())
+    }
 }
