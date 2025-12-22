@@ -32,8 +32,8 @@ Add int2DDS to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-int2DDS = "0.0.1"
-int2DDS-derive = "0.0.1"
+int2dds = "0.0.1"
+int2dds-derive = "0.0.1"
 ```
 
 ### Basic Example
@@ -42,7 +42,7 @@ int2DDS-derive = "0.0.1"
 <summary><strong>Publisher:</strong></summary>
 
 ```rust
-use int2DDS::{
+use int2dds::{
     common::instance_handle::InstanceHandle,
     core::time::Duration,
     domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
@@ -58,7 +58,7 @@ use int2DDS::{
 
 
 #[derive(DdsType)]
-#[dds_type(crate_path = "int2DDS")]
+#[dds_type(crate_path = "int2dds")]
 struct HelloWorld {
     index: u32,
     message: String,
@@ -113,7 +113,7 @@ fn main() {
 <summary><strong>Subscriber:</strong></summary>
 
 ```rust
-use int2DDS::{
+use int2dds::{
     core::time::Duration,
     domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
     infrastructure::{
@@ -128,7 +128,7 @@ use int2DDS::{
 };
 
 #[derive(DdsType)]
-#[dds_type(crate_path = "int2DDS")]
+#[dds_type(crate_path = "int2dds")]
 struct HelloWorld {
     index: u32,
     message: String,
@@ -139,7 +139,7 @@ impl DataReaderListener for MyListener {
     type Foo = HelloWorld;
     fn on_data_available(
         &self,
-        reader: &int2DDS::subscription::data_reader::DataReader<Self::Foo>,
+        reader: &int2dds::subscription::data_reader::DataReader<Self::Foo>,
     ) {
         if let Ok(samples) = reader.take(
             10,
@@ -233,14 +233,11 @@ examples:
 cargo run --example hello_world_param -- --role pub --domain 0 --reliability reliable
 cargo run --example hello_world_param -- --role sub --domain 0 --reliability reliable
 
-# Performance testing
-cargo run --example perftest_publisher
-cargo run --example perftest_subscriber
 ```
 
 ## Documentation
 
-- **API Documentation**: Run `cargo doc --open` to generate and view API docs
+- **API Documentation**: Run `cargo doc --open --no-deps` to generate and view API docs
 - **Contributing**: See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines
 - **Examples**: Check the [dds/examples/](dds/examples/) directory for comprehensive examples
 
