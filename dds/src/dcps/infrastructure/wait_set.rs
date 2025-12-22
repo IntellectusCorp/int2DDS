@@ -3,7 +3,7 @@
 //! # Example
 //!
 //! ```no_run
-//! # use int2dds::dcps::domain::DomainParticipantFactory;
+//! # use int2dds::domain::domain_participant_factory::DomainParticipantFactory;
 //! # use int2dds::infrastructure::wait_set::WaitSet;
 //! # use int2dds::infrastructure::status::StatusMask;
 //! # use int2dds::core::time::Duration;
@@ -12,23 +12,23 @@
 //! # use int2dds::subscription::sample_info::ViewStateKind;
 //! # use int2dds::subscription::sample_info::InstanceStateKind;
 //! # use int2dds::core::types::LENGTH_UNLIMITED;
-//! # #[derive(Clone, DdsType)]
+//! # #[derive(DdsType)]
 //! # struct MyData { id: u32 }
 //! # let factory = DomainParticipantFactory::get_instance();
-//! # let participant = factory.create_participant(0, Default::default(), None, Default::default())?;
-//! # let topic = participant.create_topic::<MyData>("MyTopic", "MyData", Default::default(), None, Default::default())?;
-//! # let subscriber = participant.create_subscriber(Default::default(), None, Default::default())?;
-//! # let reader = subscriber.create_datareader::<MyData>(&topic, Default::default(), None, Default::default())?;
+//! # let participant = factory.create_participant(0, Default::default(), None, Default::default()).unwrap();
+//! # let topic = participant.create_topic::<MyData>("MyTopic", "MyData", Default::default(), None, Default::default()).unwrap();
+//! # let subscriber = participant.create_subscriber(Default::default(), None, Default::default()).unwrap();
+//! # let reader = subscriber.create_datareader::<MyData>(&topic, Default::default(), None, Default::default()).unwrap();
 //! let mut wait_set = WaitSet::new();
 //!
 //! // Attach a condition for data availability
-//! let mut condition = reader.get_statuscondition()?.clone();
-//! condition.set_enabled_statuses(StatusMask::DATA_AVAILABLE)?;
-//! wait_set.attach_condition(condition)?;
+//! let mut condition = reader.get_statuscondition().unwrap().clone();
+//! condition.set_enabled_statuses(StatusMask::DATA_AVAILABLE).unwrap();
+//! wait_set.attach_condition(condition).unwrap();
 //!
 //! // Wait indefinitely for data
 //! loop {
-//!     let triggered = wait_set.wait(Duration::infinite())?;
+//!     let triggered = wait_set.wait(Duration::infinite()).unwrap();
 //!     println!("Condition triggered, {} conditions active", triggered.len());
 //!
 //!     // Read the available data
@@ -37,7 +37,7 @@
 //!         &[SampleStateKind::ANY_SAMPLE_STATE],
 //!         &[ViewStateKind::ANY_VIEW_STATE],
 //!         &[InstanceStateKind::ANY_INSTANCE_STATE]
-//!     )?;
+//!     ).unwrap();
 //!
 //!     for sample in samples {
 //!         println!("Received data: {:?}", sample.data());

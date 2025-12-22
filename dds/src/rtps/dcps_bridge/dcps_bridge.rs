@@ -1787,7 +1787,7 @@ mod tests {
             "Stateful writer's reader proxy list should contain 3 elements after addition"
         );
 
-        // Remove mocked reader proxy
+        // This would remove 2 mocked reader proxies
         guard.participant.remove_all_unmatched_endpoint_from_terminated_participant([5; 12]);
 
         assert!(
