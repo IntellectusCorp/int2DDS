@@ -401,11 +401,16 @@ impl WaitSet {
 #[cfg(test)]
 mod tests {
     use crate::{
-        common::instance_handle::InstanceHandle,
+        common::{
+            instance_handle::InstanceHandle,
+        },
         core::{error::DdsError, time::Duration},
         domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
         infrastructure::{
-            qos_policy::{ReliabilityQosPolicy, ReliabilityQosPolicyKind},
+            qos_policy::{
+                HistoryQosPolicy, HistoryQosPolicyKind, ReliabilityQosPolicy,
+                ReliabilityQosPolicyKind,
+            },
             status::StatusMask,
             wait_set::WaitSet,
         },
@@ -417,7 +422,6 @@ mod tests {
         topic::qos::TopicQos,
         DdsType,
     };
-
     #[derive(DdsType)]
     #[dds_type(crate_path = "crate")]
     struct HelloWorldType {
@@ -427,10 +431,6 @@ mod tests {
 
     #[test]
     fn test_waitset_matching() {
-        let _ = env_logger::builder()
-            .filter_module("int2dds::dds::infrastructure::wait_set", log::LevelFilter::Debug)
-            .filter_level(log::LevelFilter::Error)
-            .try_init();
         let domain_id = 13;
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
@@ -488,10 +488,6 @@ mod tests {
 
     #[test]
     fn test_waitset_timeout() {
-        let _ = env_logger::builder()
-            .filter_module("int2dds::dds::infrastructure::wait_set", log::LevelFilter::Debug)
-            .filter_level(log::LevelFilter::Error)
-            .try_init();
         let domain_id = 31;
         let participant_qos = DomainParticipantQos::default();
         let factory = DomainParticipantFactory::get_instance();
@@ -531,11 +527,6 @@ mod tests {
 
     #[test]
     fn test_waitset_multiple_status_conditions_different_entities_1() {
-        let _ = env_logger::builder()
-            .filter_module("int2dds::dds::infrastructure::wait_set", log::LevelFilter::Debug)
-            .filter_level(log::LevelFilter::Error)
-            .try_init();
-
         let domain_id = 23;
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
@@ -603,11 +594,6 @@ mod tests {
 
     #[test]
     fn test_waitset_multiple_status_conditions_different_entities_2() {
-        let _ = env_logger::builder()
-            .filter_module("int2dds::dds::infrastructure::wait_set", log::LevelFilter::Debug)
-            .filter_level(log::LevelFilter::Error)
-            .try_init();
-
         let domain_id = 23;
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
@@ -684,11 +670,6 @@ mod tests {
 
     #[test]
     fn test_waitset_status_condition_multiple_masks() {
-        let _ = env_logger::builder()
-            .filter_module("int2dds::dds::infrastructure::wait_set", log::LevelFilter::Debug)
-            .filter_level(log::LevelFilter::Error)
-            .try_init();
-
         let domain_id = 33;
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
@@ -856,11 +837,6 @@ mod tests {
 
     #[test]
     fn test_waitset_duplicate_condition_attach() {
-        let _ = env_logger::builder()
-            .filter_module("int2dds::dds::infrastructure::wait_set", log::LevelFilter::Debug)
-            .filter_level(log::LevelFilter::Error)
-            .try_init();
-
         let domain_id = 35;
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
@@ -914,11 +890,6 @@ mod tests {
 
     #[test]
     fn test_waitset_detach_nonexistent_condition() {
-        let _ = env_logger::builder()
-            .filter_module("int2dds::dds::infrastructure::wait_set", log::LevelFilter::Debug)
-            .filter_level(log::LevelFilter::Error)
-            .try_init();
-
         let domain_id = 36;
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
@@ -978,11 +949,6 @@ mod tests {
 
     #[test]
     fn test_waitset_with_readcondition() {
-        let _ = env_logger::builder()
-            .filter_module("int2dds::dds", log::LevelFilter::Debug)
-            .filter_level(log::LevelFilter::Info)
-            .try_init();
-
         let domain_id = 57;
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
@@ -1086,11 +1052,6 @@ mod tests {
 
     #[test]
     fn test_waitset_with_querycondition() {
-        let _ = env_logger::builder()
-            .filter_module("int2dds::dds", log::LevelFilter::Debug)
-            .filter_level(log::LevelFilter::Info)
-            .try_init();
-
         let domain_id = 67;
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
@@ -1202,11 +1163,6 @@ mod tests {
 
     #[test]
     fn test_waitset_with_querycondition_order_by() {
-        let _ = env_logger::builder()
-            .filter_module("int2dds::dds", log::LevelFilter::Debug)
-            .filter_level(log::LevelFilter::Info)
-            .try_init();
-
         let domain_id = 77;
         let factory = DomainParticipantFactory::get_instance();
         let participant = factory
@@ -1231,30 +1187,36 @@ mod tests {
         let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let reader = subscriber
-            .create_datareader::<HelloWorldType>(
-                &topic,
-                DataReaderQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datareader::<HelloWorldType>(&topic, reader_qos, None, StatusMask::default())
             .unwrap();
 
         let publisher = participant
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
         let writer = publisher
-            .create_datawriter::<HelloWorldType>(
-                &topic,
-                DataWriterQos::default(),
-                None,
-                StatusMask::default(),
-            )
+            .create_datawriter::<HelloWorldType>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
         // Wait for matching
-        let mut condition = writer.get_statuscondition().unwrap().clone();
-        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
+        let mut condition = reader.get_statuscondition().unwrap().clone();
+        condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::from_seconds(10)).unwrap();
@@ -1270,9 +1232,6 @@ mod tests {
                 vec!["0".to_string()], // index > 0 (all samples)
             )
             .unwrap();
-
-        // Connect QueryCondition to WaitSet
-        wait_set.attach_condition(query_condition.clone()).unwrap();
 
         // Send various data in order (for checking sort results)
         writer
@@ -1300,54 +1259,49 @@ mod tests {
             .write(&HelloWorldType { index: 50, message: "beta".to_string() }, InstanceHandle::NIL)
             .unwrap();
 
-        // Wait for data arrival
-        let result = wait_set.wait(Duration::from_seconds(10));
-        assert!(result.is_ok());
-        std::thread::sleep(std::time::Duration::from_secs(10));
+        // Wait for all data to be acknowledged by reader
+        writer.wait_for_acknowledgments(Duration::from_seconds(10)).unwrap();
+        // Delay to ensure data is in reader cache
+        std::thread::sleep(std::time::Duration::from_secs(1));
 
-        if result.is_ok() {
-            let active_conditions = result.unwrap();
+        // Read samples with QueryCondition
+        let samples = reader.read_w_condition(10, query_condition.clone()).unwrap();
+        assert_eq!(samples.len(), 5);
 
-            for _condition in active_conditions {
-                let samples = reader.read_w_condition(10, query_condition.clone()).unwrap();
-                assert_eq!(samples.len(), 5);
+        log::info!("=== ORDER BY Test Results ===");
+        log::info!("Expected order: ORDER BY message, index");
+        log::info!("Should be: alpha(100), alpha(150), beta(50), beta(200), charlie(300)");
 
-                log::info!("=== ORDER BY Test Results ===");
-                log::info!("Expected order: ORDER BY message, index");
-                log::info!("Should be: alpha(100), alpha(150), beta(50), beta(200), charlie(300)");
+        // Check ORDER BY message, index results
+        let expected_order = vec![
+            (100, "alpha"),   // message: alpha, index: 100
+            (150, "alpha"),   // message: alpha, index: 150
+            (50, "beta"),     // message: beta, index: 50
+            (200, "beta"),    // message: beta, index: 200
+            (300, "charlie"), // message: charlie, index: 300
+        ];
 
-                // Check ORDER BY message, index results
-                let expected_order = vec![
-                    (100, "alpha"),   // message: alpha, index: 100
-                    (150, "alpha"),   // message: alpha, index: 150
-                    (50, "beta"),     // message: beta, index: 50
-                    (200, "beta"),    // message: beta, index: 200
-                    (300, "charlie"), // message: charlie, index: 300
-                ];
+        for (i, sample) in samples.iter().enumerate() {
+            if sample.sample_info().valid_data {
+                let data = sample.data().unwrap();
+                let (expected_index, expected_message) = expected_order[i];
 
-                for (i, sample) in samples.iter().enumerate() {
-                    if sample.sample_info().valid_data {
-                        let data = sample.data().unwrap();
-                        let (expected_index, expected_message) = expected_order[i];
+                log::info!(
+                    "Sample {}: index={}, message='{}' (expected: index={}, message='{}')",
+                    i + 1,
+                    data.index,
+                    data.message,
+                    expected_index,
+                    expected_message
+                );
 
-                        log::info!(
-                            "Sample {}: index={}, message='{}' (expected: index={}, message='{}')",
-                            i + 1,
-                            data.index,
-                            data.message,
-                            expected_index,
-                            expected_message
-                        );
-
-                        // Verify ORDER BY sorting is correct
-                        assert_eq!(data.index, expected_index, "Index mismatch at position {}", i);
-                        assert_eq!(
-                            data.message, expected_message,
-                            "Message mismatch at position {}",
-                            i
-                        );
-                    }
-                }
+                // Verify ORDER BY sorting is correct
+                assert_eq!(data.index, expected_index, "Index mismatch at position {}", i);
+                assert_eq!(
+                    data.message, expected_message,
+                    "Message mismatch at position {}",
+                    i
+                );
             }
         }
 
