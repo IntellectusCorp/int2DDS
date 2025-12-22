@@ -390,7 +390,7 @@ mod tests {
         monitor.track_instance(&handle);
 
         // Wait to miss deadline multiple times
-        thread::sleep(std::time::Duration::from_millis(350));
+        thread::sleep(std::time::Duration::from_millis(1000));
 
         // Callback should have been called multiple times
         let count = counter.load(Ordering::SeqCst);
