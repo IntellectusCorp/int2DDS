@@ -201,3 +201,136 @@ impl From<ReadCondition> for Arc<dyn ReadConditionTrait> {
         Arc::new(val)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        common::instance_handle::InstanceHandle,
+        core::time::Duration,
+        domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
+        infrastructure::{
+            qos_policy::{
+                HistoryQosPolicy, HistoryQosPolicyKind, ReliabilityQosPolicy,
+                ReliabilityQosPolicyKind,
+            },
+            status::StatusMask,
+            wait_set::WaitSet,
+        },
+        publication::qos::{DataWriterQos, PublisherQos},
+        subscription::{
+            qos::{DataReaderQos, SubscriberQos},
+            sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind},
+        },
+        test_utils::unique_domain_id,
+        topic::{qos::TopicQos, type_support::DdsType},
+    };
+
+    #[derive(DdsType)]
+    struct HelloWorldType {
+        index: u32,
+        message: String,
+    }
+
+    #[test]
+    fn test_waitset_with_readcondition() {
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let topic = participant
+            .create_topic::<HelloWorldType>(
+                "read_topic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let reader = subscriber
+            .create_datareader::<HelloWorldType>(&topic, reader_qos, None, StatusMask::default())
+            .unwrap();
+
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let writer = publisher
+            .create_datawriter::<HelloWorldType>(&topic, writer_qos, None, StatusMask::default())
+            .unwrap();
+
+        let mut condition = writer.get_statuscondition().unwrap().clone();
+        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
+
+        let wait_set = WaitSet::new();
+        wait_set.attach_condition(condition.clone()).unwrap();
+        wait_set.wait(Duration::from_seconds(10)).unwrap();
+        wait_set.detach_condition(condition).unwrap();
+
+        // Create ReadCondition: NOT_READ samples only
+        let read_condition = reader
+            .create_readcondition(
+                &[SampleStateKind::NOT_READ_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ANY_INSTANCE_STATE],
+            )
+            .unwrap();
+
+        // Connect ReadCondition to WaitSet
+        wait_set.attach_condition(read_condition.clone()).unwrap();
+
+        writer
+            .write(
+                &HelloWorldType { index: 0, message: "hello world!".to_string() },
+                InstanceHandle::NIL,
+            )
+            .unwrap();
+        writer
+            .write(
+                &HelloWorldType { index: 1, message: "hello world!".to_string() },
+                InstanceHandle::NIL,
+            )
+            .unwrap();
+
+        // Wait for all data to be acknowledged by reader
+        writer.wait_for_acknowledgments(Duration::from_seconds(10)).unwrap();
+        // Delay to ensure data is in reader cache
+        std::thread::sleep(std::time::Duration::from_secs(1));
+
+        let samples = reader.read_w_condition(10, read_condition.clone()).unwrap();
+        assert!(!samples.is_empty());
+
+        for sample in samples.iter() {
+            if sample.sample_info().valid_data {
+                log::info!("Received: {:?}", sample.data());
+            }
+        }
+
+        assert_eq!(read_condition.get_trigger_value(), Ok(false));
+    }
+}

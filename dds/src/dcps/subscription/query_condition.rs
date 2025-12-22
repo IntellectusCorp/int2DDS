@@ -350,4 +350,115 @@ mod tests {
         assert_eq!(query_condition.get_trigger_value(), Ok(false));
         log::info!("=== ORDER BY Test Completed Successfully ===");
     }
+
+    #[test]
+    fn test_waitset_with_querycondition() {
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let topic = participant
+            .create_topic::<HelloWorldType>(
+                "query_topic",
+                "HelloWorld",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let reader_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let reader = subscriber
+            .create_datareader::<HelloWorldType>(&topic, reader_qos, None, StatusMask::default())
+            .unwrap();
+
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let writer = publisher
+            .create_datawriter::<HelloWorldType>(&topic, writer_qos, None, StatusMask::default())
+            .unwrap();
+
+        let mut condition = writer.get_statuscondition().unwrap().clone();
+        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
+
+        let wait_set = WaitSet::new();
+        wait_set.attach_condition(condition.clone()).unwrap();
+        wait_set.wait(Duration::from_seconds(10)).unwrap();
+        wait_set.detach_condition(condition).unwrap();
+
+        // Create QueryCondition: samples where index > 100 only
+        let query_condition = reader
+            .create_querycondition(
+                &[SampleStateKind::NOT_READ_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ALIVE_INSTANCE_STATE],
+                "index > %0",
+                vec!["100".to_string()],
+            )
+            .unwrap();
+
+        // Connect QueryCondition to WaitSet
+        wait_set.attach_condition(query_condition.clone()).unwrap();
+
+        writer
+            .write(
+                &HelloWorldType { index: 0, message: "hello world!".to_string() },
+                InstanceHandle::NIL,
+            )
+            .unwrap();
+        writer
+            .write(
+                &HelloWorldType { index: 100, message: "hello world!".to_string() },
+                InstanceHandle::NIL,
+            )
+            .unwrap();
+        writer
+            .write(
+                &HelloWorldType { index: 200, message: "hello world!".to_string() },
+                InstanceHandle::NIL,
+            )
+            .unwrap();
+
+        // Wait for all data to be acknowledged by reader
+        writer.wait_for_acknowledgments(Duration::from_seconds(10)).unwrap();
+        // Delay to ensure data is in reader cache
+        std::thread::sleep(std::time::Duration::from_secs(1));
+
+        let samples = reader.read_w_condition(10, query_condition.clone()).unwrap();
+        assert_eq!(samples.len(), 1); // Only index: 200 matches (index > 100)
+
+        for sample in samples.iter() {
+            if sample.sample_info().valid_data {
+                log::info!("Received: {:?}", sample.data());
+            }
+        }
+
+        assert_eq!(query_condition.get_trigger_value(), Ok(false));
+    }
 }
