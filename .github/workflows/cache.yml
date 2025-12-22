@@ -39,4 +39,6 @@ jobs:
           shared-key: cargo-develop
 
       - name: Build once to populate cache
+        env:
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C linker=lld-link' || '' }}
         run: cargo test --no-run
