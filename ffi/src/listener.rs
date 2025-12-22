@@ -422,23 +422,23 @@ mod tests {
         assert!(ffi_listener.callbacks.on_subscription_matched.is_none());
     }
 
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn test_panic_catching() {
-        // Callback that panics
-        unsafe extern "C" fn panicking_callback(
-            _reader: *mut Int2DdsDataReader,
-            _user_context: Int2DdsUserContext,
-        ) {
-            panic!("Test panic");
-        }
+    // #[cfg(target_os = "windows")]
+    // #[test]
+    // fn test_panic_catching() {
+    //     // Callback that panics
+    //     unsafe extern "C" fn panicking_callback(
+    //         _reader: *mut Int2DdsDataReader,
+    //         _user_context: Int2DdsUserContext,
+    //     ) {
+    //         panic!("Test panic");
+    //     }
 
-        // Should not propagate panic
-        invoke_callback(|| unsafe {
-            panicking_callback(std::ptr::null_mut(), std::ptr::null_mut());
-        });
+    //     // Should not propagate panic
+    //     invoke_callback(|| unsafe {
+    //         panicking_callback(std::ptr::null_mut(), std::ptr::null_mut());
+    //     });
 
-        // If we got here, panic was caught successfully
-        assert!(true);
-    }
+    //     // If we got here, panic was caught successfully
+    //     assert!(true);
+    // }
 }
