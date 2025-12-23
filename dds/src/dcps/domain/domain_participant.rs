@@ -114,6 +114,13 @@ use crate::{
 
 #[derive(Clone)]
 pub struct DomainParticipant {
+    // Indicates whether this entity is a built-in entity.
+    //
+    // Currently always `false` as DDS spec does not define built-in
+    // DomainParticipant exposed to users.
+    //
+    // TODO: Reserved for future DCPS-RTPS built-in entity mapping
+    // if needed (e.g., exposing built-in participant for diagnostics).
     is_builtin: bool,
     guid: Arc<Guid>,
     domain_id: DomainId,

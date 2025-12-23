@@ -109,6 +109,13 @@ pub(crate) trait DataWriterInternal: DataWriterBase {
 }
 
 pub struct DataWriter<Foo> {
+    // Indicates whether this entity is a built-in entity.
+    //
+    // Currently always `false` as DDS spec does not define built-in
+    // DataWriter exposed to users.
+    //
+    // TODO: Reserved for future DCPS-RTPS built-in entity mapping
+    // if needed (e.g., exposing built-in writers for diagnostics).
     is_builtin: bool,
     guid: Guid,
     qos: Arc<Mutex<DataWriterQos>>,
