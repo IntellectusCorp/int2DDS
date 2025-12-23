@@ -331,7 +331,10 @@ pub unsafe extern "C" fn int2dds_take(
     // Use sample.data() - DDS core automatically deserializes using registered TypeSupport
     let mut received_data = match sample.data() {
         Ok(d) => d,
-        Err(_) => return INT2DDS_RET_ERROR,
+        Err(e) => {
+            eprintln!("int2dds_take: sample.data() failed: {:?}", e);
+            return INT2DDS_RET_ERROR;
+        }
     };
 
     // Move values from received data to output - avoids clone
@@ -382,7 +385,10 @@ pub unsafe extern "C" fn int2dds_read(
     // Use sample.data() - DDS core automatically deserializes using registered TypeSupport
     let mut received_data = match sample.data() {
         Ok(d) => d,
-        Err(_) => return INT2DDS_RET_ERROR,
+        Err(e) => {
+            eprintln!("int2dds_read: sample.data() failed: {:?}", e);
+            return INT2DDS_RET_ERROR;
+        }
     };
 
     // Move values from received data to output
