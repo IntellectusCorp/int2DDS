@@ -100,7 +100,8 @@ impl MemberHeader {
             // Short encoding: LC=0, length directly in lower 16 bits
             // Format: [M][LC=0][member_id (12 bits)][length (16 bits)]
             // Simplified: (member_id << 16) | length
-            let header = must_understand_bit | (self.member_id << 16) | (self.member_length & 0xFFFF);
+            let header =
+                must_understand_bit | (self.member_id << 16) | (self.member_length & 0xFFFF);
             let bytes = to_bytes_u32(header, endianness);
             buffer.extend_from_slice(&bytes);
         } else {
@@ -190,14 +191,7 @@ impl MemberHeader {
             }
         };
 
-        Ok((
-            MemberHeader {
-                member_id,
-                member_length,
-                must_understand,
-            },
-            bytes_consumed,
-        ))
+        Ok((MemberHeader { member_id, member_length, must_understand }, bytes_consumed))
     }
 }
 

@@ -687,11 +687,8 @@ fn test_mutable_optional_all_present() {
 
 #[test]
 fn test_mutable_optional_none_values() {
-    let value = MutableWithOptional {
-        required_field: 456,
-        optional_string: None,
-        optional_value: None,
-    };
+    let value =
+        MutableWithOptional { required_field: 456, optional_string: None, optional_value: None };
 
     // Serialize
     let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Mutable);
@@ -740,7 +737,8 @@ fn test_mutable_optional_mixed() {
 #[test]
 fn test_appendable_struct_dheader() {
     // Appendable structs use DHEADER for forward compatibility
-    let value = AppendableStruct { id: 999, name: "dheader_test".to_string(), values: vec![10, 20, 30] };
+    let value =
+        AppendableStruct { id: 999, name: "dheader_test".to_string(), values: vec![10, 20, 30] };
 
     // Serialize
     let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Appendable);
