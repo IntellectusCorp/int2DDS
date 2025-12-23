@@ -109,6 +109,7 @@ pub(crate) trait DataWriterInternal: DataWriterBase {
 }
 
 pub struct DataWriter<Foo> {
+    is_builtin: bool,
     guid: Guid,
     qos: Arc<Mutex<DataWriterQos>>,
     listener: Arc<RwLock<Option<Arc<dyn DataWriterListener<Foo = Foo>>>>>,
@@ -171,6 +172,7 @@ impl<Foo> Debug for DataWriter<Foo> {
 impl<Foo: 'static + Clone> Clone for DataWriter<Foo> {
     fn clone(&self) -> Self {
         Self {
+            is_builtin: self.is_builtin,
             guid: self.guid,
             qos: self.qos.clone(),
             listener: self.listener.clone(),
@@ -352,6 +354,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
     // DataWriter should be specialized for each data type.
     // Trait defining methods that should be defined in auto-generated class for <Foo>
     pub(crate) fn new(
+        is_builtin: bool,
         guid: Guid,
         type_support: Arc<dyn TypeSupport + Send>,
         topic: &Arc<Topic>,
@@ -362,6 +365,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         wlp_logic: Option<WlpLogic>,
     ) -> DdsResult<Self> {
         let writer = Self {
+            is_builtin,
             guid,
             qos: Arc::new(Mutex::new(qos.clone())),
             listener: Arc::new(RwLock::new(listener)),
