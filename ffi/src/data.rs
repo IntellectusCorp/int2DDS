@@ -17,7 +17,6 @@
 //! ```
 
 use std::any::{Any, TypeId};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use int2dds::{
@@ -85,47 +84,67 @@ impl FieldValue {
     }
 }
 
-/// Dynamic data container - holds field values by name
+/// Dynamic data container - holds field values by index
 #[derive(Debug, Clone)]
 pub struct Int2DdsData {
     /// Reference to the type descriptor
     pub descriptor: Arc<Int2DdsTypeDescriptor>,
-    /// Field values by name
-    pub values: HashMap<String, FieldValue>,
+    /// Field values by index (aligned with descriptor.fields)
+    pub values: Vec<Option<FieldValue>>,
 }
 
 impl Int2DdsData {
     /// Create new data instance from type descriptor
     pub fn new(descriptor: Arc<Int2DdsTypeDescriptor>) -> Self {
-        Self { descriptor, values: HashMap::new() }
+        let values = vec![None; descriptor.fields.len()];
+        Self { descriptor, values }
     }
 
     /// Clear all values
     pub fn clear(&mut self) {
-        self.values.clear();
+        for value in &mut self.values {
+            *value = None;
+        }
     }
 
     /// Set a field value with type checking
     pub fn set_value(&mut self, field_name: &str, value: FieldValue) -> Result<(), &'static str> {
-        let field =
-            self.descriptor.get_field(field_name).ok_or("Field not found in type descriptor")?;
+        let index = self
+            .descriptor
+            .get_field_index(field_name)
+            .or_else(|| self.descriptor.fields.iter().position(|f| f.name == field_name))
+            .ok_or("Field not found in type descriptor")?;
+        let field = &self.descriptor.fields[index];
 
         if !value.matches_type(&field.field_type) {
             return Err("Value type does not match field type");
         }
 
-        self.values.insert(field_name.to_string(), value);
+        if index >= self.values.len() {
+            self.values.resize_with(index + 1, || None);
+        }
+        self.values[index] = Some(value);
         Ok(())
     }
 
+
     /// Get a field value
     pub fn get_value(&self, field_name: &str) -> Option<&FieldValue> {
-        self.values.get(field_name)
+        let index = self
+            .descriptor
+            .get_field_index(field_name)
+            .or_else(|| self.descriptor.fields.iter().position(|f| f.name == field_name))?;
+        self.get_value_by_index(index)
+    }
+
+    /// Get a field value by index
+    pub fn get_value_by_index(&self, index: usize) -> Option<&FieldValue> {
+        self.values.get(index).and_then(|value| value.as_ref())
     }
 
     /// Check if a field has a value set
     pub fn has_value(&self, field_name: &str) -> bool {
-        self.values.contains_key(field_name)
+        self.get_value(field_name).is_some()
     }
 
     /// Get type name
@@ -252,6 +271,7 @@ pub unsafe extern "C" fn int2dds_data_create(
     let descriptor = Arc::new(Int2DdsTypeDescriptor {
         type_name: desc_ref.type_name.clone(),
         fields: desc_ref.fields.clone(),
+        field_indices: desc_ref.field_indices.clone(),
         extensibility: desc_ref.extensibility,
         next_member_id: desc_ref.fields.len() as u32,
         xcdr_version: desc_ref.xcdr_version,
@@ -493,6 +513,7 @@ pub unsafe extern "C" fn int2dds_data_set_u64(
         Err(_) => INT2DDS_RET_ERROR,
     }
 }
+
 
 /// Set an f32 field value
 #[no_mangle]
@@ -813,6 +834,7 @@ pub unsafe extern "C" fn int2dds_data_get_u64(
     }
 }
 
+
 /// Get an f32 field value
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_data_get_f32(
@@ -907,6 +929,7 @@ pub unsafe extern "C" fn int2dds_data_set_bytes(
         Err(_) => INT2DDS_RET_ERROR,
     }
 }
+
 
 /// Get a byte sequence field value (sequence of u8)
 ///
@@ -1033,7 +1056,7 @@ mod tests {
         let desc = create_test_descriptor();
         let data = Int2DdsData::new(desc);
         assert_eq!(data.type_name(), "TestType");
-        assert!(data.values.is_empty());
+        assert!(!data.has_value("id"));
     }
 
     #[test]

@@ -60,6 +60,7 @@ pub unsafe extern "C" fn int2dds_create_topic(
     let type_descriptor = Arc::new(Int2DdsTypeDescriptor {
         type_name: type_desc_ref.type_name.clone(),
         fields: type_desc_ref.fields.clone(),
+        field_indices: type_desc_ref.field_indices.clone(),
         extensibility: type_desc_ref.extensibility,
         next_member_id: type_desc_ref.fields.len() as u32,
         xcdr_version: type_desc_ref.xcdr_version,

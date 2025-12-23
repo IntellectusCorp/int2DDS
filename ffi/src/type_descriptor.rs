@@ -16,6 +16,7 @@
 //! int2dds_type_descriptor_add_string(desc, "message", 256, false);
 //! ```
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use int2dds::serialize::xcdr::ExtensibilityKind;
@@ -160,6 +161,8 @@ pub struct FieldDescriptor {
     pub is_key: bool,
     /// Member ID for XCDR2 mutable types (auto-assigned if not set)
     pub member_id: u32,
+    /// Whether this field is optional (for Mutable types)
+    pub is_optional: bool,
 }
 
 /// Type descriptor - describes a complete DDS type
@@ -169,6 +172,8 @@ pub struct Int2DdsTypeDescriptor {
     pub type_name: String,
     /// List of fields in order
     pub fields: Vec<FieldDescriptor>,
+    /// Field name to index lookup
+    pub field_indices: HashMap<String, usize>,
     /// Extensibility kind for XCDR encoding
     pub extensibility: ExtensibilityKind,
     /// Next member ID for auto-assignment
@@ -183,6 +188,7 @@ impl Int2DdsTypeDescriptor {
         Self {
             type_name: type_name.to_string(),
             fields: Vec::new(),
+            field_indices: HashMap::new(),
             extensibility: ExtensibilityKind::Final,
             next_member_id: 0,
             xcdr_version: Int2DdsXcdrVersion::Xcdr1, // Default to XCDR1 for compatibility
@@ -191,15 +197,44 @@ impl Int2DdsTypeDescriptor {
 
     /// Add a field to the type
     pub fn add_field(&mut self, name: &str, field_type: FieldTypeInfo, is_key: bool) {
+        self.add_field_with_options(name, field_type, is_key, false);
+    }
+
+    /// Add an optional field to the type (for Mutable types)
+    pub fn add_optional_field(&mut self, name: &str, field_type: FieldTypeInfo, is_key: bool) {
+        self.add_field_with_options(name, field_type, is_key, true);
+    }
+
+    /// Add a field with all options
+    pub fn add_field_with_options(
+        &mut self,
+        name: &str,
+        field_type: FieldTypeInfo,
+        is_key: bool,
+        is_optional: bool,
+    ) {
         let member_id = self.next_member_id;
         self.next_member_id += 1;
 
-        self.fields.push(FieldDescriptor { name: name.to_string(), field_type, is_key, member_id });
+        let index = self.fields.len();
+        self.field_indices.insert(name.to_string(), index);
+        self.fields.push(FieldDescriptor {
+            name: name.to_string(),
+            field_type,
+            is_key,
+            member_id,
+            is_optional,
+        });
     }
 
     /// Get field by name
     pub fn get_field(&self, name: &str) -> Option<&FieldDescriptor> {
         self.fields.iter().find(|f| f.name == name)
+    }
+
+    /// Get field index by name
+    pub fn get_field_index(&self, name: &str) -> Option<usize> {
+        self.field_indices.get(name).copied()
     }
 
     /// Get key fields
@@ -370,6 +405,7 @@ pub unsafe extern "C" fn int2dds_type_descriptor_get_field_count(
 
     INT2DDS_RET_OK
 }
+
 
 // -----------------------------------------------------------------------------
 // Field addition functions
@@ -736,6 +772,7 @@ pub unsafe extern "C" fn int2dds_type_descriptor_add_struct(
     let nested_clone = Int2DdsTypeDescriptor {
         type_name: nested.type_name.clone(),
         fields: nested.fields.clone(),
+        field_indices: nested.field_indices.clone(),
         extensibility: nested.extensibility,
         next_member_id: nested.next_member_id,
         xcdr_version: nested.xcdr_version,
