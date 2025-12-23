@@ -1,5 +1,5 @@
 [workspace]
-members = ["dds", "derive", "ffi"]
+members = ["dds",  "derive", "ffi"]
 default-members = ["dds", "derive", "ffi"]
 resolver = "2"
 
