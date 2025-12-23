@@ -549,6 +549,8 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     ///     let key_holder = reader.get_key_value(handle).unwrap();
     ///     println!("Instance key: {:?}", key_holder.id);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn get_key_value(&self, handle: InstanceHandle) -> DdsResult<Foo> {
         // in: key_holder: <Foo>, handle: InstanceHandle
@@ -623,6 +625,8 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     /// } else {
     ///     println!("Found handle for instance: {:?}", handle);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn lookup_instance(&self, instance: &Foo) -> DdsResult<InstanceHandle> {
         /*

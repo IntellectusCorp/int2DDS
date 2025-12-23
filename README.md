@@ -113,6 +113,7 @@ fn main() {
 <summary><strong>Subscriber:</strong></summary>
 
 ```rust
+use std::sync::Arc;
 use int2dds::{
     core::time::Duration,
     domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
@@ -121,6 +122,7 @@ use int2dds::{
         status::StatusMask,
     },
     subscription::{
+        data_reader_listener::DataReaderListener,
         qos::{DataReaderQos, SubscriberQos},
         sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind},
     },
