@@ -1686,10 +1686,10 @@ Int2DdsRet int2dds_condition_seq_length(const struct Int2DdsConditionSeq *seq,
  * - `seq` must be a valid condition sequence
  * - `index` must be less than the sequence length
  * - `condition_out` must be a valid pointer to a null pointer
- * - The returned condition is valid only while the sequence exists
+ * - The returned condition must be freed with `int2dds_condition_delete`
  *
- * Note: The returned condition borrows from the sequence and should NOT be deleted separately.
- * It becomes invalid when the sequence is deleted.
+ * Note: The returned condition is an owned handle (cloned from the sequence).
+ * It remains valid even after the sequence is deleted.
  */
 Int2DdsRet int2dds_condition_seq_get(const struct Int2DdsConditionSeq *seq,
                                      uintptr_t index,
