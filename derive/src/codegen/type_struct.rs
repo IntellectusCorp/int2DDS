@@ -369,7 +369,6 @@ fn generate_unified_type_support_impl(
     let extensibility_tokens = if let Some(ext_kind) = extensibility {
         quote_extensibility_tokens(ext_kind, crate_path)
     } else {
-        // Changed from Final to Appendable to match OMG IDL4 spec and dust-dds default
         quote! { #crate_path::serialize::xcdr::ExtensibilityKind::Appendable }
     };
 
