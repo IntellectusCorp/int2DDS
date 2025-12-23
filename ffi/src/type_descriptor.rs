@@ -406,7 +406,6 @@ pub unsafe extern "C" fn int2dds_type_descriptor_get_field_count(
     INT2DDS_RET_OK
 }
 
-
 // -----------------------------------------------------------------------------
 // Field addition functions
 // -----------------------------------------------------------------------------

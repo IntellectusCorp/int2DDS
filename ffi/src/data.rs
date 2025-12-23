@@ -126,7 +126,6 @@ impl Int2DdsData {
         Ok(())
     }
 
-
     /// Get a field value
     pub fn get_value(&self, field_name: &str) -> Option<&FieldValue> {
         let index = self.descriptor.get_field_index(field_name)?;
@@ -510,7 +509,6 @@ pub unsafe extern "C" fn int2dds_data_set_u64(
     }
 }
 
-
 /// Set an f32 field value
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_data_set_f32(
@@ -830,7 +828,6 @@ pub unsafe extern "C" fn int2dds_data_get_u64(
     }
 }
 
-
 /// Get an f32 field value
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_data_get_f32(
@@ -925,7 +922,6 @@ pub unsafe extern "C" fn int2dds_data_set_bytes(
         Err(_) => INT2DDS_RET_ERROR,
     }
 }
-
 
 /// Get a byte sequence field value (sequence of u8)
 ///

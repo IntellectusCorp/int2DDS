@@ -17,7 +17,8 @@ use int2dds::{
     serialize::{
         cdr::{
             CdrDeserializer, CdrSerializer, CdrSerializerCommon, ExtensibilityKind,
-            PrimitiveSerialize, StringSerialize, Xcdr2Deserializer, Xcdr2Serializer,
+            PrimitiveSerialize, SequenceSerialize, StringSerialize, Xcdr2Deserializer,
+            Xcdr2Serializer,
         },
         core::{BufferManager, DeserializerReader},
     },
@@ -43,16 +44,85 @@ impl DynamicTypeSupport {
         Self { descriptor }
     }
 
+    /// Estimate the serialized size of data for buffer pre-allocation.
+    /// This avoids repeated Vec reallocations during serialization.
+    fn estimate_serialized_size(&self, data: &Int2DdsData) -> usize {
+        let mut size = 4; // CDR encapsulation header (4 bytes)
+        for (index, field) in self.descriptor.fields.iter().enumerate() {
+            if let Some(value) = data.get_value_by_index(index) {
+                size += Self::estimate_value_size(value, &field.field_type);
+            }
+        }
+        size
+    }
+
+    /// Estimate the serialized size of a single field value
+    fn estimate_value_size(value: &FieldValue, field_type: &FieldTypeInfo) -> usize {
+        match (value, field_type) {
+            (FieldValue::Bool(_), FieldTypeInfo::Bool) => 1,
+            (FieldValue::Int8(_), FieldTypeInfo::Int8) => 1,
+            (FieldValue::UInt8(_), FieldTypeInfo::UInt8) => 1,
+            (FieldValue::Int16(_), FieldTypeInfo::Int16) => 2 + 1, // +1 for potential alignment
+            (FieldValue::UInt16(_), FieldTypeInfo::UInt16) => 2 + 1,
+            (FieldValue::Int32(_), FieldTypeInfo::Int32) => 4 + 3, // +3 for potential alignment
+            (FieldValue::UInt32(_), FieldTypeInfo::UInt32) => 4 + 3,
+            (FieldValue::Int64(_), FieldTypeInfo::Int64) => 8 + 7, // +7 for potential alignment
+            (FieldValue::UInt64(_), FieldTypeInfo::UInt64) => 8 + 7,
+            (FieldValue::Float32(_), FieldTypeInfo::Float32) => 4 + 3,
+            (FieldValue::Float64(_), FieldTypeInfo::Float64) => 8 + 7,
+            (FieldValue::String(s), FieldTypeInfo::String { .. }) => {
+                4 + 3 + s.len() + 1 // length(4) + alignment(3) + data + null terminator
+            }
+            (FieldValue::Bytes(bytes), FieldTypeInfo::Bytes { .. }) => {
+                4 + bytes.len() // length prefix + data
+            }
+            (FieldValue::Bytes(bytes), FieldTypeInfo::Sequence { element_type, .. })
+                if matches!(element_type.as_ref(), FieldTypeInfo::UInt8) =>
+            {
+                4 + bytes.len()
+            }
+            (FieldValue::Sequence(v), FieldTypeInfo::Sequence { element_type, .. }) => {
+                let element_size = Self::estimate_element_type_size(element_type);
+                4 + 7 + v.len() * element_size // length + alignment + elements
+            }
+            (FieldValue::Array(v), FieldTypeInfo::Array { element_type, .. }) => {
+                let element_size = Self::estimate_element_type_size(element_type);
+                7 + v.len() * element_size // alignment + elements (no length prefix)
+            }
+            (FieldValue::Struct(nested_data), FieldTypeInfo::Struct { descriptor }) => {
+                let mut size = 0;
+                for (index, field) in descriptor.fields.iter().enumerate() {
+                    if let Some(value) = nested_data.get_value_by_index(index) {
+                        size += Self::estimate_value_size(value, &field.field_type);
+                    }
+                }
+                size
+            }
+            _ => 16, // Default estimate for unknown types
+        }
+    }
+
+    /// Estimate size of a single element based on type info
+    fn estimate_element_type_size(element_type: &FieldTypeInfo) -> usize {
+        match element_type {
+            FieldTypeInfo::Bool | FieldTypeInfo::Int8 | FieldTypeInfo::UInt8 => 1,
+            FieldTypeInfo::Int16 | FieldTypeInfo::UInt16 => 2 + 1,
+            FieldTypeInfo::Int32 | FieldTypeInfo::UInt32 | FieldTypeInfo::Float32 => 4 + 3,
+            FieldTypeInfo::Int64 | FieldTypeInfo::UInt64 | FieldTypeInfo::Float64 => 8 + 7,
+            FieldTypeInfo::String { max_length } => 4 + *max_length as usize,
+            FieldTypeInfo::Bytes { max_length } => 4 + *max_length as usize,
+            _ => 32, // Conservative estimate for nested types
+        }
+    }
+
     /// Serialize Int2DdsData fields using CDR v1
     fn serialize_cdr(&self, data: &Int2DdsData) -> DdsResult<Vec<u8>> {
-        let mut serializer = CdrSerializer::new(true); // true = little endian
+        // Pre-allocate buffer based on estimated size to avoid reallocations
+        let estimated_size = self.estimate_serialized_size(data);
+        let mut serializer = CdrSerializer::with_capacity(true, estimated_size);
 
         // Write encapsulation header
         serializer.write_encapsulation_header().map_err(|e| DdsError::Error(e.to_string()))?;
-        let header_len = serializer.buffer_mut().len();
-        if header_len == 0 {
-            eprintln!("serialize_cdr: encapsulation header length is 0");
-        }
 
         // Serialize each field in order
         for (index, field) in self.descriptor.fields.iter().enumerate() {
@@ -122,11 +192,147 @@ impl DynamicTypeSupport {
                 serializer.serialize_string(v).map_err(|e| DdsError::Error(e.to_string()))?;
             }
             (FieldValue::Sequence(v), FieldTypeInfo::Sequence { element_type, .. }) => {
-                serializer
-                    .serialize_u32(v.len() as u32)
-                    .map_err(|e| DdsError::Error(e.to_string()))?;
-                for item in v {
-                    self.serialize_value_cdr(serializer, item, element_type)?;
+                // Optimized bulk serialization for primitive type sequences
+                match element_type.as_ref() {
+                    FieldTypeInfo::Int8 => {
+                        let values: Vec<i8> = v
+                            .iter()
+                            .filter_map(
+                                |fv| if let FieldValue::Int8(n) = fv { Some(*n) } else { None },
+                            )
+                            .collect();
+                        serializer
+                            .serialize_i8_sequence(&values)
+                            .map_err(|e| DdsError::Error(e.to_string()))?;
+                    }
+                    FieldTypeInfo::Int16 => {
+                        let values: Vec<i16> = v
+                            .iter()
+                            .filter_map(
+                                |fv| if let FieldValue::Int16(n) = fv { Some(*n) } else { None },
+                            )
+                            .collect();
+                        serializer
+                            .serialize_i16_sequence(&values)
+                            .map_err(|e| DdsError::Error(e.to_string()))?;
+                    }
+                    FieldTypeInfo::Int32 => {
+                        let values: Vec<i32> = v
+                            .iter()
+                            .filter_map(
+                                |fv| if let FieldValue::Int32(n) = fv { Some(*n) } else { None },
+                            )
+                            .collect();
+                        serializer
+                            .serialize_i32_sequence(&values)
+                            .map_err(|e| DdsError::Error(e.to_string()))?;
+                    }
+                    FieldTypeInfo::Int64 => {
+                        let values: Vec<i64> = v
+                            .iter()
+                            .filter_map(
+                                |fv| if let FieldValue::Int64(n) = fv { Some(*n) } else { None },
+                            )
+                            .collect();
+                        serializer
+                            .serialize_i64_sequence(&values)
+                            .map_err(|e| DdsError::Error(e.to_string()))?;
+                    }
+                    FieldTypeInfo::UInt16 => {
+                        let values: Vec<u16> = v
+                            .iter()
+                            .filter_map(|fv| {
+                                if let FieldValue::UInt16(n) = fv {
+                                    Some(*n)
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        serializer
+                            .serialize_u16_sequence(&values)
+                            .map_err(|e| DdsError::Error(e.to_string()))?;
+                    }
+                    FieldTypeInfo::UInt32 => {
+                        let values: Vec<u32> = v
+                            .iter()
+                            .filter_map(|fv| {
+                                if let FieldValue::UInt32(n) = fv {
+                                    Some(*n)
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        serializer
+                            .serialize_u32_sequence(&values)
+                            .map_err(|e| DdsError::Error(e.to_string()))?;
+                    }
+                    FieldTypeInfo::UInt64 => {
+                        let values: Vec<u64> = v
+                            .iter()
+                            .filter_map(|fv| {
+                                if let FieldValue::UInt64(n) = fv {
+                                    Some(*n)
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        serializer
+                            .serialize_u64_sequence(&values)
+                            .map_err(|e| DdsError::Error(e.to_string()))?;
+                    }
+                    FieldTypeInfo::Float32 => {
+                        let values: Vec<f32> = v
+                            .iter()
+                            .filter_map(|fv| {
+                                if let FieldValue::Float32(n) = fv {
+                                    Some(*n)
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        serializer
+                            .serialize_f32_sequence(&values)
+                            .map_err(|e| DdsError::Error(e.to_string()))?;
+                    }
+                    FieldTypeInfo::Float64 => {
+                        let values: Vec<f64> = v
+                            .iter()
+                            .filter_map(|fv| {
+                                if let FieldValue::Float64(n) = fv {
+                                    Some(*n)
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        serializer
+                            .serialize_f64_sequence(&values)
+                            .map_err(|e| DdsError::Error(e.to_string()))?;
+                    }
+                    FieldTypeInfo::Bool => {
+                        let values: Vec<bool> = v
+                            .iter()
+                            .filter_map(
+                                |fv| if let FieldValue::Bool(n) = fv { Some(*n) } else { None },
+                            )
+                            .collect();
+                        serializer
+                            .serialize_bool_sequence(&values)
+                            .map_err(|e| DdsError::Error(e.to_string()))?;
+                    }
+                    // For complex types (String, Struct, nested Sequence), use element-by-element serialization
+                    _ => {
+                        serializer
+                            .serialize_u32(v.len() as u32)
+                            .map_err(|e| DdsError::Error(e.to_string()))?;
+                        for item in v {
+                            self.serialize_value_cdr(serializer, item, element_type)?;
+                        }
+                    }
                 }
             }
             // Optimized Bytes serialization - bulk write without per-element overhead
@@ -153,10 +359,16 @@ impl DynamicTypeSupport {
                 }
             }
             (FieldValue::Struct(nested_data), FieldTypeInfo::Struct { descriptor }) => {
-                // Recursively serialize nested struct
-                let nested_support = DynamicTypeSupport::new(descriptor.clone());
+                // Serialize nested struct fields directly without creating new DynamicTypeSupport
                 for (index, field) in descriptor.fields.iter().enumerate() {
-                    nested_support.serialize_field_cdr(serializer, nested_data, index, field)?;
+                    if let Some(value) = nested_data.get_value_by_index(index) {
+                        self.serialize_value_cdr(serializer, value, &field.field_type)?;
+                    } else {
+                        return Err(DdsError::Error(format!(
+                            "Missing required field: {}",
+                            field.name
+                        )));
+                    }
                 }
             }
             _ => {
@@ -259,15 +471,16 @@ impl DynamicTypeSupport {
                     deserializer.deserialize_u32().map_err(|e| DdsError::Error(e.to_string()))?
                         as usize;
 
-                // Optimization: bulk read for Sequence<UInt8>
+                // Optimization: bulk read for Sequence<UInt8> - direct slice to Arc conversion
                 if matches!(element_type.as_ref(), FieldTypeInfo::UInt8) {
                     deserializer
                         .check_available(len)
                         .map_err(|e| DdsError::Error(e.to_string()))?;
                     let start = deserializer.get_position();
-                    let bytes = deserializer.get_data()[start..start + len].to_vec();
+                    // Direct conversion from slice to Arc - avoids intermediate Vec allocation
+                    let bytes: Arc<[u8]> = Arc::from(&deserializer.get_data()[start..start + len]);
                     deserializer.set_position(start + len);
-                    return Ok(FieldValue::Bytes(Arc::from(bytes)));
+                    return Ok(FieldValue::Bytes(bytes));
                 }
 
                 let mut items = Vec::with_capacity(len);
@@ -284,47 +497,45 @@ impl DynamicTypeSupport {
                 Ok(FieldValue::Array(items))
             }
             FieldTypeInfo::Struct { descriptor } => {
-                let nested_support = DynamicTypeSupport::new(descriptor.clone());
+                // Deserialize nested struct directly without creating new DynamicTypeSupport
                 let mut nested_data = Int2DdsData::new(descriptor.clone());
                 for (index, field) in descriptor.fields.iter().enumerate() {
-                    let value =
-                        nested_support.deserialize_field_cdr(deserializer, &field.field_type)?;
+                    let value = self.deserialize_field_cdr(deserializer, &field.field_type)?;
                     nested_data.values[index] = Some(value);
                 }
                 Ok(FieldValue::Struct(Box::new(nested_data)))
             }
-            // Optimized Bytes deserialization - bulk read directly into Arc<[u8]>
+            // Optimized Bytes deserialization - direct slice to Arc conversion
             FieldTypeInfo::Bytes { .. } => {
                 let len =
                     deserializer.deserialize_u32().map_err(|e| DdsError::Error(e.to_string()))?
                         as usize;
-                // Bulk read: directly copy slice instead of per-byte deserialization
+                // Direct conversion from slice to Arc - avoids intermediate Vec allocation
                 deserializer.check_available(len).map_err(|e| DdsError::Error(e.to_string()))?;
                 let start = deserializer.get_position();
-                let bytes = deserializer.get_data()[start..start + len].to_vec();
+                let bytes: Arc<[u8]> = Arc::from(&deserializer.get_data()[start..start + len]);
                 deserializer.set_position(start + len);
-                Ok(FieldValue::Bytes(Arc::from(bytes)))
+                Ok(FieldValue::Bytes(bytes))
             }
         }
     }
 
     /// Serialize Int2DdsData using XCDR v2
     fn serialize_xcdr2(&self, data: &Int2DdsData) -> DdsResult<Vec<u8>> {
-        let mut serializer = Xcdr2Serializer::new(true, self.descriptor.extensibility); // true = little endian
+        // Pre-allocate buffer based on estimated size to avoid reallocations
+        let estimated_size = self.estimate_serialized_size(data);
+        let mut serializer =
+            Xcdr2Serializer::with_capacity(true, self.descriptor.extensibility, estimated_size);
 
         // Write encapsulation header
-        serializer
-            .write_encapsulation_header()
-            .map_err(|e| DdsError::Error(e.to_string()))?;
+        serializer.write_encapsulation_header().map_err(|e| DdsError::Error(e.to_string()))?;
 
         // For Appendable/Mutable: write DHEADER
         let size_pos = match self.descriptor.extensibility {
             ExtensibilityKind::Final => None,
-            ExtensibilityKind::Appendable | ExtensibilityKind::Mutable => Some(
-                serializer
-                    .begin_struct()
-                    .map_err(|e| DdsError::Error(e.to_string()))?,
-            ),
+            ExtensibilityKind::Appendable | ExtensibilityKind::Mutable => {
+                Some(serializer.begin_struct().map_err(|e| DdsError::Error(e.to_string()))?)
+            }
         };
 
         let is_mutable = matches!(self.descriptor.extensibility, ExtensibilityKind::Mutable);
@@ -381,9 +592,7 @@ impl DynamicTypeSupport {
 
         // For Appendable/Mutable: backpatch DHEADER
         if let Some(size_pos) = size_pos {
-            serializer
-                .end_struct(size_pos)
-                .map_err(|e| DdsError::Error(e.to_string()))?;
+            serializer.end_struct(size_pos).map_err(|e| DdsError::Error(e.to_string()))?;
         }
 
         Ok(serializer.into_bytes())
@@ -449,11 +658,147 @@ impl DynamicTypeSupport {
                 serializer.serialize_string(v).map_err(|e| DdsError::Error(e.to_string()))?;
             }
             (FieldValue::Sequence(v), FieldTypeInfo::Sequence { element_type, .. }) => {
-                serializer
-                    .serialize_u32(v.len() as u32)
-                    .map_err(|e| DdsError::Error(e.to_string()))?;
-                for item in v {
-                    self.serialize_value_xcdr2(serializer, item, element_type)?;
+                // Optimized bulk serialization for primitive type sequences
+                match element_type.as_ref() {
+                    FieldTypeInfo::Int8 => {
+                        let values: Vec<i8> = v
+                            .iter()
+                            .filter_map(
+                                |fv| if let FieldValue::Int8(n) = fv { Some(*n) } else { None },
+                            )
+                            .collect();
+                        serializer
+                            .serialize_i8_sequence(&values)
+                            .map_err(|e| DdsError::Error(e.to_string()))?;
+                    }
+                    FieldTypeInfo::Int16 => {
+                        let values: Vec<i16> = v
+                            .iter()
+                            .filter_map(
+                                |fv| if let FieldValue::Int16(n) = fv { Some(*n) } else { None },
+                            )
+                            .collect();
+                        serializer
+                            .serialize_i16_sequence(&values)
+                            .map_err(|e| DdsError::Error(e.to_string()))?;
+                    }
+                    FieldTypeInfo::Int32 => {
+                        let values: Vec<i32> = v
+                            .iter()
+                            .filter_map(
+                                |fv| if let FieldValue::Int32(n) = fv { Some(*n) } else { None },
+                            )
+                            .collect();
+                        serializer
+                            .serialize_i32_sequence(&values)
+                            .map_err(|e| DdsError::Error(e.to_string()))?;
+                    }
+                    FieldTypeInfo::Int64 => {
+                        let values: Vec<i64> = v
+                            .iter()
+                            .filter_map(
+                                |fv| if let FieldValue::Int64(n) = fv { Some(*n) } else { None },
+                            )
+                            .collect();
+                        serializer
+                            .serialize_i64_sequence(&values)
+                            .map_err(|e| DdsError::Error(e.to_string()))?;
+                    }
+                    FieldTypeInfo::UInt16 => {
+                        let values: Vec<u16> = v
+                            .iter()
+                            .filter_map(|fv| {
+                                if let FieldValue::UInt16(n) = fv {
+                                    Some(*n)
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        serializer
+                            .serialize_u16_sequence(&values)
+                            .map_err(|e| DdsError::Error(e.to_string()))?;
+                    }
+                    FieldTypeInfo::UInt32 => {
+                        let values: Vec<u32> = v
+                            .iter()
+                            .filter_map(|fv| {
+                                if let FieldValue::UInt32(n) = fv {
+                                    Some(*n)
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        serializer
+                            .serialize_u32_sequence(&values)
+                            .map_err(|e| DdsError::Error(e.to_string()))?;
+                    }
+                    FieldTypeInfo::UInt64 => {
+                        let values: Vec<u64> = v
+                            .iter()
+                            .filter_map(|fv| {
+                                if let FieldValue::UInt64(n) = fv {
+                                    Some(*n)
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        serializer
+                            .serialize_u64_sequence(&values)
+                            .map_err(|e| DdsError::Error(e.to_string()))?;
+                    }
+                    FieldTypeInfo::Float32 => {
+                        let values: Vec<f32> = v
+                            .iter()
+                            .filter_map(|fv| {
+                                if let FieldValue::Float32(n) = fv {
+                                    Some(*n)
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        serializer
+                            .serialize_f32_sequence(&values)
+                            .map_err(|e| DdsError::Error(e.to_string()))?;
+                    }
+                    FieldTypeInfo::Float64 => {
+                        let values: Vec<f64> = v
+                            .iter()
+                            .filter_map(|fv| {
+                                if let FieldValue::Float64(n) = fv {
+                                    Some(*n)
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        serializer
+                            .serialize_f64_sequence(&values)
+                            .map_err(|e| DdsError::Error(e.to_string()))?;
+                    }
+                    FieldTypeInfo::Bool => {
+                        let values: Vec<bool> = v
+                            .iter()
+                            .filter_map(
+                                |fv| if let FieldValue::Bool(n) = fv { Some(*n) } else { None },
+                            )
+                            .collect();
+                        serializer
+                            .serialize_bool_sequence(&values)
+                            .map_err(|e| DdsError::Error(e.to_string()))?;
+                    }
+                    // For complex types (String, Struct, nested Sequence), use element-by-element serialization
+                    _ => {
+                        serializer
+                            .serialize_u32(v.len() as u32)
+                            .map_err(|e| DdsError::Error(e.to_string()))?;
+                        for item in v {
+                            self.serialize_value_xcdr2(serializer, item, element_type)?;
+                        }
+                    }
                 }
             }
             // Optimized Bytes serialization - bulk write without per-element overhead
@@ -480,9 +825,16 @@ impl DynamicTypeSupport {
                 }
             }
             (FieldValue::Struct(nested_data), FieldTypeInfo::Struct { descriptor }) => {
-                let nested_support = DynamicTypeSupport::new(descriptor.clone());
+                // Serialize nested struct fields directly without creating new DynamicTypeSupport
                 for (index, field) in descriptor.fields.iter().enumerate() {
-                    nested_support.serialize_field_xcdr2(serializer, nested_data, index, field)?;
+                    if let Some(value) = nested_data.get_value_by_index(index) {
+                        self.serialize_value_xcdr2(serializer, value, &field.field_type)?;
+                    } else {
+                        return Err(DdsError::Error(format!(
+                            "Missing required field: {}",
+                            field.name
+                        )));
+                    }
                 }
             }
             _ => {
@@ -508,9 +860,9 @@ impl DynamicTypeSupport {
         // For Appendable/Mutable: read DHEADER
         let (object_size, start_position) = match self.descriptor.extensibility {
             ExtensibilityKind::Final => (0, 0),
-            ExtensibilityKind::Appendable | ExtensibilityKind::Mutable => deserializer
-                .begin_struct()
-                .map_err(|e| DdsError::Error(e.to_string()))?,
+            ExtensibilityKind::Appendable | ExtensibilityKind::Mutable => {
+                deserializer.begin_struct().map_err(|e| DdsError::Error(e.to_string()))?
+            }
         };
 
         let is_mutable = matches!(self.descriptor.extensibility, ExtensibilityKind::Mutable);
@@ -563,10 +915,7 @@ impl DynamicTypeSupport {
             // Check that all required fields were read
             for (index, field) in self.descriptor.fields.iter().enumerate() {
                 if !field.is_optional && !fields_read[index] {
-                    return Err(DdsError::Error(format!(
-                        "Missing required field: {}",
-                        field.name
-                    )));
+                    return Err(DdsError::Error(format!("Missing required field: {}", field.name)));
                 }
             }
         } else {
@@ -660,15 +1009,16 @@ impl DynamicTypeSupport {
                     deserializer.deserialize_u32().map_err(|e| DdsError::Error(e.to_string()))?
                         as usize;
 
-                // Optimization: bulk read for Sequence<UInt8>
+                // Optimization: bulk read for Sequence<UInt8> - direct slice to Arc conversion
                 if matches!(element_type.as_ref(), FieldTypeInfo::UInt8) {
                     deserializer
                         .check_available(len)
                         .map_err(|e| DdsError::Error(e.to_string()))?;
                     let start = deserializer.get_position();
-                    let bytes = deserializer.get_data()[start..start + len].to_vec();
+                    // Direct conversion from slice to Arc - avoids intermediate Vec allocation
+                    let bytes: Arc<[u8]> = Arc::from(&deserializer.get_data()[start..start + len]);
                     deserializer.set_position(start + len);
-                    return Ok(FieldValue::Bytes(Arc::from(bytes)));
+                    return Ok(FieldValue::Bytes(bytes));
                 }
 
                 let mut items = Vec::with_capacity(len);
@@ -685,26 +1035,25 @@ impl DynamicTypeSupport {
                 Ok(FieldValue::Array(items))
             }
             FieldTypeInfo::Struct { descriptor } => {
-                let nested_support = DynamicTypeSupport::new(descriptor.clone());
+                // Deserialize nested struct directly without creating new DynamicTypeSupport
                 let mut nested_data = Int2DdsData::new(descriptor.clone());
                 for (index, field) in descriptor.fields.iter().enumerate() {
-                    let value =
-                        nested_support.deserialize_field_xcdr2(deserializer, &field.field_type)?;
+                    let value = self.deserialize_field_xcdr2(deserializer, &field.field_type)?;
                     nested_data.values[index] = Some(value);
                 }
                 Ok(FieldValue::Struct(Box::new(nested_data)))
             }
-            // Optimized Bytes deserialization - bulk read directly into Arc<[u8]>
+            // Optimized Bytes deserialization - direct slice to Arc conversion
             FieldTypeInfo::Bytes { .. } => {
                 let len =
                     deserializer.deserialize_u32().map_err(|e| DdsError::Error(e.to_string()))?
                         as usize;
-                // Bulk read: directly copy slice instead of per-byte deserialization
+                // Direct conversion from slice to Arc - avoids intermediate Vec allocation
                 deserializer.check_available(len).map_err(|e| DdsError::Error(e.to_string()))?;
                 let start = deserializer.get_position();
-                let bytes = deserializer.get_data()[start..start + len].to_vec();
+                let bytes: Arc<[u8]> = Arc::from(&deserializer.get_data()[start..start + len]);
                 deserializer.set_position(start + len);
-                Ok(FieldValue::Bytes(Arc::from(bytes)))
+                Ok(FieldValue::Bytes(bytes))
             }
         }
     }
@@ -729,10 +1078,7 @@ impl DynamicTypeSupport {
     /// Detect encoding from data and deserialize accordingly
     fn auto_deserialize(&self, data: &[u8]) -> DdsResult<Int2DdsData> {
         if data.len() < 2 {
-            eprintln!(
-                "DynamicTypeSupport::auto_deserialize: data too short (len={})",
-                data.len()
-            );
+            eprintln!("DynamicTypeSupport::auto_deserialize: data too short (len={})", data.len());
             return Err(DdsError::Error("Data too short for encoding detection".to_string()));
         }
 
@@ -748,7 +1094,6 @@ impl DynamicTypeSupport {
         }
     }
 }
-
 
 impl TypeSupport for DynamicTypeSupport {
     fn type_id(&self) -> TypeId {
