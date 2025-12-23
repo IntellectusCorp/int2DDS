@@ -109,10 +109,32 @@ pub unsafe extern "C" fn int2dds_delete_topic(topic: *mut Int2DdsTopic) -> Int2D
         return INT2DDS_RET_NULL_POINTER;
     }
 
-    // Just drop the Arc reference
-    let _topic = Box::from_raw(topic);
+    let topic_ref = &*topic;
+    if Arc::strong_count(&topic_ref.inner) != 1 {
+        return INT2DDS_RET_PRECONDITION_NOT_MET;
+    }
 
-    INT2DDS_RET_OK
+    // Destructure Box to move Arc out
+    let Int2DdsTopic { inner: topic_arc, type_support: _ts, type_descriptor: _td } =
+        *Box::from_raw(topic);
+
+    // Try to unwrap Arc without cloning (succeeds if this is the only reference)
+    let topic_obj = match Arc::try_unwrap(topic_arc) {
+        Ok(t) => t,
+        Err(_arc) => return INT2DDS_RET_PRECONDITION_NOT_MET,
+    };
+
+    // Get the participant to delete the topic
+    let participant = match topic_obj.get_participant() {
+        Ok(p) => p,
+        Err(e) => return dds_error_to_code(&e),
+    };
+
+    match participant.delete_topic(topic_obj) {
+        Ok(()) => INT2DDS_RET_OK,
+        Err(e) => dds_error_to_code(&e),
+    }
+
 }
 
 /// Get the name of a Topic
