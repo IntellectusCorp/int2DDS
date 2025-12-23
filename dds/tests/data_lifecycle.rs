@@ -10,16 +10,22 @@ use int2dds::{
     dcps::{
         core::time::Duration,
         domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
-        infrastructure::{qos_policy::WriterDataLifecycleQosPolicy, status::StatusMask},
+        infrastructure::{
+            qos_policy::{HistoryQosPolicy, HistoryQosPolicyKind, WriterDataLifecycleQosPolicy},
+            status::StatusMask,
+        },
         publication::qos::{DataWriterQos, PublisherQos},
-        subscription::qos::{DataReaderQos, SubscriberQos},
+        subscription::{
+            qos::{DataReaderQos, SubscriberQos},
+            sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind},
+        },
     },
 };
 
 #[test]
 fn test_autodispose_unregistered_instances_true() {
-    set_log_type(LogType::File);
-    set_file_log_level(LogLevel::Debug);
+    // set_log_type(LogType::File);
+    // set_file_log_level(LogLevel::Debug);
 
     let domain_id = next_domain_id();
     let factory = DomainParticipantFactory::get_instance();
@@ -27,11 +33,25 @@ fn test_autodispose_unregistered_instances_true() {
         .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
         .unwrap();
 
-    let data_writer =
-        create_datawriter(&participant, PublisherQos::default(), DataWriterQos::default());
+    let writer_qos = DataWriterQos {
+        history: HistoryQosPolicy {
+            kind: HistoryQosPolicyKind::KeepLast(10),
+            ..Default::default()
+        },
+        ..Default::default() // autodispose_unregistered_instances is true by default
+    };
 
-    let data_reader =
-        create_datareader(&participant, SubscriberQos::default(), DataReaderQos::default());
+    let data_writer = create_datawriter(&participant, PublisherQos::default(), writer_qos);
+
+    let reader_qos = DataReaderQos {
+        history: HistoryQosPolicy {
+            kind: HistoryQosPolicyKind::KeepLast(10),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let data_reader = create_datareader(&participant, SubscriberQos::default(), reader_qos);
 
     wait_for_reader_status(
         &data_reader,
@@ -52,16 +72,18 @@ fn test_autodispose_unregistered_instances_true() {
     wait_for_reader_status(&data_reader, StatusMask::DATA_AVAILABLE, Duration::from_seconds(1))
         .unwrap();
 
-    // let samples = data_reader
-    //     .take(
-    //         10,
-    //         &[SampleStateKind::ANY_SAMPLE_STATE],
-    //         &[ViewStateKind::ANY_VIEW_STATE],
-    //         &[InstanceStateKind::NOT_ALIVE_DISPOSED_INSTANCE_STATE],
-    //     )
-    //     .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(100));
 
-    // assert!(samples.len() == 1);
+    let samples = data_reader
+        .take(
+            10,
+            &[SampleStateKind::ANY_SAMPLE_STATE],
+            &[ViewStateKind::ANY_VIEW_STATE],
+            &[InstanceStateKind::NOT_ALIVE_DISPOSED_INSTANCE_STATE],
+        )
+        .unwrap();
+
+    assert!(samples.len() == 2);
 }
 
 #[test]
@@ -79,14 +101,24 @@ fn test_autodispose_unregistered_instances_false() {
         writer_data_lifecycle: WriterDataLifecycleQosPolicy {
             autodispose_unregistered_instances: false,
         },
+        history: HistoryQosPolicy {
+            kind: HistoryQosPolicyKind::KeepLast(10),
+            ..Default::default()
+        },
         ..Default::default()
     };
 
     let data_writer = create_datawriter(&participant, PublisherQos::default(), writer_qos);
 
-    let data_reader =
-        create_datareader(&participant, SubscriberQos::default(), DataReaderQos::default());
+    let reader_qos = DataReaderQos {
+        history: HistoryQosPolicy {
+            kind: HistoryQosPolicyKind::KeepLast(10),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
 
+    let data_reader = create_datareader(&participant, SubscriberQos::default(), reader_qos);
     wait_for_reader_status(
         &data_reader,
         StatusMask::SUBSCRIPTION_MATCHED,
@@ -106,14 +138,20 @@ fn test_autodispose_unregistered_instances_false() {
     wait_for_reader_status(&data_reader, StatusMask::DATA_AVAILABLE, Duration::from_seconds(1))
         .unwrap();
 
-    // let samples = data_reader
-    //     .take(
-    //         10,
-    //         &[SampleStateKind::ANY_SAMPLE_STATE],
-    //         &[ViewStateKind::ANY_VIEW_STATE],
-    //         &[InstanceStateKind::NOT_ALIVE_NO_WRITERS_INSTANCE_STATE],
-    //     )
-    //     .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(100));
 
-    // assert!(samples.len() == 1);
+    let samples = data_reader
+        .take(
+            10,
+            &[SampleStateKind::ANY_SAMPLE_STATE],
+            &[ViewStateKind::ANY_VIEW_STATE],
+            &[InstanceStateKind::NOT_ALIVE_NO_WRITERS_INSTANCE_STATE],
+        )
+        .unwrap();
+
+    for sample in samples.clone() {
+        println!("Sample Info: {:?}", sample.sample_info());
+    }
+
+    assert!(samples.len() == 2);
 }
