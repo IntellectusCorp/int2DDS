@@ -55,6 +55,13 @@ use crate::{
 
 #[derive(Clone)]
 pub struct Topic {
+    // Indicates whether this entity is a built-in entity.
+    //
+    // Built-in entities are managed internally and have restricted operations:
+    // - Cannot be deleted (delete_topic)
+    // - Cannot modify QoS (set_qos)
+    //
+    // See also: DomainParticipant::get_builtin_subscriber()
     is_builtin: bool,
     guid: Guid,
     qos: Arc<Mutex<TopicQos>>,

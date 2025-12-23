@@ -56,6 +56,14 @@ use super::{
 
 #[derive(Clone)]
 pub struct Subscriber {
+    // Indicates whether this entity is a built-in entity.
+    //
+    // Built-in entities are managed internally and have restricted operations:
+    // - Cannot be deleted (delete_subscriber)
+    // - Cannot modify QoS (set_qos)
+    // - Cannot create/delete child DataReaders (create_datareader, delete_datareader)
+    //
+    // See also: DomainParticipant::get_builtin_subscriber()
     is_builtin: bool,
     guid: Guid,
     qos: Arc<Mutex<SubscriberQos>>,
