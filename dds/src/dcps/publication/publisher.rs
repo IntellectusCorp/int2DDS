@@ -225,6 +225,9 @@ impl Publisher {
         listener: Option<Arc<dyn DataWriterListener<Foo = Foo>>>,
         mask: StatusMask,
     ) -> DdsResult<DataWriter<Foo>> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
 
         let _ = self.cleanup_dead_writers();
@@ -346,6 +349,9 @@ impl Publisher {
         &self,
         datawriter: DataWriter<Foo>,
     ) -> DdsResult<()> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
         let arc_writer: Arc<dyn DataWriterInternal<Qos = DataWriterQos>> =
             Arc::new(datawriter.clone());
@@ -776,6 +782,9 @@ impl Publisher {
             If any of the contained entities is in a state where it cannot be deleted, this operation returns PRECONDITION_NOT_MET error.
             When delete_contained_entities returns successfully, the application is guaranteed that the Publisher no longer contains any DataWriter objects and can delete the Publisher.
         */
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
         {
             match self.get_datawriters_internal() {
@@ -1031,6 +1040,9 @@ impl Publisher {
     }
 
     pub(crate) fn delete(&mut self) {
+        if self.is_builtin {
+            return;
+        }
         self.self_ref = None;
         self.deleted.store(true, Ordering::SeqCst);
     }

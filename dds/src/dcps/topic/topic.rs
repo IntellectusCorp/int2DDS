@@ -249,6 +249,9 @@ impl Topic {
     }
 
     pub(crate) fn delete(&mut self) {
+        if self.is_builtin {
+            return;
+        }
         self.self_ref = None;
         self.deleted.store(true, Ordering::SeqCst);
     }
