@@ -21,7 +21,6 @@
 //! # Basic Usage
 //!
 //! ```no_run
-//! # fn main() -> Result<(), int2dds::core::error::DdsError> {
 //! use int2dds::domain::domain_participant_factory::DomainParticipantFactory;
 //! use int2dds::topic::type_support::DdsType;
 //!
