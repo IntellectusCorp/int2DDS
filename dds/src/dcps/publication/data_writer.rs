@@ -1921,6 +1921,9 @@ impl<Foo: 'static + Clone> DataWriterInternal for DataWriter<Foo> {
     }
 
     fn delete(&self) {
+        if self.is_builtin {
+            return;
+        }
         // Shutdown deadline monitor
         let monitor_to_drop = if let Ok(mut monitor_guard) = self.deadline_monitor.lock() {
             monitor_guard.take() // Take ownership, will drop after lock is released

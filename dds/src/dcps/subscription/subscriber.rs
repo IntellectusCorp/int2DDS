@@ -227,6 +227,9 @@ impl Subscriber {
         listener: Option<Arc<dyn DataReaderListener<Foo = Foo>>>,
         mask: StatusMask,
     ) -> DdsResult<DataReader<Foo>> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
 
         let _ = self.cleanup_dead_readers();
@@ -336,6 +339,9 @@ impl Subscriber {
         listener: Option<Arc<dyn DataReaderListener<Foo = Foo>>>,
         mask: StatusMask,
     ) -> DdsResult<DataReader<Foo>> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         let qos = self.get_datareader_qos_from_profile(qos_path)?;
         self.create_datareader::<Foo>(topic_description, qos, listener, mask)
     }
@@ -344,6 +350,9 @@ impl Subscriber {
         &self,
         datareader: DataReader<Foo>,
     ) -> DdsResult<()> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
         let arc_reader: Arc<dyn DataReaderInternal<Qos = DataReaderQos>> =
             Arc::new(datareader.clone());
@@ -518,6 +527,9 @@ impl Subscriber {
             If any of the contained entities is in a state where it cannot be deleted, this operation returns PRECONDITION_NOT_MET error.
             When delete_contained_entities returns successfully, the application is guaranteed that the Subscriber no longer contains any DataReader objects and can delete the Subscriber.
         */
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
         {
             match self.get_datareaders_internal() {
@@ -838,6 +850,9 @@ impl Subscriber {
     }
 
     pub fn set_default_datareader_qos(&self, qos: DataReaderQos) -> DdsResult<()> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
         if qos == DATAREADER_QOS_DEFAULT {
             return self.reset_default_datareader_qos();
@@ -1029,6 +1044,9 @@ impl Subscriber {
     }
 
     pub(crate) fn delete(&mut self) {
+        if self.is_builtin {
+            return;
+        }
         self.self_ref = None;
         self.deleted.store(true, Ordering::SeqCst);
     }

@@ -561,6 +561,9 @@ impl DomainParticipant {
         listener: Option<Arc<dyn PublisherListener>>,
         mask: StatusMask,
     ) -> DdsResult<Publisher> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
 
         qos.is_consistent()?;
@@ -624,6 +627,9 @@ impl DomainParticipant {
     }
 
     pub fn delete_publisher(&self, mut publisher: Publisher) -> DdsResult<()> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
 
         match self.try_delete_publisher(&mut publisher) {
@@ -754,6 +760,9 @@ impl DomainParticipant {
         listener: Option<Arc<dyn SubscriberListener>>,
         mask: StatusMask,
     ) -> DdsResult<Subscriber> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
 
         qos.is_consistent()?;
@@ -817,6 +826,9 @@ impl DomainParticipant {
     }
 
     pub fn delete_subscriber(&self, mut subscriber: Subscriber) -> DdsResult<()> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
 
         match self.try_delete_subscriber(&mut subscriber) {
@@ -974,6 +986,9 @@ impl DomainParticipant {
         _subscription_expression: &str,
         _expression_parameters: Vec<String>,
     ) -> DdsResult<MultiTopic> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
         // let multi_topic = MultiTopic::new(
         //     type_name,
@@ -995,6 +1010,9 @@ impl DomainParticipant {
     pub fn delete_multitopic(&self, _multi_topic: MultiTopic) -> DdsResult<()> {
         // in: multitopic: Multitopic
         // out: DdsError_t
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
         Err(DdsError::Unsupported)
     }
@@ -1225,6 +1243,9 @@ impl DomainParticipant {
 
             If delete_contained_entities returns successfully, the application can delete the DomainParticipant knowing that no contained entities exist anymore.
         */
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
         {
             match self.get_publishers() {
@@ -1344,6 +1365,9 @@ impl DomainParticipant {
     where
         Foo: DdsType,
     {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
 
         qos.is_consistent()?;
@@ -1419,6 +1443,9 @@ impl DomainParticipant {
     }
 
     pub fn delete_topic(&self, mut topic: Topic) -> DdsResult<()> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
 
         match self.try_delete_topic(&mut topic) {
@@ -2335,6 +2362,9 @@ impl DomainParticipant {
     }
 
     pub(crate) fn delete(&mut self) -> DdsResult<()> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         let mut bridge_guard =
             self.dcps_bridge.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 

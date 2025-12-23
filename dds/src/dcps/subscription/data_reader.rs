@@ -2885,6 +2885,9 @@ impl<Foo: 'static + Clone + Debug> DataReaderInternal for DataReader<Foo> {
     }
 
     fn delete(&self) {
+        if self.is_builtin {
+            return;
+        }
         // Shutdown and drop deadline monitor
         let monitor_to_drop = if let Ok(mut monitor_guard) = self.deadline_monitor.lock() {
             monitor_guard.take() // Take ownership, will drop after lock is released
