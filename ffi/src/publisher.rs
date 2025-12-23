@@ -80,13 +80,18 @@ pub unsafe extern "C" fn int2dds_delete_publisher(publisher: *mut Int2DdsPublish
         return INT2DDS_RET_NULL_POINTER;
     }
 
+    let publisher_ref = &*publisher;
+    if Arc::strong_count(&publisher_ref.inner) != 1 {
+        return INT2DDS_RET_PRECONDITION_NOT_MET;
+    }
+
     // Destructure Box to move Arc out
     let Int2DdsPublisher { inner: publisher_arc } = *Box::from_raw(publisher);
 
     // Try to unwrap Arc without cloning (succeeds if this is the only reference)
     let publisher_obj = match Arc::try_unwrap(publisher_arc) {
         Ok(p) => p,
-        Err(arc) => (*arc).clone(), // Fall back to clone if other references exist
+        Err(_arc) => return INT2DDS_RET_PRECONDITION_NOT_MET,
     };
 
     // Get the participant to delete the publisher
