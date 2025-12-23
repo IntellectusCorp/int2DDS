@@ -55,6 +55,7 @@ use crate::{
 
 #[derive(Clone)]
 pub struct Topic {
+    is_builtin: bool,
     guid: Guid,
     qos: Arc<Mutex<TopicQos>>,
     listener: Arc<RwLock<Option<Arc<dyn TopicListener>>>>,
@@ -148,6 +149,7 @@ impl UpdateStatus for Topic {
 
 impl Topic {
     pub(crate) fn new(
+        is_builtin: bool,
         topic_name: &str,
         type_name: &str,
         qos: TopicQos,
@@ -157,6 +159,7 @@ impl Topic {
         participant: &Arc<DomainParticipant>,
     ) -> Self {
         let mut topic = Self {
+            is_builtin,
             guid: handle.to_guid(),
             qos: Arc::new(Mutex::new(qos)),
             listener: Arc::new(RwLock::new(listener)),

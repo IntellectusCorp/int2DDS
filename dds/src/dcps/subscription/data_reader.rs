@@ -151,6 +151,7 @@ pub(crate) trait DataReaderInternal: DataReaderBase {
 
 // #[derive(Clone)]
 pub struct DataReader<Foo> {
+    is_builtin: bool,
     guid: Guid,
     qos: Arc<Mutex<DataReaderQos>>,
     listener: Arc<RwLock<Option<Arc<dyn DataReaderListener<Foo = Foo>>>>>,
@@ -219,6 +220,7 @@ impl<Foo> Debug for DataReader<Foo> {
 impl<Foo: 'static + Clone + Debug> Clone for DataReader<Foo> {
     fn clone(&self) -> Self {
         Self {
+            is_builtin: self.is_builtin,
             guid: self.guid,
             qos: self.qos.clone(),
             listener: self.listener.clone(),
@@ -1532,6 +1534,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
 impl<Foo: DdsType> DataReader<Foo> {
     pub(crate) fn new(
+        is_builtin: bool,
         guid: Guid,
         type_support: Arc<dyn TypeSupport + Send>,
         topic_description: &dyn TopicDescription,
@@ -1557,6 +1560,7 @@ impl<Foo: DdsType> DataReader<Foo> {
             (None, None)
         };
         let mut reader = Self {
+            is_builtin,
             guid,
             qos: Arc::new(Mutex::new(qos.clone())),
             listener: Arc::new(RwLock::new(listener)),

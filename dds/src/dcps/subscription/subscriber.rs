@@ -56,6 +56,7 @@ use super::{
 
 #[derive(Clone)]
 pub struct Subscriber {
+    is_builtin: bool,
     guid: Guid,
     qos: Arc<Mutex<SubscriberQos>>,
     listener: Arc<RwLock<Option<Arc<dyn SubscriberListener>>>>,
@@ -144,6 +145,7 @@ impl DomainEntity for Subscriber {}
 
 impl Subscriber {
     pub(crate) fn new(
+        is_builtin: bool,
         qos: SubscriberQos,
         listener: Option<Arc<dyn SubscriberListener>>,
         mask: StatusMask,
@@ -151,6 +153,7 @@ impl Subscriber {
         participant: &Arc<DomainParticipant>,
     ) -> Self {
         let mut subscriber = Self {
+            is_builtin,
             guid: handle.to_guid(),
             qos: Arc::new(Mutex::new(qos)),
             listener: Arc::new(RwLock::new(listener)),
@@ -249,8 +252,16 @@ impl Subscriber {
 
         drop(dcps_bridge);
 
-        let datareader =
-            DataReader::new(guid, type_support, topic_description, qos, listener, mask, self_ref)?;
+        let datareader = DataReader::new(
+            false,
+            guid,
+            type_support,
+            topic_description,
+            qos,
+            listener,
+            mask,
+            self_ref,
+        )?;
 
         if let Ok(()) = self.is_enabled() {
             if self.get_qos()?.entity_factory.autoenable_created_entities {

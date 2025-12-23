@@ -114,6 +114,7 @@ use crate::{
 
 #[derive(Clone)]
 pub struct DomainParticipant {
+    is_builtin: bool,
     guid: Arc<Guid>,
     domain_id: DomainId,
     qos: Arc<Mutex<DomainParticipantQos>>,
@@ -328,6 +329,7 @@ impl UpdateStatus for DomainParticipant {}
 
 impl DomainParticipant {
     pub(crate) fn new(
+        is_builtin: bool,
         domain_id: DomainId,
         qos: DomainParticipantQos,
         listener: Option<Arc<dyn DomainParticipantListener>>,
@@ -336,6 +338,7 @@ impl DomainParticipant {
         let dcps_bridge = DcpsBridge::new(domain_id as u32);
         let guid = dcps_bridge.get_participant().map_err(|e| DdsError::Error(e.message))?.guid();
         let mut participant = Self {
+            is_builtin,
             guid: Arc::new(guid),
             domain_id,
             qos: Arc::new(Mutex::new(qos)),
@@ -560,7 +563,7 @@ impl DomainParticipant {
             .self_ref
             .as_ref()
             .ok_or(DdsError::Error("DomainParticipant is not properly initialized".to_string()))?;
-        let publisher = Publisher::new(qos, listener, mask, handle, self_ref);
+        let publisher = Publisher::new(false, qos, listener, mask, handle, self_ref);
         let qos = self.get_qos()?;
         if let Ok(()) = self.is_enabled() {
             if qos.entity_factory.autoenable_created_entities {
@@ -753,7 +756,7 @@ impl DomainParticipant {
             .self_ref
             .as_ref()
             .ok_or(DdsError::Error("DomainParticipant not properly initialized".to_string()))?;
-        let subscriber = Subscriber::new(qos, listener, mask, handle, self_ref);
+        let subscriber = Subscriber::new(false, qos, listener, mask, handle, self_ref);
         let qos = self.get_qos()?;
         if let Ok(()) = self.is_enabled() {
             if qos.entity_factory.autoenable_created_entities {
@@ -1349,7 +1352,7 @@ impl DomainParticipant {
             .self_ref
             .as_ref()
             .ok_or(DdsError::Error("DomainParticipant not properly initialized".to_string()))?;
-        let topic = Topic::new(topic_name, type_name, qos, listener, mask, handle, self_ref);
+        let topic = Topic::new(false, topic_name, type_name, qos, listener, mask, handle, self_ref);
         let qos = self.get_qos()?;
         if let Ok(()) = self.is_enabled() {
             if qos.entity_factory.autoenable_created_entities {

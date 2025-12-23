@@ -57,6 +57,7 @@ use crate::{
 
 #[derive(Clone)]
 pub struct Publisher {
+    is_builtin: bool,
     guid: Guid,
     qos: Arc<Mutex<PublisherQos>>,
     listener: Arc<RwLock<Option<Arc<dyn PublisherListener>>>>,
@@ -145,6 +146,7 @@ impl DomainEntity for Publisher {}
 
 impl Publisher {
     pub(crate) fn new(
+        is_builtin: bool,
         qos: PublisherQos,
         listener: Option<Arc<dyn PublisherListener>>,
         mask: StatusMask,
@@ -152,6 +154,7 @@ impl Publisher {
         participant: &Arc<DomainParticipant>,
     ) -> Self {
         let mut publisher = Self {
+            is_builtin,
             qos: Arc::new(Mutex::new(qos)),
             guid: handle.to_guid(),
             listener: Arc::new(RwLock::new(listener)),
@@ -253,6 +256,7 @@ impl Publisher {
         drop(dcps_bridge);
 
         let datawriter = DataWriter::new(
+            false,
             guid,
             type_support,
             &topic_arc,
