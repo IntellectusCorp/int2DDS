@@ -1507,8 +1507,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                     }
                 } else {
                     log::debug!(
-                        "Not alive state transition only occurs from ALIVE to NOT_ALIVE,
-                        cannot change to NOT_ALIVE_DISPOSED from {:?}",
+                        "Not alive state transition only occurs from ALIVE to NOT_ALIVE,cannot change to NOT_ALIVE_DISPOSED from {:?}",
                         info.instance_state
                     );
                 }
@@ -1533,8 +1532,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                     }
                 } else {
                     log::debug!(
-                        "Not alive state transition only occurs from ALIVE to NOT_ALIVE,
-                        cannot change to NOT_ALIVE_NO_WRITERS from {:?}",
+                        "Not alive state transition only occurs from ALIVE to NOT_ALIVE, cannot change to NOT_ALIVE_NO_WRITERS from {:?}",
                         info.instance_state
                     );
                 }
