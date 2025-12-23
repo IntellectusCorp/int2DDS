@@ -112,7 +112,6 @@ impl Int2DdsData {
         let index = self
             .descriptor
             .get_field_index(field_name)
-            .or_else(|| self.descriptor.fields.iter().position(|f| f.name == field_name))
             .ok_or("Field not found in type descriptor")?;
         let field = &self.descriptor.fields[index];
 
@@ -121,7 +120,7 @@ impl Int2DdsData {
         }
 
         if index >= self.values.len() {
-            self.values.resize_with(index + 1, || None);
+            return Err("Field index out of bounds");
         }
         self.values[index] = Some(value);
         Ok(())
@@ -130,10 +129,7 @@ impl Int2DdsData {
 
     /// Get a field value
     pub fn get_value(&self, field_name: &str) -> Option<&FieldValue> {
-        let index = self
-            .descriptor
-            .get_field_index(field_name)
-            .or_else(|| self.descriptor.fields.iter().position(|f| f.name == field_name))?;
+        let index = self.descriptor.get_field_index(field_name)?;
         self.get_value_by_index(index)
     }
 
