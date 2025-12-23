@@ -49,10 +49,14 @@ impl DynamicTypeSupport {
 
         // Write encapsulation header
         serializer.write_encapsulation_header().map_err(|e| DdsError::Error(e.to_string()))?;
+        let header_len = serializer.buffer_mut().len();
+        if header_len == 0 {
+            eprintln!("serialize_cdr: encapsulation header length is 0");
+        }
 
         // Serialize each field in order
-        for field in &self.descriptor.fields {
-            self.serialize_field_cdr(&mut serializer, data, field)?;
+        for (index, field) in self.descriptor.fields.iter().enumerate() {
+            self.serialize_field_cdr(&mut serializer, data, index, field)?;
         }
 
         Ok(serializer.into_bytes())
@@ -63,10 +67,11 @@ impl DynamicTypeSupport {
         &self,
         serializer: &mut CdrSerializer,
         data: &Int2DdsData,
+        index: usize,
         field: &crate::type_descriptor::FieldDescriptor,
     ) -> DdsResult<()> {
         let value = data
-            .get_value(&field.name)
+            .get_value_by_index(index)
             .ok_or_else(|| DdsError::Error(format!("Missing required field: {}", field.name)))?;
 
         self.serialize_value_cdr(serializer, value, &field.field_type)
@@ -150,8 +155,8 @@ impl DynamicTypeSupport {
             (FieldValue::Struct(nested_data), FieldTypeInfo::Struct { descriptor }) => {
                 // Recursively serialize nested struct
                 let nested_support = DynamicTypeSupport::new(descriptor.clone());
-                for field in &descriptor.fields {
-                    nested_support.serialize_field_cdr(serializer, nested_data, field)?;
+                for (index, field) in descriptor.fields.iter().enumerate() {
+                    nested_support.serialize_field_cdr(serializer, nested_data, index, field)?;
                 }
             }
             _ => {
@@ -173,9 +178,9 @@ impl DynamicTypeSupport {
         let mut result = Int2DdsData::new(self.descriptor.clone());
 
         // Deserialize each field in order
-        for field in &self.descriptor.fields {
+        for (index, field) in self.descriptor.fields.iter().enumerate() {
             let value = self.deserialize_field_cdr(&mut deserializer, &field.field_type)?;
-            result.values.insert(field.name.clone(), value);
+            result.values[index] = Some(value);
         }
 
         Ok(result)
@@ -281,10 +286,10 @@ impl DynamicTypeSupport {
             FieldTypeInfo::Struct { descriptor } => {
                 let nested_support = DynamicTypeSupport::new(descriptor.clone());
                 let mut nested_data = Int2DdsData::new(descriptor.clone());
-                for field in &descriptor.fields {
+                for (index, field) in descriptor.fields.iter().enumerate() {
                     let value =
                         nested_support.deserialize_field_cdr(deserializer, &field.field_type)?;
-                    nested_data.values.insert(field.name.clone(), value);
+                    nested_data.values[index] = Some(value);
                 }
                 Ok(FieldValue::Struct(Box::new(nested_data)))
             }
@@ -308,11 +313,77 @@ impl DynamicTypeSupport {
         let mut serializer = Xcdr2Serializer::new(true, self.descriptor.extensibility); // true = little endian
 
         // Write encapsulation header
-        serializer.write_encapsulation_header().map_err(|e| DdsError::Error(e.to_string()))?;
+        serializer
+            .write_encapsulation_header()
+            .map_err(|e| DdsError::Error(e.to_string()))?;
 
-        // Serialize each field in order
-        for field in &self.descriptor.fields {
-            self.serialize_field_xcdr2(&mut serializer, data, field)?;
+        // For Appendable/Mutable: write DHEADER
+        let size_pos = match self.descriptor.extensibility {
+            ExtensibilityKind::Final => None,
+            ExtensibilityKind::Appendable | ExtensibilityKind::Mutable => Some(
+                serializer
+                    .begin_struct()
+                    .map_err(|e| DdsError::Error(e.to_string()))?,
+            ),
+        };
+
+        let is_mutable = matches!(self.descriptor.extensibility, ExtensibilityKind::Mutable);
+
+        // Serialize each field
+        for (index, field) in self.descriptor.fields.iter().enumerate() {
+            // Check if field has value
+            let value = data.get_value_by_index(index);
+
+            if is_mutable {
+                // For Mutable types: write EMHEADER before each field
+                if field.is_optional {
+                    // Optional field: only serialize if value exists
+                    if let Some(val) = value {
+                        // Reserve space for EMHEADER
+                        let emheader_pos = serializer.reserve_dheader();
+                        let field_start = serializer.position();
+
+                        // Serialize the field value
+                        self.serialize_value_xcdr2(&mut serializer, val, &field.field_type)?;
+
+                        // Calculate field length and backpatch EMHEADER
+                        let field_len = (serializer.position() - field_start) as u32;
+                        let emheader = (field.member_id << 16) | (field_len & 0xFFFF);
+                        serializer.write_dheader_at(emheader_pos, emheader);
+                    }
+                    // If None, don't write anything (skip this field)
+                } else {
+                    // Required field: must have value
+                    let val = value.ok_or_else(|| {
+                        DdsError::Error(format!("Missing required field: {}", field.name))
+                    })?;
+
+                    // Reserve space for EMHEADER
+                    let emheader_pos = serializer.reserve_dheader();
+                    let field_start = serializer.position();
+
+                    // Serialize the field
+                    self.serialize_value_xcdr2(&mut serializer, val, &field.field_type)?;
+
+                    // Calculate field length and backpatch EMHEADER
+                    let field_len = (serializer.position() - field_start) as u32;
+                    let emheader = (field.member_id << 16) | (field_len & 0xFFFF);
+                    serializer.write_dheader_at(emheader_pos, emheader);
+                }
+            } else {
+                // For Final/Appendable: serialize field directly
+                let val = value.ok_or_else(|| {
+                    DdsError::Error(format!("Missing required field: {}", field.name))
+                })?;
+                self.serialize_value_xcdr2(&mut serializer, val, &field.field_type)?;
+            }
+        }
+
+        // For Appendable/Mutable: backpatch DHEADER
+        if let Some(size_pos) = size_pos {
+            serializer
+                .end_struct(size_pos)
+                .map_err(|e| DdsError::Error(e.to_string()))?;
         }
 
         Ok(serializer.into_bytes())
@@ -323,10 +394,11 @@ impl DynamicTypeSupport {
         &self,
         serializer: &mut Xcdr2Serializer,
         data: &Int2DdsData,
+        index: usize,
         field: &crate::type_descriptor::FieldDescriptor,
     ) -> DdsResult<()> {
         let value = data
-            .get_value(&field.name)
+            .get_value_by_index(index)
             .ok_or_else(|| DdsError::Error(format!("Missing required field: {}", field.name)))?;
 
         self.serialize_value_xcdr2(serializer, value, &field.field_type)
@@ -409,8 +481,8 @@ impl DynamicTypeSupport {
             }
             (FieldValue::Struct(nested_data), FieldTypeInfo::Struct { descriptor }) => {
                 let nested_support = DynamicTypeSupport::new(descriptor.clone());
-                for field in &descriptor.fields {
-                    nested_support.serialize_field_xcdr2(serializer, nested_data, field)?;
+                for (index, field) in descriptor.fields.iter().enumerate() {
+                    nested_support.serialize_field_xcdr2(serializer, nested_data, index, field)?;
                 }
             }
             _ => {
@@ -422,6 +494,8 @@ impl DynamicTypeSupport {
 
     /// Deserialize XCDR v2 data into Int2DdsData
     fn deserialize_xcdr2(&self, data: &[u8]) -> DdsResult<Int2DdsData> {
+        use int2dds::serialize::cdr::is_sentinel_member_id;
+
         if data.len() < 4 {
             return Err(DdsError::Error("Data too short for XCDR2 header".to_string()));
         }
@@ -431,10 +505,83 @@ impl DynamicTypeSupport {
 
         let mut result = Int2DdsData::new(self.descriptor.clone());
 
-        // Deserialize each field in order
-        for field in &self.descriptor.fields {
-            let value = self.deserialize_field_xcdr2(&mut deserializer, &field.field_type)?;
-            result.values.insert(field.name.clone(), value);
+        // For Appendable/Mutable: read DHEADER
+        let (object_size, start_position) = match self.descriptor.extensibility {
+            ExtensibilityKind::Final => (0, 0),
+            ExtensibilityKind::Appendable | ExtensibilityKind::Mutable => deserializer
+                .begin_struct()
+                .map_err(|e| DdsError::Error(e.to_string()))?,
+        };
+
+        let is_mutable = matches!(self.descriptor.extensibility, ExtensibilityKind::Mutable);
+
+        if is_mutable {
+            // Mutable: read by member_id
+            let object_end = start_position + object_size as usize;
+            let mut fields_read = vec![false; self.descriptor.fields.len()];
+
+            while deserializer.get_position() < object_end {
+                let (member_id, member_length) = deserializer
+                    .read_member_header()
+                    .map_err(|e| DdsError::Error(e.to_string()))?;
+
+                // Check for sentinel
+                if is_sentinel_member_id(member_id) {
+                    break;
+                }
+
+                let member_start = deserializer.get_position();
+
+                // Find field by member_id
+                if let Some((index, field)) = self
+                    .descriptor
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .find(|(_, f)| f.member_id == member_id)
+                {
+                    let value =
+                        self.deserialize_field_xcdr2(&mut deserializer, &field.field_type)?;
+                    result.values[index] = Some(value);
+                    fields_read[index] = true;
+
+                    // Skip remaining bytes if needed
+                    let consumed = deserializer.get_position() - member_start;
+                    if consumed < member_length as usize {
+                        deserializer
+                            .skip((member_length as usize) - consumed)
+                            .map_err(|e| DdsError::Error(e.to_string()))?;
+                    }
+                } else {
+                    // Unknown member_id - skip for forward compatibility
+                    deserializer
+                        .skip_member(member_length)
+                        .map_err(|e| DdsError::Error(e.to_string()))?;
+                }
+            }
+
+            // Check that all required fields were read
+            for (index, field) in self.descriptor.fields.iter().enumerate() {
+                if !field.is_optional && !fields_read[index] {
+                    return Err(DdsError::Error(format!(
+                        "Missing required field: {}",
+                        field.name
+                    )));
+                }
+            }
+        } else {
+            // Final/Appendable: read in order
+            for (index, field) in self.descriptor.fields.iter().enumerate() {
+                let value = self.deserialize_field_xcdr2(&mut deserializer, &field.field_type)?;
+                result.values[index] = Some(value);
+            }
+        }
+
+        // For Appendable/Mutable: validate and skip remaining bytes
+        if !matches!(self.descriptor.extensibility, ExtensibilityKind::Final) {
+            deserializer
+                .end_struct(object_size, start_position)
+                .map_err(|e| DdsError::Error(e.to_string()))?;
         }
 
         Ok(result)
@@ -540,10 +687,10 @@ impl DynamicTypeSupport {
             FieldTypeInfo::Struct { descriptor } => {
                 let nested_support = DynamicTypeSupport::new(descriptor.clone());
                 let mut nested_data = Int2DdsData::new(descriptor.clone());
-                for field in &descriptor.fields {
+                for (index, field) in descriptor.fields.iter().enumerate() {
                     let value =
                         nested_support.deserialize_field_xcdr2(deserializer, &field.field_type)?;
-                    nested_data.values.insert(field.name.clone(), value);
+                    nested_data.values[index] = Some(value);
                 }
                 Ok(FieldValue::Struct(Box::new(nested_data)))
             }
@@ -564,16 +711,14 @@ impl DynamicTypeSupport {
 
     /// Serialize only key fields
     fn serialize_key_fields(&self, data: &Int2DdsData) -> DdsResult<Vec<u8>> {
-        let key_fields = self.descriptor.key_fields();
-        if key_fields.is_empty() {
-            return Ok(Vec::new());
-        }
-
         let mut serializer = CdrSerializer::new(true); // true = little endian
         serializer.write_encapsulation_header().map_err(|e| DdsError::Error(e.to_string()))?;
 
-        for field in key_fields {
-            if let Some(value) = data.get_value(&field.name) {
+        for (index, field) in self.descriptor.fields.iter().enumerate() {
+            if !field.is_key {
+                continue;
+            }
+            if let Some(value) = data.get_value_by_index(index) {
                 self.serialize_value_cdr(&mut serializer, value, &field.field_type)?;
             }
         }
@@ -584,6 +729,10 @@ impl DynamicTypeSupport {
     /// Detect encoding from data and deserialize accordingly
     fn auto_deserialize(&self, data: &[u8]) -> DdsResult<Int2DdsData> {
         if data.len() < 2 {
+            eprintln!(
+                "DynamicTypeSupport::auto_deserialize: data too short (len={})",
+                data.len()
+            );
             return Err(DdsError::Error("Data too short for encoding detection".to_string()));
         }
 
@@ -599,6 +748,7 @@ impl DynamicTypeSupport {
         }
     }
 }
+
 
 impl TypeSupport for DynamicTypeSupport {
     fn type_id(&self) -> TypeId {
@@ -642,11 +792,18 @@ impl TypeSupport for DynamicTypeSupport {
             .ok_or_else(|| DdsError::Error("Expected Int2DdsData".to_string()))?;
 
         // Use XCDR version specified in the type descriptor
-        let bytes = match self.descriptor.xcdr_version {
+        let bytes_result = match self.descriptor.xcdr_version {
             Int2DdsXcdrVersion::Xcdr1 => self.serialize_cdr(dynamic_data)?,
             Int2DdsXcdrVersion::Xcdr2 => self.serialize_xcdr2(dynamic_data)?,
         };
-        Ok(bytes.into())
+        if bytes_result.len() < 2 {
+            eprintln!(
+                "DynamicTypeSupport::serialize: serialized data too short (len={})",
+                bytes_result.len()
+            );
+            return Err(DdsError::Error("Serialized data too short".to_string()));
+        }
+        Ok(bytes_result.into())
     }
 
     fn deserialize(&self, data: &[u8]) -> DdsResult<Box<dyn Any>> {
@@ -663,11 +820,20 @@ impl TypeSupport for DynamicTypeSupport {
             .downcast_ref::<Int2DdsData>()
             .ok_or_else(|| DdsError::Error("Expected Int2DdsData".to_string()))?;
 
-        let bytes = match format {
+        let bytes_result = match format {
             SerializationFormat::Cdr => self.serialize_cdr(dynamic_data)?,
             SerializationFormat::Xcdr { .. } => self.serialize_xcdr2(dynamic_data)?,
         };
-        Ok(bytes.into())
+        if bytes_result.len() < 2 {
+            eprintln!(
+                "DynamicTypeSupport::serialize_with_format: serialized data too short (len={}, fields={}, values={})",
+                bytes_result.len(),
+                self.descriptor.fields.len(),
+                dynamic_data.values.len()
+            );
+            return Err(DdsError::Error("Serialized data too short".to_string()));
+        }
+        Ok(bytes_result.into())
     }
 
     fn deserialize_with_format(
@@ -703,8 +869,7 @@ impl TypeSupport for DynamicTypeSupport {
         };
 
         // Compute key from key fields
-        let key_fields = self.descriptor.key_fields();
-        if key_fields.is_empty() {
+        if !self.descriptor.fields.iter().any(|field| field.is_key) {
             return InstanceHandle::NIL;
         }
 
@@ -712,8 +877,11 @@ impl TypeSupport for DynamicTypeSupport {
         let mut hash = [0u8; 16];
         let mut hash_idx = 0usize;
 
-        for field in key_fields {
-            if let Some(value) = dynamic_data.get_value(&field.name) {
+        for (index, field) in self.descriptor.fields.iter().enumerate() {
+            if !field.is_key {
+                continue;
+            }
+            if let Some(value) = dynamic_data.get_value_by_index(index) {
                 hash_value_direct(value, &mut hash, &mut hash_idx);
             }
         }
@@ -769,7 +937,7 @@ fn hash_value_direct(value: &FieldValue, hash: &mut [u8; 16], hash_idx: &mut usi
             }
         }
         FieldValue::Struct(nested) => {
-            for value in nested.values.values() {
+            for value in nested.values.iter().flatten() {
                 hash_value_direct(value, hash, hash_idx);
             }
         }
@@ -795,9 +963,9 @@ mod tests {
         let support = DynamicTypeSupport::new(desc.clone());
 
         let mut data = Int2DdsData::new(desc);
-        data.values.insert("id".to_string(), FieldValue::UInt32(123));
-        data.values.insert("message".to_string(), FieldValue::String("hello".to_string()));
-        data.values.insert("value".to_string(), FieldValue::Float64(3.14));
+        data.set_value("id", FieldValue::UInt32(123)).unwrap();
+        data.set_value("message", FieldValue::String("hello".to_string())).unwrap();
+        data.set_value("value", FieldValue::Float64(3.14)).unwrap();
 
         // Serialize
         let serialized = support.serialize_cdr(&data).unwrap();
@@ -819,9 +987,9 @@ mod tests {
         let support = DynamicTypeSupport::new(desc.clone());
 
         let mut data = Int2DdsData::new(desc);
-        data.values.insert("id".to_string(), FieldValue::UInt32(456));
-        data.values.insert("message".to_string(), FieldValue::String("world".to_string()));
-        data.values.insert("value".to_string(), FieldValue::Float64(2.71));
+        data.set_value("id", FieldValue::UInt32(456)).unwrap();
+        data.set_value("message", FieldValue::String("world".to_string())).unwrap();
+        data.set_value("value", FieldValue::Float64(2.71)).unwrap();
 
         // Serialize
         let serialized = support.serialize_xcdr2(&data).unwrap();
@@ -843,9 +1011,9 @@ mod tests {
         let support = DynamicTypeSupport::new(desc.clone());
 
         let mut data = Int2DdsData::new(desc);
-        data.values.insert("id".to_string(), FieldValue::UInt32(789));
-        data.values.insert("message".to_string(), FieldValue::String("test".to_string()));
-        data.values.insert("value".to_string(), FieldValue::Float64(1.0));
+        data.set_value("id", FieldValue::UInt32(789)).unwrap();
+        data.set_value("message", FieldValue::String("test".to_string())).unwrap();
+        data.set_value("value", FieldValue::Float64(1.0)).unwrap();
 
         let key_bytes = support.serialize_key_fields(&data).unwrap();
         assert!(!key_bytes.is_empty());
@@ -857,9 +1025,9 @@ mod tests {
         let support = DynamicTypeSupport::new(desc.clone());
 
         let mut data = Int2DdsData::new(desc);
-        data.values.insert("id".to_string(), FieldValue::UInt32(100));
-        data.values.insert("message".to_string(), FieldValue::String("msg".to_string()));
-        data.values.insert("value".to_string(), FieldValue::Float64(0.0));
+        data.set_value("id", FieldValue::UInt32(100)).unwrap();
+        data.set_value("message", FieldValue::String("msg".to_string())).unwrap();
+        data.set_value("value", FieldValue::Float64(0.0)).unwrap();
 
         let handle = support.compute_key(&data as &dyn Any);
         assert_ne!(handle, InstanceHandle::NIL);
