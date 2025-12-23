@@ -155,7 +155,7 @@ static Int2DdsTypeDescriptor* create_performance_type_descriptor(uint32_t max_da
     Int2DdsTypeDescriptor* type_desc = NULL;
     Int2DdsRet ret;
 
-    ret = int2dds_type_descriptor_create("ThroughputTestData", &type_desc);
+    ret = int2dds_type_descriptor_create("PerformanceData", &type_desc);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create performance type descriptor: %d\n", ret);
         return NULL;
@@ -167,7 +167,7 @@ static Int2DdsTypeDescriptor* create_performance_type_descriptor(uint32_t max_da
     ret = int2dds_type_descriptor_add_u64(type_desc, "timestamp", false);
     if (ret != INT2DDS_RET_OK) goto error;
 
-    ret = int2dds_type_descriptor_add_sequence(type_desc, "data", UInt8, max_data_size, false);
+    ret = int2dds_type_descriptor_add_bytes(type_desc, "data", max_data_size, false);
     if (ret != INT2DDS_RET_OK) goto error;
 
     return type_desc;
@@ -198,7 +198,7 @@ static Int2DdsTypeDescriptor* create_latency_type_descriptor(uint32_t max_data_s
     ret = int2dds_type_descriptor_add_u64(type_desc, "echo_timestamp", false);
     if (ret != INT2DDS_RET_OK) goto error;
 
-    ret = int2dds_type_descriptor_add_sequence(type_desc, "data", UInt8, max_data_size, false);
+    ret = int2dds_type_descriptor_add_bytes(type_desc, "data", max_data_size, false);
     if (ret != INT2DDS_RET_OK) goto error;
 
     return type_desc;
@@ -261,11 +261,9 @@ static void on_data_available_throughput(
 
         /* Get values from data container */
         uint64_t seq_num = 0;
-        uint32_t data_len = 0;
+        uint32_t data_len = (uint32_t)g_data_size;
 
         int2dds_data_get_u64(g_recv_data, "seq_num", &seq_num);
-        /* Get byte sequence length by calling get_bytes with NULL buffer */
-        int2dds_data_get_bytes(g_recv_data, "data", NULL, 0, &data_len);
 
         /* Start timing on first message */
         if (stats.total_received == 0) {

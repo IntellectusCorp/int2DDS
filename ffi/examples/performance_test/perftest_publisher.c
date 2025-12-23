@@ -153,7 +153,7 @@ static Int2DdsTypeDescriptor* create_performance_type_descriptor(uint32_t max_da
     ret = int2dds_type_descriptor_add_u64(type_desc, "timestamp", false);
     if (ret != INT2DDS_RET_OK) { int2dds_type_descriptor_delete(type_desc); return NULL; }
 
-    ret = int2dds_type_descriptor_add_sequence(type_desc, "data", UInt8, max_data_size, false);
+    ret = int2dds_type_descriptor_add_bytes(type_desc, "data", max_data_size, false);
     if (ret != INT2DDS_RET_OK) { int2dds_type_descriptor_delete(type_desc); return NULL; }
 
     return type_desc;
@@ -177,7 +177,7 @@ static Int2DdsTypeDescriptor* create_latency_type_descriptor(uint32_t max_data_s
     ret = int2dds_type_descriptor_add_u64(type_desc, "echo_timestamp", false);
     if (ret != INT2DDS_RET_OK) { int2dds_type_descriptor_delete(type_desc); return NULL; }
 
-    ret = int2dds_type_descriptor_add_sequence(type_desc, "data", UInt8, max_data_size, false);
+    ret = int2dds_type_descriptor_add_bytes(type_desc, "data", max_data_size, false);
     if (ret != INT2DDS_RET_OK) { int2dds_type_descriptor_delete(type_desc); return NULL; }
 
     return type_desc;
@@ -537,6 +537,9 @@ static void run_throughput_test(const publisher_args_t *args) {
         goto cleanup;
     }
 
+    /* Set fixed payload once to avoid per-sample copy */
+    int2dds_data_set_bytes(data, "data", payload, (uint32_t)args->data_len);
+
     clock_gettime(CLOCK_MONOTONIC, &start_time);
     stats.start_time = start_time;
     last_report_time = start_time;
@@ -557,7 +560,6 @@ static void run_throughput_test(const publisher_args_t *args) {
         /* Set data fields */
         int2dds_data_set_u64(data, "seq_num", seq_num);
         int2dds_data_set_u64(data, "timestamp", get_current_time_ns());
-        int2dds_data_set_bytes(data, "data", payload, (uint32_t)args->data_len);
 
         /* Write */
         ret = int2dds_write(writer, data);
@@ -879,6 +881,9 @@ static void run_latency_test(const publisher_args_t *args) {
     }
     memset(payload, 0xAA, args->data_len);
 
+    /* Set fixed payload once to avoid per-sample copy */
+    int2dds_data_set_bytes(data, "data", payload, (uint32_t)args->data_len);
+
     clock_gettime(CLOCK_MONOTONIC, &start_time);
     last_report_time = start_time;
 
@@ -904,7 +909,6 @@ static void run_latency_test(const publisher_args_t *args) {
             int2dds_data_set_u64(data, "seq_num", seq_num);
             int2dds_data_set_u64(data, "send_timestamp", get_current_time_ns());
             int2dds_data_set_u64(data, "echo_timestamp", 0);
-            int2dds_data_set_bytes(data, "data", payload, (uint32_t)args->data_len);
 
             ret = int2dds_write(writer, data);
             if (ret != INT2DDS_RET_OK) {
@@ -995,7 +999,6 @@ static void run_latency_test(const publisher_args_t *args) {
             int2dds_data_set_u64(data, "seq_num", seq_num);
             int2dds_data_set_u64(data, "send_timestamp", get_current_time_ns());
             int2dds_data_set_u64(data, "echo_timestamp", 0);
-            int2dds_data_set_bytes(data, "data", payload, (uint32_t)args->data_len);
 
             ret = int2dds_write(writer, data);
             if (ret != INT2DDS_RET_OK) {
@@ -1297,6 +1300,9 @@ static void run_local_latency_test(const publisher_args_t *args) {
         goto cleanup;
     }
 
+    /* Set fixed payload once to avoid per-sample copy */
+    int2dds_data_set_bytes(data, "data", payload, (uint32_t)args->data_len);
+
     clock_gettime(CLOCK_MONOTONIC, &start_time);
     stats.start_time = start_time;
     last_report_time = start_time;
@@ -1335,7 +1341,6 @@ static void run_local_latency_test(const publisher_args_t *args) {
         /* Set data fields */
         int2dds_data_set_u64(data, "seq_num", seq_num);
         int2dds_data_set_u64(data, "timestamp", get_current_time_ns());
-        int2dds_data_set_bytes(data, "data", payload, (uint32_t)args->data_len);
 
         /* Write */
         ret = int2dds_write(writer, data);
