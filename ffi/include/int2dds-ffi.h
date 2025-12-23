@@ -158,7 +158,7 @@ typedef struct Int2DdsCondition Int2DdsCondition;
 typedef struct Int2DdsConditionSeq Int2DdsConditionSeq;
 
 /**
- * Dynamic data container - holds field values by name
+ * Dynamic data container - holds field values by index
  */
 typedef struct Int2DdsData Int2DdsData;
 
