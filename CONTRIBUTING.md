@@ -92,9 +92,9 @@ cargo build
 cargo build --release
 
 # Build specific package
-cargo build -p int2DDS
-cargo build -p int2DDS-derive
-cargo build -p int2DDS-ffi
+cargo build -p int2dds
+cargo build -p int2dds-derive
+cargo build -p int2dds-ffi
 
 # Build with all features
 cargo build --all-features
@@ -107,7 +107,7 @@ cargo build --all-features
 cargo test
 
 # Run tests for specific package
-cargo test -p int2DDS
+cargo test -p int2dds
 
 # Run tests with output
 cargo test -- --nocapture
@@ -126,11 +126,11 @@ RUST_LOG=debug cargo test
 ls dds/examples/
 
 # Run specific example
-cargo run --example hello_world_reliable_publisher
-cargo run --example hello_world_reliable_subscriber
+cargo run --example hello_world_param -- --role pub --domain 0 --reliability reliable
+cargo run --example hello_world_param -- --role sub --domain 0 --reliability reliable
 
 # Run with environment variables
-INT2DDS_THREAD_MONITORING=true cargo run --example hello_world_reliable_publisher
+INT2DDS_THREAD_MONITORING=true cargo run --example hello_world_param -- --role pub --domain 0 --reliability reliable
 RUST_LOG=info cargo run --example perftest_publisher
 ```
 
