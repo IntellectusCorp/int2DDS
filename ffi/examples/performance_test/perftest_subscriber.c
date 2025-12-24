@@ -1,7 +1,6 @@
 /*
  * int2dds FFI Performance Test Subscriber
  *
- * Based on CycloneDDS performance test, converted to use int2dds FFI API.
  * This program receives test data and measures performance:
  * - Throughput: Measures message throughput, bandwidth, and packet loss
  * - Latency: Echoes received data back to publisher for latency measurement

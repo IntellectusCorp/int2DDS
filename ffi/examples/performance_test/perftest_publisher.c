@@ -1,7 +1,6 @@
 /*
  * int2dds FFI Performance Test Publisher
  *
- * Based on CycloneDDS performance test, converted to use int2dds FFI API.
  * This program measures DDS performance in different modes:
  * - Throughput: Measures message throughput and bandwidth
  * - Latency: Measures round-trip latency with echo from subscriber
