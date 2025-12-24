@@ -1,3 +1,4 @@
+#![allow(clippy::needless_doctest_main)]
 //! # int2dds
 //!
 //! A Rust implementation of the Data Distribution Service (DDS) middleware standard,
@@ -54,59 +55,59 @@
 //!     }
 //! }
 //!
-//! # fn main() {
-//! let domain_id = 0;
+//! fn main() {
+//!     let domain_id = 0;
 //!
-//! let factory = DomainParticipantFactory::get_instance();
-//! let participant = factory
-//!     .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
-//!     .unwrap();
+//!     let factory = DomainParticipantFactory::get_instance();
+//!     let participant = factory
+//!         .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+//!         .unwrap();
 //!
-//! let topic = participant
-//!     .create_topic::<HelloWorld>(
-//!         "HelloWorldTopic",
-//!         "HelloWorld",
-//!         TopicQos::default(),
-//!         None,
-//!         StatusMask::default(),
-//!     )
-//!     .unwrap();
+//!     let topic = participant
+//!         .create_topic::<HelloWorld>(
+//!             "HelloWorldTopic",
+//!             "HelloWorld",
+//!             TopicQos::default(),
+//!             None,
+//!             StatusMask::default(),
+//!         )
+//!         .unwrap();
 //!
-//! let publisher = participant
-//!     .create_publisher(PublisherQos::default(), None, StatusMask::default())
-//!     .unwrap();
+//!     let publisher = participant
+//!         .create_publisher(PublisherQos::default(), None, StatusMask::default())
+//!         .unwrap();
 //!
-//! let writer_qos = DataWriterQos {
-//!     reliability: ReliabilityQosPolicy {
-//!         kind: ReliabilityQosPolicyKind::Reliable,
-//!         max_blocking_time: Duration { sec: 0, nanosec: 100_000_000 },
-//!     },
-//!     ..Default::default()
-//! };
-//!
-//! let writer = publisher
-//!     .create_datawriter::<HelloWorld>(
-//!         &topic,
-//!         writer_qos,
-//!         Some(Arc::new(MyListener)),
-//!         StatusMask::default(),
-//!     )
-//!     .unwrap();
-//!
-//! println!("Publisher started on domain {}", domain_id);
-//!
-//! let mut i = 0;
-//! loop {
-//!     let data = HelloWorld {
-//!         index: i,
-//!         message: format!("Hello, DDS! #{}", i),
+//!     let writer_qos = DataWriterQos {
+//!         reliability: ReliabilityQosPolicy {
+//!             kind: ReliabilityQosPolicyKind::Reliable,
+//!             max_blocking_time: Duration { sec: 0, nanosec: 100_000_000 },
+//!         },
+//!         ..Default::default()
 //!     };
-//!     writer.write(&data, InstanceHandle::NIL).unwrap();
-//!     println!("Published: {:?}", data);
-//!     std::thread::sleep(std::time::Duration::from_secs(1));
-//!     i += 1;
+//!
+//!     let writer = publisher
+//!         .create_datawriter::<HelloWorld>(
+//!             &topic,
+//!             writer_qos,
+//!             Some(Arc::new(MyListener)),
+//!             StatusMask::default(),
+//!         )
+//!         .unwrap();
+//!
+//!     println!("Publisher started on domain {}", domain_id);
+//!
+//!     let mut i = 0;
+//!     loop {
+//!         let data = HelloWorld {
+//!             index: i,
+//!             message: format!("Hello, DDS! #{}", i),
+//!         };
+//!         writer.write(&data, InstanceHandle::NIL).unwrap();
+//!         println!("Published: {:?}", data);
+//!         std::thread::sleep(std::time::Duration::from_secs(1));
+//!         i += 1;
+//!     }
 //! }
-//! # }
 //! ```
 //!
 //! ### examples/subscriber_example.rs
@@ -171,52 +172,52 @@
 //!     }
 //! }
 //!
-//! # fn main() {
-//! let domain_id = 0;
+//! fn main() {
+//!     let domain_id = 0;
 //!
-//! let factory = DomainParticipantFactory::get_instance();
-//! let participant = factory
-//!     .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
-//!     .unwrap();
+//!     let factory = DomainParticipantFactory::get_instance();
+//!     let participant = factory
+//!         .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+//!         .unwrap();
 //!
-//! let topic = participant
-//!     .create_topic::<HelloWorld>(
-//!         "HelloWorldTopic",
-//!         "HelloWorld",
-//!         TopicQos::default(),
-//!         None,
-//!         StatusMask::default(),
-//!     )
-//!     .unwrap();
+//!     let topic = participant
+//!         .create_topic::<HelloWorld>(
+//!             "HelloWorldTopic",
+//!             "HelloWorld",
+//!             TopicQos::default(),
+//!             None,
+//!             StatusMask::default(),
+//!         )
+//!         .unwrap();
 //!
-//! let subscriber = participant
-//!     .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
-//!     .unwrap();
+//!     let subscriber = participant
+//!         .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+//!         .unwrap();
 //!
-//! let reader_qos = DataReaderQos {
-//!     reliability: ReliabilityQosPolicy {
-//!         kind: ReliabilityQosPolicyKind::Reliable,
-//!         max_blocking_time: Duration { sec: 0, nanosec: 100_000_000 },
-//!     },
-//!     ..Default::default()
-//! };
+//!     let reader_qos = DataReaderQos {
+//!         reliability: ReliabilityQosPolicy {
+//!             kind: ReliabilityQosPolicyKind::Reliable,
+//!             max_blocking_time: Duration { sec: 0, nanosec: 100_000_000 },
+//!         },
+//!         ..Default::default()
+//!     };
 //!
-//! let _reader = subscriber
-//!     .create_datareader::<HelloWorld>(
-//!         &topic,
-//!         reader_qos,
-//!         Some(Arc::new(MyListener)),
-//!         StatusMask::default(),
-//!     )
-//!     .unwrap();
+//!     let _reader = subscriber
+//!         .create_datareader::<HelloWorld>(
+//!             &topic,
+//!             reader_qos,
+//!             Some(Arc::new(MyListener)),
+//!             StatusMask::default(),
+//!         )
+//!         .unwrap();
 //!
-//! println!("Subscriber started on domain {}", domain_id);
-//! println!("Waiting for data...");
+//!     println!("Subscriber started on domain {}", domain_id);
+//!     println!("Waiting for data...");
 //!
-//! loop {
-//!     std::thread::sleep(std::time::Duration::from_secs(1));
+//!     loop {
+//!         std::thread::sleep(std::time::Duration::from_secs(1));
+//!     }
 //! }
-//! # }
 //! ```
 //!
 //! Run the examples:
