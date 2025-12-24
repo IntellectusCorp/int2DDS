@@ -586,7 +586,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
             self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
         for (instance_handle, changes) in instance_map.iter() {
-            if changes.is_empty() && self.check_if_not_alive_no_writers(*instance_handle)? {
+            if changes.is_empty() && self.check_if_no_writers(*instance_handle)? {
                 key_to_remove = Some(*instance_handle);
                 break;
             }
@@ -600,24 +600,9 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
         }
     }
 
-    // Checks if the instance is in NOT_ALIVE_NO_WRITERS state.
-    fn check_if_not_alive_no_writers(&self, instance_handle: InstanceHandle) -> DdsResult<bool> {
-        let data_reader = self
-            .data_reader
-            .upgrade()
-            .ok_or(DdsError::Error("DataReader has been dropped".to_string()))?;
-
-        let instance_infos = (*data_reader).get_instance_infos()?;
-
-        if let Some(info) = instance_infos.get(&instance_handle) {
-            if info.instance_state == InstanceStateKind::NOT_ALIVE_NO_WRITERS_INSTANCE_STATE {
-                Ok(true)
-            } else {
-                Ok(false)
-            }
-        } else {
-            Err(DdsError::BadParameter)
-        }
+    // Checks if there is no writer writing to this instance.
+    fn check_if_no_writers(&self, instance_handle: InstanceHandle) -> DdsResult<bool> {
+        Ok(self.get_owner_of_instance(instance_handle).is_none())
     }
 
     /// Adds CacheChange to the instance map.
