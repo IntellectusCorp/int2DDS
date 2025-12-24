@@ -327,9 +327,8 @@
 //!
 //! Check the `examples/` directory for comprehensive usage examples:
 //!
-//! - `hello_world_reliable_publisher/subscriber`: Basic reliable communication
-//! - `hello_world_best_effort_publisher/subscriber`: Best-effort communication
-//! - `hello_world_publisher_with_key`: Using keyed topics
+//! - `hello_world_param`: Configurable Communication
+//! - `qos_profile_publisher/subscriber`: QoS-based Communication
 //! - `perftest_publisher/subscriber`: Performance testing
 
 #[cfg(test)]
