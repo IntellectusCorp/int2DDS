@@ -189,6 +189,11 @@ impl Subscriber {
         subscriber
     }
 
+    /// Returns whether this subscriber is a built-in entity.
+    pub(crate) fn is_builtin(&self) -> bool {
+        self.is_builtin
+    }
+
     /// Creates a new `DataReader` for receiving data of type `Foo` from the specified topic.
     ///
     /// A data reader is the primary interface for receiving data samples from a topic. Once created,

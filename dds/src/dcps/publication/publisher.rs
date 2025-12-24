@@ -186,6 +186,11 @@ impl Publisher {
         publisher
     }
 
+    /// Returns whether this publisher is a built-in entity.
+    pub(crate) fn is_builtin(&self) -> bool {
+        self.is_builtin
+    }
+
     /// Creates a new `DataWriter` for publishing data of type `Foo` to the specified topic.
     ///
     /// A data writer is the primary interface for publishing data samples to a topic. Once created,
