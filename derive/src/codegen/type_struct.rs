@@ -111,7 +111,7 @@ pub fn derive_struct_impl(
     let xcdr_deserialize_impl =
         generate_xcdr_deserialize_impl(name, fields, crate_path, type_config.extensibility);
 
-    let additional_derives = generate_additional_derives(input, name);
+    let additional_derives = generate_additional_derives(input, name, type_config);
 
     quote! {
         #type_support_struct
@@ -842,7 +842,7 @@ pub fn derive_tuple_struct_impl(
     let xcdr_deserialize_impl =
         generate_tuple_xcdr_deserialize_impl(name, fields, crate_path, type_config.extensibility);
 
-    let additional_derives = generate_additional_derives(input, name);
+    let additional_derives = generate_additional_derives(input, name, type_config);
 
     quote! {
         #type_support_struct
