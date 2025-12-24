@@ -190,6 +190,11 @@ impl Topic {
         topic
     }
 
+    /// Returns whether this topic is a built-in entity.
+    pub(crate) fn is_builtin(&self) -> bool {
+        self.is_builtin
+    }
+
     pub fn get_inconsistent_topic_status(&self) -> DdsResult<InconsistentTopicStatus> {
         self.is_deleted()?;
 

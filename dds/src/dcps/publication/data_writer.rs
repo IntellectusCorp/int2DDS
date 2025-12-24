@@ -106,6 +106,7 @@ pub(crate) trait DataWriterInternal: DataWriterBase {
     fn get_type_id(&self) -> TypeId;
     fn delete(&self);
     fn is_deleted(&self) -> DdsResult<()>;
+    fn is_builtin(&self) -> bool;
 }
 
 pub struct DataWriter<Foo> {
@@ -1876,6 +1877,10 @@ impl<Foo: 'static + Clone> DataWriterInternal for DataWriter<Foo> {
         } else {
             Ok(())
         }
+    }
+
+    fn is_builtin(&self) -> bool {
+        self.is_builtin
     }
 }
 

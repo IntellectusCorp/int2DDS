@@ -137,6 +137,7 @@ pub(crate) trait DataReaderInternal: DataReaderBase {
     fn get_type_id(&self) -> TypeId;
     fn delete(&self);
     fn is_deleted(&self) -> DdsResult<()>;
+    fn is_builtin(&self) -> bool;
     fn get_topic(&self) -> DdsResult<Topic>;
     fn get_readconditions(&self) -> DdsResult<Vec<Arc<dyn ReadConditionTrait + Send + Sync>>>;
     fn delete_readcondition_internal(
@@ -2944,6 +2945,10 @@ impl<Foo: 'static + Clone + Debug> DataReaderInternal for DataReader<Foo> {
         } else {
             Ok(())
         }
+    }
+
+    fn is_builtin(&self) -> bool {
+        self.is_builtin
     }
 
     fn get_topic(&self) -> DdsResult<Topic> {
