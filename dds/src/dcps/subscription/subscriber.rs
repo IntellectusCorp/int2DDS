@@ -74,7 +74,7 @@ pub struct Subscriber {
     mask: Arc<RwLock<StatusMask>>,
     status_condition: Arc<Mutex<StatusCondition<SubscriberQos>>>,
     pub(crate) self_ref: Option<Arc<Subscriber>>,
-    enabled: Arc<AtomicBool>,
+    pub(crate) enabled: Arc<AtomicBool>,
     deleted: Arc<AtomicBool>,
     readers_by_topic_name:
         Arc<Mutex<HashMap<String, Vec<Weak<dyn DataReaderInternal<Qos = DataReaderQos>>>>>>,
