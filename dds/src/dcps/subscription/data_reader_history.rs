@@ -442,48 +442,54 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
     }
 
     fn update_instance_state(&self, cache_change: &CacheChange) -> DdsResult<()> {
+        if cache_change.instance_handle().is_nil() {
+            return Ok(());
+        }
+
         let data_reader = self
             .data_reader
             .upgrade()
             .ok_or(DdsError::Error("DataReader has been dropped".to_string()))?;
 
-        if cache_change.instance_handle().is_nil() {
-            return Ok(());
+        let change_kind = cache_change.kind();
+
+        match change_kind {
+            ChangeKind::Alive
+            | ChangeKind::AliveFiltered
+            | ChangeKind::NotAliveDisposed
+            | ChangeKind::NotAliveDisposedUnregistered => {
+                if !self.is_writer_owner_of_instance(
+                    cache_change.writer_guid(),
+                    cache_change.instance_handle(),
+                )? {
+                    debug!(
+                        "Rejecting change, writer {:?} is not owner of instance: {:?}",
+                        cache_change.writer_guid(),
+                        cache_change.instance_handle()
+                    );
+                    return Err(DdsError::IllegalOperation);
+                }
+
+                let new_state = match change_kind {
+                    ChangeKind::Alive | ChangeKind::AliveFiltered => {
+                        InstanceStateKind::ALIVE_INSTANCE_STATE
+                    }
+                    _ => InstanceStateKind::NOT_ALIVE_DISPOSED_INSTANCE_STATE,
+                };
+
+                data_reader.update_instance_state(
+                    cache_change.instance_handle(),
+                    new_state,
+                    Some(cache_change),
+                )?;
+            }
+            _ => {}
         }
 
-        if cache_change.kind() == ChangeKind::Alive
-            || cache_change.kind() == ChangeKind::AliveFiltered
-            || cache_change.kind() == ChangeKind::NotAliveDisposed
-        {
-            if !self.is_writer_owner_of_instance(
-                cache_change.writer_guid(),
-                cache_change.instance_handle(),
-            )? {
-                debug!(
-                    "Rejecting change, writer {:?} is not owner of instance: {:?}",
-                    cache_change.writer_guid(),
-                    cache_change.instance_handle()
-                );
-
-                return Err(DdsError::IllegalOperation);
-            }
-
-            let new_state = match cache_change.kind() {
-                ChangeKind::Alive | ChangeKind::AliveFiltered => {
-                    InstanceStateKind::ALIVE_INSTANCE_STATE
-                }
-                ChangeKind::NotAliveDisposed => {
-                    InstanceStateKind::NOT_ALIVE_DISPOSED_INSTANCE_STATE
-                }
-                _ => unreachable!(),
-            };
-
-            data_reader.update_instance_state(
-                cache_change.instance_handle(),
-                new_state,
-                Some(cache_change),
-            )?
-        } else if cache_change.kind() == ChangeKind::NotAliveUnregistered {
+        if matches!(
+            change_kind,
+            ChangeKind::NotAliveUnregistered | ChangeKind::NotAliveDisposedUnregistered
+        ) {
             self.remove_writer_from_owner_candidates(cache_change.writer_guid())?;
         }
 
