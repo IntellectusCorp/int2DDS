@@ -2,13 +2,12 @@
 #![allow(unused_variables)]
 
 use std::collections::HashMap;
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use log::{debug, error, warn};
 use mio::{Events, Poll, Token, Waker};
 
-use crate::rtps::entities::participant::Participant;
 use crate::utils::timer::timer_handler::{TimerCallback, TimerMessage, TimerMessageQueue};
 
 const WAKER_TOKEN: Token = Token(0);
@@ -110,7 +109,6 @@ impl Timer {
 }
 
 pub struct TimerTask {
-    participant: Weak<Participant>,
     poll: Poll,
     waker: Arc<Waker>,
     timers: HashMap<String, Timer>,
@@ -118,18 +116,12 @@ pub struct TimerTask {
 }
 
 impl TimerTask {
-    pub(crate) fn new(participant: Arc<Participant>) -> Self {
+    pub(crate) fn new() -> Self {
         let poll = Poll::new().expect("Failed to create poll");
         let waker =
             Arc::new(Waker::new(poll.registry(), WAKER_TOKEN).expect("Failed to create waker"));
 
-        Self {
-            participant: Arc::downgrade(&participant),
-            poll,
-            waker,
-            timers: HashMap::new(),
-            running: false,
-        }
+        Self { poll, waker, timers: HashMap::new(), running: false }
     }
 
     pub(crate) fn waker(&self) -> Arc<Waker> {
@@ -142,8 +134,6 @@ impl TimerTask {
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.running = true;
         let mut events = Events::with_capacity(128);
-
-        // debug!("Timer task event loop started for participant: {:?}", self.participant.guid());
 
         while self.running {
             let timeout = self.calculate_next_timeout();
@@ -170,7 +160,6 @@ impl TimerTask {
             }
         }
 
-        // debug!("Timer task event loop finished for participant: {:?}", self.participant.guid());
         Ok(())
     }
 

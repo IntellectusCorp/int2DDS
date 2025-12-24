@@ -1374,7 +1374,7 @@ impl UnicastMessageProcessor for UserLogic {
 
                         let timer_id = format!("nackfrag_{:?}_{:?}", remote_writer_guid, last_sn);
                         if let Ok(locked_timer_handler) =
-                            TimerHandler::get_instance(participant.clone()).lock()
+                            TimerHandler::get_instance(participant.guid().prefix()).lock()
                         {
                             locked_timer_handler.remove_timer(timer_id.clone());
                             locked_timer_handler.add_timer(

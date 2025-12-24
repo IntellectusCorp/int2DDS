@@ -8,7 +8,7 @@
 #![allow(unused_variables)]
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -17,8 +17,6 @@ use mio::Waker;
 
 use crate::rtps::common::guid::{Guid, GuidPrefix};
 use crate::rtps::common::rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult};
-use crate::rtps::entities::entity::Entity;
-use crate::rtps::entities::participant::Participant;
 use crate::utils::timer::timer_task::TimerTask;
 
 pub type TimerCallback = Arc<dyn Fn() + Send + Sync>;
@@ -35,11 +33,10 @@ pub(crate) enum TimerMessage {
 
 pub(crate) type TimerMessageQueue = Arc<Mutex<Vec<TimerMessage>>>;
 
-pub(crate) static INSTANCE: OnceLock<Mutex<HashMap<Guid, Arc<Mutex<TimerHandler>>>>> =
+pub(crate) static INSTANCE: OnceLock<Mutex<HashMap<GuidPrefix, Arc<Mutex<TimerHandler>>>>> =
     OnceLock::new();
 
 pub(crate) struct TimerHandler {
-    participant: Weak<Participant>,
     guid_prefix: GuidPrefix,
     timer_task: Option<Arc<Mutex<TimerTask>>>,
     timer_thread_join_handle: Option<thread::JoinHandle<()>>,
@@ -48,10 +45,9 @@ pub(crate) struct TimerHandler {
 }
 
 impl TimerHandler {
-    fn new(participant: Arc<Participant>) -> Self {
+    fn new(guid_prefix: GuidPrefix) -> Self {
         Self {
-            participant: Arc::downgrade(&participant),
-            guid_prefix: participant.guid().prefix(),
+            guid_prefix,
             timer_task: None,
             timer_thread_join_handle: None,
             message_queue: Arc::new(Mutex::new(Vec::new())),
@@ -59,18 +55,18 @@ impl TimerHandler {
         }
     }
 
-    pub(crate) fn get_instance(participant: Arc<Participant>) -> Arc<Mutex<TimerHandler>> {
+    pub(crate) fn get_instance(guid_prefix: GuidPrefix) -> Arc<Mutex<TimerHandler>> {
         let map_mutex = INSTANCE.get_or_init(|| Mutex::new(HashMap::new()));
 
         if let Ok(map_guard) = map_mutex.lock() {
-            if let Some(handler) = map_guard.get(&participant.guid()) {
+            if let Some(handler) = map_guard.get(&guid_prefix) {
                 return handler.clone();
             }
         } else {
             panic!("Failed to acquire timer handler map lock");
         }
 
-        let mut new_handler = TimerHandler::new(participant.clone());
+        let mut new_handler = TimerHandler::new(guid_prefix);
         new_handler.spawn_event_loop();
         let handler_arc = Arc::new(Mutex::new(new_handler));
 
@@ -79,7 +75,7 @@ impl TimerHandler {
             .expect("Timer handler map should be initialized")
             .lock()
             .expect("Failed to acquire timer handler map lock");
-        let entry = map_guard.entry(participant.guid()).or_insert_with(|| handler_arc.clone());
+        let entry = map_guard.entry(guid_prefix).or_insert_with(|| handler_arc.clone());
         entry.clone()
     }
 
@@ -88,15 +84,14 @@ impl TimerHandler {
     ) -> Option<Arc<Mutex<TimerHandler>>> {
         let map_mutex = INSTANCE.get()?;
         match map_mutex.lock() {
-            Ok(map_guard) => map_guard.get(&participant_guid).cloned(),
+            Ok(map_guard) => map_guard.get(&participant_guid.prefix()).cloned(),
             Err(_) => None,
         }
     }
 
     fn spawn_event_loop(&mut self) {
         if self.timer_task.is_none() {
-            let participant = self.participant.upgrade().expect("Participant already dropped");
-            let timer_task = TimerTask::new(participant.clone());
+            let timer_task = TimerTask::new();
             self.waker = Some(timer_task.waker());
             self.timer_task = Some(Arc::new(Mutex::new(timer_task)));
         }
@@ -181,16 +176,7 @@ impl TimerHandler {
             }
             Err(e) => {
                 error!("Failed to acquire timer message queue lock: {}", e);
-                let participant = self.participant.upgrade().expect("Participant already dropped");
-                let handler = TimerHandler::get_instance(participant.clone());
-                match handler.clone().lock() {
-                    Ok(handler) => {
-                        handler.push_message_and_wake(message);
-                    }
-                    Err(e) => {
-                        error!("Failed to acquire timer handler lock: {}", e);
-                    }
-                }
+                return;
             }
         }
         self.wake_event_loop();
@@ -211,10 +197,10 @@ impl TimerHandler {
         Ok(())
     }
 
-    pub(crate) fn remove_map_guard(guid: &Guid) {
+    pub(crate) fn remove_map_guard(guid_prefix: &GuidPrefix) {
         if let Some(map_mutex) = INSTANCE.get() {
             if let Ok(mut map_guard) = map_mutex.lock() {
-                map_guard.remove(guid);
+                map_guard.remove(guid_prefix);
             }
         }
     }
@@ -229,6 +215,7 @@ mod tests {
 
     use crate::rtps::common::guid::Guid;
     use crate::rtps::common::types::{DomainId, ParticipantId};
+    use crate::rtps::entities::entity::Entity;
     use crate::rtps::entities::participant::Participant;
     use crate::utils::timer::timer_handler::TimerHandler;
 
@@ -247,7 +234,7 @@ mod tests {
     #[test]
     fn test_timer_basic_functionality() {
         let participant = create_mock_participant(0, 1);
-        let timer_handler = TimerHandler::get_instance(participant.clone());
+        let timer_handler = TimerHandler::get_instance(participant.guid().prefix());
 
         let executed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let executed_clone = executed.clone();
@@ -281,7 +268,7 @@ mod tests {
     #[test]
     fn test_timer_execution_order() {
         let participant = create_mock_participant(0, 2);
-        let timer_handler = TimerHandler::get_instance(participant.clone());
+        let timer_handler = TimerHandler::get_instance(participant.guid().prefix());
 
         let execution_order = Arc::new(std::sync::Mutex::new(Vec::new()));
 
@@ -339,7 +326,7 @@ mod tests {
     #[test]
     fn test_timer_removal() {
         let participant = create_mock_participant(0, 3);
-        let timer_handler = TimerHandler::get_instance(participant.clone());
+        let timer_handler = TimerHandler::get_instance(participant.guid().prefix());
 
         let executed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let executed_clone = executed.clone();
@@ -377,7 +364,7 @@ mod tests {
     #[test]
     fn test_repeating_timer() {
         let participant = create_mock_participant(0, 4);
-        let timer_handler = TimerHandler::get_instance(participant.clone());
+        let timer_handler = TimerHandler::get_instance(participant.guid().prefix());
 
         let count = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let count_clone = count.clone();
@@ -414,7 +401,7 @@ mod tests {
     #[test]
     fn test_timer_pause_resume() {
         let participant = create_mock_participant(0, 5);
-        let timer_handler = TimerHandler::get_instance(participant.clone());
+        let timer_handler = TimerHandler::get_instance(participant.guid().prefix());
 
         let executed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let executed_clone = executed.clone();
@@ -464,8 +451,8 @@ mod tests {
         let participant1 = create_mock_participant(0, 10);
         let participant2 = create_mock_participant(0, 20);
 
-        let handler1 = TimerHandler::get_instance(participant1.clone());
-        let handler2 = TimerHandler::get_instance(participant2.clone());
+        let handler1 = TimerHandler::get_instance(participant1.guid().prefix());
+        let handler2 = TimerHandler::get_instance(participant2.guid().prefix());
 
         let count1 = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let count2 = Arc::new(std::sync::atomic::AtomicU32::new(0));
@@ -517,7 +504,7 @@ mod tests {
     #[test]
     fn test_timer_modify_duration() {
         let participant = create_mock_participant(0, 6);
-        let timer_handler = TimerHandler::get_instance(participant.clone());
+        let timer_handler = TimerHandler::get_instance(participant.guid().prefix());
 
         let start_time = Instant::now();
         let execution_time = Arc::new(std::sync::Mutex::new(None));
@@ -560,7 +547,7 @@ mod tests {
     #[test]
     fn test_example_basic_timers() {
         let participant = create_mock_participant(0, 100);
-        let timer_handler = TimerHandler::get_instance(participant.clone());
+        let timer_handler = TimerHandler::get_instance(participant.guid().prefix());
 
         let execution_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
 
@@ -620,7 +607,7 @@ mod tests {
 
         // Setup timer for each participant
         for (i, participant) in participants.iter().enumerate() {
-            let timer_handler = TimerHandler::get_instance(participant.clone());
+            let timer_handler = TimerHandler::get_instance(participant.guid().prefix());
 
             if let Ok(handler) = timer_handler.lock() {
                 let timer_id = format!("participant_{}_timer", i);
@@ -663,7 +650,7 @@ mod tests {
     #[test]
     fn test_example_dds_scenario_timers() {
         let participant = create_mock_participant(0, 300);
-        let timer_handler = TimerHandler::get_instance(participant.clone());
+        let timer_handler = TimerHandler::get_instance(participant.guid().prefix());
 
         let execution_counts = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
 
@@ -732,7 +719,7 @@ mod tests {
     fn test_timer_order_from_timer_order_test() {
         // Timer execution order test from timer_order_test.rs
         let participant = create_mock_participant(0, 400);
-        let timer_handler = TimerHandler::get_instance(participant.clone());
+        let timer_handler = TimerHandler::get_instance(participant.guid().prefix());
 
         let execution_order = Arc::new(std::sync::Mutex::new(Vec::new()));
         let start_time = Instant::now();
@@ -802,7 +789,7 @@ mod tests {
     fn test_timer_deletion_before_execution_from_timer_order_test() {
         // Timer deletion before execution test from timer_order_test.rs
         let participant = create_mock_participant(0, 500);
-        let timer_handler = TimerHandler::get_instance(participant.clone());
+        let timer_handler = TimerHandler::get_instance(participant.guid().prefix());
 
         let execution_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
 
@@ -863,7 +850,7 @@ mod tests {
     fn test_dynamic_timer_management_from_timer_order_test() {
         // Dynamic timer management test from timer_order_test.rs
         let participant = create_mock_participant(0, 600);
-        let timer_handler = TimerHandler::get_instance(participant.clone());
+        let timer_handler = TimerHandler::get_instance(participant.guid().prefix());
 
         let execution_results = Arc::new(std::sync::Mutex::new(Vec::new()));
 
@@ -922,7 +909,7 @@ mod tests {
     fn test_timer_order_with_mixed_operations_from_timer_order_test() {
         // Mixed operations test from timer_order_test.rs (add/delete/modify combined)
         let participant = create_mock_participant(0, 700);
-        let timer_handler = TimerHandler::get_instance(participant.clone());
+        let timer_handler = TimerHandler::get_instance(participant.guid().prefix());
 
         let execution_log = Arc::new(std::sync::Mutex::new(Vec::new()));
 
