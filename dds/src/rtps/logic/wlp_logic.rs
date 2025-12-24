@@ -42,12 +42,10 @@ use crate::{
             submessage_header::SubmessageHeader,
             submessages::{ack_nack::AckNack, data::Data, heartbeat::Heartbeat},
         },
-        task::{
-            sending_handler::{MessageType, SendingHandler},
-            timer_handler::TimerHandler,
-        },
+        task::sending_handler::{MessageType, SendingHandler},
         transport::{Transport, TransportSender},
     },
+    utils::timer::timer_handler::TimerHandler,
 };
 use std::{
     collections::HashMap,

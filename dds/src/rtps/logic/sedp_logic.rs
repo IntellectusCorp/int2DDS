@@ -81,7 +81,6 @@ use crate::{
                 discovery_unicast_listening_task::DiscoveryUnicastListeningTask,
             },
             sending_handler::{MessageType, SendingHandler},
-            timer_handler::TimerHandler,
         },
         transport::{
             tcp::tcp_listener::TcpListener, udp::udp_listener::UdpListener, Transport,
@@ -89,6 +88,7 @@ use crate::{
         },
     },
     serialize::pl_cdr::InlineQosParameters,
+    utils::timer::timer_handler::TimerHandler,
 };
 
 enum MatchType {

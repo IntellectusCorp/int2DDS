@@ -43,11 +43,9 @@ use crate::{
             entity::Entity,
             history::{cache_change::CacheChange, writer_history::WriterHistoryCache},
         },
-        task::{
-            sending_handler::{MessageType, SendingHandler},
-            timer_handler::TimerHandler,
-        },
+        task::sending_handler::{MessageType, SendingHandler},
     },
+    utils::timer::timer_handler::TimerHandler,
 };
 
 use super::{reader_proxy::ReaderProxy, Writer};

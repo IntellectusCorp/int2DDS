@@ -9,7 +9,7 @@ use log::{debug, error, warn};
 use mio::{Events, Poll, Token, Waker};
 
 use crate::rtps::entities::participant::Participant;
-use crate::rtps::task::timer_handler::{TimerCallback, TimerMessage, TimerMessageQueue};
+use crate::utils::timer::timer_handler::{TimerCallback, TimerMessage, TimerMessageQueue};
 
 const WAKER_TOKEN: Token = Token(0);
 
