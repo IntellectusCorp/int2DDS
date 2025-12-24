@@ -13,11 +13,13 @@ pub enum ExtensibilityKind {
 pub struct DdsTypeConfig {
     pub crate_path: proc_macro2::TokenStream,
     pub extensibility: Option<ExtensibilityKind>,
+    pub no_default: bool,
 }
 
 pub fn parse_dds_type_attributes(input: &DeriveInput) -> DdsTypeConfig {
     let mut crate_path: Option<String> = None;
     let mut extensibility: Option<ExtensibilityKind> = None;
+    let mut no_default = false;
 
     // Parse #[dds_type(...)] attributes
     for attr in &input.attrs {
@@ -47,6 +49,8 @@ pub fn parse_dds_type_attributes(input: &DeriveInput) -> DdsTypeConfig {
                     extensibility = Some(ExtensibilityKind::Appendable);
                 } else if meta.path.is_ident("mutable") {
                     extensibility = Some(ExtensibilityKind::Mutable);
+                } else if meta.path.is_ident("no_default") {
+                    no_default = true;
                 }
                 Ok(())
             });
@@ -65,7 +69,7 @@ pub fn parse_dds_type_attributes(input: &DeriveInput) -> DdsTypeConfig {
         quote! { int2dds }
     };
 
-    DdsTypeConfig { crate_path: crate_path_tokens, extensibility }
+    DdsTypeConfig { crate_path: crate_path_tokens, extensibility, no_default }
 }
 
 /// Generate extensibility kind tokens from ExtensibilityKind enum

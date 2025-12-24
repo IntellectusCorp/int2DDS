@@ -1,6 +1,8 @@
 use quote::quote;
 use syn::{Data, DeriveInput, Fields};
 
+use super::type_config::DdsTypeConfig;
+
 /// Generate speedy Writable write_to field statements
 pub fn generate_speedy_write_fields(input: &DeriveInput) -> Vec<proc_macro2::TokenStream> {
     if let Data::Struct(data) = &input.data {
@@ -103,10 +105,11 @@ pub fn generate_eq_fields(input: &DeriveInput) -> Vec<proc_macro2::TokenStream> 
 pub fn generate_additional_derives(
     input: &DeriveInput,
     name: &syn::Ident,
+    config: &DdsTypeConfig,
 ) -> proc_macro2::TokenStream {
     // Check if this is an enum
     if let Data::Enum(_) = &input.data {
-        return generate_enum_additional_derives(input, name);
+        return generate_enum_additional_derives(input, name, config);
     }
 
     // Check if this is a tuple struct
@@ -116,22 +119,31 @@ pub fn generate_additional_derives(
         }
     }
 
-    let default_fields = generate_default_fields(input);
     let debug_fields = generate_debug_fields(input);
     let clone_fields = generate_clone_fields(input);
     let eq_fields = generate_eq_fields(input);
     let speedy_write_fields = generate_speedy_write_fields(input);
     let speedy_read_fields = generate_speedy_read_fields(input);
 
-    quote! {
-        #[automatically_derived]
-        impl Default for #name {
-            fn default() -> Self {
-                Self {
-                    #(#default_fields,)*
+    // Generate Default impl only if no_default is false
+    let default_impl = if config.no_default {
+        quote! {}
+    } else {
+        let default_fields = generate_default_fields(input);
+        quote! {
+            #[automatically_derived]
+            impl Default for #name {
+                fn default() -> Self {
+                    Self {
+                        #(#default_fields,)*
+                    }
                 }
             }
         }
+    };
+
+    quote! {
+        #default_impl
 
         #[automatically_derived]
         impl std::fmt::Debug for #name {
@@ -281,36 +293,46 @@ fn generate_tuple_struct_additional_derives(
 fn generate_enum_additional_derives(
     input: &DeriveInput,
     name: &syn::Ident,
+    config: &DdsTypeConfig,
 ) -> proc_macro2::TokenStream {
     if let Data::Enum(data) = &input.data {
         let variants = &data.variants;
 
-        // Get first variant for Default impl
-        let first_variant = variants.first();
-        let default_impl = if let Some(variant) = first_variant {
-            let variant_name = &variant.ident;
-            // Check if variant has data
-            match &variant.fields {
-                Fields::Unit => quote! {
-                    #[automatically_derived]
-                    impl Default for #name {
-                        fn default() -> Self {
-                            Self::#variant_name
-                        }
-                    }
-                },
-                Fields::Unnamed(fields) if fields.unnamed.len() == 1 => quote! {
-                    #[automatically_derived]
-                    impl Default for #name {
-                        fn default() -> Self {
-                            Self::#variant_name(Default::default())
-                        }
-                    }
-                },
-                _ => quote! {}, // Cannot generate default for complex variants
-            }
-        } else {
+        // Generate Default impl only if no_default is false
+        let default_impl = if config.no_default {
             quote! {}
+        } else {
+            // Find variant with #[default] attribute, or fall back to first variant
+            let default_variant = variants
+                .iter()
+                .find(|v| v.attrs.iter().any(|attr| attr.path().is_ident("default")))
+                .or_else(|| variants.first());
+
+            if let Some(variant) = default_variant {
+                let variant_name = &variant.ident;
+                // Check if variant has data
+                match &variant.fields {
+                    Fields::Unit => quote! {
+                        #[automatically_derived]
+                        impl Default for #name {
+                            fn default() -> Self {
+                                Self::#variant_name
+                            }
+                        }
+                    },
+                    Fields::Unnamed(fields) if fields.unnamed.len() == 1 => quote! {
+                        #[automatically_derived]
+                        impl Default for #name {
+                            fn default() -> Self {
+                                Self::#variant_name(Default::default())
+                            }
+                        }
+                    },
+                    _ => quote! {}, // Cannot generate default for complex variants
+                }
+            } else {
+                quote! {}
+            }
         };
 
         // Generate Debug impl for enum
@@ -371,6 +393,53 @@ fn generate_enum_additional_derives(
             })
             .collect();
 
+        // Generate speedy Writable impl for enum
+        let speedy_write_arms: Vec<_> = variants
+            .iter()
+            .enumerate()
+            .map(|(idx, variant)| {
+                let variant_name = &variant.ident;
+                let idx = idx as u32;
+                match &variant.fields {
+                    Fields::Unit => quote! {
+                        Self::#variant_name => {
+                            writer.write_value(&#idx)?;
+                        }
+                    },
+                    Fields::Unnamed(fields) if fields.unnamed.len() == 1 => quote! {
+                        Self::#variant_name(value) => {
+                            writer.write_value(&#idx)?;
+                            writer.write_value(value)?;
+                        }
+                    },
+                    _ => quote! {
+                        Self::#variant_name { .. } => unimplemented!("Writable not supported for this variant"),
+                    },
+                }
+            })
+            .collect();
+
+        // Generate speedy Readable impl for enum
+        let speedy_read_arms: Vec<_> = variants
+            .iter()
+            .enumerate()
+            .map(|(idx, variant)| {
+                let variant_name = &variant.ident;
+                let idx = idx as u32;
+                match &variant.fields {
+                    Fields::Unit => quote! {
+                        #idx => Self::#variant_name,
+                    },
+                    Fields::Unnamed(fields) if fields.unnamed.len() == 1 => quote! {
+                        #idx => Self::#variant_name(reader.read_value()?),
+                    },
+                    _ => quote! {
+                        #idx => unimplemented!("Readable not supported for this variant"),
+                    },
+                }
+            })
+            .collect();
+
         quote! {
             #default_impl
 
@@ -399,6 +468,27 @@ fn generate_enum_additional_derives(
                         #(#eq_arms)*
                         _ => false,
                     }
+                }
+            }
+
+            #[automatically_derived]
+            impl<C: speedy::Context> speedy::Writable<C> for #name {
+                fn write_to<T: ?Sized + speedy::Writer<C>>(&self, writer: &mut T) -> Result<(), C::Error> {
+                    match self {
+                        #(#speedy_write_arms)*
+                    }
+                    Ok(())
+                }
+            }
+
+            #[automatically_derived]
+            impl<'a, C: speedy::Context> speedy::Readable<'a, C> for #name {
+                fn read_from<R: speedy::Reader<'a, C>>(reader: &mut R) -> Result<Self, C::Error> {
+                    let discriminant: u32 = reader.read_value()?;
+                    Ok(match discriminant {
+                        #(#speedy_read_arms)*
+                        _ => return Err(speedy::Error::custom("Invalid enum discriminant").into()),
+                    })
                 }
             }
         }
