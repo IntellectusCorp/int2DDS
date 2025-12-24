@@ -60,7 +60,9 @@ pub(crate) struct StatelessReader {
     heartbeat_suppression_duration: RtpsDuration,
     reader_cache: Arc<Mutex<ReaderHistoryCache>>,
     matched_writers: Arc<Mutex<Vec<WriterLocator>>>,
+    #[allow(clippy::type_complexity)]
     change_callback: Arc<Mutex<Option<Arc<dyn Fn(Arc<CacheChange>) + Send + Sync>>>>,
+    #[allow(clippy::type_complexity)]
     status_callback:
         Arc<Mutex<Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>>>,
     subscription_builtin_topic_data: Arc<Mutex<SubscriptionBuiltinTopicData>>,
@@ -69,6 +71,8 @@ pub(crate) struct StatelessReader {
 }
 
 impl StatelessReader {
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::type_complexity)]
     pub(crate) fn new(
         guid: Guid,
         topic_kind: TopicKind,

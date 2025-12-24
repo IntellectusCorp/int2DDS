@@ -178,7 +178,7 @@ impl TcpSender {
         // Configure socket options (best-effort, don't fail if these fail)
         // These optimizations are nice-to-have but not critical for functionality
         let nodelay = Self::get_nodelay();
-        if let Err(_) = stream.set_nodelay(nodelay) {
+        if stream.set_nodelay(nodelay).is_err() {
             // warn!(
             //     "TcpSender: Failed to set nodelay={} for {:?}: {:?} (continuing anyway)",
             //     nodelay, addr, e
@@ -186,7 +186,7 @@ impl TcpSender {
         }
 
         let write_timeout = Self::get_write_timeout();
-        if let Err(_) = stream.set_write_timeout(Some(write_timeout)) {
+        if stream.set_write_timeout(Some(write_timeout)).is_err() {
             // warn!(
             //     "TcpSender: Failed to set write timeout={:?} for {:?}: {:?} (continuing anyway)",
             //     write_timeout, addr, e

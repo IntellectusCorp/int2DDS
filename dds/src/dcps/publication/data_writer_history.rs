@@ -353,7 +353,7 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
     /// Removes the first acknowledged change, or blocks for max_blocking_time if none exists.
     fn remove_first_acked_change_or_block(
         &mut self,
-        changes: &Vec<Arc<CacheChange>>,
+        changes: &[Arc<CacheChange>],
     ) -> DdsResult<Arc<CacheChange>> {
         let start_time = std::time::Instant::now();
 
@@ -401,7 +401,7 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
     /// Returns the oldest acknowledged change from the given change vector.
     fn get_first_acked_change_from_vec(
         &self,
-        changes: &Vec<Arc<CacheChange>>,
+        changes: &[Arc<CacheChange>],
     ) -> DdsResult<Option<Arc<CacheChange>>> {
         let rtps_writer = self.get_upgraded_rtps_writer()?;
         let stateful_writer = rtps_writer
@@ -419,7 +419,7 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
 
     /// Triggers unacked_sample_removed state if the given change is in unacked state.
     fn trigger_status_if_unacked(&self, change: &Arc<CacheChange>) -> DdsResult<()> {
-        if self.get_first_acked_change_from_vec(&vec![change.clone()])?.is_none() {
+        if self.get_first_acked_change_from_vec(std::slice::from_ref(change))?.is_none() {
             // TODO: trigger unacked_sample_removed status
             debug!(
                 "Unacked sample removed for sequence number {:?}",

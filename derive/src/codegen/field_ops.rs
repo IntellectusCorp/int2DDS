@@ -246,8 +246,7 @@ fn gen_serialize_code(
             };
 
             // Check if this is a map type with a bound
-            if is_map_type(field_type) && bound.is_some() {
-                let max_len = bound.unwrap();
+            if let Some(max_len) = bound.filter(|_| is_map_type(field_type)) {
                 quote! {
                     if typed_data.#field_name.len() > #max_len {
                         return Err(#crate_path::dcps::core::error::DdsError::Error(
@@ -598,8 +597,7 @@ fn gen_deserialize_code(
                 let trait_name = quote!(#crate_path::serialize::xcdr::XcdrDeserialize);
                 let method_name = quote!(deserialize_xcdr);
 
-                if is_map_type(field_type) && bound.is_some() {
-                    let max_len = bound.unwrap();
+                if let Some(max_len) = bound.filter(|_| is_map_type(field_type)) {
                     quote! {
                         let #field_name = <#field_type as #trait_name>::#method_name(&mut deserializer)
                             .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
@@ -620,8 +618,7 @@ fn gen_deserialize_code(
                 let trait_name = quote!(#crate_path::serialize::cdr::CdrDeserialize);
                 let method_name = quote!(deserialize_cdr);
 
-                if is_map_type(field_type) && bound.is_some() {
-                    let max_len = bound.unwrap();
+                if let Some(max_len) = bound.filter(|_| is_map_type(field_type)) {
                     quote! {
                         let #field_name = <#field_type as #trait_name>::#method_name(&mut deserializer)
                             .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;

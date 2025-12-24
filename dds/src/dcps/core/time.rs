@@ -256,18 +256,7 @@ impl std::ops::Div<f64> for Duration {
 
 impl PartialOrd for Duration {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        if self.is_infinite() && other.is_infinite() {
-            return Some(Ordering::Equal);
-        } else if self.is_infinite() {
-            return Some(Ordering::Greater);
-        } else if other.is_infinite() {
-            return Some(Ordering::Less);
-        }
-
-        match self.sec.cmp(&other.sec) {
-            Ordering::Equal => self.nanosec.partial_cmp(&other.nanosec),
-            ordering => Some(ordering),
-        }
+        Some(self.cmp(other))
     }
 }
 
@@ -424,14 +413,12 @@ impl Time {
         }
 
         let mut elapsed_sec = now.sec - self.sec;
-        let elapsed_nsec;
-
-        if now.nanosec >= self.nanosec {
-            elapsed_nsec = now.nanosec - self.nanosec;
+        let elapsed_nsec = if now.nanosec >= self.nanosec {
+            now.nanosec - self.nanosec
         } else {
             elapsed_sec -= 1;
-            elapsed_nsec = 1_000_000_000 + now.nanosec - self.nanosec;
-        }
+            1_000_000_000 + now.nanosec - self.nanosec
+        };
 
         Ok(Duration::new(elapsed_sec, elapsed_nsec))
     }
@@ -537,18 +524,7 @@ impl From<Time> for Duration {
 
 impl PartialOrd for Time {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        if self.is_infinite() && other.is_infinite() {
-            return Some(Ordering::Equal);
-        } else if self.is_infinite() {
-            return Some(Ordering::Greater);
-        } else if other.is_infinite() {
-            return Some(Ordering::Less);
-        }
-
-        match self.sec.cmp(&other.sec) {
-            Ordering::Equal => self.nanosec.partial_cmp(&other.nanosec),
-            ordering => Some(ordering),
-        }
+        Some(self.cmp(other))
     }
 }
 

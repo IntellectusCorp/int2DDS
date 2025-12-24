@@ -42,9 +42,11 @@ use std::net::SocketAddr;
 use std::sync::OnceLock;
 
 /// Transport protocol type
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(clippy::upper_case_acronyms)]
 pub enum TransportType {
     /// UDP transport (default)
+    #[default]
     UDP,
     /// TCP transport
     TCP,
@@ -52,12 +54,6 @@ pub enum TransportType {
     Hybrid,
     /// Shared Memory transport
     SHM,
-}
-
-impl Default for TransportType {
-    fn default() -> Self {
-        Self::UDP
-    }
 }
 
 impl std::fmt::Display for TransportType {

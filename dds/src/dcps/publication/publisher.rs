@@ -65,8 +65,10 @@ pub struct Publisher {
     pub(crate) self_ref: Option<Arc<Publisher>>,
     enabled: Arc<AtomicBool>,
     deleted: Arc<AtomicBool>,
+    #[allow(clippy::type_complexity)]
     writers_by_topic_name:
         Arc<Mutex<HashMap<String, Vec<Weak<dyn DataWriterInternal<Qos = DataWriterQos>>>>>>,
+    #[allow(clippy::type_complexity)]
     writers_by_topic_handle:
         Arc<Mutex<HashMap<InstanceHandle, Vec<Weak<dyn DataWriterInternal<Qos = DataWriterQos>>>>>>,
     orphaned_writers: Arc<Mutex<Vec<Arc<dyn DataWriterInternal<Qos = DataWriterQos>>>>>,
@@ -675,6 +677,7 @@ impl Publisher {
     }
 
     // Return DataWriters grouped by type
+    #[allow(clippy::type_complexity)]
     pub fn get_writers_by_type(
         &self,
     ) -> DdsResult<HashMap<TypeId, Vec<Box<dyn DataWriterBase<Qos = DataWriterQos>>>>> {

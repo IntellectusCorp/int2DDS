@@ -122,6 +122,7 @@ pub struct DataWriter<Foo> {
     publisher: Option<Weak<Publisher>>,
     rtps_writer: Arc<Mutex<Option<Weak<dyn RtpsWriter + Send + Sync>>>>,
     key_instances: Arc<Mutex<HashMap<SerializedData, InstanceHandle>>>, // <serialized_key, ih>
+    #[allow(clippy::type_complexity)]
     instances: Arc<Mutex<HashMap<InstanceHandle, (SerializedData, Time, InstanceState)>>>, // for instance managing
     liveliness_lost_status: Arc<Mutex<LivelinessLostStatus>>,
     offered_deadline_missed_status: Arc<Mutex<OfferedDeadlineMissedStatus>>,
@@ -202,8 +203,8 @@ impl<Foo: 'static + Clone> Clone for DataWriter<Foo> {
 impl<Foo> Drop for DataWriter<Foo> {
     fn drop(&mut self) {
         // Only handle drop for the last reference (not clones)
-        if let Some(guard) = self.self_ref.lock().ok() {
-            if let Some(ref self_arc) = guard.as_ref() {
+        if let Ok(guard) = self.self_ref.lock() {
+            if let Some(self_arc) = guard.as_ref() {
                 if Arc::strong_count(self_arc) > 1 {
                     return;
                 }
@@ -351,6 +352,7 @@ impl<Foo: 'static + Clone> UpdateStatus for DataWriter<Foo> {
 impl<Foo: 'static + Clone> DataWriter<Foo> {
     // DataWriter should be specialized for each data type.
     // Trait defining methods that should be defined in auto-generated class for <Foo>
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         guid: Guid,
         type_support: Arc<dyn TypeSupport + Send>,
@@ -1060,6 +1062,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         Ok(rtps_writer)
     }
 
+    #[allow(clippy::type_complexity)]
     pub(crate) fn create_status_callback(
         &self,
     ) -> DdsResult<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>> {
