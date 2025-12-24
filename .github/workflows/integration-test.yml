@@ -34,9 +34,6 @@ jobs:
           shared-key: cargo-develop
           save-if: false
 
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
-
       - name: Run all tests
         shell: bash
         env:
