@@ -1549,7 +1549,13 @@ impl<Foo: DdsType> DataReader<Foo> {
         listener: Option<Arc<dyn DataReaderListener<Foo = Foo>>>,
         mask: StatusMask,
         subscriber: &Arc<Subscriber>,
+        rtps_reader: Option<Arc<dyn RtpsReader + Send + Sync>>,
     ) -> DdsResult<Self> {
+        // Builtin entities must have rtps_reader, non-builtin must not
+        if is_builtin != rtps_reader.is_some() {
+            return Err(DdsError::PreconditionNotMet);
+        }
+
         // Downcast to get Topic reference
         let (topic_weak, cft_weak) = if let Some(topic) =
             topic_description.as_any().downcast_ref::<Topic>()
@@ -1581,7 +1587,7 @@ impl<Foo: DdsType> DataReader<Foo> {
             topic: topic_weak,
             content_filtered_topic: cft_weak,
             subscriber: Some(Arc::downgrade(subscriber)),
-            rtps_reader: Arc::new(Mutex::new(None)),
+            rtps_reader: Arc::new(Mutex::new(rtps_reader.map(|r| Arc::downgrade(&r)))),
             enabled: Arc::new(AtomicBool::new(false)),
             deleted: Arc::new(AtomicBool::new(false)),
             liveliness_changed_status: Arc::new(Mutex::new(LivelinessChangedStatus::default())),

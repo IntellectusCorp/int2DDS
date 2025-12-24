@@ -133,6 +133,7 @@ pub struct DomainParticipant {
     deleted: Arc<AtomicBool>,
     // rtps_participant: Arc<Mutex<Option<RtpsParticipant>>>,
     dcps_bridge: Arc<Mutex<Option<DcpsBridge>>>,
+    builtin_subscriber: Arc<Mutex<Option<Subscriber>>>,
     publishers: Arc<Mutex<Vec<Weak<Publisher>>>>,
     publishers_by_handle: Arc<Mutex<HashMap<InstanceHandle, Weak<Publisher>>>>,
     subscribers: Arc<Mutex<Vec<Weak<Subscriber>>>>,
@@ -344,6 +345,7 @@ impl DomainParticipant {
     ) -> DdsResult<Self> {
         let dcps_bridge = DcpsBridge::new(domain_id as u32);
         let guid = dcps_bridge.get_participant().map_err(|e| DdsError::Error(e.message))?.guid();
+
         let mut participant = Self {
             is_builtin,
             guid: Arc::new(guid),
@@ -357,6 +359,7 @@ impl DomainParticipant {
             deleted: Arc::new(AtomicBool::new(false)),
             // rtps_participant: Arc::new(Mutex::new(None)),
             dcps_bridge: Arc::new(Mutex::new(Some(dcps_bridge))),
+            builtin_subscriber: Arc::new(Mutex::new(None)),
             publishers: Arc::new(Mutex::new(Vec::new())),
             publishers_by_handle: Arc::new(Mutex::new(HashMap::new())),
             subscribers: Arc::new(Mutex::new(Vec::new())),
@@ -380,7 +383,30 @@ impl DomainParticipant {
             let mut status_condition = participant.status_condition.lock().unwrap();
             *status_condition = StatusCondition::new(Some(weak_ref));
         }
-        participant.self_ref = Some(participant_arc); // Without Arc, the new() function ends and memory is freed. StatusCondition's entity field returns None.
+        participant.self_ref = Some(participant_arc.clone()); // Without Arc, the new() function ends and memory is freed. StatusCondition's entity field returns None.
+                                                              // Builtin-Endpoints
+
+        let rtps_participant = participant_arc.get_rtps_participant()?;
+        let endpoints = rtps_participant.builtin_endpoints();
+        let sedp_builtin_publications_reader = endpoints.sedp_builtin_publications_reader.clone();
+        let sedp_builtin_subscriptions_reader = endpoints.sedp_builtin_subscriptions_reader.clone();
+        // let sedp_builtin_topics_reader = endpoints.sedp_builtin_topics_reader.clone();
+        let spdp_builtin_participant_reader = endpoints.spdp_builtin_participant_reader.clone();
+        let builtin_participant_message_reader =
+            endpoints.builtin_participant_message_reader.clone();
+
+        let builtin_subscriber = Subscriber::new(
+            true,
+            SubscriberQos::default(),
+            None,
+            StatusMask::all(),
+            participant_arc.create_instance_handle()?,
+            &participant_arc,
+        );
+
+        *participant.builtin_subscriber.lock().map_err(|e| DdsError::Error(e.to_string()))? =
+            Some(builtin_subscriber);
+
         Ok(participant)
     }
 
