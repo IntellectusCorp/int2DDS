@@ -1197,7 +1197,7 @@ impl UserLogic {
 
         if let Some(status_info) = inline_qos.get_status_info() {
             if status_info.disposed() && status_info.unregistered() {
-                cache_change.set_kind(ChangeKind::NotAliveDisposed);
+                cache_change.set_kind(ChangeKind::NotAliveDisposedUnregistered);
             } else if status_info.unregistered() {
                 cache_change.set_kind(ChangeKind::NotAliveUnregistered);
             } else if status_info.disposed() {

@@ -80,14 +80,6 @@ name = "hello_world_param"
 path = "examples/hello_world/hello_world_param.rs"
 
 [[example]]
-name = "perftest_publisher"
-path = "examples/performance_test/perftest_publisher.rs"
-
-[[example]]
-name = "perftest_subscriber"
-path = "examples/performance_test/perftest_subscriber.rs"
-
-[[example]]
 name = "qos_profile_publisher"
 path = "examples/qos_profile/publisher.rs"
 
