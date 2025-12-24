@@ -41,7 +41,10 @@ use crate::{
         status::StatusMask,
         status_condition::StatusCondition,
     },
-    rtps::common::{entity_kind::EntityKind, guid::Guid},
+    rtps::{
+        common::{entity_kind::EntityKind, guid::Guid},
+        entities::reader::Reader,
+    },
     topic::{qos::TopicQos, topic_description::TopicDescription},
     DdsType,
 };
@@ -345,6 +348,70 @@ impl Subscriber {
         }
         let qos = self.get_datareader_qos_from_profile(qos_path)?;
         self.create_datareader::<Foo>(topic_description, qos, listener, mask)
+    }
+
+    pub(crate) fn create_builtin_datareader<Foo: DdsType>(
+        &self,
+        topic_description: &dyn TopicDescription,
+        qos: DataReaderQos,
+        rtps_reader: Arc<dyn Reader + Send + Sync>,
+    ) -> DdsResult<DataReader<Foo>> {
+        if !self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
+
+        let type_support =
+            self.get_participant()?.find_typesupport(topic_description.get_type_name());
+        let type_support =
+            type_support.ok_or(DdsError::Error("TypeSupport not found".to_string()))?;
+
+        let self_ref = self
+            .self_ref
+            .as_ref()
+            .ok_or(DdsError::Error("Subscriber not initialized".to_string()))?;
+        let guid = rtps_reader.guid();
+
+        let datareader = DataReader::new(
+            true,
+            guid,
+            type_support,
+            topic_description,
+            qos,
+            None,
+            StatusMask::all(),
+            self_ref,
+            Some(rtps_reader.clone()), // builtin endpoint(reader)
+        )?;
+
+        // Enable the builtin datareader (connects cache via enable_rtps_entities)
+        datareader.enable()?;
+
+        let topic_name = topic_description.get_name().to_string();
+        let topic_handle = topic_description.topic_instance_handle()?;
+
+        let reader_ops: Arc<dyn DataReaderInternal<Qos = DataReaderQos>> = datareader
+            .self_ref
+            .lock()
+            .map_err(|e| DdsError::Error(e.to_string()))?
+            .as_ref()
+            .ok_or(DdsError::Error("DataReader not initialized".to_string()))?
+            .clone();
+        let weak_reader = Arc::downgrade(&reader_ops);
+
+        self.readers_by_topic_name
+            .lock()
+            .map_err(|e| DdsError::Error(e.to_string()))?
+            .entry(topic_name)
+            .or_default()
+            .push(weak_reader.clone());
+        self.readers_by_topic_handle
+            .lock()
+            .map_err(|e| DdsError::Error(e.to_string()))?
+            .entry(topic_handle)
+            .or_default()
+            .push(weak_reader);
+
+        Ok(datareader)
     }
 
     pub fn delete_datareader<Foo: 'static + Clone + Debug>(
