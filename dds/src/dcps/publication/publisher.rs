@@ -925,8 +925,15 @@ impl Publisher {
         {
             match self.writers_by_topic_name.lock() {
                 Ok(writers) => {
-                    if !writers.is_empty() {
-                        return Ok(true);
+                    // Check for non-builtin writers
+                    for weak_writers in writers.values() {
+                        for weak_writer in weak_writers {
+                            if let Some(writer) = weak_writer.upgrade() {
+                                if !writer.is_builtin() {
+                                    return Ok(true);
+                                }
+                            }
+                        }
                     }
                 }
                 Err(e) => return Err(DdsError::Error(e.to_string())),
