@@ -27,7 +27,7 @@ use crate::{
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
             sequence::SequenceNumber,
             time::RtpsDuration,
-            types::{ChangeKind, TopicKind},
+            types::TopicKind,
         },
         entities::{
             endpoint::Endpoint,
@@ -382,9 +382,7 @@ impl Reader for StatelessReader {
         match self.status_callback.lock() {
             Ok(callback) => {
                 if let Some(callback) = callback.as_ref() {
-                    if change.kind() == ChangeKind::Alive {
-                        callback(StatusKind::DATA_AVAILABLE, None);
-                    }
+                    callback(StatusKind::DATA_AVAILABLE, None);
                 }
             }
             Err(e) => {
