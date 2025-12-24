@@ -115,7 +115,7 @@ pub fn generate_additional_derives(
     // Check if this is a tuple struct
     if let Data::Struct(data) = &input.data {
         if let Fields::Unnamed(_) = &data.fields {
-            return generate_tuple_struct_additional_derives(input, name);
+            return generate_tuple_struct_additional_derives(input, name, config);
         }
     }
 
@@ -142,6 +142,20 @@ pub fn generate_additional_derives(
         }
     };
 
+    // Generate PartialEq impl only if no_partialeq is false
+    let partialeq_impl = if config.no_partialeq {
+        quote! {}
+    } else {
+        quote! {
+            #[automatically_derived]
+            impl PartialEq for #name {
+                fn eq(&self, other: &Self) -> bool {
+                    true #(&& #eq_fields)*
+                }
+            }
+        }
+    };
+
     quote! {
         #default_impl
 
@@ -163,12 +177,7 @@ pub fn generate_additional_derives(
             }
         }
 
-        #[automatically_derived]
-        impl PartialEq for #name {
-            fn eq(&self, other: &Self) -> bool {
-                true #(&& #eq_fields)*
-            }
-        }
+        #partialeq_impl
 
         #[automatically_derived]
         impl<C: speedy::Context> speedy::Writable<C> for #name {
@@ -193,14 +202,11 @@ pub fn generate_additional_derives(
 fn generate_tuple_struct_additional_derives(
     input: &DeriveInput,
     name: &syn::Ident,
+    config: &DdsTypeConfig,
 ) -> proc_macro2::TokenStream {
     if let Data::Struct(data) = &input.data {
         if let Fields::Unnamed(fields) = &data.fields {
             let field_count = fields.unnamed.len();
-
-            // Generate Default impl
-            let default_fields: Vec<_> =
-                (0..field_count).map(|_| quote! { Default::default() }).collect();
 
             // Generate Debug impl
             let debug_fields: Vec<_> = (0..field_count)
@@ -218,7 +224,7 @@ fn generate_tuple_struct_additional_derives(
                 })
                 .collect();
 
-            // Generate PartialEq impl
+            // Generate PartialEq fields
             let eq_fields: Vec<_> = (0..field_count)
                 .map(|idx| {
                     let idx = syn::Index::from(idx);
@@ -238,13 +244,38 @@ fn generate_tuple_struct_additional_derives(
             let speedy_read_fields: Vec<_> =
                 (0..field_count).map(|_| quote! { reader.read_value()? }).collect();
 
-            return quote! {
-                #[automatically_derived]
-                impl Default for #name {
-                    fn default() -> Self {
-                        Self(#(#default_fields),*)
+            // Generate Default impl only if no_default is false
+            let default_impl = if config.no_default {
+                quote! {}
+            } else {
+                let default_fields: Vec<_> =
+                    (0..field_count).map(|_| quote! { Default::default() }).collect();
+                quote! {
+                    #[automatically_derived]
+                    impl Default for #name {
+                        fn default() -> Self {
+                            Self(#(#default_fields),*)
+                        }
                     }
                 }
+            };
+
+            // Generate PartialEq impl only if no_partialeq is false
+            let partialeq_impl = if config.no_partialeq {
+                quote! {}
+            } else {
+                quote! {
+                    #[automatically_derived]
+                    impl PartialEq for #name {
+                        fn eq(&self, other: &Self) -> bool {
+                            true #(&& #eq_fields)*
+                        }
+                    }
+                }
+            };
+
+            return quote! {
+                #default_impl
 
                 #[automatically_derived]
                 impl std::fmt::Debug for #name {
@@ -262,12 +293,7 @@ fn generate_tuple_struct_additional_derives(
                     }
                 }
 
-                #[automatically_derived]
-                impl PartialEq for #name {
-                    fn eq(&self, other: &Self) -> bool {
-                        true #(&& #eq_fields)*
-                    }
-                }
+                #partialeq_impl
 
                 #[automatically_derived]
                 impl<C: speedy::Context> speedy::Writable<C> for #name {
@@ -440,6 +466,23 @@ fn generate_enum_additional_derives(
             })
             .collect();
 
+        // Generate PartialEq impl only if no_partialeq is false
+        let partialeq_impl = if config.no_partialeq {
+            quote! {}
+        } else {
+            quote! {
+                #[automatically_derived]
+                impl PartialEq for #name {
+                    fn eq(&self, other: &Self) -> bool {
+                        match (self, other) {
+                            #(#eq_arms)*
+                            _ => false,
+                        }
+                    }
+                }
+            }
+        };
+
         quote! {
             #default_impl
 
@@ -461,15 +504,7 @@ fn generate_enum_additional_derives(
                 }
             }
 
-            #[automatically_derived]
-            impl PartialEq for #name {
-                fn eq(&self, other: &Self) -> bool {
-                    match (self, other) {
-                        #(#eq_arms)*
-                        _ => false,
-                    }
-                }
-            }
+            #partialeq_impl
 
             #[automatically_derived]
             impl<C: speedy::Context> speedy::Writable<C> for #name {
