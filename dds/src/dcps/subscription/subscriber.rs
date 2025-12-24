@@ -272,6 +272,7 @@ impl Subscriber {
             listener,
             mask,
             self_ref,
+            None, // Non-builtin: RTPS reader created in enable_rtps_entities()
         )?;
 
         if let Ok(()) = self.is_enabled() {
