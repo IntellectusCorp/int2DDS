@@ -218,7 +218,7 @@ pub fn is_map_type(ty: &syn::Type) -> bool {
     }
 }
 
-/// Discriminant type for enum/union (FastDDS compatible)
+/// Discriminant type for enum/union
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DiscriminantType {
     #[default]
