@@ -479,7 +479,7 @@ impl Participant {
                 let payload = publication_builtin_topic_data.to_serialized_data();
                 let a_cache_change = self.sedp_builtin_publications_writer().new_change(
                     ChangeKind::NotAliveDisposedUnregistered,
-                    payload, // Can empty also, just like Fast DDS
+                    payload,
                     InstanceHandle::from_guid(&writer_guid),
                     Some(RtpsTime::now()),
                 );
