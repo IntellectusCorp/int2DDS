@@ -554,7 +554,7 @@ impl DcpsBridge {
             debug!("Thread monitoring stopped");
         }
 
-        let timer_handler = TimerHandler::get_instance(self.participant.clone());
+        let timer_handler = TimerHandler::get_instance(self.participant.guid().prefix());
         if let Ok(mut handler) = timer_handler.lock() {
             handler.terminate();
             let _ = handler.join_timer_thread();
@@ -603,7 +603,7 @@ impl DcpsBridge {
         // Remove all threads spawned
 
         SendingHandler::remove_map_guard(&self.participant.guid());
-        TimerHandler::remove_map_guard(&self.participant.guid());
+        TimerHandler::remove_map_guard(&self.participant.guid().prefix());
         self.thread_monitor = None;
         self.socket.close();
         Ok(())

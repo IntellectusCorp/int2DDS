@@ -19,7 +19,7 @@ use crate::rtps::{
         time::RtpsDuration,
         types::DomainId,
     },
-    entities::{participant::Participant, writer::Writer},
+    entities::{entity::Entity, participant::Participant, writer::Writer},
     logic::common::{impl_participant_accessor, ParticipantAccessor},
     logic::message_processor::participant_message_processor::ParticipantMessageProcessor,
     messages::message_creator::MessageCreator,
@@ -48,7 +48,7 @@ impl SpdpLogic {
         tcp_sender: Option<Arc<TransportSender>>,
         initial_peers: Vec<std::net::SocketAddr>,
     ) -> Self {
-        let timer_handler = TimerHandler::get_instance(participant.clone());
+        let timer_handler = TimerHandler::get_instance(participant.guid().prefix());
         Self {
             participant: Arc::downgrade(&participant),
             sender,

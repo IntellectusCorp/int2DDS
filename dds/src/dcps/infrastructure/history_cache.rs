@@ -21,7 +21,7 @@ use crate::{
     },
     rtps::{
         common::{guid::Guid, time::RtpsTime},
-        entities::{history::cache_change::CacheChange, participant::Participant},
+        entities::{entity::Entity, history::cache_change::CacheChange, participant::Participant},
     },
     utils::timer::timer_handler::TimerHandler,
 };
@@ -108,7 +108,7 @@ pub(crate) trait HistoryCache {
 
     fn get_timer_handler(&self) -> DdsResult<Arc<Mutex<TimerHandler>>> {
         let rtps_participant = self.get_rtps_participant()?;
-        Ok(TimerHandler::get_instance(rtps_participant))
+        Ok(TimerHandler::get_instance(rtps_participant.guid().prefix()))
     }
 
     fn lifespan_timer_with_callback(

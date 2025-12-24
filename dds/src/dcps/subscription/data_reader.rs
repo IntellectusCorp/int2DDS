@@ -1505,6 +1505,15 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                     if let Some(monitor) = monitor_guard.as_ref() {
                         monitor.cancel_instance(&instance_handle);
                     }
+
+                    if !self
+                        .get_qos()?
+                        .reader_data_lifecycle
+                        .autopurge_disposed_samples_delay
+                        .is_infinite()
+                    {
+                        //
+                    }
                 } else {
                     log::debug!(
                         "Not alive state transition only occurs from ALIVE to NOT_ALIVE,cannot change to NOT_ALIVE_DISPOSED from {:?}",
@@ -1529,6 +1538,15 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                         self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
                     if let Some(monitor) = monitor_guard.as_ref() {
                         monitor.cancel_instance(&instance_handle);
+                    }
+
+                    if !self
+                        .get_qos()?
+                        .reader_data_lifecycle
+                        .autopurge_nowriter_samples_delay
+                        .is_infinite()
+                    {
+                        //
                     }
                 } else {
                     log::debug!(

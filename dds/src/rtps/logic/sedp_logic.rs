@@ -173,7 +173,7 @@ fn is_partition_compatible(requested: &[String], offered: &[String]) -> bool {
 impl SedpLogic {
     pub(crate) fn new(participant: Arc<Participant>, sender: Option<Arc<TransportSender>>) -> Self {
         let builtin_endpoints = participant.builtin_endpoints();
-        let timer_handler = TimerHandler::get_instance(participant.clone());
+        let timer_handler = TimerHandler::get_instance(participant.guid().prefix());
         Self {
             participant: Arc::downgrade(&participant),
             builtin_endpoints,

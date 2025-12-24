@@ -17,6 +17,7 @@ use std::time::{Duration, SystemTime};
 
 use log::{debug, error};
 
+use crate::rtps::entities::entity::Entity;
 use crate::rtps::entities::participant::Participant;
 use crate::utils::timer::timer_handler::TimerHandler;
 
@@ -51,7 +52,7 @@ impl ThreadMonitor {
 
         debug!("Starting thread monitoring with 10 second interval");
 
-        let timer_handler = TimerHandler::get_instance(self.participant.clone());
+        let timer_handler = TimerHandler::get_instance(self.participant.guid().prefix());
         let log_file_path = self.log_file_path.clone();
 
         match timer_handler.lock() {
@@ -79,7 +80,7 @@ impl ThreadMonitor {
 
         debug!("Stopping thread monitoring");
 
-        let timer_handler = TimerHandler::get_instance(self.participant.clone());
+        let timer_handler = TimerHandler::get_instance(self.participant.guid().prefix());
         match timer_handler.lock() {
             Ok(handler) => {
                 handler.remove_timer("thread_monitoring_timer".to_string());
