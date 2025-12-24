@@ -109,6 +109,13 @@ pub fn generate_additional_derives(
         return generate_enum_additional_derives(input, name);
     }
 
+    // Check if this is a tuple struct
+    if let Data::Struct(data) = &input.data {
+        if let Fields::Unnamed(_) = &data.fields {
+            return generate_tuple_struct_additional_derives(input, name);
+        }
+    }
+
     let default_fields = generate_default_fields(input);
     let debug_fields = generate_debug_fields(input);
     let clone_fields = generate_clone_fields(input);
@@ -168,6 +175,106 @@ pub fn generate_additional_derives(
             }
         }
     }
+}
+
+/// Generate additional derives for tuple struct types
+fn generate_tuple_struct_additional_derives(
+    input: &DeriveInput,
+    name: &syn::Ident,
+) -> proc_macro2::TokenStream {
+    if let Data::Struct(data) = &input.data {
+        if let Fields::Unnamed(fields) = &data.fields {
+            let field_count = fields.unnamed.len();
+
+            // Generate Default impl
+            let default_fields: Vec<_> =
+                (0..field_count).map(|_| quote! { Default::default() }).collect();
+
+            // Generate Debug impl
+            let debug_fields: Vec<_> = (0..field_count)
+                .map(|idx| {
+                    let idx = syn::Index::from(idx);
+                    quote! { .field(&self.#idx) }
+                })
+                .collect();
+
+            // Generate Clone impl
+            let clone_fields: Vec<_> = (0..field_count)
+                .map(|idx| {
+                    let idx = syn::Index::from(idx);
+                    quote! { self.#idx.clone() }
+                })
+                .collect();
+
+            // Generate PartialEq impl
+            let eq_fields: Vec<_> = (0..field_count)
+                .map(|idx| {
+                    let idx = syn::Index::from(idx);
+                    quote! { self.#idx == other.#idx }
+                })
+                .collect();
+
+            // Generate speedy Writable impl
+            let speedy_write_fields: Vec<_> = (0..field_count)
+                .map(|idx| {
+                    let idx = syn::Index::from(idx);
+                    quote! { writer.write_value(&self.#idx)?; }
+                })
+                .collect();
+
+            // Generate speedy Readable impl
+            let speedy_read_fields: Vec<_> =
+                (0..field_count).map(|_| quote! { reader.read_value()? }).collect();
+
+            return quote! {
+                #[automatically_derived]
+                impl Default for #name {
+                    fn default() -> Self {
+                        Self(#(#default_fields),*)
+                    }
+                }
+
+                #[automatically_derived]
+                impl std::fmt::Debug for #name {
+                    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                        f.debug_tuple(stringify!(#name))
+                            #(#debug_fields)*
+                            .finish()
+                    }
+                }
+
+                #[automatically_derived]
+                impl Clone for #name {
+                    fn clone(&self) -> Self {
+                        Self(#(#clone_fields),*)
+                    }
+                }
+
+                #[automatically_derived]
+                impl PartialEq for #name {
+                    fn eq(&self, other: &Self) -> bool {
+                        true #(&& #eq_fields)*
+                    }
+                }
+
+                #[automatically_derived]
+                impl<C: speedy::Context> speedy::Writable<C> for #name {
+                    fn write_to<T: ?Sized + speedy::Writer<C>>(&self, writer: &mut T) -> Result<(), C::Error> {
+                        #(#speedy_write_fields)*
+                        Ok(())
+                    }
+                }
+
+                #[automatically_derived]
+                impl<'a, C: speedy::Context> speedy::Readable<'a, C> for #name {
+                    fn read_from<R: speedy::Reader<'a, C>>(reader: &mut R) -> Result<Self, C::Error> {
+                        Ok(Self(#(#speedy_read_fields),*))
+                    }
+                }
+            };
+        }
+    }
+    quote! {}
 }
 
 /// Generate additional derives for enum types
