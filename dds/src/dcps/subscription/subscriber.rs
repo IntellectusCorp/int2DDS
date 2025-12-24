@@ -1001,8 +1001,15 @@ impl Subscriber {
         {
             match self.readers_by_topic_name.lock() {
                 Ok(readers) => {
-                    if !readers.is_empty() {
-                        return Ok(true);
+                    // Check for non-builtin readers
+                    for weak_readers in readers.values() {
+                        for weak_reader in weak_readers {
+                            if let Some(reader) = weak_reader.upgrade() {
+                                if !reader.is_builtin() {
+                                    return Ok(true);
+                                }
+                            }
+                        }
                     }
                 }
                 Err(e) => return Err(DdsError::Error(e.to_string())),

@@ -538,25 +538,28 @@ impl DomainParticipant {
     pub(crate) fn has_active_entities(&self) -> DdsResult<bool> {
         self.is_deleted()?;
         {
+            // Check non-builtin publishers
             match self.get_publishers() {
                 Ok(publishers) => {
-                    if !publishers.is_empty() {
+                    if publishers.iter().any(|p| !p.is_builtin()) {
                         return Ok(true);
                     }
                 }
                 Err(err) => return Err(err),
             }
+            // Check non-builtin subscribers
             match self.get_subscribers() {
                 Ok(subscribers) => {
-                    if !subscribers.is_empty() {
+                    if subscribers.iter().any(|s| !s.is_builtin()) {
                         return Ok(true);
                     }
                 }
                 Err(e) => return Err(e),
             }
+            // Check non-builtin topics
             match self.get_topics() {
                 Ok(topics) => {
-                    if !topics.is_empty() {
+                    if topics.iter().any(|t| !t.is_builtin()) {
                         return Ok(true);
                     }
                 }
