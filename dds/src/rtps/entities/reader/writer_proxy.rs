@@ -256,7 +256,6 @@ impl WriterProxy {
         first_sn: SequenceNumber,
         last_sn: SequenceNumber,
     ) -> Vec<SequenceNumber> {
-        // fastdds Note
         self.lost_changes_update(first_sn);
 
         self.update_changes_for_heartbeat_range(first_sn, last_sn);

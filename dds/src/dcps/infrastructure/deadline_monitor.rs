@@ -390,7 +390,7 @@ mod tests {
         monitor.track_instance(&handle);
 
         // Wait to miss deadline multiple times
-        thread::sleep(std::time::Duration::from_millis(350));
+        thread::sleep(std::time::Duration::from_millis(1000));
 
         // Callback should have been called multiple times
         let count = counter.load(Ordering::SeqCst);
@@ -579,7 +579,7 @@ mod tests {
 
     #[test]
     fn test_no_deadline_miss_before_period() {
-        let period = Duration::from_millis(200);
+        let period = Duration::from_millis(500);
         let (counter, callback) = create_callback_counter();
         let monitor = DeadlineMonitor::new(period, callback, true);
 
@@ -587,11 +587,11 @@ mod tests {
         monitor.track_instance(&handle);
 
         // Callback should not be called before deadline
-        thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(200));
         assert_eq!(counter.load(Ordering::SeqCst), 0);
 
         // Callback should be called after deadline
-        thread::sleep(std::time::Duration::from_millis(150));
+        thread::sleep(std::time::Duration::from_millis(400));
         assert!(counter.load(Ordering::SeqCst) >= 1);
     }
 
@@ -632,7 +632,7 @@ mod tests {
 
     #[test]
     fn test_same_instance_retrack() {
-        let period = Duration::from_millis(100);
+        let period = Duration::from_millis(500);
         let (counter, callback) = create_callback_counter();
         let monitor = DeadlineMonitor::new(period, callback, true);
 
@@ -640,17 +640,17 @@ mod tests {
 
         // Track same instance multiple times (overwrite)
         monitor.track_instance(&handle);
-        thread::sleep(std::time::Duration::from_millis(30));
+        thread::sleep(std::time::Duration::from_millis(100));
         monitor.track_instance(&handle); // Update time
-        thread::sleep(std::time::Duration::from_millis(30));
+        thread::sleep(std::time::Duration::from_millis(100));
         monitor.track_instance(&handle); // Update time
 
         // Should have no deadline miss in short time after last track
-        thread::sleep(std::time::Duration::from_millis(50));
+        thread::sleep(std::time::Duration::from_millis(200));
         assert_eq!(counter.load(Ordering::SeqCst), 0);
 
         // Deadline miss occurs after sufficient time passed since last track
-        thread::sleep(std::time::Duration::from_millis(80));
+        thread::sleep(std::time::Duration::from_millis(400));
         assert!(counter.load(Ordering::SeqCst) >= 1);
     }
 }

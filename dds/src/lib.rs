@@ -327,9 +327,8 @@
 //!
 //! Check the `examples/` directory for comprehensive usage examples:
 //!
-//! - `hello_world_reliable_publisher/subscriber`: Basic reliable communication
-//! - `hello_world_best_effort_publisher/subscriber`: Best-effort communication
-//! - `hello_world_publisher_with_key`: Using keyed topics
+//! - `hello_world_param`: Configurable Communication
+//! - `qos_profile_publisher/subscriber`: QoS-based Communication
 //! - `perftest_publisher/subscriber`: Performance testing
 
 #[cfg(test)]
@@ -353,3 +352,19 @@ pub use dcps::topic::DdsType;
 pub use int2dds_derive::DdsType as DeriveDdsType;
 
 extern crate md5;
+
+/// Test utilities for generating unique domain IDs to prevent test interference
+#[cfg(test)]
+pub mod test_utils {
+    use std::sync::atomic::{AtomicI32, Ordering};
+
+    // Start from 100 to avoid conflicts with hardcoded domain IDs (0-99)
+    // Domain ID valid range: 0-232
+    static TEST_DOMAIN_ID_COUNTER: AtomicI32 = AtomicI32::new(100);
+
+    /// Returns a unique domain ID for test isolation.
+    /// Each call returns a different value, ensuring tests don't interfere with each other.
+    pub fn unique_domain_id() -> i32 {
+        TEST_DOMAIN_ID_COUNTER.fetch_add(1, Ordering::SeqCst)
+    }
+}

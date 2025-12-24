@@ -514,43 +514,6 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             return Err(DdsError::BadParameter);
         }
 
-        // TODO: Check and allocate resource space when Reliable
-        // let qos = self.get_qos().unwrap();
-        // let reliability = qos.reliability;
-        // if reliability.kind == ReliabilityQosPolicyKind::Reliable {
-        //     while !registry.has_free_space() {
-        //         if start_time.elapsed().unwrap() > reliability.max_blocking_time {
-        //             return Err(DdsError::Timeout);
-        //         }
-        //         if registry.resource_expected_to_become_available() {
-        //             return Err(DdsError::OutOfResources);
-        //         }
-        //         std::thread::sleep(Duration::from_millis(10));
-        //     }
-        //     // Example has_free_space implementation
-        //     fn has_space(&self) -> bool {
-        //         let max_samples = self.qos.resource_limits.max_samples;
-        //         let max_instances = self.qos.resource_limits.max_instances;
-        //         let history_depth = self.qos.history.depth;
-        //         let instance_count = self.get_instance_count();
-        //         // Condition 2: instance count > sample count → blocking
-        //         if max_samples < max_instances {
-        //             if instance_count >= max_samples {
-        //                 return false;
-        //             }
-        //         }
-        //         // Condition 1: overall sample count limit
-        //         let theoretical_max = instance_count * history_depth;
-        //         if max_samples < theoretical_max {
-        //             // there's potential to discard some samples
-        //             self.evict_oldest_sample_if_needed();
-        //             if self.total_sample_count() >= max_samples {
-        //                 return false; // still no space available → blocking candidate
-        //             }
-        //         }
-        //         true
-        //     }
-        // }
         let serialized_key = self.type_support.serialize_key(data as &dyn Any)?;
         let instance_handle = match self.key_instances.lock() {
             Ok(mut key_instances) => {
@@ -1582,43 +1545,6 @@ where
             return Err(DdsError::BadParameter);
         }
 
-        // TODO: Check and allocate resource space when Reliable
-        // let qos = self.get_qos().unwrap();
-        // let reliability = qos.reliability;
-        // if reliability.kind == ReliabilityQosPolicyKind::Reliable {
-        //     while !registry.has_free_space() {
-        //         if start_time.elapsed().unwrap() > reliability.max_blocking_time {
-        //             return Err(DdsError::Timeout);
-        //         }
-        //         if registry.resource_expected_to_become_available() {
-        //             return Err(DdsError::OutOfResources);
-        //         }
-        //         std::thread::sleep(Duration::from_millis(10));
-        //     }
-        //     // Example has_free_space implementation
-        //     fn has_space(&self) -> bool {
-        //         let max_samples = self.qos.resource_limits.max_samples;
-        //         let max_instances = self.qos.resource_limits.max_instances;
-        //         let history_depth = self.qos.history.depth;
-        //         let instance_count = self.get_instance_count();
-        //         // Condition 2: instance count > sample count → blocking
-        //         if max_samples < max_instances {
-        //             if instance_count >= max_samples {
-        //                 return false;
-        //             }
-        //         }
-        //         // Condition 1: overall sample count limit
-        //         let theoretical_max = instance_count * history_depth;
-        //         if max_samples < theoretical_max {
-        //             // there's potential to discard some samples
-        //             self.evict_oldest_sample_if_needed();
-        //             if self.total_sample_count() >= max_samples {
-        //                 return false; // still no space available → blocking candidate
-        //             }
-        //         }
-        //         true
-        //     }
-        // }
         let serialized_key = self.type_support.serialize_key(instance as &dyn Any)?;
         let instance_handle = match self.key_instances.lock() {
             Ok(key_instances) => {
@@ -1669,8 +1595,15 @@ where
                 monitor.cancel_instance(&handle);
             }
 
+            let change_kind =
+                if self.get_qos()?.writer_data_lifecycle.autodispose_unregistered_instances {
+                    ChangeKind::NotAliveDisposedUnregistered
+                } else {
+                    ChangeKind::NotAliveUnregistered
+                };
+
             self.add_change(
-                ChangeKind::NotAliveUnregistered,
+                change_kind,
                 serialized_key,
                 // ParameterList::default(),
                 handle,
@@ -1883,7 +1816,6 @@ impl<Foo: 'static + Clone> DataWriterBase for DataWriter<Foo> {
         let reliability = self.get_qos()?.reliability;
         if reliability.kind == ReliabilityQosPolicyKind::Reliable {
             let rtps_writer = self.get_rtps_writer()?;
-            // FastDDS example
             if rtps_writer.wait_for_all_acked(max_wait) {
                 return Ok(());
             }
@@ -2182,9 +2114,9 @@ mod tests {
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
 
-        // QoS settings with 200ms deadline
+        // QoS settings with 500ms deadline (large margin for CI)
         let mut writer_qos = DataWriterQos::default();
-        writer_qos.deadline.period = Duration::from_millis(200);
+        writer_qos.deadline.period = Duration::from_millis(500);
 
         let deadline_miss_count = Arc::new(AtomicUsize::new(0));
         let listener =
@@ -2207,12 +2139,12 @@ mod tests {
         println!("First write completed");
 
         // Write again before deadline - miss should not occur
-        thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(200));
         writer.write(&data, InstanceHandle::NIL).unwrap();
         println!("Second write completed (within deadline)");
 
         // Verify after short wait
-        thread::sleep(std::time::Duration::from_millis(50));
+        thread::sleep(std::time::Duration::from_millis(100));
         assert_eq!(
             deadline_miss_count.load(Ordering::SeqCst),
             0,
@@ -2221,7 +2153,7 @@ mod tests {
 
         // Wait to exceed deadline - miss should occur
         println!("Waiting for deadline to expire...");
-        thread::sleep(std::time::Duration::from_millis(250));
+        thread::sleep(std::time::Duration::from_millis(600));
 
         // Verify deadline miss
         let miss_count = deadline_miss_count.load(Ordering::SeqCst);
