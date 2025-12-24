@@ -369,7 +369,6 @@ fn generate_unified_type_support_impl(
     let extensibility_tokens = if let Some(ext_kind) = extensibility {
         quote_extensibility_tokens(ext_kind, crate_path)
     } else {
-        // Changed from Final to Appendable to match OMG IDL4 spec and dust-dds default
         quote! { #crate_path::serialize::xcdr::ExtensibilityKind::Appendable }
     };
 
@@ -473,6 +472,23 @@ fn generate_field_access_methods(
     name: &syn::Ident,
     crate_path: &proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
+    // Handle empty struct case
+    if fields.is_empty() {
+        return quote! {
+            fn get_field_value(&self, data: &dyn std::any::Any, field_path: &str) -> #crate_path::dcps::core::error::DdsResult<#crate_path::topic::sql::ast::Parameter> {
+                if data.downcast_ref::<#name>().is_some() {
+                    Err(#crate_path::dcps::core::error::DdsError::Error(format!("Field '{}' not found", field_path)))
+                } else {
+                    Err(#crate_path::dcps::core::error::DdsError::BadParameter)
+                }
+            }
+
+            fn has_field(&self, _field_path: &str) -> bool {
+                false
+            }
+        };
+    }
+
     let field_names: Vec<_> = fields
         .iter()
         .map(|field| {
@@ -523,6 +539,17 @@ fn generate_cdr_serialize_impl(
     fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
     crate_path: &proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
+    // Handle empty struct case
+    if fields.is_empty() {
+        return quote! {
+            impl #crate_path::serialize::cdr::CdrSerialize for #name {
+                fn serialize_cdr(&self, _serializer: &mut #crate_path::serialize::cdr::CdrSerializer) -> #crate_path::serialize::cdr::CdrResult<()> {
+                    Ok(())
+                }
+            }
+        };
+    }
+
     // Call CdrSerialize::serialize_cdr for each field
     let field_calls: Vec<_> = fields
         .iter()
@@ -551,6 +578,17 @@ fn generate_cdr_deserialize_impl(
     fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
     crate_path: &proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
+    // Handle empty struct case
+    if fields.is_empty() {
+        return quote! {
+            impl #crate_path::serialize::cdr::CdrDeserialize for #name {
+                fn deserialize_cdr(_deserializer: &mut #crate_path::serialize::cdr::CdrDeserializer) -> #crate_path::serialize::cdr::CdrResult<Self> {
+                    Ok(#name {})
+                }
+            }
+        };
+    }
+
     // Call CdrDeserialize::deserialize_cdr for each field
     let field_deserializations: Vec<_> = fields
         .iter()
@@ -585,6 +623,32 @@ fn generate_xcdr_serialize_impl(
     crate_path: &proc_macro2::TokenStream,
     extensibility: Option<ExtensibilityKind>,
 ) -> proc_macro2::TokenStream {
+    // Handle empty struct case
+    if fields.is_empty() {
+        let serialization_body = if matches!(
+            extensibility,
+            Some(ExtensibilityKind::Appendable) | Some(ExtensibilityKind::Mutable)
+        ) {
+            quote! {
+                let size_pos = serializer.begin_struct()?;
+                serializer.end_struct(size_pos)?;
+                Ok(())
+            }
+        } else {
+            quote! {
+                Ok(())
+            }
+        };
+
+        return quote! {
+            impl #crate_path::serialize::xcdr::XcdrSerialize for #name {
+                fn serialize_xcdr(&self, serializer: &mut #crate_path::serialize::xcdr::XcdrSerializer) -> #crate_path::serialize::xcdr::XcdrResult<()> {
+                    #serialization_body
+                }
+            }
+        };
+    }
+
     // Call XcdrSerialize::serialize_xcdr for each field
     let field_calls: Vec<_> = fields
         .iter()
@@ -631,6 +695,32 @@ fn generate_xcdr_deserialize_impl(
     crate_path: &proc_macro2::TokenStream,
     extensibility: Option<ExtensibilityKind>,
 ) -> proc_macro2::TokenStream {
+    // Handle empty struct case
+    if fields.is_empty() {
+        let deserialization_body = if matches!(
+            extensibility,
+            Some(ExtensibilityKind::Appendable) | Some(ExtensibilityKind::Mutable)
+        ) {
+            quote! {
+                let (object_size, start_position) = deserializer.begin_struct()?;
+                deserializer.end_struct(object_size, start_position)?;
+                Ok(#name {})
+            }
+        } else {
+            quote! {
+                Ok(#name {})
+            }
+        };
+
+        return quote! {
+            impl #crate_path::serialize::xcdr::XcdrDeserialize for #name {
+                fn deserialize_xcdr(deserializer: &mut #crate_path::serialize::xcdr::XcdrDeserializer) -> #crate_path::serialize::xcdr::XcdrResult<Self> {
+                    #deserialization_body
+                }
+            }
+        };
+    }
+
     // Call XcdrDeserialize::deserialize_xcdr for each field
     let field_deserializations: Vec<_> = fields
         .iter()
@@ -665,6 +755,562 @@ fn generate_xcdr_deserialize_impl(
             Ok(#name {
                 #(#field_names,)*
             })
+        }
+    };
+
+    quote! {
+        impl #crate_path::serialize::xcdr::XcdrDeserialize for #name {
+            fn deserialize_xcdr(deserializer: &mut #crate_path::serialize::xcdr::XcdrDeserializer) -> #crate_path::serialize::xcdr::XcdrResult<Self> {
+                #deserialization_body
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Tuple Struct Support
+// ============================================================================
+
+/// Generate DdsType implementation for tuple struct types (e.g., struct Foo(pub u8))
+pub fn derive_tuple_struct_impl(
+    input: &DeriveInput,
+    name: &syn::Ident,
+    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
+    type_config: &DdsTypeConfig,
+) -> proc_macro2::TokenStream {
+    let crate_path = &type_config.crate_path;
+    let type_support_name = quote::format_ident!("{}TypeSupport", name);
+
+    // Tuple structs don't have key fields (no named fields with #[dds(key)] attribute)
+    let has_key = false;
+
+    // Define TypeSupport struct
+    let type_support_struct = quote! {
+        #[derive(Default)]
+        pub struct #type_support_name;
+    };
+
+    // Generate field serialization/deserialization for tuple fields
+    let field_count = fields.len();
+
+    // Generate CDR serialization
+    let cdr_field_serialization = generate_tuple_field_serialization(fields, crate_path);
+    let cdr_field_deserialization = generate_tuple_field_deserialization(fields, name, crate_path);
+
+    // Generate XCDR serialization
+    let xcdr_field_serialization = generate_tuple_field_serialization_xcdr(fields, crate_path);
+    let xcdr_field_deserialization =
+        generate_tuple_field_deserialization_xcdr(fields, name, crate_path);
+
+    // Generate key-related methods (no keys for tuple structs)
+    let (serialize_key_impl, deserialize_key_impl, compute_key_impl) =
+        generate_key_methods(None, name, &cdr_field_deserialization, crate_path);
+
+    // Generate field access methods
+    let field_access_impl = generate_tuple_field_access_methods(field_count, name, crate_path);
+
+    // TypeSupport trait implementation
+    let type_support_impl = generate_tuple_type_support_impl(
+        &type_support_name,
+        name,
+        has_key,
+        &cdr_field_serialization,
+        &cdr_field_deserialization,
+        &xcdr_field_serialization,
+        &xcdr_field_deserialization,
+        &serialize_key_impl,
+        &deserialize_key_impl,
+        &compute_key_impl,
+        &field_access_impl,
+        crate_path,
+        type_config.extensibility,
+    );
+
+    let dds_type_impl = quote! {
+        impl #crate_path::dcps::topic::type_support::DdsType for #name {
+            type TypeSupport = #type_support_name;
+        }
+    };
+
+    // Generate CdrSerialize and CdrDeserialize trait implementations
+    let cdr_serialize_impl = generate_tuple_cdr_serialize_impl(name, fields, crate_path);
+    let cdr_deserialize_impl = generate_tuple_cdr_deserialize_impl(name, fields, crate_path);
+
+    // Generate XcdrSerialize and XcdrDeserialize trait implementations
+    let xcdr_serialize_impl =
+        generate_tuple_xcdr_serialize_impl(name, fields, crate_path, type_config.extensibility);
+    let xcdr_deserialize_impl =
+        generate_tuple_xcdr_deserialize_impl(name, fields, crate_path, type_config.extensibility);
+
+    let additional_derives = generate_additional_derives(input, name);
+
+    quote! {
+        #type_support_struct
+        #type_support_impl
+        #dds_type_impl
+        #cdr_serialize_impl
+        #cdr_deserialize_impl
+        #xcdr_serialize_impl
+        #xcdr_deserialize_impl
+        #additional_derives
+    }
+}
+
+/// Generate tuple field serialization code for CDR
+fn generate_tuple_field_serialization(
+    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
+    crate_path: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let field_serializations: Vec<_> = fields
+        .iter()
+        .enumerate()
+        .map(|(idx, _field)| {
+            let idx = syn::Index::from(idx);
+            quote! {
+                #crate_path::serialize::cdr::CdrSerialize::serialize_cdr(&typed_data.#idx, &mut serializer)
+                    .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+            }
+        })
+        .collect();
+
+    quote! { #(#field_serializations)* }
+}
+
+/// Generate tuple field deserialization code for CDR
+fn generate_tuple_field_deserialization(
+    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
+    name: &syn::Ident,
+    crate_path: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let field_deserializations: Vec<_> = fields
+        .iter()
+        .enumerate()
+        .map(|(idx, field)| {
+            let field_var = quote::format_ident!("field_{}", idx);
+            let field_type = &field.ty;
+            quote! {
+                let #field_var = <#field_type as #crate_path::serialize::cdr::CdrDeserialize>::deserialize_cdr(&mut deserializer)
+                    .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+            }
+        })
+        .collect();
+
+    let field_vars: Vec<_> =
+        (0..fields.len()).map(|idx| quote::format_ident!("field_{}", idx)).collect();
+
+    quote! {
+        #(#field_deserializations)*
+        let result = #name(#(#field_vars),*);
+    }
+}
+
+/// Generate tuple field serialization code for XCDR
+fn generate_tuple_field_serialization_xcdr(
+    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
+    crate_path: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let field_serializations: Vec<_> = fields
+        .iter()
+        .enumerate()
+        .map(|(idx, _field)| {
+            let idx = syn::Index::from(idx);
+            quote! {
+                #crate_path::serialize::xcdr::XcdrSerialize::serialize_xcdr(&typed_data.#idx, &mut serializer)
+                    .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+            }
+        })
+        .collect();
+
+    quote! { #(#field_serializations)* }
+}
+
+/// Generate tuple field deserialization code for XCDR
+fn generate_tuple_field_deserialization_xcdr(
+    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
+    name: &syn::Ident,
+    crate_path: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let field_deserializations: Vec<_> = fields
+        .iter()
+        .enumerate()
+        .map(|(idx, field)| {
+            let field_var = quote::format_ident!("field_{}", idx);
+            let field_type = &field.ty;
+            quote! {
+                let #field_var = <#field_type as #crate_path::serialize::xcdr::XcdrDeserialize>::deserialize_xcdr(&mut deserializer)
+                    .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+            }
+        })
+        .collect();
+
+    let field_vars: Vec<_> =
+        (0..fields.len()).map(|idx| quote::format_ident!("field_{}", idx)).collect();
+
+    quote! {
+        #(#field_deserializations)*
+        let result = #name(#(#field_vars),*);
+    }
+}
+
+/// Generate field access methods for tuple struct
+fn generate_tuple_field_access_methods(
+    field_count: usize,
+    name: &syn::Ident,
+    crate_path: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    // Handle empty tuple struct case
+    if field_count == 0 {
+        return quote! {
+            fn get_field_value(&self, data: &dyn std::any::Any, field_path: &str) -> #crate_path::dcps::core::error::DdsResult<#crate_path::topic::sql::ast::Parameter> {
+                if data.downcast_ref::<#name>().is_some() {
+                    Err(#crate_path::dcps::core::error::DdsError::Error(format!("Field '{}' not found", field_path)))
+                } else {
+                    Err(#crate_path::dcps::core::error::DdsError::BadParameter)
+                }
+            }
+
+            fn has_field(&self, _field_path: &str) -> bool {
+                false
+            }
+        };
+    }
+
+    // For tuple structs, we support accessing fields by index as string ("0", "1", etc.)
+    let field_indices: Vec<_> = (0..field_count)
+        .map(|idx| {
+            let idx_str = idx.to_string();
+            quote! { #idx_str }
+        })
+        .collect();
+
+    let field_matches: Vec<_> = (0..field_count)
+        .map(|idx| {
+            let idx_str = idx.to_string();
+            let idx_token = syn::Index::from(idx);
+            quote! {
+                #idx_str => {
+                    any_to_parameter(&typed_data.#idx_token as &dyn std::any::Any)
+                },
+            }
+        })
+        .collect();
+
+    let helper_fn = quote_field_to_parameter_conversion(crate_path);
+
+    quote! {
+        fn get_field_value(&self, data: &dyn std::any::Any, field_path: &str) -> #crate_path::dcps::core::error::DdsResult<#crate_path::topic::sql::ast::Parameter> {
+            #helper_fn
+
+            if let Some(typed_data) = data.downcast_ref::<#name>() {
+                match field_path {
+                    #(#field_matches)*
+                    _ => Err(#crate_path::dcps::core::error::DdsError::Error(format!("Field '{}' not found", field_path))),
+                }
+            } else {
+                Err(#crate_path::dcps::core::error::DdsError::BadParameter)
+            }
+        }
+
+        fn has_field(&self, field_path: &str) -> bool {
+            matches!(field_path, #(#field_indices)|*)
+        }
+    }
+}
+
+fn generate_tuple_type_support_impl(
+    type_support_name: &syn::Ident,
+    name: &syn::Ident,
+    has_key: bool,
+    cdr_field_serialization: &proc_macro2::TokenStream,
+    cdr_field_deserialization: &proc_macro2::TokenStream,
+    xcdr_field_serialization: &proc_macro2::TokenStream,
+    xcdr_field_deserialization: &proc_macro2::TokenStream,
+    serialize_key_impl: &proc_macro2::TokenStream,
+    deserialize_key_impl: &proc_macro2::TokenStream,
+    compute_key_impl: &proc_macro2::TokenStream,
+    field_access_impl: &proc_macro2::TokenStream,
+    crate_path: &proc_macro2::TokenStream,
+    extensibility: Option<ExtensibilityKind>,
+) -> proc_macro2::TokenStream {
+    let serialize_impl = quote_serialize_impl(crate_path);
+    let deserialize_impl = quote_deserialize_impl(extensibility, crate_path);
+    let serialize_with_format_impl = quote_serialize_with_format_impl(
+        name,
+        cdr_field_serialization,
+        xcdr_field_serialization,
+        crate_path,
+    );
+    let deserialize_with_format_impl = quote_deserialize_with_format_impl(
+        name,
+        cdr_field_deserialization,
+        xcdr_field_deserialization,
+        crate_path,
+    );
+
+    let extensibility_tokens = if let Some(ext_kind) = extensibility {
+        quote_extensibility_tokens(ext_kind, crate_path)
+    } else {
+        quote! { #crate_path::serialize::xcdr::ExtensibilityKind::Appendable }
+    };
+
+    quote! {
+        impl #crate_path::dcps::topic::type_support::TypeSupport for #type_support_name {
+            fn get_type_name(&self) -> &str {
+                stringify!(#name)
+            }
+
+            fn type_id(&self) -> std::any::TypeId {
+                std::any::TypeId::of::<#name>()
+            }
+
+            fn is_compute_key_provided(&self) -> bool {
+                #has_key
+            }
+
+            fn get_extensibility_kind(&self) -> #crate_path::serialize::xcdr::ExtensibilityKind {
+                #extensibility_tokens
+            }
+
+            #serialize_impl
+
+            #deserialize_impl
+
+            #serialize_with_format_impl
+
+            #deserialize_with_format_impl
+
+            #serialize_key_impl
+
+            #deserialize_key_impl
+
+            #compute_key_impl
+
+            fn serialize_key_and_non_key(&self, data: &dyn std::any::Any) -> #crate_path::dcps::core::error::DdsResult<(#crate_path::rtps::common::types::SerializedData, #crate_path::rtps::common::types::SerializedData)> {
+                if data.downcast_ref::<#name>().is_some() {
+                    let key_data = self.serialize_key(data)?;
+                    let full_data = self.serialize(data)?;
+                    Ok((key_data, full_data))
+                } else {
+                    Err(#crate_path::dcps::core::error::DdsError::BadParameter)
+                }
+            }
+
+            #field_access_impl
+        }
+    }
+}
+
+/// Generate CdrSerialize trait implementation for tuple struct
+fn generate_tuple_cdr_serialize_impl(
+    name: &syn::Ident,
+    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
+    crate_path: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    if fields.is_empty() {
+        return quote! {
+            impl #crate_path::serialize::cdr::CdrSerialize for #name {
+                fn serialize_cdr(&self, _serializer: &mut #crate_path::serialize::cdr::CdrSerializer) -> #crate_path::serialize::cdr::CdrResult<()> {
+                    Ok(())
+                }
+            }
+        };
+    }
+
+    let field_calls: Vec<_> = fields
+        .iter()
+        .enumerate()
+        .map(|(idx, _field)| {
+            let idx = syn::Index::from(idx);
+            quote! {
+                #crate_path::serialize::cdr::CdrSerialize::serialize_cdr(&self.#idx, serializer)?;
+            }
+        })
+        .collect();
+
+    quote! {
+        impl #crate_path::serialize::cdr::CdrSerialize for #name {
+            fn serialize_cdr(&self, serializer: &mut #crate_path::serialize::cdr::CdrSerializer) -> #crate_path::serialize::cdr::CdrResult<()> {
+                use #crate_path::serialize::cdr::{PrimitiveSerialize, StringSerialize, ArraySerialize, SequenceSerialize};
+                #(#field_calls)*
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Generate CdrDeserialize trait implementation for tuple struct
+fn generate_tuple_cdr_deserialize_impl(
+    name: &syn::Ident,
+    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
+    crate_path: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    if fields.is_empty() {
+        return quote! {
+            impl #crate_path::serialize::cdr::CdrDeserialize for #name {
+                fn deserialize_cdr(_deserializer: &mut #crate_path::serialize::cdr::CdrDeserializer) -> #crate_path::serialize::cdr::CdrResult<Self> {
+                    Ok(#name())
+                }
+            }
+        };
+    }
+
+    let field_deserializations: Vec<_> = fields
+        .iter()
+        .enumerate()
+        .map(|(idx, field)| {
+            let field_var = quote::format_ident!("field_{}", idx);
+            let field_type = &field.ty;
+            quote! {
+                let #field_var = <#field_type as #crate_path::serialize::cdr::CdrDeserialize>::deserialize_cdr(deserializer)?;
+            }
+        })
+        .collect();
+
+    let field_vars: Vec<_> =
+        (0..fields.len()).map(|idx| quote::format_ident!("field_{}", idx)).collect();
+
+    quote! {
+        impl #crate_path::serialize::cdr::CdrDeserialize for #name {
+            fn deserialize_cdr(deserializer: &mut #crate_path::serialize::cdr::CdrDeserializer) -> #crate_path::serialize::cdr::CdrResult<Self> {
+                #(#field_deserializations)*
+                Ok(#name(#(#field_vars),*))
+            }
+        }
+    }
+}
+
+/// Generate XcdrSerialize trait implementation for tuple struct
+fn generate_tuple_xcdr_serialize_impl(
+    name: &syn::Ident,
+    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
+    crate_path: &proc_macro2::TokenStream,
+    extensibility: Option<ExtensibilityKind>,
+) -> proc_macro2::TokenStream {
+    if fields.is_empty() {
+        let serialization_body = if matches!(
+            extensibility,
+            Some(ExtensibilityKind::Appendable) | Some(ExtensibilityKind::Mutable)
+        ) {
+            quote! {
+                let size_pos = serializer.begin_struct()?;
+                serializer.end_struct(size_pos)?;
+                Ok(())
+            }
+        } else {
+            quote! {
+                Ok(())
+            }
+        };
+
+        return quote! {
+            impl #crate_path::serialize::xcdr::XcdrSerialize for #name {
+                fn serialize_xcdr(&self, serializer: &mut #crate_path::serialize::xcdr::XcdrSerializer) -> #crate_path::serialize::xcdr::XcdrResult<()> {
+                    #serialization_body
+                }
+            }
+        };
+    }
+
+    let field_calls: Vec<_> = fields
+        .iter()
+        .enumerate()
+        .map(|(idx, _field)| {
+            let idx = syn::Index::from(idx);
+            quote! {
+                #crate_path::serialize::xcdr::XcdrSerialize::serialize_xcdr(&self.#idx, serializer)?;
+            }
+        })
+        .collect();
+
+    let serialization_body = if matches!(
+        extensibility,
+        Some(ExtensibilityKind::Appendable) | Some(ExtensibilityKind::Mutable)
+    ) {
+        quote! {
+            use #crate_path::serialize::cdr::{PrimitiveSerialize, StringSerialize, ArraySerialize, SequenceSerialize};
+            let size_pos = serializer.begin_struct()?;
+            #(#field_calls)*
+            serializer.end_struct(size_pos)?;
+            Ok(())
+        }
+    } else {
+        quote! {
+            use #crate_path::serialize::cdr::{PrimitiveSerialize, StringSerialize, ArraySerialize, SequenceSerialize};
+            #(#field_calls)*
+            Ok(())
+        }
+    };
+
+    quote! {
+        impl #crate_path::serialize::xcdr::XcdrSerialize for #name {
+            fn serialize_xcdr(&self, serializer: &mut #crate_path::serialize::xcdr::XcdrSerializer) -> #crate_path::serialize::xcdr::XcdrResult<()> {
+                #serialization_body
+            }
+        }
+    }
+}
+
+/// Generate XcdrDeserialize trait implementation for tuple struct
+fn generate_tuple_xcdr_deserialize_impl(
+    name: &syn::Ident,
+    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
+    crate_path: &proc_macro2::TokenStream,
+    extensibility: Option<ExtensibilityKind>,
+) -> proc_macro2::TokenStream {
+    if fields.is_empty() {
+        let deserialization_body = if matches!(
+            extensibility,
+            Some(ExtensibilityKind::Appendable) | Some(ExtensibilityKind::Mutable)
+        ) {
+            quote! {
+                let (object_size, start_position) = deserializer.begin_struct()?;
+                deserializer.end_struct(object_size, start_position)?;
+                Ok(#name())
+            }
+        } else {
+            quote! {
+                Ok(#name())
+            }
+        };
+
+        return quote! {
+            impl #crate_path::serialize::xcdr::XcdrDeserialize for #name {
+                fn deserialize_xcdr(deserializer: &mut #crate_path::serialize::xcdr::XcdrDeserializer) -> #crate_path::serialize::xcdr::XcdrResult<Self> {
+                    #deserialization_body
+                }
+            }
+        };
+    }
+
+    let field_deserializations: Vec<_> = fields
+        .iter()
+        .enumerate()
+        .map(|(idx, field)| {
+            let field_var = quote::format_ident!("field_{}", idx);
+            let field_type = &field.ty;
+            quote! {
+                let #field_var = <#field_type as #crate_path::serialize::xcdr::XcdrDeserialize>::deserialize_xcdr(deserializer)?;
+            }
+        })
+        .collect();
+
+    let field_vars: Vec<_> =
+        (0..fields.len()).map(|idx| quote::format_ident!("field_{}", idx)).collect();
+
+    let deserialization_body = if matches!(
+        extensibility,
+        Some(ExtensibilityKind::Appendable) | Some(ExtensibilityKind::Mutable)
+    ) {
+        quote! {
+            let (object_size, start_position) = deserializer.begin_struct()?;
+            #(#field_deserializations)*
+            deserializer.end_struct(object_size, start_position)?;
+            Ok(#name(#(#field_vars),*))
+        }
+    } else {
+        quote! {
+            #(#field_deserializations)*
+            Ok(#name(#(#field_vars),*))
         }
     };
 

@@ -480,7 +480,6 @@ impl DomainParticipant {
 
             Error codes that may be returned in addition to standard error codes: OUT_OF_RESOURCES.
         */
-        // FastDDS-based implementation example
         // match &self.rtps_participant {
         //     None => DdsError::NotEnabled,
         //     Some(participant) => {

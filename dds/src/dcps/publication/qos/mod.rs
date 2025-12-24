@@ -121,10 +121,10 @@ impl Qos for DataWriterQos {
             || self.latency_budget != LatencyBudgetQosPolicy::default()
             // || self.liveliness != LivelinessQosPolicy::default()
             || self.transport_priority != TransportPriorityQosPolicy::default()
-            // || self.lifespan != LifespanQosPolicy::default()
-            // || self.ownership != OwnershipQosPolicy::default()
-            // || self.ownership_strength != OwnershipStrengthQosPolicy::default()
-            || self.writer_data_lifecycle != WriterDataLifecycleQosPolicy::default()
+        // || self.lifespan != LifespanQosPolicy::default()
+        // || self.ownership != OwnershipQosPolicy::default()
+        // || self.ownership_strength != OwnershipStrengthQosPolicy::default()
+        // || self.writer_data_lifecycle != WriterDataLifecycleQosPolicy::default()
         {
             return Err(DdsError::Unsupported);
         }

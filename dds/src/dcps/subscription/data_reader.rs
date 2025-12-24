@@ -1497,37 +1497,53 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                 }
             }
             InstanceStateKind::NOT_ALIVE_DISPOSED_INSTANCE_STATE => {
-                log::debug!("Setting instance state to NOT_ALIVE_DISPOSED");
-                info.instance_state = InstanceStateKind::NOT_ALIVE_DISPOSED_INSTANCE_STATE;
-                if info.key.is_empty() && cache_change.is_some() {
-                    info.key = cache_change
-                        .as_ref()
-                        .ok_or(DdsError::Error(
-                            "CacheChange is not properly initialized".to_string(),
-                        ))?
-                        .data_value_arc();
-                }
-                let monitor_guard =
-                    self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-                if let Some(monitor) = monitor_guard.as_ref() {
-                    monitor.cancel_instance(&instance_handle);
+                if info.instance_state == InstanceStateKind::ALIVE_INSTANCE_STATE {
+                    log::debug!("Setting instance state to NOT_ALIVE_DISPOSED");
+                    info.instance_state = InstanceStateKind::NOT_ALIVE_DISPOSED_INSTANCE_STATE;
+                    if info.key.is_empty() && cache_change.is_some() {
+                        info.key = cache_change
+                            .as_ref()
+                            .ok_or(DdsError::Error(
+                                "CacheChange is not properly initialized".to_string(),
+                            ))?
+                            .data_value_arc();
+                    }
+
+                    let monitor_guard =
+                        self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+                    if let Some(monitor) = monitor_guard.as_ref() {
+                        monitor.cancel_instance(&instance_handle);
+                    }
+                } else {
+                    log::debug!(
+                        "Not alive state transition only occurs from ALIVE to NOT_ALIVE,cannot change to NOT_ALIVE_DISPOSED from {:?}",
+                        info.instance_state
+                    );
                 }
             }
             InstanceStateKind::NOT_ALIVE_NO_WRITERS_INSTANCE_STATE => {
-                log::debug!("Setting instance state to NOT_ALIVE_NO_WRITERS");
-                info.instance_state = InstanceStateKind::NOT_ALIVE_NO_WRITERS_INSTANCE_STATE;
-                if info.key.is_empty() && cache_change.is_some() {
-                    info.key = cache_change
-                        .as_ref()
-                        .ok_or(DdsError::Error(
-                            "CacheChange is not properly initialized".to_string(),
-                        ))?
-                        .data_value_arc();
-                }
-                let monitor_guard =
-                    self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-                if let Some(monitor) = monitor_guard.as_ref() {
-                    monitor.cancel_instance(&instance_handle);
+                if info.instance_state == InstanceStateKind::ALIVE_INSTANCE_STATE {
+                    log::debug!("Setting instance state to NOT_ALIVE_NO_WRITERS");
+                    info.instance_state = InstanceStateKind::NOT_ALIVE_NO_WRITERS_INSTANCE_STATE;
+                    if info.key.is_empty() && cache_change.is_some() {
+                        info.key = cache_change
+                            .as_ref()
+                            .ok_or(DdsError::Error(
+                                "CacheChange is not properly initialized".to_string(),
+                            ))?
+                            .data_value_arc();
+                    }
+
+                    let monitor_guard =
+                        self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+                    if let Some(monitor) = monitor_guard.as_ref() {
+                        monitor.cancel_instance(&instance_handle);
+                    }
+                } else {
+                    log::debug!(
+                        "Not alive state transition only occurs from ALIVE to NOT_ALIVE, cannot change to NOT_ALIVE_NO_WRITERS from {:?}",
+                        info.instance_state
+                    );
                 }
             }
             _ => {
