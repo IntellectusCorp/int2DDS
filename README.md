@@ -2,19 +2,15 @@
 
 <div align="center">
 
-A **Rust implementation** of the [Data Distribution Service (DDS)](https://www.omg.org/spec/DDS/) middleware standard, following the Real-Time Publish-Subscribe (RTPS) protocol.
-
-[English](#english) | [한국어](#korean)
+A **Rust implementation** of the [Data Distribution Service (DDS)](https://www.omg.org/spec/DDS/) middleware standard, following the Real-Time Publish-Subscribe (RTPS)
 
 </div>
 
 ---
 
-<a name="english"></a>
-
 ## Overview
 
-**int2DDS** is a production-grade DDS middleware implementation in Rust, developed by Intellectus Corp. It provides high-performance, real-time pub-sub communication for distributed systems with full RTPS protocol support.
+**int2DDS** is an open-source, real-time DDS / RTPS middleware core. It provides high-performance, real-time pub-sub communication for distributed systems with RTPS protocol support. It provides a standards-based foundation for building reliable, low-latency distributed systems in domains such as autonomous driving, robotics, industrial automation, and defense.
 
 ### Key Features
 
@@ -36,16 +32,17 @@ Add int2DDS to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-int2DDS = "0.0.1"
-int2DDS-derive = "0.0.1"
+int2dds = "0.0.1"
+int2dds-derive = "0.0.1"
 ```
 
 ### Basic Example
 
-**Publisher:**
+<details>
+<summary><strong>Publisher:</strong></summary>
 
 ```rust
-use int2DDS::{
+use int2dds::{
     common::instance_handle::InstanceHandle,
     core::time::Duration,
     domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
@@ -61,7 +58,7 @@ use int2DDS::{
 
 
 #[derive(DdsType)]
-#[dds_type(crate_path = "int2DDS")]
+#[dds_type(crate_path = "int2dds")]
 struct HelloWorld {
     index: u32,
     message: String,
@@ -110,10 +107,14 @@ fn main() {
 }
 ```
 
-**Subscriber:**
+</details>
+
+<details>
+<summary><strong>Subscriber:</strong></summary>
 
 ```rust
-use int2DDS::{
+use std::sync::Arc;
+use int2dds::{
     core::time::Duration,
     domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
     infrastructure::{
@@ -121,6 +122,7 @@ use int2DDS::{
         status::StatusMask,
     },
     subscription::{
+        data_reader_listener::DataReaderListener,
         qos::{DataReaderQos, SubscriberQos},
         sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind},
     },
@@ -128,7 +130,7 @@ use int2DDS::{
 };
 
 #[derive(DdsType)]
-#[dds_type(crate_path = "int2DDS")]
+#[dds_type(crate_path = "int2dds")]
 struct HelloWorld {
     index: u32,
     message: String,
@@ -139,7 +141,7 @@ impl DataReaderListener for MyListener {
     type Foo = HelloWorld;
     fn on_data_available(
         &self,
-        reader: &int2DDS::subscription::data_reader::DataReader<Self::Foo>,
+        reader: &int2dds::subscription::data_reader::DataReader<Self::Foo>,
     ) {
         if let Ok(samples) = reader.take(
             10,
@@ -198,11 +200,13 @@ fn main() {
 }
 ```
 
+</details>
+
 ## Building from Source
 
 ### Prerequisites
 
-- Rust 1.70 or later
+- Rust 1.88 or later
 - Cargo
 
 ### Build
@@ -230,15 +234,11 @@ examples:
 # Basic hello world examples
 cargo run --example hello_world_param -- --role pub --domain 0 --reliability reliable
 cargo run --example hello_world_param -- --role sub --domain 0 --reliability reliable
-
-# Performance testing
-cargo run --example perftest_publisher
-cargo run --example perftest_subscriber
 ```
 
 ## Documentation
 
-- **API Documentation**: Run `cargo doc --open` to generate and view API docs
+- **API Documentation**: Run `cargo doc --open --no-deps` to generate and view API docs
 - **Contributing**: See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines
 - **Examples**: Check the [dds/examples/](dds/examples/) directory for comprehensive examples
 
@@ -246,14 +246,24 @@ cargo run --example perftest_subscriber
 
 int2DDS supports various environment variables for configuration:
 
-- `INT2DDS_NETWORK_INTERFACE`: Specify network interface (e.g., "eth0")
+### Basic Environment Variables
+
+- `INT2DDS_LOG_TYPE`: Log output type (console, file, all, none)
+- `INT2DDS_CONSOLE_LOG_LEVEL`: Console log level (error, warn, info, debug, trace)
+- `INT2DDS_FILE_LOG_LEVEL`: File log level (error, warn, info, debug, trace)
+- `INT2DDS_UDP_SOCKET_BUFFER`: UDP socket buffer size (bytes), increase up to 8388608(8MB) for large payloads
+
+### int2DDS-feature dependent Environment Variables
+
+These variables require [int2DDS-feature](https://github.com/IntellectusCorp/int2DDS-feature-releases) binary. Place the binary in the same directory as your executable.
+
+- `INT2DDS_NETWORK_INTERFACE`: Specify network interface (e.g., "eth0", "Ethernet")
 - `INT2DDS_NETWORK_IP`: Specify network IP address directly
 - `INT2DDS_EXTENDED_DISCOVERY`: Enable extended discovery alongside multicast
-- `INT2DDS_THREAD_MONITORING`: Enable thread monitoring and logging
-- `INT2DDS_FUNCTION_TIMING`: Enable function performance profiling
-- `RUST_LOG`: Control logging level (error, warn, info, debug, trace)
 
-For environment variable documentation and advanced configuration, see the documentation in the repository.
+### Additional Environment Variables
+
+- For detailed environment variable documentation, see [docs/guide/env.md](docs/guide/env.md).
 
 ## Project Structure
 
@@ -280,6 +290,32 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 - Submitting pull requests
 - Reporting issues
 
+All contributors must agree to a **Contributor License Agreement (CLA)** before contributions can be merged.
+
+- Individual contributors: [`CLA-Individual.md`](./CLA-Individual.md)
+- Corporate / organizational contributors: [`CLA-Corporate.md`](./CLA-Corporate.md)
+
+## Scope of int2DDS
+
+int2DDS focuses on the **core runtime and communication layer** of a DDS middleware implementation.
+It is designed to be embedded and reused by higher-level systems, including commercial products such as **int2ConneX**, without imposing strong copyleft obligations.
+
+## Scope of the Open-Source Core
+
+### Included
+
+- OMG DDS / RTPS standard-based core functionality
+- Discovery, transport, topics, and essential QoS mechanisms
+- Minimal tooling required to build, run, and test the middleware
+
+### Not Included
+
+- Centralized management or monitoring dashboards
+- Fleet or cluster orchestration
+- Domain-specific bridges, UIs, analytics, or data pipelines
+
+These advanced capabilities are provided through commercial products such as **int2ConneX**.
+
 ## License
 
 This project is licensed under the [Apache License 2.0](LICENSE).
@@ -287,59 +323,3 @@ This project is licensed under the [Apache License 2.0](LICENSE).
 ## Acknowledgments
 
 Developed by [Intellectus Corp](https://github.com/IntellectusCorp).
-
----
-
-<a name="korean"></a>
-
-## 한국어
-
-### 개요
-
-**int2DDS**는 인텔렉투스에서 개발한 Rust 기반 DDS(Data Distribution Service) 미들웨어 구현체입니다. 실시간 분산 시스템을 위한 고성능 pub-sub 통신을 RTPS 프로토콜로 제공합니다.
-
-### 주요 기능
-
-- **RTPS 프로토콜**: OMG RTPS 2.5 와이어 프로토콜 구현
-- **QoS 정책**: 신뢰성, 내구성, 히스토리, 생존성 등 포괄적인 QoS 지원
-- **자동 검색**: SPDP 및 SEDP를 통한 자동 엔드포인트 검색
-- **타입 안전성**: `#[derive(DdsType)]` 매크로로 컴파일 타임 타입 체킹
-- **전송 유연성**: UDP 멀티캐스트, 브로드캐스트, TCP 전송 지원
-- **데이터 단편화**: 대용량 메시지 자동 처리
-- **XCDR2 직렬화**: 확장 가능한 데이터 표현 지원
-- **크로스 플랫폼**: Windows, Linux, macOS 지원
-- **상호운용성**: 다른 RTPS/DDS 구현체와 상호운용 가능
-
-### 빠른 시작
-
-설치 및 사용 방법은 위의 영어 섹션을 참고하세요.
-
-### 문서
-
-- **API 문서**: `cargo doc --open` 실행
-- **기여 가이드**: [CONTRIBUTING.md](CONTRIBUTING.md)
-- **예제**: [dds/examples/](dds/examples/) 디렉토리
-
-### 프로젝트 구조
-
-```
-int2DDS/
-├── dds/              # DDS 라이브러리 구현
-│   ├── src/
-│   │   ├── dcps/     # DCPS 레이어 (엔티티, QoS, 토픽)
-│   │   ├── rtps/     # RTPS 프로토콜 레이어
-│   │   └── common/   # 공통 유틸리티
-│   ├── examples/     # 예제 프로그램
-│   ├── tests/        # 통합 테스트
-│   └── benches/      # 성능 벤치마크
-├── derive/           # DdsType 매크로
-└── docs/             # 문서 및 가이드
-```
-
-### 라이선스
-
-이 프로젝트는 [Apache License 2.0](./LICENSE) 라이선스로 배포됩니다.
-
-### 문의
-
-인텔렉투스 (Intellectus Corp)에서 개발했습니다.
