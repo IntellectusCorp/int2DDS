@@ -383,8 +383,12 @@ impl Subscriber {
             Some(rtps_reader.clone()), // builtin endpoint(reader)
         )?;
 
-        // Enable the builtin datareader (connects cache via enable_rtps_entities)
-        datareader.enable()?;
+        // Enable if subscriber is enabled and autoenable is set (same as create_datareader)
+        if let Ok(()) = self.is_enabled() {
+            if self.get_qos()?.entity_factory.autoenable_created_entities {
+                datareader.enable()?;
+            }
+        }
 
         let topic_name = topic_description.get_name().to_string();
         let topic_handle = topic_description.topic_instance_handle()?;

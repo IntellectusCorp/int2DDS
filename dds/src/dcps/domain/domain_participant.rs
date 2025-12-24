@@ -74,7 +74,7 @@ use crate::{
     core::{
         error::{DdsError, DdsResult},
         time::{Duration, Time},
-        types::DomainId,
+        types::{DomainId, LENGTH_UNLIMITED},
     },
     domain::domain_participant_factory::DomainParticipantFactory,
     infrastructure::{
@@ -82,7 +82,13 @@ use crate::{
             impl_dds_entity, impl_dds_entity_impl, BaseEntity, EnableChild, Entity, EntityInternal,
             UpdateStatus,
         },
-        qos_policy::{LivelinessQosPolicyKind, Qos},
+        qos_policy::{
+            DeadlineQosPolicy, DestinationOrderQosPolicy, DestinationOrderQosPolicyKind,
+            DurabilityQosPolicy, DurabilityQosPolicyKind, EntityFactoryQosPolicy, HistoryQosPolicy,
+            HistoryQosPolicyKind, LivelinessQosPolicy, LivelinessQosPolicyKind, OwnershipQosPolicy,
+            OwnershipQosPolicyKind, Qos, ReaderDataLifecycleQosPolicy, ReliabilityQosPolicy,
+            ReliabilityQosPolicyKind, ResourceLimitsQosPolicy, TimeBasedFilterQosPolicy,
+        },
         status::StatusMask,
         status_condition::StatusCondition,
     },
@@ -92,12 +98,16 @@ use crate::{
         qos::{PublisherQos, PUBLISHER_QOS_DEFAULT},
     },
     rtps::{
+        builtin::data::participant_message_data::ParticipantMessageData,
         common::{guid::Guid, rtps_error_code::RtpsErrorCode},
         dcps_bridge::dcps_bridge::DcpsBridge,
-        entities::{entity::Entity as RtpsEntity, participant::Participant as RtpsParticipant},
+        entities::{
+            entity::Entity as RtpsEntity, participant::Participant as RtpsParticipant,
+            reader::Reader,
+        },
     },
     subscription::{
-        qos::{SubscriberQos, SUBSCRIBER_QOS_DEFAULT},
+        qos::{DataReaderQos, SubscriberQos, SUBSCRIBER_QOS_DEFAULT},
         subscriber::Subscriber,
         subscriber_listener::SubscriberListener,
     },
@@ -386,7 +396,14 @@ impl DomainParticipant {
         participant.self_ref = Some(participant_arc.clone()); // Without Arc, the new() function ends and memory is freed. StatusCondition's entity field returns None.
                                                               // Builtin-Endpoints
 
-        let rtps_participant = participant_arc.get_rtps_participant()?;
+        Self::initialize_builtin_entities(&participant_arc)?;
+
+        Ok(participant)
+    }
+
+    fn initialize_builtin_entities(participant: &Arc<Self>) -> DdsResult<()> {
+        let rtps_participant = participant.get_rtps_participant()?;
+
         let endpoints = rtps_participant.builtin_endpoints();
         let sedp_builtin_publications_reader = endpoints.sedp_builtin_publications_reader.clone();
         let sedp_builtin_subscriptions_reader = endpoints.sedp_builtin_subscriptions_reader.clone();
@@ -395,19 +412,152 @@ impl DomainParticipant {
         let builtin_participant_message_reader =
             endpoints.builtin_participant_message_reader.clone();
 
-        let builtin_subscriber = Subscriber::new(
-            true,
-            SubscriberQos::default(),
+        // @Intellectus-Garam
+        let dcps_participant_topic = Topic::new(
+            true, // is_builtin
+            "DCPSParticipant",
+            "SPDPdiscoveredParticipantData",
+            TopicQos::default(),
             None,
             StatusMask::all(),
-            participant_arc.create_instance_handle()?,
-            &participant_arc,
+            participant.create_instance_handle()?,
+            &participant,
         );
+        let dcps_publication_topic = Topic::new(
+            true, // is_builtin
+            "DCPSPublication",
+            "DiscoveredWriterData",
+            TopicQos::default(),
+            None,
+            StatusMask::all(),
+            participant.create_instance_handle()?,
+            &participant,
+        );
+        let dcps_subscription_topic = Topic::new(
+            true, // is_builtin
+            "DCPSSubscription",
+            "DiscoveredReaderData",
+            TopicQos::default(),
+            None,
+            StatusMask::all(),
+            participant.create_instance_handle()?,
+            &participant,
+        );
+        // TODO
+        // let dcps_topic_topic = Topic::new(
+        //     true, // is_builtin
+        //     "DCPSTopic",
+        //     "DiscoveredTopicData",
+        //     TopicQos::default(),
+        //     None,
+        //     StatusMask::all(),
+        //     participant.create_instance_handle()?,
+        //     &participant,
+        // );
+        let dcps_participant_message_topic = Topic::new(
+            true, // is_builtin
+            "DCPSParticipantMessage",
+            "BuiltinParticipantMessageReader",
+            TopicQos::default(),
+            None,
+            StatusMask::all(),
+            participant.create_instance_handle()?,
+            &participant,
+        );
+
+        // 2.2.5 Built-in Topics
+        let mut subscriber_qos = SubscriberQos::default();
+        // TODO
+        // subscriber_qos.presentation = PresentationQosPolicy {
+        //     access_scope: PresentationQosAccessScopeKind::Topic,
+        //     coherent_access: false,
+        //     ordered_access: false,
+        // };
+        subscriber_qos.entity_factory =
+            EntityFactoryQosPolicy { autoenable_created_entities: true };
+
+        let builtin_subscriber = Subscriber::new(
+            true,
+            subscriber_qos,
+            None,
+            StatusMask::all(),
+            participant.create_instance_handle()?,
+            &participant,
+        );
+
+        builtin_subscriber.enable()?;
+
+        // 2.2.5 Built-in Topics
+        let mut reader_qos = DataReaderQos::default();
+        reader_qos.durability =
+            DurabilityQosPolicy { kind: DurabilityQosPolicyKind::TransientLocal };
+        reader_qos.deadline = DeadlineQosPolicy { period: Duration::infinite() };
+        reader_qos.ownership = OwnershipQosPolicy { kind: OwnershipQosPolicyKind::Shared };
+        reader_qos.liveliness = LivelinessQosPolicy {
+            kind: LivelinessQosPolicyKind::Automatic,
+            lease_duration: Duration::from_seconds(100), // mutable, unspecified
+        };
+        reader_qos.time_based_filter =
+            TimeBasedFilterQosPolicy { minimum_separation: Duration::zero() };
+        reader_qos.reliability = ReliabilityQosPolicy {
+            kind: ReliabilityQosPolicyKind::Reliable,
+            max_blocking_time: Duration::from_millis(100),
+        };
+        reader_qos.destination_order =
+            DestinationOrderQosPolicy { kind: DestinationOrderQosPolicyKind::ByReceptionTimestamp };
+        reader_qos.history = HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepLast(1) };
+        reader_qos.resource_limits = ResourceLimitsQosPolicy {
+            max_instances: LENGTH_UNLIMITED,
+            max_samples: LENGTH_UNLIMITED,
+            max_samples_per_instance: LENGTH_UNLIMITED,
+        };
+        reader_qos.reader_data_lifecycle = ReaderDataLifecycleQosPolicy {
+            autopurge_nowriter_samples_delay: Duration {
+                sec: Duration::INFINITE_SEC,
+                nanosec: Duration::INFINITE_NSEC,
+            },
+            autopurge_disposed_samples_delay: Duration {
+                sec: Duration::INFINITE_SEC,
+                nanosec: Duration::INFINITE_NSEC,
+            },
+        };
+
+        let _participant_reader = builtin_subscriber
+            .create_builtin_datareader::<ParticipantBuiltinTopicData>(
+                &dcps_participant_topic,
+                reader_qos.clone(),
+                spdp_builtin_participant_reader.clone() as Arc<dyn Reader + Send + Sync>,
+            )?;
+        let _publication_reader = builtin_subscriber
+            .create_builtin_datareader::<PublicationBuiltinTopicData>(
+                &dcps_publication_topic,
+                reader_qos.clone(),
+                sedp_builtin_publications_reader.clone() as Arc<dyn Reader + Send + Sync>,
+            )?;
+        let _subscription_reader = builtin_subscriber
+            .create_builtin_datareader::<SubscriptionBuiltinTopicData>(
+                &dcps_subscription_topic,
+                reader_qos.clone(),
+                sedp_builtin_subscriptions_reader.clone() as Arc<dyn Reader + Send + Sync>,
+            )?;
+        // TODO
+        // let _topic_reader = builtin_subscriber
+        //     .create_builtin_datareader::<TopicBuiltinTopicData>(
+        //         &dcps_topic_topic,
+        //         reader_qos,
+        //         sedp_builtin_topics_reader.clone() as Arc<dyn Reader + Send + Sync>,
+        //     )?;
+        let _participant_message_reader = builtin_subscriber
+            .create_builtin_datareader::<ParticipantMessageData>(
+                &dcps_participant_message_topic,
+                reader_qos.clone(),
+                builtin_participant_message_reader.clone() as Arc<dyn Reader + Send + Sync>,
+            )?;
 
         *participant.builtin_subscriber.lock().map_err(|e| DdsError::Error(e.to_string()))? =
             Some(builtin_subscriber);
 
-        Ok(participant)
+        Ok(())
     }
 
     pub(crate) fn has_active_entities(&self) -> DdsResult<bool> {
@@ -957,7 +1107,6 @@ impl DomainParticipant {
         // If not found, it has already been properly deleted via delete_subscriber, so do nothing
     }
 
-    // TODO: RTPS layer implementation must be completed first (Built-in)
     pub fn get_builtin_subscriber(&self) -> DdsResult<Subscriber> {
         /*
             This operation enables access to the built-in Subscriber.
@@ -968,7 +1117,11 @@ impl DomainParticipant {
             Descriptions of these built-in objects are covered in Section 2.2.5, Built-in Topics.
         */
         self.is_deleted()?;
-        Err(DdsError::Unsupported)
+        self.builtin_subscriber
+            .lock()
+            .map_err(|e| DdsError::Error(e.to_string()))?
+            .clone()
+            .ok_or(DdsError::PreconditionNotMet)
     }
 
     // TODO: In the future, when MultiTopic are implemented, extend this function to
