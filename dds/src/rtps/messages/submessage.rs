@@ -77,7 +77,7 @@ impl Submessage {
         // Handle RTPS 2.5 case where submessageLength == 0 - end
 
         // Separate header and body from current submessage
-        let mut submessage_body_bytes = curr_submessage_bytes.split_off(4);
+        let submessage_body_bytes = curr_submessage_bytes.split_off(4);
 
         let submessage_body = match submessage_header.submessage_id() {
             SubmessageId::ACKNACK => {
@@ -114,7 +114,7 @@ impl Submessage {
                     submessage_header.endianness_flag().ok_or_else(|| {
                         RtpsError::new(RtpsErrorCode::UnsupportedSubmessageType, None)
                     })?,
-                    &mut submessage_body_bytes,
+                    &submessage_body_bytes,
                 )
                 .map_err(map_speedy_err)?;
                 // Change in state of Receiver
@@ -140,7 +140,7 @@ impl Submessage {
                     submessage_header.endianness_flag().ok_or_else(|| {
                         RtpsError::new(RtpsErrorCode::UnsupportedSubmessageType, None)
                     })?,
-                    &mut submessage_body_bytes,
+                    &submessage_body_bytes,
                 )
                 .map_err(map_speedy_err)?;
                 // Change in state of Receiver
@@ -152,7 +152,7 @@ impl Submessage {
                     submessage_header.endianness_flag().ok_or_else(|| {
                         RtpsError::new(RtpsErrorCode::UnsupportedSubmessageType, None)
                     })?,
-                    &mut submessage_body_bytes,
+                    &submessage_body_bytes,
                 )
                 .map_err(map_speedy_err)?;
                 // Change in state of Receiver

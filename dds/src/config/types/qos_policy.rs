@@ -111,6 +111,7 @@ pub(crate) struct PresentationQosPolicy {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[allow(clippy::enum_variant_names)]
 pub(crate) enum PresentationQosAccessScopeKind {
     #[default]
     InstancePresentationQos,
@@ -281,6 +282,7 @@ impl ReliabilityQosPolicy {
     }
 
     /// Converts kind to internal representation if present.
+    #[allow(clippy::wrong_self_convention)]
     pub(crate) fn into_internal_kind(&self) -> Option<qos_policy::ReliabilityQosPolicyKind> {
         self.kind.as_ref().map(|k| match k {
             ReliabilityQosPolicyKind::BestEffortReliabilityQos => {
@@ -328,6 +330,7 @@ impl Default for LivelinessQosPolicy {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[allow(clippy::enum_variant_names)]
 pub(crate) enum LivelinessQosPolicyKind {
     #[default]
     AutomaticLivelinessQos,
@@ -381,6 +384,7 @@ pub(crate) struct DurabilityQosPolicy {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[allow(clippy::enum_variant_names)]
 pub(crate) enum DurabilityQosPolicyKind {
     #[default]
     VolatileDurabilityQos,

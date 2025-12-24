@@ -161,7 +161,7 @@ impl Parameter {
 }
 
 impl<'a, C: Context> Readable<'a, C> for Parameter {
-    fn read_from<T: ?Sized + Reader<'a, C>>(reader: &mut T) -> Result<Self, C::Error> {
+    fn read_from<T: Reader<'a, C>>(reader: &mut T) -> Result<Self, C::Error> {
         let parameter_id = reader.read_u16()?;
         let length = reader.read_u16()? as i16;
         let mut value: Vec<u8> = vec![0u8; length as usize];
@@ -181,7 +181,7 @@ impl<C: Context> Writable<C> for Parameter {
     #[inline]
     fn write_to<T: ?Sized + Writer<C>>(&self, writer: &mut T) -> Result<(), C::Error> {
         let length = self.value.len();
-        let pad = if length % 4 != 0 { 4 - (length % 4) } else { 0 };
+        let pad = if !length.is_multiple_of(4) { 4 - (length % 4) } else { 0 };
 
         //#[repr(u16)] does not work.
         writer.write_value(&(self.parameter_id as u16))?;
@@ -244,7 +244,7 @@ impl ParameterList {
 }
 
 impl<'a, C: Context> Readable<'a, C> for ParameterList {
-    fn read_from<T: ?Sized + Reader<'a, C>>(reader: &mut T) -> Result<Self, C::Error> {
+    fn read_from<T: Reader<'a, C>>(reader: &mut T) -> Result<Self, C::Error> {
         let mut parameter = Vec::new();
         loop {
             let param = Parameter::read_from(reader)?;

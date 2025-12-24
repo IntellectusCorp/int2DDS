@@ -592,7 +592,7 @@ impl SedpLogic {
                     "QoS changed for remote reader {:?}, still compatible - updating builtin_topic_data",
                     endpoint_guid
                 );
-                writer
+                if let Some(proxy) = writer
                     .reader_proxies()
                     .lock()
                     .map_err(|e| {
@@ -603,9 +603,9 @@ impl SedpLogic {
                     })?
                     .iter_mut()
                     .find(|proxy| proxy.remote_reader_guid() == endpoint_guid)
-                    .map(|proxy| {
-                        proxy.set_subscription_builtin_topic_data(subscription_builtin_topic_data)
-                    });
+                {
+                    proxy.set_subscription_builtin_topic_data(subscription_builtin_topic_data)
+                }
             }
 
             return Ok(());
@@ -722,7 +722,7 @@ impl SedpLogic {
                     "QoS changed for remote reader {:?}, still compatible - updating builtin_topic_data",
                     endpoint_guid
                 );
-                writer
+                if let Some(locator) = writer
                     .reader_locator()
                     .lock()
                     .map_err(|e| {
@@ -733,9 +733,9 @@ impl SedpLogic {
                     })?
                     .iter_mut()
                     .find(|locator| locator.remote_reader_guid() == endpoint_guid)
-                    .map(|locator| {
-                        locator.set_subscription_builtin_topic_data(subscription_builtin_topic_data)
-                    });
+                {
+                    locator.set_subscription_builtin_topic_data(subscription_builtin_topic_data)
+                }
             }
 
             return Ok(());
@@ -963,7 +963,7 @@ impl SedpLogic {
                     "QoS changed for remote writer {:?}, still compatible - updating builtin_topic_data",
                     endpoint_guid
                 );
-                reader
+                if let Some(proxy) = reader
                     .writer_proxies()
                     .lock()
                     .map_err(|e| {
@@ -974,9 +974,9 @@ impl SedpLogic {
                     })?
                     .iter_mut()
                     .find(|proxy| proxy.remote_writer_guid() == endpoint_guid)
-                    .map(|proxy| {
-                        proxy.set_publication_builtin_topic_data(publication_builtin_topic_data)
-                    });
+                {
+                    proxy.set_publication_builtin_topic_data(publication_builtin_topic_data)
+                }
             }
 
             return Ok(());
@@ -1075,7 +1075,7 @@ impl SedpLogic {
                     endpoint_guid
                 );
 
-                reader
+                if let Some(locator) = reader
                     .writer_locators()
                     .lock()
                     .map_err(|e| {
@@ -1086,9 +1086,9 @@ impl SedpLogic {
                     })?
                     .iter_mut()
                     .find(|locator| locator.remote_writer_guid() == endpoint_guid)
-                    .map(|locator| {
-                        locator.set_publication_builtin_topic_data(publication_builtin_topic_data)
-                    });
+                {
+                    locator.set_publication_builtin_topic_data(publication_builtin_topic_data)
+                }
             }
 
             return Ok(());
@@ -1624,7 +1624,7 @@ impl SedpLogic {
 
         for remote_participant_data in remote_participant_datas_guard.iter() {
             for locator in remote_participant_data.metatraffic_unicast_locator_list() {
-                self.send_to_single_locator(&buffer, locator.clone(), message_type)?;
+                self.send_to_single_locator(buffer, locator.clone(), message_type)?;
             }
         }
 
@@ -2031,16 +2031,16 @@ impl UnicastMessageProcessor for SedpLogic {
 
             writer_proxy.increase_acknack_count();
             let acknack_count = writer_proxy.acknack_count();
-            return self.send_sedp_acknack_message(
+            self.send_sedp_acknack_message(
                 remote_writer_guid,
                 heartbeat.reader_id,
                 heartbeat.writer_id,
                 missing_changes,
                 acknack_count,
                 bitmap_base,
-            );
+            )
         } else {
-            return Ok(());
+            Ok(())
         }
     }
 

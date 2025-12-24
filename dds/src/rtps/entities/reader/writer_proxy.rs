@@ -35,6 +35,7 @@ pub(crate) struct WriterProxy {
     expected_sn: SequenceNumber, // Expected next sequence number from writer
     buffered_change: Vec<CacheChange>, // Changes that reader has not processed yet
     publication_builtin_topic_data: PublicationBuiltinTopicData,
+    #[allow(clippy::type_complexity)]
     status_callback:
         Arc<Mutex<Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>>>,
 }
@@ -46,6 +47,7 @@ impl PartialEq for WriterProxy {
 }
 
 impl WriterProxy {
+    #[allow(clippy::type_complexity)]
     pub(crate) fn new(
         remote_writer_guid: Guid,
         remote_group_entity_id: EntityId,
@@ -237,12 +239,12 @@ impl WriterProxy {
         let keys: Vec<SequenceNumber> = self
             .changes_from_writer
             .range(..first_available_seq_num)
-            .filter_map(|(seq_num, change_from_writer)| {
+            .map(|(seq_num, change_from_writer)| {
                 if change_from_writer.status == ChangeFromWriterStatusKind::Missing {
                     debug!("Sample Lost!: {:?}", change_from_writer.sequence_number);
                     self.on_sample_lost();
                 }
-                Some(*seq_num)
+                *seq_num
             })
             .collect();
 

@@ -75,6 +75,7 @@ impl MessageCreator {
         Ok(rtps_message)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn create_heartbeat_message(
         local_participant_guid: Guid,
         target_participant_guid: Guid,
@@ -107,6 +108,7 @@ impl MessageCreator {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn create_acknack_message(
         local_participant_guid: Guid,
         remote_guid: Guid,
@@ -250,6 +252,7 @@ impl MessageCreator {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn create_data_frag_msg(
         cache_change: Arc<CacheChange>,
         remote_guid: Guid,
@@ -374,6 +377,7 @@ impl MessageCreator {
         Ok(gap_rtps_messages)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn create_nackfrag_msg(
         reader_guid: Guid,
         writer_guid: Guid,
