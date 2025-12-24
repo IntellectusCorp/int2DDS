@@ -459,7 +459,8 @@ impl DomainParticipant {
             &participant,
         );
 
-        builtin_subscriber.enable()?;
+        // Directly enable builtin subscriber (bypass parent check during initialization)
+        builtin_subscriber.enabled.store(true, Ordering::SeqCst);
 
         // 2.2.5 Built-in Topics
         let mut reader_qos = DataReaderQos::default();
