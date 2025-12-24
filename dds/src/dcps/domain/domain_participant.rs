@@ -403,7 +403,6 @@ impl DomainParticipant {
 
     fn initialize_builtin_entities(participant: &Arc<Self>) -> DdsResult<()> {
         let rtps_participant = participant.get_rtps_participant()?;
-
         let endpoints = rtps_participant.builtin_endpoints();
         let sedp_builtin_publications_reader = endpoints.sedp_builtin_publications_reader.clone();
         let sedp_builtin_subscriptions_reader = endpoints.sedp_builtin_subscriptions_reader.clone();
@@ -412,58 +411,33 @@ impl DomainParticipant {
         let builtin_participant_message_reader =
             endpoints.builtin_participant_message_reader.clone();
 
-        // @Intellectus-Garam
-        let dcps_participant_topic = Topic::new(
-            true, // is_builtin
+        // Create builtin topics (type registration is handled internally)
+        let dcps_participant_topic = Self::create_builtin_topic::<ParticipantBuiltinTopicData>(
+            participant,
             "DCPSParticipant",
             "SPDPdiscoveredParticipantData",
-            TopicQos::default(),
-            None,
-            StatusMask::all(),
-            participant.create_instance_handle()?,
-            &participant,
-        );
-        let dcps_publication_topic = Topic::new(
-            true, // is_builtin
+        )?;
+        let dcps_publication_topic = Self::create_builtin_topic::<PublicationBuiltinTopicData>(
+            participant,
             "DCPSPublication",
             "DiscoveredWriterData",
-            TopicQos::default(),
-            None,
-            StatusMask::all(),
-            participant.create_instance_handle()?,
-            &participant,
-        );
-        let dcps_subscription_topic = Topic::new(
-            true, // is_builtin
+        )?;
+        let dcps_subscription_topic = Self::create_builtin_topic::<SubscriptionBuiltinTopicData>(
+            participant,
             "DCPSSubscription",
             "DiscoveredReaderData",
-            TopicQos::default(),
-            None,
-            StatusMask::all(),
-            participant.create_instance_handle()?,
-            &participant,
-        );
+        )?;
         // TODO
-        // let dcps_topic_topic = Topic::new(
-        //     true, // is_builtin
+        // let dcps_topic_topic = Self::create_builtin_topic::<TopicBuiltinTopicData>(
+        //     participant,
         //     "DCPSTopic",
         //     "DiscoveredTopicData",
-        //     TopicQos::default(),
-        //     None,
-        //     StatusMask::all(),
-        //     participant.create_instance_handle()?,
-        //     &participant,
-        // );
-        let dcps_participant_message_topic = Topic::new(
-            true, // is_builtin
+        // )?;
+        let dcps_participant_message_topic = Self::create_builtin_topic::<ParticipantMessageData>(
+            participant,
             "DCPSParticipantMessage",
             "BuiltinParticipantMessageReader",
-            TopicQos::default(),
-            None,
-            StatusMask::all(),
-            participant.create_instance_handle()?,
-            &participant,
-        );
+        )?;
 
         // 2.2.5 Built-in Topics
         let mut subscriber_qos = SubscriberQos::default();
@@ -1618,6 +1592,57 @@ impl DomainParticipant {
     {
         let qos = self.get_topic_qos_from_profile(qos_path)?;
         self.create_topic::<Foo>(topic_name, type_name, qos, listener, mask)
+    }
+
+    /// Creates a builtin topic for internal use.
+    ///
+    /// Builtin topics are used for discovery protocol (DCPSParticipant, DCPSPublication,
+    /// DCPSSubscription, DCPSParticipantMessage). They are created during participant
+    /// initialization and cannot be deleted by user code.
+    fn create_builtin_topic<Foo>(
+        participant: &Arc<Self>,
+        topic_name: &str,
+        type_name: &str,
+    ) -> DdsResult<Topic>
+    where
+        Foo: DdsType,
+    {
+        let handle = participant.create_instance_handle()?;
+
+        // Register type support for builtin type
+        let type_support = Foo::TypeSupport::default();
+        participant.register_type(Arc::new(type_support), type_name)?;
+
+        let topic = Topic::new(
+            true, // is_builtin
+            topic_name,
+            type_name,
+            TopicQos::default(),
+            None,
+            StatusMask::all(),
+            handle,
+            participant,
+        );
+
+        // Add to topics collection
+        let topic_ref = topic
+            .self_ref
+            .as_ref()
+            .ok_or(DdsError::Error("Topic is not properly initialized".to_string()))?
+            .clone();
+        let weak_topic = Arc::downgrade(&topic_ref);
+        {
+            let mut topics =
+                participant.topics.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            topics.push(weak_topic.clone());
+        }
+        {
+            let mut topics_by_handle =
+                participant.topics_by_handle.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            topics_by_handle.insert(handle, weak_topic);
+        }
+
+        Ok(topic)
     }
 
     pub fn delete_topic(&self, mut topic: Topic) -> DdsResult<()> {
