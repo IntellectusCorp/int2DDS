@@ -19,7 +19,7 @@ use crate::rtps::common::guid::{Guid, GuidPrefix};
 use crate::rtps::common::rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult};
 use crate::rtps::entities::entity::Entity;
 use crate::rtps::entities::participant::Participant;
-use crate::rtps::task::timer_task::TimerTask;
+use crate::utils::timer::timer_task::TimerTask;
 
 pub type TimerCallback = Arc<dyn Fn() + Send + Sync>;
 
@@ -230,7 +230,7 @@ mod tests {
     use crate::rtps::common::guid::Guid;
     use crate::rtps::common::types::{DomainId, ParticipantId};
     use crate::rtps::entities::participant::Participant;
-    use crate::rtps::task::timer_handler::TimerHandler;
+    use crate::utils::timer::timer_handler::TimerHandler;
 
     // Helper to create mock participant for tests
     fn create_mock_participant(

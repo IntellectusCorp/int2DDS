@@ -22,8 +22,8 @@ use crate::{
     rtps::{
         common::{guid::Guid, time::RtpsTime},
         entities::{history::cache_change::CacheChange, participant::Participant},
-        task::timer_handler::TimerHandler,
     },
+    utils::timer::timer_handler::TimerHandler,
 };
 
 pub(crate) trait HistoryCache {

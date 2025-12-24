@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime};
 use log::{debug, error};
 
 use crate::rtps::entities::participant::Participant;
-use crate::rtps::task::timer_handler::TimerHandler;
+use crate::utils::timer::timer_handler::TimerHandler;
 
 // Global thread registry for all platforms
 static THREAD_REGISTRY: OnceLock<Mutex<HashMap<u32, String>>> = OnceLock::new();

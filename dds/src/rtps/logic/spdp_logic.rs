@@ -23,12 +23,10 @@ use crate::rtps::{
     logic::common::{impl_participant_accessor, ParticipantAccessor},
     logic::message_processor::participant_message_processor::ParticipantMessageProcessor,
     messages::message_creator::MessageCreator,
-    task::{
-        sending_handler::{MessageType, SendingHandler},
-        timer_handler::TimerHandler,
-    },
+    task::sending_handler::{MessageType, SendingHandler},
     transport::{Transport, TransportSender, TransportType},
 };
+use crate::utils::timer::timer_handler::TimerHandler;
 
 #[derive(Clone)]
 pub(crate) struct SpdpLogic {

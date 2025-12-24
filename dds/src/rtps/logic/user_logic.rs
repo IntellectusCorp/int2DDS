@@ -44,7 +44,6 @@ use crate::rtps::messages::submessages::gap::Gap;
 use crate::rtps::messages::submessages::heartbeat::Heartbeat;
 use crate::rtps::messages::submessages::nack_frag::NackFrag;
 use crate::rtps::task::sending_handler::{MessageType, SendingHandler};
-use crate::rtps::task::timer_handler::TimerHandler;
 use crate::rtps::task::user_traffic::user_unicast_listening_task::UserUnicastListeningTask;
 use crate::rtps::transport::shm::ShmListener;
 use crate::rtps::transport::tcp::TcpListener;
@@ -54,6 +53,7 @@ use crate::rtps::{
     entities::participant::Participant, messages::message_receiver::MessageReceiver,
 };
 use crate::serialize::pl_cdr::InlineQosParameters;
+use crate::utils::timer::timer_handler::TimerHandler;
 use dashmap::DashMap;
 
 use std::net::{SocketAddr, SocketAddrV4};

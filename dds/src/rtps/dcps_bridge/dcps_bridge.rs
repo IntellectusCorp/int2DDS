@@ -52,12 +52,10 @@ use crate::{
         },
         messages::sedp_message::SEDPMessage,
         service::background_service::BackgroundService,
-        task::{
-            sending_handler::SendingHandler, thread_monitor::ThreadMonitor,
-            timer_handler::TimerHandler,
-        },
+        task::{sending_handler::SendingHandler, thread_monitor::ThreadMonitor},
         transport::{get_transport_type, port_manager::PortManager, socket::Socket, TransportType},
     },
+    utils::timer::timer_handler::TimerHandler,
 };
 
 pub(crate) struct DcpsBridge {
@@ -841,7 +839,7 @@ mod tests {
     #[test]
     fn test_all_handler_cleanup() {
         use crate::rtps::task::sending_handler::SendingHandler;
-        use crate::rtps::task::timer_handler::TimerHandler;
+        use crate::utils::timer::timer_handler::TimerHandler;
 
         let domain_id = unique_domain_id();
         let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32)));
