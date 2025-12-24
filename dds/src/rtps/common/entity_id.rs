@@ -4,11 +4,11 @@
 //! within a participant. Each EntityId consists of a 3-byte key and an EntityKind byte that
 //! indicates the entity type (builtin vs user-defined, reader vs writer, keyed vs keyless).
 
-use speedy::{Readable, Writable};
-
+use crate::dcps::topic::type_support::DdsType;
 use crate::rtps::common::entity_kind::EntityKind;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Readable, Writable, Hash)]
+#[derive(DdsType, PartialEq, Copy, Eq, PartialOrd, Ord, Hash)]
+#[dds_type(crate_path = "crate", no_partialeq)]
 pub struct EntityId {
     pub entity_key: [u8; 3],
     pub entity_kind: EntityKind, //u8
@@ -86,8 +86,8 @@ impl EntityId {
 
         // {00, 02, 01} with kinds c3 or c4
         if self.entity_key == [0x00, 0x02, 0x01]
-            && (matches!(self.entity_kind, EntityKind::BUILT_IN_WRITER_NO_KEY)
-                || matches!(self.entity_kind, EntityKind::BUILT_IN_READER_NO_KEY))
+            && (self.entity_kind == EntityKind::BUILT_IN_WRITER_NO_KEY
+                || self.entity_kind == EntityKind::BUILT_IN_READER_NO_KEY)
         {
             return true;
         }
@@ -99,8 +99,8 @@ impl EntityId {
     fn is_dds_xtypes_reserved(&self) -> bool {
         // {00, 03, 00} and {00, 03, 01} with kinds c3 or c4
         if (self.entity_key == [0x00, 0x03, 0x00] || self.entity_key == [0x00, 0x03, 0x01])
-            && (matches!(self.entity_kind, EntityKind::BUILT_IN_WRITER_NO_KEY)
-                || matches!(self.entity_kind, EntityKind::BUILT_IN_READER_NO_KEY))
+            && (self.entity_kind == EntityKind::BUILT_IN_WRITER_NO_KEY
+                || self.entity_kind == EntityKind::BUILT_IN_READER_NO_KEY)
         {
             return true;
         }
