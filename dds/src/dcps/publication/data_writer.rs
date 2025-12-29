@@ -753,53 +753,58 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
 
         let serialized_data = self.type_support.serialize_with_format(data as &dyn Any, &format)?;
         let mut instance_handle = InstanceHandle::NIL;
+        let mut is_new_instance = false;
+
         if self.type_support.is_compute_key_provided() {
-            // When data arrives -> if we have a key, instance_handle pair just use the handle, or add it and continue
             let serialized_key = self.type_support.serialize_key(data as &dyn Any)?;
-            instance_handle = match self.key_instances.lock() {
-                Ok(mut key_instances) => {
-                    if let Some(instance_handle) = key_instances.get(&serialized_key) {
-                        *instance_handle
-                    } else {
-                        // 3. Deserialize key
-                        let computed_handle = self.type_support.compute_key(data as &dyn Any); //hashing
 
-                        {
-                            let mut instances = self
-                                .instances
-                                .lock()
-                                .map_err(|e| DdsError::Error(e.to_string()))?;
-                            instances.insert(
-                                computed_handle,
-                                (serialized_key.clone(), timestamp, InstanceState::Registered),
-                            );
-                        }
+            // Fast path: quick lookup with minimal lock holding
+            let existing_handle = {
+                let key_instances =
+                    self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+                key_instances.get(&serialized_key).copied()
+            };
 
-                        key_instances.insert(serialized_key, computed_handle);
+            instance_handle = if let Some(handle) = existing_handle {
+                handle
+            } else {
+                // Slow path: compute key first (outside all locks)
+                let computed_handle = self.type_support.compute_key(data as &dyn Any);
 
-                        let monitor_guard = self
-                            .deadline_monitor
-                            .lock()
-                            .map_err(|e| DdsError::Error(e.to_string()))?;
-                        if let Some(monitor) = monitor_guard.as_ref() {
-                            monitor.track_instance(&computed_handle);
-                        }
-
-                        computed_handle
-                    }
+                // Insert into instances (separate lock, not nested)
+                {
+                    let mut instances =
+                        self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+                    instances.insert(
+                        computed_handle,
+                        (serialized_key.clone(), timestamp, InstanceState::Registered),
+                    );
                 }
-                Err(e) => return Err(DdsError::Error(e.to_string())),
-            }
+
+                // Insert into key_instances (separate lock, not nested)
+                {
+                    let mut key_instances =
+                        self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+                    key_instances.insert(serialized_key, computed_handle);
+                }
+
+                is_new_instance = true;
+                computed_handle
+            };
         }
 
         if !handle.is_nil() && handle != instance_handle {
             return Err(DdsError::PreconditionNotMet);
         }
 
+        // Single deadline_monitor lock for both track and reschedule
         let monitor_guard =
             self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
         if !instance_handle.is_nil() {
             if let Some(monitor) = monitor_guard.as_ref() {
+                if is_new_instance {
+                    monitor.track_instance(&instance_handle);
+                }
                 monitor.reschedule_instance(&instance_handle);
             }
         }

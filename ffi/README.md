@@ -91,8 +91,8 @@ int2dds_participant_assert_liveliness() // Assert liveliness
 int2dds_create_publisher()              // Create publisher
 int2dds_delete_publisher()              // Delete publisher
 int2dds_create_datawriter()             // Create data writer
-int2dds_write()                         // Write raw data
-int2dds_write_with_key()                // Write raw data with key
+int2dds_write()                         // Write data (CDR serialized)
+int2dds_write_with_key()                // Write keyed data
 int2dds_register_instance()             // Register keyed instance
 int2dds_unregister_instance()           // Unregister keyed instance
 int2dds_dispose()                       // Dispose keyed instance
@@ -215,27 +215,49 @@ INT2DDS_RET_NULL_POINTER        = 100  // Null pointer
 
 ## Data Format
 
-The FFI uses **raw bytes pass-through** for data serialization:
-- C applications serialize data to bytes before calling `int2dds_write()`
-- C applications deserialize bytes after calling `int2dds_take()` or `int2dds_read()`
-- Serialization format should be consistent between publisher and subscriber
+The FFI uses a **Type System with CDR serialization**:
+- C applications define types using `Int2DdsTypeDescriptor`
+- Data is stored in `Int2DdsData` containers with type-checked field access
+- CDR serialization/deserialization is handled automatically by the DDS core
 
-Example serialization format:
+### Type Descriptor API
+
 ```c
-// Simple format: 4-byte index + null-terminated string
-uint8_t buffer[512];
-uint32_t index = 42;
-const char* message = "Hello World";
+// Create type descriptor
+Int2DdsTypeDescriptor* desc;
+int2dds_type_descriptor_create("HelloWorld", &desc);
 
-// Serialize
-buffer[0] = index & 0xFF;
-buffer[1] = (index >> 8) & 0xFF;
-buffer[2] = (index >> 16) & 0xFF;
-buffer[3] = (index >> 24) & 0xFF;
-memcpy(buffer + 4, message, strlen(message) + 1);
+// Add fields (with optional key designation)
+int2dds_type_descriptor_add_u32(desc, "id", true);        // key field
+int2dds_type_descriptor_add_string(desc, "message", 256, false);
+int2dds_type_descriptor_add_f64(desc, "value", false);
 
-// Write
-int2dds_write(writer, buffer, 4 + strlen(message) + 1);
+// Optional: Set XCDR version (default is XCDR1 for compatibility)
+int2dds_type_descriptor_set_xcdr_version(desc, INT2DDS_XCDR_VERSION_XCDR2);
+```
+
+### Data API
+
+```c
+// Create data instance
+Int2DdsData* data;
+int2dds_data_create(desc, &data);
+
+// Set field values (type-checked)
+int2dds_data_set_u32(data, "id", 42);
+int2dds_data_set_string(data, "message", "Hello World");
+int2dds_data_set_f64(data, "value", 3.14);
+
+// Write data (CDR serialization is automatic)
+int2dds_write(writer, data);
+
+// Read data (CDR deserialization is automatic)
+Int2DdsData* received_data;
+int2dds_take(reader, &received_data, ...);
+
+// Get field values
+uint32_t id;
+int2dds_data_get_u32(received_data, "id", &id);
 ```
 
 ## Examples
