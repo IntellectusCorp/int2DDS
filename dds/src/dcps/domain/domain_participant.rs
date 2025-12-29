@@ -2407,6 +2407,31 @@ impl DomainParticipant {
         Ok(false)
     }
 
+    /// Register a custom TypeSupport implementation with the DomainParticipant.
+    ///
+    /// This method allows registering a TypeSupport for a type before creating topics.
+    /// When a topic is created with the same type_name, the already-registered TypeSupport
+    /// will be used instead of the default one.
+    ///
+    /// This is particularly useful for FFI scenarios where the TypeSupport implementation
+    /// needs to be provided at runtime rather than compile time.
+    ///
+    /// # Arguments
+    /// * `type_support` - The TypeSupport implementation to register
+    /// * `type_name` - The name to register the type under (must be non-empty)
+    ///
+    /// # Errors
+    /// * `DdsError::BadParameter` - If type_name is empty
+    /// * `DdsError::PreconditionNotMet` - If a different TypeSupport is already registered
+    ///   for this type_name (same TypeSupport is OK)
+    pub fn register_type_support(
+        &self,
+        type_support: Arc<dyn TypeSupport>,
+        type_name: &str,
+    ) -> DdsResult<()> {
+        self.register_type(type_support, type_name)
+    }
+
     pub(crate) fn register_type(
         &self,
         type_support: Arc<dyn TypeSupport>,

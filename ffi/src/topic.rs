@@ -9,28 +9,29 @@
 //!
 //! ## Data Type
 //!
-//! The FFI uses RawData type internally, which means serialization/deserialization
-//! must be handled on the C side using CDR format.
+//! The FFI uses Int2DdsData type with DynamicTypeSupport for CDR serialization/deserialization.
+//! The type system is registered with the DomainParticipant before topic creation.
 
 use std::ffi::{CStr, CString};
 use std::sync::Arc;
 
-use int2dds::{
-    infrastructure::status::StatusMask,
-    topic::{qos::TopicQos, RawData},
-};
+use int2dds::{infrastructure::status::StatusMask, topic::qos::TopicQos, topic::TypeSupport};
+
+use crate::data::Int2DdsData;
+use crate::dynamic_type_support::DynamicTypeSupport;
+use crate::type_descriptor::Int2DdsTypeDescriptor;
 
 use super::{error::*, qos::Int2DdsTopicQos, types::*};
 
 /// Create a Topic
 ///
-/// Creates a topic using RawData type for FFI. The C application is responsible
-/// for serializing/deserializing data in CDR format.
+/// Creates a topic with Int2DdsData type and registers the DynamicTypeSupport
+/// for CDR serialization/deserialization.
 ///
 /// # Safety
 /// - `participant` must be a valid participant
 /// - `topic_name` must be a valid null-terminated C string
-/// - `type_name` must be a valid null-terminated C string
+/// - `type_desc` must be a valid type descriptor
 /// - `qos` can be null for default QoS
 /// - `topic_out` must be a valid pointer to a null pointer
 /// - The returned topic must be freed with `int2dds_delete_topic`
@@ -38,13 +39,13 @@ use super::{error::*, qos::Int2DdsTopicQos, types::*};
 pub unsafe extern "C" fn int2dds_create_topic(
     participant: *const Int2DdsParticipant,
     topic_name: *const std::os::raw::c_char,
-    type_name: *const std::os::raw::c_char,
+    type_desc: *const Int2DdsTypeDescriptor,
     qos: *const Int2DdsTopicQos,
     topic_out: *mut *mut Int2DdsTopic,
 ) -> Int2DdsRet {
     check_null!(participant);
     check_null!(topic_name);
-    check_null!(type_name);
+    check_null!(type_desc);
     check_null!(topic_out);
 
     let participant_ref = &*participant;
@@ -54,24 +55,42 @@ pub unsafe extern "C" fn int2dds_create_topic(
         Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
     };
 
-    let type_name_str = match CStr::from_ptr(type_name).to_str() {
-        Ok(s) => s,
-        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
-    };
+    // Clone the type descriptor into Arc
+    let type_desc_ref = &*type_desc;
+    let type_descriptor = Arc::new(Int2DdsTypeDescriptor {
+        type_name: type_desc_ref.type_name.clone(),
+        fields: type_desc_ref.fields.clone(),
+        field_indices: type_desc_ref.field_indices.clone(),
+        extensibility: type_desc_ref.extensibility,
+        next_member_id: type_desc_ref.fields.len() as u32,
+        xcdr_version: type_desc_ref.xcdr_version,
+    });
+
+    // Create DynamicTypeSupport
+    let type_support = Arc::new(DynamicTypeSupport::new(type_descriptor.clone()));
+    let type_name = &type_descriptor.type_name;
+
+    // Register the DynamicTypeSupport with the participant BEFORE creating the topic.
+    // This ensures the DDS core uses our TypeSupport for serialization/deserialization
+    // instead of the placeholder DynamicTypeSupportDefault.
+    ffi_try!(participant_ref
+        .inner
+        .register_type_support(type_support.clone() as Arc<dyn TypeSupport>, type_name));
 
     let topic_qos = if qos.is_null() { TopicQos::default() } else { (*qos).inner.clone() };
 
-    // Create topic using RawData type
-    // The type_name parameter is used when registering with the participant
-    let topic = ffi_try!(participant_ref.inner.create_topic::<RawData>(
+    // Create topic using Int2DdsData type
+    // The registered DynamicTypeSupport will handle serialization when writing/reading
+    let topic = ffi_try!(participant_ref.inner.create_topic::<Int2DdsData>(
         topic_name_str,
-        type_name_str,
+        type_name,
         topic_qos,
         None,
         StatusMask::default()
     ));
 
-    let topic_handle = Box::new(Int2DdsTopic { inner: Arc::new(topic) });
+    let topic_handle =
+        Box::new(Int2DdsTopic { inner: Arc::new(topic), type_support, type_descriptor });
 
     *topic_out = Box::into_raw(topic_handle);
 
@@ -90,10 +109,31 @@ pub unsafe extern "C" fn int2dds_delete_topic(topic: *mut Int2DdsTopic) -> Int2D
         return INT2DDS_RET_NULL_POINTER;
     }
 
-    // Just drop the Arc reference
-    let _topic = Box::from_raw(topic);
+    let topic_ref = &*topic;
+    if Arc::strong_count(&topic_ref.inner) != 1 {
+        return INT2DDS_RET_PRECONDITION_NOT_MET;
+    }
 
-    INT2DDS_RET_OK
+    // Destructure Box to move Arc out
+    let Int2DdsTopic { inner: topic_arc, type_support: _ts, type_descriptor: _td } =
+        *Box::from_raw(topic);
+
+    // Try to unwrap Arc without cloning (succeeds if this is the only reference)
+    let topic_obj = match Arc::try_unwrap(topic_arc) {
+        Ok(t) => t,
+        Err(_arc) => return INT2DDS_RET_PRECONDITION_NOT_MET,
+    };
+
+    // Get the participant to delete the topic
+    let participant = match topic_obj.get_participant() {
+        Ok(p) => p,
+        Err(e) => return dds_error_to_code(&e),
+    };
+
+    match participant.delete_topic(topic_obj) {
+        Ok(()) => INT2DDS_RET_OK,
+        Err(e) => dds_error_to_code(&e),
+    }
 }
 
 /// Get the name of a Topic
@@ -148,10 +188,10 @@ pub unsafe extern "C" fn int2dds_topic_get_type_name(
 
     let topic_ref = &*topic;
 
-    // According to trait definition, get_type_name() returns &str directly
-    let type_name = topic_ref.inner.get_type_name();
+    // Use the type descriptor's type name
+    let type_name = &topic_ref.type_descriptor.type_name;
 
-    let type_name_cstr = match CString::new(type_name) {
+    let type_name_cstr = match CString::new(type_name.as_str()) {
         Ok(s) => s,
         Err(_) => return INT2DDS_RET_ERROR,
     };
@@ -166,6 +206,28 @@ pub unsafe extern "C" fn int2dds_topic_get_type_name(
         type_name_out,
         type_name_bytes.len(),
     );
+
+    INT2DDS_RET_OK
+}
+
+/// Get the type descriptor of a Topic
+///
+/// Returns a pointer to the type descriptor. The returned pointer is valid
+/// as long as the topic is not deleted.
+///
+/// # Safety
+/// - `topic` must be a valid topic
+/// - `desc_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_topic_get_type_descriptor(
+    topic: *const Int2DdsTopic,
+    desc_out: *mut *const Int2DdsTypeDescriptor,
+) -> Int2DdsRet {
+    check_null!(topic);
+    check_null!(desc_out);
+
+    let topic_ref = &*topic;
+    *desc_out = Arc::as_ptr(&topic_ref.type_descriptor);
 
     INT2DDS_RET_OK
 }
