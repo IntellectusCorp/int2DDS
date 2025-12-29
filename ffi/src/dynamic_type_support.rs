@@ -1,3 +1,6 @@
+#![allow(clippy::only_used_in_recursion)]
+#![allow(clippy::manual_range_patterns)]
+
 //! # Dynamic Type Support
 //!
 //! TypeSupport implementation for runtime-defined types.
@@ -599,6 +602,7 @@ impl DynamicTypeSupport {
     }
 
     /// Serialize a single field using XCDR v2
+    #[allow(dead_code)]
     fn serialize_field_xcdr2(
         &self,
         serializer: &mut Xcdr2Serializer,
