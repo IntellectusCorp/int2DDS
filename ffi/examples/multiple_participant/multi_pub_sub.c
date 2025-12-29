@@ -24,55 +24,6 @@
 
 #include "int2dds-ffi.h"
 
-/* Simple HelloWorld data structure */
-typedef struct {
-    uint32_t index;
-    char message[256];
-} HelloWorld;
-
-/* Serialize HelloWorld to raw bytes */
-static size_t serialize_hello_world(const HelloWorld* data, uint8_t* buffer, size_t buffer_size) {
-    size_t msg_len = strlen(data->message) + 1;
-    size_t total_size = sizeof(uint32_t) + msg_len;
-
-    if (buffer_size < total_size) {
-        return 0;
-    }
-
-    /* Write index (little-endian) */
-    buffer[0] = (uint8_t)(data->index & 0xFF);
-    buffer[1] = (uint8_t)((data->index >> 8) & 0xFF);
-    buffer[2] = (uint8_t)((data->index >> 16) & 0xFF);
-    buffer[3] = (uint8_t)((data->index >> 24) & 0xFF);
-
-    /* Write message */
-    memcpy(buffer + 4, data->message, msg_len);
-
-    return total_size;
-}
-
-/* Deserialize raw bytes to HelloWorld */
-static int deserialize_hello_world(const uint8_t* buffer, size_t size, HelloWorld* data) {
-    if (size < sizeof(uint32_t) + 1) {
-        return -1;
-    }
-
-    /* Read index (little-endian) */
-    data->index = (uint32_t)buffer[0] |
-                  ((uint32_t)buffer[1] << 8) |
-                  ((uint32_t)buffer[2] << 16) |
-                  ((uint32_t)buffer[3] << 24);
-
-    /* Read message */
-    size_t msg_len = size - sizeof(uint32_t);
-    if (msg_len >= sizeof(data->message)) {
-        msg_len = sizeof(data->message) - 1;
-    }
-    memcpy(data->message, buffer + 4, msg_len);
-    data->message[msg_len] = '\0';
-
-    return 0;
-}
 
 int main(int argc, char* argv[]) {
     Int2DdsRet ret;
@@ -91,6 +42,12 @@ int main(int argc, char* argv[]) {
     Int2DdsTopic* topic2 = NULL;
     Int2DdsDataReader* reader = NULL;
     Int2DdsDataReaderQos* reader_qos = NULL;
+
+    /* Type descriptors and data */
+    Int2DdsTypeDescriptor* type_desc1 = NULL;
+    Int2DdsTypeDescriptor* type_desc2 = NULL;
+    Int2DdsData* send_data = NULL;
+    Int2DdsData* recv_data = NULL;
 
     int32_t domain_id = 0;
     int num_messages = 10;
@@ -130,7 +87,20 @@ int main(int argc, char* argv[]) {
         goto cleanup;
     }
 
-    ret = int2dds_create_topic(participant1, "HelloWorld", "HelloWorld", NULL, &topic1);
+    /* Create type descriptor for participant 1 */
+    ret = int2dds_type_descriptor_create("HelloWorld", &type_desc1);
+    if (ret != INT2DDS_RET_OK) {
+        fprintf(stderr, "Failed to create type descriptor 1: %d\n", ret);
+        goto cleanup;
+    }
+
+    ret = int2dds_type_descriptor_add_u32(type_desc1, "index", false);
+    if (ret != INT2DDS_RET_OK) goto cleanup;
+
+    ret = int2dds_type_descriptor_add_string(type_desc1, "message", 256, false);
+    if (ret != INT2DDS_RET_OK) goto cleanup;
+
+    ret = int2dds_create_topic(participant1, "HelloWorld", type_desc1, NULL, &topic1);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create topic1: %d\n", ret);
         goto cleanup;
@@ -172,7 +142,20 @@ int main(int argc, char* argv[]) {
         goto cleanup;
     }
 
-    ret = int2dds_create_topic(participant2, "HelloWorld", "HelloWorld", NULL, &topic2);
+    /* Create type descriptor for participant 2 */
+    ret = int2dds_type_descriptor_create("HelloWorld", &type_desc2);
+    if (ret != INT2DDS_RET_OK) {
+        fprintf(stderr, "Failed to create type descriptor 2: %d\n", ret);
+        goto cleanup;
+    }
+
+    ret = int2dds_type_descriptor_add_u32(type_desc2, "index", false);
+    if (ret != INT2DDS_RET_OK) goto cleanup;
+
+    ret = int2dds_type_descriptor_add_string(type_desc2, "message", 256, false);
+    if (ret != INT2DDS_RET_OK) goto cleanup;
+
+    ret = int2dds_create_topic(participant2, "HelloWorld", type_desc2, NULL, &topic2);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create topic2: %d\n", ret);
         goto cleanup;
@@ -247,32 +230,39 @@ int main(int argc, char* argv[]) {
     /* ========== Communication Loop ========== */
     printf("\nStarting communication between participants...\n\n");
 
-    uint8_t send_buffer[512];
-    uint8_t recv_buffer[512];
-    HelloWorld send_data;
-    HelloWorld recv_data;
-    size_t data_size;
+    /* Create data containers */
+    ret = int2dds_data_create(type_desc1, &send_data);
+    if (ret != INT2DDS_RET_OK) {
+        fprintf(stderr, "Failed to create send_data: %d\n", ret);
+        goto cleanup;
+    }
+
+    ret = int2dds_data_create(type_desc2, &recv_data);
+    if (ret != INT2DDS_RET_OK) {
+        fprintf(stderr, "Failed to create recv_data: %d\n", ret);
+        goto cleanup;
+    }
+
     bool valid_data;
     int received_count = 0;
+    char message[256];
 
     for (int i = 0; i < num_messages; i++) {
         /* Publish message from Participant 1 */
-        send_data.index = i;
-        snprintf(send_data.message, sizeof(send_data.message),
-                 "Message from Participant 1 [%d]", i);
+        snprintf(message, sizeof(message), "Message from Participant 1 [%d]", i);
 
-        size_t serialized_size = serialize_hello_world(&send_data, send_buffer, sizeof(send_buffer));
-        if (serialized_size == 0) {
-            fprintf(stderr, "Failed to serialize data\n");
-            continue;
-        }
+        ret = int2dds_data_set_u32(send_data, "index", i);
+        if (ret != INT2DDS_RET_OK) continue;
 
-        ret = int2dds_write(writer, send_buffer, serialized_size);
+        ret = int2dds_data_set_string(send_data, "message", message);
+        if (ret != INT2DDS_RET_OK) continue;
+
+        ret = int2dds_write(writer, send_data);
         if (ret != INT2DDS_RET_OK) {
             fprintf(stderr, "Failed to write: %d\n", ret);
             continue;
         }
-        printf("[Participant 1] Sent: %s\n", send_data.message);
+        printf("[Participant 1] Sent: %s\n", message);
 
         /* Small delay for data propagation */
         sleep_ms(100);
@@ -280,14 +270,22 @@ int main(int argc, char* argv[]) {
         /* Receive message at Participant 2 */
         int attempts = 0;
         while (attempts < 10) {
-            ret = int2dds_take(reader, recv_buffer, sizeof(recv_buffer), &data_size, &valid_data);
+            ret = int2dds_take(reader, recv_data, &valid_data);
 
             if (ret == INT2DDS_RET_OK && valid_data) {
-                if (deserialize_hello_world(recv_buffer, data_size, &recv_data) == 0) {
-                    printf("[Participant 2] Received: %s\n", recv_data.message);
-                    received_count++;
-                    break;
-                }
+                uint32_t recv_index;
+                char recv_message[256];
+                size_t message_len;
+
+                ret = int2dds_data_get_u32(recv_data, "index", &recv_index);
+                if (ret != INT2DDS_RET_OK) break;
+
+                ret = int2dds_data_get_string(recv_data, "message", recv_message, sizeof(recv_message), &message_len);
+                if (ret != INT2DDS_RET_OK) break;
+
+                printf("[Participant 2] Received: %s\n", recv_message);
+                received_count++;
+                break;
             } else if (ret == INT2DDS_RET_NO_DATA) {
                 sleep_ms(50);
                 attempts++;
@@ -309,6 +307,10 @@ int main(int argc, char* argv[]) {
     printf("Sent: %d messages, Received: %d messages\n", num_messages, received_count);
 
 cleanup:
+    /* Cleanup data containers */
+    if (recv_data) int2dds_data_delete(recv_data);
+    if (send_data) int2dds_data_delete(send_data);
+
     /* Cleanup WaitSets */
     if (reader_waitset) {
         int2dds_waitset_detach_datareader(reader_waitset, reader);
@@ -323,6 +325,7 @@ cleanup:
     if (reader) int2dds_delete_datareader(reader);
     if (reader_qos) int2dds_datareader_qos_destroy(reader_qos);
     if (topic2) int2dds_delete_topic(topic2);
+    if (type_desc2) int2dds_type_descriptor_delete(type_desc2);
     if (subscriber) int2dds_delete_subscriber(subscriber);
     if (participant2) int2dds_delete_participant(participant2);
 
@@ -330,6 +333,7 @@ cleanup:
     if (writer) int2dds_delete_datawriter(writer);
     if (writer_qos) int2dds_datawriter_qos_destroy(writer_qos);
     if (topic1) int2dds_delete_topic(topic1);
+    if (type_desc1) int2dds_type_descriptor_delete(type_desc1);
     if (publisher) int2dds_delete_publisher(publisher);
     if (participant1) int2dds_delete_participant(participant1);
 
