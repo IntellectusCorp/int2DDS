@@ -101,6 +101,8 @@ impl TimerHandler {
             self.timer_task = Some(Arc::new(Mutex::new(timer_task)));
         }
         if self.timer_thread_join_handle.is_none() {
+            let participant_guid =
+                self.participant.upgrade().expect("Participant already dropped").guid();
             match self.timer_task.clone() {
                 Some(timer_task) => {
                     let timer_task_clone = timer_task.clone();
@@ -111,11 +113,19 @@ impl TimerHandler {
                             // Register thread name for monitoring
                             {
                                 use crate::rtps::task::thread_monitor::ThreadMonitor;
-                                ThreadMonitor::register_current_thread_name("timer task thread");
+                                ThreadMonitor::register_current_thread_name_with_guid(
+                                    "timer task thread",
+                                    &participant_guid,
+                                );
                             }
 
                             let _ =
                                 timer_task_clone.lock().unwrap().event_loop(message_queue_clone);
+                            // Cleanup thread from registry before exit
+                            {
+                                use crate::rtps::task::thread_monitor::ThreadMonitor;
+                                ThreadMonitor::remove_map_guard();
+                            }
                             debug!("timer task thread finished");
                         })
                         .expect("Failed to create timer task thread");

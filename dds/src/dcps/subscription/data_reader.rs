@@ -137,6 +137,7 @@ pub(crate) trait DataReaderInternal: DataReaderBase {
     fn get_type_id(&self) -> TypeId;
     fn delete(&self);
     fn is_deleted(&self) -> DdsResult<()>;
+    fn is_builtin(&self) -> bool;
     fn get_topic(&self) -> DdsResult<Topic>;
     fn get_readconditions(&self) -> DdsResult<Vec<Arc<dyn ReadConditionTrait + Send + Sync>>>;
     fn delete_readcondition_internal(
@@ -151,6 +152,14 @@ pub(crate) trait DataReaderInternal: DataReaderBase {
 
 // #[derive(Clone)]
 pub struct DataReader<Foo> {
+    // Indicates whether this entity is a built-in entity.
+    //
+    // Built-in entities are managed internally and have restricted operations:
+    // - Cannot be deleted (delete_datareader)
+    // - Cannot modify QoS (set_qos)
+    //
+    // See also: DomainParticipant::get_builtin_subscriber()
+    is_builtin: bool,
     guid: Guid,
     qos: Arc<Mutex<DataReaderQos>>,
     listener: Arc<RwLock<Option<Arc<dyn DataReaderListener<Foo = Foo>>>>>,
@@ -220,6 +229,7 @@ impl<Foo> Debug for DataReader<Foo> {
 impl<Foo: 'static + Clone + Debug> Clone for DataReader<Foo> {
     fn clone(&self) -> Self {
         Self {
+            is_builtin: self.is_builtin,
             guid: self.guid,
             qos: self.qos.clone(),
             listener: self.listener.clone(),
@@ -256,6 +266,11 @@ impl<Foo: 'static + Clone + Debug> Clone for DataReader<Foo> {
 impl<Foo> Drop for DataReader<Foo> {
     #[allow(clippy::match_result_ok)]
     fn drop(&mut self) {
+        // Builtin entities are managed separately, skip orphan handling
+        if self.is_builtin {
+            return;
+        }
+
         // Only handle drop for the last reference (not clones)
         if let Some(guard) = self.self_ref.lock().ok() {
             if let Some(self_arc) = guard.as_ref() {
@@ -295,75 +310,93 @@ impl_dds_entity!(DataReader<Foo>, DataReaderQos, Foo: 'static + Clone + Debug);
 impl<Foo: 'static + Clone + Debug> DomainEntity for DataReader<Foo> {}
 impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
     fn enable_rtps_entities(&self) -> DdsResult<()> {
-        let topic_description = self.get_topicdescription()?;
-        let cft = topic_description.as_any().downcast_ref::<ContentFilteredTopic>();
-        let subscriber = self.get_subscriber()?;
-        let participant = subscriber.get_participant()?;
-
-        let content_filter_property = if let Some(content_filtered_topic) = cft {
-            let related_topic = content_filtered_topic.get_related_topic()?;
-            Some(ContentFilterProperty {
-                content_filtered_topic_name: content_filtered_topic.get_name().to_owned(),
-                related_topic_name: related_topic.get_name().to_owned(),
-                filter_class_name: "DDSSQL".to_string(),
-                filter_expression: content_filtered_topic.get_filter_expression()?,
-                expression_parameters: content_filtered_topic.get_expression_parameters()?,
-            })
+        let rtps_reader = if self.is_builtin {
+            // Builtin: RTPS reader was already set during creation
+            self.get_rtps_reader()?
         } else {
-            None
+            // Non-builtin: Create RTPS reader
+            let topic_description = self.get_topicdescription()?;
+            let cft = topic_description.as_any().downcast_ref::<ContentFilteredTopic>();
+            let subscriber = self.get_subscriber()?;
+            let participant = subscriber.get_participant()?;
+
+            let content_filter_property = if let Some(content_filtered_topic) = cft {
+                let related_topic = content_filtered_topic.get_related_topic()?;
+                Some(ContentFilterProperty {
+                    content_filtered_topic_name: content_filtered_topic.get_name().to_owned(),
+                    related_topic_name: related_topic.get_name().to_owned(),
+                    filter_class_name: "DDSSQL".to_string(),
+                    filter_expression: content_filtered_topic.get_filter_expression()?,
+                    expression_parameters: content_filtered_topic.get_expression_parameters()?,
+                })
+            } else {
+                None
+            };
+
+            // Downcast to get underlying Topic for QoS
+            let topic_qos = if let Some(topic) = topic_description.as_any().downcast_ref::<Topic>()
+            {
+                topic.get_qos()?
+            } else if let Some(content_filtered_topic) = cft {
+                content_filtered_topic.get_related_topic()?.get_qos()?
+            } else {
+                return Err(DdsError::Error("Unsupported TopicDescription type".to_string()));
+            };
+
+            let topic_name = if let Some(topic) = topic_description.as_any().downcast_ref::<Topic>()
+            {
+                topic.get_name().to_string()
+            } else if let Some(content_filtered_topic) = cft {
+                content_filtered_topic.get_related_topic()?.get_name().to_string()
+            } else {
+                return Err(DdsError::Error("Unsupported TopicDescription type".to_string()));
+            };
+
+            let mut subscription_builtin_topic_data = SubscriptionBuiltinTopicData::new(
+                &self.get_qos()?,
+                &subscriber.get_qos()?,
+                &topic_qos,
+            );
+            subscription_builtin_topic_data.set_topic_name(topic_name);
+            subscription_builtin_topic_data
+                .set_type_name(topic_description.get_type_name().to_string());
+            subscription_builtin_topic_data.set_endpoint_guid(self.guid);
+
+            let status_callback = self
+                .status_callback
+                .as_ref()
+                .ok_or(DdsError::Error("Status callback is not initialized".to_string()))?
+                .clone();
+            let change_callback = self
+                .change_callback
+                .as_ref()
+                .ok_or(DdsError::Error("Change callback is not initialized".to_string()))?
+                .clone();
+
+            // Use Weak to avoid lifetime issues in closure
+            let mut dcps_bridge = participant.get_dcps_bridge()?;
+            let rtps_reader = match dcps_bridge.as_mut() {
+                Some(dcps_bridge) => dcps_bridge
+                    .create_rtps_reader(
+                        subscription_builtin_topic_data,
+                        content_filter_property,
+                        Some(change_callback),
+                        Some(status_callback),
+                    )
+                    .map_err(|e| DdsError::Error(e.message))?,
+                None => return Err(DdsError::Error("DCPS Bridge is not initialized".to_string())),
+            };
+
+            drop(dcps_bridge);
+
+            // Store RTPS reader reference
+            *self.rtps_reader.lock().map_err(|e| DdsError::Error(e.to_string()))? =
+                Some(Arc::downgrade(&rtps_reader));
+
+            rtps_reader
         };
 
-        // Downcast to get underlying Topic for QoS
-        let topic_qos = if let Some(topic) = topic_description.as_any().downcast_ref::<Topic>() {
-            topic.get_qos()?
-        } else if let Some(content_filtered_topic) = cft {
-            content_filtered_topic.get_related_topic()?.get_qos()?
-        } else {
-            return Err(DdsError::Error("Unsupported TopicDescription type".to_string()));
-        };
-
-        let topic_name = if let Some(topic) = topic_description.as_any().downcast_ref::<Topic>() {
-            topic.get_name().to_string()
-        } else if let Some(content_filtered_topic) = cft {
-            content_filtered_topic.get_related_topic()?.get_name().to_string()
-        } else {
-            return Err(DdsError::Error("Unsupported TopicDescription type".to_string()));
-        };
-
-        let mut subscription_builtin_topic_data =
-            SubscriptionBuiltinTopicData::new(&self.get_qos()?, &subscriber.get_qos()?, &topic_qos);
-        subscription_builtin_topic_data.set_topic_name(topic_name);
-        subscription_builtin_topic_data
-            .set_type_name(topic_description.get_type_name().to_string());
-        subscription_builtin_topic_data.set_endpoint_guid(self.guid);
-
-        let status_callback = self
-            .status_callback
-            .as_ref()
-            .ok_or(DdsError::Error("Status callback is not initialized".to_string()))?
-            .clone();
-        let change_callback = self
-            .change_callback
-            .as_ref()
-            .ok_or(DdsError::Error("Change callback is not initialized".to_string()))?
-            .clone();
-
-        // Use Weak to avoid lifetime issues in closure
-        let mut dcps_bridge = participant.get_dcps_bridge()?;
-        let rtps_reader = match dcps_bridge.as_mut() {
-            Some(dcps_bridge) => dcps_bridge
-                .create_rtps_reader(
-                    subscription_builtin_topic_data,
-                    content_filter_property,
-                    Some(change_callback),
-                    Some(status_callback),
-                )
-                .map_err(|e| DdsError::Error(e.message))?,
-            None => return Err(DdsError::Error("DCPS Bridge is not initialized".to_string())),
-        };
-
-        drop(dcps_bridge);
-
+        // Common: Connect datareader cache to RTPS reader cache
         {
             let reader_cache = rtps_reader.reader_cache();
             reader_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?.set_datareader_cache(
@@ -376,11 +409,6 @@ impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
                         >,
                     >,
             );
-        }
-
-        {
-            *self.rtps_reader.lock().map_err(|e| DdsError::Error(e.to_string()))? =
-                Some(Arc::downgrade(&rtps_reader));
         }
 
         Ok(())
@@ -1552,6 +1580,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
 impl<Foo: DdsType> DataReader<Foo> {
     pub(crate) fn new(
+        is_builtin: bool,
         guid: Guid,
         type_support: Arc<dyn TypeSupport + Send>,
         topic_description: &dyn TopicDescription,
@@ -1559,7 +1588,13 @@ impl<Foo: DdsType> DataReader<Foo> {
         listener: Option<Arc<dyn DataReaderListener<Foo = Foo>>>,
         mask: StatusMask,
         subscriber: &Arc<Subscriber>,
+        rtps_reader: Option<Arc<dyn RtpsReader + Send + Sync>>,
     ) -> DdsResult<Self> {
+        // Builtin entities must have rtps_reader, non-builtin must not
+        if is_builtin != rtps_reader.is_some() {
+            return Err(DdsError::PreconditionNotMet);
+        }
+
         // Downcast to get Topic reference
         let (topic_weak, cft_weak) = if let Some(topic) =
             topic_description.as_any().downcast_ref::<Topic>()
@@ -1577,6 +1612,7 @@ impl<Foo: DdsType> DataReader<Foo> {
             (None, None)
         };
         let mut reader = Self {
+            is_builtin,
             guid,
             qos: Arc::new(Mutex::new(qos.clone())),
             listener: Arc::new(RwLock::new(listener)),
@@ -1590,7 +1626,7 @@ impl<Foo: DdsType> DataReader<Foo> {
             topic: topic_weak,
             content_filtered_topic: cft_weak,
             subscriber: Some(Arc::downgrade(subscriber)),
-            rtps_reader: Arc::new(Mutex::new(None)),
+            rtps_reader: Arc::new(Mutex::new(rtps_reader.map(|r| Arc::downgrade(&r)))),
             enabled: Arc::new(AtomicBool::new(false)),
             deleted: Arc::new(AtomicBool::new(false)),
             liveliness_changed_status: Arc::new(Mutex::new(LivelinessChangedStatus::default())),
@@ -2411,7 +2447,7 @@ impl<Foo: DdsType> DataReader<Foo> {
             publication_handle: InstanceHandle::from_guid(&change.writer_guid()),
             valid_data: has_valid_data,
         };
-        Ok(DataSample::new_with_type_support(data, sample_info, Some(self.type_support.clone())))
+        Ok(DataSample::new(data, sample_info, Some(self.type_support.clone())))
     }
 
     fn sort_changes_by_timestamp(&self, changes: &mut [Arc<CacheChange>]) -> DdsResult<()> {
@@ -2936,6 +2972,10 @@ impl<Foo: 'static + Clone + Debug> DataReaderInternal for DataReader<Foo> {
         } else {
             Ok(())
         }
+    }
+
+    fn is_builtin(&self) -> bool {
+        self.is_builtin
     }
 
     fn get_topic(&self) -> DdsResult<Topic> {

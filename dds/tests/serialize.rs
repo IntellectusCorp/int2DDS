@@ -464,6 +464,96 @@ fn test_cdr_invalid_encapsulation() {
     assert!(result.is_err());
 }
 
+// Tuple Struct Tests
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final")]
+struct TupleStruct(pub u8);
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final")]
+struct MultiFieldTuple(pub u32, pub String);
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+struct AppendableTuple(pub i32);
+
+#[test]
+fn test_tuple_struct_cdr() {
+    let value = TupleStruct(42);
+
+    let mut serializer = CdrSerializer::new(true);
+    serializer.write_encapsulation_header().unwrap();
+    value.serialize_cdr(&mut serializer).unwrap();
+
+    let bytes = serializer.into_bytes();
+    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+    let result = TupleStruct::deserialize_cdr(&mut deserializer).unwrap();
+    assert_eq!(result.0, value.0);
+}
+
+#[test]
+fn test_tuple_struct_xcdr2() {
+    let value = TupleStruct(123);
+
+    let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Final);
+    serializer.write_encapsulation_header().unwrap();
+    value.serialize_xcdr(&mut serializer).unwrap();
+
+    let bytes = serializer.into_bytes();
+    let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
+    let result = TupleStruct::deserialize_xcdr(&mut deserializer).unwrap();
+    assert_eq!(result.0, value.0);
+}
+
+#[test]
+fn test_multi_field_tuple_cdr() {
+    let value = MultiFieldTuple(12345, "hello".to_string());
+
+    let mut serializer = CdrSerializer::new(true);
+    serializer.write_encapsulation_header().unwrap();
+    value.serialize_cdr(&mut serializer).unwrap();
+
+    let bytes = serializer.into_bytes();
+    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+    let result = MultiFieldTuple::deserialize_cdr(&mut deserializer).unwrap();
+    assert_eq!(result.0, value.0);
+    assert_eq!(result.1, value.1);
+}
+
+#[test]
+fn test_appendable_tuple_xcdr2() {
+    let value = AppendableTuple(-42);
+
+    let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Appendable);
+    serializer.write_encapsulation_header().unwrap();
+    value.serialize_xcdr(&mut serializer).unwrap();
+
+    let bytes = serializer.into_bytes();
+    let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
+    let result = AppendableTuple::deserialize_xcdr(&mut deserializer).unwrap();
+    assert_eq!(result.0, value.0);
+}
+
+#[test]
+fn test_tuple_struct_type_support() {
+    use int2dds::dcps::topic::type_support::TypeSupport;
+
+    let value = TupleStruct(99);
+    let type_support = TupleStruct::get_type_support();
+
+    // Serialize and deserialize
+    let serialized = type_support.serialize(&value).unwrap();
+    let deserialized = type_support.deserialize(&serialized).unwrap();
+    let result = deserialized.downcast_ref::<TupleStruct>().unwrap();
+    assert_eq!(result.0, value.0);
+
+    // has_field should work with index as string
+    assert!(type_support.has_field("0"));
+    assert!(!type_support.has_field("1"));
+    assert!(!type_support.has_field("value"));
+}
+
 // =============================================================================
 // EMHEADER (Member Header) Tests for Mutable Types
 // =============================================================================
