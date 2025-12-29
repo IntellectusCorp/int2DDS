@@ -129,8 +129,7 @@ impl ThreadMonitor {
 
         #[cfg(target_os = "macos")]
         {
-            #[allow(clippy::needless_return)]
-            return Self::get_macos_process_threads();
+            Self::get_macos_process_threads()
         }
 
         #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
