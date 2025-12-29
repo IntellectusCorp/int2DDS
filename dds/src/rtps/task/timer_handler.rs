@@ -862,7 +862,7 @@ mod tests {
     #[test]
     fn test_dynamic_timer_management_from_timer_order_test() {
         // Dynamic timer management test from timer_order_test.rs
-        let participant = create_mock_participant(0, 800);
+        let participant = create_mock_participant(0, 600);
         let timer_handler = TimerHandler::get_instance(participant.clone());
 
         let execution_results = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -870,11 +870,11 @@ mod tests {
         {
             let handler = timer_handler.lock().unwrap();
 
-            // Add timers with large intervals for CI stability (especially macOS)
-            // Timers: 400ms, 800ms, 1200ms, 1600ms, 2000ms
+            // Add timers with large intervals for CI stability
+            // Timers: 300ms, 600ms, 900ms, 1200ms, 1500ms
             for i in 1..=5 {
                 let timer_id = format!("fast_timer_{}", i);
-                let delay_ms = i * 400; // 400ms, 800ms, 1200ms, 1600ms, 2000ms
+                let delay_ms = i * 300; // 300ms, 600ms, 900ms, 1200ms, 1500ms
                 let results_clone = execution_results.clone();
 
                 handler.add_timer(
@@ -888,27 +888,26 @@ mod tests {
             }
         }
 
-        // Delete timers 4 and 5 after 1400ms (after 400, 800, 1200ms execute, before 1600, 2000ms)
-        // Margin: 200ms before timer 4 (1600ms)
-        thread::sleep(Duration::from_millis(1400));
+        // Delete timers 4 and 5 after 1050ms (after 300, 600, 900ms execute, before 1200, 1500ms)
+        thread::sleep(Duration::from_millis(1050));
 
         {
             let handler = timer_handler.lock().unwrap();
-            handler.remove_timer("fast_timer_4".to_string()); // Delete 1600ms timer
-            handler.remove_timer("fast_timer_5".to_string()); // Delete 2000ms timer
+            handler.remove_timer("fast_timer_4".to_string()); // Delete 1200ms timer
+            handler.remove_timer("fast_timer_5".to_string()); // Delete 1500ms timer
         }
 
-        // Wait an additional 800ms
-        thread::sleep(Duration::from_millis(800));
+        // Wait an additional 600ms
+        thread::sleep(Duration::from_millis(600));
 
         let results = execution_results.lock().unwrap();
 
         // Verify timers 1, 2, 3 executed and 4, 5 did not
-        assert!(results.contains(&1)); // 400ms
-        assert!(results.contains(&2)); // 800ms
-        assert!(results.contains(&3)); // 1200ms
-        assert!(!results.contains(&4)); // 1600ms (deleted before execution)
-        assert!(!results.contains(&5)); // 2000ms (deleted before execution)
+        assert!(results.contains(&1)); // 300ms
+        assert!(results.contains(&2)); // 600ms
+        assert!(results.contains(&3)); // 900ms
+        assert!(!results.contains(&4)); // 1200ms (deleted before execution)
+        assert!(!results.contains(&5)); // 1500ms (deleted before execution)
 
         assert_eq!(results.len(), 3);
 
