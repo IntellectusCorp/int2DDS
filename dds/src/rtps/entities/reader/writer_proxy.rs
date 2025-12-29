@@ -233,18 +233,19 @@ impl WriterProxy {
         change.is_relevant = false;
     }
 
+    #[allow(clippy::unnecessary_filter_map)]
     pub(crate) fn lost_changes_update(&mut self, first_available_seq_num: SequenceNumber) {
         self.expected_sn = max(self.expected_sn, first_available_seq_num);
 
         let keys: Vec<SequenceNumber> = self
             .changes_from_writer
             .range(..first_available_seq_num)
-            .map(|(seq_num, change_from_writer)| {
+            .filter_map(|(seq_num, change_from_writer)| {
                 if change_from_writer.status == ChangeFromWriterStatusKind::Missing {
                     debug!("Sample Lost!: {:?}", change_from_writer.sequence_number);
                     self.on_sample_lost();
                 }
-                *seq_num
+                Some(*seq_num)
             })
             .collect();
 

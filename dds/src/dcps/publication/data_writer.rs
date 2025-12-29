@@ -201,9 +201,10 @@ impl<Foo: 'static + Clone> Clone for DataWriter<Foo> {
 // When user doesn't call delete_datawriter and automatic drop occurs when going out of scope,
 // it must not be deleted from Publisher.
 impl<Foo> Drop for DataWriter<Foo> {
+    #[allow(clippy::match_result_ok)]
     fn drop(&mut self) {
         // Only handle drop for the last reference (not clones)
-        if let Ok(guard) = self.self_ref.lock() {
+        if let Some(guard) = self.self_ref.lock().ok() {
             if let Some(self_arc) = guard.as_ref() {
                 if Arc::strong_count(self_arc) > 1 {
                     return;
