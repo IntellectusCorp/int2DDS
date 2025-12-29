@@ -197,8 +197,10 @@ impl<'a> Xcdr2Deserializer<'a> {
     }
 
     /// Align position to boundary (accounting for removed header)
+    /// XCDR2 limits maximum alignment to 4 bytes to reduce padding
     pub(super) fn align(&mut self, alignment: usize) {
-        align_position_with_header_offset(&mut self.position, alignment, self.header_size);
+        let actual_alignment = std::cmp::min(alignment, 4);
+        align_position_with_header_offset(&mut self.position, actual_alignment, self.header_size);
     }
 
     /// Check if enough data is available
@@ -250,6 +252,85 @@ impl<'a> Xcdr2Deserializer<'a> {
         }
 
         Ok(())
+    }
+
+    /// Read EMHEADER for MUTABLE types
+    /// Returns (member_id, member_length) on success
+    /// The deserializer position is advanced past the header
+    pub fn read_member_header(&mut self) -> Result<(u32, u32), CdrError> {
+        use super::MemberHeader;
+
+        let (header, bytes_consumed) =
+            MemberHeader::read(self.data, self.position, self.endianness)?;
+
+        self.position += bytes_consumed;
+
+        Ok((header.member_id, header.member_length))
+    }
+
+    /// Read EMHEADER and also return must_understand flag
+    /// Returns (member_id, member_length, must_understand) on success
+    pub fn read_member_header_full(&mut self) -> Result<(u32, u32, bool), CdrError> {
+        use super::MemberHeader;
+
+        let (header, bytes_consumed) =
+            MemberHeader::read(self.data, self.position, self.endianness)?;
+
+        self.position += bytes_consumed;
+
+        Ok((header.member_id, header.member_length, header.must_understand))
+    }
+
+    /// Skip to next member (for unknown member_ids in Mutable types)
+    /// This enables forward compatibility
+    pub fn skip_member(&mut self, member_length: u32) -> Result<(), CdrError> {
+        self.skip(member_length as usize)
+    }
+
+    /// Peek at the next member header without consuming it
+    /// Returns Some((member_id, member_length)) or None if at end of struct
+    pub fn peek_member_header(&self, object_end_position: usize) -> Option<(u32, u32)> {
+        use super::MemberHeader;
+
+        if self.position >= object_end_position {
+            return None;
+        }
+
+        if self.position + 4 > self.data.len() {
+            return None;
+        }
+
+        MemberHeader::read(self.data, self.position, self.endianness)
+            .ok()
+            .map(|(h, _)| (h.member_id, h.member_length))
+    }
+
+    /// Check if the next member header is a sentinel (end of mutable struct)
+    pub fn is_at_sentinel(&self) -> bool {
+        use super::is_sentinel_member_id;
+
+        if self.position + 4 > self.data.len() {
+            return false;
+        }
+
+        if let Ok((header, _)) =
+            super::MemberHeader::read(self.data, self.position, self.endianness)
+        {
+            is_sentinel_member_id(header.member_id)
+        } else {
+            false
+        }
+    }
+
+    /// Skip the sentinel header if present
+    pub fn skip_sentinel_if_present(&mut self) -> Result<bool, CdrError> {
+        if self.is_at_sentinel() {
+            // Read and discard the sentinel header
+            let _ = self.read_member_header()?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 }
 

@@ -584,13 +584,71 @@ fn generate_xcdr_serialize_impl(
     crate_path: &proc_macro2::TokenStream,
     extensibility: Option<ExtensibilityKind>,
 ) -> proc_macro2::TokenStream {
-    // Call XcdrSerialize::serialize_xcdr for each field
+    let is_mutable = matches!(extensibility, Some(ExtensibilityKind::Mutable));
+
+    // Generate field serialization calls
     let field_calls: Vec<_> = fields
         .iter()
-        .map(|field| {
+        .enumerate()
+        .map(|(index, field)| {
             let field_name = field.ident.as_ref().unwrap();
-            quote! {
-                #crate_path::serialize::xcdr::XcdrSerialize::serialize_xcdr(&self.#field_name, serializer)?;
+            let field_config = parse_field_attributes(field);
+            let member_id = field_config.id.unwrap_or(index as u32);
+            let is_optional = field_config.optional;
+
+            if is_mutable {
+                // For Mutable types: write EMHEADER before each field
+                if is_optional {
+                    // Optional field: only serialize if Some
+                    quote! {
+                        if let Some(ref opt_value) = self.#field_name {
+                            // Reserve space for EMHEADER
+                            let emheader_pos = serializer.reserve_dheader();
+                            let field_start = serializer.position();
+
+                            // Serialize the field value
+                            #crate_path::serialize::xcdr::XcdrSerialize::serialize_xcdr(opt_value, serializer)?;
+
+                            // Calculate field length and backpatch EMHEADER
+                            let field_len = (serializer.position() - field_start) as u32;
+                            let emheader = (#member_id << 16) | (field_len & 0xFFFF);
+                            serializer.write_dheader_at(emheader_pos, emheader);
+                        }
+                    }
+                } else {
+                    // Required field: always serialize
+                    quote! {
+                        {
+                            // Reserve space for EMHEADER
+                            let emheader_pos = serializer.reserve_dheader();
+                            let field_start = serializer.position();
+
+                            // Serialize the field
+                            #crate_path::serialize::xcdr::XcdrSerialize::serialize_xcdr(&self.#field_name, serializer)?;
+
+                            // Calculate field length and backpatch EMHEADER
+                            let field_len = (serializer.position() - field_start) as u32;
+                            let emheader = (#member_id << 16) | (field_len & 0xFFFF);
+                            serializer.write_dheader_at(emheader_pos, emheader);
+                        }
+                    }
+                }
+            } else {
+                // For Final/Appendable: serialize field directly
+                if is_optional {
+                    quote! {
+                        if let Some(ref opt_value) = self.#field_name {
+                            serializer.serialize_bool(true)?;
+                            #crate_path::serialize::xcdr::XcdrSerialize::serialize_xcdr(opt_value, serializer)?;
+                        } else {
+                            serializer.serialize_bool(false)?;
+                        }
+                    }
+                } else {
+                    quote! {
+                        #crate_path::serialize::xcdr::XcdrSerialize::serialize_xcdr(&self.#field_name, serializer)?;
+                    }
+                }
             }
         })
         .collect();
@@ -630,47 +688,240 @@ fn generate_xcdr_deserialize_impl(
     crate_path: &proc_macro2::TokenStream,
     extensibility: Option<ExtensibilityKind>,
 ) -> proc_macro2::TokenStream {
-    // Call XcdrDeserialize::deserialize_xcdr for each field
+    let is_mutable = matches!(extensibility, Some(ExtensibilityKind::Mutable));
+
+    if is_mutable {
+        generate_mutable_deserialize_impl(name, fields, crate_path)
+    } else if matches!(extensibility, Some(ExtensibilityKind::Appendable)) {
+        generate_appendable_deserialize_impl(name, fields, crate_path)
+    } else {
+        generate_final_deserialize_impl(name, fields, crate_path)
+    }
+}
+
+/// Generate deserialization for Final types (no DHEADER)
+fn generate_final_deserialize_impl(
+    name: &syn::Ident,
+    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
+    crate_path: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
     let field_deserializations: Vec<_> = fields
         .iter()
         .map(|field| {
             let field_name = field.ident.as_ref().unwrap();
             let field_type = &field.ty;
-            quote! {
-                let #field_name = <#field_type as #crate_path::serialize::xcdr::XcdrDeserialize>::deserialize_xcdr(deserializer)?;
+            let field_config = parse_field_attributes(field);
+
+            if field_config.optional {
+                quote! {
+                    let #field_name = {
+                        let has_value = deserializer.deserialize_bool()?;
+                        if has_value {
+                            Some(<#field_type as #crate_path::serialize::xcdr::XcdrDeserialize>::deserialize_xcdr(deserializer)?)
+                        } else {
+                            None
+                        }
+                    };
+                }
+            } else {
+                quote! {
+                    let #field_name = <#field_type as #crate_path::serialize::xcdr::XcdrDeserialize>::deserialize_xcdr(deserializer)?;
+                }
             }
         })
         .collect();
 
     let field_names: Vec<_> = fields.iter().map(|f| f.ident.as_ref().unwrap()).collect();
 
-    let deserialization_body = if matches!(
-        extensibility,
-        Some(ExtensibilityKind::Appendable) | Some(ExtensibilityKind::Mutable)
-    ) {
-        quote! {
-            let (object_size, start_position) = deserializer.begin_struct()?;
-            #(#field_deserializations)*
-            deserializer.end_struct(object_size, start_position)?;
+    quote! {
+        impl #crate_path::serialize::xcdr::XcdrDeserialize for #name {
+            fn deserialize_xcdr(deserializer: &mut #crate_path::serialize::xcdr::XcdrDeserializer) -> #crate_path::serialize::xcdr::XcdrResult<Self> {
+                #(#field_deserializations)*
 
-            Ok(#name {
-                #(#field_names,)*
-            })
+                Ok(#name {
+                    #(#field_names,)*
+                })
+            }
         }
-    } else {
-        quote! {
-            #(#field_deserializations)*
+    }
+}
 
-            Ok(#name {
-                #(#field_names,)*
-            })
-        }
-    };
+/// Generate deserialization for Appendable types (with DHEADER, sequential fields)
+fn generate_appendable_deserialize_impl(
+    name: &syn::Ident,
+    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
+    crate_path: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let field_deserializations: Vec<_> = fields
+        .iter()
+        .map(|field| {
+            let field_name = field.ident.as_ref().unwrap();
+            let field_type = &field.ty;
+            let field_config = parse_field_attributes(field);
+
+            if field_config.optional {
+                quote! {
+                    let #field_name = {
+                        let has_value = deserializer.deserialize_bool()?;
+                        if has_value {
+                            Some(<#field_type as #crate_path::serialize::xcdr::XcdrDeserialize>::deserialize_xcdr(deserializer)?)
+                        } else {
+                            None
+                        }
+                    };
+                }
+            } else {
+                quote! {
+                    let #field_name = <#field_type as #crate_path::serialize::xcdr::XcdrDeserialize>::deserialize_xcdr(deserializer)?;
+                }
+            }
+        })
+        .collect();
+
+    let field_names: Vec<_> = fields.iter().map(|f| f.ident.as_ref().unwrap()).collect();
 
     quote! {
         impl #crate_path::serialize::xcdr::XcdrDeserialize for #name {
             fn deserialize_xcdr(deserializer: &mut #crate_path::serialize::xcdr::XcdrDeserializer) -> #crate_path::serialize::xcdr::XcdrResult<Self> {
-                #deserialization_body
+                let (object_size, start_position) = deserializer.begin_struct()?;
+                #(#field_deserializations)*
+                deserializer.end_struct(object_size, start_position)?;
+
+                Ok(#name {
+                    #(#field_names,)*
+                })
+            }
+        }
+    }
+}
+
+/// Generate deserialization for Mutable types (with DHEADER and EMHEADER per field)
+fn generate_mutable_deserialize_impl(
+    name: &syn::Ident,
+    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
+    crate_path: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    // Generate field declarations with Option wrapper
+    let field_declarations: Vec<_> = fields
+        .iter()
+        .map(|field| {
+            let field_name = field.ident.as_ref().unwrap();
+            let field_type = &field.ty;
+            let field_config = parse_field_attributes(field);
+
+            if field_config.optional {
+                // Optional fields are already Option<T>, initialize to None
+                quote! {
+                    let mut #field_name: #field_type = None;
+                }
+            } else {
+                // Required fields: wrap in Option for tracking
+                quote! {
+                    let mut #field_name: Option<#field_type> = None;
+                }
+            }
+        })
+        .collect();
+
+    // Generate match arms for each member_id
+    let field_match_arms: Vec<_> = fields
+        .iter()
+        .enumerate()
+        .map(|(index, field)| {
+            let field_name = field.ident.as_ref().unwrap();
+            let field_type = &field.ty;
+            let field_config = parse_field_attributes(field);
+            let member_id = field_config.id.unwrap_or(index as u32);
+
+            if field_config.optional {
+                // For optional fields, the inner type needs to be extracted
+                // We assume it's Option<InnerType>
+                quote! {
+                    #member_id => {
+                        // Deserialize the inner value for optional field
+                        #field_name = Some(#crate_path::serialize::xcdr::XcdrDeserialize::deserialize_xcdr(deserializer)?);
+                    }
+                }
+            } else {
+                quote! {
+                    #member_id => {
+                        #field_name = Some(<#field_type as #crate_path::serialize::xcdr::XcdrDeserialize>::deserialize_xcdr(deserializer)?);
+                    }
+                }
+            }
+        })
+        .collect();
+
+    // Generate field unwrapping for struct construction
+    let field_unwraps: Vec<_> = fields
+        .iter()
+        .map(|field| {
+            let field_name = field.ident.as_ref().unwrap();
+            let field_name_str = field_name.to_string();
+            let field_config = parse_field_attributes(field);
+
+            if field_config.optional {
+                // Optional fields: already Option<T>, just use the value
+                quote! {
+                    #field_name
+                }
+            } else {
+                // Required fields: must be Some, error if None
+                quote! {
+                    #field_name.ok_or_else(||
+                        #crate_path::serialize::core::SerializationError::DeserializationError(
+                            format!("Missing required field: {}", #field_name_str)
+                        )
+                    )?
+                }
+            }
+        })
+        .collect();
+
+    let field_names: Vec<_> = fields.iter().map(|f| f.ident.as_ref().unwrap()).collect();
+
+    quote! {
+        impl #crate_path::serialize::xcdr::XcdrDeserialize for #name {
+            fn deserialize_xcdr(deserializer: &mut #crate_path::serialize::xcdr::XcdrDeserializer) -> #crate_path::serialize::xcdr::XcdrResult<Self> {
+                use #crate_path::serialize::cdr::is_sentinel_member_id;
+
+                let (object_size, start_position) = deserializer.begin_struct()?;
+                let object_end = start_position + object_size as usize;
+
+                // Declare all fields as Option for tracking
+                #(#field_declarations)*
+
+                // Read member headers and route to appropriate fields
+                while deserializer.get_position() < object_end {
+                    let (member_id, member_length) = deserializer.read_member_header()?;
+
+                    // Check for sentinel
+                    if is_sentinel_member_id(member_id) {
+                        break;
+                    }
+
+                    let member_start = deserializer.get_position();
+
+                    match member_id {
+                        #(#field_match_arms)*
+                        _ => {
+                            // Unknown member_id - skip for forward compatibility
+                            deserializer.skip_member(member_length)?;
+                        }
+                    }
+
+                    // Verify we consumed the correct number of bytes, skip remaining if needed
+                    let consumed = deserializer.get_position() - member_start;
+                    if consumed < member_length as usize {
+                        deserializer.skip((member_length as usize) - consumed)?;
+                    }
+                }
+
+                deserializer.end_struct(object_size, start_position)?;
+
+                Ok(#name {
+                    #(#field_names: #field_unwraps,)*
+                })
             }
         }
     }

@@ -7,7 +7,7 @@ use int2dds::{
             CdrDeserialize, CdrDeserializer, CdrSerialize, CdrSerializer, ExtensibilityKind,
             XcdrDeserialize, XcdrDeserializer, XcdrSerialize, XcdrSerializer,
         },
-        BufferManager, WChar, WString,
+        BufferManager, DeserializerReader, WChar, WString,
     },
 };
 use std::collections::HashMap;
@@ -462,4 +462,312 @@ fn test_cdr_invalid_encapsulation() {
     let data = [0xFF, 0xFF, 0x00, 0x00];
     let result = CdrDeserializer::new(&data);
     assert!(result.is_err());
+}
+
+// =============================================================================
+// EMHEADER (Member Header) Tests for Mutable Types
+// =============================================================================
+
+use int2dds::serialize::cdr::MemberHeader;
+use speedy::Endianness;
+
+#[test]
+fn test_emheader_roundtrip_small_length() {
+    // Test EMHEADER with small length (< 64KB, LC=0)
+    let header = MemberHeader::new(42, 100); // member_id=42, length=100
+
+    let mut buffer = Vec::new();
+    header.write(&mut buffer, Endianness::LittleEndian).unwrap();
+
+    // Verify header is 4 bytes for small lengths
+    assert_eq!(buffer.len(), 4);
+
+    // Read it back
+    let (read_header, bytes_consumed) =
+        MemberHeader::read(&buffer, 0, Endianness::LittleEndian).unwrap();
+
+    assert_eq!(bytes_consumed, 4);
+    assert_eq!(read_header.member_id, 42);
+    assert_eq!(read_header.member_length, 100);
+    assert!(!read_header.must_understand);
+}
+
+#[test]
+fn test_emheader_roundtrip_large_length() {
+    // Test EMHEADER with large length (> 64KB, requires LC=4 extended header)
+    let large_length: usize = 100_000; // 100KB
+    let header = MemberHeader::new(123, large_length);
+
+    let mut buffer = Vec::new();
+    header.write(&mut buffer, Endianness::LittleEndian).unwrap();
+
+    // Verify header is 8 bytes for large lengths (4 + 4 for extended length)
+    assert_eq!(buffer.len(), 8);
+
+    // Read it back
+    let (read_header, bytes_consumed) =
+        MemberHeader::read(&buffer, 0, Endianness::LittleEndian).unwrap();
+
+    assert_eq!(bytes_consumed, 8);
+    assert_eq!(read_header.member_id, 123);
+    assert_eq!(read_header.member_length, large_length as u32);
+}
+
+#[test]
+fn test_emheader_must_understand_flag() {
+    // Test must_understand flag (bit 31)
+    let header = MemberHeader { member_id: 10, member_length: 50, must_understand: true };
+
+    let mut buffer = Vec::new();
+    header.write(&mut buffer, Endianness::LittleEndian).unwrap();
+
+    // Read it back
+    let (read_header, _) = MemberHeader::read(&buffer, 0, Endianness::LittleEndian).unwrap();
+
+    assert_eq!(read_header.member_id, 10);
+    assert_eq!(read_header.member_length, 50);
+    assert!(read_header.must_understand);
+}
+
+#[test]
+fn test_emheader_big_endian() {
+    // Test big-endian encoding/decoding
+    let header = MemberHeader::new(255, 1000);
+
+    let mut buffer = Vec::new();
+    header.write(&mut buffer, Endianness::BigEndian).unwrap();
+
+    let (read_header, _) = MemberHeader::read(&buffer, 0, Endianness::BigEndian).unwrap();
+
+    assert_eq!(read_header.member_id, 255);
+    assert_eq!(read_header.member_length, 1000);
+}
+
+// =============================================================================
+// Mutable Struct Tests
+// =============================================================================
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Mutable")]
+struct MutableStruct {
+    #[dds(id = 1)]
+    pub id: u32,
+    #[dds(id = 2)]
+    pub name: String,
+    #[dds(id = 3)]
+    pub value: f64,
+}
+
+#[test]
+fn test_mutable_struct_xcdr2() {
+    let value = MutableStruct { id: 42, name: "test_mutable".to_string(), value: 3.14159 };
+
+    // Serialize
+    let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Mutable);
+    serializer.write_encapsulation_header().unwrap();
+    value.serialize_xcdr(&mut serializer).unwrap();
+
+    let bytes = serializer.into_bytes();
+
+    // Verify encapsulation header is PL_CDR2_LE (0x000B)
+    assert_eq!(bytes[0], 0x00);
+    assert_eq!(bytes[1], 0x0B);
+
+    // Deserialize
+    let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
+    let result = MutableStruct::deserialize_xcdr(&mut deserializer).unwrap();
+
+    assert_eq!(result.id, 42);
+    assert_eq!(result.name, "test_mutable");
+    assert!((result.value - 3.14159).abs() < 1e-10);
+}
+
+#[test]
+fn test_mutable_struct_big_endian() {
+    let value = MutableStruct { id: 100, name: "big_endian".to_string(), value: 2.71828 };
+
+    // Serialize in big-endian
+    let mut serializer = XcdrSerializer::new(false, ExtensibilityKind::Mutable);
+    serializer.write_encapsulation_header().unwrap();
+    value.serialize_xcdr(&mut serializer).unwrap();
+
+    let bytes = serializer.into_bytes();
+
+    // Verify encapsulation header is PL_CDR2_BE (0x000A)
+    assert_eq!(bytes[0], 0x00);
+    assert_eq!(bytes[1], 0x0A);
+
+    // Deserialize
+    let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
+    let result = MutableStruct::deserialize_xcdr(&mut deserializer).unwrap();
+
+    assert_eq!(result.id, 100);
+    assert_eq!(result.name, "big_endian");
+    assert!((result.value - 2.71828).abs() < 1e-10);
+}
+
+// =============================================================================
+// Mutable Struct with Nested Types
+// =============================================================================
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Mutable")]
+struct MutableNestedStruct {
+    #[dds(id = 1)]
+    pub header: SimpleStruct,
+    #[dds(id = 2)]
+    pub data: Vec<i32>,
+    #[dds(id = 3)]
+    pub count: u32,
+}
+
+#[test]
+fn test_mutable_nested_struct_xcdr2() {
+    let value = MutableNestedStruct {
+        header: SimpleStruct { x: 10, y: 20 },
+        data: vec![1, 2, 3, 4, 5],
+        count: 5,
+    };
+
+    // Serialize
+    let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Mutable);
+    serializer.write_encapsulation_header().unwrap();
+    value.serialize_xcdr(&mut serializer).unwrap();
+
+    let bytes = serializer.into_bytes();
+
+    // Deserialize
+    let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
+    let result = MutableNestedStruct::deserialize_xcdr(&mut deserializer).unwrap();
+
+    assert_eq!(result.header.x, 10);
+    assert_eq!(result.header.y, 20);
+    assert_eq!(result.data, vec![1, 2, 3, 4, 5]);
+    assert_eq!(result.count, 5);
+}
+
+// =============================================================================
+// Optional Field Tests (Mutable types)
+// =============================================================================
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Mutable")]
+struct MutableWithOptional {
+    #[dds(id = 1)]
+    pub required_field: u32,
+    #[dds(id = 2, optional)]
+    pub optional_string: Option<String>,
+    #[dds(id = 3, optional)]
+    pub optional_value: Option<f64>,
+}
+
+#[test]
+fn test_mutable_optional_all_present() {
+    let value = MutableWithOptional {
+        required_field: 123,
+        optional_string: Some("hello".to_string()),
+        optional_value: Some(99.9),
+    };
+
+    // Serialize
+    let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Mutable);
+    serializer.write_encapsulation_header().unwrap();
+    value.serialize_xcdr(&mut serializer).unwrap();
+
+    let bytes = serializer.into_bytes();
+
+    // Deserialize
+    let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
+    let result = MutableWithOptional::deserialize_xcdr(&mut deserializer).unwrap();
+
+    assert_eq!(result.required_field, 123);
+    assert_eq!(result.optional_string, Some("hello".to_string()));
+    assert_eq!(result.optional_value, Some(99.9));
+}
+
+#[test]
+fn test_mutable_optional_none_values() {
+    let value =
+        MutableWithOptional { required_field: 456, optional_string: None, optional_value: None };
+
+    // Serialize
+    let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Mutable);
+    serializer.write_encapsulation_header().unwrap();
+    value.serialize_xcdr(&mut serializer).unwrap();
+
+    let bytes = serializer.into_bytes();
+
+    // Deserialize
+    let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
+    let result = MutableWithOptional::deserialize_xcdr(&mut deserializer).unwrap();
+
+    assert_eq!(result.required_field, 456);
+    assert_eq!(result.optional_string, None);
+    assert_eq!(result.optional_value, None);
+}
+
+#[test]
+fn test_mutable_optional_mixed() {
+    let value = MutableWithOptional {
+        required_field: 789,
+        optional_string: Some("partial".to_string()),
+        optional_value: None,
+    };
+
+    // Serialize
+    let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Mutable);
+    serializer.write_encapsulation_header().unwrap();
+    value.serialize_xcdr(&mut serializer).unwrap();
+
+    let bytes = serializer.into_bytes();
+
+    // Deserialize
+    let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
+    let result = MutableWithOptional::deserialize_xcdr(&mut deserializer).unwrap();
+
+    assert_eq!(result.required_field, 789);
+    assert_eq!(result.optional_string, Some("partial".to_string()));
+    assert_eq!(result.optional_value, None);
+}
+
+// =============================================================================
+// DHEADER Tests (Appendable/Mutable struct size header)
+// =============================================================================
+
+#[test]
+fn test_appendable_struct_dheader() {
+    // Appendable structs use DHEADER for forward compatibility
+    let value =
+        AppendableStruct { id: 999, name: "dheader_test".to_string(), values: vec![10, 20, 30] };
+
+    // Serialize
+    let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Appendable);
+    serializer.write_encapsulation_header().unwrap();
+    value.serialize_xcdr(&mut serializer).unwrap();
+
+    let bytes = serializer.into_bytes();
+
+    // Verify encapsulation header is DCDR2_LE (0x0009)
+    assert_eq!(bytes[0], 0x00);
+    assert_eq!(bytes[1], 0x09);
+
+    // After encap header (4 bytes), there should be a DHEADER (4 bytes)
+    // The DHEADER contains the object size
+    let dheader_bytes = &bytes[4..8];
+    let dheader_size = u32::from_le_bytes([
+        dheader_bytes[0],
+        dheader_bytes[1],
+        dheader_bytes[2],
+        dheader_bytes[3],
+    ]);
+
+    // Object size should match remaining data
+    let object_data_len = bytes.len() - 8; // Total - encap header - dheader
+    assert_eq!(dheader_size as usize, object_data_len);
+
+    // Deserialize should still work
+    let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
+    let result = AppendableStruct::deserialize_xcdr(&mut deserializer).unwrap();
+
+    assert_eq!(result, value);
 }
