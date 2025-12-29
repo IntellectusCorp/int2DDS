@@ -3517,17 +3517,11 @@ mod domain_participant_tests {
         let topic_desc = reader.get_topicdescription().unwrap();
         assert_eq!(topic_desc.get_name(), "filtered_topic");
         assert_eq!(topic_desc.get_type_name(), "HelloWorld");
-        println!("1");
         subscriber.delete_datareader(reader).unwrap();
-        println!("2");
         participant.delete_contentfilteredtopic(cft).unwrap();
-        println!("3");
         participant.delete_topic(topic).unwrap();
-        println!("4");
         participant.delete_subscriber(subscriber).unwrap();
-        println!("5");
         factory.delete_participant(participant).unwrap();
-        println!("6");
     }
 
     impl DomainParticipant {
@@ -3914,5 +3908,258 @@ mod domain_participant_tests {
 
         // Should still be registered
         assert!(domain_participant.is_type_registered(type_name));
+    }
+
+    // ==================== Builtin Subscriber Tests (DDS 2.2.2.2.1.13) ====================
+
+    /// Test that get_builtin_subscriber returns successfully
+    #[test]
+    fn test_get_builtin_subscriber_success() {
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        // Should return the builtin subscriber without error
+        let builtin_subscriber = participant.get_builtin_subscriber();
+        assert!(builtin_subscriber.is_ok(), "get_builtin_subscriber should succeed");
+
+        factory.delete_participant(participant).unwrap();
+    }
+
+    /// Test that builtin subscriber contains expected DataReaders
+    #[test]
+    fn test_builtin_subscriber_contains_datareaders() {
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let builtin_subscriber = participant.get_builtin_subscriber().unwrap();
+
+        // Check that builtin DataReaders exist via lookup_datareader
+        // DCPSParticipant
+        let participant_reader =
+            builtin_subscriber.lookup_datareader::<ParticipantBuiltinTopicData>("DCPSParticipant");
+        assert!(participant_reader.is_ok(), "DCPSParticipant reader lookup should succeed");
+
+        // DCPSPublication
+        let publication_reader =
+            builtin_subscriber.lookup_datareader::<PublicationBuiltinTopicData>("DCPSPublication");
+        assert!(publication_reader.is_ok(), "DCPSPublication reader lookup should succeed");
+
+        // DCPSSubscription
+        let subscription_reader = builtin_subscriber
+            .lookup_datareader::<SubscriptionBuiltinTopicData>("DCPSSubscription");
+        assert!(subscription_reader.is_ok(), "DCPSSubscription reader lookup should succeed");
+
+        factory.delete_participant(participant).unwrap();
+    }
+
+    /// Test that builtin subscriber has correct QoS settings per DDS 2.2.5
+    #[test]
+    fn test_builtin_subscriber_qos() {
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let builtin_subscriber = participant.get_builtin_subscriber().unwrap();
+        let qos = builtin_subscriber.get_qos().unwrap();
+
+        // ENTITY_FACTORY: autoenable_created_entities = TRUE
+        assert!(
+            qos.entity_factory.autoenable_created_entities,
+            "Builtin subscriber should have autoenable_created_entities = true"
+        );
+
+        factory.delete_participant(participant).unwrap();
+    }
+
+    /// Test that builtin DataReaders have correct QoS settings per DDS 2.2.5
+    #[test]
+    fn test_builtin_datareader_qos() {
+        use crate::infrastructure::qos_policy::{
+            DestinationOrderQosPolicyKind, DurabilityQosPolicyKind, HistoryQosPolicyKind,
+            OwnershipQosPolicyKind, ReliabilityQosPolicyKind,
+        };
+
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let builtin_subscriber = participant.get_builtin_subscriber().unwrap();
+
+        // Get DCPSSubscription reader and check its QoS
+        let subscription_reader = builtin_subscriber
+            .lookup_datareader::<SubscriptionBuiltinTopicData>("DCPSSubscription")
+            .unwrap();
+
+        let qos = subscription_reader.get_qos().unwrap();
+
+        // DURABILITY: TRANSIENT_LOCAL
+        assert_eq!(
+            qos.durability.kind,
+            DurabilityQosPolicyKind::TransientLocal,
+            "Builtin reader should have TRANSIENT_LOCAL durability"
+        );
+
+        // DEADLINE: infinite
+        assert!(qos.deadline.period.is_infinite(), "Builtin reader should have infinite deadline");
+
+        // OWNERSHIP: SHARED
+        assert_eq!(
+            qos.ownership.kind,
+            OwnershipQosPolicyKind::Shared,
+            "Builtin reader should have SHARED ownership"
+        );
+
+        // RELIABILITY: RELIABLE
+        assert_eq!(
+            qos.reliability.kind,
+            ReliabilityQosPolicyKind::Reliable,
+            "Builtin reader should have RELIABLE reliability"
+        );
+
+        // DESTINATION_ORDER: BY_RECEPTION_TIMESTAMP
+        assert_eq!(
+            qos.destination_order.kind,
+            DestinationOrderQosPolicyKind::ByReceptionTimestamp,
+            "Builtin reader should have BY_RECEPTION_TIMESTAMP destination order"
+        );
+
+        // HISTORY: KEEP_LAST depth=1
+        assert!(
+            matches!(qos.history.kind, HistoryQosPolicyKind::KeepLast(1)),
+            "Builtin reader should have KEEP_LAST(1) history"
+        );
+
+        // TIME_BASED_FILTER: minimum_separation = 0
+        assert!(
+            qos.time_based_filter.minimum_separation.is_zero(),
+            "Builtin reader should have zero time_based_filter"
+        );
+
+        // RESOURCE_LIMITS: all LENGTH_UNLIMITED
+        assert_eq!(
+            qos.resource_limits.max_instances, LENGTH_UNLIMITED,
+            "Builtin reader should have unlimited max_instances"
+        );
+        assert_eq!(
+            qos.resource_limits.max_samples, LENGTH_UNLIMITED,
+            "Builtin reader should have unlimited max_samples"
+        );
+        assert_eq!(
+            qos.resource_limits.max_samples_per_instance, LENGTH_UNLIMITED,
+            "Builtin reader should have unlimited max_samples_per_instance"
+        );
+
+        // READER_DATA_LIFECYCLE: autopurge delays = infinite
+        assert!(
+            qos.reader_data_lifecycle.autopurge_nowriter_samples_delay.is_infinite(),
+            "Builtin reader should have infinite autopurge_nowriter_samples_delay"
+        );
+        assert!(
+            qos.reader_data_lifecycle.autopurge_disposed_samples_delay.is_infinite(),
+            "Builtin reader should have infinite autopurge_disposed_samples_delay"
+        );
+
+        factory.delete_participant(participant).unwrap();
+    }
+
+    /// Test that builtin subscriber cannot be deleted
+    #[test]
+    fn test_builtin_subscriber_cannot_be_deleted() {
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let builtin_subscriber = participant.get_builtin_subscriber().unwrap();
+
+        // Attempting to delete builtin subscriber should fail
+        let result = participant.delete_subscriber(builtin_subscriber);
+        assert!(result.is_err(), "Deleting builtin subscriber should fail");
+
+        factory.delete_participant(participant).unwrap();
+    }
+
+    /// Test that builtin subscriber QoS cannot be modified
+    #[test]
+    fn test_builtin_subscriber_qos_immutable() {
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let builtin_subscriber = participant.get_builtin_subscriber().unwrap();
+
+        // Attempting to modify QoS should fail
+        let mut new_qos = builtin_subscriber.get_qos().unwrap();
+        new_qos.entity_factory.autoenable_created_entities = false;
+
+        let result = builtin_subscriber.set_qos(new_qos);
+        assert!(result.is_err(), "Modifying builtin subscriber QoS should fail");
+
+        factory.delete_participant(participant).unwrap();
+    }
+
+    /// Test get_builtin_subscriber on deleted participant
+    #[test]
+    fn test_get_builtin_subscriber_on_deleted_participant() {
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let participant_clone = participant.clone();
+        factory.delete_participant(participant).unwrap();
+
+        // Should return error on deleted participant
+        let result = participant_clone.get_builtin_subscriber();
+        assert!(result.is_err(), "get_builtin_subscriber on deleted participant should fail");
     }
 }
