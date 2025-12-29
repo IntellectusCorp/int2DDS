@@ -602,8 +602,7 @@ impl DynamicTypeSupport {
     }
 
     /// Serialize a single field using XCDR v2
-    #[allow(dead_code)]
-    fn serialize_field_xcdr2(
+    fn _serialize_field_xcdr2(
         &self,
         serializer: &mut Xcdr2Serializer,
         data: &Int2DdsData,

@@ -213,6 +213,11 @@ impl DeadlineMonitor {
 
                 thread::sleep(sleep_duration.try_into().unwrap());
 
+                // Check shutdown flag after waking from sleep (prevents race condition)
+                if shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
+
                 // Check deadline
                 if let Ok(mut trackers_guard) = trackers.lock() {
                     let now = Time::now();

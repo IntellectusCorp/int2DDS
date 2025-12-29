@@ -3,10 +3,15 @@
 //! This module defines the `ParticipantBuiltinTopicData` structure that represents
 //! discovered domain participant information in the DDS discovery protocol.
 
-use crate::{infrastructure::qos_policy::UserDataQosPolicy, rtps::common::guid::Guid};
+use crate::{
+    infrastructure::qos_policy::UserDataQosPolicy, rtps::common::guid::Guid,
+    topic::type_support::DdsType,
+};
 
 use super::builtin_topic_key::BuiltinTopicKey;
 
+#[derive(DdsType)]
+#[dds_type(crate_path = "crate", no_default)]
 pub struct ParticipantBuiltinTopicData {
     key: BuiltinTopicKey,
     user_data: UserDataQosPolicy,
