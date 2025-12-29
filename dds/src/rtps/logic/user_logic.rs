@@ -108,6 +108,8 @@ impl UserLogic {
             participant.clone(),
         );
 
+        let participant_guid = participant.guid();
+
         // unicast listening
         let unicast_handle = thread::Builder::new()
             .name("user_traffic_unicast_listening".to_string())
@@ -115,10 +117,18 @@ impl UserLogic {
                 // Register thread name for monitoring
                 {
                     use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::register_current_thread_name("user_traffic_unicast_listening");
+                    ThreadMonitor::register_current_thread_name_with_guid(
+                        "user_traffic_unicast_listening",
+                        &participant_guid,
+                    );
                 }
 
                 let _ = user_unicast_listening_task.unicast_listening();
+                // Cleanup thread from registry before exit
+                {
+                    use crate::rtps::task::thread_monitor::ThreadMonitor;
+                    ThreadMonitor::remove_map_guard();
+                }
                 debug!("user unicast listening thread finished");
             })
             .expect("Failed to create user unicast listening thread");
