@@ -285,9 +285,7 @@ impl Participant {
         self.builtin_endpoints.spdp_builtin_participant_writer.clone()
     }
 
-    pub(crate) fn spdp_builtin_participant_reader(
-        &self,
-    ) -> Arc<Mutex<SPDPBuiltinParticipantReader>> {
+    pub(crate) fn spdp_builtin_participant_reader(&self) -> Arc<SPDPBuiltinParticipantReader> {
         self.builtin_endpoints.spdp_builtin_participant_reader.clone()
     }
 

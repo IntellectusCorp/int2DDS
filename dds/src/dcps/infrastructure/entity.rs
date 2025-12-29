@@ -129,6 +129,9 @@ macro_rules! impl_dds_entity_impl {
             }
 
             fn set_qos(&self, qos: Self::Qos) -> DdsResult<()> {
+                if self.is_builtin {
+                    return Err(DdsError::PreconditionNotMet);
+                }
                 self.is_deleted()?;
                 qos.check_unsupported_policies()?;
                 qos.is_consistent()?;

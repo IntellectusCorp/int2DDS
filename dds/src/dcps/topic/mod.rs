@@ -34,12 +34,16 @@ pub mod content_filtered_topic;
 pub mod multi_topic;
 pub mod qos;
 #[doc(hidden)]
+pub mod raw_data;
+#[doc(hidden)]
 pub mod sql;
 pub mod topic;
 pub mod topic_description;
 pub mod topic_listener;
 pub mod type_support;
 
+#[doc(hidden)]
+pub use raw_data::{RawData, RawDataTypeSupport};
 #[doc(hidden)]
 pub use topic::*;
 #[doc(hidden)]

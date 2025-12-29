@@ -106,9 +106,18 @@ pub(crate) trait DataWriterInternal: DataWriterBase {
     fn get_type_id(&self) -> TypeId;
     fn delete(&self);
     fn is_deleted(&self) -> DdsResult<()>;
+    fn is_builtin(&self) -> bool;
 }
 
 pub struct DataWriter<Foo> {
+    // Indicates whether this entity is a built-in entity.
+    //
+    // Currently always `false` as DDS spec does not define built-in
+    // DataWriter exposed to users.
+    //
+    // TODO: Reserved for future DCPS-RTPS built-in entity mapping
+    // if needed (e.g., exposing built-in writers for diagnostics).
+    is_builtin: bool,
     guid: Guid,
     qos: Arc<Mutex<DataWriterQos>>,
     listener: Arc<RwLock<Option<Arc<dyn DataWriterListener<Foo = Foo>>>>>,
@@ -171,6 +180,7 @@ impl<Foo> Debug for DataWriter<Foo> {
 impl<Foo: 'static + Clone> Clone for DataWriter<Foo> {
     fn clone(&self) -> Self {
         Self {
+            is_builtin: self.is_builtin,
             guid: self.guid,
             qos: self.qos.clone(),
             listener: self.listener.clone(),
@@ -201,6 +211,11 @@ impl<Foo: 'static + Clone> Clone for DataWriter<Foo> {
 // it must not be deleted from Publisher.
 impl<Foo> Drop for DataWriter<Foo> {
     fn drop(&mut self) {
+        // Builtin entities are managed separately, skip orphan handling
+        if self.is_builtin {
+            return;
+        }
+
         // Only handle drop for the last reference (not clones)
         if let Some(guard) = self.self_ref.lock().ok() {
             if let Some(ref self_arc) = guard.as_ref() {
@@ -352,6 +367,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
     // DataWriter should be specialized for each data type.
     // Trait defining methods that should be defined in auto-generated class for <Foo>
     pub(crate) fn new(
+        is_builtin: bool,
         guid: Guid,
         type_support: Arc<dyn TypeSupport + Send>,
         topic: &Arc<Topic>,
@@ -362,6 +378,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         wlp_logic: Option<WlpLogic>,
     ) -> DdsResult<Self> {
         let writer = Self {
+            is_builtin,
             guid,
             qos: Arc::new(Mutex::new(qos.clone())),
             listener: Arc::new(RwLock::new(listener)),
@@ -1867,6 +1884,10 @@ impl<Foo: 'static + Clone> DataWriterInternal for DataWriter<Foo> {
         } else {
             Ok(())
         }
+    }
+
+    fn is_builtin(&self) -> bool {
+        self.is_builtin
     }
 }
 

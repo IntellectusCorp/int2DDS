@@ -57,6 +57,14 @@ use crate::{
 
 #[derive(Clone)]
 pub struct Publisher {
+    // Indicates whether this entity is a built-in entity.
+    //
+    // Currently always `false` as DDS spec does not define built-in
+    // Publisher exposed to users.
+    //
+    // TODO: Reserved for future DCPS-RTPS built-in entity mapping
+    // if needed (e.g., exposing built-in publisher for diagnostics).
+    is_builtin: bool,
     guid: Guid,
     qos: Arc<Mutex<PublisherQos>>,
     listener: Arc<RwLock<Option<Arc<dyn PublisherListener>>>>,
@@ -101,6 +109,11 @@ impl Eq for Publisher {}
 
 impl Drop for Publisher {
     fn drop(&mut self) {
+        // Builtin entities are managed separately, skip orphan handling
+        if self.is_builtin {
+            return;
+        }
+
         // Only handle drop for the last reference (not clones)
         if let Some(ref self_arc) = self.self_ref {
             if Arc::strong_count(self_arc) > 1 {
@@ -145,6 +158,7 @@ impl DomainEntity for Publisher {}
 
 impl Publisher {
     pub(crate) fn new(
+        is_builtin: bool,
         qos: PublisherQos,
         listener: Option<Arc<dyn PublisherListener>>,
         mask: StatusMask,
@@ -152,6 +166,7 @@ impl Publisher {
         participant: &Arc<DomainParticipant>,
     ) -> Self {
         let mut publisher = Self {
+            is_builtin,
             qos: Arc::new(Mutex::new(qos)),
             guid: handle.to_guid(),
             listener: Arc::new(RwLock::new(listener)),
@@ -174,6 +189,11 @@ impl Publisher {
         }
         publisher.self_ref = Some(publisher_arc); // Without Arc, the new() function ends and memory is freed. StatusCondition's entity field would return None.
         publisher
+    }
+
+    /// Returns whether this publisher is a built-in entity.
+    pub(crate) fn is_builtin(&self) -> bool {
+        self.is_builtin
     }
 
     /// Creates a new `DataWriter` for publishing data of type `Foo` to the specified topic.
@@ -215,6 +235,9 @@ impl Publisher {
         listener: Option<Arc<dyn DataWriterListener<Foo = Foo>>>,
         mask: StatusMask,
     ) -> DdsResult<DataWriter<Foo>> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
 
         let _ = self.cleanup_dead_writers();
@@ -253,6 +276,7 @@ impl Publisher {
         drop(dcps_bridge);
 
         let datawriter = DataWriter::new(
+            false,
             guid,
             type_support,
             &topic_arc,
@@ -335,6 +359,9 @@ impl Publisher {
         &self,
         datawriter: DataWriter<Foo>,
     ) -> DdsResult<()> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
         let arc_writer: Arc<dyn DataWriterInternal<Qos = DataWriterQos>> =
             Arc::new(datawriter.clone());
@@ -765,6 +792,9 @@ impl Publisher {
             If any of the contained entities is in a state where it cannot be deleted, this operation returns PRECONDITION_NOT_MET error.
             When delete_contained_entities returns successfully, the application is guaranteed that the Publisher no longer contains any DataWriter objects and can delete the Publisher.
         */
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
         {
             match self.get_datawriters_internal() {
@@ -900,8 +930,15 @@ impl Publisher {
         {
             match self.writers_by_topic_name.lock() {
                 Ok(writers) => {
-                    if !writers.is_empty() {
-                        return Ok(true);
+                    // Check for non-builtin writers
+                    for weak_writers in writers.values() {
+                        for weak_writer in weak_writers {
+                            if let Some(writer) = weak_writer.upgrade() {
+                                if !writer.is_builtin() {
+                                    return Ok(true);
+                                }
+                            }
+                        }
                     }
                 }
                 Err(e) => return Err(DdsError::Error(e.to_string())),

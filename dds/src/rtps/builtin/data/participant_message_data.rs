@@ -10,9 +10,11 @@
 use crate::{
     infrastructure::qos_policy::LivelinessQosPolicyKind,
     rtps::common::{guid::GuidPrefix, types::SerializedData},
+    topic::type_support::DdsType,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(DdsType, Copy, PartialEq, Eq)]
+#[dds_type(crate_path = "crate", no_default, no_partialeq)]
 pub(crate) struct ParticipantMessageDataKind([u8; 4]);
 
 impl ParticipantMessageDataKind {
@@ -39,7 +41,8 @@ impl From<LivelinessQosPolicyKind> for ParticipantMessageDataKind {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(DdsType)]
+#[dds_type(crate_path = "crate", no_default)]
 pub(crate) struct ParticipantMessageData {
     participant_guid_prefix: GuidPrefix,
     kind: ParticipantMessageDataKind,
