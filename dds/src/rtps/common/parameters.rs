@@ -161,7 +161,8 @@ impl Parameter {
 }
 
 impl<'a, C: Context> Readable<'a, C> for Parameter {
-    fn read_from<T: Reader<'a, C>>(reader: &mut T) -> Result<Self, C::Error> {
+    #[allow(clippy::needless_maybe_sized)]
+    fn read_from<T: ?Sized + Reader<'a, C>>(reader: &mut T) -> Result<Self, C::Error> {
         let parameter_id = reader.read_u16()?;
         let length = reader.read_u16()? as i16;
         let mut value: Vec<u8> = vec![0u8; length as usize];
@@ -244,7 +245,8 @@ impl ParameterList {
 }
 
 impl<'a, C: Context> Readable<'a, C> for ParameterList {
-    fn read_from<T: Reader<'a, C>>(reader: &mut T) -> Result<Self, C::Error> {
+    #[allow(clippy::needless_maybe_sized)]
+    fn read_from<T: ?Sized + Reader<'a, C>>(reader: &mut T) -> Result<Self, C::Error> {
         let mut parameter = Vec::new();
         loop {
             let param = Parameter::read_from(reader)?;

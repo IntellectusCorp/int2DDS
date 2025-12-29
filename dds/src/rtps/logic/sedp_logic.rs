@@ -539,6 +539,7 @@ impl SedpLogic {
         Ok(())
     }
 
+    #[allow(clippy::option_map_unit_fn)]
     pub(crate) fn handle_stateful_writer_subscription(
         &self,
         writer: &StatefulWriter,
@@ -592,7 +593,7 @@ impl SedpLogic {
                     "QoS changed for remote reader {:?}, still compatible - updating builtin_topic_data",
                     endpoint_guid
                 );
-                if let Some(proxy) = writer
+                writer
                     .reader_proxies()
                     .lock()
                     .map_err(|e| {
@@ -603,9 +604,9 @@ impl SedpLogic {
                     })?
                     .iter_mut()
                     .find(|proxy| proxy.remote_reader_guid() == endpoint_guid)
-                {
-                    proxy.set_subscription_builtin_topic_data(subscription_builtin_topic_data)
-                }
+                    .map(|proxy| {
+                        proxy.set_subscription_builtin_topic_data(subscription_builtin_topic_data)
+                    });
             }
 
             return Ok(());
@@ -667,6 +668,7 @@ impl SedpLogic {
         Ok(())
     }
 
+    #[allow(clippy::option_map_unit_fn)]
     pub(crate) fn handle_stateless_writer_subscription(
         &self,
         writer: &StatelessWriter,
@@ -722,7 +724,7 @@ impl SedpLogic {
                     "QoS changed for remote reader {:?}, still compatible - updating builtin_topic_data",
                     endpoint_guid
                 );
-                if let Some(locator) = writer
+                writer
                     .reader_locator()
                     .lock()
                     .map_err(|e| {
@@ -733,9 +735,9 @@ impl SedpLogic {
                     })?
                     .iter_mut()
                     .find(|locator| locator.remote_reader_guid() == endpoint_guid)
-                {
-                    locator.set_subscription_builtin_topic_data(subscription_builtin_topic_data)
-                }
+                    .map(|locator| {
+                        locator.set_subscription_builtin_topic_data(subscription_builtin_topic_data)
+                    });
             }
 
             return Ok(());
@@ -909,6 +911,7 @@ impl SedpLogic {
         Ok(())
     }
 
+    #[allow(clippy::option_map_unit_fn)]
     pub(crate) fn handle_stateful_reader_publication(
         &self,
         reader: &StatefulReader,
@@ -963,7 +966,7 @@ impl SedpLogic {
                     "QoS changed for remote writer {:?}, still compatible - updating builtin_topic_data",
                     endpoint_guid
                 );
-                if let Some(proxy) = reader
+                reader
                     .writer_proxies()
                     .lock()
                     .map_err(|e| {
@@ -974,9 +977,9 @@ impl SedpLogic {
                     })?
                     .iter_mut()
                     .find(|proxy| proxy.remote_writer_guid() == endpoint_guid)
-                {
-                    proxy.set_publication_builtin_topic_data(publication_builtin_topic_data)
-                }
+                    .map(|proxy| {
+                        proxy.set_publication_builtin_topic_data(publication_builtin_topic_data)
+                    });
             }
 
             return Ok(());
@@ -1020,6 +1023,7 @@ impl SedpLogic {
         Ok(())
     }
 
+    #[allow(clippy::option_map_unit_fn)]
     pub(crate) fn handle_stateless_reader_publication(
         &self,
         reader: &StatelessReader,
@@ -1075,7 +1079,7 @@ impl SedpLogic {
                     endpoint_guid
                 );
 
-                if let Some(locator) = reader
+                reader
                     .writer_locators()
                     .lock()
                     .map_err(|e| {
@@ -1086,9 +1090,9 @@ impl SedpLogic {
                     })?
                     .iter_mut()
                     .find(|locator| locator.remote_writer_guid() == endpoint_guid)
-                {
-                    locator.set_publication_builtin_topic_data(publication_builtin_topic_data)
-                }
+                    .map(|locator| {
+                        locator.set_publication_builtin_topic_data(publication_builtin_topic_data)
+                    });
             }
 
             return Ok(());

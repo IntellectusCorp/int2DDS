@@ -254,9 +254,10 @@ impl<Foo: 'static + Clone + Debug> Clone for DataReader<Foo> {
 // When the user goes out of scope and auto-drops without calling delete_datareader,
 // it should not be deleted from Subscriber.
 impl<Foo> Drop for DataReader<Foo> {
+    #[allow(clippy::match_result_ok)]
     fn drop(&mut self) {
         // Only handle drop for the last reference (not clones)
-        if let Ok(guard) = self.self_ref.lock() {
+        if let Some(guard) = self.self_ref.lock().ok() {
             if let Some(self_arc) = guard.as_ref() {
                 if Arc::strong_count(self_arc) > 1 {
                     return;
