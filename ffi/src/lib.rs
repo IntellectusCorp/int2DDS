@@ -50,6 +50,8 @@ pub mod error;
 
 pub mod condition;
 pub mod context;
+pub mod data;
+pub mod dynamic_type_support;
 pub mod listener;
 pub mod participant;
 pub mod publisher;
@@ -58,5 +60,6 @@ pub mod status;
 pub mod status_condition;
 pub mod subscriber;
 pub mod topic;
+pub mod type_descriptor;
 pub mod types;
 pub mod waitset;

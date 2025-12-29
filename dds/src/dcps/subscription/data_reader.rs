@@ -2122,6 +2122,10 @@ impl<Foo: DdsType> DataReader<Foo> {
         };
 
         log::debug!("Processing {} changes, need {} samples", changes.len(), remaining_samples);
+
+        // Get instance_infos once outside the loop to avoid repeated lock acquisition and cloning
+        let instance_infos = self.get_instance_infos()?;
+
         for (idx, change) in changes.iter().enumerate() {
             if remaining_samples <= 0 {
                 log::debug!("Reached sample limit, stopping");
@@ -2133,17 +2137,7 @@ impl<Foo: DdsType> DataReader<Foo> {
                 continue;
             }
 
-            // let is_read = self.is_sample_read(&change.writer_guid(), &change.sequence_number())?;
-            // let sample_state = if is_read {
-            //     SampleStateKind::READ_SAMPLE_STATE
-            // } else {
-            //     SampleStateKind::NOT_READ_SAMPLE_STATE
-            // };
-            // if !sample_states.matches(sample_state) {
-            //     continue;
-            // }
             // Check sample state
-            let instance_infos = self.get_instance_infos()?; // Only DataSample1 of the same instance is treated as New, DataSample2 is treated as NotNew.
             let sample_state =
                 self.get_sample_state(&change.writer_guid(), &change.sequence_number())?;
             let info = match instance_infos.get(&change.instance_handle()) {
@@ -2168,8 +2162,13 @@ impl<Foo: DdsType> DataReader<Foo> {
             }
             log::trace!("Change {} passed state mask filters", idx);
 
-            // 2. Create DataSample
-            match self.change_to_data_sample(change, change.instance_handle(), sample_state) {
+            // 2. Create DataSample - use optimized version with pre-fetched instance_infos
+            match self.change_to_data_sample_with_infos(
+                change,
+                change.instance_handle(),
+                sample_state,
+                Some(&instance_infos),
+            ) {
                 Ok(data_sample) => {
                     if let Some(qc_expr) = &qc_expression {
                         if !qc_expr.evaluate(&data_sample.data()?, &qc_parameters)? {
@@ -2347,6 +2346,18 @@ impl<Foo: DdsType> DataReader<Foo> {
         instance_handle: InstanceHandle,
         sample_state: SampleStateKind,
     ) -> DdsResult<DataSample<Foo>> {
+        // Delegate to optimized version, fetching instance_infos internally
+        self.change_to_data_sample_with_infos(change, instance_handle, sample_state, None)
+    }
+
+    /// Optimized version that accepts pre-fetched instance_infos to avoid repeated lock acquisition
+    fn change_to_data_sample_with_infos(
+        &self,
+        change: &CacheChange,
+        instance_handle: InstanceHandle,
+        sample_state: SampleStateKind,
+        cached_instance_infos: Option<&HashMap<InstanceHandle, InstanceInfo>>,
+    ) -> DdsResult<DataSample<Foo>> {
         // Check if change has valid data based on its kind
         let has_valid_data = match change.kind() {
             ChangeKind::Alive | ChangeKind::AliveFiltered => true,
@@ -2358,7 +2369,16 @@ impl<Foo: DdsType> DataReader<Foo> {
         // Deserialize the data
         let data = if has_valid_data { Some(change.data_value_arc()) } else { None };
 
-        let instance_infos = self.get_instance_infos()?;
+        // Use cached instance_infos if provided, otherwise fetch
+        let owned_instance_infos;
+        let instance_infos = match cached_instance_infos {
+            Some(infos) => infos,
+            None => {
+                owned_instance_infos = self.get_instance_infos()?;
+                &owned_instance_infos
+            }
+        };
+
         let info = if !instance_handle.is_nil() {
             instance_infos
                 .get(&instance_handle)
@@ -2391,7 +2411,7 @@ impl<Foo: DdsType> DataReader<Foo> {
             publication_handle: InstanceHandle::from_guid(&change.writer_guid()),
             valid_data: has_valid_data,
         };
-        Ok(DataSample::new(data, sample_info))
+        Ok(DataSample::new_with_type_support(data, sample_info, Some(self.type_support.clone())))
     }
 
     fn sort_changes_by_timestamp(&self, changes: &mut [Arc<CacheChange>]) -> DdsResult<()> {
