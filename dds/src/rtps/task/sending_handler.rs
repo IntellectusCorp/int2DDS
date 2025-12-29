@@ -149,19 +149,29 @@ impl SendingHandler {
                 Some(sending_task) => {
                     let sending_task_clone = sending_task.clone();
                     let message_queue_clone = self.message_queue.clone();
+                    let participant_guid =
+                        self.participant.upgrade().expect("Participant already dropped").guid();
                     let handle = thread::Builder::new()
                         .name("sending task thread".to_string())
                         .spawn(move || {
                             // Register thread name for monitoring
                             {
                                 use crate::rtps::task::thread_monitor::ThreadMonitor;
-                                ThreadMonitor::register_current_thread_name("sending task thread");
+                                ThreadMonitor::register_current_thread_name_with_guid(
+                                    "sending task thread",
+                                    &participant_guid,
+                                );
                             }
 
                             if let Err(e) =
                                 sending_task_clone.lock().unwrap().event_loop(message_queue_clone)
                             {
                                 error!("Sending task event loop terminated with error: {:?}", e);
+                            }
+                            // Cleanup thread from registry before exit
+                            {
+                                use crate::rtps::task::thread_monitor::ThreadMonitor;
+                                ThreadMonitor::remove_map_guard();
                             }
                             debug!("sending task thread finished");
                         })
