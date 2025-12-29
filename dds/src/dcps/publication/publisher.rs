@@ -109,6 +109,11 @@ impl Eq for Publisher {}
 
 impl Drop for Publisher {
     fn drop(&mut self) {
+        // Builtin entities are managed separately, skip orphan handling
+        if self.is_builtin {
+            return;
+        }
+
         // Only handle drop for the last reference (not clones)
         if let Some(ref self_arc) = self.self_ref {
             if Arc::strong_count(self_arc) > 1 {
@@ -1052,9 +1057,6 @@ impl Publisher {
     }
 
     pub(crate) fn delete(&mut self) {
-        if self.is_builtin {
-            return;
-        }
         self.self_ref = None;
         self.deleted.store(true, Ordering::SeqCst);
     }

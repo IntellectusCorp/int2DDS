@@ -144,6 +144,7 @@ pub struct DomainParticipant {
     // rtps_participant: Arc<Mutex<Option<RtpsParticipant>>>,
     dcps_bridge: Arc<Mutex<Option<DcpsBridge>>>,
     builtin_subscriber: Arc<Mutex<Option<Subscriber>>>,
+    builtin_topics: Arc<Mutex<Vec<Topic>>>,
     publishers: Arc<Mutex<Vec<Weak<Publisher>>>>,
     publishers_by_handle: Arc<Mutex<HashMap<InstanceHandle, Weak<Publisher>>>>,
     subscribers: Arc<Mutex<Vec<Weak<Subscriber>>>>,
@@ -175,6 +176,11 @@ impl Debug for DomainParticipant {
 
 impl Drop for DomainParticipant {
     fn drop(&mut self) {
+        // Builtin entities are managed separately, skip orphan handling
+        if self.is_builtin {
+            return;
+        }
+
         // Only handle drop for the last reference (not clones)
         if let Some(ref self_arc) = self.self_ref {
             if Arc::strong_count(self_arc) > 1 {
@@ -370,6 +376,7 @@ impl DomainParticipant {
             // rtps_participant: Arc::new(Mutex::new(None)),
             dcps_bridge: Arc::new(Mutex::new(Some(dcps_bridge))),
             builtin_subscriber: Arc::new(Mutex::new(None)),
+            builtin_topics: Arc::new(Mutex::new(Vec::new())),
             publishers: Arc::new(Mutex::new(Vec::new())),
             publishers_by_handle: Arc::new(Mutex::new(HashMap::new())),
             subscribers: Arc::new(Mutex::new(Vec::new())),
@@ -1628,7 +1635,7 @@ impl DomainParticipant {
             participant,
         );
 
-        // Add to topics collection
+        // Add weak references to topics collection (for find_internal_topic lookup)
         let topic_ref = topic
             .self_ref
             .as_ref()
@@ -1644,6 +1651,13 @@ impl DomainParticipant {
             let mut topics_by_handle =
                 participant.topics_by_handle.lock().map_err(|e| DdsError::Error(e.to_string()))?;
             topics_by_handle.insert(handle, weak_topic);
+        }
+
+        // Store owned topic in builtin_topics for proper cleanup
+        {
+            let mut builtin_topics =
+                participant.builtin_topics.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            builtin_topics.push(topic.clone());
         }
 
         Ok(topic)
@@ -2569,9 +2583,9 @@ impl DomainParticipant {
     }
 
     pub(crate) fn delete(&mut self) -> DdsResult<()> {
-        if self.is_builtin {
-            return Err(DdsError::PreconditionNotMet);
-        }
+        // Clean up builtin entities to break self-reference cycles
+        self.cleanup_builtin_entities();
+
         let mut bridge_guard =
             self.dcps_bridge.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
@@ -2591,6 +2605,23 @@ impl DomainParticipant {
         self.self_ref = None;
         self.deleted.store(true, Ordering::SeqCst);
         Ok(())
+    }
+
+    /// Cleans up builtin entities to break self-reference cycles and prevent memory leaks.
+    fn cleanup_builtin_entities(&self) {
+        // Clean up builtin subscriber and its datareaders
+        if let Ok(mut guard) = self.builtin_subscriber.lock() {
+            if let Some(mut subscriber) = guard.take() {
+                subscriber.cleanup_builtin_entities();
+            }
+        }
+
+        // Clean up builtin topics
+        if let Ok(mut builtin_topics) = self.builtin_topics.lock() {
+            for mut topic in builtin_topics.drain(..) {
+                topic.delete();
+            }
+        }
     }
 
     fn is_deleted(&self) -> DdsResult<()> {

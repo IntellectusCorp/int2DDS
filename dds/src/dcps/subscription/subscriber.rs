@@ -80,6 +80,7 @@ pub struct Subscriber {
         Arc<Mutex<HashMap<String, Vec<Weak<dyn DataReaderInternal<Qos = DataReaderQos>>>>>>,
     readers_by_topic_handle:
         Arc<Mutex<HashMap<InstanceHandle, Vec<Weak<dyn DataReaderInternal<Qos = DataReaderQos>>>>>>,
+    builtin_readers: Arc<Mutex<Vec<Arc<dyn DataReaderInternal<Qos = DataReaderQos>>>>>,
     orphaned_readers: Arc<Mutex<Vec<Arc<dyn DataReaderInternal<Qos = DataReaderQos>>>>>,
     default_datareader_qos: Arc<Mutex<DataReaderQos>>,
     participant: Option<Weak<DomainParticipant>>,
@@ -112,6 +113,11 @@ impl Eq for Subscriber {}
 
 impl Drop for Subscriber {
     fn drop(&mut self) {
+        // Builtin entities are managed separately, skip orphan handling
+        if self.is_builtin {
+            return;
+        }
+
         // Only handle drop for the last reference (not clones)
         if let Some(ref self_arc) = self.self_ref {
             if Arc::strong_count(self_arc) > 1 {
@@ -175,6 +181,7 @@ impl Subscriber {
             deleted: Arc::new(AtomicBool::new(false)),
             readers_by_topic_name: Arc::new(Mutex::new(HashMap::new())),
             readers_by_topic_handle: Arc::new(Mutex::new(HashMap::new())),
+            builtin_readers: Arc::new(Mutex::new(Vec::new())),
             orphaned_readers: Arc::new(Mutex::new(Vec::new())),
             default_datareader_qos: Arc::new(Mutex::new(DataReaderQos::default())),
             participant: Some(Arc::downgrade(participant)),
@@ -395,9 +402,7 @@ impl Subscriber {
             }
         }
 
-        let topic_name = topic_description.get_name().to_string();
-        let topic_handle = topic_description.topic_instance_handle()?;
-
+        // Store builtin reader with strong reference (not in readers_by_topic_name/handle)
         let reader_ops: Arc<dyn DataReaderInternal<Qos = DataReaderQos>> = datareader
             .self_ref
             .lock()
@@ -405,20 +410,11 @@ impl Subscriber {
             .as_ref()
             .ok_or(DdsError::Error("DataReader not initialized".to_string()))?
             .clone();
-        let weak_reader = Arc::downgrade(&reader_ops);
 
-        self.readers_by_topic_name
+        self.builtin_readers
             .lock()
             .map_err(|e| DdsError::Error(e.to_string()))?
-            .entry(topic_name)
-            .or_default()
-            .push(weak_reader.clone());
-        self.readers_by_topic_handle
-            .lock()
-            .map_err(|e| DdsError::Error(e.to_string()))?
-            .entry(topic_handle)
-            .or_default()
-            .push(weak_reader);
+            .push(reader_ops);
 
         Ok(datareader)
     }
@@ -683,6 +679,23 @@ impl Subscriber {
         topic_name: &str,
     ) -> DdsResult<DataReader<Foo>> {
         self.is_deleted()?;
+
+        // For builtin subscriber, search in builtin_readers
+        if self.is_builtin {
+            let builtin_readers =
+                self.builtin_readers.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            for reader in builtin_readers.iter() {
+                if let Ok(topic) = reader.get_topic() {
+                    if topic.get_name() == topic_name {
+                        if let Some(typed_reader) = reader.as_any().downcast_ref::<DataReader<Foo>>() {
+                            return Ok(typed_reader.clone());
+                        }
+                    }
+                }
+            }
+            return Err(DdsError::Error("DataReader not found.".to_string()));
+        }
+
         let _ = self.cleanup_dead_readers();
         {
             let readers_by_topic_name =
@@ -1128,9 +1141,20 @@ impl Subscriber {
     }
 
     pub(crate) fn delete(&mut self) {
-        if self.is_builtin {
-            return;
+        self.self_ref = None;
+        self.deleted.store(true, Ordering::SeqCst);
+    }
+
+    /// Cleans up builtin entities (datareaders) to break self-reference cycles.
+    /// Called during participant deletion.
+    pub(crate) fn cleanup_builtin_entities(&mut self) {
+        // Delete all builtin datareaders
+        if let Ok(mut builtin_readers) = self.builtin_readers.lock() {
+            for reader in builtin_readers.drain(..) {
+                reader.delete();
+            }
         }
+        // Break self-reference cycle
         self.self_ref = None;
         self.deleted.store(true, Ordering::SeqCst);
     }

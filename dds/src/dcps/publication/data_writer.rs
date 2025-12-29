@@ -211,6 +211,11 @@ impl<Foo: 'static + Clone> Clone for DataWriter<Foo> {
 // it must not be deleted from Publisher.
 impl<Foo> Drop for DataWriter<Foo> {
     fn drop(&mut self) {
+        // Builtin entities are managed separately, skip orphan handling
+        if self.is_builtin {
+            return;
+        }
+
         // Only handle drop for the last reference (not clones)
         if let Some(guard) = self.self_ref.lock().ok() {
             if let Some(ref self_arc) = guard.as_ref() {
@@ -1854,9 +1859,6 @@ impl<Foo: 'static + Clone> DataWriterInternal for DataWriter<Foo> {
     }
 
     fn delete(&self) {
-        if self.is_builtin {
-            return;
-        }
         // Shutdown deadline monitor
         let monitor_to_drop = if let Ok(mut monitor_guard) = self.deadline_monitor.lock() {
             monitor_guard.take() // Take ownership, will drop after lock is released
