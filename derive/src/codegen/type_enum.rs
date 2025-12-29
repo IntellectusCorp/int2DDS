@@ -65,7 +65,7 @@ pub fn derive_enum_impl(
         };
 
     // Generate additional derives (Default, Debug, Clone, PartialEq, speedy traits)
-    let additional_derives = generate_additional_derives(input, name);
+    let additional_derives = generate_additional_derives(input, name, type_config);
 
     quote! {
         #type_support_struct

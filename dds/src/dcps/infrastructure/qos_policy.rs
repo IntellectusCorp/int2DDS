@@ -46,10 +46,14 @@ use const_default::ConstDefault;
 use serde::{Deserialize, Serialize};
 use speedy::{Readable, Writable};
 
-use crate::core::{
-    error::DdsResult,
-    time::Duration,
-    types::{deserialize_i32_or_unlimited, serialize_i32_or_unlimited, LENGTH_UNLIMITED},
+use crate::{
+    core::{
+        error::DdsResult,
+        time::Duration,
+        types::{deserialize_i32_or_unlimited, serialize_i32_or_unlimited, LENGTH_UNLIMITED},
+    },
+    serialize::cdr::serializer::primitive::PrimitiveSerialize,
+    topic::type_support::DdsType,
 };
 
 pub trait QosPolicy {
@@ -195,7 +199,8 @@ impl QosPolicyId {
 ///
 /// - `KeepLast(depth)`: Store only the last `depth` samples per instance
 /// - `KeepAll`: Store all samples until resource limits are reached
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Readable, Writable)]
+#[derive(DdsType, PartialEq, Copy, Eq)]
+#[dds_type(crate_path = "crate", no_default, no_partialeq)]
 pub enum HistoryQosPolicyKind {
     /// Keep only the last N samples per instance, where N is the depth value.
     KeepLast(i32),
@@ -280,7 +285,8 @@ impl HistoryQosPolicyKind {
 ///     .create_datawriter::<HelloWorldType>(&topic, writer_qos_keep_last, None, StatusMask::default())
 ///     .unwrap();
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Readable, Writable, Default)]
+#[derive(DdsType, Copy, Eq)]
+#[dds_type(crate_path = "crate")]
 pub struct HistoryQosPolicy {
     /// The history storage strategy.
     pub kind: HistoryQosPolicyKind,
@@ -348,7 +354,8 @@ impl HistoryQosPolicy {
 ///     .create_datawriter::<HelloWorldType>(&topic, writer_qos, None, StatusMask::default())
 ///     .unwrap();
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Readable, Writable, Deserialize, Serialize)]
+#[derive(DdsType, Copy, Eq, Deserialize, Serialize)]
+#[dds_type(crate_path = "crate", no_default)]
 pub struct LifespanQosPolicy {
     /// Maximum validity duration for samples.
     #[serde(default)]
@@ -378,7 +385,8 @@ impl QosPolicy for LifespanQosPolicy {
 ///
 /// - `Shared`: Multiple DataWriters can update the same instance (default)
 /// - `Exclusive`: Only the DataWriter with highest strength owns the instance
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Readable, Writable)]
+#[derive(DdsType, PartialEq, Default, Copy, Eq)]
+#[dds_type(crate_path = "crate", no_default, no_partialeq)]
 pub enum OwnershipQosPolicyKind {
     /// Multiple DataWriters can update the same instance simultaneously.
     #[default]
@@ -462,7 +470,8 @@ impl OwnershipQosPolicyKind {
 ///     .create_datareader::<HelloWorldType>(&topic, reader_qos, None, StatusMask::default())
 ///     .unwrap();
 /// ```
-#[derive(Debug, Default, ConstDefault, Clone, Copy, PartialEq, Eq, Readable, Writable)]
+#[derive(DdsType, ConstDefault, Copy, Eq)]
+#[dds_type(crate_path = "crate")]
 pub struct OwnershipQosPolicy {
     /// The ownership strategy.
     pub kind: OwnershipQosPolicyKind,
@@ -483,19 +492,8 @@ impl QosPolicy for OwnershipQosPolicy {
 ///
 /// # Default
 /// `0`
-#[derive(
-    Debug,
-    Default,
-    ConstDefault,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Readable,
-    Writable,
-    Deserialize,
-    Serialize,
-)]
+#[derive(DdsType, ConstDefault, Copy, Eq, Deserialize, Serialize)]
+#[dds_type(crate_path = "crate")]
 #[serde(default)]
 pub struct OwnershipStrengthQosPolicy {
     /// The ownership strength value. Higher values win ownership.
@@ -513,7 +511,8 @@ impl QosPolicy for OwnershipStrengthQosPolicy {
 ///
 /// # Default
 /// `autodispose_unregistered_instances: true`
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Readable, Writable, Deserialize, Serialize)]
+#[derive(DdsType, Copy, Eq, Deserialize, Serialize)]
+#[dds_type(crate_path = "crate", no_default)]
 pub struct WriterDataLifecycleQosPolicy {
     /// Whether to automatically dispose instances when unregistered.
     #[serde(default)]
@@ -542,7 +541,8 @@ impl QosPolicy for WriterDataLifecycleQosPolicy {
 ///
 /// # Default
 /// Both delays are `Duration::INFINITE` - samples are never automatically purged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Readable, Writable, Deserialize, Serialize)]
+#[derive(DdsType, Copy, Eq, Deserialize, Serialize)]
+#[dds_type(crate_path = "crate", no_default)]
 pub struct ReaderDataLifecycleQosPolicy {
     /// Delay before purging samples from instances with no writers.
     #[serde(default)]
@@ -589,7 +589,8 @@ impl QosPolicy for ReaderDataLifecycleQosPolicy {
 /// Specifies the access scope for coherent and ordered access.
 ///
 /// **Note**: This QoS policy is currently unsupported.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Readable, Writable, PartialOrd, Ord)]
+#[derive(DdsType, PartialEq, Default, Copy, Eq, PartialOrd, Ord)]
+#[dds_type(crate_path = "crate", no_default, no_partialeq)]
 pub enum PresentationQosAccessScopeKind {
     /// Changes are coherent/ordered at instance level.
     #[default]
@@ -625,7 +626,8 @@ impl PresentationQosAccessScopeKind {
 /// - `access_scope`: Instance
 /// - `coherent_access`: false
 /// - `ordered_access`: false
-#[derive(Debug, Default, ConstDefault, Clone, Copy, PartialEq, Eq, Readable, Writable)]
+#[derive(DdsType, ConstDefault, Copy, Eq)]
+#[dds_type(crate_path = "crate")]
 pub struct PresentationQosPolicy {
     /// The scope for coherent/ordered access.
     pub access_scope: PresentationQosAccessScopeKind,
@@ -647,19 +649,8 @@ impl QosPolicy for PresentationQosPolicy {
 ///
 /// # Default
 /// `0`
-#[derive(
-    Debug,
-    Default,
-    ConstDefault,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Readable,
-    Writable,
-    Deserialize,
-    Serialize,
-)]
+#[derive(DdsType, ConstDefault, Copy, Eq, Deserialize, Serialize)]
+#[dds_type(crate_path = "crate")]
 #[serde(default)]
 pub struct TransportPriorityQosPolicy {
     /// The transport priority value.
@@ -681,7 +672,8 @@ impl QosPolicy for TransportPriorityQosPolicy {
 ///
 /// # Default
 /// Empty byte vector.
-#[derive(Debug, Default, ConstDefault, Clone, PartialEq, Eq, Readable, Writable)]
+#[derive(DdsType, ConstDefault, Eq)]
+#[dds_type(crate_path = "crate")]
 pub struct UserDataQosPolicy {
     /// Arbitrary user-defined data.
     pub value: Vec<u8>,
@@ -699,7 +691,8 @@ impl QosPolicy for UserDataQosPolicy {
 ///
 /// # Default
 /// Empty byte vector.
-#[derive(Debug, Default, ConstDefault, Clone, PartialEq, Eq, Readable, Writable)]
+#[derive(DdsType, ConstDefault, Eq)]
+#[dds_type(crate_path = "crate")]
 pub struct TopicDataQosPolicy {
     /// Arbitrary topic-specific data.
     pub value: Vec<u8>,
@@ -717,7 +710,8 @@ impl QosPolicy for TopicDataQosPolicy {
 ///
 /// # Default
 /// Empty byte vector.
-#[derive(Debug, Default, ConstDefault, Clone, PartialEq, Eq, Readable, Writable)]
+#[derive(DdsType, ConstDefault, Eq)]
+#[dds_type(crate_path = "crate")]
 pub struct GroupDataQosPolicy {
     /// Arbitrary group-specific data.
     pub value: Vec<u8>,
@@ -740,19 +734,8 @@ impl QosPolicy for GroupDataQosPolicy {
 ///
 /// # Default
 /// `Duration::ZERO`
-#[derive(
-    Debug,
-    Default,
-    ConstDefault,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Readable,
-    Writable,
-    Deserialize,
-    Serialize,
-)]
+#[derive(DdsType, ConstDefault, Copy, Eq, Deserialize, Serialize)]
+#[dds_type(crate_path = "crate")]
 #[serde(default)]
 pub struct LatencyBudgetQosPolicy {
     /// Maximum acceptable delay for data delivery.
@@ -830,7 +813,8 @@ impl QosPolicy for LatencyBudgetQosPolicy {
 ///     .create_datareader::<HelloWorldType>(&topic, reader_qos, None, StatusMask::default())
 ///     .unwrap();
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Readable, Writable, Deserialize, Serialize)]
+#[derive(DdsType, Copy, Eq, Deserialize, Serialize)]
+#[dds_type(crate_path = "crate", no_default)]
 #[serde(default)]
 pub struct DeadlineQosPolicy {
     /// Maximum expected period between data updates.
@@ -863,19 +847,8 @@ impl QosPolicy for DeadlineQosPolicy {
 ///
 /// # Default
 /// `Duration::ZERO` - No filtering.
-#[derive(
-    Debug,
-    Default,
-    ConstDefault,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Readable,
-    Writable,
-    Deserialize,
-    Serialize,
-)]
+#[derive(DdsType, ConstDefault, Copy, Eq, Deserialize, Serialize)]
+#[dds_type(crate_path = "crate")]
 #[serde(default)]
 pub struct TimeBasedFilterQosPolicy {
     /// Minimum time between received samples.
@@ -938,7 +911,8 @@ impl QosPolicy for TimeBasedFilterQosPolicy {
 /// // Manually enable when ready to communicate
 /// writer.enable().unwrap();
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Readable, Writable, Deserialize, Serialize)]
+#[derive(DdsType, Copy, Eq, Deserialize, Serialize)]
+#[dds_type(crate_path = "crate", no_default)]
 #[serde(default)]
 pub struct EntityFactoryQosPolicy {
     /// Whether created entities are automatically enabled.
@@ -1037,7 +1011,8 @@ impl QosPolicy for EntityFactoryQosPolicy {
 /// - Concrete names (e.g., "sensors/temperature") match exactly
 /// - Regular expressions (e.g., "sensors/*") match against concrete names
 /// - Two entities match if they share at least one common partition
-#[derive(Debug, Default, ConstDefault, Clone, PartialEq, Eq, Readable, Writable)]
+#[derive(DdsType, ConstDefault, Eq)]
+#[dds_type(crate_path = "crate")]
 pub struct PartitionQosPolicy {
     /// List of partition names. Can be concrete names or wildcard patterns.
     pub name: Vec<String>,
@@ -1052,7 +1027,8 @@ impl QosPolicy for PartitionQosPolicy {
 ///
 /// - `BestEffort`: No delivery guarantee, lower latency, suitable for periodic data
 /// - `Reliable`: Guaranteed delivery with acknowledgments and retransmission
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Readable, Writable, PartialOrd, Ord)]
+#[derive(DdsType, PartialEq, Copy, Eq, PartialOrd, Ord)]
+#[dds_type(crate_path = "crate", no_default, no_partialeq)]
 pub enum ReliabilityQosPolicyKind {
     /// Best-effort delivery - samples may be lost but latency is minimized.
     BestEffort = 1,
@@ -1118,7 +1094,8 @@ impl ReliabilityQosPolicyKind {
 ///     .create_datawriter::<HelloWorldType>(&topic, writer_qos, None, StatusMask::default())
 ///     .unwrap();
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Readable, Writable)]
+#[derive(DdsType, Copy, Eq)]
+#[dds_type(crate_path = "crate", no_default)]
 pub struct ReliabilityQosPolicy {
     /// The reliability level.
     pub kind: ReliabilityQosPolicyKind,
@@ -1137,7 +1114,8 @@ impl QosPolicy for ReliabilityQosPolicy {
 /// - `Automatic`: Liveliness is asserted automatically by any DDS activity
 /// - `ManualByParticipant`: Must call `assert_liveliness()` on DomainParticipant
 /// - `ManualByTopic`: Must call `assert_liveliness()` on DataWriter
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Readable, Writable, PartialOrd, Ord)]
+#[derive(DdsType, PartialEq, Default, Copy, Eq, PartialOrd, Ord)]
+#[dds_type(crate_path = "crate", no_default, no_partialeq)]
 pub enum LivelinessQosPolicyKind {
     /// Liveliness is asserted automatically by the middleware.
     #[default]
@@ -1231,7 +1209,8 @@ impl LivelinessQosPolicyKind {
 ///     .create_datareader::<HelloWorldType>(&topic, reader_qos, None, StatusMask::default())
 ///     .unwrap();
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Readable, Writable)]
+#[derive(DdsType, Copy, Eq)]
+#[dds_type(crate_path = "crate", no_default)]
 pub struct LivelinessQosPolicy {
     /// The liveliness assertion mechanism.
     pub kind: LivelinessQosPolicyKind,
@@ -1272,7 +1251,8 @@ impl QosPolicy for LivelinessQosPolicy {
 /// - `Persistent`: Historical data persisted to storage (Unsupported)
 ///
 /// This QoS policy is RxO (requested/offered) and immutable after entity creation.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Readable, Writable, PartialOrd, Ord)]
+#[derive(DdsType, PartialEq, Default, Copy, Eq, PartialOrd, Ord)]
+#[dds_type(crate_path = "crate", no_default, no_partialeq)]
 pub enum DurabilityQosPolicyKind {
     /// No historical data sent to late-joining DataReaders.
     #[default]
@@ -1361,7 +1341,8 @@ impl DurabilityQosPolicyKind {
 /// # Note
 /// Only `Volatile` and `TransientLocal` are currently supported.
 /// `Transient` and `Persistent` require an external durability service.
-#[derive(Debug, Default, ConstDefault, Clone, Copy, PartialEq, Eq, Readable, Writable)]
+#[derive(DdsType, ConstDefault, Copy, Eq)]
+#[dds_type(crate_path = "crate")]
 pub struct DurabilityQosPolicy {
     /// The durability level.
     pub kind: DurabilityQosPolicyKind,
@@ -1442,7 +1423,8 @@ impl QosPolicy for DurabilityQosPolicy {
 ///     .create_datareader::<HelloWorldType>(&topic, reader_qos, None, StatusMask::default())
 ///     .unwrap();
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Readable, Writable, Serialize, Deserialize)]
+#[derive(DdsType, Copy, Eq, Serialize, Deserialize)]
+#[dds_type(crate_path = "crate", no_default)]
 #[serde(default)]
 pub struct ResourceLimitsQosPolicy {
     /// Maximum total number of samples that can be stored.
@@ -1494,7 +1476,8 @@ impl QosPolicy for ResourceLimitsQosPolicy {
 /// - `service_cleanup_delay`: Duration::ZERO
 /// - `history_kind`: KeepLast(1)
 /// - All limits: LENGTH_UNLIMITED
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Readable, Writable)]
+#[derive(DdsType, Copy, Eq)]
+#[dds_type(crate_path = "crate", no_default)]
 pub struct DurabilityServiceQosPolicy {
     /// Delay before cleaning up stale data.
     pub service_cleanup_delay: Duration,
@@ -1540,7 +1523,8 @@ impl QosPolicy for DurabilityServiceQosPolicy {
 ///
 /// - `ByReceptionTimestamp`: Order by the time the sample was received (default)
 /// - `BySourceTimestamp`: Order by the timestamp set by the DataWriter
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Readable, Writable, PartialOrd, Ord)]
+#[derive(DdsType, PartialEq, Default, Copy, Eq, PartialOrd, Ord)]
+#[dds_type(crate_path = "crate", no_default, no_partialeq)]
 pub enum DestinationOrderQosPolicyKind {
     /// Samples are ordered by the time they were received.
     #[default]
@@ -1607,7 +1591,8 @@ impl DestinationOrderQosPolicyKind {
 ///     .create_datareader::<HelloWorldType>(&topic, reader_qos, None, StatusMask::default())
 ///     .unwrap();
 /// ```
-#[derive(Debug, Default, ConstDefault, Clone, Copy, PartialEq, Eq, Readable, Writable)]
+#[derive(DdsType, ConstDefault, Copy, Eq)]
+#[dds_type(crate_path = "crate")]
 pub struct DestinationOrderQosPolicy {
     /// The ordering strategy for samples.
     pub kind: DestinationOrderQosPolicyKind,
@@ -1626,7 +1611,8 @@ impl QosPolicy for DestinationOrderQosPolicy {
 /// - `XcdrDataRepresentation`: XCDR1 encoding (default, legacy)
 /// - `XmlDataRepresentation`: XML encoding (Unsupported)
 /// - `Xcdr2DataRepresentation`: XCDR2 encoding (recommended for new applications)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Readable, Writable, Default)]
+#[derive(DdsType, PartialEq, Default, Copy, Eq)]
+#[dds_type(crate_path = "crate", no_default, no_partialeq)]
 pub enum DataRepresentationId {
     /// XCDR1 data representation (legacy).
     #[default]
@@ -1714,7 +1700,8 @@ impl DataRepresentationId {
 ///     .create_datareader::<HelloWorldType>(&topic, reader_qos, None, StatusMask::default())
 ///     .unwrap();
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Readable, Writable, Default, ConstDefault)]
+#[derive(DdsType, Eq, ConstDefault)]
+#[dds_type(crate_path = "crate")]
 pub struct DataRepresentationQosPolicy {
     /// List of supported data representations.
     pub value: Vec<DataRepresentationId>,
