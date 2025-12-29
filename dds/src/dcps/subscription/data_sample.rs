@@ -29,6 +29,7 @@ pub struct DataSample<Foo> {
 
 impl<Foo> DataSample<Foo> {
     /// Create a new DataSample without type support (uses default TypeSupport for deserialization)
+    #[allow(dead_code)]
     pub(crate) fn new(data: Option<Arc<[u8]>>, sample_info: SampleInfo) -> Self {
         Self { data, type_support: None, sample_info, phantom: PhantomData }
     }

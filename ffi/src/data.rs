@@ -1,3 +1,5 @@
+#![allow(clippy::missing_safety_doc)]
+
 //! # Dynamic Data API
 //!
 //! Runtime data container for C/FFI interoperability.
@@ -312,6 +314,7 @@ pub unsafe extern "C" fn int2dds_data_clear(data: *mut Int2DdsData) -> Int2DdsRe
 // -----------------------------------------------------------------------------
 
 /// Set a bool field value
+#[allow(clippy::missing_safety_doc)]
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_data_set_bool(
     data: *mut Int2DdsData,
@@ -334,6 +337,7 @@ pub unsafe extern "C" fn int2dds_data_set_bool(
 }
 
 /// Set an i8 field value
+#[allow(clippy::missing_safety_doc)]
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_data_set_i8(
     data: *mut Int2DdsData,
@@ -356,6 +360,7 @@ pub unsafe extern "C" fn int2dds_data_set_i8(
 }
 
 /// Set a u8 field value
+#[allow(clippy::missing_safety_doc)]
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_data_set_u8(
     data: *mut Int2DdsData,
@@ -378,6 +383,7 @@ pub unsafe extern "C" fn int2dds_data_set_u8(
 }
 
 /// Set an i16 field value
+#[allow(clippy::missing_safety_doc)]
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_data_set_i16(
     data: *mut Int2DdsData,

@@ -129,6 +129,7 @@ impl ThreadMonitor {
 
         #[cfg(target_os = "macos")]
         {
+            #[allow(clippy::needless_return)]
             return Self::get_macos_process_threads();
         }
 
@@ -538,6 +539,7 @@ impl ThreadMonitor {
         let mut thread_count = 0;
 
         // Try ps with thread-specific flags
+        #[allow(clippy::needless_borrow)]
         match std::process::Command::new("ps")
             .args(&["-M", "-o", "pid,tid,comm,state,time", "-p", &pid.to_string()])
             .output()
@@ -598,6 +600,7 @@ impl ThreadMonitor {
         let mut thread_count = 0;
 
         // Try ps with more detailed format to get thread names
+        #[allow(clippy::needless_borrow)]
         match std::process::Command::new("ps")
             .args(&["-M", "-o", "pid,tid,comm,state,time", "-p", &pid.to_string()])
             .output()
