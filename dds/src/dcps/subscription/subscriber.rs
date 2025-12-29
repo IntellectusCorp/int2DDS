@@ -411,10 +411,7 @@ impl Subscriber {
             .ok_or(DdsError::Error("DataReader not initialized".to_string()))?
             .clone();
 
-        self.builtin_readers
-            .lock()
-            .map_err(|e| DdsError::Error(e.to_string()))?
-            .push(reader_ops);
+        self.builtin_readers.lock().map_err(|e| DdsError::Error(e.to_string()))?.push(reader_ops);
 
         Ok(datareader)
     }
@@ -687,7 +684,9 @@ impl Subscriber {
             for reader in builtin_readers.iter() {
                 if let Ok(topic) = reader.get_topic() {
                     if topic.get_name() == topic_name {
-                        if let Some(typed_reader) = reader.as_any().downcast_ref::<DataReader<Foo>>() {
+                        if let Some(typed_reader) =
+                            reader.as_any().downcast_ref::<DataReader<Foo>>()
+                        {
                             return Ok(typed_reader.clone());
                         }
                     }
