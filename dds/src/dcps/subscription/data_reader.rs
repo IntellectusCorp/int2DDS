@@ -264,6 +264,11 @@ impl<Foo: 'static + Clone + Debug> Clone for DataReader<Foo> {
 // it should not be deleted from Subscriber.
 impl<Foo> Drop for DataReader<Foo> {
     fn drop(&mut self) {
+        // Builtin entities are managed separately, skip orphan handling
+        if self.is_builtin {
+            return;
+        }
+
         // Only handle drop for the last reference (not clones)
         if let Some(guard) = self.self_ref.lock().ok() {
             if let Some(ref self_arc) = guard.as_ref() {
@@ -2921,9 +2926,6 @@ impl<Foo: 'static + Clone + Debug> DataReaderInternal for DataReader<Foo> {
     }
 
     fn delete(&self) {
-        if self.is_builtin {
-            return;
-        }
         // Shutdown and drop deadline monitor
         let monitor_to_drop = if let Ok(mut monitor_guard) = self.deadline_monitor.lock() {
             monitor_guard.take() // Take ownership, will drop after lock is released
