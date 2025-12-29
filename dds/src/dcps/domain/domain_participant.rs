@@ -2934,11 +2934,6 @@ mod domain_participant_tests {
         let create_thread = thread::Builder::new()
             .name("delayed_topic_creator".to_string())
             .spawn(move || {
-                // Register thread name for monitoring
-                {
-                    use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::register_current_thread_name("delayed_topic_creator");
-                }
                 // Create topic after waiting 300ms
                 thread::sleep(StdDuration::from_millis(300));
                 let _delayed_topic = participant_clone
