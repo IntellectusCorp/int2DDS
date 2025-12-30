@@ -39,10 +39,8 @@ pub unsafe extern "C" fn int2dds_create_participant(
 
     // Name is optional for now (not used in current implementation)
     // Just validate UTF-8 without allocating String
-    if !name.is_null() {
-        if CStr::from_ptr(name).to_str().is_err() {
-            return INT2DDS_RET_INVALID_ARGUMENT;
-        }
+    if !name.is_null() && CStr::from_ptr(name).to_str().is_err() {
+        return INT2DDS_RET_INVALID_ARGUMENT;
     }
 
     let factory = DomainParticipantFactory::get_instance();
@@ -120,7 +118,7 @@ pub unsafe extern "C" fn int2dds_participant_get_domain_id(
 
     match participant_ref.inner.get_domain_id() {
         Ok(domain_id) => {
-            *domain_id_out = domain_id as i32;
+            *domain_id_out = domain_id;
             INT2DDS_RET_OK
         }
         Err(e) => dds_error_to_code(&e),

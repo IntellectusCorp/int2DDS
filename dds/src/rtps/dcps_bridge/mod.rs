@@ -15,4 +15,5 @@
 //! - Delivering received data from RTPS readers to DDS readers
 //! - Managing entity lifecycle and QoS policies
 
+#[allow(clippy::module_inception)]
 pub(crate) mod dcps_bridge;

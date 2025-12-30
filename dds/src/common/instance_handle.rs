@@ -32,6 +32,7 @@ impl InstanceHandle {
         Self { value: v, is_defined: true }
     }
 
+    #[allow(clippy::wrong_self_convention)]
     pub(crate) fn to_guid(&self) -> Guid {
         let mut prefix = [0u8; 12];
         prefix.copy_from_slice(&self.value[..12]);

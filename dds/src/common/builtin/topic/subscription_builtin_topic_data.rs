@@ -74,6 +74,7 @@ impl SubscriptionBuiltinTopicData {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn default() -> Self {
         Self::new(&DataReaderQos::default(), &SubscriberQos::default(), &TopicQos::default())
     }

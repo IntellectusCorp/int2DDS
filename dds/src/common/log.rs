@@ -3,18 +3,13 @@
 //! This module provides logging configuration types (`LogType`, `LogLevel`) and functions
 //! for setting up the logging infrastructure used throughout int2dds.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LogType {
     Console,
     File,
     All,
+    #[default]
     None,
-}
-
-impl Default for LogType {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 impl std::fmt::Display for LogType {
@@ -45,19 +40,14 @@ impl std::str::FromStr for LogType {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LogLevel {
     Trace,
     Debug,
+    #[default]
     Info,
     Warn,
     Error,
-}
-
-impl Default for LogLevel {
-    fn default() -> Self {
-        Self::Info
-    }
 }
 
 impl std::fmt::Display for LogLevel {

@@ -171,7 +171,6 @@ impl SendingTask {
             }
 
             MessageType::SedpTerminateEndpoint(builtin_writer_guid, cache_change) => {
-                let sedp_logic = sedp_logic;
                 sedp_logic.send_endpoint_termination_message(builtin_writer_guid, cache_change)?;
                 Ok(())
             }

@@ -143,7 +143,8 @@ impl InlineQosParser {
         }
 
         let num_signatures = reader.read_u32()? as usize;
-        let expected_bitmaps = (num_signatures / 32) + if num_signatures % 32 != 0 { 1 } else { 0 };
+        let expected_bitmaps =
+            (num_signatures / 32) + if !num_signatures.is_multiple_of(32) { 1 } else { 0 };
         if num_bitmaps != expected_bitmaps {
             return Err(format!(
                 "Invalid content filter info: numBitmaps={} but expected {} for numSignatures={}",

@@ -1,3 +1,4 @@
+#![allow(clippy::needless_doctest_main)]
 //! # int2dds
 //!
 //! A Rust implementation of the Data Distribution Service (DDS) middleware standard,
