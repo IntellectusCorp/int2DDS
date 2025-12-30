@@ -17,12 +17,13 @@ use std::time::{Duration, SystemTime};
 
 use log::{debug, error};
 
+use crate::rtps::common::guid::Guid;
 use crate::rtps::entities::entity::Entity;
 use crate::rtps::entities::participant::Participant;
 use crate::utils::timer::timer_handler::TimerHandler;
 
-// Global thread registry for all platforms
-static THREAD_REGISTRY: OnceLock<Mutex<HashMap<u32, String>>> = OnceLock::new();
+// Global thread registry: Guid -> (TID -> thread name)
+static THREAD_REGISTRY: OnceLock<Mutex<HashMap<Guid, HashMap<u32, String>>>> = OnceLock::new();
 
 pub(crate) struct ThreadMonitor {
     participant: Arc<Participant>,
@@ -130,7 +131,7 @@ impl ThreadMonitor {
 
         #[cfg(target_os = "macos")]
         {
-            return Self::get_macos_process_threads();
+            Self::get_macos_process_threads()
         }
 
         #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
@@ -539,6 +540,7 @@ impl ThreadMonitor {
         let mut thread_count = 0;
 
         // Try ps with thread-specific flags
+        #[allow(clippy::needless_borrow)]
         match std::process::Command::new("ps")
             .args(&["-M", "-o", "pid,tid,comm,state,time", "-p", &pid.to_string()])
             .output()
@@ -599,6 +601,7 @@ impl ThreadMonitor {
         let mut thread_count = 0;
 
         // Try ps with more detailed format to get thread names
+        #[allow(clippy::needless_borrow)]
         match std::process::Command::new("ps")
             .args(&["-M", "-o", "pid,tid,comm,state,time", "-p", &pid.to_string()])
             .output()
@@ -717,14 +720,41 @@ impl ThreadMonitor {
         &self.log_file_path
     }
 
-    /// Register current thread TID in registry (all platforms)
-    pub(crate) fn register_current_thread_name(name: &str) {
+    /// Remove current thread from registry (all platforms)
+    pub(crate) fn remove_map_guard() {
+        let tid = Self::get_current_thread_id();
+        if let Some(registry) = THREAD_REGISTRY.get() {
+            if let Ok(mut map) = registry.lock() {
+                for (guid, tid_map) in map.iter_mut() {
+                    if tid_map.remove(&tid).is_some() {
+                        debug!("Removed thread TID {} from registry (Guid: {:?})", tid, guid);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Register current thread TID with associated Guid (all platforms)
+    #[allow(clippy::clone_on_copy)]
+    pub(crate) fn register_current_thread_name_with_guid(name: &str, guid: &Guid) {
         let tid = Self::get_current_thread_id();
         let registry = THREAD_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
 
         if let Ok(mut map) = registry.lock() {
-            map.insert(tid, name.to_string());
-            debug!("Registered thread TID {} with name '{}'", tid, name);
+            map.entry(guid.clone()).or_insert_with(HashMap::new).insert(tid, name.to_string());
+            debug!("Registered thread TID {} with name '{}' for Guid {:?}", tid, name, guid);
+        }
+    }
+
+    /// Remove all threads associated with a Guid from registry (for cleanup on disable)
+    pub(crate) fn remove_threads_by_guid(guid: &Guid) {
+        if let Some(registry) = THREAD_REGISTRY.get() {
+            if let Ok(mut map) = registry.lock() {
+                if let Some(tid_map) = map.remove(guid) {
+                    debug!("Removed {} threads associated with Guid {:?}", tid_map.len(), guid);
+                }
+            }
         }
     }
 
@@ -732,7 +762,11 @@ impl ThreadMonitor {
     fn get_thread_name_from_registry(tid: u32) -> Option<String> {
         if let Some(registry) = THREAD_REGISTRY.get() {
             if let Ok(map) = registry.lock() {
-                return map.get(&tid).cloned();
+                for tid_map in map.values() {
+                    if let Some(name) = tid_map.get(&tid) {
+                        return Some(name.clone());
+                    }
+                }
             }
         }
         None
@@ -909,7 +943,10 @@ mod tests {
             .spawn(move || {
                 // Register thread name for monitoring
                 {
-                    ThreadMonitor::register_current_thread_name("test_thread_monitoring");
+                    ThreadMonitor::register_current_thread_name_with_guid(
+                        "test_thread_monitoring",
+                        &Guid::UNKNOWN,
+                    );
                 }
 
                 // Signal that thread has started

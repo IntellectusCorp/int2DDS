@@ -4,11 +4,11 @@
 //! DDS domain. A GUID consists of a GuidPrefix (12 bytes, unique per participant) and
 //! an EntityId (4 bytes, unique within the participant).
 
-use speedy::{Readable, Writable};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::dcps::topic::type_support::DdsType;
 use crate::rtps::common::entity_id::EntityId;
 use crate::rtps::common::entity_kind::EntityKind;
 
@@ -16,7 +16,8 @@ use crate::rtps::common::entity_kind::EntityKind;
 pub const GUIDPREFIX_UNKNOWN: GuidPrefix = [0x00; 12];
 pub type GuidPrefix = [u8; 12];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Readable, Writable, Hash)]
+#[derive(DdsType, Copy, Eq, PartialOrd, Ord, Hash)]
+#[dds_type(crate_path = "crate")]
 pub struct Guid {
     prefix: GuidPrefix,  // [u8; 12]
     entity_id: EntityId, // [u8; 4]

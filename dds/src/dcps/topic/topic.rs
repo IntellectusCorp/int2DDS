@@ -55,6 +55,14 @@ use crate::{
 
 #[derive(Clone)]
 pub struct Topic {
+    // Indicates whether this entity is a built-in entity.
+    //
+    // Built-in entities are managed internally and have restricted operations:
+    // - Cannot be deleted (delete_topic)
+    // - Cannot modify QoS (set_qos)
+    //
+    // See also: DomainParticipant::get_builtin_subscriber()
+    is_builtin: bool,
     guid: Guid,
     qos: Arc<Mutex<TopicQos>>,
     listener: Arc<RwLock<Option<Arc<dyn TopicListener>>>>,
@@ -97,6 +105,11 @@ impl Eq for Topic {}
 
 impl Drop for Topic {
     fn drop(&mut self) {
+        // Builtin entities are managed separately, skip orphan handling
+        if self.is_builtin {
+            return;
+        }
+
         // Only handle drop for the last reference (not clones)
         if let Some(ref self_arc) = self.self_ref {
             if Arc::strong_count(self_arc) > 1 {
@@ -147,7 +160,9 @@ impl UpdateStatus for Topic {
 }
 
 impl Topic {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
+        is_builtin: bool,
         topic_name: &str,
         type_name: &str,
         qos: TopicQos,
@@ -157,6 +172,7 @@ impl Topic {
         participant: &Arc<DomainParticipant>,
     ) -> Self {
         let mut topic = Self {
+            is_builtin,
             guid: handle.to_guid(),
             qos: Arc::new(Mutex::new(qos)),
             listener: Arc::new(RwLock::new(listener)),
@@ -178,6 +194,11 @@ impl Topic {
         }
         topic.self_ref = Some(topic_arc); // Without Arc, the new() function completes and memory is freed. The StatusCondition's entity field returns None.
         topic
+    }
+
+    /// Returns whether this topic is a built-in entity.
+    pub(crate) fn is_builtin(&self) -> bool {
+        self.is_builtin
     }
 
     pub fn get_inconsistent_topic_status(&self) -> DdsResult<InconsistentTopicStatus> {

@@ -379,6 +379,7 @@ pub enum DiscoveryMode {
 
 impl DiscoveryMode {
     /// Convert string to DiscoveryMode
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "udp" => Some(DiscoveryMode::Udp),

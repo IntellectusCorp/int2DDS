@@ -1185,7 +1185,7 @@ impl WlpLogic {
     }
 
     pub(crate) fn update_local_writer_liveliness(&self, writer_guid: &Guid) -> RtpsResult<()> {
-        if let Some(mut info) = self.local_writers.get_mut(&writer_guid) {
+        if let Some(mut info) = self.local_writers.get_mut(writer_guid) {
             let was_not_alive = info.alive_state() == WriterAliveState::NotAlive;
             info.set_alive();
 
@@ -1204,7 +1204,7 @@ impl WlpLogic {
             // LivelinessMonitor Timer Update (re-track if removed after LOST)
             if let Ok(monitor) = self.liveliness_monitor.lock() {
                 if let Some(monitor) = monitor.as_ref() {
-                    monitor.update_writer(&writer_guid);
+                    monitor.update_writer(writer_guid);
                 }
             }
         }
@@ -1251,7 +1251,7 @@ impl WlpLogic {
                 };
 
                 if should_update {
-                    guids.push(guid.clone());
+                    guids.push(*guid);
                 }
             }
         }

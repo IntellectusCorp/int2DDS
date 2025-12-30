@@ -3,6 +3,7 @@
 //! This module defines `Locator` for identifying network endpoints in RTPS communication.
 //! Supports UDP and TCP transports with IPv4/IPv6 addressing. Locators specify both the
 //! transport type and network address for sending and receiving RTPS messages.
+use crate::dcps::topic::type_support::DdsType;
 
 use std::{fmt::Debug, net::IpAddr};
 
@@ -28,7 +29,8 @@ pub const LOCATOR_INVALID: Locator = Locator {
     address: LOCATOR_ADDRESS_INVALID,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Readable, Writable)]
+#[derive(DdsType, Eq, Hash)]
+#[dds_type(crate_path = "crate", no_default)]
 pub struct Locator {
     kind: i32, // -1: invalid, 1: UDPv4, 2: UDPv6
     port: u32,

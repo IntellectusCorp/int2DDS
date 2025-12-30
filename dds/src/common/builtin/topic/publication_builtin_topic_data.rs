@@ -13,12 +13,13 @@ use crate::{
     },
     publication::qos::{DataWriterQos, PublisherQos},
     rtps::common::{guid::Guid, locator::Locator, types::SerializedData},
-    topic::qos::TopicQos,
+    topic::{qos::TopicQos, type_support::DdsType},
 };
 
 use super::builtin_topic_key::BuiltinTopicKey;
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(DdsType, Eq)]
+#[dds_type(crate_path = "crate", no_default)]
 pub struct PublicationBuiltinTopicData {
     endpoint_guid: Guid,
     key: BuiltinTopicKey,
@@ -84,6 +85,7 @@ impl PublicationBuiltinTopicData {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn default() -> Self {
         Self::new(&DataWriterQos::default(), &PublisherQos::default(), &TopicQos::default())
     }

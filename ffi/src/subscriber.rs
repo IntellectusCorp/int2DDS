@@ -13,16 +13,16 @@
 //! - `int2dds_take` - Returns and removes the next sample from the cache
 //! - `int2dds_read` - Returns the next sample without removing it
 //!
-//! ## Buffer Management
+//! ## Data Format
 //!
-//! The C application must allocate the buffer for received data. If the buffer
-//! is too small, the function returns an error and sets the required size.
+//! The FFI uses Int2DdsData with DynamicTypeSupport for CDR deserialization.
+//! The DDS core handles all deserialization automatically using the registered TypeSupport.
 
 use std::sync::Arc;
 
-use int2dds::{
-    infrastructure::status::StatusMask, subscription::qos::SubscriberQos, topic::RawData,
-};
+use int2dds::{infrastructure::status::StatusMask, subscription::qos::SubscriberQos};
+
+use crate::data::Int2DdsData;
 
 use super::{
     error::*,
@@ -78,13 +78,18 @@ pub unsafe extern "C" fn int2dds_delete_subscriber(
         return INT2DDS_RET_NULL_POINTER;
     }
 
+    let subscriber_ref = &*subscriber;
+    if Arc::strong_count(&subscriber_ref.inner) != 1 {
+        return INT2DDS_RET_PRECONDITION_NOT_MET;
+    }
+
     // Destructure Box to move Arc out
     let Int2DdsSubscriber { inner: subscriber_arc } = *Box::from_raw(subscriber);
 
     // Try to unwrap Arc without cloning (succeeds if this is the only reference)
     let subscriber_obj = match Arc::try_unwrap(subscriber_arc) {
         Ok(s) => s,
-        Err(arc) => (*arc).clone(), // Fall back to clone if other references exist
+        Err(_arc) => return INT2DDS_RET_PRECONDITION_NOT_MET,
     };
 
     // Get the participant to delete the subscriber
@@ -127,8 +132,8 @@ pub unsafe extern "C" fn int2dds_create_datareader(
         (*qos).inner.clone()
     };
 
-    // Create DataReader<RawData>
-    let reader = ffi_try!(subscriber_ref.inner.create_datareader::<RawData>(
+    // Create DataReader<Int2DdsData>
+    let reader = ffi_try!(subscriber_ref.inner.create_datareader::<Int2DdsData>(
         &*topic_ref.inner,
         reader_qos,
         None,
@@ -175,8 +180,8 @@ pub unsafe extern "C" fn int2dds_create_datareader_with_listener(
         (*qos).inner.clone()
     };
 
-    // Create DataReader<RawData> first without listener
-    let reader = ffi_try!(subscriber_ref.inner.create_datareader::<RawData>(
+    // Create DataReader<Int2DdsData> first without listener
+    let reader = ffi_try!(subscriber_ref.inner.create_datareader::<Int2DdsData>(
         &*topic_ref.inner,
         reader_qos,
         None,
@@ -195,7 +200,9 @@ pub unsafe extern "C" fn int2dds_create_datareader_with_listener(
         // Set the listener on the reader
         let listener_clone = listener_arc.clone()
             as Arc<
-                dyn int2dds::subscription::data_reader_listener::DataReaderListener<Foo = RawData>,
+                dyn int2dds::subscription::data_reader_listener::DataReaderListener<
+                    Foo = Int2DdsData,
+                >,
             >;
         ffi_try!(reader_handle
             .inner
@@ -238,7 +245,9 @@ pub unsafe extern "C" fn int2dds_datareader_set_listener(
     let result = reader_ref.inner.set_listener(
         listener_arc.clone().map(|l| {
             l as Arc<
-                dyn int2dds::subscription::data_reader_listener::DataReaderListener<Foo = RawData>,
+                dyn int2dds::subscription::data_reader_listener::DataReaderListener<
+                    Foo = Int2DdsData,
+                >,
             >
         }),
         StatusMask::from_bits_truncate(mask),
@@ -283,30 +292,26 @@ pub unsafe extern "C" fn int2dds_datareader_get_listener(
 
 /// Take data from a DataReader (removes from cache)
 ///
-/// Returns the raw bytes of the next sample, removing it from the cache.
-/// The C application must allocate the buffer and provide the buffer size.
+/// Returns the next sample, removing it from the cache.
+/// The data is automatically deserialized from CDR format using the registered TypeSupport.
 ///
 /// # Safety
 /// - `reader` must be a valid datareader
-/// - `data_buffer` must point to a buffer of at least `buffer_size` bytes
-/// - `data_size_out` will be set to the actual size of the data read
+/// - `data_out` must be a valid Int2DdsData created from a compatible TypeDescriptor
 /// - `valid_data_out` will be set to true if valid data was read
 ///
 /// # Returns
 /// - INT2DDS_RET_OK if data was successfully read
 /// - INT2DDS_RET_NO_DATA if no data is available
-/// - INT2DDS_RET_ERROR if buffer is too small (data_size_out will contain required size)
+/// - INT2DDS_RET_ERROR if deserialization failed
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_take(
     reader: *const Int2DdsDataReader,
-    data_buffer: *mut u8,
-    buffer_size: usize,
-    data_size_out: *mut usize,
+    data_out: *mut Int2DdsData,
     valid_data_out: *mut bool,
 ) -> Int2DdsRet {
     check_null!(reader);
-    check_null!(data_buffer);
-    check_null!(data_size_out);
+    check_null!(data_out);
     check_null!(valid_data_out);
 
     let reader_ref = &*reader;
@@ -316,60 +321,51 @@ pub unsafe extern "C" fn int2dds_take(
         Ok(result) => result,
         Err(int2dds::dcps::core::error::DdsError::NoData) => {
             *valid_data_out = false;
-            *data_size_out = 0;
             return INT2DDS_RET_NO_DATA;
         }
         Err(e) => return dds_error_to_code(&e),
     };
 
-    // Get raw bytes directly (zero-copy, bypasses deserialization)
-    let raw_bytes = match sample.raw_bytes() {
-        Some(bytes) => bytes,
-        None => {
-            *valid_data_out = false;
-            *data_size_out = 0;
-            return INT2DDS_RET_NO_DATA;
+    let info = sample.sample_info();
+    *valid_data_out = info.valid_data;
+
+    if !info.valid_data {
+        return INT2DDS_RET_OK;
+    }
+
+    // Use sample.data() - DDS core automatically deserializes using registered TypeSupport
+    let mut received_data = match sample.data() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("int2dds_take: sample.data() failed: {:?}", e);
+            return INT2DDS_RET_ERROR;
         }
     };
 
-    let info = sample.sample_info();
-
-    // Check if buffer is large enough
-    let data_len = raw_bytes.len();
-    *data_size_out = data_len;
-
-    if data_len > buffer_size {
-        *valid_data_out = false;
-        return INT2DDS_RET_ERROR;
-    }
-
-    // Copy data to buffer
-    std::ptr::copy_nonoverlapping(raw_bytes.as_ptr(), data_buffer, data_len);
-    *valid_data_out = info.valid_data;
+    // Move values from received data to output - avoids clone
+    let data_out_ref = &mut *data_out;
+    data_out_ref.values = std::mem::take(&mut received_data.values);
 
     INT2DDS_RET_OK
 }
 
 /// Read data from a DataReader (keeps in cache)
 ///
-/// Returns the raw bytes of the next sample without removing it from the cache.
+/// Returns the next sample without removing it from the cache.
+/// The data is automatically deserialized from CDR format using the registered TypeSupport.
 ///
 /// # Safety
 /// - `reader` must be a valid datareader
-/// - `data_buffer` must point to a buffer of at least `buffer_size` bytes
-/// - `data_size_out` will be set to the actual size of the data read
+/// - `data_out` must be a valid Int2DdsData created from a compatible TypeDescriptor
 /// - `valid_data_out` will be set to true if valid data was read
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_read(
     reader: *const Int2DdsDataReader,
-    data_buffer: *mut u8,
-    buffer_size: usize,
-    data_size_out: *mut usize,
+    data_out: *mut Int2DdsData,
     valid_data_out: *mut bool,
 ) -> Int2DdsRet {
     check_null!(reader);
-    check_null!(data_buffer);
-    check_null!(data_size_out);
+    check_null!(data_out);
     check_null!(valid_data_out);
 
     let reader_ref = &*reader;
@@ -379,36 +375,30 @@ pub unsafe extern "C" fn int2dds_read(
         Ok(result) => result,
         Err(int2dds::dcps::core::error::DdsError::NoData) => {
             *valid_data_out = false;
-            *data_size_out = 0;
             return INT2DDS_RET_NO_DATA;
         }
         Err(e) => return dds_error_to_code(&e),
     };
 
-    // Get raw bytes directly (zero-copy, bypasses deserialization)
-    let raw_bytes = match sample.raw_bytes() {
-        Some(bytes) => bytes,
-        None => {
-            *valid_data_out = false;
-            *data_size_out = 0;
-            return INT2DDS_RET_NO_DATA;
+    let info = sample.sample_info();
+    *valid_data_out = info.valid_data;
+
+    if !info.valid_data {
+        return INT2DDS_RET_OK;
+    }
+
+    // Use sample.data() - DDS core automatically deserializes using registered TypeSupport
+    let mut received_data = match sample.data() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("int2dds_read: sample.data() failed: {:?}", e);
+            return INT2DDS_RET_ERROR;
         }
     };
 
-    let info = sample.sample_info();
-
-    // Check if buffer is large enough
-    let data_len = raw_bytes.len();
-    *data_size_out = data_len;
-
-    if data_len > buffer_size {
-        *valid_data_out = false;
-        return INT2DDS_RET_ERROR;
-    }
-
-    // Copy data to buffer
-    std::ptr::copy_nonoverlapping(raw_bytes.as_ptr(), data_buffer, data_len);
-    *valid_data_out = info.valid_data;
+    // Move values from received data to output
+    let data_out_ref = &mut *data_out;
+    data_out_ref.values = std::mem::take(&mut received_data.values);
 
     INT2DDS_RET_OK
 }
