@@ -15,7 +15,7 @@ use std::time::Duration;
 use log::{debug, error};
 use mio::Waker;
 
-use crate::rtps::common::guid::{self, Guid, GuidPrefix};
+use crate::rtps::common::guid::{Guid, GuidPrefix};
 use crate::rtps::common::rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult};
 use crate::utils::timer::timer_task::TimerTask;
 

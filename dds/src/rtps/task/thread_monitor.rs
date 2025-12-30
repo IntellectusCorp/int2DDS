@@ -17,7 +17,7 @@ use std::time::{Duration, SystemTime};
 
 use log::{debug, error};
 
-use crate::rtps::common::guid::{Guid, GuidPrefix};
+use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::entities::entity::Entity;
 use crate::rtps::entities::participant::Participant;
 use crate::utils::timer::timer_handler::TimerHandler;
