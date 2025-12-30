@@ -75,12 +75,15 @@ pub struct Participant {
     // Remote participant data
     remote_participant_proxy_datas: Arc<Mutex<Vec<SPDPDiscoveredParticipantData>>>,
 
+    #[allow(clippy::type_complexity)]
     callback:
         Arc<ArcSwap<Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>>>,
 
     // RTPS data reader/writer matched with DCPS r/w
     // Key is domain id + topic name
+    #[allow(clippy::type_complexity)]
     rtps_reader_map: Arc<DashMap<String, HashMap<EntityId, Arc<dyn Reader + Send + Sync>>>>,
+    #[allow(clippy::type_complexity)]
     rtps_writer_map: Arc<DashMap<String, HashMap<EntityId, Arc<dyn Writer + Send + Sync>>>>,
 
     spdp_logic: OnceLock<Arc<Option<SpdpLogic>>>,
@@ -1099,6 +1102,7 @@ impl Participant {
         let _ = self.user_logic.set(user_logic);
     }
 
+    #[allow(clippy::type_complexity)]
     pub(crate) fn get_logics(
         &self,
     ) -> (Arc<Option<SpdpLogic>>, Arc<Option<SedpLogic>>, Arc<Option<UserLogic>>) {

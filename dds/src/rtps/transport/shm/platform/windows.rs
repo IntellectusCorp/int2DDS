@@ -21,9 +21,11 @@ use winapi::um::winbase::{CreateFileMappingA, OpenFileMappingA};
 #[cfg(windows)]
 use winapi::um::winnt::PAGE_READWRITE;
 #[cfg(windows)]
+#[allow(clippy::upper_case_acronyms)]
 type HANDLE = winapi::shared::ntdef::HANDLE;
 
 #[cfg(not(windows))]
+#[allow(clippy::upper_case_acronyms)]
 type HANDLE = *mut std::ffi::c_void;
 
 /// Windows shared memory implementation

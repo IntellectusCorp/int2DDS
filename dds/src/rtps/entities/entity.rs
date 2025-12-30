@@ -15,6 +15,7 @@ use crate::{
 };
 
 // Entity's attribute: guid(Guid_t)
+#[allow(clippy::type_complexity)]
 pub(crate) trait Entity {
     fn guid(&self) -> Guid;
     fn set_update_status(

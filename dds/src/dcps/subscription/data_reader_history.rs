@@ -75,6 +75,7 @@ pub(crate) struct DataReaderHistoryCache<Foo> {
     ownership_kind: OwnershipQosPolicyKind,
     owner_candidates: Arc<DashMap<InstanceHandle, BTreeSet<OwnershipInfo>>>, // Track valid writers per instance (includes writers that missed deadline or unregistered, not just strictly alive ones by Liveliness QoS)
     lifespan_timers: Arc<Mutex<HashMap<Guid, String>>>, // writer_guid -> timer_id
+    #[allow(clippy::type_complexity)]
     status_callback:
         Arc<Mutex<Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>>>,
 }
@@ -659,6 +660,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
         change.cloned()
     }
 
+    #[allow(clippy::type_complexity)]
     pub(crate) fn set_update_status(
         &self,
         f: Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>,
