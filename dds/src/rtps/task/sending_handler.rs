@@ -270,6 +270,10 @@ impl SendingHandler {
             *waker_guard = None;
         }
 
+        if let Ok(mut queue) = self.message_queue.lock() {
+            queue.clear();
+        }
+
         if let Ok(mut sender_guard) = self.udp_sender.lock() {
             *sender_guard = None;
         }
