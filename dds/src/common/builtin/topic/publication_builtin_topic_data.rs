@@ -85,6 +85,7 @@ impl PublicationBuiltinTopicData {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn default() -> Self {
         Self::new(&DataWriterQos::default(), &PublisherQos::default(), &TopicQos::default())
     }

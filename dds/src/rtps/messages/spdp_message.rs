@@ -269,7 +269,7 @@ impl SpdpMessage {
         }
 
         match discovery_helpers::create_spdp_participant_message(
-            domain_id as u32,
+            domain_id,
             participant_guid,
             vendor_id,
             entity_name,
@@ -281,7 +281,7 @@ impl SpdpMessage {
 
                 // Fallback to simple builder if discovery_helpers fails
                 match RtpsMessageBuilder::build_spdp_participant_data(
-                    domain_id as u32,
+                    domain_id,
                     participant_guid,
                     vendor_id,
                     true,

@@ -26,6 +26,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: 1.89.0
+          components: clippy
           rustflags: ""
 
       - name: Load cache
@@ -41,4 +42,5 @@ jobs:
           RUSTFLAGS: ${{ runner.os == 'Windows' && '-C linker=lld-link' || '' }}
         run: |
           echo "RUSTFLAGS=$RUSTFLAGS"
+          cargo clippy
           cargo test -- --test-threads=1

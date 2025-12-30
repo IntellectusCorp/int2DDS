@@ -408,6 +408,7 @@ impl DomainParticipant {
         Ok(participant)
     }
 
+    #[allow(clippy::field_reassign_with_default, clippy::needless_borrow)]
     fn initialize_builtin_entities(participant: &Arc<Self>) -> DdsResult<()> {
         let rtps_participant = participant.get_rtps_participant()?;
         let endpoints = rtps_participant.builtin_endpoints();
