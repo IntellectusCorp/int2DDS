@@ -1251,6 +1251,7 @@ fn generate_tuple_field_deserialization_xcdr(
 }
 
 /// Generate tuple field deserialization code for XCDR with per-field DHEADER
+/// Uses DHEADER value for forward compatibility - skips remaining bytes if field has extra data.
 fn generate_tuple_field_deserialization_xcdr_per_field_dheader(
     fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
     name: &syn::Ident,
@@ -1263,11 +1264,27 @@ fn generate_tuple_field_deserialization_xcdr_per_field_dheader(
             let field_var = quote::format_ident!("field_{}", idx);
             let field_type = &field.ty;
             // Read DHEADER before each field (interoperability format)
+            // Use DHEADER value to skip remaining bytes for forward compatibility
             quote! {
-                let _field_dheader = deserializer.read_dheader()
+                let __field_size = deserializer.read_dheader()
                     .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+                let __field_start = {
+                    use #crate_path::serialize::DeserializerReader;
+                    deserializer.get_position()
+                };
+
                 let #field_var = <#field_type as #crate_path::serialize::xcdr::XcdrDeserialize>::deserialize_xcdr(&mut deserializer)
                     .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+
+                // Skip remaining bytes for forward compatibility (unknown additional data)
+                {
+                    use #crate_path::serialize::DeserializerReader;
+                    let __bytes_consumed = deserializer.get_position() - __field_start;
+                    if __bytes_consumed < __field_size as usize {
+                        deserializer.skip((__field_size as usize) - __bytes_consumed)
+                            .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+                    }
+                }
             }
         })
         .collect();

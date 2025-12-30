@@ -780,6 +780,7 @@ pub fn generate_field_deserialization_xcdr(
 /// Generate XCDR deserialization code with per-field DHEADER reading.
 /// This is for interoperability with implementations that serialize APPENDABLE types
 /// with a DHEADER before each field instead of a single DHEADER for the whole struct.
+/// Uses DHEADER value for forward compatibility - skips remaining bytes if field has extra data.
 pub fn generate_field_deserialization_xcdr_per_field_dheader(
     fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
     name: &syn::Ident,
@@ -799,11 +800,26 @@ pub fn generate_field_deserialization_xcdr_per_field_dheader(
         );
 
         // Read DHEADER before each field (interoperability format)
-        // Note: field variable must be declared outside block to stay in scope
+        // Use DHEADER value to skip remaining bytes for forward compatibility
         quote! {
-            let _field_dheader = deserializer.read_dheader()
+            let __field_size = deserializer.read_dheader()
                 .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+            let __field_start = {
+                use #crate_path::serialize::DeserializerReader;
+                deserializer.get_position()
+            };
+
             #inner_deserialize
+
+            // Skip remaining bytes for forward compatibility (unknown additional data)
+            {
+                use #crate_path::serialize::DeserializerReader;
+                let __bytes_consumed = deserializer.get_position() - __field_start;
+                if __bytes_consumed < __field_size as usize {
+                    deserializer.skip((__field_size as usize) - __bytes_consumed)
+                        .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+                }
+            }
         }
     });
 
