@@ -1198,6 +1198,7 @@ impl SedpLogic {
                         ));
                     }
                 }
+
                 for remote_participant_data in list.iter() {
                     if let Err(e) = self.send_to_participant_metatraffic_locators(
                         &data,
@@ -1206,19 +1207,20 @@ impl SedpLogic {
                     ) {
                         warn!("Failed to send SPDP discovery message: {:?}", e);
                     }
-                    let start_time = Instant::now();
-                    let _ = self.register_send_timer(
-                        Some(start_time),
-                        logic_start_time,
-                        duration,
-                        MessageType::PeriodicParticipantDataUnicast(
-                            Some(start_time),
-                            duration,
-                            spdp_discovered_participant_data.clone(),
-                            Some(data.clone()),
-                        ),
-                    );
                 }
+
+                let start_time = Instant::now();
+                let _ = self.register_send_timer(
+                    Some(start_time),
+                    logic_start_time,
+                    duration,
+                    MessageType::PeriodicParticipantDataUnicast(
+                        Some(start_time),
+                        duration,
+                        spdp_discovered_participant_data.clone(),
+                        Some(data.clone()),
+                    ),
+                );
             }
             None => return Err(RtpsError::new(RtpsErrorCode::DataNotSet, "Data is not set")),
         };
