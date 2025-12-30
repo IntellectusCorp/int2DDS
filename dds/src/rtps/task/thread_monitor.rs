@@ -130,7 +130,7 @@ impl ThreadMonitor {
 
         #[cfg(target_os = "macos")]
         {
-            return Self::get_macos_process_threads();
+            Self::get_macos_process_threads()
         }
 
         #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
@@ -539,6 +539,7 @@ impl ThreadMonitor {
         let mut thread_count = 0;
 
         // Try ps with thread-specific flags
+        #[allow(clippy::needless_borrow)]
         match std::process::Command::new("ps")
             .args(&["-M", "-o", "pid,tid,comm,state,time", "-p", &pid.to_string()])
             .output()
@@ -599,6 +600,7 @@ impl ThreadMonitor {
         let mut thread_count = 0;
 
         // Try ps with more detailed format to get thread names
+        #[allow(clippy::needless_borrow)]
         match std::process::Command::new("ps")
             .args(&["-M", "-o", "pid,tid,comm,state,time", "-p", &pid.to_string()])
             .output()
@@ -733,6 +735,7 @@ impl ThreadMonitor {
     }
 
     /// Register current thread TID with associated Guid (all platforms)
+    #[allow(clippy::clone_on_copy)]
     pub(crate) fn register_current_thread_name_with_guid(name: &str, guid: &Guid) {
         let tid = Self::get_current_thread_id();
         let registry = THREAD_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));

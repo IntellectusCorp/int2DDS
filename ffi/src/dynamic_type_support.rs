@@ -1,3 +1,6 @@
+#![allow(clippy::only_used_in_recursion)]
+#![allow(clippy::manual_range_patterns)]
+
 //! # Dynamic Type Support
 //!
 //! TypeSupport implementation for runtime-defined types.

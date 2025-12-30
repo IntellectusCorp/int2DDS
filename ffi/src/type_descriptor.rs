@@ -1,3 +1,5 @@
+#![allow(clippy::missing_safety_doc)]
+
 //! # Type Descriptor API
 //!
 //! Runtime type definition for C/FFI interoperability.

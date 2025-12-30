@@ -69,10 +69,7 @@ impl UdpSender {
 /// enabling transport-agnostic code throughout the DDS stack.
 impl Transport for UdpSender {
     fn send(&self, addr: &SocketAddr, data: &[u8]) -> io::Result<usize> {
-        let guard = self
-            .socket
-            .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Mutex poisoned"))?;
+        let guard = self.socket.lock().map_err(|_| io::Error::other("Mutex poisoned"))?;
         let socket = guard
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "Socket is closed"))?;
@@ -83,10 +80,7 @@ impl Transport for UdpSender {
     }
 
     fn send_multicast(&self, domain_id: u32, data: &[u8]) -> io::Result<usize> {
-        let guard = self
-            .socket
-            .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Mutex poisoned"))?;
+        let guard = self.socket.lock().map_err(|_| io::Error::other("Mutex poisoned"))?;
         let socket = guard
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "Socket is closed"))?;

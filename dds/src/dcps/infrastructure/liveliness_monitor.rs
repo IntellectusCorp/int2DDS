@@ -96,7 +96,7 @@ impl LivelinessMonitor {
     pub(crate) fn update_writer(&self, guid: &Guid) {
         trace!("[LivelinessMonitor] Rescheduling Guid: {:?}", guid);
         if let Ok(mut trackers) = self.writer_trackers.lock() {
-            if let Some(tracker_info) = trackers.get_mut(&guid) {
+            if let Some(tracker_info) = trackers.get_mut(guid) {
                 let now = Time::now();
                 let old_time = tracker_info.last_update();
                 tracker_info.update_timestamp(now);
