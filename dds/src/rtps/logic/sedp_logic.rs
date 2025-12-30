@@ -206,9 +206,9 @@ impl SedpLogic {
                 // Register thread name for monitoring
                 {
                     use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::register_current_thread_name_with_guid(
+                    ThreadMonitor::register_current_thread_name_with_guid_prefix(
                         "discovery_traffic_multicast_listening",
-                        &participant_guid,
+                        participant_guid.prefix(),
                     );
                 }
 
@@ -241,9 +241,9 @@ impl SedpLogic {
                 // Register thread name for monitoring
                 {
                     use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::register_current_thread_name_with_guid(
+                    ThreadMonitor::register_current_thread_name_with_guid_prefix(
                         "discovery_traffic_unicast_listening",
-                        &unicast_guid,
+                        unicast_guid.prefix(),
                     );
                 }
 

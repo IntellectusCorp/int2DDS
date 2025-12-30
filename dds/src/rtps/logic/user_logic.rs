@@ -117,9 +117,9 @@ impl UserLogic {
                 // Register thread name for monitoring
                 {
                     use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::register_current_thread_name_with_guid(
+                    ThreadMonitor::register_current_thread_name_with_guid_prefix(
                         "user_traffic_unicast_listening",
-                        &participant_guid,
+                        participant_guid.prefix(),
                     );
                 }
 

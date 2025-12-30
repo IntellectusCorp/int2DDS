@@ -15,7 +15,7 @@ use std::time::Duration;
 use log::{debug, error};
 use mio::Waker;
 
-use crate::rtps::common::guid::{Guid, GuidPrefix};
+use crate::rtps::common::guid::{self, Guid, GuidPrefix};
 use crate::rtps::common::rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult};
 use crate::utils::timer::timer_task::TimerTask;
 
@@ -96,21 +96,22 @@ impl TimerHandler {
             self.timer_task = Some(Arc::new(Mutex::new(timer_task)));
         }
         if self.timer_thread_join_handle.is_none() {
-            let participant_guid =
-                self.participant.upgrade().expect("Participant already dropped").guid();
+            // let participant_guid =
+            //     self.participant.upgrade().expect("Participant already dropped").guid();
             match self.timer_task.clone() {
                 Some(timer_task) => {
                     let timer_task_clone = timer_task.clone();
                     let message_queue_clone = self.message_queue.clone();
+                    let guid_prefix = self.guid_prefix.clone();
                     let handle = thread::Builder::new()
                         .name("timer task thread".to_string())
                         .spawn(move || {
                             // Register thread name for monitoring
                             {
                                 use crate::rtps::task::thread_monitor::ThreadMonitor;
-                                ThreadMonitor::register_current_thread_name_with_guid(
+                                ThreadMonitor::register_current_thread_name_with_guid_prefix(
                                     "timer task thread",
-                                    &participant_guid,
+                                    guid_prefix,
                                 );
                             }
 
