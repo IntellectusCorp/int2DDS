@@ -76,8 +76,10 @@ pub struct Subscriber {
     pub(crate) self_ref: Option<Arc<Subscriber>>,
     pub(crate) enabled: Arc<AtomicBool>,
     deleted: Arc<AtomicBool>,
+    #[allow(clippy::type_complexity)]
     readers_by_topic_name:
         Arc<Mutex<HashMap<String, Vec<Weak<dyn DataReaderInternal<Qos = DataReaderQos>>>>>>,
+    #[allow(clippy::type_complexity)]
     readers_by_topic_handle:
         Arc<Mutex<HashMap<InstanceHandle, Vec<Weak<dyn DataReaderInternal<Qos = DataReaderQos>>>>>>,
     builtin_readers: Arc<Mutex<Vec<Arc<dyn DataReaderInternal<Qos = DataReaderQos>>>>>,
@@ -830,6 +832,7 @@ impl Subscriber {
     }
 
     // Return DataReaders grouped by type
+    #[allow(clippy::type_complexity)]
     pub fn get_readers_by_type(
         &self,
     ) -> DdsResult<HashMap<TypeId, Vec<Box<dyn DataReaderBase<Qos = DataReaderQos>>>>> {

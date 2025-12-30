@@ -88,6 +88,7 @@ pub(crate) struct Token {
 }
 
 #[derive(Debug, PartialEq, Clone)]
+#[allow(clippy::enum_variant_names)]
 pub(crate) enum Expression {
     // ContentFilteredTopic
     FilterExpression(Box<Condition>), // Condition
@@ -96,11 +97,11 @@ pub(crate) enum Expression {
         select: SelectClause,
         from: FromClause,
         where_clause: Option<WhereClause>,
-    }, // SelectFrom {Where } ‘;’
+    }, // SelectFrom {Where } ';'
     // QueryReadCondition
     QueryExpression {
         condition: Option<Box<Condition>>,
-        order_by: Option<Vec<String>>, // ORDER BY field1, field2 }, // {Condition}{‘ORDER BY’ (FIELDNAME // ‘,’) }
+        order_by: Option<Vec<String>>, // ORDER BY field1, field2 }, // {Condition}{'ORDER BY' (FIELDNAME // ',') }
     },
 }
 
@@ -156,6 +157,7 @@ pub(crate) enum Selection {
 }
 
 #[derive(Debug, PartialEq, Clone)]
+#[allow(clippy::enum_variant_names)]
 // NaturalJoin ::= 'INNER NATURAL JOIN'
 //             |    'NATURAL JOIN'
 //             |    'NATURAL INNER JOIN'

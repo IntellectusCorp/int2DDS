@@ -100,6 +100,7 @@ fn gen_sequence_deserialize(
     }
 }
 
+#[allow(clippy::unnecessary_unwrap)]
 fn gen_serialize_code(
     method: SerializationMethod,
     field_name: &syn::Ident,
@@ -268,6 +269,7 @@ fn gen_serialize_code(
     }
 }
 
+#[allow(clippy::unnecessary_unwrap)]
 fn gen_deserialize_code(
     method: SerializationMethod,
     field_name: &syn::Ident,

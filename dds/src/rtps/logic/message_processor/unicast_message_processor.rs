@@ -35,22 +35,22 @@ pub(crate) trait UnicastMessageProcessor: ParticipantAccessor {
         for submessage in submessages {
             match submessage {
                 TypedSubmessage::Data(header, data) => {
-                    self.handle_data_message(&rtps_header, &header, &data, &message_receiver)?;
+                    self.handle_data_message(&rtps_header, header, data, &message_receiver)?;
                 }
                 TypedSubmessage::Heartbeat(header, heartbeat) => {
-                    self.handle_heartbeat_message(&rtps_header, &header, &heartbeat)?;
+                    self.handle_heartbeat_message(&rtps_header, header, heartbeat)?;
                 }
                 TypedSubmessage::AckNack(_header, acknack) => {
-                    self.handle_acknack_message(&rtps_header, &acknack)?;
+                    self.handle_acknack_message(&rtps_header, acknack)?;
                 }
                 TypedSubmessage::DataFrag(_header, data_frag) => {
-                    self.handle_datafrag_message(&rtps_header, &data_frag, &message_receiver)?;
+                    self.handle_datafrag_message(&rtps_header, data_frag, &message_receiver)?;
                 }
                 TypedSubmessage::NackFrag(_header, nack_frag) => {
-                    self.handle_nackfrag_message(&rtps_header, &nack_frag)?;
+                    self.handle_nackfrag_message(&rtps_header, nack_frag)?;
                 }
                 TypedSubmessage::Gap(_header, gap) => {
-                    self.handle_gap_message(&rtps_header, &gap)?;
+                    self.handle_gap_message(&rtps_header, gap)?;
                 }
             }
         }

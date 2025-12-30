@@ -399,6 +399,7 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
     }
 
     /// Returns the oldest acknowledged change from the given change vector.
+    #[allow(clippy::ptr_arg)]
     fn get_first_acked_change_from_vec(
         &self,
         changes: &Vec<Arc<CacheChange>>,

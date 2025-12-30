@@ -107,14 +107,14 @@ impl SpdpLogic {
             Some(ref data) => {
                 // Send via multicast (UDP)
                 if let Some(ref sender) = self.sender {
-                    let _ = sender.send_multicast(domain_id, &data);
+                    let _ = sender.send_multicast(domain_id, data);
                     log::debug!("discovery multicast packet send");
                 } else {
                     log::debug!("UDP sender not available, skipping SPDP multicast");
                 }
 
                 // Also send to initial peers via TCP (if configured and in TCP/Hybrid mode)
-                self.send_spdp_to_initial_peers(&data);
+                self.send_spdp_to_initial_peers(data);
             }
             None => {
                 log::error!("spdp message is not set");
