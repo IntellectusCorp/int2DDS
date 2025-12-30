@@ -3,11 +3,12 @@ use syn::DeriveInput;
 
 use crate::codegen::{
     generate_additional_derives, generate_field_deserialization,
-    generate_field_deserialization_xcdr, generate_field_serialization,
-    generate_field_serialization_xcdr, generate_key_field_serialization,
-    generate_key_field_serialization_xcdr, generate_key_methods, generate_multi_key_methods,
-    generate_non_key_field_serialization, generate_non_key_field_serialization_xcdr,
-    parse_field_attributes, KeyFieldInfo, MultiKeyFieldInfo,
+    generate_field_deserialization_xcdr, generate_field_deserialization_xcdr_per_field_dheader,
+    generate_field_serialization, generate_field_serialization_xcdr,
+    generate_key_field_serialization, generate_key_field_serialization_xcdr, generate_key_methods,
+    generate_multi_key_methods, generate_non_key_field_serialization,
+    generate_non_key_field_serialization_xcdr, parse_field_attributes, KeyFieldInfo,
+    MultiKeyFieldInfo,
 };
 use crate::codegen::{quote_extensibility_tokens, DdsTypeConfig, ExtensibilityKind};
 
@@ -45,6 +46,10 @@ pub fn derive_struct_impl(
     let xcdr_field_serialization = generate_field_serialization_xcdr(fields, crate_path);
     let xcdr_field_deserialization = generate_field_deserialization_xcdr(fields, name, crate_path);
 
+    // Generate per-field DHEADER deserialization for dust-dds compatibility
+    let xcdr_field_deserialization_per_field_dheader =
+        generate_field_deserialization_xcdr_per_field_dheader(fields, name, crate_path);
+
     // Generate code to serialize only key fields
     let key_field_serialization = generate_key_field_serialization(fields, crate_path);
     let key_field_serialization_xcdr = generate_key_field_serialization_xcdr(fields, crate_path);
@@ -81,6 +86,7 @@ pub fn derive_struct_impl(
         &field_deserialization,
         &xcdr_field_serialization,
         &xcdr_field_deserialization,
+        &xcdr_field_deserialization_per_field_dheader,
         &key_field_serialization,
         &key_field_serialization_xcdr,
         &non_key_field_serialization,
@@ -270,6 +276,7 @@ fn quote_deserialize_with_format_impl(
     name: &syn::Ident,
     cdr_field_deserialization: &proc_macro2::TokenStream,
     xcdr_field_deserialization: &proc_macro2::TokenStream,
+    xcdr_field_deserialization_per_field_dheader: &proc_macro2::TokenStream,
     crate_path: &proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
     quote! {
@@ -289,12 +296,21 @@ fn quote_deserialize_with_format_impl(
                     use #crate_path::serialize::xcdr::Xcdr2Deserializer;
 
                     let use_delimiters = *use_delimiters;
+
+                    // Standard XCDR2 deserialization (single DHEADER for struct)
                     let mut parse_body = |mut deserializer: &mut Xcdr2Deserializer<'_>| -> #crate_path::dcps::core::error::DdsResult<#name> {
                         #xcdr_field_deserialization
                         Ok(result)
                     };
 
+                    // Alternative deserialization with per-field DHEADER (for interoperability)
+                    let mut parse_body_per_field_dheader = |mut deserializer: &mut Xcdr2Deserializer<'_>| -> #crate_path::dcps::core::error::DdsResult<#name> {
+                        #xcdr_field_deserialization_per_field_dheader
+                        Ok(result)
+                    };
+
                     if use_delimiters {
+                        // Try 1: Standard XCDR2 delimited format (single DHEADER for entire struct)
                         let mut delimited_deserializer = Xcdr2Deserializer::new(data)
                             .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
 
@@ -312,14 +328,35 @@ fn quote_deserialize_with_format_impl(
                                 return Ok(Box::new(result));
                             }
                             Err(err) => {
-                                log::warn!(
-                                    "====deserialize_with_format XCDR delimited path failed ({}); retrying without delimiters",
+                                log::debug!(
+                                    "XCDR2 delimited path failed ({}); trying per-field DHEADER mode",
+                                    err
+                                );
+                            }
+                        }
+
+                        // Try 2: Per-field DHEADER format (interoperability fallback)
+                        let mut compat_deserializer = Xcdr2Deserializer::new(data)
+                            .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+
+                        match (|| -> #crate_path::dcps::core::error::DdsResult<#name> {
+                            let value = parse_body_per_field_dheader(&mut compat_deserializer)?;
+                            Ok(value)
+                        })() {
+                            Ok(result) => {
+                                log::debug!("XCDR2 per-field DHEADER mode succeeded");
+                                return Ok(Box::new(result));
+                            }
+                            Err(err) => {
+                                log::debug!(
+                                    "XCDR2 per-field DHEADER path failed ({}); trying without delimiters",
                                     err
                                 );
                             }
                         }
                     }
 
+                    // Try 3: Fallback - no delimiters
                     let mut fallback_deserializer = Xcdr2Deserializer::new(data)
                         .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
 
@@ -340,6 +377,7 @@ fn generate_unified_type_support_impl(
     cdr_field_deserialization: &proc_macro2::TokenStream,
     xcdr_field_serialization: &proc_macro2::TokenStream,
     xcdr_field_deserialization: &proc_macro2::TokenStream,
+    xcdr_field_deserialization_per_field_dheader: &proc_macro2::TokenStream,
     _key_field_serialization: &proc_macro2::TokenStream,
     _key_field_serialization_xcdr: &proc_macro2::TokenStream,
     _non_key_field_serialization: &proc_macro2::TokenStream,
@@ -363,6 +401,7 @@ fn generate_unified_type_support_impl(
         name,
         cdr_field_deserialization,
         xcdr_field_deserialization,
+        xcdr_field_deserialization_per_field_dheader,
         crate_path,
     );
 
@@ -675,8 +714,9 @@ fn generate_xcdr_serialize_impl(
                             #crate_path::serialize::xcdr::XcdrSerialize::serialize_xcdr(opt_value, serializer)?;
 
                             // Calculate field length and backpatch EMHEADER
+                            // member_id must be masked to 12 bits (0x0FFF) per DDS-XTYPES spec
                             let field_len = (serializer.position() - field_start) as u32;
-                            let emheader = (#member_id << 16) | (field_len & 0xFFFF);
+                            let emheader = ((#member_id & 0x0FFFu32) << 16) | (field_len & 0xFFFF);
                             serializer.write_dheader_at(emheader_pos, emheader);
                         }
                     }
@@ -692,8 +732,9 @@ fn generate_xcdr_serialize_impl(
                             #crate_path::serialize::xcdr::XcdrSerialize::serialize_xcdr(&self.#field_name, serializer)?;
 
                             // Calculate field length and backpatch EMHEADER
+                            // member_id must be masked to 12 bits (0x0FFF) per DDS-XTYPES spec
                             let field_len = (serializer.position() - field_start) as u32;
-                            let emheader = (#member_id << 16) | (field_len & 0xFFFF);
+                            let emheader = ((#member_id & 0x0FFFu32) << 16) | (field_len & 0xFFFF);
                             serializer.write_dheader_at(emheader_pos, emheader);
                         }
                     }
@@ -1053,6 +1094,10 @@ pub fn derive_tuple_struct_impl(
     let xcdr_field_deserialization =
         generate_tuple_field_deserialization_xcdr(fields, name, crate_path);
 
+    // Generate per-field DHEADER deserialization for interoperability
+    let xcdr_field_deserialization_per_field_dheader =
+        generate_tuple_field_deserialization_xcdr_per_field_dheader(fields, name, crate_path);
+
     // Generate key-related methods (no keys for tuple structs)
     let (serialize_key_impl, deserialize_key_impl, compute_key_impl) =
         generate_key_methods(None, name, &cdr_field_deserialization, crate_path);
@@ -1069,6 +1114,7 @@ pub fn derive_tuple_struct_impl(
         &cdr_field_deserialization,
         &xcdr_field_serialization,
         &xcdr_field_deserialization,
+        &xcdr_field_deserialization_per_field_dheader,
         &serialize_key_impl,
         &deserialize_key_impl,
         &compute_key_impl,
@@ -1203,6 +1249,37 @@ fn generate_tuple_field_deserialization_xcdr(
     }
 }
 
+/// Generate tuple field deserialization code for XCDR with per-field DHEADER
+fn generate_tuple_field_deserialization_xcdr_per_field_dheader(
+    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
+    name: &syn::Ident,
+    crate_path: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let field_deserializations: Vec<_> = fields
+        .iter()
+        .enumerate()
+        .map(|(idx, field)| {
+            let field_var = quote::format_ident!("field_{}", idx);
+            let field_type = &field.ty;
+            // Read DHEADER before each field (interoperability format)
+            quote! {
+                let _field_dheader = deserializer.read_dheader()
+                    .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+                let #field_var = <#field_type as #crate_path::serialize::xcdr::XcdrDeserialize>::deserialize_xcdr(&mut deserializer)
+                    .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+            }
+        })
+        .collect();
+
+    let field_vars: Vec<_> =
+        (0..fields.len()).map(|idx| quote::format_ident!("field_{}", idx)).collect();
+
+    quote! {
+        #(#field_deserializations)*
+        let result = #name(#(#field_vars),*);
+    }
+}
+
 /// Generate field access methods for tuple struct
 fn generate_tuple_field_access_methods(
     field_count: usize,
@@ -1276,6 +1353,7 @@ fn generate_tuple_type_support_impl(
     cdr_field_deserialization: &proc_macro2::TokenStream,
     xcdr_field_serialization: &proc_macro2::TokenStream,
     xcdr_field_deserialization: &proc_macro2::TokenStream,
+    xcdr_field_deserialization_per_field_dheader: &proc_macro2::TokenStream,
     serialize_key_impl: &proc_macro2::TokenStream,
     deserialize_key_impl: &proc_macro2::TokenStream,
     compute_key_impl: &proc_macro2::TokenStream,
@@ -1295,6 +1373,7 @@ fn generate_tuple_type_support_impl(
         name,
         cdr_field_deserialization,
         xcdr_field_deserialization,
+        xcdr_field_deserialization_per_field_dheader,
         crate_path,
     );
 

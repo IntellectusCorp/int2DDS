@@ -99,16 +99,18 @@ impl MemberHeader {
         if self.member_length <= 0xFFFF {
             // Short encoding: LC=0, length directly in lower 16 bits
             // Format: [M][LC=0][member_id (12 bits)][length (16 bits)]
-            // Simplified: (member_id << 16) | length
-            let header =
-                must_understand_bit | (self.member_id << 16) | (self.member_length & 0xFFFF);
+            // member_id must be masked to 12 bits to prevent overflow into LC bits
+            let header = must_understand_bit
+                | ((self.member_id & 0x0FFF) << 16)
+                | (self.member_length & 0xFFFF);
             let bytes = to_bytes_u32(header, endianness);
             buffer.extend_from_slice(&bytes);
         } else {
             // Extended encoding with LC=4: length follows in next 4 bytes
             // Format: [M][LC=4][member_id (12 bits)][0000]
+            // member_id must be masked to 12 bits to prevent overflow into LC bits
             let lc = LengthCode::NextInt as u32;
-            let header = must_understand_bit | (lc << 28) | (self.member_id << 16);
+            let header = must_understand_bit | (lc << 28) | ((self.member_id & 0x0FFF) << 16);
             let bytes = to_bytes_u32(header, endianness);
             buffer.extend_from_slice(&bytes);
             // Write actual length as next 4 bytes

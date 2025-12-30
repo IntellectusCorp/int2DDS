@@ -774,3 +774,44 @@ pub fn generate_field_deserialization_xcdr(
 ) -> proc_macro2::TokenStream {
     generate_field_deserialization_internal(fields, name, crate_path, true)
 }
+
+/// Generate XCDR deserialization code with per-field DHEADER reading.
+/// This is for interoperability with implementations that serialize APPENDABLE types
+/// with a DHEADER before each field instead of a single DHEADER for the whole struct.
+pub fn generate_field_deserialization_xcdr_per_field_dheader(
+    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
+    name: &syn::Ident,
+    crate_path: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let field_deserializations = fields.iter().map(|field| {
+        let field_config = parse_field_attributes(field);
+        let field_name = field.ident.as_ref().unwrap();
+        let method = get_serialization_method(&field.ty);
+        let inner_deserialize = gen_deserialize_code(
+            method,
+            field_name,
+            &field.ty,
+            crate_path,
+            true,
+            field_config.bound,
+        );
+
+        // Read DHEADER before each field (interoperability format)
+        // Note: field variable must be declared outside block to stay in scope
+        quote! {
+            let _field_dheader = deserializer.read_dheader()
+                .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+            #inner_deserialize
+        }
+    });
+
+    let field_names: Vec<_> = fields.iter().map(|f| f.ident.as_ref().unwrap()).collect();
+
+    quote! {
+        #(#field_deserializations)*
+
+        let result = #name {
+            #(#field_names, )*
+        };
+    }
+}
