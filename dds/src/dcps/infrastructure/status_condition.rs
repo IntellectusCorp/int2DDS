@@ -35,6 +35,7 @@ pub struct StatusCondition<Q> {
     entity: Option<Weak<dyn EntityInternal<Qos = Q> + Send + Sync>>,
     pub(crate) enabled_statuses: Arc<Mutex<StatusMask>>, // mask (list of enabled statuses)
     pub(crate) status_changes: Arc<Mutex<StatusMask>>,
+    #[allow(clippy::type_complexity)]
     waitset_callback: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
 }
 

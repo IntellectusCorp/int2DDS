@@ -104,26 +104,26 @@ pub fn get_serialization_method(ty: &syn::Type) -> SerializationMethod {
                 "Vec" => {
                     // Check Vec<T> generic argument
                     if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-                        if let Some(syn::GenericArgument::Type(inner_type)) = args.args.first() {
-                            if let syn::Type::Path(inner_path) = inner_type {
-                                if let Some(inner_segment) = inner_path.path.segments.last() {
-                                    return match inner_segment.ident.to_string().as_str() {
-                                        "u8" => SerializationMethod::VecU8,
-                                        "u16" => SerializationMethod::VecU16,
-                                        "u32" => SerializationMethod::VecU32,
-                                        "u64" => SerializationMethod::VecU64,
-                                        "i8" => SerializationMethod::VecI8,
-                                        "i16" => SerializationMethod::VecI16,
-                                        "i32" => SerializationMethod::VecI32,
-                                        "i64" => SerializationMethod::VecI64,
-                                        "f32" => SerializationMethod::VecF32,
-                                        "f64" => SerializationMethod::VecF64,
-                                        "bool" => SerializationMethod::VecBool,
-                                        "char" => SerializationMethod::VecChar,
-                                        "String" => SerializationMethod::VecString,
-                                        _ => SerializationMethod::Fallback,
-                                    };
-                                }
+                        if let Some(syn::GenericArgument::Type(syn::Type::Path(inner_path))) =
+                            args.args.first()
+                        {
+                            if let Some(inner_segment) = inner_path.path.segments.last() {
+                                return match inner_segment.ident.to_string().as_str() {
+                                    "u8" => SerializationMethod::VecU8,
+                                    "u16" => SerializationMethod::VecU16,
+                                    "u32" => SerializationMethod::VecU32,
+                                    "u64" => SerializationMethod::VecU64,
+                                    "i8" => SerializationMethod::VecI8,
+                                    "i16" => SerializationMethod::VecI16,
+                                    "i32" => SerializationMethod::VecI32,
+                                    "i64" => SerializationMethod::VecI64,
+                                    "f32" => SerializationMethod::VecF32,
+                                    "f64" => SerializationMethod::VecF64,
+                                    "bool" => SerializationMethod::VecBool,
+                                    "char" => SerializationMethod::VecChar,
+                                    "String" => SerializationMethod::VecString,
+                                    _ => SerializationMethod::Fallback,
+                                };
                             }
                         }
                     }

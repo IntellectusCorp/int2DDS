@@ -49,6 +49,7 @@ pub struct QueryCondition {
     query_parameters: Arc<Mutex<Vec<String>>>,
     pub(crate) parsed_expression: Expression,
     datareader: Option<Weak<dyn DataReaderInternal<Qos = DataReaderQos>>>,
+    #[allow(clippy::type_complexity)]
     waitset_callback: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
 }
 
