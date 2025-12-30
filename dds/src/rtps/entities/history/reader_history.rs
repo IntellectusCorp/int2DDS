@@ -109,18 +109,10 @@ impl ReaderHistoryCache {
     /// Add CacheChange to ReaderHistoryCache.
     /// This takes mutex-wrapped CacheChange as input to set instance handle before making it immutable on the DataReader's side.
     pub(crate) fn add_change(&mut self, a_change: CacheChange) -> RtpsResult<Arc<CacheChange>> {
-        if !self.is_builtin() {
-            // This can be modified by DataReader so wrap with mutex first.
-            let mutex_wrapped = Arc::new(Mutex::new(a_change));
-
-            // Add to DataReaderHistory
-            if let Some(datareader_cache_weak) = &self.datareader_cache {
-                let datareader_cache_arc = datareader_cache_weak.upgrade().ok_or_else(|| {
-                    RtpsError::new(
-                        RtpsErrorCode::ArcUpgradeError,
-                        "Failed to upgrade DataReader cache Weak",
-                    )
-                })?;
+        if let Some(datareader_cache_weak) = &self.datareader_cache {
+            if let Some(datareader_cache_arc) = datareader_cache_weak.upgrade() {
+                // This can be modified by DataReader so wrap with mutex first.
+                let mutex_wrapped = Arc::new(Mutex::new(a_change));
 
                 let removed_cache: Option<Arc<CacheChange>> = match datareader_cache_arc.lock() {
                     Ok(mut datareader_cache) => {
@@ -149,15 +141,13 @@ impl ReaderHistoryCache {
                 let immutable_change = Arc::new(change_guard.clone());
 
                 self.changes.push(immutable_change.clone());
-                Ok(immutable_change)
-            } else {
-                Err(RtpsError::new(
-                    RtpsErrorCode::DataReaderCacheNotSet,
-                    "DataReader cache is not set for ReaderHistoryCache",
-                ))
+                return Ok(immutable_change);
             }
-        } else {
-            // Built-in endpoint not connected to DDS entity, Resource limits & History QoS not applied
+        }
+
+        // No DataReader cache connected (builtin endpoint without DDS entity or weak reference expired)
+        if self.is_builtin() {
+            // Built-in endpoint: Resource limits & History QoS not applied
             // Therefore arbitrarily limit size
             if self.changes.len() >= BUILTIN_ENDPOINT_HISTORYCACHE_CAPACITY {
                 self.changes.remove(0);
@@ -166,6 +156,12 @@ impl ReaderHistoryCache {
             let immutable_change = Arc::new(a_change);
             self.changes.push(immutable_change.clone());
             Ok(immutable_change)
+        } else {
+            // Non-builtin endpoint must have DataReader cache
+            Err(RtpsError::new(
+                RtpsErrorCode::DataReaderCacheNotSet,
+                "DataReader cache is not set for ReaderHistoryCache",
+            ))
         }
     }
 }
