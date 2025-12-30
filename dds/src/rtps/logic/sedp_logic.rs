@@ -1411,7 +1411,7 @@ impl SedpLogic {
             random_range(0..10000)
         );
 
-        let participant = Arc::new(participant.clone());
+        let participant = participant.clone();
         let message = Arc::new(message);
         if let Ok(timer_handler) = self.timer_handler.lock() {
             timer_handler.add_timer(
@@ -1423,7 +1423,7 @@ impl SedpLogic {
                     let message = message.clone();
                     move || {
                         let sending_handler =
-                            SendingHandler::get_instance((*participant).clone(), None, None);
+                            SendingHandler::get_instance(participant.clone(), None, None);
                         sending_handler.push_message_and_wake((*message).clone());
                     }
                 },
