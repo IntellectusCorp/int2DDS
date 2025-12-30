@@ -11,12 +11,13 @@ use crate::{
         TopicDataQosPolicy, TransportPriorityQosPolicy,
     },
     rtps::common::guid::Guid,
-    topic::qos::TopicQos,
+    topic::{qos::TopicQos, DdsType},
 };
 
 use super::builtin_topic_key::BuiltinTopicKey;
 
-#[derive(Debug)]
+#[derive(DdsType)]
+#[dds_type(crate_path = "crate", no_default)]
 pub struct TopicBuiltinTopicData {
     key: BuiltinTopicKey,
     name: String,

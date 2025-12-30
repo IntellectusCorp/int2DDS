@@ -6,9 +6,9 @@
 //! These types are used in QoS policies (deadlines, liveliness lease duration), timeout
 //! parameters for blocking operations, and timestamping of data samples.
 
+use crate::dcps::topic::type_support::DdsType;
 use const_default::ConstDefault;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
-use speedy::{Context, Readable, Writable, Writer};
 use std::{
     borrow::Borrow,
     cmp::Ordering,
@@ -17,9 +17,8 @@ use std::{
 
 use super::error::{DdsError, DdsResult};
 
-#[derive(
-    Debug, Default, ConstDefault, Clone, Copy, PartialEq, Eq, Readable, Deserialize, Serialize,
-)]
+#[derive(DdsType, ConstDefault, Copy, Eq, Deserialize, Serialize)]
+#[dds_type(crate_path = "crate")]
 pub struct Duration {
     #[serde(deserialize_with = "deserialize_duration_field")]
     #[serde(serialize_with = "serialize_duration_sec")]
@@ -256,18 +255,7 @@ impl std::ops::Div<f64> for Duration {
 
 impl PartialOrd for Duration {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        if self.is_infinite() && other.is_infinite() {
-            return Some(Ordering::Equal);
-        } else if self.is_infinite() {
-            return Some(Ordering::Greater);
-        } else if other.is_infinite() {
-            return Some(Ordering::Less);
-        }
-
-        match self.sec.cmp(&other.sec) {
-            Ordering::Equal => self.nanosec.partial_cmp(&other.nanosec),
-            ordering => Some(ordering),
-        }
+        Some(self.cmp(other))
     }
 }
 
@@ -285,15 +273,6 @@ impl Ord for Duration {
             Ordering::Equal => self.nanosec.cmp(&other.nanosec),
             ordering => ordering,
         }
-    }
-}
-
-impl<C: Context> Writable<C> for Duration {
-    fn write_to<T: ?Sized + Writer<C>>(&self, writer: &mut T) -> Result<(), C::Error> {
-        writer.write_value(&self.sec)?;
-        writer.write_value(&self.nanosec)?;
-
-        Ok(())
     }
 }
 
@@ -424,14 +403,12 @@ impl Time {
         }
 
         let mut elapsed_sec = now.sec - self.sec;
-        let elapsed_nsec;
-
-        if now.nanosec >= self.nanosec {
-            elapsed_nsec = now.nanosec - self.nanosec;
+        let elapsed_nsec = if now.nanosec >= self.nanosec {
+            now.nanosec - self.nanosec
         } else {
             elapsed_sec -= 1;
-            elapsed_nsec = 1_000_000_000 + now.nanosec - self.nanosec;
-        }
+            1_000_000_000 + now.nanosec - self.nanosec
+        };
 
         Ok(Duration::new(elapsed_sec, elapsed_nsec))
     }
@@ -537,18 +514,7 @@ impl From<Time> for Duration {
 
 impl PartialOrd for Time {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        if self.is_infinite() && other.is_infinite() {
-            return Some(Ordering::Equal);
-        } else if self.is_infinite() {
-            return Some(Ordering::Greater);
-        } else if other.is_infinite() {
-            return Some(Ordering::Less);
-        }
-
-        match self.sec.cmp(&other.sec) {
-            Ordering::Equal => self.nanosec.partial_cmp(&other.nanosec),
-            ordering => Some(ordering),
-        }
+        Some(self.cmp(other))
     }
 }
 

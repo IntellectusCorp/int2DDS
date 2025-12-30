@@ -105,6 +105,7 @@ impl WString {
     }
 
     /// Create a new WString from a &str
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Result<Self, std::string::FromUtf8Error> {
         Ok(Self { inner: s.to_string() })
     }

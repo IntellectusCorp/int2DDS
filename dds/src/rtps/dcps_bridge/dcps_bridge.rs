@@ -204,6 +204,7 @@ impl DcpsBridge {
         Ok((unicast_locator_list, multicast_locator_list))
     }
 
+    #[allow(clippy::type_complexity)]
     pub(crate) fn create_rtps_writer(
         &mut self,
         mut publication_builtin_topic_data: PublicationBuiltinTopicData,
@@ -349,6 +350,7 @@ impl DcpsBridge {
         Ok(())
     }
 
+    #[allow(clippy::type_complexity)]
     pub(crate) fn create_rtps_reader(
         &mut self,
         mut subscription_builtin_topic_data: SubscriptionBuiltinTopicData,
@@ -482,6 +484,7 @@ impl DcpsBridge {
     }
 
     /// send sedp message to remote participants and match pending endpoints
+    #[allow(clippy::too_many_arguments)]
     fn send_sedp_message_and_match<F, G, T, E>(
         &self,
         cache_change: Arc<CacheChange>,

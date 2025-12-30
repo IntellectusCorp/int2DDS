@@ -185,6 +185,7 @@ impl SedpLogic {
         }
     }
 
+    #[allow(clippy::clone_on_copy)]
     pub(crate) fn start_sedp(
         &self,
         discovery_multicast_listener: Option<UdpListener>,
@@ -196,6 +197,8 @@ impl SedpLogic {
         let mut discovery_multicast_listening_task =
             DiscoveryMulticastListeningTask::new(discovery_multicast_listener, participant.clone());
 
+        let participant_guid = participant.guid().clone();
+
         // multicast listening
         let multicast_handle = thread::Builder::new()
             .name("discovery_traffic_multicast_listening".to_string())
@@ -203,12 +206,18 @@ impl SedpLogic {
                 // Register thread name for monitoring
                 {
                     use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::register_current_thread_name(
+                    ThreadMonitor::register_current_thread_name_with_guid(
                         "discovery_traffic_multicast_listening",
+                        &participant_guid,
                     );
                 }
 
                 let _ = discovery_multicast_listening_task.multicast_listening();
+                // Cleanup thread from registry before exit
+                {
+                    use crate::rtps::task::thread_monitor::ThreadMonitor;
+                    ThreadMonitor::remove_map_guard();
+                }
                 debug!("discovery multicast listening thread finished");
             })
             .expect("Failed to create discovery multicast listening thread");
@@ -225,18 +234,25 @@ impl SedpLogic {
         );
 
         // unicast listening
+        let unicast_guid = participant_guid;
         let unicast_handle = thread::Builder::new()
             .name("discovery_traffic_unicast_listening".to_string())
             .spawn(move || {
                 // Register thread name for monitoring
                 {
                     use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::register_current_thread_name(
+                    ThreadMonitor::register_current_thread_name_with_guid(
                         "discovery_traffic_unicast_listening",
+                        &unicast_guid,
                     );
                 }
 
                 let _ = discovery_unicast_listening_task.unicast_listening();
+                // Cleanup thread from registry before exit
+                {
+                    use crate::rtps::task::thread_monitor::ThreadMonitor;
+                    ThreadMonitor::remove_map_guard();
+                }
                 debug!("discovery unicast listening thread finished");
             })
             .expect("Failed to create discovery unicast listening thread");
@@ -539,6 +555,7 @@ impl SedpLogic {
         Ok(())
     }
 
+    #[allow(clippy::option_map_unit_fn)]
     pub(crate) fn handle_stateful_writer_subscription(
         &self,
         writer: &StatefulWriter,
@@ -667,6 +684,7 @@ impl SedpLogic {
         Ok(())
     }
 
+    #[allow(clippy::option_map_unit_fn)]
     pub(crate) fn handle_stateless_writer_subscription(
         &self,
         writer: &StatelessWriter,
@@ -909,6 +927,7 @@ impl SedpLogic {
         Ok(())
     }
 
+    #[allow(clippy::option_map_unit_fn)]
     pub(crate) fn handle_stateful_reader_publication(
         &self,
         reader: &StatefulReader,
@@ -1020,6 +1039,7 @@ impl SedpLogic {
         Ok(())
     }
 
+    #[allow(clippy::option_map_unit_fn)]
     pub(crate) fn handle_stateless_reader_publication(
         &self,
         reader: &StatelessReader,
@@ -1624,7 +1644,7 @@ impl SedpLogic {
 
         for remote_participant_data in remote_participant_datas_guard.iter() {
             for locator in remote_participant_data.metatraffic_unicast_locator_list() {
-                self.send_to_single_locator(&buffer, locator.clone(), message_type)?;
+                self.send_to_single_locator(buffer, locator.clone(), message_type)?;
             }
         }
 
@@ -2031,16 +2051,16 @@ impl UnicastMessageProcessor for SedpLogic {
 
             writer_proxy.increase_acknack_count();
             let acknack_count = writer_proxy.acknack_count();
-            return self.send_sedp_acknack_message(
+            self.send_sedp_acknack_message(
                 remote_writer_guid,
                 heartbeat.reader_id,
                 heartbeat.writer_id,
                 missing_changes,
                 acknack_count,
                 bitmap_base,
-            );
+            )
         } else {
-            return Ok(());
+            Ok(())
         }
     }
 
@@ -2193,7 +2213,7 @@ mod tests {
     use std::{sync::Arc, thread};
 
     use crate::rtps::{
-        entities::participant::Participant,
+        entities::{entity::Entity, participant::Participant},
         logic::spdp_logic::SpdpLogic,
         task::{
             discovery_traffic::{
@@ -2246,8 +2266,9 @@ mod tests {
                 // Register thread name for monitoring
                 {
                     use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::register_current_thread_name(
+                    ThreadMonitor::register_current_thread_name_with_guid(
                         "discovery_traffic_multicast_listening",
+                        &participant.guid(),
                     );
                 }
 
@@ -2291,6 +2312,7 @@ mod tests {
             socket.discovery_multicast_listener(),
             participant.clone(),
         );
+        let participant_guid = participant.clone().guid();
         //multicast listening
         thread::Builder::new()
             .name("discovery_traffic_multicast_listening".to_string())
@@ -2298,8 +2320,9 @@ mod tests {
                 // Register thread name for monitoring
                 {
                     use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::register_current_thread_name(
+                    ThreadMonitor::register_current_thread_name_with_guid(
                         "discovery_traffic_multicast_listening",
+                        &participant_guid,
                     );
                 }
 

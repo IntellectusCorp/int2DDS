@@ -108,6 +108,8 @@ impl UserLogic {
             participant.clone(),
         );
 
+        let participant_guid = participant.guid();
+
         // unicast listening
         let unicast_handle = thread::Builder::new()
             .name("user_traffic_unicast_listening".to_string())
@@ -115,10 +117,18 @@ impl UserLogic {
                 // Register thread name for monitoring
                 {
                     use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::register_current_thread_name("user_traffic_unicast_listening");
+                    ThreadMonitor::register_current_thread_name_with_guid(
+                        "user_traffic_unicast_listening",
+                        &participant_guid,
+                    );
                 }
 
                 let _ = user_unicast_listening_task.unicast_listening();
+                // Cleanup thread from registry before exit
+                {
+                    use crate::rtps::task::thread_monitor::ThreadMonitor;
+                    ThreadMonitor::remove_map_guard();
+                }
                 debug!("user unicast listening thread finished");
             })
             .expect("Failed to create user unicast listening thread");
@@ -681,7 +691,7 @@ impl UserLogic {
             )
         })?;
 
-        let mut reader_proxy = reader_proxies
+        let reader_proxy = reader_proxies
             .iter_mut()
             .find(|proxy| proxy.remote_reader_guid() == remote_reader_guid)
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
@@ -699,7 +709,7 @@ impl UserLogic {
             return Ok(());
         }
 
-        self.send_heartbeat_to_a_reader_proxy_inner(stateful_writer, &mut reader_proxy)?;
+        self.send_heartbeat_to_a_reader_proxy_inner(stateful_writer, reader_proxy)?;
 
         Ok(())
     }
@@ -745,10 +755,10 @@ impl UserLogic {
             writer.increase_heartbeat_count();
             Ok(())
         } else {
-            return Err(RtpsError::new(
+            Err(RtpsError::new(
                 RtpsErrorCode::Io,
                 "Failed to create heartbeat message for reader proxy",
-            ));
+            ))
         }
     }
 }
@@ -776,7 +786,7 @@ impl UserLogic {
                 format!("Failed to acquire writer_proxies lock: {}", e),
             )
         })?;
-        let mut writer_proxy = writer_proxies_guard
+        let writer_proxy = writer_proxies_guard
             .iter_mut()
             .find(|wp| wp.remote_writer_guid() == remote_writer_guid)
             .ok_or_else(|| {
@@ -785,7 +795,7 @@ impl UserLogic {
 
         if writer_proxy.expected_sn() == SequenceNumber::UNKNOWN {
             self.send_acknack_to_writer_proxy_inner(
-                &mut writer_proxy,
+                writer_proxy,
                 stateful_reader,
                 vec![],
                 SequenceNumber::from_i64(0),

@@ -16,6 +16,7 @@ use crate::{
 };
 
 #[derive(Debug)]
+#[allow(clippy::type_complexity)]
 pub struct ReaderHistoryCache {
     owner_id: EntityId,
     changes: Vec<Arc<CacheChange>>,
@@ -60,6 +61,7 @@ impl HistoryCache for ReaderHistoryCache {
 }
 
 #[allow(dead_code)]
+#[allow(clippy::type_complexity)]
 impl ReaderHistoryCache {
     pub(crate) fn new(
         owner_id: EntityId,

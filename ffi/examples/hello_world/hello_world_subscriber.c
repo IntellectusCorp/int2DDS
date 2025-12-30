@@ -21,34 +21,6 @@
 
 #include "int2dds-ffi.h"
 
-/* Simple HelloWorld data structure */
-typedef struct {
-    uint32_t index;
-    char message[256];
-} HelloWorld;
-
-/* Deserialize raw bytes to HelloWorld */
-static int deserialize_hello_world(const uint8_t* buffer, size_t size, HelloWorld* data) {
-    if (size < sizeof(uint32_t) + 1) {
-        return -1;
-    }
-
-    /* Read index (little-endian) */
-    data->index = (uint32_t)buffer[0] |
-                  ((uint32_t)buffer[1] << 8) |
-                  ((uint32_t)buffer[2] << 16) |
-                  ((uint32_t)buffer[3] << 24);
-
-    /* Read message */
-    size_t msg_len = size - sizeof(uint32_t);
-    if (msg_len >= sizeof(data->message)) {
-        msg_len = sizeof(data->message) - 1;
-    }
-    memcpy(data->message, buffer + 4, msg_len);
-    data->message[msg_len] = '\0';
-
-    return 0;
-}
 
 int main(int argc, char* argv[]) {
     Int2DdsRet ret;
@@ -58,6 +30,8 @@ int main(int argc, char* argv[]) {
     Int2DdsTopic* topic = NULL;
     Int2DdsDataReader* reader = NULL;
     Int2DdsDataReaderQos* qos = NULL;
+    Int2DdsTypeDescriptor* type_desc = NULL;
+    Int2DdsData* data = NULL;
 
     int32_t domain_id = 0;
     int use_reliable = 0;  /* 0 = best effort, 1 = reliable */
@@ -96,8 +70,28 @@ int main(int argc, char* argv[]) {
         goto cleanup;
     }
 
-    /* Create topic */
-    ret = int2dds_create_topic(participant, "HelloWorld", "HelloWorld", NULL, &topic);
+    /* Create type descriptor for HelloWorld */
+    ret = int2dds_type_descriptor_create("HelloWorld", &type_desc);
+    if (ret != INT2DDS_RET_OK) {
+        fprintf(stderr, "Failed to create type descriptor: %d\n", ret);
+        goto cleanup;
+    }
+
+    /* Add fields to type descriptor */
+    ret = int2dds_type_descriptor_add_u32(type_desc, "index", false);
+    if (ret != INT2DDS_RET_OK) {
+        fprintf(stderr, "Failed to add index field: %d\n", ret);
+        goto cleanup;
+    }
+
+    ret = int2dds_type_descriptor_add_string(type_desc, "message", 256, false);
+    if (ret != INT2DDS_RET_OK) {
+        fprintf(stderr, "Failed to add message field: %d\n", ret);
+        goto cleanup;
+    }
+
+    /* Create topic with type descriptor */
+    ret = int2dds_create_topic(participant, "hello_world_topic", type_desc, NULL, &topic);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create topic: %d\n", ret);
         goto cleanup;
@@ -162,23 +156,39 @@ int main(int argc, char* argv[]) {
     printf("Publisher matched! (total: %d, current: %d)\n", total_count, current_count);
     printf("Waiting for messages...\n\n");
 
+    /* Create data container */
+    ret = int2dds_data_create(type_desc, &data);
+    if (ret != INT2DDS_RET_OK) {
+        fprintf(stderr, "Failed to create data: %d\n", ret);
+        goto cleanup;
+    }
+
     /* Receive messages */
-    uint8_t buffer[512];
-    size_t data_size;
     bool valid_data;
-    HelloWorld data;
+    uint32_t index;
+    char message[256];
+    size_t message_len;
     int received_count = 0;
 
     while (received_count < 100) {
-        ret = int2dds_take(reader, buffer, sizeof(buffer), &data_size, &valid_data);
+        ret = int2dds_take(reader, data, &valid_data);
 
         if (ret == INT2DDS_RET_OK && valid_data) {
-            if (deserialize_hello_world(buffer, data_size, &data) == 0) {
-                printf("[%u] Received: %s\n", data.index, data.message);
-                received_count++;
-            } else {
-                fprintf(stderr, "Failed to deserialize data\n");
+            /* Get field values */
+            ret = int2dds_data_get_u32(data, "index", &index);
+            if (ret != INT2DDS_RET_OK) {
+                fprintf(stderr, "Failed to get index: %d\n", ret);
+                continue;
             }
+
+            ret = int2dds_data_get_string(data, "message", message, sizeof(message), &message_len);
+            if (ret != INT2DDS_RET_OK) {
+                fprintf(stderr, "Failed to get message: %d\n", ret);
+                continue;
+            }
+
+            printf("[%u] Received: %s\n", index, message);
+            received_count++;
         } else if (ret == INT2DDS_RET_NO_DATA) {
             /* No data available, wait and try again */
             sleep_ms(100);
@@ -194,6 +204,9 @@ cleanup:
         int2dds_waitset_detach_datareader(waitset, reader);
         int2dds_waitset_delete(waitset);
     }
+    if (data) {
+        int2dds_data_delete(data);
+    }
     if (reader) {
         int2dds_delete_datareader(reader);
     }
@@ -202,6 +215,9 @@ cleanup:
     }
     if (topic) {
         int2dds_delete_topic(topic);
+    }
+    if (type_desc) {
+        int2dds_type_descriptor_delete(type_desc);
     }
     if (subscriber) {
         int2dds_delete_subscriber(subscriber);

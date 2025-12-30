@@ -26,6 +26,7 @@ use super::condition::Condition;
 
 pub struct GuardCondition {
     trigger_value: Arc<AtomicBool>,
+    #[allow(clippy::type_complexity)]
     waitset_callback: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
 }
 
