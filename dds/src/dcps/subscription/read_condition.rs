@@ -110,6 +110,7 @@ pub struct ReadCondition {
     instance_state_mask: Vec<InstanceStateKind>,
     sample_state_mask: Vec<SampleStateKind>,
     datareader: Option<Weak<dyn DataReaderInternal<Qos = DataReaderQos>>>,
+    #[allow(clippy::type_complexity)]
     waitset_callback: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
 }
 
@@ -132,7 +133,7 @@ impl PartialEq for ReadCondition {
     fn eq(&self, other: &Self) -> bool {
         self.view_status_mask == other.view_status_mask
             && self.instance_state_mask == other.instance_state_mask
-            && self.view_status_mask == other.view_status_mask
+            && self.sample_state_mask == other.sample_state_mask
     }
 }
 impl Eq for ReadCondition {}

@@ -9,6 +9,7 @@ license = "Apache-2.0"
 repository = "https://github.com/IntellectusCorp/int2DDS"
 homepage = "https://github.com/IntellectusCorp/int2DDS"
 edition = "2021"
+rust-version = "1.89.0"
 
 [profile.dev]
 opt-level = 1

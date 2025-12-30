@@ -113,6 +113,7 @@ impl MessageReceiver {
     }
 
     // 8.3.6.4 Change in state of Receiver
+    #[allow(clippy::wrong_self_convention)]
     pub(crate) fn from_header(mut self, header: Header) {
         self.source_guid_prefix = header.guid_prefix();
         self.source_version = header.version();
@@ -121,6 +122,7 @@ impl MessageReceiver {
     }
 
     // 8.3.8.8.4 Change in state of Receiver
+    #[allow(clippy::wrong_self_convention)]
     pub(crate) fn from_destination(&mut self, info_destination: &InfoDestination) {
         // If there is a specified destination other than the current participant's GUID prefix, set the destination to that GUID prefix
         if info_destination.guid_prefix() != GUIDPREFIX_UNKNOWN {
@@ -133,6 +135,7 @@ impl MessageReceiver {
     }
 
     // 8.3.8.9.4 Change in state of Receiver
+    #[allow(clippy::wrong_self_convention)]
     pub(crate) fn from_reply(
         &mut self,
         info_reply_header: &SubmessageHeader,
@@ -147,6 +150,7 @@ impl MessageReceiver {
     }
 
     // 9.4.5.14
+    #[allow(clippy::wrong_self_convention)]
     pub(crate) fn from_reply_ip4(
         &mut self,
         info_reply_ip4_header: &SubmessageHeader,
@@ -163,6 +167,7 @@ impl MessageReceiver {
     }
 
     // 8.3.8.10.4 Change in state of Receiver
+    #[allow(clippy::wrong_self_convention)]
     pub(crate) fn from_source(&mut self, info_source: &InfoSource) {
         self.source_guid_prefix = info_source.guid_prefix();
         self.source_version = info_source.protocol_version();
@@ -172,6 +177,7 @@ impl MessageReceiver {
         self.have_timestamp = false
     }
 
+    #[allow(clippy::wrong_self_convention)]
     pub(crate) fn from_timestamp(
         &mut self,
         info_timestamp_header: &SubmessageHeader,

@@ -184,6 +184,7 @@ pub struct DataReader<Foo> {
     sample_lost_status: Arc<Mutex<SampleLostStatus>>,
     deadline_monitor: Arc<Mutex<Option<DeadlineMonitor>>>,
     change_callback: Option<Arc<dyn Fn(Arc<CacheChange>) + Send + Sync>>,
+    #[allow(clippy::type_complexity)]
     status_callback: Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>,
     _phantom: PhantomData<fn() -> Foo>, // Temporary
     datareader_cache: Arc<Mutex<DataReaderHistoryCache<Foo>>>,
@@ -263,6 +264,7 @@ impl<Foo: 'static + Clone + Debug> Clone for DataReader<Foo> {
 // When the user goes out of scope and auto-drops without calling delete_datareader,
 // it should not be deleted from Subscriber.
 impl<Foo> Drop for DataReader<Foo> {
+    #[allow(clippy::match_result_ok)]
     fn drop(&mut self) {
         // Builtin entities are managed separately, skip orphan handling
         if self.is_builtin {
@@ -271,7 +273,7 @@ impl<Foo> Drop for DataReader<Foo> {
 
         // Only handle drop for the last reference (not clones)
         if let Some(guard) = self.self_ref.lock().ok() {
-            if let Some(ref self_arc) = guard.as_ref() {
+            if let Some(self_arc) = guard.as_ref() {
                 if Arc::strong_count(self_arc) > 1 {
                     return;
                 }
@@ -947,6 +949,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         Ok(rtps_reader)
     }
 
+    #[allow(clippy::type_complexity)]
     pub(crate) fn create_status_callback(
         &self,
     ) -> DdsResult<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>> {
@@ -1408,9 +1411,9 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
             })?;
             let res = cache_guard.remove_change(a_change);
             if res.is_ok() {
-                return Ok(());
+                Ok(())
             } else {
-                return Err(DdsError::Error(res.err().unwrap().to_string()));
+                Err(DdsError::Error(res.err().unwrap().to_string()))
             }
         } else {
             Err(DdsError::Error("RTPS Reader is not initialized".to_string()))
@@ -1500,6 +1503,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                             ))?
                             .data_value(),
                     )?;
+                    #[allow(clippy::disallowed_names)]
                     let foo = data
                         .downcast::<Foo>()
                         .map(|boxed| *boxed)
@@ -1575,6 +1579,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 }
 
 impl<Foo: DdsType> DataReader<Foo> {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         is_builtin: bool,
         guid: Guid,
@@ -2033,6 +2038,7 @@ impl<Foo: DdsType> DataReader<Foo> {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn read_or_take(
         &self,
         max_samples: i32,
@@ -2057,7 +2063,7 @@ impl<Foo: DdsType> DataReader<Foo> {
 
         self.is_enabled()?;
 
-        if max_samples == 0 || max_samples > i32::MAX {
+        if max_samples == 0 {
             log::warn!("BadParameter: max_samples={}", max_samples);
             return Err(DdsError::BadParameter);
         }
