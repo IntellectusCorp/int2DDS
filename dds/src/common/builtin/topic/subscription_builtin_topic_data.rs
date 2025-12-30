@@ -13,10 +13,10 @@ use crate::{
     },
     rtps::common::{guid::Guid, locator::Locator, types::SerializedData},
     subscription::qos::{DataReaderQos, SubscriberQos},
-    topic::qos::TopicQos,
+    topic::{qos::TopicQos, DdsType},
 };
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(DdsType, Eq)]
+#[dds_type(crate_path = "crate", no_default)]
 pub struct SubscriptionBuiltinTopicData {
     endpoint_guid: Guid,
     key: BuiltinTopicKey,

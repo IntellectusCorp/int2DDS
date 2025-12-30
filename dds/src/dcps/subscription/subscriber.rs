@@ -41,7 +41,10 @@ use crate::{
         status::StatusMask,
         status_condition::StatusCondition,
     },
-    rtps::common::{entity_kind::EntityKind, guid::Guid},
+    rtps::{
+        common::{entity_kind::EntityKind, guid::Guid},
+        entities::reader::Reader,
+    },
     topic::{qos::TopicQos, topic_description::TopicDescription},
     DdsType,
 };
@@ -56,18 +59,28 @@ use super::{
 
 #[derive(Clone)]
 pub struct Subscriber {
+    // Indicates whether this entity is a built-in entity.
+    //
+    // Built-in entities are managed internally and have restricted operations:
+    // - Cannot be deleted (delete_subscriber)
+    // - Cannot modify QoS (set_qos)
+    // - Cannot create/delete child DataReaders (create_datareader, delete_datareader)
+    //
+    // See also: DomainParticipant::get_builtin_subscriber()
+    is_builtin: bool,
     guid: Guid,
     qos: Arc<Mutex<SubscriberQos>>,
     listener: Arc<RwLock<Option<Arc<dyn SubscriberListener>>>>,
     mask: Arc<RwLock<StatusMask>>,
     status_condition: Arc<Mutex<StatusCondition<SubscriberQos>>>,
     pub(crate) self_ref: Option<Arc<Subscriber>>,
-    enabled: Arc<AtomicBool>,
+    pub(crate) enabled: Arc<AtomicBool>,
     deleted: Arc<AtomicBool>,
     readers_by_topic_name:
         Arc<Mutex<HashMap<String, Vec<Weak<dyn DataReaderInternal<Qos = DataReaderQos>>>>>>,
     readers_by_topic_handle:
         Arc<Mutex<HashMap<InstanceHandle, Vec<Weak<dyn DataReaderInternal<Qos = DataReaderQos>>>>>>,
+    builtin_readers: Arc<Mutex<Vec<Arc<dyn DataReaderInternal<Qos = DataReaderQos>>>>>,
     orphaned_readers: Arc<Mutex<Vec<Arc<dyn DataReaderInternal<Qos = DataReaderQos>>>>>,
     default_datareader_qos: Arc<Mutex<DataReaderQos>>,
     participant: Option<Weak<DomainParticipant>>,
@@ -100,6 +113,11 @@ impl Eq for Subscriber {}
 
 impl Drop for Subscriber {
     fn drop(&mut self) {
+        // Builtin entities are managed separately, skip orphan handling
+        if self.is_builtin {
+            return;
+        }
+
         // Only handle drop for the last reference (not clones)
         if let Some(ref self_arc) = self.self_ref {
             if Arc::strong_count(self_arc) > 1 {
@@ -144,6 +162,7 @@ impl DomainEntity for Subscriber {}
 
 impl Subscriber {
     pub(crate) fn new(
+        is_builtin: bool,
         qos: SubscriberQos,
         listener: Option<Arc<dyn SubscriberListener>>,
         mask: StatusMask,
@@ -151,6 +170,7 @@ impl Subscriber {
         participant: &Arc<DomainParticipant>,
     ) -> Self {
         let mut subscriber = Self {
+            is_builtin,
             guid: handle.to_guid(),
             qos: Arc::new(Mutex::new(qos)),
             listener: Arc::new(RwLock::new(listener)),
@@ -161,6 +181,7 @@ impl Subscriber {
             deleted: Arc::new(AtomicBool::new(false)),
             readers_by_topic_name: Arc::new(Mutex::new(HashMap::new())),
             readers_by_topic_handle: Arc::new(Mutex::new(HashMap::new())),
+            builtin_readers: Arc::new(Mutex::new(Vec::new())),
             orphaned_readers: Arc::new(Mutex::new(Vec::new())),
             default_datareader_qos: Arc::new(Mutex::new(DataReaderQos::default())),
             participant: Some(Arc::downgrade(participant)),
@@ -173,6 +194,11 @@ impl Subscriber {
         }
         subscriber.self_ref = Some(subscriber_arc); // Without Arc, the new() function ends and memory is freed. StatusCondition's entity field would return None.
         subscriber
+    }
+
+    /// Returns whether this subscriber is a built-in entity.
+    pub(crate) fn is_builtin(&self) -> bool {
+        self.is_builtin
     }
 
     /// Creates a new `DataReader` for receiving data of type `Foo` from the specified topic.
@@ -216,6 +242,9 @@ impl Subscriber {
         listener: Option<Arc<dyn DataReaderListener<Foo = Foo>>>,
         mask: StatusMask,
     ) -> DdsResult<DataReader<Foo>> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
 
         let _ = self.cleanup_dead_readers();
@@ -249,8 +278,17 @@ impl Subscriber {
 
         drop(dcps_bridge);
 
-        let datareader =
-            DataReader::new(guid, type_support, topic_description, qos, listener, mask, self_ref)?;
+        let datareader = DataReader::new(
+            false,
+            guid,
+            type_support,
+            topic_description,
+            qos,
+            listener,
+            mask,
+            self_ref,
+            None, // Non-builtin: RTPS reader created in enable_rtps_entities()
+        )?;
 
         if let Ok(()) = self.is_enabled() {
             if self.get_qos()?.entity_factory.autoenable_created_entities {
@@ -317,14 +355,74 @@ impl Subscriber {
         listener: Option<Arc<dyn DataReaderListener<Foo = Foo>>>,
         mask: StatusMask,
     ) -> DdsResult<DataReader<Foo>> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         let qos = self.get_datareader_qos_from_profile(qos_path)?;
         self.create_datareader::<Foo>(topic_description, qos, listener, mask)
+    }
+
+    pub(crate) fn create_builtin_datareader<Foo: DdsType>(
+        &self,
+        topic_description: &dyn TopicDescription,
+        qos: DataReaderQos,
+        rtps_reader: Arc<dyn Reader + Send + Sync>,
+    ) -> DdsResult<DataReader<Foo>> {
+        if !self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
+
+        let type_support =
+            self.get_participant()?.find_typesupport(topic_description.get_type_name());
+        let type_support =
+            type_support.ok_or(DdsError::Error("TypeSupport not found".to_string()))?;
+
+        let self_ref = self
+            .self_ref
+            .as_ref()
+            .ok_or(DdsError::Error("Subscriber not initialized".to_string()))?;
+        let guid = rtps_reader.guid();
+
+        let datareader = DataReader::new(
+            true,
+            guid,
+            type_support,
+            topic_description,
+            qos,
+            None,
+            StatusMask::all(),
+            self_ref,
+            Some(rtps_reader.clone()), // builtin endpoint(reader)
+        )?;
+
+        // Enable if subscriber is enabled and autoenable is set (same as create_datareader)
+        if let Ok(()) = self.is_enabled() {
+            if self.get_qos()?.entity_factory.autoenable_created_entities {
+                datareader.enable()?;
+            }
+        }
+
+        // Store builtin reader with strong reference (not in readers_by_topic_name/handle)
+        let reader_ops: Arc<dyn DataReaderInternal<Qos = DataReaderQos>> = datareader
+            .self_ref
+            .lock()
+            .map_err(|e| DdsError::Error(e.to_string()))?
+            .as_ref()
+            .ok_or(DdsError::Error("DataReader not initialized".to_string()))?
+            .clone();
+
+        self.builtin_readers.lock().map_err(|e| DdsError::Error(e.to_string()))?.push(reader_ops);
+
+        Ok(datareader)
     }
 
     pub fn delete_datareader<Foo: 'static + Clone + Debug>(
         &self,
         datareader: DataReader<Foo>,
     ) -> DdsResult<()> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
         let arc_reader: Arc<dyn DataReaderInternal<Qos = DataReaderQos>> =
             Arc::new(datareader.clone());
@@ -499,6 +597,9 @@ impl Subscriber {
             If any of the contained entities is in a state where it cannot be deleted, this operation returns PRECONDITION_NOT_MET error.
             When delete_contained_entities returns successfully, the application is guaranteed that the Subscriber no longer contains any DataReader objects and can delete the Subscriber.
         */
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
         {
             match self.get_datareaders_internal() {
@@ -575,6 +676,25 @@ impl Subscriber {
         topic_name: &str,
     ) -> DdsResult<DataReader<Foo>> {
         self.is_deleted()?;
+
+        // For builtin subscriber, search in builtin_readers
+        if self.is_builtin {
+            let builtin_readers =
+                self.builtin_readers.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            for reader in builtin_readers.iter() {
+                if let Ok(topic) = reader.get_topic() {
+                    if topic.get_name() == topic_name {
+                        if let Some(typed_reader) =
+                            reader.as_any().downcast_ref::<DataReader<Foo>>()
+                        {
+                            return Ok(typed_reader.clone());
+                        }
+                    }
+                }
+            }
+            return Err(DdsError::Error("DataReader not found.".to_string()));
+        }
+
         let _ = self.cleanup_dead_readers();
         {
             let readers_by_topic_name =
@@ -819,6 +939,9 @@ impl Subscriber {
     }
 
     pub fn set_default_datareader_qos(&self, qos: DataReaderQos) -> DdsResult<()> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
         self.is_deleted()?;
         if qos == DATAREADER_QOS_DEFAULT {
             return self.reset_default_datareader_qos();
@@ -890,8 +1013,15 @@ impl Subscriber {
         {
             match self.readers_by_topic_name.lock() {
                 Ok(readers) => {
-                    if !readers.is_empty() {
-                        return Ok(true);
+                    // Check for non-builtin readers
+                    for weak_readers in readers.values() {
+                        for weak_reader in weak_readers {
+                            if let Some(reader) = weak_reader.upgrade() {
+                                if !reader.is_builtin() {
+                                    return Ok(true);
+                                }
+                            }
+                        }
                     }
                 }
                 Err(e) => return Err(DdsError::Error(e.to_string())),
@@ -1010,6 +1140,20 @@ impl Subscriber {
     }
 
     pub(crate) fn delete(&mut self) {
+        self.self_ref = None;
+        self.deleted.store(true, Ordering::SeqCst);
+    }
+
+    /// Cleans up builtin entities (datareaders) to break self-reference cycles.
+    /// Called during participant deletion.
+    pub(crate) fn cleanup_builtin_entities(&mut self) {
+        // Delete all builtin datareaders
+        if let Ok(mut builtin_readers) = self.builtin_readers.lock() {
+            for reader in builtin_readers.drain(..) {
+                reader.delete();
+            }
+        }
+        // Break self-reference cycle
         self.self_ref = None;
         self.deleted.store(true, Ordering::SeqCst);
     }
