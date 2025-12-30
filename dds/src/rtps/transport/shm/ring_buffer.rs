@@ -470,10 +470,8 @@ impl RingBufferReader {
         let expected_sequence = self.last_sequence + 1;
         let lost = if self.last_sequence == 0 {
             0 // First message, no loss
-        } else if msg_header.sequence >= expected_sequence {
-            msg_header.sequence - expected_sequence
         } else {
-            0 // Sequence wrapped or reset
+            msg_header.sequence.saturating_sub(expected_sequence)
         };
 
         self.last_sequence = msg_header.sequence;

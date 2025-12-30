@@ -7,6 +7,7 @@
 use crate::rtps::messages::submessage_id::SubmessageId;
 
 #[allow(dead_code)]
+#[allow(clippy::enum_variant_names)]
 pub(crate) enum SubmessageFlagType {
     EndiannessFlag,
     FinalFlag,

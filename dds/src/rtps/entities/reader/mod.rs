@@ -1,3 +1,4 @@
+#[allow(clippy::module_inception)]
 mod reader;
 mod stateful_reader;
 mod stateless_reader;

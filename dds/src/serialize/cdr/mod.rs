@@ -144,6 +144,7 @@ impl MemberHeader {
         let member_id = (header >> 16) & 0x0FFF; // member_id is bits 27-16 (12 bits)
         let length_or_flags = header & 0xFFFF; // lower 16 bits
 
+        #[allow(clippy::manual_range_patterns)]
         let (member_length, bytes_consumed) = match lc {
             0 | 1 | 2 | 3 => {
                 // LC 0-3: Direct length encoding

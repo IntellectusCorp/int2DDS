@@ -160,6 +160,7 @@ impl UpdateStatus for Topic {
 }
 
 impl Topic {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         is_builtin: bool,
         topic_name: &str,
