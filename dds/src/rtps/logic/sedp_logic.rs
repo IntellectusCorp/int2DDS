@@ -23,6 +23,7 @@ use crate::{
         },
         instance_handle::InstanceHandle,
     },
+    dcps::topic::type_support::DdsType,
     infrastructure::qos_policy::{DurabilityQosPolicyKind, QosPolicyId, ReliabilityQosPolicyKind},
     rtps::{
         builtin::{
@@ -43,6 +44,7 @@ use crate::{
             parameters::ParameterList,
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
             sequence::SequenceNumber,
+            types::ChangeKind,
         },
         entities::{
             entity::Entity,
@@ -1930,6 +1932,23 @@ impl UnicastMessageProcessor for SedpLogic {
                     )
                 })?;
 
+                if let Ok(serialized_data) = writer_data.publication_builtin_topic_data.serialize()
+                {
+                    let cache_change = CacheChange::new(
+                        ChangeKind::Alive,
+                        writer_guid,
+                        InstanceHandle::NIL,
+                        data.writer_sn,
+                        serialized_data,
+                        message_receiver.get_source_timestamp(),
+                    );
+
+                    let reader = builtin_endpoint_pair.reader();
+                    if let Ok(mut cache_guard) = reader.reader_cache().lock() {
+                        let _ = cache_guard.add_change(cache_change);
+                    }
+                }
+
                 debug!("SEDP Logic: DiscoveredWriterData: {:?}", writer_data);
                 return self.handle_publication_builtin_topic_data(
                     writer_data.publication_builtin_topic_data,
@@ -1946,6 +1965,23 @@ impl UnicastMessageProcessor for SedpLogic {
                         format!("Failed to parse DiscoveredReaderData: {}", e),
                     )
                 })?;
+
+                if let Ok(serialized_data) = reader_data.subscription_builtin_topic_data.serialize()
+                {
+                    let cache_change = CacheChange::new(
+                        ChangeKind::Alive,
+                        writer_guid,
+                        InstanceHandle::NIL,
+                        data.writer_sn,
+                        serialized_data,
+                        message_receiver.get_source_timestamp(),
+                    );
+
+                    let reader = builtin_endpoint_pair.reader();
+                    if let Ok(mut cache_guard) = reader.reader_cache().lock() {
+                        let _ = cache_guard.add_change(cache_change);
+                    }
+                }
 
                 debug!("SEDP Logic: DiscoveredReaderData: {:?}", reader_data);
                 return self.handle_subscription_builtin_topic_data(

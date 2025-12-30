@@ -1946,42 +1946,6 @@ impl DomainParticipant {
         Err(DdsError::Unsupported)
     }
 
-    /// Returns a list of PublicationBuiltinTopicData for all discovered DataWriters (publications).
-    ///
-    /// This operation retrieves data for remote DataWriters that have been discovered
-    /// and are not ignored via the `ignore_publication` operation.
-    pub fn get_discovered_publications(&self) -> DdsResult<Vec<PublicationBuiltinTopicData>> {
-        self.is_deleted()?;
-        let rtps_participant = self.get_rtps_participant()?;
-        let remote_publications = rtps_participant.remote_publications();
-
-        let mut result = Vec::new();
-        for entry in remote_publications.iter() {
-            for (_, data) in entry.value().iter() {
-                result.push(data.clone());
-            }
-        }
-        Ok(result)
-    }
-
-    /// Returns a list of SubscriptionBuiltinTopicData for all discovered DataReaders (subscriptions).
-    ///
-    /// This operation retrieves data for remote DataReaders that have been discovered
-    /// and are not ignored via the `ignore_subscription` operation.
-    pub fn get_discovered_subscriptions(&self) -> DdsResult<Vec<SubscriptionBuiltinTopicData>> {
-        self.is_deleted()?;
-        let rtps_participant = self.get_rtps_participant()?;
-        let remote_subscriptions = rtps_participant.remote_subscriptions();
-
-        let mut result = Vec::new();
-        for entry in remote_subscriptions.iter() {
-            for (_, data) in entry.value().iter() {
-                result.push(data.clone());
-            }
-        }
-        Ok(result)
-    }
-
     pub fn contains_entity(&self, handle: InstanceHandle) -> DdsResult<bool> {
         self.is_deleted()?;
 
