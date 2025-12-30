@@ -735,6 +735,7 @@ impl ThreadMonitor {
     }
 
     /// Register current thread TID with associated Guid (all platforms)
+    #[allow(clippy::clone_on_copy)]
     pub(crate) fn register_current_thread_name_with_guid(name: &str, guid: &Guid) {
         let tid = Self::get_current_thread_id();
         let registry = THREAD_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));

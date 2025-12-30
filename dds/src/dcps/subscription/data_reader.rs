@@ -1579,6 +1579,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 }
 
 impl<Foo: DdsType> DataReader<Foo> {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         is_builtin: bool,
         guid: Guid,

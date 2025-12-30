@@ -185,6 +185,7 @@ impl SedpLogic {
         }
     }
 
+    #[allow(clippy::clone_on_copy)]
     pub(crate) fn start_sedp(
         &self,
         discovery_multicast_listener: Option<UdpListener>,
