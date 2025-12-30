@@ -187,6 +187,7 @@ impl SedpLogic {
         }
     }
 
+    #[allow(clippy::clone_on_copy)]
     pub(crate) fn start_sedp(
         &self,
         discovery_multicast_listener: Option<UdpListener>,
@@ -556,6 +557,7 @@ impl SedpLogic {
         Ok(())
     }
 
+    #[allow(clippy::option_map_unit_fn)]
     pub(crate) fn handle_stateful_writer_subscription(
         &self,
         writer: &StatefulWriter,
@@ -684,6 +686,7 @@ impl SedpLogic {
         Ok(())
     }
 
+    #[allow(clippy::option_map_unit_fn)]
     pub(crate) fn handle_stateless_writer_subscription(
         &self,
         writer: &StatelessWriter,
@@ -926,6 +929,7 @@ impl SedpLogic {
         Ok(())
     }
 
+    #[allow(clippy::option_map_unit_fn)]
     pub(crate) fn handle_stateful_reader_publication(
         &self,
         reader: &StatefulReader,
@@ -1037,6 +1041,7 @@ impl SedpLogic {
         Ok(())
     }
 
+    #[allow(clippy::option_map_unit_fn)]
     pub(crate) fn handle_stateless_reader_publication(
         &self,
         reader: &StatelessReader,
@@ -1641,7 +1646,7 @@ impl SedpLogic {
 
         for remote_participant_data in remote_participant_datas_guard.iter() {
             for locator in remote_participant_data.metatraffic_unicast_locator_list() {
-                self.send_to_single_locator(&buffer, locator.clone(), message_type)?;
+                self.send_to_single_locator(buffer, locator.clone(), message_type)?;
             }
         }
 
@@ -2082,16 +2087,16 @@ impl UnicastMessageProcessor for SedpLogic {
 
             writer_proxy.increase_acknack_count();
             let acknack_count = writer_proxy.acknack_count();
-            return self.send_sedp_acknack_message(
+            self.send_sedp_acknack_message(
                 remote_writer_guid,
                 heartbeat.reader_id,
                 heartbeat.writer_id,
                 missing_changes,
                 acknack_count,
                 bitmap_base,
-            );
+            )
         } else {
-            return Ok(());
+            Ok(())
         }
     }
 

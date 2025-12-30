@@ -83,10 +83,7 @@ impl UserUnicastListeningTask {
         let has_shm_listener = self.shm_listener.is_some();
 
         if udp_token.is_none() && tcp_token.is_none() && !has_shm_listener {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "No listener (UDP, TCP, or SHM) is set",
-            ));
+            return Err(std::io::Error::other("No listener (UDP, TCP, or SHM) is set"));
         }
 
         if has_shm_listener {
@@ -100,9 +97,10 @@ impl UserUnicastListeningTask {
             Duration::from_millis(100)
         };
 
-        let participant = self.participant.upgrade().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::Other, "Participant already dropped")
-        })?;
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or_else(|| std::io::Error::other("Participant already dropped"))?;
 
         loop {
             poll.poll(&mut events, Some(poll_timeout))?;

@@ -43,6 +43,7 @@ impl Hash for ReaderProxy {
 }
 
 impl ReaderProxy {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         remote_reader_guid: Guid,
         remote_group_entity_id: EntityId,

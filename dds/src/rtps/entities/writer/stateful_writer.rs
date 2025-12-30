@@ -70,6 +70,7 @@ pub(crate) struct StatefulWriter {
     matched_readers: Arc<Mutex<Vec<ReaderProxy>>>,
     writer_cache: Arc<Mutex<WriterHistoryCache>>,
     heartbeat_count: Arc<Mutex<i32>>,
+    #[allow(clippy::type_complexity)]
     callback:
         Arc<Mutex<Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>>>,
     publication_builtin_topic_data: Arc<Mutex<PublicationBuiltinTopicData>>,
@@ -79,6 +80,8 @@ pub(crate) struct StatefulWriter {
 }
 
 impl StatefulWriter {
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::type_complexity)]
     pub(crate) fn new(
         guid: Guid,
         unicast_locator_list: Vec<Locator>,

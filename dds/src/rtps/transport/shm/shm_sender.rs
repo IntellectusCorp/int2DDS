@@ -90,10 +90,7 @@ impl ShmSender {
 
 impl Transport for ShmSender {
     fn send(&self, addr: &SocketAddr, data: &[u8]) -> io::Result<usize> {
-        let mut guard = self
-            .writer
-            .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Mutex poisoned"))?;
+        let mut guard = self.writer.lock().map_err(|_| io::Error::other("Mutex poisoned"))?;
 
         let writer = guard
             .as_mut()
@@ -106,7 +103,7 @@ impl Transport for ShmSender {
             }
             Err(e) => {
                 warn!("[ShmSender] Write failed: {}", e);
-                Err(io::Error::new(io::ErrorKind::Other, e.to_string()))
+                Err(io::Error::other(e.to_string()))
             }
         }
     }

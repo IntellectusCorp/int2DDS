@@ -199,7 +199,7 @@ pub fn get_working_ip() -> std::io::Result<String> {
         };
 
         if ret == INT2DDS_FEATURE_OK {
-            let cstr = unsafe { CStr::from_ptr(buffer.as_ptr()) };
+            let cstr = unsafe { CStr::from_ptr(buffer.as_ptr() as *const c_char) };
             let ip = cstr.to_string_lossy().into_owned();
             log::info!("[int2dds_feature] Using IP from library: {}", ip);
             return Ok(ip);
@@ -252,10 +252,10 @@ pub fn init_extended_discovery(socket: &Socket) -> std::io::Result<()> {
     if ret == INT2DDS_FEATURE_OK {
         Ok(())
     } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("int2dds_feature_init_extended_discovery failed with code {}", ret),
-        ))
+        Err(std::io::Error::other(format!(
+            "int2dds_feature_init_extended_discovery failed with code {}",
+            ret
+        )))
     }
 }
 
@@ -289,10 +289,10 @@ pub fn send_extended_discovery(
     if ret == INT2DDS_FEATURE_OK {
         Ok(())
     } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("int2dds_feature_send_extended_discovery failed with code {}", ret),
-        ))
+        Err(std::io::Error::other(format!(
+            "int2dds_feature_send_extended_discovery failed with code {}",
+            ret
+        )))
     }
 }
 

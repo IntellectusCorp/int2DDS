@@ -60,6 +60,7 @@ pub(crate) struct StatelessWriter {
     data_max_size_serialized: i32,
     reader_locators: Arc<Mutex<Vec<ReaderLocator>>>,
     writer_cache: Arc<Mutex<WriterHistoryCache>>, // Subject to change to Rc, Mutex, etc. in the future
+    #[allow(clippy::type_complexity)]
     callback:
         Arc<Mutex<Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>>>,
     publication_builtin_topic_data: Arc<Mutex<PublicationBuiltinTopicData>>,
@@ -68,6 +69,8 @@ pub(crate) struct StatelessWriter {
 }
 
 impl StatelessWriter {
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::type_complexity)]
     pub(crate) fn new(
         guid: Guid,
         unicast_locator_list: Vec<Locator>,

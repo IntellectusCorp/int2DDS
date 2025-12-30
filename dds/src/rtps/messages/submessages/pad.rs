@@ -10,7 +10,7 @@ pub(crate) struct Pad {}
 
 #[allow(dead_code)]
 impl Pad {
-    pub(crate) fn new(&self) -> Self {
+    pub(crate) fn new() -> Self {
         Self {}
     }
 

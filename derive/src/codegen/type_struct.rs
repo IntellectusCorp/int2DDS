@@ -331,6 +331,7 @@ fn quote_deserialize_with_format_impl(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn generate_unified_type_support_impl(
     type_support_name: &syn::Ident,
     name: &syn::Ident,
@@ -1268,6 +1269,7 @@ fn generate_tuple_field_access_methods(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn generate_tuple_type_support_impl(
     type_support_name: &syn::Ident,
     name: &syn::Ident,

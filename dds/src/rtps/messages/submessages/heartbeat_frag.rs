@@ -57,10 +57,10 @@ impl HeartbeatFrag {
         };
 
         // 8.3.7.6.3
-        if last_fragment_num <= 0 {
+        if last_fragment_num == 0 {
             return Err(RtpsError::new(
                 RtpsErrorCode::InvalidSubmessageBody,
-                "Last fragment number is zero or negative",
+                "Last fragment number is zero",
             ));
         }
 
