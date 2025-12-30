@@ -25,13 +25,16 @@ use crate::{
     },
 };
 
+/// Type alias for the deadline callback function
+type DeadlineCallback = Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>;
+
 pub(crate) struct DeadlineMonitor {
     _period: Duration,
     trackers: Arc<Mutex<HashMap<InstanceHandle, Time>>>,
     monitor_task: Option<JoinHandle<()>>,
     shutdown: Arc<AtomicBool>,
     _is_writer: bool,
-    _on_deadline_missed: Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>,
+    _on_deadline_missed: DeadlineCallback,
 }
 
 impl Drop for DeadlineMonitor {
@@ -50,11 +53,7 @@ impl Drop for DeadlineMonitor {
 }
 
 impl DeadlineMonitor {
-    pub(crate) fn new(
-        period: Duration,
-        callback: Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>,
-        is_writer: bool,
-    ) -> Self {
+    pub(crate) fn new(period: Duration, callback: DeadlineCallback, is_writer: bool) -> Self {
         debug!(
             "[DeadlineMonitor] Creating new monitor - period: {:?}, is_writer: {}",
             period, is_writer
@@ -148,7 +147,7 @@ impl DeadlineMonitor {
         period: Duration,
         trackers: Arc<Mutex<HashMap<InstanceHandle, Time>>>,
         shutdown: Arc<AtomicBool>,
-        callback: Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>,
+        callback: DeadlineCallback,
         is_writer: bool,
     ) -> JoinHandle<()> {
         thread::Builder::new()

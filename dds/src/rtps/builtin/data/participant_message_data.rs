@@ -187,9 +187,7 @@ impl ParticipantMessageData {
 
         // Add padding to 4-byte alignment if needed
         let padding_needed = (4 - (serialized.len() % 4)) % 4;
-        for _ in 0..padding_needed {
-            serialized.push(0x00);
-        }
+        serialized.extend(std::iter::repeat_n(0x00, padding_needed));
 
         SerializedData::from(serialized)
     }

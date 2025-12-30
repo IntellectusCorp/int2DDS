@@ -54,9 +54,9 @@ macro_rules! impl_participant_accessor {
     ($type:ty) => {
         impl ParticipantAccessor for $type {
             fn get_upgraded_participant(&self) -> RtpsResult<Arc<Participant>> {
-                Ok(self.participant.upgrade().ok_or_else(|| {
+                self.participant.upgrade().ok_or_else(|| {
                     RtpsError::new(RtpsErrorCode::ArcUpgradeError, "Participant already dropped")
-                })?)
+                })
             }
         }
     };
