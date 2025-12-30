@@ -606,6 +606,7 @@ impl DcpsBridge {
 
         SendingHandler::remove_map_guard(&self.participant.guid());
         TimerHandler::remove_map_guard(&self.participant.guid());
+        ThreadMonitor::remove_threads_by_guid(&self.participant.guid());
         self.thread_monitor = None;
         self.socket.close();
         Ok(())

@@ -20,30 +20,6 @@
 
 #include "../include/int2dds-ffi.h"
 
-// Serialize HelloWorld: index (u32) + message (String with length prefix)
-size_t serialize_hello_world(uint32_t index, const char* message, uint8_t* buffer, size_t buffer_size) {
-    size_t msg_len = strlen(message);
-    size_t total_size = 4 + 4 + msg_len;  // index + string_len + string
-
-    if (total_size > buffer_size) return 0;
-
-    // Write index (little-endian u32)
-    buffer[0] = index & 0xFF;
-    buffer[1] = (index >> 8) & 0xFF;
-    buffer[2] = (index >> 16) & 0xFF;
-    buffer[3] = (index >> 24) & 0xFF;
-
-    // Write string length (little-endian u32)
-    buffer[4] = msg_len & 0xFF;
-    buffer[5] = (msg_len >> 8) & 0xFF;
-    buffer[6] = (msg_len >> 16) & 0xFF;
-    buffer[7] = (msg_len >> 24) & 0xFF;
-
-    // Write string data
-    memcpy(buffer + 8, message, msg_len);
-
-    return total_size;
-}
 
 int main(int argc, char* argv[]) {
     Int2DdsRet ret;
@@ -53,6 +29,8 @@ int main(int argc, char* argv[]) {
     Int2DdsTopic* topic = NULL;
     Int2DdsDataWriter* writer = NULL;
     Int2DdsWaitSet* waitset = NULL;
+    Int2DdsTypeDescriptor* type_desc = NULL;
+    Int2DdsData* data = NULL;
 
     int domain_id = 0;
 
@@ -81,8 +59,28 @@ int main(int argc, char* argv[]) {
         goto cleanup;
     }
 
-    // Create Topic (must match waitset_subscriber)
-    ret = int2dds_create_topic(participant, "HelloWorldTopic", "HelloWorld", NULL, &topic);
+    // Create type descriptor for HelloWorld
+    ret = int2dds_type_descriptor_create("HelloWorld", &type_desc);
+    if (ret != INT2DDS_RET_OK) {
+        printf("Failed to create type descriptor: %d\n", ret);
+        goto cleanup;
+    }
+
+    // Add fields to type descriptor
+    ret = int2dds_type_descriptor_add_u32(type_desc, "index", false);
+    if (ret != INT2DDS_RET_OK) {
+        printf("Failed to add index field: %d\n", ret);
+        goto cleanup;
+    }
+
+    ret = int2dds_type_descriptor_add_string(type_desc, "message", 256, false);
+    if (ret != INT2DDS_RET_OK) {
+        printf("Failed to add message field: %d\n", ret);
+        goto cleanup;
+    }
+
+    // Create Topic with type descriptor (must match waitset_subscriber)
+    ret = int2dds_create_topic(participant, "HelloWorldTopic", type_desc, NULL, &topic);
     if (ret != INT2DDS_RET_OK) {
         printf("Failed to create topic: %d\n", ret);
         goto cleanup;
@@ -130,20 +128,34 @@ int main(int argc, char* argv[]) {
     printf("Subscriber matched! (total: %d, current: %d)\n", total_count, current_count);
     printf("Starting to send messages...\n\n");
 
+    // Create data container
+    ret = int2dds_data_create(type_desc, &data);
+    if (ret != INT2DDS_RET_OK) {
+        printf("Failed to create data: %d\n", ret);
+        goto cleanup;
+    }
+
     // Send messages
-    uint8_t buffer[512];
+    char message[64];
 
     for (uint32_t i = 0; i < 100; i++) {
-        char message[64];
         snprintf(message, sizeof(message), "WaitSet message %u", i);
 
-        size_t data_size = serialize_hello_world(i, message, buffer, sizeof(buffer));
-        if (data_size == 0) {
-            printf("Failed to serialize\n");
+        // Set field values
+        ret = int2dds_data_set_u32(data, "index", i);
+        if (ret != INT2DDS_RET_OK) {
+            printf("Failed to set index: %d\n", ret);
             continue;
         }
 
-        ret = int2dds_write(writer, buffer, data_size);
+        ret = int2dds_data_set_string(data, "message", message);
+        if (ret != INT2DDS_RET_OK) {
+            printf("Failed to set message: %d\n", ret);
+            continue;
+        }
+
+        // Write data (automatic CDR serialization)
+        ret = int2dds_write(writer, data);
         if (ret != INT2DDS_RET_OK) {
             printf("Failed to write: %d\n", ret);
         } else {
@@ -160,8 +172,10 @@ cleanup:
         int2dds_waitset_detach_datawriter(waitset, writer);
         int2dds_waitset_delete(waitset);
     }
+    if (data) int2dds_data_delete(data);
     if (writer) int2dds_delete_datawriter(writer);
     if (topic) int2dds_delete_topic(topic);
+    if (type_desc) int2dds_type_descriptor_delete(type_desc);
     if (publisher) int2dds_delete_publisher(publisher);
     if (participant) int2dds_delete_participant(participant);
     if (factory) int2dds_domain_participant_factory_finalize(factory);

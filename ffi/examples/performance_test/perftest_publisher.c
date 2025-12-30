@@ -61,22 +61,20 @@ static int clock_gettime(int clock_id, struct timespec *ts) {
 
 /* ====== Data Structures ====== */
 
-/* Performance test data structure */
-typedef struct {
-    uint64_t seq_num;
-    uint64_t timestamp;
-    uint8_t* data;
-    size_t data_len;
-} PerformanceTestData;
-
-/* Latency test data structure */
-typedef struct {
-    uint64_t seq_num;
-    uint64_t send_timestamp;
-    uint64_t echo_timestamp;
-    uint8_t* data;
-    size_t data_len;
-} LatencyTestData;
+/* Note: With the new TypeDescriptor API, we don't need to manually define
+ * data structures. The types are defined at runtime using TypeDescriptor.
+ *
+ * PerformanceData type:
+ *   - seq_num: uint64
+ *   - timestamp: uint64
+ *   - data: sequence<uint8>
+ *
+ * LatencyTestData type:
+ *   - seq_num: uint64
+ *   - send_timestamp: uint64
+ *   - echo_timestamp: uint64
+ *   - data: sequence<uint8>
+ */
 
 /* Performance statistics */
 typedef struct {
@@ -107,8 +105,7 @@ typedef struct {
 /* Global state */
 static volatile bool running = true;
 static performance_stats_t g_latency_stats = {0};
-static uint8_t* g_latency_buffer = NULL;
-static size_t g_latency_buffer_size = 0;
+static Int2DdsData* g_latency_data = NULL;  /* Data container for latency callback */
 
 /* ====== Signal Handlers ====== */
 
@@ -140,125 +137,49 @@ static uint64_t get_current_time_ns(void) {
 #endif
 }
 
-/* ====== Serialization Functions ====== */
+/* ====== Helper: Create TypeDescriptor for PerformanceData ====== */
 
-/* Serialize PerformanceTestData to bytes */
-static size_t serialize_performance_data(const PerformanceTestData* data, uint8_t* buffer, size_t buffer_size) {
-    size_t total_size = 8 + 8 + 8 + data->data_len;
+static Int2DdsTypeDescriptor* create_performance_type_descriptor(uint32_t max_data_size) {
+    Int2DdsTypeDescriptor* type_desc = NULL;
+    Int2DdsRet ret;
 
-    if (buffer_size < total_size) {
-        fprintf(stderr, "Buffer too small for serialization\n");
-        return 0;
-    }
+    ret = int2dds_type_descriptor_create("PerformanceData", &type_desc);
+    if (ret != INT2DDS_RET_OK) return NULL;
 
-    size_t offset = 0;
+    ret = int2dds_type_descriptor_add_u64(type_desc, "seq_num", false);
+    if (ret != INT2DDS_RET_OK) { int2dds_type_descriptor_delete(type_desc); return NULL; }
 
-    /* seq_num (little-endian) */
-    buffer[offset++] = (uint8_t)(data->seq_num & 0xFF);
-    buffer[offset++] = (uint8_t)((data->seq_num >> 8) & 0xFF);
-    buffer[offset++] = (uint8_t)((data->seq_num >> 16) & 0xFF);
-    buffer[offset++] = (uint8_t)((data->seq_num >> 24) & 0xFF);
-    buffer[offset++] = (uint8_t)((data->seq_num >> 32) & 0xFF);
-    buffer[offset++] = (uint8_t)((data->seq_num >> 40) & 0xFF);
-    buffer[offset++] = (uint8_t)((data->seq_num >> 48) & 0xFF);
-    buffer[offset++] = (uint8_t)((data->seq_num >> 56) & 0xFF);
+    ret = int2dds_type_descriptor_add_u64(type_desc, "timestamp", false);
+    if (ret != INT2DDS_RET_OK) { int2dds_type_descriptor_delete(type_desc); return NULL; }
 
-    /* timestamp (little-endian) */
-    buffer[offset++] = (uint8_t)(data->timestamp & 0xFF);
-    buffer[offset++] = (uint8_t)((data->timestamp >> 8) & 0xFF);
-    buffer[offset++] = (uint8_t)((data->timestamp >> 16) & 0xFF);
-    buffer[offset++] = (uint8_t)((data->timestamp >> 24) & 0xFF);
-    buffer[offset++] = (uint8_t)((data->timestamp >> 32) & 0xFF);
-    buffer[offset++] = (uint8_t)((data->timestamp >> 40) & 0xFF);
-    buffer[offset++] = (uint8_t)((data->timestamp >> 48) & 0xFF);
-    buffer[offset++] = (uint8_t)((data->timestamp >> 56) & 0xFF);
+    ret = int2dds_type_descriptor_add_bytes(type_desc, "data", max_data_size, false);
+    if (ret != INT2DDS_RET_OK) { int2dds_type_descriptor_delete(type_desc); return NULL; }
 
-    /* data_len (little-endian) */
-    uint64_t data_len_64 = data->data_len;
-    buffer[offset++] = (uint8_t)(data_len_64 & 0xFF);
-    buffer[offset++] = (uint8_t)((data_len_64 >> 8) & 0xFF);
-    buffer[offset++] = (uint8_t)((data_len_64 >> 16) & 0xFF);
-    buffer[offset++] = (uint8_t)((data_len_64 >> 24) & 0xFF);
-    buffer[offset++] = (uint8_t)((data_len_64 >> 32) & 0xFF);
-    buffer[offset++] = (uint8_t)((data_len_64 >> 40) & 0xFF);
-    buffer[offset++] = (uint8_t)((data_len_64 >> 48) & 0xFF);
-    buffer[offset++] = (uint8_t)((data_len_64 >> 56) & 0xFF);
-
-    /* data */
-    memcpy(buffer + offset, data->data, data->data_len);
-    offset += data->data_len;
-
-    return offset;
+    return type_desc;
 }
 
-/* Serialize LatencyTestData to bytes */
-static size_t serialize_latency_data(const LatencyTestData* data, uint8_t* buffer, size_t buffer_size) {
-    size_t total_size = 8 + 8 + 8 + 8 + data->data_len;
+/* ====== Helper: Create TypeDescriptor for LatencyTestData ====== */
 
-    if (buffer_size < total_size) {
-        fprintf(stderr, "Buffer too small for serialization\n");
-        return 0;
-    }
+static Int2DdsTypeDescriptor* create_latency_type_descriptor(uint32_t max_data_size) {
+    Int2DdsTypeDescriptor* type_desc = NULL;
+    Int2DdsRet ret;
 
-    size_t offset = 0;
+    ret = int2dds_type_descriptor_create("LatencyTestData", &type_desc);
+    if (ret != INT2DDS_RET_OK) return NULL;
 
-    /* seq_num */
-    buffer[offset++] = (uint8_t)(data->seq_num & 0xFF);
-    buffer[offset++] = (uint8_t)((data->seq_num >> 8) & 0xFF);
-    buffer[offset++] = (uint8_t)((data->seq_num >> 16) & 0xFF);
-    buffer[offset++] = (uint8_t)((data->seq_num >> 24) & 0xFF);
-    buffer[offset++] = (uint8_t)((data->seq_num >> 32) & 0xFF);
-    buffer[offset++] = (uint8_t)((data->seq_num >> 40) & 0xFF);
-    buffer[offset++] = (uint8_t)((data->seq_num >> 48) & 0xFF);
-    buffer[offset++] = (uint8_t)((data->seq_num >> 56) & 0xFF);
+    ret = int2dds_type_descriptor_add_u64(type_desc, "seq_num", false);
+    if (ret != INT2DDS_RET_OK) { int2dds_type_descriptor_delete(type_desc); return NULL; }
 
-    /* send_timestamp */
-    buffer[offset++] = (uint8_t)(data->send_timestamp & 0xFF);
-    buffer[offset++] = (uint8_t)((data->send_timestamp >> 8) & 0xFF);
-    buffer[offset++] = (uint8_t)((data->send_timestamp >> 16) & 0xFF);
-    buffer[offset++] = (uint8_t)((data->send_timestamp >> 24) & 0xFF);
-    buffer[offset++] = (uint8_t)((data->send_timestamp >> 32) & 0xFF);
-    buffer[offset++] = (uint8_t)((data->send_timestamp >> 40) & 0xFF);
-    buffer[offset++] = (uint8_t)((data->send_timestamp >> 48) & 0xFF);
-    buffer[offset++] = (uint8_t)((data->send_timestamp >> 56) & 0xFF);
+    ret = int2dds_type_descriptor_add_u64(type_desc, "send_timestamp", false);
+    if (ret != INT2DDS_RET_OK) { int2dds_type_descriptor_delete(type_desc); return NULL; }
 
-    /* echo_timestamp */
-    buffer[offset++] = (uint8_t)(data->echo_timestamp & 0xFF);
-    buffer[offset++] = (uint8_t)((data->echo_timestamp >> 8) & 0xFF);
-    buffer[offset++] = (uint8_t)((data->echo_timestamp >> 16) & 0xFF);
-    buffer[offset++] = (uint8_t)((data->echo_timestamp >> 24) & 0xFF);
-    buffer[offset++] = (uint8_t)((data->echo_timestamp >> 32) & 0xFF);
-    buffer[offset++] = (uint8_t)((data->echo_timestamp >> 40) & 0xFF);
-    buffer[offset++] = (uint8_t)((data->echo_timestamp >> 48) & 0xFF);
-    buffer[offset++] = (uint8_t)((data->echo_timestamp >> 56) & 0xFF);
+    ret = int2dds_type_descriptor_add_u64(type_desc, "echo_timestamp", false);
+    if (ret != INT2DDS_RET_OK) { int2dds_type_descriptor_delete(type_desc); return NULL; }
 
-    /* data_len */
-    uint64_t data_len_64 = data->data_len;
-    buffer[offset++] = (uint8_t)(data_len_64 & 0xFF);
-    buffer[offset++] = (uint8_t)((data_len_64 >> 8) & 0xFF);
-    buffer[offset++] = (uint8_t)((data_len_64 >> 16) & 0xFF);
-    buffer[offset++] = (uint8_t)((data_len_64 >> 24) & 0xFF);
-    buffer[offset++] = (uint8_t)((data_len_64 >> 32) & 0xFF);
-    buffer[offset++] = (uint8_t)((data_len_64 >> 40) & 0xFF);
-    buffer[offset++] = (uint8_t)((data_len_64 >> 48) & 0xFF);
-    buffer[offset++] = (uint8_t)((data_len_64 >> 56) & 0xFF);
+    ret = int2dds_type_descriptor_add_bytes(type_desc, "data", max_data_size, false);
+    if (ret != INT2DDS_RET_OK) { int2dds_type_descriptor_delete(type_desc); return NULL; }
 
-    /* data */
-    memcpy(buffer + offset, data->data, data->data_len);
-    offset += data->data_len;
-
-    return offset;
-}
-
-/* Optimized: Extract only send_timestamp without memory allocation (zero-copy) */
-static inline int deserialize_latency_timestamp_fast(const uint8_t* buffer, size_t buffer_size, uint64_t* send_timestamp) {
-    if (buffer_size < 16) {  /* Only need seq_num(8) + send_timestamp(8) */
-        return -1;
-    }
-
-    /* Skip seq_num (8 bytes), read send_timestamp directly using memcpy (little-endian) */
-    memcpy(send_timestamp, buffer + 8, sizeof(uint64_t));
-    return 0;
+    return type_desc;
 }
 
 /* ====== Listener Callbacks ====== */
@@ -286,27 +207,25 @@ static void on_data_available_latency_echo(
     (void)ctx;
     uint64_t current_time = get_current_time_ns();
 
-    if (g_latency_buffer == NULL || g_latency_buffer_size == 0) {
-        fprintf(stderr, "ERROR: g_latency_buffer not allocated\n");
+    if (g_latency_data == NULL) {
+        fprintf(stderr, "ERROR: g_latency_data not allocated\n");
         return;
     }
 
-    uint8_t* buffer = g_latency_buffer;
-    size_t buffer_size = g_latency_buffer_size;
-    size_t data_size = 0;
     bool valid_data = false;
 
     while (1) {
-        Int2DdsRet ret = int2dds_take(reader, buffer, buffer_size, &data_size, &valid_data);
+        Int2DdsRet ret = int2dds_take(reader, g_latency_data, &valid_data);
         if (ret == INT2DDS_RET_NO_DATA) {
             break;
         } else if (ret != INT2DDS_RET_OK || !valid_data) {
             continue;
         }
 
-        /* Fast path: extract only send_timestamp */
-        uint64_t send_timestamp;
-        if (deserialize_latency_timestamp_fast(buffer, data_size, &send_timestamp) != 0) {
+        /* Extract send_timestamp from data */
+        uint64_t send_timestamp = 0;
+        ret = int2dds_data_get_u64(g_latency_data, "send_timestamp", &send_timestamp);
+        if (ret != INT2DDS_RET_OK) {
             continue;
         }
 
@@ -478,6 +397,8 @@ static void run_throughput_test(const publisher_args_t *args) {
     Int2DdsDataWriter* writer = NULL;
     Int2DdsDataWriterQos* qos = NULL;
     Int2DdsWaitSet* waitset = NULL;
+    Int2DdsTypeDescriptor* type_desc = NULL;
+    Int2DdsData* data = NULL;
 
     performance_stats_t stats = {0};
     struct timespec start_time, end_time, last_report_time;
@@ -517,8 +438,15 @@ static void run_throughput_test(const publisher_args_t *args) {
         goto cleanup;
     }
 
+    /* Create type descriptor */
+    type_desc = create_performance_type_descriptor((uint32_t)args->data_len);
+    if (type_desc == NULL) {
+        fprintf(stderr, "Failed to create type descriptor\n");
+        goto cleanup;
+    }
+
     /* Create topic */
-    ret = int2dds_create_topic(participant, "throughput_test_topic", "PerformanceData", NULL, &topic);
+    ret = int2dds_create_topic(participant, "throughput_test_topic", type_desc, NULL, &topic);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create topic: %d\n", ret);
         goto cleanup;
@@ -600,14 +528,16 @@ static void run_throughput_test(const publisher_args_t *args) {
     }
     memset(payload, 0xAA, args->data_len);
 
-    /* Allocate serialization buffer */
-    size_t buffer_size = 24 + args->data_len;
-    uint8_t* buffer = (uint8_t*)malloc(buffer_size);
-    if (buffer == NULL) {
-        fprintf(stderr, "Failed to allocate buffer\n");
+    /* Create data container */
+    ret = int2dds_data_create(type_desc, &data);
+    if (ret != INT2DDS_RET_OK) {
+        fprintf(stderr, "Failed to create data container\n");
         free(payload);
         goto cleanup;
     }
+
+    /* Set fixed payload once to avoid per-sample copy */
+    int2dds_data_set_bytes(data, "data", payload, (uint32_t)args->data_len);
 
     clock_gettime(CLOCK_MONOTONIC, &start_time);
     stats.start_time = start_time;
@@ -626,23 +556,12 @@ static void run_throughput_test(const publisher_args_t *args) {
             break;
         }
 
-        /* Create sample */
-        PerformanceTestData sample = {
-            .seq_num = seq_num,
-            .timestamp = get_current_time_ns(),
-            .data = payload,
-            .data_len = args->data_len
-        };
-
-        /* Serialize */
-        size_t serialized_size = serialize_performance_data(&sample, buffer, buffer_size);
-        if (serialized_size == 0) {
-            fprintf(stderr, "Serialization failed\n");
-            break;
-        }
+        /* Set data fields */
+        int2dds_data_set_u64(data, "seq_num", seq_num);
+        int2dds_data_set_u64(data, "timestamp", get_current_time_ns());
 
         /* Write */
-        ret = int2dds_write(writer, buffer, serialized_size);
+        ret = int2dds_write(writer, data);
         if (ret != INT2DDS_RET_OK) {
             fprintf(stderr, "Write failed: %d\n", ret);
             break;
@@ -733,9 +652,10 @@ static void run_throughput_test(const publisher_args_t *args) {
     }
 
     free(payload);
-    free(buffer);
 
 cleanup:
+    if (data) int2dds_data_delete(data);
+    if (type_desc) int2dds_type_descriptor_delete(type_desc);
     if (participant) {
         int2dds_participant_delete_contained_entities(participant);
         int2dds_delete_participant(participant);
@@ -758,6 +678,8 @@ static void run_latency_test(const publisher_args_t *args) {
     Int2DdsDataWriterQos* writer_qos = NULL;
     Int2DdsDataReaderQos* reader_qos = NULL;
     Int2DdsWaitSet* waitset = NULL;
+    Int2DdsTypeDescriptor* type_desc = NULL;
+    Int2DdsData* data = NULL;
 
     struct timespec start_time, end_time, last_report_time;
     uint64_t last_report_sent = 0;
@@ -780,14 +702,6 @@ static void run_latency_test(const publisher_args_t *args) {
     /* Reset global latency stats */
     memset(&g_latency_stats, 0, sizeof(g_latency_stats));
     g_latency_stats.min_latency = -1.0;
-
-    /* Allocate dynamic buffer for latency callback */
-    g_latency_buffer_size = args->data_len + 64;
-    g_latency_buffer = (uint8_t*)malloc(g_latency_buffer_size);
-    if (g_latency_buffer == NULL) {
-        fprintf(stderr, "Failed to allocate latency buffer\n");
-        return;
-    }
 
     /* Initialize factory */
     ret = int2dds_domain_participant_factory_get_instance(&factory);
@@ -817,16 +731,37 @@ static void run_latency_test(const publisher_args_t *args) {
         goto cleanup;
     }
 
+    /* Create type descriptor */
+    type_desc = create_latency_type_descriptor((uint32_t)args->data_len);
+    if (type_desc == NULL) {
+        fprintf(stderr, "Failed to create type descriptor\n");
+        goto cleanup;
+    }
+
     /* Create topics */
-    ret = int2dds_create_topic(participant, "latency_test_topic", "LatencyTestData", NULL, &topic);
+    ret = int2dds_create_topic(participant, "latency_test_topic", type_desc, NULL, &topic);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create topic: %d\n", ret);
         goto cleanup;
     }
 
-    ret = int2dds_create_topic(participant, "latency_echo_topic", "LatencyTestData", NULL, &echo_topic);
+    ret = int2dds_create_topic(participant, "latency_test_topic_echo", type_desc, NULL, &echo_topic);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create echo topic: %d\n", ret);
+        goto cleanup;
+    }
+
+    /* Create data container for sending */
+    ret = int2dds_data_create(type_desc, &data);
+    if (ret != INT2DDS_RET_OK) {
+        fprintf(stderr, "Failed to create send data container\n");
+        goto cleanup;
+    }
+
+    /* Create global data container for receiving (used in callback) */
+    ret = int2dds_data_create(type_desc, &g_latency_data);
+    if (ret != INT2DDS_RET_OK) {
+        fprintf(stderr, "Failed to create receive data container\n");
         goto cleanup;
     }
 
@@ -945,14 +880,8 @@ static void run_latency_test(const publisher_args_t *args) {
     }
     memset(payload, 0xAA, args->data_len);
 
-    /* Allocate serialization buffer */
-    size_t buffer_size = 32 + args->data_len;
-    uint8_t* buffer = (uint8_t*)malloc(buffer_size);
-    if (buffer == NULL) {
-        fprintf(stderr, "Failed to allocate buffer\n");
-        free(payload);
-        goto cleanup;
-    }
+    /* Set fixed payload once to avoid per-sample copy */
+    int2dds_data_set_bytes(data, "data", payload, (uint32_t)args->data_len);
 
     clock_gettime(CLOCK_MONOTONIC, &start_time);
     last_report_time = start_time;
@@ -975,21 +904,12 @@ static void run_latency_test(const publisher_args_t *args) {
                 break;
             }
 
-            LatencyTestData sample = {
-                .seq_num = seq_num,
-                .send_timestamp = get_current_time_ns(),
-                .echo_timestamp = 0,
-                .data = payload,
-                .data_len = args->data_len
-            };
+            /* Set data fields */
+            int2dds_data_set_u64(data, "seq_num", seq_num);
+            int2dds_data_set_u64(data, "send_timestamp", get_current_time_ns());
+            int2dds_data_set_u64(data, "echo_timestamp", 0);
 
-            size_t serialized_size = serialize_latency_data(&sample, buffer, buffer_size);
-            if (serialized_size == 0) {
-                fprintf(stderr, "Serialization failed\n");
-                break;
-            }
-
-            ret = int2dds_write(writer, buffer, serialized_size);
+            ret = int2dds_write(writer, data);
             if (ret != INT2DDS_RET_OK) {
                 fprintf(stderr, "Write failed: %d\n", ret);
                 break;
@@ -1074,21 +994,12 @@ static void run_latency_test(const publisher_args_t *args) {
                 break;
             }
 
-            LatencyTestData sample = {
-                .seq_num = seq_num,
-                .send_timestamp = get_current_time_ns(),
-                .echo_timestamp = 0,
-                .data = payload,
-                .data_len = args->data_len
-            };
+            /* Set data fields */
+            int2dds_data_set_u64(data, "seq_num", seq_num);
+            int2dds_data_set_u64(data, "send_timestamp", get_current_time_ns());
+            int2dds_data_set_u64(data, "echo_timestamp", 0);
 
-            size_t serialized_size = serialize_latency_data(&sample, buffer, buffer_size);
-            if (serialized_size == 0) {
-                fprintf(stderr, "Serialization failed\n");
-                break;
-            }
-
-            ret = int2dds_write(writer, buffer, serialized_size);
+            ret = int2dds_write(writer, data);
             if (ret != INT2DDS_RET_OK) {
                 fprintf(stderr, "Write failed: %d\n", ret);
                 break;
@@ -1222,15 +1133,14 @@ static void run_latency_test(const publisher_args_t *args) {
     }
 
     free(payload);
-    free(buffer);
 
 cleanup:
-    if (g_latency_buffer) {
-        free(g_latency_buffer);
-        g_latency_buffer = NULL;
-        g_latency_buffer_size = 0;
+    if (g_latency_data) {
+        int2dds_data_delete(g_latency_data);
+        g_latency_data = NULL;
     }
-
+    if (data) int2dds_data_delete(data);
+    if (type_desc) int2dds_type_descriptor_delete(type_desc);
     if (participant) {
         int2dds_participant_delete_contained_entities(participant);
         int2dds_delete_participant(participant);
@@ -1249,6 +1159,8 @@ static void run_local_latency_test(const publisher_args_t *args) {
     Int2DdsDataWriter* writer = NULL;
     Int2DdsDataWriterQos* qos = NULL;
     Int2DdsWaitSet* waitset = NULL;
+    Int2DdsTypeDescriptor* type_desc = NULL;
+    Int2DdsData* data = NULL;
 
     performance_stats_t stats = {0};
     struct timespec start_time, end_time, last_report_time;
@@ -1289,8 +1201,15 @@ static void run_local_latency_test(const publisher_args_t *args) {
         goto cleanup;
     }
 
+    /* Create type descriptor */
+    type_desc = create_performance_type_descriptor((uint32_t)args->data_len);
+    if (type_desc == NULL) {
+        fprintf(stderr, "Failed to create type descriptor\n");
+        goto cleanup;
+    }
+
     /* Create topic */
-    ret = int2dds_create_topic(participant, "local_latency_test_topic", "PerformanceData", NULL, &topic);
+    ret = int2dds_create_topic(participant, "local_latency_test_topic", type_desc, NULL, &topic);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create topic: %d\n", ret);
         goto cleanup;
@@ -1372,14 +1291,16 @@ static void run_local_latency_test(const publisher_args_t *args) {
     }
     memset(payload, 0xAA, args->data_len);
 
-    /* Allocate serialization buffer */
-    size_t buffer_size = 24 + args->data_len;
-    uint8_t* buffer = (uint8_t*)malloc(buffer_size);
-    if (buffer == NULL) {
-        fprintf(stderr, "Failed to allocate buffer\n");
+    /* Create data container */
+    ret = int2dds_data_create(type_desc, &data);
+    if (ret != INT2DDS_RET_OK) {
+        fprintf(stderr, "Failed to create data container\n");
         free(payload);
         goto cleanup;
     }
+
+    /* Set fixed payload once to avoid per-sample copy */
+    int2dds_data_set_bytes(data, "data", payload, (uint32_t)args->data_len);
 
     clock_gettime(CLOCK_MONOTONIC, &start_time);
     stats.start_time = start_time;
@@ -1416,23 +1337,12 @@ static void run_local_latency_test(const publisher_args_t *args) {
             }
         }
 
-        /* Create sample */
-        PerformanceTestData sample = {
-            .seq_num = seq_num,
-            .timestamp = get_current_time_ns(),
-            .data = payload,
-            .data_len = args->data_len
-        };
-
-        /* Serialize */
-        size_t serialized_size = serialize_performance_data(&sample, buffer, buffer_size);
-        if (serialized_size == 0) {
-            fprintf(stderr, "Serialization failed\n");
-            break;
-        }
+        /* Set data fields */
+        int2dds_data_set_u64(data, "seq_num", seq_num);
+        int2dds_data_set_u64(data, "timestamp", get_current_time_ns());
 
         /* Write */
-        ret = int2dds_write(writer, buffer, serialized_size);
+        ret = int2dds_write(writer, data);
         if (ret != INT2DDS_RET_OK) {
             fprintf(stderr, "Write failed: %d\n", ret);
             break;
@@ -1509,9 +1419,10 @@ static void run_local_latency_test(const publisher_args_t *args) {
     }
 
     free(payload);
-    free(buffer);
 
 cleanup:
+    if (data) int2dds_data_delete(data);
+    if (type_desc) int2dds_type_descriptor_delete(type_desc);
     if (participant) {
         int2dds_participant_delete_contained_entities(participant);
         int2dds_delete_participant(participant);

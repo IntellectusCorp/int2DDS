@@ -9,8 +9,8 @@
 //!
 //! ## Data Format
 //!
-//! Since DataWriter is generic in Rust, the FFI uses raw byte buffers.
-//! Data must be pre-serialized in CDR format on the C side before writing.
+//! The FFI uses Int2DdsData with DynamicTypeSupport for CDR serialization.
+//! The DDS core handles all serialization automatically using the registered TypeSupport.
 //!
 //! ## Instance Management
 //!
@@ -23,8 +23,10 @@ use std::sync::Arc;
 
 use int2dds::{
     common::instance_handle::InstanceHandle, infrastructure::status::StatusMask,
-    publication::qos::PublisherQos, topic::RawData,
+    publication::qos::PublisherQos,
 };
+
+use crate::data::Int2DdsData;
 
 use super::{
     error::*,
@@ -78,13 +80,18 @@ pub unsafe extern "C" fn int2dds_delete_publisher(publisher: *mut Int2DdsPublish
         return INT2DDS_RET_NULL_POINTER;
     }
 
+    let publisher_ref = &*publisher;
+    if Arc::strong_count(&publisher_ref.inner) != 1 {
+        return INT2DDS_RET_PRECONDITION_NOT_MET;
+    }
+
     // Destructure Box to move Arc out
     let Int2DdsPublisher { inner: publisher_arc } = *Box::from_raw(publisher);
 
     // Try to unwrap Arc without cloning (succeeds if this is the only reference)
     let publisher_obj = match Arc::try_unwrap(publisher_arc) {
         Ok(p) => p,
-        Err(arc) => (*arc).clone(), // Fall back to clone if other references exist
+        Err(_arc) => return INT2DDS_RET_PRECONDITION_NOT_MET,
     };
 
     // Get the participant to delete the publisher
@@ -127,8 +134,8 @@ pub unsafe extern "C" fn int2dds_create_datawriter(
         (*qos).inner.clone()
     };
 
-    // Create DataWriter<RawData>
-    let writer = ffi_try!(publisher_ref.inner.create_datawriter::<RawData>(
+    // Create DataWriter<Int2DdsData>
+    let writer = ffi_try!(publisher_ref.inner.create_datawriter::<Int2DdsData>(
         &topic_ref.inner,
         writer_qos,
         None,
@@ -175,8 +182,8 @@ pub unsafe extern "C" fn int2dds_create_datawriter_with_listener(
         (*qos).inner.clone()
     };
 
-    // Create DataWriter<RawData> first without listener
-    let writer = ffi_try!(publisher_ref.inner.create_datawriter::<RawData>(
+    // Create DataWriter<Int2DdsData> first without listener
+    let writer = ffi_try!(publisher_ref.inner.create_datawriter::<Int2DdsData>(
         &topic_ref.inner,
         writer_qos,
         None,
@@ -195,7 +202,9 @@ pub unsafe extern "C" fn int2dds_create_datawriter_with_listener(
         // Set the listener on the writer
         let listener_clone = listener_arc.clone()
             as Arc<
-                dyn int2dds::publication::data_writer_listener::DataWriterListener<Foo = RawData>,
+                dyn int2dds::publication::data_writer_listener::DataWriterListener<
+                    Foo = Int2DdsData,
+                >,
             >;
         ffi_try!(writer_handle
             .inner
@@ -238,7 +247,9 @@ pub unsafe extern "C" fn int2dds_datawriter_set_listener(
     let result = writer_ref.inner.set_listener(
         listener_arc.clone().map(|l| {
             l as Arc<
-                dyn int2dds::publication::data_writer_listener::DataWriterListener<Foo = RawData>,
+                dyn int2dds::publication::data_writer_listener::DataWriterListener<
+                    Foo = Int2DdsData,
+                >,
             >
         }),
         StatusMask::from_bits_truncate(mask),
@@ -285,64 +296,23 @@ pub unsafe extern "C" fn int2dds_datawriter_get_listener(
 ///
 /// # Safety
 /// - `writer` must be a valid datawriter
-/// - `data` must point to valid serialized data
-/// - `data_size` must be the correct size of the data
+/// - `data` must be a valid Int2DdsData created from a compatible TypeDescriptor
 ///
-/// Note: The data must be pre-serialized using CDR format.
+/// The data is automatically serialized using CDR format by the DDS core.
+/// The registered DynamicTypeSupport handles all serialization.
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_write(
     writer: *const Int2DdsDataWriter,
-    data: *const u8,
-    data_size: usize,
+    data: *const Int2DdsData,
 ) -> Int2DdsRet {
     check_null!(writer);
     check_null!(data);
 
     let writer_ref = &*writer;
+    let data_ref = &*data;
 
-    // Create RawData from input bytes (zero-copy to Arc)
-    let raw_data = RawData::from_slice(std::slice::from_raw_parts(data, data_size));
-
-    // Write with NIL handle (instance identification from data)
-    ffi_try!(writer_ref.inner.write(&raw_data, InstanceHandle::NIL));
-
-    INT2DDS_RET_OK
-}
-
-/// Write data to a DataWriter with key
-///
-/// # Safety
-/// - `writer` must be a valid datawriter
-/// - `data` must point to valid serialized data
-/// - `data_size` must be the correct size of the data
-/// - `key` must point to valid serialized key data
-/// - `key_size` must be the correct size of the key
-///
-/// Note: The data and key must be pre-serialized using CDR format.
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_write_with_key(
-    writer: *const Int2DdsDataWriter,
-    data: *const u8,
-    data_size: usize,
-    key: *const u8,
-    key_size: usize,
-) -> Int2DdsRet {
-    check_null!(writer);
-    check_null!(data);
-
-    let writer_ref = &*writer;
-
-    // Create RawData with key (zero-copy to Arc)
-    let data_slice = std::slice::from_raw_parts(data, data_size);
-    let raw_data = if !key.is_null() && key_size > 0 {
-        let key_slice = std::slice::from_raw_parts(key, key_size);
-        RawData::from_slices(data_slice, key_slice)
-    } else {
-        RawData::from_slice(data_slice)
-    };
-
-    // Write with NIL handle
-    ffi_try!(writer_ref.inner.write(&raw_data, InstanceHandle::NIL));
+    // Write directly without cloning - DDS core uses registered TypeSupport for serialization
+    ffi_try!(writer_ref.inner.write(data_ref, InstanceHandle::NIL));
 
     INT2DDS_RET_OK
 }
@@ -410,8 +380,7 @@ pub unsafe extern "C" fn int2dds_get_publication_matched_status(
 ///
 /// # Safety
 /// - `writer` must be a valid datawriter
-/// - `key` must point to valid serialized key data
-/// - `key_size` must be the correct size of the key
+/// - `data` must be a valid Int2DdsData with key fields set
 /// - `handle_out` must be a valid pointer to 16-byte array for the instance handle
 ///
 /// # Returns
@@ -419,23 +388,18 @@ pub unsafe extern "C" fn int2dds_get_publication_matched_status(
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_register_instance(
     writer: *const Int2DdsDataWriter,
-    key: *const u8,
-    key_size: usize,
+    data: *const Int2DdsData,
     handle_out: *mut [u8; 16],
 ) -> Int2DdsRet {
     check_null!(writer);
+    check_null!(data);
     check_null!(handle_out);
 
     let writer_ref = &*writer;
+    let data_ref = &*data;
 
-    // Create RawData with key for registration (zero-copy to Arc)
-    let raw_data = if !key.is_null() && key_size > 0 {
-        RawData::key_only_from_slice(std::slice::from_raw_parts(key, key_size))
-    } else {
-        RawData::empty()
-    };
-
-    match writer_ref.inner.register_instance(&raw_data) {
+    // Register directly without cloning - DDS core uses registered TypeSupport for key handling
+    match writer_ref.inner.register_instance(data_ref) {
         Ok(handle) => {
             *handle_out = *handle.value();
             INT2DDS_RET_OK
@@ -451,31 +415,25 @@ pub unsafe extern "C" fn int2dds_register_instance(
 ///
 /// # Safety
 /// - `writer` must be a valid datawriter
-/// - `key` must point to valid serialized key data
-/// - `key_size` must be the correct size of the key
+/// - `data` must be a valid Int2DdsData with key fields set
 /// - `handle` is a pointer to 16-byte instance handle (use all zeros for NIL)
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_unregister_instance(
     writer: *const Int2DdsDataWriter,
-    key: *const u8,
-    key_size: usize,
+    data: *const Int2DdsData,
     handle: *const [u8; 16],
 ) -> Int2DdsRet {
     check_null!(writer);
+    check_null!(data);
 
     let writer_ref = &*writer;
+    let data_ref = &*data;
 
-    // Create RawData with key for identification (zero-copy to Arc)
-    let raw_data = if !key.is_null() && key_size > 0 {
-        RawData::key_only_from_slice(std::slice::from_raw_parts(key, key_size))
-    } else {
-        RawData::empty()
-    };
-
+    // Unregister directly without cloning
     let instance_handle =
         if handle.is_null() { InstanceHandle::NIL } else { InstanceHandle::new(*handle) };
 
-    match writer_ref.inner.unregister_instance(&raw_data, instance_handle) {
+    match writer_ref.inner.unregister_instance(data_ref, instance_handle) {
         Ok(()) => INT2DDS_RET_OK,
         Err(e) => dds_error_to_code(&e),
     }
@@ -488,31 +446,25 @@ pub unsafe extern "C" fn int2dds_unregister_instance(
 ///
 /// # Safety
 /// - `writer` must be a valid datawriter
-/// - `key` must point to valid serialized key data
-/// - `key_size` must be the correct size of the key
+/// - `data` must be a valid Int2DdsData with key fields set
 /// - `handle` is a pointer to 16-byte instance handle (use all zeros for NIL)
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dispose(
     writer: *const Int2DdsDataWriter,
-    key: *const u8,
-    key_size: usize,
+    data: *const Int2DdsData,
     handle: *const [u8; 16],
 ) -> Int2DdsRet {
     check_null!(writer);
+    check_null!(data);
 
     let writer_ref = &*writer;
+    let data_ref = &*data;
 
-    // Create RawData with key for identification (zero-copy to Arc)
-    let raw_data = if !key.is_null() && key_size > 0 {
-        RawData::key_only_from_slice(std::slice::from_raw_parts(key, key_size))
-    } else {
-        RawData::empty()
-    };
-
+    // Dispose directly without cloning
     let instance_handle =
         if handle.is_null() { InstanceHandle::NIL } else { InstanceHandle::new(*handle) };
 
-    match writer_ref.inner.dispose(&raw_data, instance_handle) {
+    match writer_ref.inner.dispose(data_ref, instance_handle) {
         Ok(()) => INT2DDS_RET_OK,
         Err(e) => dds_error_to_code(&e),
     }
