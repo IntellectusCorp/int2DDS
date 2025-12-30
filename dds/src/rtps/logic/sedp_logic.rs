@@ -1402,6 +1402,7 @@ impl SedpLogic {
         };
 
         let participant = self.get_upgraded_participant()?;
+        let participant_weak = self.participant.clone();
 
         // Generate unique timer ID using participant GUID, timestamp and random number
         let timer_id = format!(
@@ -1411,7 +1412,6 @@ impl SedpLogic {
             random_range(0..10000)
         );
 
-        let participant = participant.clone();
         let message = Arc::new(message);
         if let Ok(timer_handler) = self.timer_handler.lock() {
             timer_handler.add_timer(
@@ -1419,12 +1419,15 @@ impl SedpLogic {
                 remaining_duration,
                 false, // one-shot timer
                 {
-                    let participant = participant.clone();
                     let message = message.clone();
                     move || {
-                        let sending_handler =
-                            SendingHandler::get_instance(participant.clone(), None, None);
-                        sending_handler.push_message_and_wake((*message).clone());
+                        if let Some(participant) = participant_weak.upgrade() {
+                            if !participant.is_terminated() {
+                                let sending_handler =
+                                    SendingHandler::get_instance(participant, None, None);
+                                sending_handler.push_message_and_wake((*message).clone());
+                            }
+                        }
                     }
                 },
             );
