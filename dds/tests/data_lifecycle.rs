@@ -198,6 +198,8 @@ fn test_autopurge_dispose_samples() {
     wait_for_reader_status(&data_reader, StatusMask::DATA_AVAILABLE, Duration::from_seconds(1))
         .unwrap();
 
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
     let samples = data_reader
         .read(
             10,
@@ -283,6 +285,8 @@ fn test_autopurge_nowriter_samples() {
 
     wait_for_reader_status(&data_reader, StatusMask::DATA_AVAILABLE, Duration::from_seconds(1))
         .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
 
     let samples = data_reader
         .read(
