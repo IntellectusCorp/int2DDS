@@ -1,5 +1,5 @@
 name: Run Interoperability Tests
-run-name: "Interop test [${{ github.ref_name }}]"
+run-name: "Interop test ${{ github.ref_name }}"
 on:
   workflow_dispatch:
     inputs:
