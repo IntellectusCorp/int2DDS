@@ -1,5 +1,5 @@
 name: Cross Platform Build
-run-name: "Build ${{ github.ref_name }}"
+run-name: "Build ${{ github.head_ref }}"
 
 on:
   pull_request:
