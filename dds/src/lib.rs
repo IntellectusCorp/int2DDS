@@ -347,6 +347,7 @@ pub mod config;
 pub mod rtps;
 #[doc(hidden)]
 pub mod serialize;
+pub mod xtypes;
 #[doc(hidden)]
 pub use dcps::topic::DdsType;
 #[doc(hidden)]
