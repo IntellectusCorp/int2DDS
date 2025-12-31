@@ -1,4 +1,4 @@
-name: Cross Platform Build
+name: Build
 run-name: "Build ${{ github.head_ref }}"
 
 on:

@@ -1,5 +1,5 @@
-name: Tests
-run-name: "Test ${{ github.head_ref }}"
+name: Cargo Tests
+run-name: "Cargo test ${{ github.head_ref }}"
 
 on:
   pull_request:

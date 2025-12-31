@@ -1,4 +1,4 @@
-name: Cache Cargo Dependencies Build
+name: Cache Cargo Dependencies
 run-name: "Cache dependencies"
 
 on:
