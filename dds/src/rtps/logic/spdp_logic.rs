@@ -144,19 +144,23 @@ impl SpdpLogic {
                 remaining_duration,
                 false, // one-shot timer
                 {
-                    let participant = self.get_upgraded_participant()?;
+                    let participant_weak = self.participant.clone();
                     let data_arc = data_arc.clone();
                     move || {
-                        let sending_handler =
-                            SendingHandler::get_instance(participant.clone(), None, None);
-                        sending_handler.push_message_and_wake(
-                            MessageType::PeriodicParticipantDataMulticast(
-                                Some(Instant::now()),
-                                duration,
-                                domain_id,
-                                (*data_arc).clone(),
-                            ),
-                        );
+                        if let Some(participant) = participant_weak.upgrade() {
+                            if !participant.is_terminated() {
+                                let sending_handler =
+                                    SendingHandler::get_instance(participant, None, None);
+                                sending_handler.push_message_and_wake(
+                                    MessageType::PeriodicParticipantDataMulticast(
+                                        Some(Instant::now()),
+                                        duration,
+                                        domain_id,
+                                        (*data_arc).clone(),
+                                    ),
+                                );
+                            }
+                        }
                     }
                 },
             );
