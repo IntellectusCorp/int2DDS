@@ -23,6 +23,7 @@ use crate::{
         },
         instance_handle::InstanceHandle,
     },
+    dcps::topic::type_support::DdsType,
     infrastructure::qos_policy::{DurabilityQosPolicyKind, QosPolicyId, ReliabilityQosPolicyKind},
     rtps::{
         builtin::{
@@ -43,6 +44,7 @@ use crate::{
             parameters::ParameterList,
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
             sequence::SequenceNumber,
+            types::ChangeKind,
         },
         entities::{
             entity::Entity,
@@ -1203,6 +1205,7 @@ impl SedpLogic {
                         ));
                     }
                 }
+
                 for remote_participant_data in list.iter() {
                     if let Err(e) = self.send_to_participant_metatraffic_locators(
                         &data,
@@ -1211,19 +1214,20 @@ impl SedpLogic {
                     ) {
                         warn!("Failed to send SPDP discovery message: {:?}", e);
                     }
-                    let start_time = Instant::now();
-                    let _ = self.register_send_timer(
-                        Some(start_time),
-                        logic_start_time,
-                        duration,
-                        MessageType::PeriodicParticipantDataUnicast(
-                            Some(start_time),
-                            duration,
-                            spdp_discovered_participant_data.clone(),
-                            Some(data.clone()),
-                        ),
-                    );
                 }
+
+                let start_time = Instant::now();
+                let _ = self.register_send_timer(
+                    Some(start_time),
+                    logic_start_time,
+                    duration,
+                    MessageType::PeriodicParticipantDataUnicast(
+                        Some(start_time),
+                        duration,
+                        spdp_discovered_participant_data.clone(),
+                        Some(data.clone()),
+                    ),
+                );
             }
             None => return Err(RtpsError::new(RtpsErrorCode::DataNotSet, "Data is not set")),
         };
@@ -1407,6 +1411,7 @@ impl SedpLogic {
         };
 
         let participant = self.get_upgraded_participant()?;
+        let participant_weak = self.participant.clone();
 
         // Generate unique timer ID using participant GUID, timestamp and random number
         let timer_id = format!(
@@ -1416,7 +1421,6 @@ impl SedpLogic {
             random_range(0..10000)
         );
 
-        let participant = Arc::new(participant.clone());
         let message = Arc::new(message);
         if let Ok(timer_handler) = self.timer_handler.lock() {
             timer_handler.add_timer(
@@ -1424,12 +1428,15 @@ impl SedpLogic {
                 remaining_duration,
                 false, // one-shot timer
                 {
-                    let participant = participant.clone();
                     let message = message.clone();
                     move || {
-                        let sending_handler =
-                            SendingHandler::get_instance((*participant).clone(), None, None);
-                        sending_handler.push_message_and_wake((*message).clone());
+                        if let Some(participant) = participant_weak.upgrade() {
+                            if !participant.is_terminated() {
+                                let sending_handler =
+                                    SendingHandler::get_instance(participant, None, None);
+                                sending_handler.push_message_and_wake((*message).clone());
+                            }
+                        }
                     }
                 },
             );
@@ -1930,6 +1937,23 @@ impl UnicastMessageProcessor for SedpLogic {
                     )
                 })?;
 
+                if let Ok(serialized_data) = writer_data.publication_builtin_topic_data.serialize()
+                {
+                    let cache_change = CacheChange::new(
+                        ChangeKind::Alive,
+                        writer_guid,
+                        InstanceHandle::NIL,
+                        data.writer_sn,
+                        serialized_data,
+                        message_receiver.get_source_timestamp(),
+                    );
+
+                    let reader = builtin_endpoint_pair.reader();
+                    if let Ok(mut cache_guard) = reader.reader_cache().lock() {
+                        let _ = cache_guard.add_change(cache_change);
+                    }
+                }
+
                 debug!("SEDP Logic: DiscoveredWriterData: {:?}", writer_data);
                 return self.handle_publication_builtin_topic_data(
                     writer_data.publication_builtin_topic_data,
@@ -1946,6 +1970,23 @@ impl UnicastMessageProcessor for SedpLogic {
                         format!("Failed to parse DiscoveredReaderData: {}", e),
                     )
                 })?;
+
+                if let Ok(serialized_data) = reader_data.subscription_builtin_topic_data.serialize()
+                {
+                    let cache_change = CacheChange::new(
+                        ChangeKind::Alive,
+                        writer_guid,
+                        InstanceHandle::NIL,
+                        data.writer_sn,
+                        serialized_data,
+                        message_receiver.get_source_timestamp(),
+                    );
+
+                    let reader = builtin_endpoint_pair.reader();
+                    if let Ok(mut cache_guard) = reader.reader_cache().lock() {
+                        let _ = cache_guard.add_change(cache_change);
+                    }
+                }
 
                 debug!("SEDP Logic: DiscoveredReaderData: {:?}", reader_data);
                 return self.handle_subscription_builtin_topic_data(
