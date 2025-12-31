@@ -12,7 +12,7 @@
 //! - TimeBasedFilter enforcement
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     fmt::Debug,
     sync::{Arc, Mutex, Weak},
 };
@@ -41,6 +41,8 @@ use crate::{
     },
     subscription::{data_reader::DataReader, sample_info::InstanceStateKind},
 };
+
+pub(crate) type ReaderChangeId = (Guid, SequenceNumber);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct OwnershipInfo {
@@ -633,6 +635,23 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
         Ok(())
     }
 
+    /// Removes all samples of the specified instance.
+    pub(crate) fn remove_all_changes_of_instance(
+        &mut self,
+        instance_handle: InstanceHandle,
+    ) -> DdsResult<()> {
+        let mut instance_map =
+            self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        if let Some(changes) = instance_map.get_mut(&instance_handle) {
+            changes.clear();
+        }
+
+        let changes = &mut self.changes;
+        changes.retain(|change| change.instance_handle() != instance_handle);
+
+        Ok(())
+    }
+
     /// Retrieves CacheChange using the SequenceNumber and the Guid of the Writer that sent it.
     pub(crate) fn get_change(
         &self,
@@ -643,6 +662,25 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
             change.sequence_number() == seq_num && change.writer_guid() == writer_guid
         });
         change.cloned()
+    }
+
+    /// Retrieves all change identifiers (writer GUID and sequence number) of the specified instance.
+    pub(crate) fn get_change_id_set_of_instance(
+        &self,
+        instance_handle: InstanceHandle,
+    ) -> DdsResult<HashSet<ReaderChangeId>> {
+        let instance_map = self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        let changes = if let Some(weak_changes) = instance_map.get(&instance_handle) {
+            weak_changes
+                .iter()
+                .filter_map(|weak| weak.upgrade())
+                .map(|change| (change.writer_guid(), change.sequence_number()))
+                .collect::<HashSet<ReaderChangeId>>()
+        } else {
+            HashSet::new()
+        };
+
+        Ok(changes)
     }
 
     #[allow(clippy::type_complexity)]
