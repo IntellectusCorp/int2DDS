@@ -102,7 +102,7 @@ impl TimerHandler {
                 Some(timer_task) => {
                     let timer_task_clone = timer_task.clone();
                     let message_queue_clone = self.message_queue.clone();
-                    let guid_prefix = self.guid_prefix.clone();
+                    let guid_prefix = self.guid_prefix;
                     let handle = thread::Builder::new()
                         .name("timer task thread".to_string())
                         .spawn(move || {
