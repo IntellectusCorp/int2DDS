@@ -181,6 +181,9 @@ impl TimerHandler {
     }
 
     pub(crate) fn terminate(&self) {
+        if let Ok(mut queue) = self.message_queue.lock() {
+            queue.clear();
+        }
         self.push_message_and_wake(TimerMessage::Terminate);
     }
 
@@ -218,6 +221,11 @@ impl TimerHandler {
         self.timer_task = None;
         // Clear waker reference
         self.waker = None;
+
+        if let Ok(mut queue) = self.message_queue.lock() {
+            queue.clear();
+        }
+
         Ok(())
     }
 
