@@ -762,6 +762,7 @@ impl WlpLogic {
         };
 
         let participant = self.get_upgraded_participant()?;
+        let participant_weak = self.participant.clone();
 
         let timer_id = format!(
             "wlp_p2p_{:?}_{}",
@@ -776,12 +777,15 @@ impl WlpLogic {
                 remaining_duration,
                 false, // one-shot
                 {
-                    let participant = participant.clone();
                     let message = message.clone();
                     move || {
-                        let sending_handler =
-                            SendingHandler::get_instance(participant.clone(), None, None);
-                        sending_handler.push_message_and_wake((*message).clone());
+                        if let Some(participant) = participant_weak.upgrade() {
+                            if !participant.is_terminated() {
+                                let sending_handler =
+                                    SendingHandler::get_instance(participant, None, None);
+                                sending_handler.push_message_and_wake((*message).clone());
+                            }
+                        }
                     }
                 },
             );
