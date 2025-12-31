@@ -2307,9 +2307,9 @@ mod tests {
                 // Register thread name for monitoring
                 {
                     use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::register_current_thread_name_with_guid(
+                    ThreadMonitor::register_current_thread_name_with_guid_prefix(
                         "discovery_traffic_multicast_listening",
-                        &participant.guid(),
+                        participant.guid().prefix(),
                     );
                 }
 
@@ -2361,9 +2361,9 @@ mod tests {
                 // Register thread name for monitoring
                 {
                     use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::register_current_thread_name_with_guid(
+                    ThreadMonitor::register_current_thread_name_with_guid_prefix(
                         "discovery_traffic_multicast_listening",
-                        &participant_guid,
+                        participant_guid.prefix(),
                     );
                 }
 

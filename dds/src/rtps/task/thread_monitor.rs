@@ -825,6 +825,7 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    use crate::rtps::common::guid::Guid;
     use crate::rtps::common::types::{DomainId, ParticipantId};
     use crate::rtps::entities::participant::Participant;
 
@@ -956,9 +957,9 @@ mod tests {
             .spawn(move || {
                 // Register thread name for monitoring
                 {
-                    ThreadMonitor::register_current_thread_name_with_guid(
+                    ThreadMonitor::register_current_thread_name_with_guid_prefix(
                         "test_thread_monitoring",
-                        &Guid::UNKNOWN,
+                        Guid::UNKNOWN.prefix(),
                     );
                 }
 
