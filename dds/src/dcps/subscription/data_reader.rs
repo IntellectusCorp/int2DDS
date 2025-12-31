@@ -35,7 +35,6 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, RwLock, Weak,
     },
-    time::Duration,
 };
 
 use super::{
@@ -54,7 +53,10 @@ use crate::{
         },
         instance_handle::InstanceHandle,
     },
-    core::error::{DdsError, DdsResult},
+    core::{
+        error::{DdsError, DdsResult},
+        time::Duration,
+    },
     infrastructure::{
         deadline_monitor::DeadlineMonitor,
         domain_entity::DomainEntity,
@@ -1586,7 +1588,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
                     let reader_data_lifecycle_qos = &self.get_qos()?.reader_data_lifecycle;
                     if !reader_data_lifecycle_qos.autopurge_disposed_samples_delay.is_infinite() {
-                        let std_duration = Duration::from_nanos(
+                        let std_duration = std::time::Duration::from_nanos(
                             reader_data_lifecycle_qos.autopurge_disposed_samples_delay.as_nanos()
                                 as u64,
                         );
@@ -1624,7 +1626,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
                     let reader_data_lifecycle_qos = &self.get_qos()?.reader_data_lifecycle;
                     if !reader_data_lifecycle_qos.autopurge_nowriter_samples_delay.is_infinite() {
-                        let std_duration = Duration::from_nanos(
+                        let std_duration = std::time::Duration::from_nanos(
                             reader_data_lifecycle_qos.autopurge_nowriter_samples_delay.as_nanos()
                                 as u64,
                         );
@@ -1651,7 +1653,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
     fn add_autopurge_timer(
         &self,
-        std_duration: Duration,
+        std_duration: std::time::Duration,
         timer_id: String,
         instance_handle: InstanceHandle,
     ) -> DdsResult<()> {
