@@ -6,6 +6,35 @@ pub struct FieldConfig {
     pub optional: bool,
     pub must_understand: bool,
     pub bound: Option<usize>,
+    /// Default value for the field when not present in serialized data (DDS-XTYPES @default)
+    pub default: Option<syn::Lit>,
+}
+
+/// Convert a literal to a TokenStream for code generation
+/// Handles type conversion for String (adds .to_string())
+pub fn literal_to_tokens(lit: &syn::Lit, ty: &syn::Type) -> proc_macro2::TokenStream {
+    use quote::quote;
+
+    match lit {
+        syn::Lit::Str(s) => {
+            // Check if target type is String
+            if let syn::Type::Path(type_path) = ty {
+                if let Some(seg) = type_path.path.segments.last() {
+                    if seg.ident == "String" {
+                        return quote! { #s.to_string() };
+                    }
+                }
+            }
+            quote! { #s }
+        }
+        syn::Lit::Int(i) => quote! { #i },
+        syn::Lit::Float(f) => quote! { #f },
+        syn::Lit::Bool(b) => quote! { #b },
+        syn::Lit::Char(c) => quote! { #c },
+        syn::Lit::Byte(b) => quote! { #b },
+        syn::Lit::ByteStr(bs) => quote! { #bs },
+        _ => quote! { Default::default() },
+    }
 }
 
 /// Parse field attributes from #[dds(...)] annotations
@@ -29,6 +58,12 @@ pub fn parse_field_attributes(field: &syn::Field) -> FieldConfig {
                     let value = meta.value()?;
                     let lit: syn::LitInt = value.parse()?;
                     config.bound = Some(lit.base10_parse::<usize>()?);
+                } else if meta.path.is_ident("default") {
+                    // Parse @default annotation: #[dds(default = <literal>)]
+                    // Supported literals: integer, float, bool, string, char
+                    let value = meta.value()?;
+                    let lit: syn::Lit = value.parse()?;
+                    config.default = Some(lit);
                 }
                 Ok(())
             });
