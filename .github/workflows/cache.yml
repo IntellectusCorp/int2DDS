@@ -30,7 +30,7 @@ jobs:
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: 1.89.0
+          toolchain: 1.88.0
           rustflags: ""
 
       - name: Cache cargo registry and build
@@ -41,4 +41,4 @@ jobs:
       - name: Build once to populate cache
         env:
           RUSTFLAGS: ${{ runner.os == 'Windows' && '-C linker=lld-link' || '' }}
-        run: cargo test --no-run
+        run: cargo build --all-targets
