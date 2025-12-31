@@ -100,6 +100,7 @@ const GROUPDATA_QOS_POLICY_NAME: &str = "GroupData";
 const LIFESPAN_QOS_POLICY_NAME: &str = "Lifespan";
 const DURABILITYSERVICE_QOS_POLICY_NAME: &str = "DurabilityService";
 const DATAREPRESENTATION_QOS_POLICY_NAME: &str = "DataRepresentation";
+const TYPECONSISTENCYENFORCEMENT_QOS_POLICY_NAME: &str = "TypeConsistencyEnforcement";
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash, Readable, Writable)]
 pub enum QosPolicyId {
@@ -128,6 +129,7 @@ pub enum QosPolicyId {
     Lifespan = 21,
     DurabilityService = 22,
     DataRepresentation = 23,
+    TypeConsistencyEnforcement = 24,
 }
 
 impl QosPolicyId {
@@ -161,6 +163,7 @@ impl QosPolicyId {
             21 => Some(QosPolicyId::Lifespan),
             22 => Some(QosPolicyId::DurabilityService),
             23 => Some(QosPolicyId::DataRepresentation),
+            24 => Some(QosPolicyId::TypeConsistencyEnforcement),
             _ => None,
         }
     }
@@ -191,6 +194,7 @@ impl QosPolicyId {
             QosPolicyId::Lifespan => LIFESPAN_QOS_POLICY_NAME,
             QosPolicyId::DurabilityService => DURABILITYSERVICE_QOS_POLICY_NAME,
             QosPolicyId::DataRepresentation => DATAREPRESENTATION_QOS_POLICY_NAME,
+            QosPolicyId::TypeConsistencyEnforcement => TYPECONSISTENCYENFORCEMENT_QOS_POLICY_NAME,
         }
     }
 }
@@ -1710,5 +1714,136 @@ pub struct DataRepresentationQosPolicy {
 impl QosPolicy for DataRepresentationQosPolicy {
     fn name(&self) -> &str {
         DATAREPRESENTATION_QOS_POLICY_NAME
+    }
+}
+
+/// Specifies the type consistency enforcement level for DDS-XTypes.
+///
+/// - `DisallowTypeCoercion`: Strict type matching required (default)
+/// - `AllowTypeCoercion`: Allow compatible type coercion during deserialization
+#[derive(DdsType, PartialEq, Default, Copy, Eq)]
+#[dds_type(crate_path = "crate", no_default, no_partialeq)]
+pub enum TypeConsistencyKind {
+    /// Strict type matching - types must be identical.
+    #[default]
+    DisallowTypeCoercion = 0,
+    /// Allow type coercion for compatible types (e.g., adding optional fields).
+    AllowTypeCoercion = 1,
+}
+
+impl ConstDefault for TypeConsistencyKind {
+    const DEFAULT: Self = TypeConsistencyKind::DisallowTypeCoercion;
+}
+
+impl TypeConsistencyKind {
+    pub fn from_u16(value: u16) -> Option<Self> {
+        match value {
+            0 => Some(Self::DisallowTypeCoercion),
+            1 => Some(Self::AllowTypeCoercion),
+            _ => None,
+        }
+    }
+}
+
+/// Controls type consistency enforcement for DDS-XTypes.
+///
+/// This QoS policy determines how strictly types are matched between DataWriters
+/// and DataReaders, and how the middleware handles type evolution.
+///
+/// **Note**: This QoS policy is defined for compatibility with DDS-XTypes specification.
+/// The compatibility checking logic may be extended in future versions.
+///
+/// # Default
+/// - `kind`: DisallowTypeCoercion
+/// - All ignore flags: false
+/// - `prevent_type_widening`: false
+/// - `force_type_validation`: false
+///
+/// # Example
+/// ```no_run
+/// use int2dds::{
+///     infrastructure::{
+///         qos_policy::{TypeConsistencyEnforcementQosPolicy, TypeConsistencyKind},
+///         status::StatusMask,
+///     },
+///     subscription::qos::{DataReaderQos, SubscriberQos},
+/// #     domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
+/// #     topic::{qos::TopicQos, type_support::DdsType},
+/// };
+/// #
+/// #
+/// # #[derive(DdsType)]
+/// # #[dds_type(crate_path = "int2dds")]
+/// # struct HelloWorldType { index: u32, message: String }
+/// #
+/// # let factory = DomainParticipantFactory::get_instance();
+/// # let participant = factory.create_participant(0, DomainParticipantQos::default(), None, StatusMask::default()).unwrap();
+/// # let topic = participant.create_topic::<HelloWorldType>("topic", "HelloWorld", TopicQos::default(), None, StatusMask::default()).unwrap();
+///
+/// let subscriber = participant
+///     .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+///     .unwrap();
+///
+/// // Allow type coercion for forward compatibility
+/// let reader_qos = DataReaderQos {
+///     type_consistency_enforcement: TypeConsistencyEnforcementQosPolicy {
+///         kind: TypeConsistencyKind::AllowTypeCoercion,
+///         ignore_sequence_bounds: true,
+///         ignore_string_bounds: true,
+///         ignore_member_names: false,
+///         prevent_type_widening: false,
+///         force_type_validation: false,
+///     },
+///     ..Default::default()
+/// };
+///
+/// let _reader = subscriber
+///     .create_datareader::<HelloWorldType>(&topic, reader_qos, None, StatusMask::default())
+///     .unwrap();
+/// ```
+#[derive(DdsType, Copy, Eq)]
+#[dds_type(crate_path = "crate", no_default)]
+pub struct TypeConsistencyEnforcementQosPolicy {
+    /// The type consistency enforcement level.
+    pub kind: TypeConsistencyKind,
+    /// Ignore differences in sequence bounds when matching types.
+    pub ignore_sequence_bounds: bool,
+    /// Ignore differences in string bounds when matching types.
+    pub ignore_string_bounds: bool,
+    /// Ignore member names when matching types (use hash-based matching).
+    pub ignore_member_names: bool,
+    /// Prevent type widening (adding new members to received types).
+    pub prevent_type_widening: bool,
+    /// Force TypeObject validation even if hash matches.
+    pub force_type_validation: bool,
+}
+
+impl Default for TypeConsistencyEnforcementQosPolicy {
+    fn default() -> Self {
+        Self {
+            kind: TypeConsistencyKind::DisallowTypeCoercion,
+            ignore_sequence_bounds: false,
+            ignore_string_bounds: false,
+            ignore_member_names: false,
+            prevent_type_widening: false,
+            force_type_validation: false,
+        }
+    }
+}
+
+impl ConstDefault for TypeConsistencyEnforcementQosPolicy {
+    const DEFAULT: Self = Self {
+        kind: TypeConsistencyKind::DEFAULT,
+        ignore_sequence_bounds: false,
+        ignore_string_bounds: false,
+        ignore_member_names: false,
+        prevent_type_widening: false,
+        force_type_validation: false,
+    };
+}
+
+impl QosPolicy for TypeConsistencyEnforcementQosPolicy {
+    fn name(&self) -> &str {
+        TYPECONSISTENCYENFORCEMENT_QOS_POLICY_NAME
     }
 }

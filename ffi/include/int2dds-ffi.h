@@ -76,6 +76,7 @@ typedef enum Int2DdsQosPolicyId {
   Lifespan = 21,
   DurabilityService = 22,
   DataRepresentation = 23,
+  TypeConsistencyEnforcement = 24,
 } Int2DdsQosPolicyId;
 
 /**
