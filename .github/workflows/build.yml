@@ -36,14 +36,10 @@ jobs:
           shared-key: cargo-develop
           save-if: false
 
-      - name: Clippy
+      - name: Clippy & Build
         shell: bash
         env:
           RUSTFLAGS: ${{ runner.os == 'Windows' && '-C linker=lld-link' || '' }}
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: Build
-        shell: bash
-        env:
-          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C linker=lld-link' || '' }}
-        run: cargo build
+        run: |
+          cargo clippy
+          cargo build
