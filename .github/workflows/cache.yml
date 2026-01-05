@@ -1,5 +1,5 @@
-name: Cache Cargo Dependencies Build
-run-name: Cache Cargo Dependencies Build
+name: Cache Cargo Dependencies
+run-name: "Cache dependencies"
 
 on:
   push:
@@ -41,4 +41,4 @@ jobs:
       - name: Build once to populate cache
         env:
           RUSTFLAGS: ${{ runner.os == 'Windows' && '-C linker=lld-link' || '' }}
-        run: cargo test --no-run
+        run: cargo build --all-targets
