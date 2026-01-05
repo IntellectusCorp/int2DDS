@@ -17,12 +17,14 @@ use std::time::{Duration, SystemTime};
 
 use log::{debug, error};
 
-use crate::rtps::common::guid::Guid;
+use crate::rtps::common::guid::GuidPrefix;
+use crate::rtps::entities::entity::Entity;
 use crate::rtps::entities::participant::Participant;
-use crate::rtps::task::timer_handler::TimerHandler;
+use crate::utils::timer::timer_handler::TimerHandler;
 
 // Global thread registry: Guid -> (TID -> thread name)
-static THREAD_REGISTRY: OnceLock<Mutex<HashMap<Guid, HashMap<u32, String>>>> = OnceLock::new();
+static THREAD_REGISTRY: OnceLock<Mutex<HashMap<GuidPrefix, HashMap<u32, String>>>> =
+    OnceLock::new();
 
 pub(crate) struct ThreadMonitor {
     participant: Arc<Participant>,
@@ -52,7 +54,7 @@ impl ThreadMonitor {
 
         debug!("Starting thread monitoring with 10 second interval");
 
-        let timer_handler = TimerHandler::get_instance(self.participant.clone());
+        let timer_handler = TimerHandler::get_instance(self.participant.guid().prefix());
         let log_file_path = self.log_file_path.clone();
 
         match timer_handler.lock() {
@@ -80,7 +82,9 @@ impl ThreadMonitor {
 
         debug!("Stopping thread monitoring");
 
-        let timer_handler = TimerHandler::get_instance(self.participant.clone());
+        let timer_handler = TimerHandler::get_instance(self.participant.guid().prefix());
+        Self::remove_threads_by_guid_prefix(&self.participant.guid().prefix());
+
         match timer_handler.lock() {
             Ok(handler) => {
                 handler.remove_timer("thread_monitoring_timer".to_string());
@@ -736,22 +740,32 @@ impl ThreadMonitor {
 
     /// Register current thread TID with associated Guid (all platforms)
     #[allow(clippy::clone_on_copy)]
-    pub(crate) fn register_current_thread_name_with_guid(name: &str, guid: &Guid) {
+    pub(crate) fn register_current_thread_name_with_guid_prefix(
+        name: &str,
+        guid_prefix: GuidPrefix,
+    ) {
         let tid = Self::get_current_thread_id();
         let registry = THREAD_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
 
         if let Ok(mut map) = registry.lock() {
-            map.entry(guid.clone()).or_insert_with(HashMap::new).insert(tid, name.to_string());
-            debug!("Registered thread TID {} with name '{}' for Guid {:?}", tid, name, guid);
+            map.entry(guid_prefix).or_insert_with(HashMap::new).insert(tid, name.to_string());
+            debug!(
+                "Registered thread TID {} with name '{}' for GuidPrefix {:?}",
+                tid, name, guid_prefix
+            );
         }
     }
 
     /// Remove all threads associated with a Guid from registry (for cleanup on disable)
-    pub(crate) fn remove_threads_by_guid(guid: &Guid) {
+    pub(crate) fn remove_threads_by_guid_prefix(guid_prefix: &GuidPrefix) {
         if let Some(registry) = THREAD_REGISTRY.get() {
             if let Ok(mut map) = registry.lock() {
-                if let Some(tid_map) = map.remove(guid) {
-                    debug!("Removed {} threads associated with Guid {:?}", tid_map.len(), guid);
+                if let Some(tid_map) = map.remove(guid_prefix) {
+                    debug!(
+                        "Removed {} threads associated with GuidPrefix {:?}",
+                        tid_map.len(),
+                        guid_prefix
+                    );
                 }
             }
         }
@@ -811,6 +825,7 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    use crate::rtps::common::guid::Guid;
     use crate::rtps::common::types::{DomainId, ParticipantId};
     use crate::rtps::entities::participant::Participant;
 
@@ -942,9 +957,9 @@ mod tests {
             .spawn(move || {
                 // Register thread name for monitoring
                 {
-                    ThreadMonitor::register_current_thread_name_with_guid(
+                    ThreadMonitor::register_current_thread_name_with_guid_prefix(
                         "test_thread_monitoring",
-                        &Guid::UNKNOWN,
+                        Guid::UNKNOWN.prefix(),
                     );
                 }
 

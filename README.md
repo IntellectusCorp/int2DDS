@@ -206,7 +206,7 @@ fn main() {
 
 ### Prerequisites
 
-- Rust 1.88 or later
+- Rust 1.89 or later
 - Cargo
 
 ### Build
