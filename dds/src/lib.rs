@@ -351,6 +351,8 @@ pub mod serialize;
 pub use dcps::topic::DdsType;
 #[doc(hidden)]
 pub use int2dds_derive::DdsType as DeriveDdsType;
+#[doc(hidden)]
+pub mod utils;
 
 extern crate md5;
 

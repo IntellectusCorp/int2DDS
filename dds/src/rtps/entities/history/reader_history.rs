@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex, Weak};
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex, Weak},
+};
 
 use crate::{
     common::instance_handle::InstanceHandle,
@@ -13,6 +16,7 @@ use crate::{
         },
         entities::history::{cache_change::CacheChange, history_cache::HistoryCache},
     },
+    subscription::data_reader_history::ReaderChangeId,
 };
 
 #[derive(Debug)]
@@ -163,5 +167,16 @@ impl ReaderHistoryCache {
                 "DataReader cache is not set for ReaderHistoryCache",
             ))
         }
+    }
+
+    /// Remove changes by the given change IDs.
+    pub(crate) fn remove_change_by_id_set(
+        &mut self,
+        change_id_set: HashSet<ReaderChangeId>,
+    ) -> RtpsResult<()> {
+        self.changes.retain(|change| {
+            !change_id_set.contains(&(change.writer_guid(), change.sequence_number()))
+        });
+        Ok(())
     }
 }
