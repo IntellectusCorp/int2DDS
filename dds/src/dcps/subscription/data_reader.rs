@@ -28,7 +28,7 @@
 use std::{
     any::{Any, TypeId},
     cmp::Ordering as CmpOrdering,
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     fmt::Debug,
     marker::PhantomData,
     sync::{
@@ -82,7 +82,7 @@ use crate::{
         },
     },
     subscription::{
-        data_reader_history::DataReaderHistoryCache,
+        data_reader_history::{DataReaderHistoryCache, ReaderChangeId},
         data_sample::DataSample,
         read_condition::ReadConditionTrait,
         sample_info::{InstanceInfo, SampleInfo, StateMaskExt},
@@ -93,6 +93,7 @@ use crate::{
         topic_description::TopicDescription,
         type_support::{DdsType, TypeSupport},
     },
+    utils::timer::timer_handler::TimerHandler,
 };
 
 // Pub/Sub must contain multiple types of DataWriter/Reader<Foo>,
@@ -1394,6 +1395,25 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         Ok(())
     }
 
+    /// Removes all changes of the given instance from both DataReader and RTPS reader caches.
+    /// This acquires both cache locks, so avoid calling from RTPS Reader contexts to prevent deadlock.
+    pub(crate) fn remove_change_of_instance(
+        &self,
+        instance_handle: InstanceHandle,
+    ) -> DdsResult<()> {
+        let change_id_set_to_remove =
+            if let Ok(mut datareader_cache) = self.get_datareader_cache()?.lock() {
+                let ids = datareader_cache.get_change_id_set_of_instance(instance_handle)?;
+                datareader_cache.remove_all_changes_of_instance(instance_handle)?;
+                ids
+            } else {
+                HashSet::new()
+            };
+
+        self.remove_change_from_rtps_reader_cache_by_id_set(change_id_set_to_remove)?;
+        Ok(())
+    }
+
     /// This should be only called when removing a change from data reader side to rtps reader side to avoid deadlock.
     /// RTPS reader history keeps acquiring datareader cache lock on socket listening thread,
     /// So never try to acquire rtps reader cache lock while holding datareader cache lock.
@@ -1410,6 +1430,34 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                 DdsError::Error(format!("Failed to lock rtps reader cache mutex: {}", e))
             })?;
             let res = cache_guard.remove_change(a_change);
+            if res.is_ok() {
+                Ok(())
+            } else {
+                Err(DdsError::Error(res.err().unwrap().to_string()))
+            }
+        } else {
+            Err(DdsError::Error("RTPS Reader is not initialized".to_string()))
+        }
+    }
+
+    /// Removes changes by the given change IDs from RTPS reader cache.
+    /// This should be only called when removing changes from data reader side to rtps reader side to avoid deadlock.
+    fn remove_change_from_rtps_reader_cache_by_id_set(
+        &self,
+        change_id_set: HashSet<ReaderChangeId>,
+    ) -> DdsResult<()> {
+        if let Ok(weak_rtps_reader) = self.rtps_reader.lock().as_ref() {
+            let weak_rtps_reader = weak_rtps_reader
+                .as_ref()
+                .ok_or(DdsError::Error("RTPS Reader is not initialized".to_string()))?;
+            let rtps_reader = weak_rtps_reader
+                .upgrade()
+                .ok_or(DdsError::Error("Failed to upgrade rtps reader weak".to_string()))?;
+            let rtps_reader_cache = rtps_reader.reader_cache();
+            let mut cache_guard = rtps_reader_cache.lock().map_err(|e| {
+                DdsError::Error(format!("Failed to lock rtps reader cache mutex: {}", e))
+            })?;
+            let res = cache_guard.remove_change_by_id_set(change_id_set);
             if res.is_ok() {
                 Ok(())
             } else {
@@ -1537,6 +1585,19 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                     if let Some(monitor) = monitor_guard.as_ref() {
                         monitor.cancel_instance(&instance_handle);
                     }
+
+                    let reader_data_lifecycle_qos = &self.get_qos()?.reader_data_lifecycle;
+                    if !reader_data_lifecycle_qos.autopurge_disposed_samples_delay.is_infinite() {
+                        let std_duration = std::time::Duration::from_nanos(
+                            reader_data_lifecycle_qos.autopurge_disposed_samples_delay.as_nanos()
+                                as u64,
+                        );
+                        self.add_autopurge_timer(
+                            std_duration,
+                            format!("autopurge_disposed_samples_{:?}", self.guid),
+                            instance_handle,
+                        )?;
+                    }
                 } else {
                     log::debug!(
                         "Not alive state transition only occurs from ALIVE to NOT_ALIVE,cannot change to NOT_ALIVE_DISPOSED from {:?}",
@@ -1562,6 +1623,19 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                     if let Some(monitor) = monitor_guard.as_ref() {
                         monitor.cancel_instance(&instance_handle);
                     }
+
+                    let reader_data_lifecycle_qos = &self.get_qos()?.reader_data_lifecycle;
+                    if !reader_data_lifecycle_qos.autopurge_nowriter_samples_delay.is_infinite() {
+                        let std_duration = std::time::Duration::from_nanos(
+                            reader_data_lifecycle_qos.autopurge_nowriter_samples_delay.as_nanos()
+                                as u64,
+                        );
+                        self.add_autopurge_timer(
+                            std_duration,
+                            format!("autopurge_nowriter_samples_{:?}", self.guid),
+                            instance_handle,
+                        )?;
+                    }
                 } else {
                     log::debug!(
                         "Not alive state transition only occurs from ALIVE to NOT_ALIVE, cannot change to NOT_ALIVE_NO_WRITERS from {:?}",
@@ -1574,6 +1648,32 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
             }
         }
 
+        Ok(())
+    }
+
+    fn add_autopurge_timer(
+        &self,
+        std_duration: std::time::Duration,
+        timer_id: String,
+        instance_handle: InstanceHandle,
+    ) -> DdsResult<()> {
+        // Get weak reference to self (DataReader)
+        let self_ref = self.self_ref.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        let weak_self = self_ref.as_ref().map(Arc::downgrade);
+
+        // Get timer handler lock
+        let timer_handler = TimerHandler::get_instance(self.guid.prefix());
+        let timer_handler_guard = timer_handler
+            .lock()
+            .map_err(|e| DdsError::Error(format!("Failed to lock timer handler: {}", e)))?;
+
+        timer_handler_guard.add_timer(timer_id, std_duration, false, move || {
+            if let Some(strong) = weak_self.as_ref().and_then(|w| w.upgrade()) {
+                if let Err(e) = strong.remove_change_of_instance(instance_handle) {
+                    log::error!("Failed to remove change: {:?}", e);
+                }
+            }
+        });
         Ok(())
     }
 }
