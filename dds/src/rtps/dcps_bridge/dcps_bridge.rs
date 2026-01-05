@@ -52,12 +52,10 @@ use crate::{
         },
         messages::sedp_message::SEDPMessage,
         service::background_service::BackgroundService,
-        task::{
-            sending_handler::SendingHandler, thread_monitor::ThreadMonitor,
-            timer_handler::TimerHandler,
-        },
+        task::{sending_handler::SendingHandler, thread_monitor::ThreadMonitor},
         transport::{get_transport_type, port_manager::PortManager, socket::Socket, TransportType},
     },
+    utils::timer::timer_handler::TimerHandler,
 };
 
 pub(crate) struct DcpsBridge {
@@ -559,7 +557,7 @@ impl DcpsBridge {
             debug!("Thread monitoring stopped");
         }
 
-        let timer_handler = TimerHandler::get_instance(self.participant.clone());
+        let timer_handler = TimerHandler::get_instance(self.participant.guid().prefix());
         if let Ok(mut handler) = timer_handler.lock() {
             handler.terminate();
             let _ = handler.join_timer_thread();
@@ -608,8 +606,7 @@ impl DcpsBridge {
         // Remove all threads spawned
 
         SendingHandler::remove_map_guard(&self.participant.guid());
-        TimerHandler::remove_map_guard(&self.participant.guid());
-        ThreadMonitor::remove_threads_by_guid(&self.participant.guid());
+        TimerHandler::remove_map_guard(&self.participant.guid().prefix());
         self.thread_monitor = None;
         self.socket.close();
         Ok(())
@@ -845,7 +842,7 @@ mod tests {
     #[test]
     fn test_all_handler_cleanup() {
         use crate::rtps::task::sending_handler::SendingHandler;
-        use crate::rtps::task::timer_handler::TimerHandler;
+        use crate::utils::timer::timer_handler::TimerHandler;
 
         let domain_id = unique_domain_id();
         let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32)));
