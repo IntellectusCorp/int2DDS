@@ -45,7 +45,6 @@ jobs:
           cargo build
 
   cross-platform-build:
-    name: Build Result
     runs-on: ubuntu-latest
     needs: build
     if: always()
