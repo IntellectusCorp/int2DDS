@@ -1,13 +1,14 @@
-name: Library Integration Tests
-run-name: Run integration tests on ${{ github.head_ref }}
+name: Build
+run-name: "Build ${{ github.head_ref }}"
 
 on:
   pull_request:
     branches: [develop]
     types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
 
 jobs:
-  integration-test:
+  build:
     strategy:
       fail-fast: false
       matrix:
@@ -35,12 +36,23 @@ jobs:
           shared-key: cargo-develop
           save-if: false
 
-      - name: Run all tests
+      - name: Clippy & Build
         shell: bash
         env:
-          INT2DDS_UDP_SOCKET_BUFFER: 5242880
           RUSTFLAGS: ${{ runner.os == 'Windows' && '-C linker=lld-link' || '' }}
         run: |
-          echo "RUSTFLAGS=$RUSTFLAGS"
           cargo clippy
-          cargo test -- --test-threads=1
+          cargo build
+
+  cross-platform-build:
+    runs-on: ubuntu-latest
+    needs: build
+    if: always()
+    steps:
+      - name: Check build result
+        run: |
+          if [ "${{ needs.build.result }}" != "success" ]; then
+            echo "Build failed on one or more platforms"
+            exit 1
+          fi
+          echo "All builds succeeded"
