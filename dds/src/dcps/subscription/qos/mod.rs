@@ -110,7 +110,7 @@ impl Qos for DataReaderQos {
             // || self.liveliness != LivelinessQosPolicy::default()
             // || self.ownership != OwnershipQosPolicy::default()
             || self.time_based_filter != TimeBasedFilterQosPolicy::default()
-            || self.reader_data_lifecycle != ReaderDataLifecycleQosPolicy::default()
+        // || self.reader_data_lifecycle != ReaderDataLifecycleQosPolicy::default()
         {
             return Err(DdsError::Unsupported);
         }
