@@ -44,7 +44,6 @@ use crate::rtps::messages::submessages::gap::Gap;
 use crate::rtps::messages::submessages::heartbeat::Heartbeat;
 use crate::rtps::messages::submessages::nack_frag::NackFrag;
 use crate::rtps::task::sending_handler::{MessageType, SendingHandler};
-use crate::rtps::task::timer_handler::TimerHandler;
 use crate::rtps::task::user_traffic::user_unicast_listening_task::UserUnicastListeningTask;
 use crate::rtps::transport::shm::ShmListener;
 use crate::rtps::transport::tcp::TcpListener;
@@ -54,6 +53,7 @@ use crate::rtps::{
     entities::participant::Participant, messages::message_receiver::MessageReceiver,
 };
 use crate::serialize::pl_cdr::InlineQosParameters;
+use crate::utils::timer::timer_handler::TimerHandler;
 use dashmap::DashMap;
 
 use std::net::{SocketAddr, SocketAddrV4};
@@ -117,9 +117,9 @@ impl UserLogic {
                 // Register thread name for monitoring
                 {
                     use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::register_current_thread_name_with_guid(
+                    ThreadMonitor::register_current_thread_name_with_guid_prefix(
                         "user_traffic_unicast_listening",
-                        &participant_guid,
+                        participant_guid.prefix(),
                     );
                 }
 
@@ -1384,7 +1384,7 @@ impl UnicastMessageProcessor for UserLogic {
 
                         let timer_id = format!("nackfrag_{:?}_{:?}", remote_writer_guid, last_sn);
                         if let Ok(locked_timer_handler) =
-                            TimerHandler::get_instance(participant.clone()).lock()
+                            TimerHandler::get_instance(participant.guid().prefix()).lock()
                         {
                             locked_timer_handler.remove_timer(timer_id.clone());
                             locked_timer_handler.add_timer(

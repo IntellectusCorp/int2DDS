@@ -83,7 +83,6 @@ use crate::{
                 discovery_unicast_listening_task::DiscoveryUnicastListeningTask,
             },
             sending_handler::{MessageType, SendingHandler},
-            timer_handler::TimerHandler,
         },
         transport::{
             tcp::tcp_listener::TcpListener, udp::udp_listener::UdpListener, Transport,
@@ -91,6 +90,7 @@ use crate::{
         },
     },
     serialize::pl_cdr::InlineQosParameters,
+    utils::timer::timer_handler::TimerHandler,
 };
 
 enum MatchType {
@@ -175,7 +175,7 @@ fn is_partition_compatible(requested: &[String], offered: &[String]) -> bool {
 impl SedpLogic {
     pub(crate) fn new(participant: Arc<Participant>, sender: Option<Arc<TransportSender>>) -> Self {
         let builtin_endpoints = participant.builtin_endpoints();
-        let timer_handler = TimerHandler::get_instance(participant.clone());
+        let timer_handler = TimerHandler::get_instance(participant.guid().prefix());
         Self {
             participant: Arc::downgrade(&participant),
             builtin_endpoints,
@@ -208,9 +208,9 @@ impl SedpLogic {
                 // Register thread name for monitoring
                 {
                     use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::register_current_thread_name_with_guid(
+                    ThreadMonitor::register_current_thread_name_with_guid_prefix(
                         "discovery_traffic_multicast_listening",
-                        &participant_guid,
+                        participant_guid.prefix(),
                     );
                 }
 
@@ -243,9 +243,9 @@ impl SedpLogic {
                 // Register thread name for monitoring
                 {
                     use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::register_current_thread_name_with_guid(
+                    ThreadMonitor::register_current_thread_name_with_guid_prefix(
                         "discovery_traffic_unicast_listening",
-                        &unicast_guid,
+                        unicast_guid.prefix(),
                     );
                 }
 
@@ -2307,9 +2307,9 @@ mod tests {
                 // Register thread name for monitoring
                 {
                     use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::register_current_thread_name_with_guid(
+                    ThreadMonitor::register_current_thread_name_with_guid_prefix(
                         "discovery_traffic_multicast_listening",
-                        &participant.guid(),
+                        participant.guid().prefix(),
                     );
                 }
 
@@ -2361,9 +2361,9 @@ mod tests {
                 // Register thread name for monitoring
                 {
                     use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::register_current_thread_name_with_guid(
+                    ThreadMonitor::register_current_thread_name_with_guid_prefix(
                         "discovery_traffic_multicast_listening",
-                        &participant_guid,
+                        participant_guid.prefix(),
                     );
                 }
 
