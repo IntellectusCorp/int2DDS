@@ -470,6 +470,207 @@ impl TypeIdentifier {
             }
         }
     }
+
+    /// Deserialize a TypeIdentifier from bytes (XCDR2 format).
+    ///
+    /// Returns the TypeIdentifier and the number of bytes consumed.
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        if data.is_empty() {
+            return Err("Empty data for TypeIdentifier".to_string());
+        }
+
+        let discriminator = data[0];
+        let rest = &data[1..];
+
+        match discriminator {
+            // Primitive types - just discriminator (1 byte total)
+            type_kind::TK_NONE => Ok((TypeIdentifier::None, 1)),
+            type_kind::TK_BOOLEAN => Ok((TypeIdentifier::Boolean, 1)),
+            type_kind::TK_BYTE => Ok((TypeIdentifier::Byte, 1)),
+            type_kind::TK_INT8 => Ok((TypeIdentifier::Int8, 1)),
+            type_kind::TK_INT16 => Ok((TypeIdentifier::Int16, 1)),
+            type_kind::TK_INT32 => Ok((TypeIdentifier::Int32, 1)),
+            type_kind::TK_INT64 => Ok((TypeIdentifier::Int64, 1)),
+            type_kind::TK_UINT8 => Ok((TypeIdentifier::Uint8, 1)),
+            type_kind::TK_UINT16 => Ok((TypeIdentifier::Uint16, 1)),
+            type_kind::TK_UINT32 => Ok((TypeIdentifier::Uint32, 1)),
+            type_kind::TK_UINT64 => Ok((TypeIdentifier::Uint64, 1)),
+            type_kind::TK_FLOAT32 => Ok((TypeIdentifier::Float32, 1)),
+            type_kind::TK_FLOAT64 => Ok((TypeIdentifier::Float64, 1)),
+            type_kind::TK_FLOAT128 => Ok((TypeIdentifier::Float128, 1)),
+            type_kind::TK_CHAR8 => Ok((TypeIdentifier::Char8, 1)),
+            type_kind::TK_CHAR16 => Ok((TypeIdentifier::Char16, 1)),
+            type_kind::TK_STRING8 => Ok((TypeIdentifier::String8, 1)),
+            type_kind::TK_STRING16 => Ok((TypeIdentifier::String16, 1)),
+
+            // Bounded strings (small: 1 byte bound)
+            type_kind::TI_STRING8_SMALL => {
+                if rest.is_empty() {
+                    return Err("Missing bound for String8Small".to_string());
+                }
+                Ok((TypeIdentifier::String8Small { bound: rest[0] }, 2))
+            }
+            type_kind::TI_STRING16_SMALL => {
+                if rest.is_empty() {
+                    return Err("Missing bound for String16Small".to_string());
+                }
+                Ok((TypeIdentifier::String16Small { bound: rest[0] }, 2))
+            }
+
+            // Bounded strings (large: 4 byte bound)
+            type_kind::TI_STRING8_LARGE => {
+                if rest.len() < 4 {
+                    return Err("Insufficient data for String8Large bound".to_string());
+                }
+                let bound = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]);
+                Ok((TypeIdentifier::String8Large { bound }, 5))
+            }
+            type_kind::TI_STRING16_LARGE => {
+                if rest.len() < 4 {
+                    return Err("Insufficient data for String16Large bound".to_string());
+                }
+                let bound = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]);
+                Ok((TypeIdentifier::String16Large { bound }, 5))
+            }
+
+            // Complex types with equivalence hash (14 bytes)
+            type_kind::EK_MINIMAL => {
+                if rest.len() < 14 {
+                    return Err("Insufficient data for MinimalTypeId hash".to_string());
+                }
+                let mut hash_bytes = [0u8; 14];
+                hash_bytes.copy_from_slice(&rest[..14]);
+                Ok((
+                    TypeIdentifier::MinimalTypeId(EquivalenceHash::new(hash_bytes)),
+                    15,
+                ))
+            }
+            type_kind::EK_COMPLETE => {
+                if rest.len() < 14 {
+                    return Err("Insufficient data for CompleteTypeId hash".to_string());
+                }
+                let mut hash_bytes = [0u8; 14];
+                hash_bytes.copy_from_slice(&rest[..14]);
+                Ok((
+                    TypeIdentifier::CompleteTypeId(EquivalenceHash::new(hash_bytes)),
+                    15,
+                ))
+            }
+
+            // Sequences - basic support
+            type_kind::TI_PLAIN_SEQUENCE_SMALL => {
+                if rest.len() < 3 {
+                    return Err("Insufficient data for PlainSequenceSmall".to_string());
+                }
+                let header = PlainCollectionHeader {
+                    equiv_kind: EquivalenceKind::from_u8(rest[0]),
+                    element_flags: CollectionElementFlag(rest[1]),
+                };
+                let bound = rest[2];
+                let (element_id, elem_len) = TypeIdentifier::deserialize(&rest[3..])?;
+                Ok((
+                    TypeIdentifier::PlainSequenceSmall {
+                        header,
+                        bound,
+                        element_identifier: Box::new(element_id),
+                    },
+                    1 + 3 + elem_len,
+                ))
+            }
+            type_kind::TI_PLAIN_SEQUENCE_LARGE => {
+                if rest.len() < 6 {
+                    return Err("Insufficient data for PlainSequenceLarge".to_string());
+                }
+                let header = PlainCollectionHeader {
+                    equiv_kind: EquivalenceKind::from_u8(rest[0]),
+                    element_flags: CollectionElementFlag(rest[1]),
+                };
+                let bound = u32::from_le_bytes([rest[2], rest[3], rest[4], rest[5]]);
+                let (element_id, elem_len) = TypeIdentifier::deserialize(&rest[6..])?;
+                Ok((
+                    TypeIdentifier::PlainSequenceLarge {
+                        header,
+                        bound,
+                        element_identifier: Box::new(element_id),
+                    },
+                    1 + 6 + elem_len,
+                ))
+            }
+
+            // Arrays - basic support
+            type_kind::TI_PLAIN_ARRAY_SMALL => {
+                if rest.len() < 6 {
+                    return Err("Insufficient data for PlainArraySmall".to_string());
+                }
+                let header = PlainCollectionHeader {
+                    equiv_kind: EquivalenceKind::from_u8(rest[0]),
+                    element_flags: CollectionElementFlag(rest[1]),
+                };
+                let bound_count = u32::from_le_bytes([rest[2], rest[3], rest[4], rest[5]]) as usize;
+                if rest.len() < 6 + bound_count {
+                    return Err("Insufficient data for PlainArraySmall bounds".to_string());
+                }
+                let array_bound_seq: Vec<u8> = rest[6..6 + bound_count].to_vec();
+                let (element_id, elem_len) =
+                    TypeIdentifier::deserialize(&rest[6 + bound_count..])?;
+                Ok((
+                    TypeIdentifier::PlainArraySmall {
+                        header,
+                        array_bound_seq,
+                        element_identifier: Box::new(element_id),
+                    },
+                    1 + 6 + bound_count + elem_len,
+                ))
+            }
+            type_kind::TI_PLAIN_ARRAY_LARGE => {
+                if rest.len() < 6 {
+                    return Err("Insufficient data for PlainArrayLarge".to_string());
+                }
+                let header = PlainCollectionHeader {
+                    equiv_kind: EquivalenceKind::from_u8(rest[0]),
+                    element_flags: CollectionElementFlag(rest[1]),
+                };
+                let bound_count = u32::from_le_bytes([rest[2], rest[3], rest[4], rest[5]]) as usize;
+                if rest.len() < 6 + bound_count * 4 {
+                    return Err("Insufficient data for PlainArrayLarge bounds".to_string());
+                }
+                let mut array_bound_seq = Vec::with_capacity(bound_count);
+                for i in 0..bound_count {
+                    let offset = 6 + i * 4;
+                    let bound = u32::from_le_bytes([
+                        rest[offset],
+                        rest[offset + 1],
+                        rest[offset + 2],
+                        rest[offset + 3],
+                    ]);
+                    array_bound_seq.push(bound);
+                }
+                let (element_id, elem_len) =
+                    TypeIdentifier::deserialize(&rest[6 + bound_count * 4..])?;
+                Ok((
+                    TypeIdentifier::PlainArrayLarge {
+                        header,
+                        array_bound_seq,
+                        element_identifier: Box::new(element_id),
+                    },
+                    1 + 6 + bound_count * 4 + elem_len,
+                ))
+            }
+
+            // Maps - not fully supported yet
+            type_kind::TI_PLAIN_MAP_SMALL | type_kind::TI_PLAIN_MAP_LARGE => {
+                Err(format!(
+                    "Map TypeIdentifier deserialization not yet supported: 0x{:02X}",
+                    discriminator
+                ))
+            }
+
+            _ => Err(format!(
+                "Unsupported TypeIdentifier discriminator: 0x{:02X}",
+                discriminator
+            )),
+        }
+    }
 }
 
 // ============================================================================
@@ -524,6 +725,17 @@ pub enum EquivalenceKind {
     Minimal = 0xF2,
     Complete = 0xF1,
     Both = 0xF3,
+}
+
+impl EquivalenceKind {
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            0xF1 => EquivalenceKind::Complete,
+            0xF2 => EquivalenceKind::Minimal,
+            0xF3 => EquivalenceKind::Both,
+            _ => EquivalenceKind::Minimal, // Default fallback
+        }
+    }
 }
 
 /// TryConstruct behavior for elements.
@@ -597,6 +809,14 @@ impl TypeFlag {
     pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
         buffer.extend_from_slice(&self.0.to_le_bytes());
     }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        if data.len() < 2 {
+            return Err("Insufficient data for TypeFlag".to_string());
+        }
+        let flags = u16::from_le_bytes([data[0], data[1]]);
+        Ok((TypeFlag(flags), 2))
+    }
 }
 
 /// Member flags (16-bit bitmask).
@@ -658,6 +878,14 @@ impl MemberFlag {
     pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
         buffer.extend_from_slice(&self.0.to_le_bytes());
     }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        if data.len() < 2 {
+            return Err("Insufficient data for MemberFlag".to_string());
+        }
+        let flags = u16::from_le_bytes([data[0], data[1]]);
+        Ok((MemberFlag(flags), 2))
+    }
 }
 
 // ============================================================================
@@ -699,6 +927,28 @@ impl MinimalStructMember {
         self.common.serialize_into(buffer);
         buffer.extend_from_slice(&self.name_hash.to_le_bytes());
     }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        let mut pos = 0;
+
+        // common
+        let (common, consumed) = CommonStructMember::deserialize(data)?;
+        pos += consumed;
+
+        // name_hash (4 bytes)
+        if data.len() < pos + 4 {
+            return Err("Insufficient data for MinimalStructMember name_hash".to_string());
+        }
+        let name_hash = u32::from_le_bytes([
+            data[pos],
+            data[pos + 1],
+            data[pos + 2],
+            data[pos + 3],
+        ]);
+        pos += 4;
+
+        Ok((MinimalStructMember { common, name_hash }, pos))
+    }
 }
 
 /// Complete struct member with full details.
@@ -733,6 +983,20 @@ impl CompleteStructMember {
         self.common.serialize_into(buffer);
         self.detail.serialize_into(buffer);
     }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        let mut pos = 0;
+
+        // common
+        let (common, consumed) = CommonStructMember::deserialize(data)?;
+        pos += consumed;
+
+        // detail
+        let (detail, consumed) = CompleteMemberDetail::deserialize(&data[pos..])?;
+        pos += consumed;
+
+        Ok((CompleteStructMember { common, detail }, pos))
+    }
 }
 
 /// Common struct member data.
@@ -748,6 +1012,34 @@ impl CommonStructMember {
         buffer.extend_from_slice(&self.member_id.to_le_bytes());
         self.member_flags.serialize_into(buffer);
         self.member_type_id.serialize_into(buffer);
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        if data.len() < 6 {
+            return Err("Insufficient data for CommonStructMember".to_string());
+        }
+        let mut pos = 0;
+
+        // member_id (4 bytes)
+        let member_id = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        pos += 4;
+
+        // member_flags (2 bytes)
+        let (member_flags, consumed) = MemberFlag::deserialize(&data[pos..])?;
+        pos += consumed;
+
+        // member_type_id (variable)
+        let (member_type_id, consumed) = TypeIdentifier::deserialize(&data[pos..])?;
+        pos += consumed;
+
+        Ok((
+            CommonStructMember {
+                member_id,
+                member_flags,
+                member_type_id,
+            },
+            pos,
+        ))
     }
 }
 
@@ -770,6 +1062,51 @@ impl CompleteMemberDetail {
         // Serialize optional annotations (simplified - just write empty for now)
         buffer.push(0); // no builtin annotations
         buffer.extend_from_slice(&0u32.to_le_bytes()); // empty custom annotations
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        if data.len() < 4 {
+            return Err("Insufficient data for CompleteMemberDetail".to_string());
+        }
+        let mut pos = 0;
+
+        // Read name length (includes null terminator)
+        let name_len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        pos += 4;
+
+        if data.len() < pos + name_len {
+            return Err("Insufficient data for CompleteMemberDetail name".to_string());
+        }
+
+        // Read name (excluding null terminator)
+        let name = if name_len > 0 {
+            String::from_utf8_lossy(&data[pos..pos + name_len - 1]).to_string()
+        } else {
+            String::new()
+        };
+        pos += name_len;
+
+        // Skip annotations (simplified - just read the flags)
+        if data.len() < pos + 1 {
+            return Err("Insufficient data for annotations flag".to_string());
+        }
+        let _has_builtin = data[pos];
+        pos += 1;
+
+        if data.len() < pos + 4 {
+            return Err("Insufficient data for custom annotations count".to_string());
+        }
+        let _custom_count = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+        pos += 4;
+
+        Ok((
+            CompleteMemberDetail {
+                name,
+                ann_builtin: None,
+                ann_custom: Vec::new(),
+            },
+            pos,
+        ))
     }
 }
 
@@ -829,6 +1166,47 @@ impl MinimalStructType {
         let serialized = self.serialize();
         EquivalenceHash::compute(&serialized)
     }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        let mut pos = 0;
+
+        // struct_flags (2 bytes)
+        let (struct_flags, consumed) = TypeFlag::deserialize(data)?;
+        pos += consumed;
+
+        // header
+        let (header, consumed) = MinimalStructHeader::deserialize(&data[pos..])?;
+        pos += consumed;
+
+        // member_seq length (4 bytes)
+        if data.len() < pos + 4 {
+            return Err("Insufficient data for member_seq length".to_string());
+        }
+        let member_count = u32::from_le_bytes([
+            data[pos],
+            data[pos + 1],
+            data[pos + 2],
+            data[pos + 3],
+        ]) as usize;
+        pos += 4;
+
+        // members
+        let mut member_seq = Vec::with_capacity(member_count);
+        for _ in 0..member_count {
+            let (member, consumed) = MinimalStructMember::deserialize(&data[pos..])?;
+            pos += consumed;
+            member_seq.push(member);
+        }
+
+        Ok((
+            MinimalStructType {
+                struct_flags,
+                header,
+                member_seq,
+            },
+            pos,
+        ))
+    }
 }
 
 /// Minimal struct header.
@@ -845,6 +1223,26 @@ impl MinimalStructHeader {
         } else {
             buffer.push(0); // no base type
         }
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        if data.is_empty() {
+            return Err("Insufficient data for MinimalStructHeader".to_string());
+        }
+        let mut pos = 0;
+
+        let has_base = data[0];
+        pos += 1;
+
+        let base_type = if has_base != 0 {
+            let (type_id, consumed) = TypeIdentifier::deserialize(&data[pos..])?;
+            pos += consumed;
+            Some(type_id)
+        } else {
+            None
+        };
+
+        Ok((MinimalStructHeader { base_type }, pos))
     }
 }
 
@@ -892,6 +1290,47 @@ impl CompleteStructType {
             member.serialize_into(buffer);
         }
     }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        let mut pos = 0;
+
+        // struct_flags (2 bytes)
+        let (struct_flags, consumed) = TypeFlag::deserialize(data)?;
+        pos += consumed;
+
+        // header
+        let (header, consumed) = CompleteStructHeader::deserialize(&data[pos..])?;
+        pos += consumed;
+
+        // member_seq length (4 bytes)
+        if data.len() < pos + 4 {
+            return Err("Insufficient data for member_seq length".to_string());
+        }
+        let member_count = u32::from_le_bytes([
+            data[pos],
+            data[pos + 1],
+            data[pos + 2],
+            data[pos + 3],
+        ]) as usize;
+        pos += 4;
+
+        // members
+        let mut member_seq = Vec::with_capacity(member_count);
+        for _ in 0..member_count {
+            let (member, consumed) = CompleteStructMember::deserialize(&data[pos..])?;
+            pos += consumed;
+            member_seq.push(member);
+        }
+
+        Ok((
+            CompleteStructType {
+                struct_flags,
+                header,
+                member_seq,
+            },
+            pos,
+        ))
+    }
 }
 
 /// Complete struct header.
@@ -910,6 +1349,29 @@ impl CompleteStructHeader {
             buffer.push(0);
         }
         self.detail.serialize_into(buffer);
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        if data.is_empty() {
+            return Err("Insufficient data for CompleteStructHeader".to_string());
+        }
+        let mut pos = 0;
+
+        let has_base = data[0];
+        pos += 1;
+
+        let base_type = if has_base != 0 {
+            let (type_id, consumed) = TypeIdentifier::deserialize(&data[pos..])?;
+            pos += consumed;
+            Some(type_id)
+        } else {
+            None
+        };
+
+        let (detail, consumed) = CompleteTypeDetail::deserialize(&data[pos..])?;
+        pos += consumed;
+
+        Ok((CompleteStructHeader { base_type, detail }, pos))
     }
 }
 
@@ -932,6 +1394,51 @@ impl CompleteTypeDetail {
         // Annotations (simplified)
         buffer.push(0);
         buffer.extend_from_slice(&0u32.to_le_bytes());
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        if data.len() < 4 {
+            return Err("Insufficient data for CompleteTypeDetail".to_string());
+        }
+        let mut pos = 0;
+
+        // Read name length (includes null terminator)
+        let name_len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        pos += 4;
+
+        if data.len() < pos + name_len {
+            return Err("Insufficient data for CompleteTypeDetail type_name".to_string());
+        }
+
+        // Read name (excluding null terminator)
+        let type_name = if name_len > 0 {
+            String::from_utf8_lossy(&data[pos..pos + name_len - 1]).to_string()
+        } else {
+            String::new()
+        };
+        pos += name_len;
+
+        // Skip annotations
+        if data.len() < pos + 1 {
+            return Err("Insufficient data for annotations flag".to_string());
+        }
+        let _has_builtin = data[pos];
+        pos += 1;
+
+        if data.len() < pos + 4 {
+            return Err("Insufficient data for custom annotations count".to_string());
+        }
+        let _custom_count = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+        pos += 4;
+
+        Ok((
+            CompleteTypeDetail {
+                type_name,
+                ann_builtin: None,
+                ann_custom: Vec::new(),
+            },
+            pos,
+        ))
     }
 }
 
@@ -962,6 +1469,26 @@ impl MinimalEnumeratedLiteral {
         self.common.serialize_into(buffer);
         buffer.extend_from_slice(&self.name_hash.to_le_bytes());
     }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        let mut pos = 0;
+
+        let (common, consumed) = CommonEnumeratedLiteral::deserialize(data)?;
+        pos += consumed;
+
+        if data.len() < pos + 4 {
+            return Err("Insufficient data for MinimalEnumeratedLiteral name_hash".to_string());
+        }
+        let name_hash = u32::from_le_bytes([
+            data[pos],
+            data[pos + 1],
+            data[pos + 2],
+            data[pos + 3],
+        ]);
+        pos += 4;
+
+        Ok((MinimalEnumeratedLiteral { common, name_hash }, pos))
+    }
 }
 
 /// Complete enumerated literal.
@@ -987,6 +1514,18 @@ impl CompleteEnumeratedLiteral {
         self.common.serialize_into(buffer);
         self.detail.serialize_into(buffer);
     }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        let mut pos = 0;
+
+        let (common, consumed) = CommonEnumeratedLiteral::deserialize(data)?;
+        pos += consumed;
+
+        let (detail, consumed) = CompleteMemberDetail::deserialize(&data[pos..])?;
+        pos += consumed;
+
+        Ok((CompleteEnumeratedLiteral { common, detail }, pos))
+    }
 }
 
 /// Common enumerated literal data.
@@ -1000,6 +1539,21 @@ impl CommonEnumeratedLiteral {
     pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
         buffer.extend_from_slice(&self.value.to_le_bytes());
         self.flags.serialize_into(buffer);
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        if data.len() < 5 {
+            return Err("Insufficient data for CommonEnumeratedLiteral".to_string());
+        }
+        let mut pos = 0;
+
+        let value = i32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        pos += 4;
+
+        let (flags, consumed) = EnumeratedLiteralFlag::deserialize(&data[pos..])?;
+        pos += consumed;
+
+        Ok((CommonEnumeratedLiteral { value, flags }, pos))
     }
 }
 
@@ -1016,6 +1570,13 @@ impl EnumeratedLiteralFlag {
 
     pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
         buffer.push(self.0);
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        if data.is_empty() {
+            return Err("Insufficient data for EnumeratedLiteralFlag".to_string());
+        }
+        Ok((EnumeratedLiteralFlag(data[0]), 1))
     }
 }
 
@@ -1062,6 +1623,47 @@ impl MinimalEnumeratedType {
         let serialized = self.serialize();
         EquivalenceHash::compute(&serialized)
     }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        let mut pos = 0;
+
+        // enum_flags (2 bytes)
+        let (enum_flags, consumed) = TypeFlag::deserialize(data)?;
+        pos += consumed;
+
+        // header
+        let (header, consumed) = MinimalEnumeratedHeader::deserialize(&data[pos..])?;
+        pos += consumed;
+
+        // literal_seq length (4 bytes)
+        if data.len() < pos + 4 {
+            return Err("Insufficient data for literal_seq length".to_string());
+        }
+        let literal_count = u32::from_le_bytes([
+            data[pos],
+            data[pos + 1],
+            data[pos + 2],
+            data[pos + 3],
+        ]) as usize;
+        pos += 4;
+
+        // literals
+        let mut literal_seq = Vec::with_capacity(literal_count);
+        for _ in 0..literal_count {
+            let (literal, consumed) = MinimalEnumeratedLiteral::deserialize(&data[pos..])?;
+            pos += consumed;
+            literal_seq.push(literal);
+        }
+
+        Ok((
+            MinimalEnumeratedType {
+                enum_flags,
+                header,
+                literal_seq,
+            },
+            pos,
+        ))
+    }
 }
 
 /// Minimal enumerated header.
@@ -1074,6 +1676,11 @@ impl MinimalEnumeratedHeader {
     pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
         self.common.serialize_into(buffer);
     }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        let (common, consumed) = CommonEnumeratedHeader::deserialize(data)?;
+        Ok((MinimalEnumeratedHeader { common }, consumed))
+    }
 }
 
 /// Common enumerated header.
@@ -1085,6 +1692,14 @@ pub struct CommonEnumeratedHeader {
 impl CommonEnumeratedHeader {
     pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
         buffer.extend_from_slice(&self.bit_bound.to_le_bytes());
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        if data.len() < 2 {
+            return Err("Insufficient data for CommonEnumeratedHeader".to_string());
+        }
+        let bit_bound = u16::from_le_bytes([data[0], data[1]]);
+        Ok((CommonEnumeratedHeader { bit_bound }, 2))
     }
 }
 
@@ -1131,6 +1746,47 @@ impl CompleteEnumeratedType {
             literal.serialize_into(buffer);
         }
     }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        let mut pos = 0;
+
+        // enum_flags (2 bytes)
+        let (enum_flags, consumed) = TypeFlag::deserialize(data)?;
+        pos += consumed;
+
+        // header
+        let (header, consumed) = CompleteEnumeratedHeader::deserialize(&data[pos..])?;
+        pos += consumed;
+
+        // literal_seq length (4 bytes)
+        if data.len() < pos + 4 {
+            return Err("Insufficient data for literal_seq length".to_string());
+        }
+        let literal_count = u32::from_le_bytes([
+            data[pos],
+            data[pos + 1],
+            data[pos + 2],
+            data[pos + 3],
+        ]) as usize;
+        pos += 4;
+
+        // literals
+        let mut literal_seq = Vec::with_capacity(literal_count);
+        for _ in 0..literal_count {
+            let (literal, consumed) = CompleteEnumeratedLiteral::deserialize(&data[pos..])?;
+            pos += consumed;
+            literal_seq.push(literal);
+        }
+
+        Ok((
+            CompleteEnumeratedType {
+                enum_flags,
+                header,
+                literal_seq,
+            },
+            pos,
+        ))
+    }
 }
 
 /// Complete enumerated header.
@@ -1144,6 +1800,18 @@ impl CompleteEnumeratedHeader {
     pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
         self.common.serialize_into(buffer);
         self.detail.serialize_into(buffer);
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        let mut pos = 0;
+
+        let (common, consumed) = CommonEnumeratedHeader::deserialize(data)?;
+        pos += consumed;
+
+        let (detail, consumed) = CompleteTypeDetail::deserialize(&data[pos..])?;
+        pos += consumed;
+
+        Ok((CompleteEnumeratedHeader { common, detail }, pos))
     }
 }
 
@@ -1204,6 +1872,28 @@ impl MinimalTypeObject {
         let serialized = self.serialize();
         EquivalenceHash::compute(&serialized)
     }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        if data.is_empty() {
+            return Err("Empty data for MinimalTypeObject".to_string());
+        }
+
+        let discriminator = data[0];
+        match discriminator {
+            type_object_kind::TK_STRUCT => {
+                MinimalStructType::deserialize(&data[1..])
+                    .map(|(s, consumed)| (MinimalTypeObject::Struct(s), 1 + consumed))
+            }
+            type_object_kind::TK_ENUM => {
+                MinimalEnumeratedType::deserialize(&data[1..])
+                    .map(|(e, consumed)| (MinimalTypeObject::Enum(e), 1 + consumed))
+            }
+            _ => Err(format!(
+                "Unsupported MinimalTypeObject kind: 0x{:02X}",
+                discriminator
+            )),
+        }
+    }
 }
 
 /// Complete TypeObject - full type description.
@@ -1240,6 +1930,28 @@ impl CompleteTypeObject {
             CompleteTypeObject::Enum(e) => e.serialize_into(buffer),
         }
     }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        if data.is_empty() {
+            return Err("Empty data for CompleteTypeObject".to_string());
+        }
+
+        let discriminator = data[0];
+        match discriminator {
+            type_object_kind::TK_STRUCT => {
+                CompleteStructType::deserialize(&data[1..])
+                    .map(|(s, consumed)| (CompleteTypeObject::Struct(s), 1 + consumed))
+            }
+            type_object_kind::TK_ENUM => {
+                CompleteEnumeratedType::deserialize(&data[1..])
+                    .map(|(e, consumed)| (CompleteTypeObject::Enum(e), 1 + consumed))
+            }
+            _ => Err(format!(
+                "Unsupported CompleteTypeObject kind: 0x{:02X}",
+                discriminator
+            )),
+        }
+    }
 }
 
 /// Combined TypeObject for both Complete and Minimal.
@@ -1254,6 +1966,49 @@ impl TypeObject {
         match self {
             TypeObject::Complete(c) => EquivalenceHash::compute(&c.serialize()),
             TypeObject::Minimal(m) => m.compute_hash(),
+        }
+    }
+
+    /// Serialize TypeObject to bytes.
+    /// Format: [EK_MINIMAL/EK_COMPLETE] [TypeObject data...]
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        self.serialize_into(&mut buffer);
+        buffer
+    }
+
+    /// Serialize TypeObject into a buffer.
+    pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
+        match self {
+            TypeObject::Minimal(m) => {
+                buffer.push(type_kind::EK_MINIMAL);
+                m.serialize_into(buffer);
+            }
+            TypeObject::Complete(c) => {
+                buffer.push(type_kind::EK_COMPLETE);
+                c.serialize_into(buffer);
+            }
+        }
+    }
+
+    /// Deserialize TypeObject from bytes.
+    /// Returns the deserialized TypeObject and number of bytes consumed.
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        if data.is_empty() {
+            return Err("Empty data for TypeObject".to_string());
+        }
+
+        let kind = data[0];
+        match kind {
+            type_kind::EK_MINIMAL => {
+                MinimalTypeObject::deserialize(&data[1..])
+                    .map(|(obj, consumed)| (TypeObject::Minimal(obj), 1 + consumed))
+            }
+            type_kind::EK_COMPLETE => {
+                CompleteTypeObject::deserialize(&data[1..])
+                    .map(|(obj, consumed)| (TypeObject::Complete(obj), 1 + consumed))
+            }
+            _ => Err(format!("Unknown TypeObject kind: 0x{:02X}", kind)),
         }
     }
 }
@@ -1413,6 +2168,143 @@ macro_rules! impl_array_has_type_object {
 impl_array_has_type_object! {
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
     20, 24, 32, 48, 64, 128, 256, 512, 1024
+}
+
+// ============================================================================
+// CDR/XCDR Serialization Traits for TypeIdentifier
+// ============================================================================
+
+use crate::serialize::cdr::{
+    CdrDeserialize, CdrResult, CdrSerialize, CdrSerializer, CdrSerializerCommon,
+    PrimitiveSerialize, XcdrDeserialize, XcdrResult, XcdrSerialize, Xcdr2Deserializer,
+    Xcdr2Serializer,
+};
+
+impl CdrSerialize for TypeIdentifier {
+    fn serialize_cdr(&self, serializer: &mut CdrSerializer) -> CdrResult<()> {
+        // Serialize as length-prefixed byte array
+        let bytes = self.serialize();
+        let len = bytes.len() as u32;
+        serializer.serialize_u32(len)?;
+        serializer.buffer_mut().extend_from_slice(&bytes);
+        Ok(())
+    }
+}
+
+impl CdrDeserialize for TypeIdentifier {
+    fn deserialize_cdr(deserializer: &mut crate::serialize::cdr::CdrDeserializer) -> CdrResult<Self> {
+        let len = deserializer.deserialize_u32()? as usize;
+        let bytes = deserializer.deserialize_byte_array(len)?;
+        TypeIdentifier::deserialize(&bytes)
+            .map(|(id, _)| id)
+            .map_err(|e| crate::serialize::cdr::CdrError::DeserializationError(e))
+    }
+}
+
+impl XcdrSerialize for TypeIdentifier {
+    fn serialize_xcdr(&self, serializer: &mut Xcdr2Serializer) -> XcdrResult<()> {
+        // Serialize as length-prefixed byte array
+        let bytes = self.serialize();
+        let len = bytes.len() as u32;
+        serializer.serialize_u32(len)?;
+        serializer.buffer_mut().extend_from_slice(&bytes);
+        Ok(())
+    }
+}
+
+impl XcdrDeserialize for TypeIdentifier {
+    fn deserialize_xcdr(deserializer: &mut Xcdr2Deserializer) -> XcdrResult<Self> {
+        let len = deserializer.deserialize_u32()? as usize;
+        let bytes = deserializer.deserialize_byte_array(len)?;
+        TypeIdentifier::deserialize(&bytes)
+            .map(|(id, _)| id)
+            .map_err(|e| crate::serialize::cdr::XcdrError::DeserializationError(e))
+    }
+}
+
+// CDR/XCDR traits for TypeObject
+impl CdrSerialize for TypeObject {
+    fn serialize_cdr(&self, serializer: &mut CdrSerializer) -> CdrResult<()> {
+        let bytes = self.serialize();
+        let len = bytes.len() as u32;
+        serializer.serialize_u32(len)?;
+        serializer.buffer_mut().extend_from_slice(&bytes);
+        Ok(())
+    }
+}
+
+impl CdrDeserialize for TypeObject {
+    fn deserialize_cdr(deserializer: &mut crate::serialize::cdr::CdrDeserializer) -> CdrResult<Self> {
+        let len = deserializer.deserialize_u32()? as usize;
+        let bytes = deserializer.deserialize_byte_array(len)?;
+        TypeObject::deserialize(&bytes)
+            .map(|(obj, _)| obj)
+            .map_err(|e| crate::serialize::cdr::CdrError::DeserializationError(e))
+    }
+}
+
+impl XcdrSerialize for TypeObject {
+    fn serialize_xcdr(&self, serializer: &mut Xcdr2Serializer) -> XcdrResult<()> {
+        let bytes = self.serialize();
+        let len = bytes.len() as u32;
+        serializer.serialize_u32(len)?;
+        serializer.buffer_mut().extend_from_slice(&bytes);
+        Ok(())
+    }
+}
+
+impl XcdrDeserialize for TypeObject {
+    fn deserialize_xcdr(deserializer: &mut Xcdr2Deserializer) -> XcdrResult<Self> {
+        let len = deserializer.deserialize_u32()? as usize;
+        let bytes = deserializer.deserialize_byte_array(len)?;
+        TypeObject::deserialize(&bytes)
+            .map(|(obj, _)| obj)
+            .map_err(|e| crate::serialize::cdr::XcdrError::DeserializationError(e))
+    }
+}
+
+// Speedy traits for TypeIdentifier
+use speedy::{Context, Readable, Reader, Writable, Writer};
+
+impl<C: Context> Writable<C> for TypeIdentifier {
+    fn write_to<T: ?Sized + Writer<C>>(&self, writer: &mut T) -> Result<(), C::Error> {
+        let bytes = self.serialize();
+        let len = bytes.len() as u32;
+        writer.write_value(&len)?;
+        writer.write_bytes(&bytes)?;
+        Ok(())
+    }
+}
+
+impl<'a, C: Context> Readable<'a, C> for TypeIdentifier {
+    fn read_from<R: Reader<'a, C>>(reader: &mut R) -> Result<Self, C::Error> {
+        let len: u32 = reader.read_value()?;
+        let bytes = reader.read_vec(len as usize)?;
+        TypeIdentifier::deserialize(&bytes)
+            .map(|(id, _)| id)
+            .map_err(|_| speedy::Error::custom("Failed to deserialize TypeIdentifier").into())
+    }
+}
+
+// Speedy traits for TypeObject
+impl<C: Context> Writable<C> for TypeObject {
+    fn write_to<T: ?Sized + Writer<C>>(&self, writer: &mut T) -> Result<(), C::Error> {
+        let bytes = self.serialize();
+        let len = bytes.len() as u32;
+        writer.write_value(&len)?;
+        writer.write_bytes(&bytes)?;
+        Ok(())
+    }
+}
+
+impl<'a, C: Context> Readable<'a, C> for TypeObject {
+    fn read_from<R: Reader<'a, C>>(reader: &mut R) -> Result<Self, C::Error> {
+        let len: u32 = reader.read_value()?;
+        let bytes = reader.read_vec(len as usize)?;
+        TypeObject::deserialize(&bytes)
+            .map(|(obj, _)| obj)
+            .map_err(|_| speedy::Error::custom("Failed to deserialize TypeObject").into())
+    }
 }
 
 // ============================================================================

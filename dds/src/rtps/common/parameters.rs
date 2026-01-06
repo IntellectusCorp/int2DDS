@@ -13,7 +13,9 @@ use crate::{
         DataRepresentationQosPolicy, DestinationOrderQosPolicy, DurabilityQosPolicy,
         DurabilityServiceQosPolicy, HistoryQosPolicy, LivelinessQosPolicy, OwnershipQosPolicy,
         PresentationQosPolicy, ReliabilityQosPolicy, ResourceLimitsQosPolicy,
+        TypeConsistencyEnforcementQosPolicy,
     },
+    xtypes::{TypeIdentifier, TypeObject},
     rtps::{
         builtin::data::content_filtered_topic::{ContentFilterInfo, ContentFilterProperty},
         common::{
@@ -99,6 +101,7 @@ pub enum ParameterId {
     PidSecureWriterGroupInfo = 0x0066,
     PidKeyHash = 0x0070,
     PidStatusInfo = 0x0071,
+    PidTypeObject = 0x0072,
 
     /* From table 9.25 of DDS-RTPS 2.5 - Deprecated */
     PidPersistence = 0x0003,
@@ -122,6 +125,10 @@ pub enum ParameterId {
     PidParticipantEntityId = 0x0051,
 
     PidDataRepresentation = 0x0073,
+
+    /* DDS-XTypes 1.3 */
+    PidTypeInformation = 0x0069,
+    PidTypeConsistencyEnforcement = 0x0074,
 
     UNKNOWN = 0xffff,
 }
@@ -349,6 +356,9 @@ pub enum ParameterValue<'a> {
     Lifespan(RtpsDuration),
     DurabilityService(DurabilityServiceQosPolicy),
     DataRepresentation(DataRepresentationQosPolicy),
+    TypeInformation(TypeIdentifier),
+    TypeConsistencyEnforcement(TypeConsistencyEnforcementQosPolicy),
+    TypeObject(TypeObject),
     KeyHash([u8; 16]),
     StatusInfo(StatusInfo),
     MaxSerializedSize(u32),
