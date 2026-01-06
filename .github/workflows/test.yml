@@ -1,0 +1,32 @@
+name: Cargo Tests
+run-name: "Cargo test ${{ github.head_ref }}"
+
+on:
+  pull_request:
+    branches: [develop]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+jobs:
+  cargo-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.89.0
+          rustflags: ""
+
+      - name: Load cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-develop
+          save-if: false
+
+      - name: Run all tests
+        env:
+          INT2DDS_UDP_SOCKET_BUFFER: 5242880
+        run: cargo test -- --test-threads=1
