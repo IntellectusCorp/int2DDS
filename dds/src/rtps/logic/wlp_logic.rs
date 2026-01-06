@@ -42,12 +42,10 @@ use crate::{
             submessage_header::SubmessageHeader,
             submessages::{ack_nack::AckNack, data::Data, heartbeat::Heartbeat},
         },
-        task::{
-            sending_handler::{MessageType, SendingHandler},
-            timer_handler::TimerHandler,
-        },
+        task::sending_handler::{MessageType, SendingHandler},
         transport::{Transport, TransportSender},
     },
+    utils::timer::timer_handler::TimerHandler,
 };
 use std::{
     collections::HashMap,
@@ -106,7 +104,7 @@ pub(crate) struct WlpLogic {
 // Constructor and lifecycle management
 impl WlpLogic {
     pub(crate) fn new(participant: Arc<Participant>, sender: Arc<TransportSender>) -> Self {
-        let timer_handler = TimerHandler::get_instance(participant.clone());
+        let timer_handler = TimerHandler::get_instance(participant.guid().prefix());
         Self {
             participant: Arc::downgrade(&participant),
             sender: Arc::new(Mutex::new(Some(sender))),
