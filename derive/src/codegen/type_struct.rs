@@ -459,6 +459,16 @@ fn generate_unified_type_support_impl(
                 }
             }
 
+            fn get_type_identifier(&self) -> Option<#crate_path::xtypes::TypeIdentifier> {
+                Some(<#name as #crate_path::xtypes::HasTypeObject>::type_identifier())
+            }
+
+            fn get_type_object(&self) -> Option<#crate_path::xtypes::TypeObject> {
+                Some(#crate_path::xtypes::TypeObject::Minimal(
+                    <#name as #crate_path::xtypes::HasTypeObject>::minimal_type_object()
+                ))
+            }
+
             #field_access_impl
         }
     }
@@ -1455,6 +1465,8 @@ fn generate_tuple_type_support_impl(
                     Err(#crate_path::dcps::core::error::DdsError::BadParameter)
                 }
             }
+
+            // Tuple structs don't have HasTypeObject, use default (None)
 
             #field_access_impl
         }

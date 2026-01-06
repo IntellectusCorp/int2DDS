@@ -211,6 +211,9 @@ pub fn generate_enum_type_support_impl(
             fn has_field(&self, _field_path: &str) -> bool {
                 false
             }
+
+            // Enums (including unions) use default get_type_identifier/get_type_object (None)
+            // Only C-style enums have HasTypeObject, but TypeSupport is shared
         }
     }
 }
