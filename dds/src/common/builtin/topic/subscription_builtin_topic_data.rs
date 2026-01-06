@@ -9,11 +9,13 @@ use crate::{
         DataRepresentationQosPolicy, DeadlineQosPolicy, DestinationOrderQosPolicy,
         DurabilityQosPolicy, GroupDataQosPolicy, LatencyBudgetQosPolicy, LivelinessQosPolicy,
         OwnershipQosPolicy, PartitionQosPolicy, PresentationQosPolicy, ReliabilityQosPolicy,
-        ReliabilityQosPolicyKind, TimeBasedFilterQosPolicy, TopicDataQosPolicy, UserDataQosPolicy,
+        ReliabilityQosPolicyKind, TimeBasedFilterQosPolicy, TopicDataQosPolicy,
+        TypeConsistencyEnforcementQosPolicy, UserDataQosPolicy,
     },
     rtps::common::{guid::Guid, locator::Locator, types::SerializedData},
     subscription::qos::{DataReaderQos, SubscriberQos},
     topic::{qos::TopicQos, DdsType},
+    xtypes::{TypeIdentifier, TypeObject},
 };
 #[derive(DdsType, Eq)]
 #[dds_type(crate_path = "crate", no_default)]
@@ -39,6 +41,9 @@ pub struct SubscriptionBuiltinTopicData {
     unicast_locator_list: Vec<Locator>,
     multicast_locator_list: Vec<Locator>,
     data_representation: DataRepresentationQosPolicy,
+    type_identifier: Option<TypeIdentifier>,
+    type_object: Option<TypeObject>,
+    type_consistency_enforcement: TypeConsistencyEnforcementQosPolicy,
 }
 
 impl SubscriptionBuiltinTopicData {
@@ -71,6 +76,9 @@ impl SubscriptionBuiltinTopicData {
             unicast_locator_list: Vec::new(),
             multicast_locator_list: Vec::new(),
             data_representation: datareader_qos.data_representation.clone(),
+            type_identifier: None,
+            type_object: None,
+            type_consistency_enforcement: datareader_qos.type_consistency_enforcement,
         }
     }
 
@@ -235,6 +243,26 @@ impl SubscriptionBuiltinTopicData {
 
     pub fn data_representation(&self) -> &DataRepresentationQosPolicy {
         &self.data_representation
+    }
+
+    pub fn type_identifier(&self) -> Option<&TypeIdentifier> {
+        self.type_identifier.as_ref()
+    }
+
+    pub fn set_type_identifier(&mut self, type_id: Option<TypeIdentifier>) {
+        self.type_identifier = type_id;
+    }
+
+    pub fn type_object(&self) -> Option<&TypeObject> {
+        self.type_object.as_ref()
+    }
+
+    pub fn set_type_object(&mut self, type_obj: Option<TypeObject>) {
+        self.type_object = type_obj;
+    }
+
+    pub fn type_consistency_enforcement(&self) -> &TypeConsistencyEnforcementQosPolicy {
+        &self.type_consistency_enforcement
     }
 
     pub fn convert_u8_to_i32_array(data: [u8; 12]) -> [i32; 3] {
