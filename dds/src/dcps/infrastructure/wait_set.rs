@@ -279,7 +279,7 @@ impl WaitSet {
                 // Check conditions
                 let triggered_conditions = self.check_triggered_conditions()?;
                 if !triggered_conditions.is_empty() {
-                    info!(
+                    debug!(
                         "[WaitSet-{}] Conditions triggered during wait: {} conditions",
                         self.instance_id,
                         triggered_conditions.len()
