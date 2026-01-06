@@ -38,6 +38,7 @@ use crate::{
         error::{DdsError, DdsResult},
         time::Duration,
     },
+    dcps::topic::type_support::TypeSupport,
     domain::{
         domain_participant::DomainParticipant, domain_participant_factory::DomainParticipantFactory,
     },
@@ -355,6 +356,137 @@ impl Publisher {
     ) -> DdsResult<DataWriter<Foo>> {
         let qos = self.get_datawriter_qos_from_profile(qos_path)?;
         self.create_datawriter::<Foo>(topic, qos, listener, mask)
+    }
+
+    /// Creates a `DataWriter` for `DynamicData` using a `DynamicTypeSupport`.
+    ///
+    /// This method is used when the data type is not known at compile time.
+    /// The `DynamicTypeSupport` is typically created from a `TypeObject`.
+    ///
+    /// # Arguments
+    ///
+    /// * `topic` - The topic to write data to.
+    /// * `type_support` - The `DynamicTypeSupport` describing the data type.
+    /// * `qos` - QoS policies for the DataWriter.
+    /// * `listener` - Optional listener for status notifications.
+    /// * `mask` - Status mask indicating which status changes trigger listener callbacks.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use int2dds::xtypes::{DynamicTypeSupport, DynamicData};
+    ///
+    /// // Create DynamicTypeSupport from a TypeObject
+    /// let type_support = DynamicTypeSupport::from_type_object(type_object)?;
+    ///
+    /// // Create a DataWriter for DynamicData
+    /// let writer = publisher.create_datawriter_dynamic(
+    ///     &topic,
+    ///     Arc::new(type_support.clone()),
+    ///     DataWriterQos::default(),
+    ///     None,
+    ///     StatusMask::default(),
+    /// )?;
+    ///
+    /// // Create and write data
+    /// let mut data = type_support.create_data();
+    /// data.set("id", 42i32)?;
+    /// data.set("message", "Hello!")?;
+    /// writer.write(&data, InstanceHandle::NIL)?;
+    /// ```
+    pub fn create_datawriter_dynamic(
+        &self,
+        topic: &Topic,
+        type_support: Arc<crate::xtypes::DynamicTypeSupport>,
+        qos: DataWriterQos,
+        listener: Option<Arc<dyn DataWriterListener<Foo = crate::xtypes::DynamicData>>>,
+        mask: StatusMask,
+    ) -> DdsResult<DataWriter<crate::xtypes::DynamicData>> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
+        self.is_deleted()?;
+
+        let _ = self.cleanup_dead_writers();
+
+        let topic_arc = self.get_participant()?.find_internal_topic(topic)?;
+
+        qos.is_consistent()?;
+
+        let self_ref = self
+            .self_ref
+            .as_ref()
+            .ok_or(DdsError::Error("Publisher is not properly initialized".to_string()))?;
+
+        let participant = self.get_participant()?;
+        let entity_kind = if type_support.is_compute_key_provided() {
+            EntityKind::USER_DEFINED_WRITER_WITH_KEY
+        } else {
+            EntityKind::USER_DEFINED_WRITER_NO_KEY
+        };
+        let dcps_bridge = participant.get_dcps_bridge()?;
+        let guid = dcps_bridge
+            .as_ref()
+            .ok_or(DdsError::Error("DCPS Bridge is not initialized".to_string()))?
+            .next_entity_guid(entity_kind);
+        let wlp_logic = dcps_bridge
+            .as_ref()
+            .and_then(|bridge| bridge.get_participant().ok())
+            .and_then(|p| p.wlp_logic());
+
+        drop(dcps_bridge);
+
+        let datawriter = DataWriter::new(
+            false,
+            guid,
+            type_support,
+            &topic_arc,
+            qos,
+            listener,
+            mask,
+            self_ref,
+            wlp_logic,
+        )?;
+
+        if let Ok(()) = self.is_enabled() {
+            if self.get_qos()?.entity_factory.autoenable_created_entities {
+                datawriter.enable()?;
+            }
+        }
+
+        let writer_ops: Arc<dyn DataWriterInternal<Qos = DataWriterQos>> = datawriter
+            .self_ref
+            .lock()
+            .map_err(|e| DdsError::Error(e.to_string()))?
+            .as_ref()
+            .ok_or(DdsError::Error("DataWriter is not properly initialized".to_string()))?
+            .clone();
+        let weak_writer = Arc::downgrade(&writer_ops);
+        {
+            let mut writers_by_topic_name = match self.writers_by_topic_name.lock() {
+                Ok(writers_guard) => writers_guard,
+                Err(e) => return Err(DdsError::Error(e.to_string())),
+            };
+
+            let mut writers_by_topic_handle = match self.writers_by_topic_handle.lock() {
+                Ok(writers_guard) => writers_guard,
+                Err(e) => return Err(DdsError::Error(e.to_string())),
+            };
+
+            let topic_name = topic.get_name().to_string();
+            let topic_handle = topic.get_instance_handle()?;
+
+            writers_by_topic_name
+                .entry(topic_name)
+                .or_insert_with(Vec::new)
+                .push(weak_writer.clone());
+            writers_by_topic_handle
+                .entry(topic_handle)
+                .or_insert_with(Vec::new)
+                .push(weak_writer.clone());
+        }
+
+        Ok(datawriter)
     }
 
     pub fn delete_datawriter<Foo: 'static + Clone>(

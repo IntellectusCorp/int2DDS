@@ -2397,6 +2397,171 @@ impl DomainParticipant {
         self.register_type(type_support, type_name)
     }
 
+    /// Registers a `DynamicTypeSupport` for dynamic type handling.
+    ///
+    /// This is a convenience method for registering type support for dynamic data.
+    /// The type name is automatically extracted from the DynamicTypeSupport.
+    ///
+    /// # Arguments
+    ///
+    /// * `type_support` - The `DynamicTypeSupport` created from a `TypeObject`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use int2dds::xtypes::DynamicTypeSupport;
+    ///
+    /// // Create DynamicTypeSupport from a TypeObject received during discovery
+    /// let type_support = DynamicTypeSupport::from_type_object(type_object)?;
+    ///
+    /// // Register the dynamic type
+    /// participant.register_dynamic_type(Arc::new(type_support))?;
+    /// ```
+    pub fn register_dynamic_type(
+        &self,
+        type_support: Arc<crate::xtypes::DynamicTypeSupport>,
+    ) -> DdsResult<()> {
+        let type_name = type_support.get_type_name().to_string();
+        self.register_type(type_support, &type_name)
+    }
+
+    /// Creates a Topic for use with `DynamicData`.
+    ///
+    /// This method creates a topic without requiring a compile-time type. It is used
+    /// when working with `DynamicTypeSupport` for dynamic data handling.
+    ///
+    /// # Arguments
+    ///
+    /// * `topic_name` - Name of the topic to create.
+    /// * `type_support` - The `DynamicTypeSupport` for this topic.
+    /// * `qos` - QoS policies for the topic.
+    /// * `listener` - Optional listener for topic events.
+    /// * `mask` - Status mask for listener callbacks.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use int2dds::xtypes::DynamicTypeSupport;
+    ///
+    /// let type_support = DynamicTypeSupport::from_type_object(type_object)?;
+    /// let type_support_arc = Arc::new(type_support);
+    ///
+    /// // Register and create topic
+    /// participant.register_dynamic_type(type_support_arc.clone())?;
+    /// let topic = participant.create_topic_dynamic(
+    ///     "SensorData",
+    ///     type_support_arc,
+    ///     TopicQos::default(),
+    ///     None,
+    ///     StatusMask::default(),
+    /// )?;
+    /// ```
+    pub fn create_topic_dynamic(
+        &self,
+        topic_name: &str,
+        type_support: Arc<crate::xtypes::DynamicTypeSupport>,
+        qos: TopicQos,
+        listener: Option<Arc<dyn TopicListener>>,
+        mask: StatusMask,
+    ) -> DdsResult<Topic> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
+        self.is_deleted()?;
+
+        qos.is_consistent()?;
+        let handle = self.create_instance_handle()?;
+
+        let type_name = type_support.get_type_name().to_string();
+        self.register_type(type_support, &type_name)?;
+
+        let self_ref = self
+            .self_ref
+            .as_ref()
+            .ok_or(DdsError::Error("DomainParticipant not properly initialized".to_string()))?;
+        let topic = Topic::new(false, topic_name, &type_name, qos, listener, mask, handle, self_ref);
+        let qos = self.get_qos()?;
+        if let Ok(()) = self.is_enabled() {
+            if qos.entity_factory.autoenable_created_entities {
+                topic.enable()?;
+            }
+        }
+
+        // Store topic reference
+        let topic_ref = topic
+            .self_ref
+            .as_ref()
+            .ok_or(DdsError::Error("Topic is not properly initialized".to_string()))?
+            .clone();
+        let weak_topic = Arc::downgrade(&topic_ref);
+        {
+            let mut topics = self.topics.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            topics.push(weak_topic.clone());
+        }
+        {
+            let mut topics_by_handle =
+                self.topics_by_handle.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            topics_by_handle.insert(handle, weak_topic.clone());
+        }
+
+        Ok(topic)
+    }
+
+    /// Creates a `DynamicTypeSupport` from a `TypeObject`.
+    ///
+    /// This is a convenience method for creating dynamic type support from
+    /// TypeObjects received during discovery. The TypeObject is typically
+    /// obtained from `PublicationBuiltinTopicData::type_object()` after
+    /// reading from the builtin subscriber's DCPSPublication DataReader.
+    ///
+    /// # Arguments
+    ///
+    /// * `type_object` - The `TypeObject` received during discovery.
+    ///
+    /// # Returns
+    ///
+    /// A `DynamicTypeSupport` that can be used to create DataReader or
+    /// DataWriter for `DynamicData`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use int2dds::xtypes::{DynamicTypeSupport, TypeObject};
+    ///
+    /// // Get TypeObject from discovered publication
+    /// let publication_data = datareader.get_matched_publication_data(handle)?;
+    /// if let Some(type_object) = publication_data.type_object() {
+    ///     // Create DynamicTypeSupport from TypeObject
+    ///     let type_support = participant.create_dynamic_type_from_type_object(
+    ///         type_object.clone()
+    ///     )?;
+    ///
+    ///     // Register and use for dynamic data handling
+    ///     let type_support_arc = Arc::new(type_support);
+    ///     participant.register_dynamic_type(type_support_arc.clone())?;
+    ///     let topic = participant.create_topic_dynamic(
+    ///         "SensorTopic",
+    ///         type_support_arc.clone(),
+    ///         TopicQos::default(),
+    ///         None,
+    ///         StatusMask::default(),
+    ///     )?;
+    ///     let reader = subscriber.create_datareader_dynamic(
+    ///         &topic,
+    ///         type_support_arc,
+    ///         DataReaderQos::default(),
+    ///         None,
+    ///         StatusMask::default(),
+    ///     )?;
+    /// }
+    /// ```
+    pub fn create_dynamic_type_from_type_object(
+        &self,
+        type_object: crate::xtypes::TypeObject,
+    ) -> DdsResult<crate::xtypes::DynamicTypeSupport> {
+        crate::xtypes::DynamicTypeSupport::from_type_object(type_object)
+    }
+
     pub(crate) fn register_type(
         &self,
         type_support: Arc<dyn TypeSupport>,
