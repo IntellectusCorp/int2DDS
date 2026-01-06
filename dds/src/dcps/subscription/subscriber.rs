@@ -28,6 +28,7 @@ use std::{
 use crate::{
     common::instance_handle::InstanceHandle,
     core::error::{DdsError, DdsResult},
+    dcps::topic::type_support::TypeSupport,
     domain::{
         domain_participant::DomainParticipant, domain_participant_factory::DomainParticipantFactory,
     },
@@ -362,6 +363,136 @@ impl Subscriber {
         }
         let qos = self.get_datareader_qos_from_profile(qos_path)?;
         self.create_datareader::<Foo>(topic_description, qos, listener, mask)
+    }
+
+    /// Creates a `DataReader` for `DynamicData` using a `DynamicTypeSupport`.
+    ///
+    /// This method is used when the data type is not known at compile time.
+    /// The `DynamicTypeSupport` is typically created from a `TypeObject` received
+    /// during discovery.
+    ///
+    /// # Arguments
+    ///
+    /// * `topic_description` - The topic description to read data from.
+    /// * `type_support` - The `DynamicTypeSupport` describing the data type.
+    /// * `qos` - QoS policies for the DataReader.
+    /// * `listener` - Optional listener for status notifications.
+    /// * `mask` - Status mask indicating which status changes trigger listener callbacks.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use int2dds::xtypes::{DynamicTypeSupport, DynamicData};
+    ///
+    /// // Create DynamicTypeSupport from a TypeObject received during discovery
+    /// let type_support = DynamicTypeSupport::from_type_object(type_object)?;
+    ///
+    /// // Create a DataReader for DynamicData
+    /// let reader = subscriber.create_datareader_dynamic(
+    ///     &topic,
+    ///     Arc::new(type_support),
+    ///     DataReaderQos::default(),
+    ///     None,
+    ///     StatusMask::default(),
+    /// )?;
+    ///
+    /// // Read data
+    /// let samples = reader.take(10)?;
+    /// for sample in samples {
+    ///     if let Some(data) = sample.data() {
+    ///         let id: i32 = data.get("id")?;
+    ///         println!("Received id: {}", id);
+    ///     }
+    /// }
+    /// ```
+    pub fn create_datareader_dynamic(
+        &self,
+        topic_description: &dyn TopicDescription,
+        type_support: Arc<crate::xtypes::DynamicTypeSupport>,
+        qos: DataReaderQos,
+        listener: Option<Arc<dyn DataReaderListener<Foo = crate::xtypes::DynamicData>>>,
+        mask: StatusMask,
+    ) -> DdsResult<DataReader<crate::xtypes::DynamicData>> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
+        self.is_deleted()?;
+
+        let _ = self.cleanup_dead_readers();
+
+        qos.is_consistent()?;
+
+        let self_ref = self
+            .self_ref
+            .as_ref()
+            .ok_or(DdsError::Error("Subscriber is not properly initialized".to_string()))?;
+
+        let participant = self.get_participant()?;
+        let entity_kind = if type_support.is_compute_key_provided() {
+            EntityKind::USER_DEFINED_READER_WITH_KEY
+        } else {
+            EntityKind::USER_DEFINED_READER_NO_KEY
+        };
+        let dcps_bridge = participant.get_dcps_bridge()?;
+        let guid = dcps_bridge
+            .as_ref()
+            .ok_or(DdsError::Error("DCPS Bridge is not initialized".to_string()))?
+            .next_entity_guid(entity_kind);
+
+        drop(dcps_bridge);
+
+        let datareader = DataReader::new(
+            false,
+            guid,
+            type_support,
+            topic_description,
+            qos,
+            listener,
+            mask,
+            self_ref,
+            None,
+        )?;
+
+        if let Ok(()) = self.is_enabled() {
+            if self.get_qos()?.entity_factory.autoenable_created_entities {
+                datareader.enable()?;
+            }
+        }
+
+        let reader_ops: Arc<dyn DataReaderInternal<Qos = DataReaderQos>> = datareader
+            .self_ref
+            .lock()
+            .map_err(|e| DdsError::Error(e.to_string()))?
+            .as_ref()
+            .ok_or(DdsError::Error("DataReader is not properly initialized".to_string()))?
+            .clone();
+        let weak_reader: Weak<dyn DataReaderInternal<Qos = DataReaderQos>> =
+            Arc::downgrade(&reader_ops);
+        {
+            let mut readers_by_topic_name = match self.readers_by_topic_name.lock() {
+                Ok(readers_guard) => readers_guard,
+                Err(e) => return Err(DdsError::Error(e.to_string())),
+            };
+
+            let mut readers_by_topic_handle = match self.readers_by_topic_handle.lock() {
+                Ok(readers_guard) => readers_guard,
+                Err(e) => return Err(DdsError::Error(e.to_string())),
+            };
+
+            let topic_name = topic_description.get_name().to_string();
+            let topic_handle = topic_description.topic_instance_handle()?;
+
+            readers_by_topic_name
+                .entry(topic_name)
+                .or_insert_with(Vec::new)
+                .push(weak_reader.clone());
+            readers_by_topic_handle
+                .entry(topic_handle)
+                .or_insert_with(Vec::new)
+                .push(weak_reader.clone());
+        }
+
+        Ok(datareader)
     }
 
     pub(crate) fn create_builtin_datareader<Foo: DdsType>(
