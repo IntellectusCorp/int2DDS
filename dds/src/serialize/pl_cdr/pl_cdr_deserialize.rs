@@ -13,8 +13,10 @@ use crate::{
         DurabilityServiceQosPolicy, HistoryQosPolicy, HistoryQosPolicyKind, LivelinessQosPolicy,
         LivelinessQosPolicyKind, OwnershipQosPolicy, OwnershipQosPolicyKind,
         PresentationQosAccessScopeKind, PresentationQosPolicy, ReliabilityQosPolicy,
-        ReliabilityQosPolicyKind, ResourceLimitsQosPolicy,
+        ReliabilityQosPolicyKind, ResourceLimitsQosPolicy, TypeConsistencyEnforcementQosPolicy,
+        TypeConsistencyKind,
     },
+    xtypes::{TypeIdentifier, TypeObject},
     rtps::{
         builtin::data::content_filtered_topic::ContentFilterProperty,
         common::{
@@ -646,6 +648,53 @@ impl PlCdrParser {
                 ParameterValue::DataRepresentation(DataRepresentationQosPolicy {
                     value: representations,
                 })
+            }
+            ParameterId::PidTypeInformation => {
+                match TypeIdentifier::deserialize(data) {
+                    Ok((type_id, _consumed)) => ParameterValue::TypeInformation(type_id),
+                    Err(e) => {
+                        warn!("Failed to parse TypeIdentifier: {}", e);
+                        ParameterValue::Unknown(data)
+                    }
+                }
+            }
+            ParameterId::PidTypeConsistencyEnforcement => {
+                // TypeConsistencyEnforcementQosPolicy: kind(2) + 5 bools(5) + padding(1) = 8 bytes
+                if data.len() < 7 {
+                    warn!("Insufficient data for TypeConsistencyEnforcement");
+                    ParameterValue::Unknown(data)
+                } else {
+                    let mut reader = PlCdrReader::new(data, self.endianness);
+                    let kind_u16 = reader.read_u16().unwrap_or(0);
+                    let kind = TypeConsistencyKind::from_u16(kind_u16)
+                        .unwrap_or(TypeConsistencyKind::DisallowTypeCoercion);
+
+                    // Read boolean flags (1 byte each)
+                    let ignore_sequence_bounds = reader.read_bytes(1).map(|b| b[0] != 0).unwrap_or(false);
+                    let ignore_string_bounds = reader.read_bytes(1).map(|b| b[0] != 0).unwrap_or(false);
+                    let ignore_member_names = reader.read_bytes(1).map(|b| b[0] != 0).unwrap_or(false);
+                    let prevent_type_widening = reader.read_bytes(1).map(|b| b[0] != 0).unwrap_or(false);
+                    let force_type_validation = reader.read_bytes(1).map(|b| b[0] != 0).unwrap_or(false);
+
+                    ParameterValue::TypeConsistencyEnforcement(TypeConsistencyEnforcementQosPolicy {
+                        kind,
+                        ignore_sequence_bounds,
+                        ignore_string_bounds,
+                        ignore_member_names,
+                        prevent_type_widening,
+                        force_type_validation,
+                    })
+                }
+            }
+            ParameterId::PidTypeObject => {
+                // TypeObject: first byte indicates Minimal (0xF2) or Complete (0xF1)
+                match TypeObject::deserialize(data) {
+                    Ok((type_obj, _consumed)) => ParameterValue::TypeObject(type_obj),
+                    Err(e) => {
+                        warn!("Failed to parse TypeObject: {}", e);
+                        ParameterValue::Unknown(data)
+                    }
+                }
             }
             _ => ParameterValue::Unknown(data),
         };
