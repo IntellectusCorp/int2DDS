@@ -243,15 +243,28 @@ impl Publisher {
         }
         self.is_deleted()?;
 
-        let _ = self.cleanup_dead_writers();
-
-        let topic_arc = self.get_participant()?.find_internal_topic(topic)?;
         let type_support = self.get_participant()?.find_typesupport(topic.get_type_name());
         if type_support.is_none() {
             return Err(DdsError::Error("Failed to create DataWriter: Topic does not belong to the same DomainParticipant as Publisher.".to_string()));
         }
         let type_support =
             type_support.ok_or(DdsError::Error("TypeSupport not found for Topic".to_string()))?;
+
+        self.create_datawriter_impl(type_support, topic, qos, listener, mask)
+    }
+
+    /// Internal implementation for creating a DataWriter with a provided TypeSupport.
+    fn create_datawriter_impl<Foo: 'static + Clone>(
+        &self,
+        type_support: Arc<dyn TypeSupport>,
+        topic: &Topic,
+        qos: DataWriterQos,
+        listener: Option<Arc<dyn DataWriterListener<Foo = Foo>>>,
+        mask: StatusMask,
+    ) -> DdsResult<DataWriter<Foo>> {
+        let _ = self.cleanup_dead_writers();
+
+        let topic_arc = self.get_participant()?.find_internal_topic(topic)?;
 
         qos.is_consistent()?;
 
@@ -407,86 +420,7 @@ impl Publisher {
         }
         self.is_deleted()?;
 
-        let _ = self.cleanup_dead_writers();
-
-        let topic_arc = self.get_participant()?.find_internal_topic(topic)?;
-
-        qos.is_consistent()?;
-
-        let self_ref = self
-            .self_ref
-            .as_ref()
-            .ok_or(DdsError::Error("Publisher is not properly initialized".to_string()))?;
-
-        let participant = self.get_participant()?;
-        let entity_kind = if type_support.is_compute_key_provided() {
-            EntityKind::USER_DEFINED_WRITER_WITH_KEY
-        } else {
-            EntityKind::USER_DEFINED_WRITER_NO_KEY
-        };
-        let dcps_bridge = participant.get_dcps_bridge()?;
-        let guid = dcps_bridge
-            .as_ref()
-            .ok_or(DdsError::Error("DCPS Bridge is not initialized".to_string()))?
-            .next_entity_guid(entity_kind);
-        let wlp_logic = dcps_bridge
-            .as_ref()
-            .and_then(|bridge| bridge.get_participant().ok())
-            .and_then(|p| p.wlp_logic());
-
-        drop(dcps_bridge);
-
-        let datawriter = DataWriter::new(
-            false,
-            guid,
-            type_support,
-            &topic_arc,
-            qos,
-            listener,
-            mask,
-            self_ref,
-            wlp_logic,
-        )?;
-
-        if let Ok(()) = self.is_enabled() {
-            if self.get_qos()?.entity_factory.autoenable_created_entities {
-                datawriter.enable()?;
-            }
-        }
-
-        let writer_ops: Arc<dyn DataWriterInternal<Qos = DataWriterQos>> = datawriter
-            .self_ref
-            .lock()
-            .map_err(|e| DdsError::Error(e.to_string()))?
-            .as_ref()
-            .ok_or(DdsError::Error("DataWriter is not properly initialized".to_string()))?
-            .clone();
-        let weak_writer = Arc::downgrade(&writer_ops);
-        {
-            let mut writers_by_topic_name = match self.writers_by_topic_name.lock() {
-                Ok(writers_guard) => writers_guard,
-                Err(e) => return Err(DdsError::Error(e.to_string())),
-            };
-
-            let mut writers_by_topic_handle = match self.writers_by_topic_handle.lock() {
-                Ok(writers_guard) => writers_guard,
-                Err(e) => return Err(DdsError::Error(e.to_string())),
-            };
-
-            let topic_name = topic.get_name().to_string();
-            let topic_handle = topic.get_instance_handle()?;
-
-            writers_by_topic_name
-                .entry(topic_name)
-                .or_insert_with(Vec::new)
-                .push(weak_writer.clone());
-            writers_by_topic_handle
-                .entry(topic_handle)
-                .or_insert_with(Vec::new)
-                .push(weak_writer.clone());
-        }
-
-        Ok(datawriter)
+        self.create_datawriter_impl(type_support, topic, qos, listener, mask)
     }
 
     pub fn delete_datawriter<Foo: 'static + Clone>(
