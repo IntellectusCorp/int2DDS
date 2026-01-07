@@ -250,8 +250,6 @@ impl Subscriber {
         }
         self.is_deleted()?;
 
-        let _ = self.cleanup_dead_readers();
-
         let type_support =
             self.get_participant()?.find_typesupport(topic_description.get_type_name());
         if type_support.is_none() {
@@ -259,6 +257,20 @@ impl Subscriber {
         }
         let type_support =
             type_support.ok_or(DdsError::Error("TypeSupport not found for Topic".to_string()))?;
+
+        self.create_datareader_impl(type_support, topic_description, qos, listener, mask)
+    }
+
+    /// Internal implementation for creating a DataReader with a provided TypeSupport.
+    fn create_datareader_impl<Foo: DdsType>(
+        &self,
+        type_support: Arc<dyn TypeSupport>,
+        topic_description: &dyn TopicDescription,
+        qos: DataReaderQos,
+        listener: Option<Arc<dyn DataReaderListener<Foo = Foo>>>,
+        mask: StatusMask,
+    ) -> DdsResult<DataReader<Foo>> {
+        let _ = self.cleanup_dead_readers();
 
         qos.is_consistent()?;
 
@@ -418,81 +430,7 @@ impl Subscriber {
         }
         self.is_deleted()?;
 
-        let _ = self.cleanup_dead_readers();
-
-        qos.is_consistent()?;
-
-        let self_ref = self
-            .self_ref
-            .as_ref()
-            .ok_or(DdsError::Error("Subscriber is not properly initialized".to_string()))?;
-
-        let participant = self.get_participant()?;
-        let entity_kind = if type_support.is_compute_key_provided() {
-            EntityKind::USER_DEFINED_READER_WITH_KEY
-        } else {
-            EntityKind::USER_DEFINED_READER_NO_KEY
-        };
-        let dcps_bridge = participant.get_dcps_bridge()?;
-        let guid = dcps_bridge
-            .as_ref()
-            .ok_or(DdsError::Error("DCPS Bridge is not initialized".to_string()))?
-            .next_entity_guid(entity_kind);
-
-        drop(dcps_bridge);
-
-        let datareader = DataReader::new(
-            false,
-            guid,
-            type_support,
-            topic_description,
-            qos,
-            listener,
-            mask,
-            self_ref,
-            None,
-        )?;
-
-        if let Ok(()) = self.is_enabled() {
-            if self.get_qos()?.entity_factory.autoenable_created_entities {
-                datareader.enable()?;
-            }
-        }
-
-        let reader_ops: Arc<dyn DataReaderInternal<Qos = DataReaderQos>> = datareader
-            .self_ref
-            .lock()
-            .map_err(|e| DdsError::Error(e.to_string()))?
-            .as_ref()
-            .ok_or(DdsError::Error("DataReader is not properly initialized".to_string()))?
-            .clone();
-        let weak_reader: Weak<dyn DataReaderInternal<Qos = DataReaderQos>> =
-            Arc::downgrade(&reader_ops);
-        {
-            let mut readers_by_topic_name = match self.readers_by_topic_name.lock() {
-                Ok(readers_guard) => readers_guard,
-                Err(e) => return Err(DdsError::Error(e.to_string())),
-            };
-
-            let mut readers_by_topic_handle = match self.readers_by_topic_handle.lock() {
-                Ok(readers_guard) => readers_guard,
-                Err(e) => return Err(DdsError::Error(e.to_string())),
-            };
-
-            let topic_name = topic_description.get_name().to_string();
-            let topic_handle = topic_description.topic_instance_handle()?;
-
-            readers_by_topic_name
-                .entry(topic_name)
-                .or_insert_with(Vec::new)
-                .push(weak_reader.clone());
-            readers_by_topic_handle
-                .entry(topic_handle)
-                .or_insert_with(Vec::new)
-                .push(weak_reader.clone());
-        }
-
-        Ok(datareader)
+        self.create_datareader_impl(type_support, topic_description, qos, listener, mask)
     }
 
     pub(crate) fn create_builtin_datareader<Foo: DdsType>(
