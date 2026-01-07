@@ -74,15 +74,13 @@ impl DiscoveryUnicastListeningTask {
         };
 
         if udp_token.is_none() && tcp_token.is_none() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "No listener (UDP or TCP) is set",
-            ));
+            return Err(std::io::Error::other("No listener (UDP or TCP) is set"));
         }
 
-        let participant = self.participant.upgrade().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::Other, "Participant already dropped")
-        })?;
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or_else(|| std::io::Error::other("Participant already dropped"))?;
 
         loop {
             poll.poll(&mut events, Some(Duration::from_millis(100)))?;

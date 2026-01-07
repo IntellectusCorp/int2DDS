@@ -42,12 +42,10 @@ use crate::{
             submessage_header::SubmessageHeader,
             submessages::{ack_nack::AckNack, data::Data, heartbeat::Heartbeat},
         },
-        task::{
-            sending_handler::{MessageType, SendingHandler},
-            timer_handler::TimerHandler,
-        },
+        task::sending_handler::{MessageType, SendingHandler},
         transport::{Transport, TransportSender},
     },
+    utils::timer::timer_handler::TimerHandler,
 };
 use std::{
     collections::HashMap,
@@ -106,7 +104,7 @@ pub(crate) struct WlpLogic {
 // Constructor and lifecycle management
 impl WlpLogic {
     pub(crate) fn new(participant: Arc<Participant>, sender: Arc<TransportSender>) -> Self {
-        let timer_handler = TimerHandler::get_instance(participant.clone());
+        let timer_handler = TimerHandler::get_instance(participant.guid().prefix());
         Self {
             participant: Arc::downgrade(&participant),
             sender: Arc::new(Mutex::new(Some(sender))),
@@ -762,6 +760,7 @@ impl WlpLogic {
         };
 
         let participant = self.get_upgraded_participant()?;
+        let participant_weak = self.participant.clone();
 
         let timer_id = format!(
             "wlp_p2p_{:?}_{}",
@@ -776,12 +775,15 @@ impl WlpLogic {
                 remaining_duration,
                 false, // one-shot
                 {
-                    let participant = participant.clone();
                     let message = message.clone();
                     move || {
-                        let sending_handler =
-                            SendingHandler::get_instance(participant.clone(), None, None);
-                        sending_handler.push_message_and_wake((*message).clone());
+                        if let Some(participant) = participant_weak.upgrade() {
+                            if !participant.is_terminated() {
+                                let sending_handler =
+                                    SendingHandler::get_instance(participant, None, None);
+                                sending_handler.push_message_and_wake((*message).clone());
+                            }
+                        }
                     }
                 },
             );
@@ -1187,7 +1189,7 @@ impl WlpLogic {
     }
 
     pub(crate) fn update_local_writer_liveliness(&self, writer_guid: &Guid) -> RtpsResult<()> {
-        if let Some(mut info) = self.local_writers.get_mut(&writer_guid) {
+        if let Some(mut info) = self.local_writers.get_mut(writer_guid) {
             let was_not_alive = info.alive_state() == WriterAliveState::NotAlive;
             info.set_alive();
 
@@ -1206,7 +1208,7 @@ impl WlpLogic {
             // LivelinessMonitor Timer Update (re-track if removed after LOST)
             if let Ok(monitor) = self.liveliness_monitor.lock() {
                 if let Some(monitor) = monitor.as_ref() {
-                    monitor.update_writer(&writer_guid);
+                    monitor.update_writer(writer_guid);
                 }
             }
         }
@@ -1253,7 +1255,7 @@ impl WlpLogic {
                 };
 
                 if should_update {
-                    guids.push(guid.clone());
+                    guids.push(*guid);
                 }
             }
         }

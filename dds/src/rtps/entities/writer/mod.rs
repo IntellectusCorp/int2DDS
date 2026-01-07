@@ -4,6 +4,7 @@ pub(crate) mod reader_locator;
 pub(crate) mod reader_proxy;
 mod stateful_writer;
 mod stateless_writer;
+#[allow(clippy::module_inception)]
 mod writer;
 
 pub(crate) use stateful_writer::StatefulWriter;

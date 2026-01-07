@@ -53,8 +53,8 @@ pub(crate) static INSTANCE: OnceLock<Mutex<HashMap<Guid, Arc<SendingHandler>>>> 
 pub(crate) struct SendingHandler {
     // Immutable fields - no lock needed
     participant: Weak<Participant>,
-    udp_sender: Option<Arc<TransportSender>>,
-    tcp_sender: Option<Arc<TransportSender>>,
+    udp_sender: Mutex<Option<Arc<TransportSender>>>,
+    tcp_sender: Mutex<Option<Arc<TransportSender>>>,
 
     // Mutable fields - use interior mutability
     sending_task: Mutex<Option<Arc<Mutex<SendingTask>>>>,
@@ -75,8 +75,8 @@ impl SendingHandler {
     ) -> Self {
         Self {
             participant: Arc::downgrade(&participant),
-            udp_sender,
-            tcp_sender,
+            udp_sender: Mutex::new(udp_sender),
+            tcp_sender: Mutex::new(tcp_sender),
             sending_task: Mutex::new(None),
             sending_thread_join_handle: Mutex::new(None),
             waker: Mutex::new(None),
@@ -126,10 +126,13 @@ impl SendingHandler {
     fn spawn_event_loop(&self) {
         let mut sending_task_guard = self.sending_task.lock().expect("Failed to lock sending_task");
         if sending_task_guard.is_none() {
+            let udp_sender = self.udp_sender.lock().ok().and_then(|g| g.clone());
+            let tcp_sender = self.tcp_sender.lock().ok().and_then(|g| g.clone());
+
             let sending_task = SendingTask::new(
                 self.participant.upgrade().expect("Participant already dropped"),
-                self.udp_sender.clone(),
-                self.tcp_sender.clone(),
+                udp_sender,
+                tcp_sender,
             );
             let waker = sending_task.waker();
             *sending_task_guard = Some(Arc::new(Mutex::new(sending_task)));
@@ -149,19 +152,29 @@ impl SendingHandler {
                 Some(sending_task) => {
                     let sending_task_clone = sending_task.clone();
                     let message_queue_clone = self.message_queue.clone();
+                    let participant_guid =
+                        self.participant.upgrade().expect("Participant already dropped").guid();
                     let handle = thread::Builder::new()
                         .name("sending task thread".to_string())
                         .spawn(move || {
                             // Register thread name for monitoring
                             {
                                 use crate::rtps::task::thread_monitor::ThreadMonitor;
-                                ThreadMonitor::register_current_thread_name("sending task thread");
+                                ThreadMonitor::register_current_thread_name_with_guid_prefix(
+                                    "sending task thread",
+                                    participant_guid.prefix(),
+                                );
                             }
 
                             if let Err(e) =
                                 sending_task_clone.lock().unwrap().event_loop(message_queue_clone)
                             {
                                 error!("Sending task event loop terminated with error: {:?}", e);
+                            }
+                            // Cleanup thread from registry before exit
+                            {
+                                use crate::rtps::task::thread_monitor::ThreadMonitor;
+                                ThreadMonitor::remove_map_guard();
                             }
                             debug!("sending task thread finished");
                         })
@@ -255,6 +268,17 @@ impl SendingHandler {
         // Clear waker reference
         if let Ok(mut waker_guard) = self.waker.lock() {
             *waker_guard = None;
+        }
+
+        if let Ok(mut queue) = self.message_queue.lock() {
+            queue.clear();
+        }
+
+        if let Ok(mut sender_guard) = self.udp_sender.lock() {
+            *sender_guard = None;
+        }
+        if let Ok(mut sender_guard) = self.tcp_sender.lock() {
+            *sender_guard = None;
         }
 
         Ok(())

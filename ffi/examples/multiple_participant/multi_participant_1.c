@@ -25,37 +25,6 @@
 
 #include "../include/int2dds-ffi.h"
 
-// Serialize message
-size_t serialize_message(uint32_t index, const char* message, uint8_t* buffer, size_t buffer_size) {
-    size_t msg_len = strlen(message);
-    size_t total_size = 4 + 4 + msg_len;
-    if (total_size > buffer_size) return 0;
-
-    buffer[0] = index & 0xFF;
-    buffer[1] = (index >> 8) & 0xFF;
-    buffer[2] = (index >> 16) & 0xFF;
-    buffer[3] = (index >> 24) & 0xFF;
-
-    buffer[4] = msg_len & 0xFF;
-    buffer[5] = (msg_len >> 8) & 0xFF;
-    buffer[6] = (msg_len >> 16) & 0xFF;
-    buffer[7] = (msg_len >> 24) & 0xFF;
-
-    memcpy(buffer + 8, message, msg_len);
-    return total_size;
-}
-
-// Deserialize message
-int deserialize_message(const uint8_t* data, size_t size, uint32_t* index, char* message, size_t msg_buf_size) {
-    if (size < 8) return -1;
-    *index = data[0] | (data[1] << 8) | (data[2] << 16) | (data[3] << 24);
-    uint32_t str_len = data[4] | (data[5] << 8) | (data[6] << 16) | (data[7] << 24);
-    if (size < 8 + str_len) return -1;
-    size_t copy_len = (str_len < msg_buf_size - 1) ? str_len : msg_buf_size - 1;
-    memcpy(message, data + 8, copy_len);
-    message[copy_len] = '\0';
-    return 0;
-}
 
 int main(int argc, char* argv[]) {
     Int2DdsRet ret;
@@ -72,6 +41,12 @@ int main(int argc, char* argv[]) {
     Int2DdsSubscriber* subscriber = NULL;
     Int2DdsTopic* sub_topic = NULL;
     Int2DdsDataReader* reader = NULL;
+
+    // Type descriptors and data
+    Int2DdsTypeDescriptor* pub_type_desc = NULL;
+    Int2DdsTypeDescriptor* sub_type_desc = NULL;
+    Int2DdsData* pub_data = NULL;
+    Int2DdsData* sub_data = NULL;
 
     printf("=== Multi-Participant Example 1 ===\n");
     printf("Publisher: Domain 0\n");
@@ -114,14 +89,52 @@ int main(int argc, char* argv[]) {
         goto cleanup;
     }
 
-    // Create topics
-    ret = int2dds_create_topic(pub_participant, "MultiDomainTopic", "MultiDomainData", NULL, &pub_topic);
+    // Create type descriptor for publisher
+    ret = int2dds_type_descriptor_create("MultiDomainData", &pub_type_desc);
+    if (ret != INT2DDS_RET_OK) {
+        printf("Failed to create publisher type descriptor: %d\n", ret);
+        goto cleanup;
+    }
+
+    ret = int2dds_type_descriptor_add_u32(pub_type_desc, "index", false);
+    if (ret != INT2DDS_RET_OK) {
+        printf("Failed to add index field: %d\n", ret);
+        goto cleanup;
+    }
+
+    ret = int2dds_type_descriptor_add_string(pub_type_desc, "message", 256, false);
+    if (ret != INT2DDS_RET_OK) {
+        printf("Failed to add message field: %d\n", ret);
+        goto cleanup;
+    }
+
+    // Create type descriptor for subscriber
+    ret = int2dds_type_descriptor_create("MultiDomainData", &sub_type_desc);
+    if (ret != INT2DDS_RET_OK) {
+        printf("Failed to create subscriber type descriptor: %d\n", ret);
+        goto cleanup;
+    }
+
+    ret = int2dds_type_descriptor_add_u32(sub_type_desc, "index", false);
+    if (ret != INT2DDS_RET_OK) {
+        printf("Failed to add index field: %d\n", ret);
+        goto cleanup;
+    }
+
+    ret = int2dds_type_descriptor_add_string(sub_type_desc, "message", 256, false);
+    if (ret != INT2DDS_RET_OK) {
+        printf("Failed to add message field: %d\n", ret);
+        goto cleanup;
+    }
+
+    // Create topics with type descriptors
+    ret = int2dds_create_topic(pub_participant, "MultiDomainTopic", pub_type_desc, NULL, &pub_topic);
     if (ret != INT2DDS_RET_OK) {
         printf("Failed to create publisher topic: %d\n", ret);
         goto cleanup;
     }
 
-    ret = int2dds_create_topic(sub_participant, "MultiDomainTopic", "MultiDomainData", NULL, &sub_topic);
+    ret = int2dds_create_topic(sub_participant, "MultiDomainTopic", sub_type_desc, NULL, &sub_topic);
     if (ret != INT2DDS_RET_OK) {
         printf("Failed to create subscriber topic: %d\n", ret);
         goto cleanup;
@@ -144,44 +157,76 @@ int main(int argc, char* argv[]) {
     printf("This example: Publisher domain 0, Subscriber domain 1\n");
     printf("multi_participant_2: Publisher domain 1, Subscriber domain 0 (opposite)\n\n");
 
+    // Create data containers
+    ret = int2dds_data_create(pub_type_desc, &pub_data);
+    if (ret != INT2DDS_RET_OK) {
+        printf("Failed to create publisher data: %d\n", ret);
+        goto cleanup;
+    }
+
+    ret = int2dds_data_create(sub_type_desc, &sub_data);
+    if (ret != INT2DDS_RET_OK) {
+        printf("Failed to create subscriber data: %d\n", ret);
+        goto cleanup;
+    }
+
     // Send messages (won't be received due to different domains)
     printf("Sending messages on domain 0...\n");
-    uint8_t buffer[512];
+    char message[64];
     for (uint32_t i = 0; i < 5; i++) {
-        char message[64];
         snprintf(message, sizeof(message), "Message from domain 0 [%u]", i);
-        size_t data_size = serialize_message(i, message, buffer, sizeof(buffer));
 
-        ret = int2dds_write(writer, buffer, data_size);
+        ret = int2dds_data_set_u32(pub_data, "index", i);
+        if (ret != INT2DDS_RET_OK) {
+            printf("Failed to set index: %d\n", ret);
+            continue;
+        }
+
+        ret = int2dds_data_set_string(pub_data, "message", message);
+        if (ret != INT2DDS_RET_OK) {
+            printf("Failed to set message: %d\n", ret);
+            continue;
+        }
+
+        ret = int2dds_write(writer, pub_data);
         if (ret == INT2DDS_RET_OK) {
             printf("[%u] Sent: %s\n", i, message);
         }
         sleep_ms(500);
     }
 
-
+    // Try to receive messages
     while (1) {
-        size_t data_size = 0;
         bool valid_data = false;
-        ret = int2dds_take(reader, buffer, sizeof(buffer), &data_size, &valid_data);
+        ret = int2dds_take(reader, sub_data, &valid_data);
         if (ret == INT2DDS_RET_NO_DATA) {
             break;
         } else if (ret == INT2DDS_RET_OK && valid_data) {
             uint32_t index;
-            char message[256];
-            if (deserialize_message(buffer, data_size, &index, message, sizeof(message)) == 0) {
-                printf("[%u] Received: %s\n", index, message);
-            }
+            char recv_message[256];
+            size_t message_len;
+
+            ret = int2dds_data_get_u32(sub_data, "index", &index);
+            if (ret != INT2DDS_RET_OK) continue;
+
+            ret = int2dds_data_get_string(sub_data, "message", recv_message, sizeof(recv_message), &message_len);
+            if (ret != INT2DDS_RET_OK) continue;
+
+            printf("[%u] Received: %s\n", index, recv_message);
         }
     }
 
     printf("\nExample complete.\n");
 
 cleanup:
+    if (sub_data) int2dds_data_delete(sub_data);
+    if (pub_data) int2dds_data_delete(pub_data);
     if (reader) int2dds_delete_datareader(reader);
     if (writer) int2dds_delete_datawriter(writer);
     if (sub_topic) int2dds_delete_topic(sub_topic);
     if (pub_topic) int2dds_delete_topic(pub_topic);
+    if (sub_type_desc) int2dds_type_descriptor_delete(sub_type_desc);
+    if (pub_type_desc) int2dds_type_descriptor_delete(pub_type_desc);
     if (subscriber) int2dds_delete_subscriber(subscriber);
     if (publisher) int2dds_delete_publisher(publisher);
     if (sub_participant) int2dds_delete_participant(sub_participant);

@@ -1,3 +1,4 @@
+#![allow(clippy::needless_doctest_main)]
 //! # int2dds
 //!
 //! A Rust implementation of the Data Distribution Service (DDS) middleware standard,
@@ -350,6 +351,8 @@ pub mod serialize;
 pub use dcps::topic::DdsType;
 #[doc(hidden)]
 pub use int2dds_derive::DdsType as DeriveDdsType;
+#[doc(hidden)]
+pub mod utils;
 
 extern crate md5;
 

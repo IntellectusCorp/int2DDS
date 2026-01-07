@@ -82,7 +82,7 @@ impl Ord for SequenceNumber {
 
 impl Clone for SequenceNumber {
     fn clone(&self) -> Self {
-        Self { high: self.high, low: self.low }
+        *self
     }
 }
 
@@ -112,8 +112,8 @@ impl<'a, C: Context> Readable<'a, C> for SequenceNumberSet {
         let num_bits: u32 = reader.read_value()?;
         let num_of_longs: usize = num_bits.div_ceil(32) as usize;
         let mut bitmap = [0_i32; 8];
-        for i in 0..num_of_longs {
-            bitmap[i] = reader.read_value()?;
+        for item in bitmap.iter_mut().take(num_of_longs) {
+            *item = reader.read_value()?;
         }
         Ok(Self { bitmap_base, bitmap, num_bits })
     }
@@ -124,8 +124,8 @@ impl<C: Context> Writable<C> for SequenceNumberSet {
         writer.write_value(&self.bitmap_base)?;
         writer.write_u32(self.num_bits)?;
         let num_of_longs: usize = self.num_bits.div_ceil(32) as usize;
-        for i in 0..(num_of_longs) {
-            writer.write_i32(self.bitmap[i])?;
+        for item in self.bitmap.iter().take(num_of_longs) {
+            writer.write_i32(*item)?;
         }
         Ok(())
     }
@@ -141,8 +141,8 @@ impl<'a, C: Context> Readable<'a, C> for FragmentNumberSet {
         let num_bits: u32 = reader.read_value()?;
         let num_of_longs: usize = num_bits.div_ceil(32) as usize;
         let mut bitmap = [0_i32; 8];
-        for i in 0..num_of_longs {
-            bitmap[i] = reader.read_value()?;
+        for item in bitmap.iter_mut().take(num_of_longs) {
+            *item = reader.read_value()?;
         }
         Ok(Self { bitmap_base, bitmap, num_bits })
     }

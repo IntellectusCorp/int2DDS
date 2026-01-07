@@ -236,7 +236,7 @@ impl FragmentBuffer {
         fragment_size: u16,
     ) -> Self {
         let total_fragments = (total_size / fragment_size as u32)
-            + if total_size % fragment_size as u32 > 0 { 1 } else { 0 };
+            + if !total_size.is_multiple_of(fragment_size as u32) { 1 } else { 0 };
         let now = Instant::now();
 
         Self {

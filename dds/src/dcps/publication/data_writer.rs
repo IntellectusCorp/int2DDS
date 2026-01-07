@@ -106,9 +106,18 @@ pub(crate) trait DataWriterInternal: DataWriterBase {
     fn get_type_id(&self) -> TypeId;
     fn delete(&self);
     fn is_deleted(&self) -> DdsResult<()>;
+    fn is_builtin(&self) -> bool;
 }
 
 pub struct DataWriter<Foo> {
+    // Indicates whether this entity is a built-in entity.
+    //
+    // Currently always `false` as DDS spec does not define built-in
+    // DataWriter exposed to users.
+    //
+    // TODO: Reserved for future DCPS-RTPS built-in entity mapping
+    // if needed (e.g., exposing built-in writers for diagnostics).
+    is_builtin: bool,
     guid: Guid,
     qos: Arc<Mutex<DataWriterQos>>,
     listener: Arc<RwLock<Option<Arc<dyn DataWriterListener<Foo = Foo>>>>>,
@@ -122,6 +131,7 @@ pub struct DataWriter<Foo> {
     publisher: Option<Weak<Publisher>>,
     rtps_writer: Arc<Mutex<Option<Weak<dyn RtpsWriter + Send + Sync>>>>,
     key_instances: Arc<Mutex<HashMap<SerializedData, InstanceHandle>>>, // <serialized_key, ih>
+    #[allow(clippy::type_complexity)]
     instances: Arc<Mutex<HashMap<InstanceHandle, (SerializedData, Time, InstanceState)>>>, // for instance managing
     liveliness_lost_status: Arc<Mutex<LivelinessLostStatus>>,
     offered_deadline_missed_status: Arc<Mutex<OfferedDeadlineMissedStatus>>,
@@ -171,6 +181,7 @@ impl<Foo> Debug for DataWriter<Foo> {
 impl<Foo: 'static + Clone> Clone for DataWriter<Foo> {
     fn clone(&self) -> Self {
         Self {
+            is_builtin: self.is_builtin,
             guid: self.guid,
             qos: self.qos.clone(),
             listener: self.listener.clone(),
@@ -200,10 +211,16 @@ impl<Foo: 'static + Clone> Clone for DataWriter<Foo> {
 // When user doesn't call delete_datawriter and automatic drop occurs when going out of scope,
 // it must not be deleted from Publisher.
 impl<Foo> Drop for DataWriter<Foo> {
+    #[allow(clippy::match_result_ok)]
     fn drop(&mut self) {
+        // Builtin entities are managed separately, skip orphan handling
+        if self.is_builtin {
+            return;
+        }
+
         // Only handle drop for the last reference (not clones)
         if let Some(guard) = self.self_ref.lock().ok() {
-            if let Some(ref self_arc) = guard.as_ref() {
+            if let Some(self_arc) = guard.as_ref() {
                 if Arc::strong_count(self_arc) > 1 {
                     return;
                 }
@@ -351,7 +368,9 @@ impl<Foo: 'static + Clone> UpdateStatus for DataWriter<Foo> {
 impl<Foo: 'static + Clone> DataWriter<Foo> {
     // DataWriter should be specialized for each data type.
     // Trait defining methods that should be defined in auto-generated class for <Foo>
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
+        is_builtin: bool,
         guid: Guid,
         type_support: Arc<dyn TypeSupport + Send>,
         topic: &Arc<Topic>,
@@ -362,6 +381,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         wlp_logic: Option<WlpLogic>,
     ) -> DdsResult<Self> {
         let writer = Self {
+            is_builtin,
             guid,
             qos: Arc::new(Mutex::new(qos.clone())),
             listener: Arc::new(RwLock::new(listener)),
@@ -736,53 +756,58 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
 
         let serialized_data = self.type_support.serialize_with_format(data as &dyn Any, &format)?;
         let mut instance_handle = InstanceHandle::NIL;
+        let mut is_new_instance = false;
+
         if self.type_support.is_compute_key_provided() {
-            // When data arrives -> if we have a key, instance_handle pair just use the handle, or add it and continue
             let serialized_key = self.type_support.serialize_key(data as &dyn Any)?;
-            instance_handle = match self.key_instances.lock() {
-                Ok(mut key_instances) => {
-                    if let Some(instance_handle) = key_instances.get(&serialized_key) {
-                        *instance_handle
-                    } else {
-                        // 3. Deserialize key
-                        let computed_handle = self.type_support.compute_key(data as &dyn Any); //hashing
 
-                        {
-                            let mut instances = self
-                                .instances
-                                .lock()
-                                .map_err(|e| DdsError::Error(e.to_string()))?;
-                            instances.insert(
-                                computed_handle,
-                                (serialized_key.clone(), timestamp, InstanceState::Registered),
-                            );
-                        }
+            // Fast path: quick lookup with minimal lock holding
+            let existing_handle = {
+                let key_instances =
+                    self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+                key_instances.get(&serialized_key).copied()
+            };
 
-                        key_instances.insert(serialized_key, computed_handle);
+            instance_handle = if let Some(handle) = existing_handle {
+                handle
+            } else {
+                // Slow path: compute key first (outside all locks)
+                let computed_handle = self.type_support.compute_key(data as &dyn Any);
 
-                        let monitor_guard = self
-                            .deadline_monitor
-                            .lock()
-                            .map_err(|e| DdsError::Error(e.to_string()))?;
-                        if let Some(monitor) = monitor_guard.as_ref() {
-                            monitor.track_instance(&computed_handle);
-                        }
-
-                        computed_handle
-                    }
+                // Insert into instances (separate lock, not nested)
+                {
+                    let mut instances =
+                        self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+                    instances.insert(
+                        computed_handle,
+                        (serialized_key.clone(), timestamp, InstanceState::Registered),
+                    );
                 }
-                Err(e) => return Err(DdsError::Error(e.to_string())),
-            }
+
+                // Insert into key_instances (separate lock, not nested)
+                {
+                    let mut key_instances =
+                        self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+                    key_instances.insert(serialized_key, computed_handle);
+                }
+
+                is_new_instance = true;
+                computed_handle
+            };
         }
 
         if !handle.is_nil() && handle != instance_handle {
             return Err(DdsError::PreconditionNotMet);
         }
 
+        // Single deadline_monitor lock for both track and reschedule
         let monitor_guard =
             self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
         if !instance_handle.is_nil() {
             if let Some(monitor) = monitor_guard.as_ref() {
+                if is_new_instance {
+                    monitor.track_instance(&instance_handle);
+                }
                 monitor.reschedule_instance(&instance_handle);
             }
         }
@@ -1023,6 +1048,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         Ok(rtps_writer)
     }
 
+    #[allow(clippy::type_complexity)]
     pub(crate) fn create_status_callback(
         &self,
     ) -> DdsResult<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>> {
@@ -1862,6 +1888,10 @@ impl<Foo: 'static + Clone> DataWriterInternal for DataWriter<Foo> {
         } else {
             Ok(())
         }
+    }
+
+    fn is_builtin(&self) -> bool {
+        self.is_builtin
     }
 }
 

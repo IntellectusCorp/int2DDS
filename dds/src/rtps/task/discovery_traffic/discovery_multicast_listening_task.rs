@@ -134,15 +134,10 @@ impl DiscoveryMulticastListeningTask {
                                     {
                                         error!("Failed to handle participant termination message: {:?}", e);
                                     }
-                                } else {
-                                    if let Err(e) = spdp_logic
-                                        .handle_discovered_participant_data(participant_proxy_data)
-                                    {
-                                        error!(
-                                            "Failed to handle discovered participant data: {:?}",
-                                            e
-                                        );
-                                    }
+                                } else if let Err(e) = spdp_logic
+                                    .handle_discovered_participant_data(participant_proxy_data)
+                                {
+                                    error!("Failed to handle discovered participant data: {:?}", e);
                                 }
                             }
                             None => {

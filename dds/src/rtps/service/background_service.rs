@@ -42,11 +42,6 @@ impl BackgroundService {
         let handler = thread::Builder::new()
             .name("background thread".to_string())
             .spawn(move || {
-                // Register thread name for monitoring
-                {
-                    use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::register_current_thread_name("background thread");
-                }
                 #[cfg(unix)]
                 {
                     let mut signals = Signals::new([SIGINT, SIGTERM]).unwrap();

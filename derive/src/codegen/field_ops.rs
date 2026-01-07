@@ -100,6 +100,7 @@ fn gen_sequence_deserialize(
     }
 }
 
+#[allow(clippy::unnecessary_unwrap)]
 fn gen_serialize_code(
     method: SerializationMethod,
     field_name: &syn::Ident,
@@ -268,6 +269,7 @@ fn gen_serialize_code(
     }
 }
 
+#[allow(clippy::unnecessary_unwrap)]
 fn gen_deserialize_code(
     method: SerializationMethod,
     field_name: &syn::Ident,
@@ -773,4 +775,61 @@ pub fn generate_field_deserialization_xcdr(
     crate_path: &proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
     generate_field_deserialization_internal(fields, name, crate_path, true)
+}
+
+/// Generate XCDR deserialization code with per-field DHEADER reading.
+/// This is for interoperability with implementations that serialize APPENDABLE types
+/// with a DHEADER before each field instead of a single DHEADER for the whole struct.
+/// Uses DHEADER value for forward compatibility - skips remaining bytes if field has extra data.
+pub fn generate_field_deserialization_xcdr_per_field_dheader(
+    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
+    name: &syn::Ident,
+    crate_path: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let field_deserializations = fields.iter().map(|field| {
+        let field_config = parse_field_attributes(field);
+        let field_name = field.ident.as_ref().unwrap();
+        let method = get_serialization_method(&field.ty);
+        let inner_deserialize = gen_deserialize_code(
+            method,
+            field_name,
+            &field.ty,
+            crate_path,
+            true,
+            field_config.bound,
+        );
+
+        // Read DHEADER before each field (interoperability format)
+        // Use DHEADER value to skip remaining bytes for forward compatibility
+        quote! {
+            let __field_size = deserializer.read_dheader()
+                .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+            let __field_start = {
+                use #crate_path::serialize::DeserializerReader;
+                deserializer.get_position()
+            };
+
+            #inner_deserialize
+
+            // Skip remaining bytes for forward compatibility (unknown additional data)
+            {
+                use #crate_path::serialize::DeserializerReader;
+                let __bytes_consumed = deserializer.get_position() - __field_start;
+                if __bytes_consumed < __field_size as usize {
+                    deserializer.skip((__field_size as usize) - __bytes_consumed)
+                        .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+                }
+            }
+        }
+    });
+
+    let field_names: Vec<_> = fields.iter().map(|f| f.ident.as_ref().unwrap()).collect();
+
+    quote! {
+        #(#field_deserializations)*
+
+        let result = #name {
+            #(#field_names, )*
+        };
+    }
 }
