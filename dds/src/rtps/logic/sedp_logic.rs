@@ -23,6 +23,7 @@ use crate::{
         },
         instance_handle::InstanceHandle,
     },
+    dcps::topic::type_support::DdsType,
     infrastructure::qos_policy::{DurabilityQosPolicyKind, QosPolicyId, ReliabilityQosPolicyKind},
     rtps::{
         builtin::{
@@ -43,6 +44,7 @@ use crate::{
             parameters::ParameterList,
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
             sequence::SequenceNumber,
+            types::ChangeKind,
         },
         entities::{
             entity::Entity,
@@ -81,7 +83,6 @@ use crate::{
                 discovery_unicast_listening_task::DiscoveryUnicastListeningTask,
             },
             sending_handler::{MessageType, SendingHandler},
-            timer_handler::TimerHandler,
         },
         transport::{
             tcp::tcp_listener::TcpListener, udp::udp_listener::UdpListener, Transport,
@@ -89,6 +90,7 @@ use crate::{
         },
     },
     serialize::pl_cdr::InlineQosParameters,
+    utils::timer::timer_handler::TimerHandler,
 };
 
 enum MatchType {
@@ -173,7 +175,7 @@ fn is_partition_compatible(requested: &[String], offered: &[String]) -> bool {
 impl SedpLogic {
     pub(crate) fn new(participant: Arc<Participant>, sender: Option<Arc<TransportSender>>) -> Self {
         let builtin_endpoints = participant.builtin_endpoints();
-        let timer_handler = TimerHandler::get_instance(participant.clone());
+        let timer_handler = TimerHandler::get_instance(participant.guid().prefix());
         Self {
             participant: Arc::downgrade(&participant),
             builtin_endpoints,
@@ -185,6 +187,7 @@ impl SedpLogic {
         }
     }
 
+    #[allow(clippy::clone_on_copy)]
     pub(crate) fn start_sedp(
         &self,
         discovery_multicast_listener: Option<UdpListener>,
@@ -196,6 +199,8 @@ impl SedpLogic {
         let mut discovery_multicast_listening_task =
             DiscoveryMulticastListeningTask::new(discovery_multicast_listener, participant.clone());
 
+        let participant_guid = participant.guid().clone();
+
         // multicast listening
         let multicast_handle = thread::Builder::new()
             .name("discovery_traffic_multicast_listening".to_string())
@@ -203,12 +208,18 @@ impl SedpLogic {
                 // Register thread name for monitoring
                 {
                     use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::register_current_thread_name(
+                    ThreadMonitor::register_current_thread_name_with_guid_prefix(
                         "discovery_traffic_multicast_listening",
+                        participant_guid.prefix(),
                     );
                 }
 
                 let _ = discovery_multicast_listening_task.multicast_listening();
+                // Cleanup thread from registry before exit
+                {
+                    use crate::rtps::task::thread_monitor::ThreadMonitor;
+                    ThreadMonitor::remove_map_guard();
+                }
                 debug!("discovery multicast listening thread finished");
             })
             .expect("Failed to create discovery multicast listening thread");
@@ -225,18 +236,25 @@ impl SedpLogic {
         );
 
         // unicast listening
+        let unicast_guid = participant_guid;
         let unicast_handle = thread::Builder::new()
             .name("discovery_traffic_unicast_listening".to_string())
             .spawn(move || {
                 // Register thread name for monitoring
                 {
                     use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::register_current_thread_name(
+                    ThreadMonitor::register_current_thread_name_with_guid_prefix(
                         "discovery_traffic_unicast_listening",
+                        unicast_guid.prefix(),
                     );
                 }
 
                 let _ = discovery_unicast_listening_task.unicast_listening();
+                // Cleanup thread from registry before exit
+                {
+                    use crate::rtps::task::thread_monitor::ThreadMonitor;
+                    ThreadMonitor::remove_map_guard();
+                }
                 debug!("discovery unicast listening thread finished");
             })
             .expect("Failed to create discovery unicast listening thread");
@@ -539,6 +557,7 @@ impl SedpLogic {
         Ok(())
     }
 
+    #[allow(clippy::option_map_unit_fn)]
     pub(crate) fn handle_stateful_writer_subscription(
         &self,
         writer: &StatefulWriter,
@@ -667,6 +686,7 @@ impl SedpLogic {
         Ok(())
     }
 
+    #[allow(clippy::option_map_unit_fn)]
     pub(crate) fn handle_stateless_writer_subscription(
         &self,
         writer: &StatelessWriter,
@@ -909,6 +929,7 @@ impl SedpLogic {
         Ok(())
     }
 
+    #[allow(clippy::option_map_unit_fn)]
     pub(crate) fn handle_stateful_reader_publication(
         &self,
         reader: &StatefulReader,
@@ -1020,6 +1041,7 @@ impl SedpLogic {
         Ok(())
     }
 
+    #[allow(clippy::option_map_unit_fn)]
     pub(crate) fn handle_stateless_reader_publication(
         &self,
         reader: &StatelessReader,
@@ -1183,6 +1205,7 @@ impl SedpLogic {
                         ));
                     }
                 }
+
                 for remote_participant_data in list.iter() {
                     if let Err(e) = self.send_to_participant_metatraffic_locators(
                         &data,
@@ -1191,19 +1214,20 @@ impl SedpLogic {
                     ) {
                         warn!("Failed to send SPDP discovery message: {:?}", e);
                     }
-                    let start_time = Instant::now();
-                    let _ = self.register_send_timer(
-                        Some(start_time),
-                        logic_start_time,
-                        duration,
-                        MessageType::PeriodicParticipantDataUnicast(
-                            Some(start_time),
-                            duration,
-                            spdp_discovered_participant_data.clone(),
-                            Some(data.clone()),
-                        ),
-                    );
                 }
+
+                let start_time = Instant::now();
+                let _ = self.register_send_timer(
+                    Some(start_time),
+                    logic_start_time,
+                    duration,
+                    MessageType::PeriodicParticipantDataUnicast(
+                        Some(start_time),
+                        duration,
+                        spdp_discovered_participant_data.clone(),
+                        Some(data.clone()),
+                    ),
+                );
             }
             None => return Err(RtpsError::new(RtpsErrorCode::DataNotSet, "Data is not set")),
         };
@@ -1387,6 +1411,7 @@ impl SedpLogic {
         };
 
         let participant = self.get_upgraded_participant()?;
+        let participant_weak = self.participant.clone();
 
         // Generate unique timer ID using participant GUID, timestamp and random number
         let timer_id = format!(
@@ -1396,7 +1421,6 @@ impl SedpLogic {
             random_range(0..10000)
         );
 
-        let participant = Arc::new(participant.clone());
         let message = Arc::new(message);
         if let Ok(timer_handler) = self.timer_handler.lock() {
             timer_handler.add_timer(
@@ -1404,12 +1428,15 @@ impl SedpLogic {
                 remaining_duration,
                 false, // one-shot timer
                 {
-                    let participant = participant.clone();
                     let message = message.clone();
                     move || {
-                        let sending_handler =
-                            SendingHandler::get_instance((*participant).clone(), None, None);
-                        sending_handler.push_message_and_wake((*message).clone());
+                        if let Some(participant) = participant_weak.upgrade() {
+                            if !participant.is_terminated() {
+                                let sending_handler =
+                                    SendingHandler::get_instance(participant, None, None);
+                                sending_handler.push_message_and_wake((*message).clone());
+                            }
+                        }
                     }
                 },
             );
@@ -1624,7 +1651,7 @@ impl SedpLogic {
 
         for remote_participant_data in remote_participant_datas_guard.iter() {
             for locator in remote_participant_data.metatraffic_unicast_locator_list() {
-                self.send_to_single_locator(&buffer, locator.clone(), message_type)?;
+                self.send_to_single_locator(buffer, locator.clone(), message_type)?;
             }
         }
 
@@ -1910,6 +1937,23 @@ impl UnicastMessageProcessor for SedpLogic {
                     )
                 })?;
 
+                if let Ok(serialized_data) = writer_data.publication_builtin_topic_data.serialize()
+                {
+                    let cache_change = CacheChange::new(
+                        ChangeKind::Alive,
+                        writer_guid,
+                        InstanceHandle::NIL,
+                        data.writer_sn,
+                        serialized_data,
+                        message_receiver.get_source_timestamp(),
+                    );
+
+                    let reader = builtin_endpoint_pair.reader();
+                    if let Ok(mut cache_guard) = reader.reader_cache().lock() {
+                        let _ = cache_guard.add_change(cache_change);
+                    }
+                }
+
                 debug!("SEDP Logic: DiscoveredWriterData: {:?}", writer_data);
                 return self.handle_publication_builtin_topic_data(
                     writer_data.publication_builtin_topic_data,
@@ -1926,6 +1970,23 @@ impl UnicastMessageProcessor for SedpLogic {
                         format!("Failed to parse DiscoveredReaderData: {}", e),
                     )
                 })?;
+
+                if let Ok(serialized_data) = reader_data.subscription_builtin_topic_data.serialize()
+                {
+                    let cache_change = CacheChange::new(
+                        ChangeKind::Alive,
+                        writer_guid,
+                        InstanceHandle::NIL,
+                        data.writer_sn,
+                        serialized_data,
+                        message_receiver.get_source_timestamp(),
+                    );
+
+                    let reader = builtin_endpoint_pair.reader();
+                    if let Ok(mut cache_guard) = reader.reader_cache().lock() {
+                        let _ = cache_guard.add_change(cache_change);
+                    }
+                }
 
                 debug!("SEDP Logic: DiscoveredReaderData: {:?}", reader_data);
                 return self.handle_subscription_builtin_topic_data(
@@ -2031,16 +2092,16 @@ impl UnicastMessageProcessor for SedpLogic {
 
             writer_proxy.increase_acknack_count();
             let acknack_count = writer_proxy.acknack_count();
-            return self.send_sedp_acknack_message(
+            self.send_sedp_acknack_message(
                 remote_writer_guid,
                 heartbeat.reader_id,
                 heartbeat.writer_id,
                 missing_changes,
                 acknack_count,
                 bitmap_base,
-            );
+            )
         } else {
-            return Ok(());
+            Ok(())
         }
     }
 
@@ -2193,7 +2254,7 @@ mod tests {
     use std::{sync::Arc, thread};
 
     use crate::rtps::{
-        entities::participant::Participant,
+        entities::{entity::Entity, participant::Participant},
         logic::spdp_logic::SpdpLogic,
         task::{
             discovery_traffic::{
@@ -2246,8 +2307,9 @@ mod tests {
                 // Register thread name for monitoring
                 {
                     use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::register_current_thread_name(
+                    ThreadMonitor::register_current_thread_name_with_guid_prefix(
                         "discovery_traffic_multicast_listening",
+                        participant.guid().prefix(),
                     );
                 }
 
@@ -2291,6 +2353,7 @@ mod tests {
             socket.discovery_multicast_listener(),
             participant.clone(),
         );
+        let participant_guid = participant.clone().guid();
         //multicast listening
         thread::Builder::new()
             .name("discovery_traffic_multicast_listening".to_string())
@@ -2298,8 +2361,9 @@ mod tests {
                 // Register thread name for monitoring
                 {
                     use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::register_current_thread_name(
+                    ThreadMonitor::register_current_thread_name_with_guid_prefix(
                         "discovery_traffic_multicast_listening",
+                        participant_guid.prefix(),
                     );
                 }
 

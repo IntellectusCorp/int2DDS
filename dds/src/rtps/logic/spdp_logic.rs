@@ -19,16 +19,14 @@ use crate::rtps::{
         time::RtpsDuration,
         types::DomainId,
     },
-    entities::{participant::Participant, writer::Writer},
+    entities::{entity::Entity, participant::Participant, writer::Writer},
     logic::common::{impl_participant_accessor, ParticipantAccessor},
     logic::message_processor::participant_message_processor::ParticipantMessageProcessor,
     messages::message_creator::MessageCreator,
-    task::{
-        sending_handler::{MessageType, SendingHandler},
-        timer_handler::TimerHandler,
-    },
+    task::sending_handler::{MessageType, SendingHandler},
     transport::{Transport, TransportSender, TransportType},
 };
+use crate::utils::timer::timer_handler::TimerHandler;
 
 #[derive(Clone)]
 pub(crate) struct SpdpLogic {
@@ -50,7 +48,7 @@ impl SpdpLogic {
         tcp_sender: Option<Arc<TransportSender>>,
         initial_peers: Vec<std::net::SocketAddr>,
     ) -> Self {
-        let timer_handler = TimerHandler::get_instance(participant.clone());
+        let timer_handler = TimerHandler::get_instance(participant.guid().prefix());
         Self {
             participant: Arc::downgrade(&participant),
             sender,
@@ -107,14 +105,14 @@ impl SpdpLogic {
             Some(ref data) => {
                 // Send via multicast (UDP)
                 if let Some(ref sender) = self.sender {
-                    let _ = sender.send_multicast(domain_id, &data);
+                    let _ = sender.send_multicast(domain_id, data);
                     log::debug!("discovery multicast packet send");
                 } else {
                     log::debug!("UDP sender not available, skipping SPDP multicast");
                 }
 
                 // Also send to initial peers via TCP (if configured and in TCP/Hybrid mode)
-                self.send_spdp_to_initial_peers(&data);
+                self.send_spdp_to_initial_peers(data);
             }
             None => {
                 log::error!("spdp message is not set");
@@ -146,19 +144,23 @@ impl SpdpLogic {
                 remaining_duration,
                 false, // one-shot timer
                 {
-                    let participant = self.get_upgraded_participant()?;
+                    let participant_weak = self.participant.clone();
                     let data_arc = data_arc.clone();
                     move || {
-                        let sending_handler =
-                            SendingHandler::get_instance(participant.clone(), None, None);
-                        sending_handler.push_message_and_wake(
-                            MessageType::PeriodicParticipantDataMulticast(
-                                Some(Instant::now()),
-                                duration,
-                                domain_id,
-                                (*data_arc).clone(),
-                            ),
-                        );
+                        if let Some(participant) = participant_weak.upgrade() {
+                            if !participant.is_terminated() {
+                                let sending_handler =
+                                    SendingHandler::get_instance(participant, None, None);
+                                sending_handler.push_message_and_wake(
+                                    MessageType::PeriodicParticipantDataMulticast(
+                                        Some(Instant::now()),
+                                        duration,
+                                        domain_id,
+                                        (*data_arc).clone(),
+                                    ),
+                                );
+                            }
+                        }
                     }
                 },
             );

@@ -227,16 +227,16 @@ impl SubmessageCreator {
         let mut sn_after_base: Vec<SequenceNumber> = Vec::new();
         let mut processed = 0;
 
-        for i in 1..gap_list.len() {
-            if gap_list[i] == bitmap_base {
+        for (i, sn) in gap_list.iter().enumerate().skip(1) {
+            if *sn == bitmap_base {
                 // RTPS 2.5 - 8.3.8.4.5
                 // The set of sequence numbers identify in the range gapStart <= sequence_number <= gapList.base -1
                 bitmap_base += 1;
                 processed = i;
             } else {
                 // Bitmap base can handle up to the range of 256 sequence numbers
-                if gap_list[i] <= bitmap_base + 255 {
-                    sn_after_base.push(gap_list[i]);
+                if *sn <= bitmap_base + 255 {
+                    sn_after_base.push(*sn);
                     processed = i;
                 } else {
                     break;

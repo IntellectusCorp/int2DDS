@@ -12,7 +12,7 @@
 //! - TimeBasedFilter enforcement
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     fmt::Debug,
     sync::{Arc, Mutex, Weak},
 };
@@ -41,6 +41,8 @@ use crate::{
     },
     subscription::{data_reader::DataReader, sample_info::InstanceStateKind},
 };
+
+pub(crate) type ReaderChangeId = (Guid, SequenceNumber);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct OwnershipInfo {
@@ -75,6 +77,7 @@ pub(crate) struct DataReaderHistoryCache<Foo> {
     ownership_kind: OwnershipQosPolicyKind,
     owner_candidates: Arc<DashMap<InstanceHandle, BTreeSet<OwnershipInfo>>>, // Track valid writers per instance (includes writers that missed deadline or unregistered, not just strictly alive ones by Liveliness QoS)
     lifespan_timers: Arc<Mutex<HashMap<Guid, String>>>, // writer_guid -> timer_id
+    #[allow(clippy::type_complexity)]
     status_callback:
         Arc<Mutex<Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>>>,
 }
@@ -586,7 +589,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
             self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
         for (instance_handle, changes) in instance_map.iter() {
-            if changes.is_empty() && self.check_if_not_alive_no_writers(*instance_handle)? {
+            if changes.is_empty() && self.check_if_no_writers(*instance_handle)? {
                 key_to_remove = Some(*instance_handle);
                 break;
             }
@@ -600,24 +603,9 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
         }
     }
 
-    // Checks if the instance is in NOT_ALIVE_NO_WRITERS state.
-    fn check_if_not_alive_no_writers(&self, instance_handle: InstanceHandle) -> DdsResult<bool> {
-        let data_reader = self
-            .data_reader
-            .upgrade()
-            .ok_or(DdsError::Error("DataReader has been dropped".to_string()))?;
-
-        let instance_infos = (*data_reader).get_instance_infos()?;
-
-        if let Some(info) = instance_infos.get(&instance_handle) {
-            if info.instance_state == InstanceStateKind::NOT_ALIVE_NO_WRITERS_INSTANCE_STATE {
-                Ok(true)
-            } else {
-                Ok(false)
-            }
-        } else {
-            Err(DdsError::BadParameter)
-        }
+    // Checks if there is no writer writing to this instance.
+    fn check_if_no_writers(&self, instance_handle: InstanceHandle) -> DdsResult<bool> {
+        Ok(self.get_owner_of_instance(instance_handle).is_none())
     }
 
     /// Adds CacheChange to the instance map.
@@ -647,6 +635,23 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
         Ok(())
     }
 
+    /// Removes all samples of the specified instance.
+    pub(crate) fn remove_all_changes_of_instance(
+        &mut self,
+        instance_handle: InstanceHandle,
+    ) -> DdsResult<()> {
+        let mut instance_map =
+            self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        if let Some(changes) = instance_map.get_mut(&instance_handle) {
+            changes.clear();
+        }
+
+        let changes = &mut self.changes;
+        changes.retain(|change| change.instance_handle() != instance_handle);
+
+        Ok(())
+    }
+
     /// Retrieves CacheChange using the SequenceNumber and the Guid of the Writer that sent it.
     pub(crate) fn get_change(
         &self,
@@ -659,6 +664,26 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
         change.cloned()
     }
 
+    /// Retrieves all change identifiers (writer GUID and sequence number) of the specified instance.
+    pub(crate) fn get_change_id_set_of_instance(
+        &self,
+        instance_handle: InstanceHandle,
+    ) -> DdsResult<HashSet<ReaderChangeId>> {
+        let instance_map = self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        let changes = if let Some(weak_changes) = instance_map.get(&instance_handle) {
+            weak_changes
+                .iter()
+                .filter_map(|weak| weak.upgrade())
+                .map(|change| (change.writer_guid(), change.sequence_number()))
+                .collect::<HashSet<ReaderChangeId>>()
+        } else {
+            HashSet::new()
+        };
+
+        Ok(changes)
+    }
+
+    #[allow(clippy::type_complexity)]
     pub(crate) fn set_update_status(
         &self,
         f: Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>,

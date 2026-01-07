@@ -38,7 +38,7 @@ const DEFAULT_HEARTBEAT_PERIOD_SECONDS: f64 = 2.0;
 pub struct BuiltinEndpoints {
     //SPDP
     pub spdp_builtin_participant_writer: Arc<Mutex<SPDPbuiltinParticipantWriter>>,
-    pub spdp_builtin_participant_reader: Arc<Mutex<SPDPBuiltinParticipantReader>>,
+    pub spdp_builtin_participant_reader: Arc<SPDPBuiltinParticipantReader>,
 
     //SEDP
     pub sedp_builtin_publications_writer: Arc<StatefulWriter>,
@@ -206,7 +206,7 @@ impl BuiltinEndpoints {
 
         Self {
             spdp_builtin_participant_writer: Arc::new(Mutex::new(spdp_writer)),
-            spdp_builtin_participant_reader: Arc::new(Mutex::new(spdp_reader)),
+            spdp_builtin_participant_reader: Arc::new(spdp_reader),
             sedp_builtin_publications_writer: Arc::new(sedp_publications_writer),
             sedp_builtin_publications_reader: Arc::new(sedp_publications_reader),
             sedp_builtin_subscriptions_writer: Arc::new(sedp_subscriptions_writer),

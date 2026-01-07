@@ -52,11 +52,41 @@ pub struct MemberHeader {
     pub must_understand: bool,
 }
 
+/// PL_CDR2 sentinel member_id indicating end of mutable struct members
+pub const MEMBER_ID_SENTINEL: u32 = 0x3F02;
+
+/// Check if a member_id is the list terminator sentinel
+#[inline]
+pub fn is_sentinel_member_id(member_id: u32) -> bool {
+    member_id == MEMBER_ID_SENTINEL
+}
+
+/// EMHEADER Length Code values (LC field in bits 30-28)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LengthCode {
+    /// LC 0-3: Length is directly in lower 16 bits (0-65535 bytes)
+    Direct = 0,
+    /// LC 4: Next 4 bytes contain the actual length
+    NextInt = 4,
+    /// LC 5: Length is (next 4 bytes) * 4
+    NextIntMul4 = 5,
+    /// LC 6: Length is (next 4 bytes) * 8
+    NextIntMul8 = 6,
+    /// LC 7: Nested length (complex case)
+    Nested = 7,
+}
+
 impl MemberHeader {
     pub fn new(member_id: u32, length: usize) -> Self {
         Self { member_id, member_length: length as u32, must_understand: false }
     }
 
+    pub fn with_must_understand(member_id: u32, length: usize, must_understand: bool) -> Self {
+        Self { member_id, member_length: length as u32, must_understand }
+    }
+
+    /// Write EMHEADER to buffer
+    /// Supports extended length encoding (LC) for lengths > 65535 bytes
     pub fn write(
         &self,
         buffer: &mut Vec<u8>,
@@ -64,11 +94,107 @@ impl MemberHeader {
     ) -> Result<(), SerializationError> {
         use crate::serialize::to_bytes_u32;
 
-        // Write EMHEADER (member_id + length encoded)
-        let header = (self.member_id << 16) | (self.member_length & 0xFFFF);
-        let bytes = to_bytes_u32(header, endianness);
-        buffer.extend_from_slice(&bytes);
+        let must_understand_bit = if self.must_understand { 0x8000_0000u32 } else { 0 };
+
+        if self.member_length <= 0xFFFF {
+            // Short encoding: LC=0, length directly in lower 16 bits
+            // Format: [M][LC=0][member_id (12 bits)][length (16 bits)]
+            // member_id must be masked to 12 bits to prevent overflow into LC bits
+            let header = must_understand_bit
+                | ((self.member_id & 0x0FFF) << 16)
+                | (self.member_length & 0xFFFF);
+            let bytes = to_bytes_u32(header, endianness);
+            buffer.extend_from_slice(&bytes);
+        } else {
+            // Extended encoding with LC=4: length follows in next 4 bytes
+            // Format: [M][LC=4][member_id (12 bits)][0000]
+            // member_id must be masked to 12 bits to prevent overflow into LC bits
+            let lc = LengthCode::NextInt as u32;
+            let header = must_understand_bit | (lc << 28) | ((self.member_id & 0x0FFF) << 16);
+            let bytes = to_bytes_u32(header, endianness);
+            buffer.extend_from_slice(&bytes);
+            // Write actual length as next 4 bytes
+            let len_bytes = to_bytes_u32(self.member_length, endianness);
+            buffer.extend_from_slice(&len_bytes);
+        }
         Ok(())
+    }
+
+    /// Read EMHEADER from buffer
+    /// Returns (MemberHeader, bytes_consumed) on success
+    pub fn read(
+        data: &[u8],
+        position: usize,
+        endianness: speedy::Endianness,
+    ) -> Result<(Self, usize), SerializationError> {
+        use crate::serialize::from_bytes_u32;
+
+        if position + 4 > data.len() {
+            return Err(SerializationError::InsufficientData);
+        }
+
+        let header_bytes: [u8; 4] = data[position..position + 4]
+            .try_into()
+            .map_err(|_| SerializationError::InsufficientData)?;
+        let header = from_bytes_u32(header_bytes, endianness);
+
+        // Parse EMHEADER fields
+        let must_understand = (header & 0x8000_0000) != 0;
+        let lc = ((header >> 28) & 0x07) as u8; // LC is bits 30-28
+        let member_id = (header >> 16) & 0x0FFF; // member_id is bits 27-16 (12 bits)
+        let length_or_flags = header & 0xFFFF; // lower 16 bits
+
+        #[allow(clippy::manual_range_patterns)]
+        let (member_length, bytes_consumed) = match lc {
+            0 | 1 | 2 | 3 => {
+                // LC 0-3: Direct length encoding
+                // For LC 0-3, length is directly in lower 16 bits
+                (length_or_flags, 4)
+            }
+            4 => {
+                // LC 4: Next 4 bytes contain the actual length
+                if position + 8 > data.len() {
+                    return Err(SerializationError::InsufficientData);
+                }
+                let ext_bytes: [u8; 4] = data[position + 4..position + 8]
+                    .try_into()
+                    .map_err(|_| SerializationError::InsufficientData)?;
+                let ext_len = from_bytes_u32(ext_bytes, endianness);
+                (ext_len, 8)
+            }
+            5 => {
+                // LC 5: Length is (next 4 bytes) * 4
+                if position + 8 > data.len() {
+                    return Err(SerializationError::InsufficientData);
+                }
+                let ext_bytes: [u8; 4] = data[position + 4..position + 8]
+                    .try_into()
+                    .map_err(|_| SerializationError::InsufficientData)?;
+                let ext_len = from_bytes_u32(ext_bytes, endianness);
+                (ext_len * 4, 8)
+            }
+            6 => {
+                // LC 6: Length is (next 4 bytes) * 8
+                if position + 8 > data.len() {
+                    return Err(SerializationError::InsufficientData);
+                }
+                let ext_bytes: [u8; 4] = data[position + 4..position + 8]
+                    .try_into()
+                    .map_err(|_| SerializationError::InsufficientData)?;
+                let ext_len = from_bytes_u32(ext_bytes, endianness);
+                (ext_len * 8, 8)
+            }
+            7 => {
+                // LC 7: Nested length - use lower 16 bits as length
+                (length_or_flags, 4)
+            }
+            _ => {
+                // Should not happen with 3-bit LC
+                (length_or_flags, 4)
+            }
+        };
+
+        Ok((MemberHeader { member_id, member_length, must_understand }, bytes_consumed))
     }
 }
 
