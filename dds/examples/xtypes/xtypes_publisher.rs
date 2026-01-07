@@ -60,7 +60,12 @@ fn main() {
 
     let factory = DomainParticipantFactory::get_instance();
     let participant = factory
-        .create_participant(args.domain, DomainParticipantQos::default(), None, StatusMask::default())
+        .create_participant(
+            args.domain,
+            DomainParticipantQos::default(),
+            None,
+            StatusMask::default(),
+        )
         .expect("Failed to create participant");
 
     let topic = participant

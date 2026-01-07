@@ -186,10 +186,18 @@ pub enum TypeIdentifier {
     String16,
 
     // Bounded strings (small: bound fits in u8, large: bound needs u32)
-    String8Small { bound: u8 },
-    String8Large { bound: u32 },
-    String16Small { bound: u8 },
-    String16Large { bound: u32 },
+    String8Small {
+        bound: u8,
+    },
+    String8Large {
+        bound: u32,
+    },
+    String16Small {
+        bound: u8,
+    },
+    String16Large {
+        bound: u32,
+    },
 
     // Sequences
     PlainSequenceSmall {
@@ -335,10 +343,7 @@ impl TypeIdentifier {
 
     /// Check if this is a complex type (struct, union, enum, etc.).
     pub fn is_complex(&self) -> bool {
-        matches!(
-            self,
-            TypeIdentifier::CompleteTypeId(_) | TypeIdentifier::MinimalTypeId(_)
-        )
+        matches!(self, TypeIdentifier::CompleteTypeId(_) | TypeIdentifier::MinimalTypeId(_))
     }
 
     /// Get the equivalence hash if this is a complex type.
@@ -393,41 +398,25 @@ impl TypeIdentifier {
             }
 
             // Sequences
-            TypeIdentifier::PlainSequenceSmall {
-                header,
-                bound,
-                element_identifier,
-            } => {
+            TypeIdentifier::PlainSequenceSmall { header, bound, element_identifier } => {
                 header.serialize_into(buffer);
                 buffer.push(*bound);
                 element_identifier.serialize_into(buffer);
             }
-            TypeIdentifier::PlainSequenceLarge {
-                header,
-                bound,
-                element_identifier,
-            } => {
+            TypeIdentifier::PlainSequenceLarge { header, bound, element_identifier } => {
                 header.serialize_into(buffer);
                 buffer.extend_from_slice(&bound.to_le_bytes());
                 element_identifier.serialize_into(buffer);
             }
 
             // Arrays
-            TypeIdentifier::PlainArraySmall {
-                header,
-                array_bound_seq,
-                element_identifier,
-            } => {
+            TypeIdentifier::PlainArraySmall { header, array_bound_seq, element_identifier } => {
                 header.serialize_into(buffer);
                 buffer.extend_from_slice(&(array_bound_seq.len() as u32).to_le_bytes());
                 buffer.extend_from_slice(array_bound_seq);
                 element_identifier.serialize_into(buffer);
             }
-            TypeIdentifier::PlainArrayLarge {
-                header,
-                array_bound_seq,
-                element_identifier,
-            } => {
+            TypeIdentifier::PlainArrayLarge { header, array_bound_seq, element_identifier } => {
                 header.serialize_into(buffer);
                 buffer.extend_from_slice(&(array_bound_seq.len() as u32).to_le_bytes());
                 for bound in array_bound_seq {
@@ -540,10 +529,7 @@ impl TypeIdentifier {
                 }
                 let mut hash_bytes = [0u8; 14];
                 hash_bytes.copy_from_slice(&rest[..14]);
-                Ok((
-                    TypeIdentifier::MinimalTypeId(EquivalenceHash::new(hash_bytes)),
-                    15,
-                ))
+                Ok((TypeIdentifier::MinimalTypeId(EquivalenceHash::new(hash_bytes)), 15))
             }
             type_kind::EK_COMPLETE => {
                 if rest.len() < 14 {
@@ -551,10 +537,7 @@ impl TypeIdentifier {
                 }
                 let mut hash_bytes = [0u8; 14];
                 hash_bytes.copy_from_slice(&rest[..14]);
-                Ok((
-                    TypeIdentifier::CompleteTypeId(EquivalenceHash::new(hash_bytes)),
-                    15,
-                ))
+                Ok((TypeIdentifier::CompleteTypeId(EquivalenceHash::new(hash_bytes)), 15))
             }
 
             // Sequences - basic support
@@ -611,8 +594,7 @@ impl TypeIdentifier {
                     return Err("Insufficient data for PlainArraySmall bounds".to_string());
                 }
                 let array_bound_seq: Vec<u8> = rest[6..6 + bound_count].to_vec();
-                let (element_id, elem_len) =
-                    TypeIdentifier::deserialize(&rest[6 + bound_count..])?;
+                let (element_id, elem_len) = TypeIdentifier::deserialize(&rest[6 + bound_count..])?;
                 Ok((
                     TypeIdentifier::PlainArraySmall {
                         header,
@@ -658,17 +640,12 @@ impl TypeIdentifier {
             }
 
             // Maps - not fully supported yet
-            type_kind::TI_PLAIN_MAP_SMALL | type_kind::TI_PLAIN_MAP_LARGE => {
-                Err(format!(
-                    "Map TypeIdentifier deserialization not yet supported: 0x{:02X}",
-                    discriminator
-                ))
-            }
-
-            _ => Err(format!(
-                "Unsupported TypeIdentifier discriminator: 0x{:02X}",
+            type_kind::TI_PLAIN_MAP_SMALL | type_kind::TI_PLAIN_MAP_LARGE => Err(format!(
+                "Map TypeIdentifier deserialization not yet supported: 0x{:02X}",
                 discriminator
             )),
+
+            _ => Err(format!("Unsupported TypeIdentifier discriminator: 0x{:02X}", discriminator)),
         }
     }
 }
@@ -778,7 +755,11 @@ pub enum ExtensibilityKind {
 pub struct TypeFlag(pub u16);
 
 impl TypeFlag {
-    pub const fn new(extensibility: ExtensibilityKind, is_nested: bool, is_autoid_hash: bool) -> Self {
+    pub const fn new(
+        extensibility: ExtensibilityKind,
+        is_nested: bool,
+        is_autoid_hash: bool,
+    ) -> Self {
         let mut flags = extensibility as u16;
         if is_nested {
             flags |= type_flag::IS_NESTED;
@@ -914,11 +895,7 @@ pub struct MinimalStructMember {
 impl MinimalStructMember {
     pub fn new(member_id: u32, flags: MemberFlag, type_id: TypeIdentifier, name: &str) -> Self {
         Self {
-            common: CommonStructMember {
-                member_id,
-                member_flags: flags,
-                member_type_id: type_id,
-            },
+            common: CommonStructMember { member_id, member_flags: flags, member_type_id: type_id },
             name_hash: compute_name_hash(name),
         }
     }
@@ -939,12 +916,8 @@ impl MinimalStructMember {
         if data.len() < pos + 4 {
             return Err("Insufficient data for MinimalStructMember name_hash".to_string());
         }
-        let name_hash = u32::from_le_bytes([
-            data[pos],
-            data[pos + 1],
-            data[pos + 2],
-            data[pos + 3],
-        ]);
+        let name_hash =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
         pos += 4;
 
         Ok((MinimalStructMember { common, name_hash }, pos))
@@ -959,23 +932,10 @@ pub struct CompleteStructMember {
 }
 
 impl CompleteStructMember {
-    pub fn new(
-        member_id: u32,
-        flags: MemberFlag,
-        type_id: TypeIdentifier,
-        name: String,
-    ) -> Self {
+    pub fn new(member_id: u32, flags: MemberFlag, type_id: TypeIdentifier, name: String) -> Self {
         Self {
-            common: CommonStructMember {
-                member_id,
-                member_flags: flags,
-                member_type_id: type_id,
-            },
-            detail: CompleteMemberDetail {
-                name,
-                ann_builtin: None,
-                ann_custom: Vec::new(),
-            },
+            common: CommonStructMember { member_id, member_flags: flags, member_type_id: type_id },
+            detail: CompleteMemberDetail { name, ann_builtin: None, ann_custom: Vec::new() },
         }
     }
 
@@ -1032,14 +992,7 @@ impl CommonStructMember {
         let (member_type_id, consumed) = TypeIdentifier::deserialize(&data[pos..])?;
         pos += consumed;
 
-        Ok((
-            CommonStructMember {
-                member_id,
-                member_flags,
-                member_type_id,
-            },
-            pos,
-        ))
+        Ok((CommonStructMember { member_id, member_flags, member_type_id }, pos))
     }
 }
 
@@ -1096,17 +1049,11 @@ impl CompleteMemberDetail {
         if data.len() < pos + 4 {
             return Err("Insufficient data for custom annotations count".to_string());
         }
-        let _custom_count = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+        let _custom_count =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
         pos += 4;
 
-        Ok((
-            CompleteMemberDetail {
-                name,
-                ann_builtin: None,
-                ann_custom: Vec::new(),
-            },
-            pos,
-        ))
+        Ok((CompleteMemberDetail { name, ann_builtin: None, ann_custom: Vec::new() }, pos))
     }
 }
 
@@ -1182,12 +1129,8 @@ impl MinimalStructType {
         if data.len() < pos + 4 {
             return Err("Insufficient data for member_seq length".to_string());
         }
-        let member_count = u32::from_le_bytes([
-            data[pos],
-            data[pos + 1],
-            data[pos + 2],
-            data[pos + 3],
-        ]) as usize;
+        let member_count =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
 
         // members
@@ -1198,14 +1141,7 @@ impl MinimalStructType {
             member_seq.push(member);
         }
 
-        Ok((
-            MinimalStructType {
-                struct_flags,
-                header,
-                member_seq,
-            },
-            pos,
-        ))
+        Ok((MinimalStructType { struct_flags, header, member_seq }, pos))
     }
 }
 
@@ -1260,11 +1196,7 @@ impl CompleteStructType {
             struct_flags: flags,
             header: CompleteStructHeader {
                 base_type,
-                detail: CompleteTypeDetail {
-                    type_name,
-                    ann_builtin: None,
-                    ann_custom: Vec::new(),
-                },
+                detail: CompleteTypeDetail { type_name, ann_builtin: None, ann_custom: Vec::new() },
             },
             member_seq: Vec::new(),
         }
@@ -1306,12 +1238,8 @@ impl CompleteStructType {
         if data.len() < pos + 4 {
             return Err("Insufficient data for member_seq length".to_string());
         }
-        let member_count = u32::from_le_bytes([
-            data[pos],
-            data[pos + 1],
-            data[pos + 2],
-            data[pos + 3],
-        ]) as usize;
+        let member_count =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
 
         // members
@@ -1322,14 +1250,7 @@ impl CompleteStructType {
             member_seq.push(member);
         }
 
-        Ok((
-            CompleteStructType {
-                struct_flags,
-                header,
-                member_seq,
-            },
-            pos,
-        ))
+        Ok((CompleteStructType { struct_flags, header, member_seq }, pos))
     }
 }
 
@@ -1428,17 +1349,11 @@ impl CompleteTypeDetail {
         if data.len() < pos + 4 {
             return Err("Insufficient data for custom annotations count".to_string());
         }
-        let _custom_count = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+        let _custom_count =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
         pos += 4;
 
-        Ok((
-            CompleteTypeDetail {
-                type_name,
-                ann_builtin: None,
-                ann_custom: Vec::new(),
-            },
-            pos,
-        ))
+        Ok((CompleteTypeDetail { type_name, ann_builtin: None, ann_custom: Vec::new() }, pos))
     }
 }
 
@@ -1479,12 +1394,8 @@ impl MinimalEnumeratedLiteral {
         if data.len() < pos + 4 {
             return Err("Insufficient data for MinimalEnumeratedLiteral name_hash".to_string());
         }
-        let name_hash = u32::from_le_bytes([
-            data[pos],
-            data[pos + 1],
-            data[pos + 2],
-            data[pos + 3],
-        ]);
+        let name_hash =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
         pos += 4;
 
         Ok((MinimalEnumeratedLiteral { common, name_hash }, pos))
@@ -1502,11 +1413,7 @@ impl CompleteEnumeratedLiteral {
     pub fn new(value: i32, flags: EnumeratedLiteralFlag, name: String) -> Self {
         Self {
             common: CommonEnumeratedLiteral { value, flags },
-            detail: CompleteMemberDetail {
-                name,
-                ann_builtin: None,
-                ann_custom: Vec::new(),
-            },
+            detail: CompleteMemberDetail { name, ann_builtin: None, ann_custom: Vec::new() },
         }
     }
 
@@ -1592,9 +1499,7 @@ impl MinimalEnumeratedType {
     pub fn new(flags: TypeFlag, bit_bound: u16) -> Self {
         Self {
             enum_flags: flags,
-            header: MinimalEnumeratedHeader {
-                common: CommonEnumeratedHeader { bit_bound },
-            },
+            header: MinimalEnumeratedHeader { common: CommonEnumeratedHeader { bit_bound } },
             literal_seq: Vec::new(),
         }
     }
@@ -1639,12 +1544,8 @@ impl MinimalEnumeratedType {
         if data.len() < pos + 4 {
             return Err("Insufficient data for literal_seq length".to_string());
         }
-        let literal_count = u32::from_le_bytes([
-            data[pos],
-            data[pos + 1],
-            data[pos + 2],
-            data[pos + 3],
-        ]) as usize;
+        let literal_count =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
 
         // literals
@@ -1655,14 +1556,7 @@ impl MinimalEnumeratedType {
             literal_seq.push(literal);
         }
 
-        Ok((
-            MinimalEnumeratedType {
-                enum_flags,
-                header,
-                literal_seq,
-            },
-            pos,
-        ))
+        Ok((MinimalEnumeratedType { enum_flags, header, literal_seq }, pos))
     }
 }
 
@@ -1717,11 +1611,7 @@ impl CompleteEnumeratedType {
             enum_flags: flags,
             header: CompleteEnumeratedHeader {
                 common: CommonEnumeratedHeader { bit_bound },
-                detail: CompleteTypeDetail {
-                    type_name,
-                    ann_builtin: None,
-                    ann_custom: Vec::new(),
-                },
+                detail: CompleteTypeDetail { type_name, ann_builtin: None, ann_custom: Vec::new() },
             },
             literal_seq: Vec::new(),
         }
@@ -1762,12 +1652,8 @@ impl CompleteEnumeratedType {
         if data.len() < pos + 4 {
             return Err("Insufficient data for literal_seq length".to_string());
         }
-        let literal_count = u32::from_le_bytes([
-            data[pos],
-            data[pos + 1],
-            data[pos + 2],
-            data[pos + 3],
-        ]) as usize;
+        let literal_count =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
 
         // literals
@@ -1778,14 +1664,7 @@ impl CompleteEnumeratedType {
             literal_seq.push(literal);
         }
 
-        Ok((
-            CompleteEnumeratedType {
-                enum_flags,
-                header,
-                literal_seq,
-            },
-            pos,
-        ))
+        Ok((CompleteEnumeratedType { enum_flags, header, literal_seq }, pos))
     }
 }
 
@@ -1880,18 +1759,11 @@ impl MinimalTypeObject {
 
         let discriminator = data[0];
         match discriminator {
-            type_object_kind::TK_STRUCT => {
-                MinimalStructType::deserialize(&data[1..])
-                    .map(|(s, consumed)| (MinimalTypeObject::Struct(s), 1 + consumed))
-            }
-            type_object_kind::TK_ENUM => {
-                MinimalEnumeratedType::deserialize(&data[1..])
-                    .map(|(e, consumed)| (MinimalTypeObject::Enum(e), 1 + consumed))
-            }
-            _ => Err(format!(
-                "Unsupported MinimalTypeObject kind: 0x{:02X}",
-                discriminator
-            )),
+            type_object_kind::TK_STRUCT => MinimalStructType::deserialize(&data[1..])
+                .map(|(s, consumed)| (MinimalTypeObject::Struct(s), 1 + consumed)),
+            type_object_kind::TK_ENUM => MinimalEnumeratedType::deserialize(&data[1..])
+                .map(|(e, consumed)| (MinimalTypeObject::Enum(e), 1 + consumed)),
+            _ => Err(format!("Unsupported MinimalTypeObject kind: 0x{:02X}", discriminator)),
         }
     }
 }
@@ -1938,18 +1810,11 @@ impl CompleteTypeObject {
 
         let discriminator = data[0];
         match discriminator {
-            type_object_kind::TK_STRUCT => {
-                CompleteStructType::deserialize(&data[1..])
-                    .map(|(s, consumed)| (CompleteTypeObject::Struct(s), 1 + consumed))
-            }
-            type_object_kind::TK_ENUM => {
-                CompleteEnumeratedType::deserialize(&data[1..])
-                    .map(|(e, consumed)| (CompleteTypeObject::Enum(e), 1 + consumed))
-            }
-            _ => Err(format!(
-                "Unsupported CompleteTypeObject kind: 0x{:02X}",
-                discriminator
-            )),
+            type_object_kind::TK_STRUCT => CompleteStructType::deserialize(&data[1..])
+                .map(|(s, consumed)| (CompleteTypeObject::Struct(s), 1 + consumed)),
+            type_object_kind::TK_ENUM => CompleteEnumeratedType::deserialize(&data[1..])
+                .map(|(e, consumed)| (CompleteTypeObject::Enum(e), 1 + consumed)),
+            _ => Err(format!("Unsupported CompleteTypeObject kind: 0x{:02X}", discriminator)),
         }
     }
 }
@@ -2000,14 +1865,10 @@ impl TypeObject {
 
         let kind = data[0];
         match kind {
-            type_kind::EK_MINIMAL => {
-                MinimalTypeObject::deserialize(&data[1..])
-                    .map(|(obj, consumed)| (TypeObject::Minimal(obj), 1 + consumed))
-            }
-            type_kind::EK_COMPLETE => {
-                CompleteTypeObject::deserialize(&data[1..])
-                    .map(|(obj, consumed)| (TypeObject::Complete(obj), 1 + consumed))
-            }
+            type_kind::EK_MINIMAL => MinimalTypeObject::deserialize(&data[1..])
+                .map(|(obj, consumed)| (TypeObject::Minimal(obj), 1 + consumed)),
+            type_kind::EK_COMPLETE => CompleteTypeObject::deserialize(&data[1..])
+                .map(|(obj, consumed)| (TypeObject::Complete(obj), 1 + consumed)),
             _ => Err(format!("Unknown TypeObject kind: 0x{:02X}", kind)),
         }
     }
@@ -2176,8 +2037,8 @@ impl_array_has_type_object! {
 
 use crate::serialize::cdr::{
     CdrDeserialize, CdrResult, CdrSerialize, CdrSerializer, CdrSerializerCommon,
-    PrimitiveSerialize, XcdrDeserialize, XcdrResult, XcdrSerialize, Xcdr2Deserializer,
-    Xcdr2Serializer,
+    PrimitiveSerialize, Xcdr2Deserializer, Xcdr2Serializer, XcdrDeserialize, XcdrResult,
+    XcdrSerialize,
 };
 
 impl CdrSerialize for TypeIdentifier {
@@ -2192,7 +2053,9 @@ impl CdrSerialize for TypeIdentifier {
 }
 
 impl CdrDeserialize for TypeIdentifier {
-    fn deserialize_cdr(deserializer: &mut crate::serialize::cdr::CdrDeserializer) -> CdrResult<Self> {
+    fn deserialize_cdr(
+        deserializer: &mut crate::serialize::cdr::CdrDeserializer,
+    ) -> CdrResult<Self> {
         let len = deserializer.deserialize_u32()? as usize;
         let bytes = deserializer.deserialize_byte_array(len)?;
         TypeIdentifier::deserialize(&bytes)
@@ -2234,7 +2097,9 @@ impl CdrSerialize for TypeObject {
 }
 
 impl CdrDeserialize for TypeObject {
-    fn deserialize_cdr(deserializer: &mut crate::serialize::cdr::CdrDeserializer) -> CdrResult<Self> {
+    fn deserialize_cdr(
+        deserializer: &mut crate::serialize::cdr::CdrDeserializer,
+    ) -> CdrResult<Self> {
         let len = deserializer.deserialize_u32()? as usize;
         let bytes = deserializer.deserialize_byte_array(len)?;
         TypeObject::deserialize(&bytes)
@@ -2361,10 +2226,8 @@ mod tests {
 
     #[test]
     fn test_minimal_struct_type_hash() {
-        let mut struct_type = MinimalStructType::new(
-            TypeFlag::new(ExtensibilityKind::Final, false, false),
-            None,
-        );
+        let mut struct_type =
+            MinimalStructType::new(TypeFlag::new(ExtensibilityKind::Final, false, false), None);
 
         struct_type.add_member(MinimalStructMember::new(
             0,
@@ -2384,10 +2247,8 @@ mod tests {
         assert_ne!(hash, EquivalenceHash::zero());
 
         // Same structure should produce same hash
-        let mut struct_type2 = MinimalStructType::new(
-            TypeFlag::new(ExtensibilityKind::Final, false, false),
-            None,
-        );
+        let mut struct_type2 =
+            MinimalStructType::new(TypeFlag::new(ExtensibilityKind::Final, false, false), None);
         struct_type2.add_member(MinimalStructMember::new(
             0,
             MemberFlag::new(TryConstructKind::Discard, false, false, false, true, false),
@@ -2459,10 +2320,7 @@ mod tests {
 
     #[test]
     fn test_minimal_enumerated_type() {
-        let mut enum_type = MinimalEnumeratedType::new(
-            TypeFlag::default(),
-            32,
-        );
+        let mut enum_type = MinimalEnumeratedType::new(TypeFlag::default(), 32);
 
         enum_type.add_literal(MinimalEnumeratedLiteral::new(
             0,
@@ -2520,7 +2378,8 @@ mod tests {
     #[test]
     fn test_array_type_identifier() {
         let arr_id = <[i32; 10]>::type_identifier();
-        if let TypeIdentifier::PlainArrayLarge { array_bound_seq, element_identifier, .. } = arr_id {
+        if let TypeIdentifier::PlainArrayLarge { array_bound_seq, element_identifier, .. } = arr_id
+        {
             assert_eq!(*element_identifier, TypeIdentifier::Int32);
             assert_eq!(array_bound_seq, vec![10]);
         } else {

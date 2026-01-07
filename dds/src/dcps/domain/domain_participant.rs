@@ -2479,7 +2479,8 @@ impl DomainParticipant {
             .self_ref
             .as_ref()
             .ok_or(DdsError::Error("DomainParticipant not properly initialized".to_string()))?;
-        let topic = Topic::new(false, topic_name, &type_name, qos, listener, mask, handle, self_ref);
+        let topic =
+            Topic::new(false, topic_name, &type_name, qos, listener, mask, handle, self_ref);
         let qos = self.get_qos()?;
         if let Ok(()) = self.is_enabled() {
             if qos.entity_factory.autoenable_created_entities {

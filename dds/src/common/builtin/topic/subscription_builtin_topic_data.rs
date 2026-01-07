@@ -317,6 +317,13 @@ impl SubscriptionBuiltinTopicData {
         subscription_data.unicast_locator_list = parsed.unicast_locator_list;
         subscription_data.multicast_locator_list = parsed.multicast_locator_list;
 
+        // DDS-XTypes fields
+        subscription_data.type_identifier = parsed.type_identifier;
+        subscription_data.type_object = parsed.type_object;
+        if let Some(tce) = parsed.type_consistency_enforcement {
+            subscription_data.type_consistency_enforcement = tce;
+        }
+
         Ok(subscription_data)
     }
 

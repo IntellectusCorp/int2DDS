@@ -330,6 +330,10 @@ impl PublicationBuiltinTopicData {
         publication_data.unicast_locator_list = parsed.unicast_locator_list;
         publication_data.multicast_locator_list = parsed.multicast_locator_list;
 
+        // DDS-XTypes fields
+        publication_data.type_identifier = parsed.type_identifier;
+        publication_data.type_object = parsed.type_object;
+
         Ok(publication_data)
     }
 

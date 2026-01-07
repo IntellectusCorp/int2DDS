@@ -15,7 +15,6 @@ use crate::{
         PresentationQosPolicy, ReliabilityQosPolicy, ResourceLimitsQosPolicy,
         TypeConsistencyEnforcementQosPolicy,
     },
-    xtypes::{TypeIdentifier, TypeObject},
     rtps::{
         builtin::data::content_filtered_topic::{ContentFilterInfo, ContentFilterProperty},
         common::{
@@ -25,6 +24,7 @@ use crate::{
             types::{Count, GroupInfo, ProtocolVersion, VendorId},
         },
     },
+    xtypes::{TypeIdentifier, TypeObject},
 };
 
 // pub type ParameterId = i16;

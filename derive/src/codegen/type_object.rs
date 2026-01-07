@@ -5,7 +5,9 @@
 use quote::quote;
 
 use crate::codegen::type_config::DdsTypeConfig;
-use crate::codegen::utils::{get_serialization_method, parse_field_attributes, SerializationMethod};
+use crate::codegen::utils::{
+    get_serialization_method, parse_field_attributes, SerializationMethod,
+};
 
 /// Generate TypeIdentifier expression for a Rust type.
 fn type_to_identifier(
@@ -196,12 +198,14 @@ pub fn generate_has_type_object_impl(
     quote! {
         impl #crate_path::xtypes::HasTypeObject for #name {
             fn type_identifier() -> #crate_path::xtypes::TypeIdentifier {
-                // For complex types, compute hash from MinimalTypeObject
+                // For complex types, compute hash from CompleteTypeObject
+                // This ensures consistency with DynamicTypeSupport which also uses CompleteTypeObject
                 static TYPE_ID: std::sync::OnceLock<#crate_path::xtypes::TypeIdentifier> = std::sync::OnceLock::new();
                 TYPE_ID.get_or_init(|| {
-                    let minimal = Self::minimal_type_object();
-                    let hash = minimal.compute_hash();
-                    #crate_path::xtypes::TypeIdentifier::MinimalTypeId(hash)
+                    let complete = Self::complete_type_object();
+                    let type_obj = #crate_path::xtypes::TypeObject::Complete(complete);
+                    let hash = type_obj.compute_hash();
+                    #crate_path::xtypes::TypeIdentifier::CompleteTypeId(hash)
                 }).clone()
             }
 
@@ -281,11 +285,14 @@ pub fn generate_has_type_object_enum_impl(
     quote! {
         impl #crate_path::xtypes::HasTypeObject for #name {
             fn type_identifier() -> #crate_path::xtypes::TypeIdentifier {
+                // For complex types, compute hash from CompleteTypeObject
+                // This ensures consistency with DynamicTypeSupport which also uses CompleteTypeObject
                 static TYPE_ID: std::sync::OnceLock<#crate_path::xtypes::TypeIdentifier> = std::sync::OnceLock::new();
                 TYPE_ID.get_or_init(|| {
-                    let minimal = Self::minimal_type_object();
-                    let hash = minimal.compute_hash();
-                    #crate_path::xtypes::TypeIdentifier::MinimalTypeId(hash)
+                    let complete = Self::complete_type_object();
+                    let type_obj = #crate_path::xtypes::TypeObject::Complete(complete);
+                    let hash = type_obj.compute_hash();
+                    #crate_path::xtypes::TypeIdentifier::CompleteTypeId(hash)
                 }).clone()
             }
 

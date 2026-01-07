@@ -464,8 +464,8 @@ fn generate_unified_type_support_impl(
             }
 
             fn get_type_object(&self) -> Option<#crate_path::xtypes::TypeObject> {
-                Some(#crate_path::xtypes::TypeObject::Minimal(
-                    <#name as #crate_path::xtypes::HasTypeObject>::minimal_type_object()
+                Some(#crate_path::xtypes::TypeObject::Complete(
+                    <#name as #crate_path::xtypes::HasTypeObject>::complete_type_object()
                 ))
             }
 
@@ -1016,7 +1016,8 @@ fn generate_mutable_deserialize_impl(
                 }
             } else if let Some(ref default_lit) = field_config.default {
                 // Field has @default annotation: use default value if not present
-                let default_value = crate::codegen::utils::literal_to_tokens(default_lit, field_type);
+                let default_value =
+                    crate::codegen::utils::literal_to_tokens(default_lit, field_type);
                 quote! {
                     #field_name.unwrap_or_else(|| #default_value)
                 }

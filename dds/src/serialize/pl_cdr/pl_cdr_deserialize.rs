@@ -16,7 +16,6 @@ use crate::{
         ReliabilityQosPolicyKind, ResourceLimitsQosPolicy, TypeConsistencyEnforcementQosPolicy,
         TypeConsistencyKind,
     },
-    xtypes::{TypeIdentifier, TypeObject},
     rtps::{
         builtin::data::content_filtered_topic::ContentFilterProperty,
         common::{
@@ -29,6 +28,7 @@ use crate::{
             types::{GroupInfo, ProtocolVersion},
         },
     },
+    xtypes::{TypeIdentifier, TypeObject},
 };
 
 use super::{reader::PlCdrReader, MAX_PARAMETER_ITERATIONS};
@@ -649,15 +649,13 @@ impl PlCdrParser {
                     value: representations,
                 })
             }
-            ParameterId::PidTypeInformation => {
-                match TypeIdentifier::deserialize(data) {
-                    Ok((type_id, _consumed)) => ParameterValue::TypeInformation(type_id),
-                    Err(e) => {
-                        warn!("Failed to parse TypeIdentifier: {}", e);
-                        ParameterValue::Unknown(data)
-                    }
+            ParameterId::PidTypeInformation => match TypeIdentifier::deserialize(data) {
+                Ok((type_id, _consumed)) => ParameterValue::TypeInformation(type_id),
+                Err(e) => {
+                    warn!("Failed to parse TypeIdentifier: {}", e);
+                    ParameterValue::Unknown(data)
                 }
-            }
+            },
             ParameterId::PidTypeConsistencyEnforcement => {
                 // TypeConsistencyEnforcementQosPolicy: kind(2) + 5 bools(5) + padding(1) = 8 bytes
                 if data.len() < 7 {
@@ -670,20 +668,27 @@ impl PlCdrParser {
                         .unwrap_or(TypeConsistencyKind::DisallowTypeCoercion);
 
                     // Read boolean flags (1 byte each)
-                    let ignore_sequence_bounds = reader.read_bytes(1).map(|b| b[0] != 0).unwrap_or(false);
-                    let ignore_string_bounds = reader.read_bytes(1).map(|b| b[0] != 0).unwrap_or(false);
-                    let ignore_member_names = reader.read_bytes(1).map(|b| b[0] != 0).unwrap_or(false);
-                    let prevent_type_widening = reader.read_bytes(1).map(|b| b[0] != 0).unwrap_or(false);
-                    let force_type_validation = reader.read_bytes(1).map(|b| b[0] != 0).unwrap_or(false);
+                    let ignore_sequence_bounds =
+                        reader.read_bytes(1).map(|b| b[0] != 0).unwrap_or(false);
+                    let ignore_string_bounds =
+                        reader.read_bytes(1).map(|b| b[0] != 0).unwrap_or(false);
+                    let ignore_member_names =
+                        reader.read_bytes(1).map(|b| b[0] != 0).unwrap_or(false);
+                    let prevent_type_widening =
+                        reader.read_bytes(1).map(|b| b[0] != 0).unwrap_or(false);
+                    let force_type_validation =
+                        reader.read_bytes(1).map(|b| b[0] != 0).unwrap_or(false);
 
-                    ParameterValue::TypeConsistencyEnforcement(TypeConsistencyEnforcementQosPolicy {
-                        kind,
-                        ignore_sequence_bounds,
-                        ignore_string_bounds,
-                        ignore_member_names,
-                        prevent_type_widening,
-                        force_type_validation,
-                    })
+                    ParameterValue::TypeConsistencyEnforcement(
+                        TypeConsistencyEnforcementQosPolicy {
+                            kind,
+                            ignore_sequence_bounds,
+                            ignore_string_bounds,
+                            ignore_member_names,
+                            prevent_type_widening,
+                            force_type_validation,
+                        },
+                    )
                 }
             }
             ParameterId::PidTypeObject => {

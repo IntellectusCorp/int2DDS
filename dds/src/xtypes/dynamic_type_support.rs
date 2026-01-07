@@ -13,7 +13,7 @@ use crate::{
     rtps::common::types::SerializedData,
     serialize::xcdr::ExtensibilityKind,
     topic::sql::ast::Parameter,
-    xtypes::{TypeIdentifier, TypeObject, CompleteTypeObject},
+    xtypes::{CompleteTypeObject, TypeIdentifier, TypeObject},
 };
 
 use super::dynamic_data::{DynamicData, DynamicValue};
@@ -46,7 +46,7 @@ impl DynamicTypeSupport {
             TypeObject::Complete(complete) => complete.clone(),
             TypeObject::Minimal(_) => {
                 return Err(DdsError::Error(
-                    "DynamicTypeSupport requires CompleteTypeObject".to_string()
+                    "DynamicTypeSupport requires CompleteTypeObject".to_string(),
                 ));
             }
         };
@@ -56,15 +56,11 @@ impl DynamicTypeSupport {
         let type_identifier = TypeIdentifier::CompleteTypeId(hash);
         let type_name = Self::extract_type_name(&complete_type_object);
 
-        let dynamic_type = DynamicType::from_type_object(complete_type_object, type_identifier.clone())
-            .map_err(|e| DdsError::Error(e.to_string()))?;
+        let dynamic_type =
+            DynamicType::from_type_object(complete_type_object, type_identifier.clone())
+                .map_err(|e| DdsError::Error(e.to_string()))?;
 
-        Ok(Self {
-            dynamic_type: Arc::new(dynamic_type),
-            type_name,
-            type_identifier,
-            type_object,
-        })
+        Ok(Self { dynamic_type: Arc::new(dynamic_type), type_name, type_identifier, type_object })
     }
 
     /// Create DynamicTypeSupport from a CompleteTypeObject directly.
@@ -115,14 +111,17 @@ impl Default for DynamicTypeSupport {
         Self::from_type_object(type_object).unwrap_or_else(|_| {
             // Fallback - should never happen
             Self {
-                dynamic_type: Arc::new(DynamicType::from_type_object(
-                    CompleteTypeObject::Struct(crate::xtypes::CompleteStructType::default()),
-                    TypeIdentifier::None,
-                ).unwrap()),
+                dynamic_type: Arc::new(
+                    DynamicType::from_type_object(
+                        CompleteTypeObject::Struct(crate::xtypes::CompleteStructType::default()),
+                        TypeIdentifier::None,
+                    )
+                    .unwrap(),
+                ),
                 type_name: "DynamicData".to_string(),
                 type_identifier: TypeIdentifier::None,
                 type_object: TypeObject::Complete(CompleteTypeObject::Struct(
-                    crate::xtypes::CompleteStructType::default()
+                    crate::xtypes::CompleteStructType::default(),
                 )),
             }
         })
@@ -143,7 +142,8 @@ impl TypeSupport for DynamicTypeSupport {
             .downcast_ref::<DynamicData>()
             .ok_or_else(|| DdsError::Error("Expected DynamicData type".to_string()))?;
 
-        let value = dynamic_data.get_value(field_path)
+        let value = dynamic_data
+            .get_value(field_path)
             .ok_or_else(|| DdsError::Error(format!("Field not found: {}", field_path)))?;
 
         // Convert DynamicValue to Parameter
@@ -244,7 +244,7 @@ impl TypeSupport for DynamicTypeSupport {
         for (name, value) in key_values {
             hasher_data.extend_from_slice(name.as_bytes());
             hasher_data.push(0); // Separator
-            // Simple value serialization for hashing
+                                 // Simple value serialization for hashing
             match value {
                 DynamicValue::Int32(v) => hasher_data.extend_from_slice(&v.to_le_bytes()),
                 DynamicValue::Int64(v) => hasher_data.extend_from_slice(&v.to_le_bytes()),
@@ -308,10 +308,9 @@ fn dynamic_value_to_parameter(value: &DynamicValue) -> DdsResult<Parameter> {
         DynamicValue::WString(v) => Ok(Parameter::String(v.clone())),
         DynamicValue::Char8(v) => Ok(Parameter::CharValue(*v)),
         DynamicValue::Byte(v) => Ok(Parameter::IntegerValue(*v as i32)),
-        DynamicValue::Enum { name, value: _ } => Ok(Parameter::EnumeratedValue {
-            type_name: None,
-            value: name.clone(),
-        }),
+        DynamicValue::Enum { name, value: _ } => {
+            Ok(Parameter::EnumeratedValue { type_name: None, value: name.clone() })
+        }
         _ => Err(DdsError::Error("Cannot convert complex DynamicValue to Parameter".to_string())),
     }
 }
@@ -319,10 +318,7 @@ fn dynamic_value_to_parameter(value: &DynamicValue) -> DdsResult<Parameter> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::xtypes::{
-        CompleteStructType, CompleteStructMember,
-        MemberFlag, TypeFlag,
-    };
+    use crate::xtypes::{CompleteStructMember, CompleteStructType, MemberFlag, TypeFlag};
 
     fn create_test_type_object() -> TypeObject {
         let mut struct_type = CompleteStructType::new(
@@ -333,13 +329,27 @@ mod tests {
 
         struct_type.add_member(CompleteStructMember::new(
             0,
-            MemberFlag::new(crate::xtypes::TryConstructKind::Discard, false, false, false, true, false),
+            MemberFlag::new(
+                crate::xtypes::TryConstructKind::Discard,
+                false,
+                false,
+                false,
+                true,
+                false,
+            ),
             TypeIdentifier::Int32,
             "id".to_string(),
         ));
         struct_type.add_member(CompleteStructMember::new(
             1,
-            MemberFlag::new(crate::xtypes::TryConstructKind::Discard, false, false, false, false, false),
+            MemberFlag::new(
+                crate::xtypes::TryConstructKind::Discard,
+                false,
+                false,
+                false,
+                false,
+                false,
+            ),
             TypeIdentifier::String8,
             "message".to_string(),
         ));
