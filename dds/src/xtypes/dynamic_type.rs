@@ -8,8 +8,7 @@ use std::sync::Arc;
 
 use crate::serialize::xcdr::ExtensibilityKind;
 use crate::xtypes::{
-    CompleteEnumeratedType, CompleteStructType, CompleteTypeObject,
-    TypeIdentifier,
+    CompleteEnumeratedType, CompleteStructType, CompleteTypeObject, TypeIdentifier,
 };
 
 /// Error type for DynamicType operations.
@@ -62,7 +61,11 @@ impl PrimitiveKind {
     /// Get the size in bytes for this primitive type.
     pub fn size(&self) -> usize {
         match self {
-            PrimitiveKind::Boolean | PrimitiveKind::Byte | PrimitiveKind::Int8 | PrimitiveKind::Uint8 | PrimitiveKind::Char8 => 1,
+            PrimitiveKind::Boolean
+            | PrimitiveKind::Byte
+            | PrimitiveKind::Int8
+            | PrimitiveKind::Uint8
+            | PrimitiveKind::Char8 => 1,
             PrimitiveKind::Int16 | PrimitiveKind::Uint16 | PrimitiveKind::Char16 => 2,
             PrimitiveKind::Int32 | PrimitiveKind::Uint32 | PrimitiveKind::Float32 => 4,
             PrimitiveKind::Int64 | PrimitiveKind::Uint64 | PrimitiveKind::Float64 => 8,
@@ -141,11 +144,7 @@ impl DynamicType {
             members.push(descriptor);
         }
 
-        let struct_desc = StructDescriptor {
-            members,
-            member_by_name,
-            member_by_id,
-        };
+        let struct_desc = StructDescriptor { members, member_by_name, member_by_id };
 
         Ok(Self {
             type_name,
@@ -183,12 +182,7 @@ impl DynamicType {
         }
 
         let bit_bound = enum_type.header.common.bit_bound;
-        let enum_desc = EnumDescriptor {
-            literals,
-            literal_by_name,
-            literal_by_value,
-            bit_bound,
-        };
+        let enum_desc = EnumDescriptor { literals, literal_by_name, literal_by_value, bit_bound };
 
         Ok(Self {
             type_name,
@@ -227,10 +221,18 @@ impl DynamicType {
             TypeIdentifier::Char16 => Ok(DynamicTypeKind::Primitive(PrimitiveKind::Char16)),
             TypeIdentifier::String8 => Ok(DynamicTypeKind::String { bound: None }),
             TypeIdentifier::String16 => Ok(DynamicTypeKind::WString { bound: None }),
-            TypeIdentifier::String8Small { bound } => Ok(DynamicTypeKind::String { bound: Some(*bound as u32) }),
-            TypeIdentifier::String8Large { bound } => Ok(DynamicTypeKind::String { bound: Some(*bound) }),
-            TypeIdentifier::String16Small { bound } => Ok(DynamicTypeKind::WString { bound: Some(*bound as u32) }),
-            TypeIdentifier::String16Large { bound } => Ok(DynamicTypeKind::WString { bound: Some(*bound) }),
+            TypeIdentifier::String8Small { bound } => {
+                Ok(DynamicTypeKind::String { bound: Some(*bound as u32) })
+            }
+            TypeIdentifier::String8Large { bound } => {
+                Ok(DynamicTypeKind::String { bound: Some(*bound) })
+            }
+            TypeIdentifier::String16Small { bound } => {
+                Ok(DynamicTypeKind::WString { bound: Some(*bound as u32) })
+            }
+            TypeIdentifier::String16Large { bound } => {
+                Ok(DynamicTypeKind::WString { bound: Some(*bound) })
+            }
             TypeIdentifier::PlainSequenceSmall { element_identifier, bound, .. } => {
                 let element_type = Self::type_from_identifier(element_identifier)?;
                 Ok(DynamicTypeKind::Sequence {
@@ -261,21 +263,18 @@ impl DynamicType {
             }
             TypeIdentifier::CompleteTypeId(_) => {
                 // This references another type by hash - return as external reference
-                Ok(DynamicTypeKind::ExternalType {
-                    type_identifier: type_id.clone(),
-                })
+                Ok(DynamicTypeKind::ExternalType { type_identifier: type_id.clone() })
             }
             TypeIdentifier::MinimalTypeId(_) => {
-                Ok(DynamicTypeKind::ExternalType {
-                    type_identifier: type_id.clone(),
-                })
+                Ok(DynamicTypeKind::ExternalType { type_identifier: type_id.clone() })
             }
             TypeIdentifier::None => {
                 Err(DynamicTypeError::UnsupportedType("None type identifier".to_string()))
             }
-            _ => {
-                Err(DynamicTypeError::UnsupportedType(format!("Unsupported TypeIdentifier: {:?}", type_id)))
-            }
+            _ => Err(DynamicTypeError::UnsupportedType(format!(
+                "Unsupported TypeIdentifier: {:?}",
+                type_id
+            ))),
         }
     }
 
@@ -356,9 +355,7 @@ impl DynamicType {
 
     /// Get key members (for struct types).
     pub fn key_members(&self) -> Vec<&MemberDescriptor> {
-        self.as_struct()
-            .map(|s| s.key_members())
-            .unwrap_or_default()
+        self.as_struct().map(|s| s.key_members()).unwrap_or_default()
     }
 
     /// Get an enum literal by name.
@@ -511,9 +508,7 @@ pub struct EnumLiteralDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::xtypes::{
-        CompleteStructMember, MemberFlag, TypeFlag,
-    };
+    use crate::xtypes::{CompleteStructMember, MemberFlag, TypeFlag};
 
     #[test]
     fn test_dynamic_type_from_struct() {
@@ -527,13 +522,27 @@ mod tests {
         // Add members
         struct_type.add_member(CompleteStructMember::new(
             0,
-            MemberFlag::new(crate::xtypes::TryConstructKind::Discard, false, false, false, true, false),
+            MemberFlag::new(
+                crate::xtypes::TryConstructKind::Discard,
+                false,
+                false,
+                false,
+                true,
+                false,
+            ),
             TypeIdentifier::Int32,
             "id".to_string(),
         ));
         struct_type.add_member(CompleteStructMember::new(
             1,
-            MemberFlag::new(crate::xtypes::TryConstructKind::Discard, false, false, false, false, false),
+            MemberFlag::new(
+                crate::xtypes::TryConstructKind::Discard,
+                false,
+                false,
+                false,
+                false,
+                false,
+            ),
             TypeIdentifier::String8,
             "message".to_string(),
         ));
@@ -571,25 +580,47 @@ mod tests {
 
         struct_type.add_member(CompleteStructMember::new(
             0,
-            MemberFlag::new(crate::xtypes::TryConstructKind::Discard, false, false, false, true, false),
+            MemberFlag::new(
+                crate::xtypes::TryConstructKind::Discard,
+                false,
+                false,
+                false,
+                true,
+                false,
+            ),
             TypeIdentifier::Int32,
             "key1".to_string(),
         ));
         struct_type.add_member(CompleteStructMember::new(
             1,
-            MemberFlag::new(crate::xtypes::TryConstructKind::Discard, false, false, false, false, false),
+            MemberFlag::new(
+                crate::xtypes::TryConstructKind::Discard,
+                false,
+                false,
+                false,
+                false,
+                false,
+            ),
             TypeIdentifier::Float64,
             "value".to_string(),
         ));
         struct_type.add_member(CompleteStructMember::new(
             2,
-            MemberFlag::new(crate::xtypes::TryConstructKind::Discard, false, false, false, true, false),
+            MemberFlag::new(
+                crate::xtypes::TryConstructKind::Discard,
+                false,
+                false,
+                false,
+                true,
+                false,
+            ),
             TypeIdentifier::String8,
             "key2".to_string(),
         ));
 
         let type_object = CompleteTypeObject::Struct(struct_type);
-        let dynamic_type = DynamicType::from_type_object(type_object, TypeIdentifier::None).unwrap();
+        let dynamic_type =
+            DynamicType::from_type_object(type_object, TypeIdentifier::None).unwrap();
 
         let key_members = dynamic_type.key_members();
         assert_eq!(key_members.len(), 2);

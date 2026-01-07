@@ -28,7 +28,6 @@ use crate::{
         DurabilityQosPolicyKind, QosPolicyId, ReliabilityQosPolicyKind,
         TypeConsistencyEnforcementQosPolicy, TypeConsistencyKind,
     },
-    xtypes::TypeIdentifier,
     rtps::{
         builtin::{
             builtin_endpoints::BuiltinEndpoints,
@@ -95,6 +94,7 @@ use crate::{
     },
     serialize::pl_cdr::InlineQosParameters,
     utils::timer::timer_handler::TimerHandler,
+    xtypes::TypeIdentifier,
 };
 
 enum MatchType {

@@ -29,18 +29,15 @@ impl PartialEq for DynamicData {
 impl DynamicData {
     /// Create a new DynamicData instance for the given type.
     pub fn new(dynamic_type: Arc<DynamicType>) -> Self {
-        Self {
-            dynamic_type,
-            values: HashMap::new(),
-        }
+        Self { dynamic_type, values: HashMap::new() }
     }
 
     /// Create a new DynamicData with pre-populated values.
-    pub fn with_values(dynamic_type: Arc<DynamicType>, values: HashMap<String, DynamicValue>) -> Self {
-        Self {
-            dynamic_type,
-            values,
-        }
+    pub fn with_values(
+        dynamic_type: Arc<DynamicType>,
+        values: HashMap<String, DynamicValue>,
+    ) -> Self {
+        Self { dynamic_type, values }
     }
 
     /// Get the type descriptor.
@@ -59,14 +56,19 @@ impl DynamicData {
 
     /// Get a field value with type conversion.
     pub fn get<T: FromDynamicValue>(&self, field: &str) -> Result<T, DynamicTypeError> {
-        let value = self.values.get(field).ok_or_else(|| {
-            DynamicTypeError::FieldNotFound(field.to_string())
-        })?;
+        let value = self
+            .values
+            .get(field)
+            .ok_or_else(|| DynamicTypeError::FieldNotFound(field.to_string()))?;
         T::from_dynamic(value)
     }
 
     /// Set a field value with type conversion.
-    pub fn set<T: IntoDynamicValue>(&mut self, field: &str, value: T) -> Result<(), DynamicTypeError> {
+    pub fn set<T: IntoDynamicValue>(
+        &mut self,
+        field: &str,
+        value: T,
+    ) -> Result<(), DynamicTypeError> {
         // Verify field exists in type
         if let Some(struct_desc) = self.dynamic_type.as_struct() {
             if struct_desc.get_member(field).is_none() {
@@ -84,21 +86,24 @@ impl DynamicData {
             return Err(DynamicTypeError::FieldNotFound(path.to_string()));
         }
 
-        let mut current_value = self.values.get(parts[0]).ok_or_else(|| {
-            DynamicTypeError::FieldNotFound(parts[0].to_string())
-        })?;
+        let mut current_value = self
+            .values
+            .get(parts[0])
+            .ok_or_else(|| DynamicTypeError::FieldNotFound(parts[0].to_string()))?;
 
         for part in &parts[1..] {
             match current_value {
                 DynamicValue::Struct(inner) => {
-                    current_value = inner.values.get(*part).ok_or_else(|| {
-                        DynamicTypeError::FieldNotFound(part.to_string())
-                    })?;
+                    current_value = inner
+                        .values
+                        .get(*part)
+                        .ok_or_else(|| DynamicTypeError::FieldNotFound(part.to_string()))?;
                 }
                 _ => {
-                    return Err(DynamicTypeError::InvalidOperation(
-                        format!("Cannot access field '{}' on non-struct value", part)
-                    ));
+                    return Err(DynamicTypeError::InvalidOperation(format!(
+                        "Cannot access field '{}' on non-struct value",
+                        part
+                    )));
                 }
             }
         }
@@ -161,9 +166,7 @@ impl DynamicData {
         let key_members = self.dynamic_type.key_members();
         key_members
             .iter()
-            .filter_map(|m| {
-                self.values.get(&m.name).map(|v| (m.name.as_str(), v))
-            })
+            .filter_map(|m| self.values.get(&m.name).map(|v| (m.name.as_str(), v)))
             .collect()
     }
 
@@ -211,7 +214,10 @@ pub enum DynamicValue {
     /// Wide string (stored as String for simplicity)
     WString(String),
     /// Enum value with name and numeric value
-    Enum { name: String, value: i32 },
+    Enum {
+        name: String,
+        value: i32,
+    },
     /// Nested struct
     Struct(Box<DynamicData>),
     /// Sequence (dynamic array)
@@ -363,9 +369,10 @@ impl FromDynamicValue for bool {
     fn from_dynamic(value: &DynamicValue) -> Result<Self, DynamicTypeError> {
         match value {
             DynamicValue::Boolean(v) => Ok(*v),
-            _ => Err(DynamicTypeError::ConversionError(
-                format!("Cannot convert {} to bool", value.type_kind())
-            )),
+            _ => Err(DynamicTypeError::ConversionError(format!(
+                "Cannot convert {} to bool",
+                value.type_kind()
+            ))),
         }
     }
 }
@@ -374,9 +381,10 @@ impl FromDynamicValue for i8 {
     fn from_dynamic(value: &DynamicValue) -> Result<Self, DynamicTypeError> {
         match value {
             DynamicValue::Int8(v) => Ok(*v),
-            _ => Err(DynamicTypeError::ConversionError(
-                format!("Cannot convert {} to i8", value.type_kind())
-            )),
+            _ => Err(DynamicTypeError::ConversionError(format!(
+                "Cannot convert {} to i8",
+                value.type_kind()
+            ))),
         }
     }
 }
@@ -386,9 +394,10 @@ impl FromDynamicValue for i16 {
         match value {
             DynamicValue::Int16(v) => Ok(*v),
             DynamicValue::Int8(v) => Ok(*v as i16),
-            _ => Err(DynamicTypeError::ConversionError(
-                format!("Cannot convert {} to i16", value.type_kind())
-            )),
+            _ => Err(DynamicTypeError::ConversionError(format!(
+                "Cannot convert {} to i16",
+                value.type_kind()
+            ))),
         }
     }
 }
@@ -399,9 +408,10 @@ impl FromDynamicValue for i32 {
             DynamicValue::Int32(v) => Ok(*v),
             DynamicValue::Int16(v) => Ok(*v as i32),
             DynamicValue::Int8(v) => Ok(*v as i32),
-            _ => Err(DynamicTypeError::ConversionError(
-                format!("Cannot convert {} to i32", value.type_kind())
-            )),
+            _ => Err(DynamicTypeError::ConversionError(format!(
+                "Cannot convert {} to i32",
+                value.type_kind()
+            ))),
         }
     }
 }
@@ -413,9 +423,10 @@ impl FromDynamicValue for i64 {
             DynamicValue::Int32(v) => Ok(*v as i64),
             DynamicValue::Int16(v) => Ok(*v as i64),
             DynamicValue::Int8(v) => Ok(*v as i64),
-            _ => Err(DynamicTypeError::ConversionError(
-                format!("Cannot convert {} to i64", value.type_kind())
-            )),
+            _ => Err(DynamicTypeError::ConversionError(format!(
+                "Cannot convert {} to i64",
+                value.type_kind()
+            ))),
         }
     }
 }
@@ -425,9 +436,10 @@ impl FromDynamicValue for u8 {
         match value {
             DynamicValue::Uint8(v) => Ok(*v),
             DynamicValue::Byte(v) => Ok(*v),
-            _ => Err(DynamicTypeError::ConversionError(
-                format!("Cannot convert {} to u8", value.type_kind())
-            )),
+            _ => Err(DynamicTypeError::ConversionError(format!(
+                "Cannot convert {} to u8",
+                value.type_kind()
+            ))),
         }
     }
 }
@@ -438,9 +450,10 @@ impl FromDynamicValue for u16 {
             DynamicValue::Uint16(v) => Ok(*v),
             DynamicValue::Uint8(v) => Ok(*v as u16),
             DynamicValue::Byte(v) => Ok(*v as u16),
-            _ => Err(DynamicTypeError::ConversionError(
-                format!("Cannot convert {} to u16", value.type_kind())
-            )),
+            _ => Err(DynamicTypeError::ConversionError(format!(
+                "Cannot convert {} to u16",
+                value.type_kind()
+            ))),
         }
     }
 }
@@ -452,9 +465,10 @@ impl FromDynamicValue for u32 {
             DynamicValue::Uint16(v) => Ok(*v as u32),
             DynamicValue::Uint8(v) => Ok(*v as u32),
             DynamicValue::Byte(v) => Ok(*v as u32),
-            _ => Err(DynamicTypeError::ConversionError(
-                format!("Cannot convert {} to u32", value.type_kind())
-            )),
+            _ => Err(DynamicTypeError::ConversionError(format!(
+                "Cannot convert {} to u32",
+                value.type_kind()
+            ))),
         }
     }
 }
@@ -467,9 +481,10 @@ impl FromDynamicValue for u64 {
             DynamicValue::Uint16(v) => Ok(*v as u64),
             DynamicValue::Uint8(v) => Ok(*v as u64),
             DynamicValue::Byte(v) => Ok(*v as u64),
-            _ => Err(DynamicTypeError::ConversionError(
-                format!("Cannot convert {} to u64", value.type_kind())
-            )),
+            _ => Err(DynamicTypeError::ConversionError(format!(
+                "Cannot convert {} to u64",
+                value.type_kind()
+            ))),
         }
     }
 }
@@ -478,9 +493,10 @@ impl FromDynamicValue for f32 {
     fn from_dynamic(value: &DynamicValue) -> Result<Self, DynamicTypeError> {
         match value {
             DynamicValue::Float32(v) => Ok(*v),
-            _ => Err(DynamicTypeError::ConversionError(
-                format!("Cannot convert {} to f32", value.type_kind())
-            )),
+            _ => Err(DynamicTypeError::ConversionError(format!(
+                "Cannot convert {} to f32",
+                value.type_kind()
+            ))),
         }
     }
 }
@@ -490,9 +506,10 @@ impl FromDynamicValue for f64 {
         match value {
             DynamicValue::Float64(v) => Ok(*v),
             DynamicValue::Float32(v) => Ok(*v as f64),
-            _ => Err(DynamicTypeError::ConversionError(
-                format!("Cannot convert {} to f64", value.type_kind())
-            )),
+            _ => Err(DynamicTypeError::ConversionError(format!(
+                "Cannot convert {} to f64",
+                value.type_kind()
+            ))),
         }
     }
 }
@@ -501,9 +518,10 @@ impl FromDynamicValue for char {
     fn from_dynamic(value: &DynamicValue) -> Result<Self, DynamicTypeError> {
         match value {
             DynamicValue::Char8(v) => Ok(*v),
-            _ => Err(DynamicTypeError::ConversionError(
-                format!("Cannot convert {} to char", value.type_kind())
-            )),
+            _ => Err(DynamicTypeError::ConversionError(format!(
+                "Cannot convert {} to char",
+                value.type_kind()
+            ))),
         }
     }
 }
@@ -513,9 +531,10 @@ impl FromDynamicValue for String {
         match value {
             DynamicValue::String(v) => Ok(v.clone()),
             DynamicValue::WString(v) => Ok(v.clone()),
-            _ => Err(DynamicTypeError::ConversionError(
-                format!("Cannot convert {} to String", value.type_kind())
-            )),
+            _ => Err(DynamicTypeError::ConversionError(format!(
+                "Cannot convert {} to String",
+                value.type_kind()
+            ))),
         }
     }
 }
@@ -526,9 +545,10 @@ impl<T: FromDynamicValue> FromDynamicValue for Vec<T> {
             DynamicValue::Sequence(items) | DynamicValue::Array(items) => {
                 items.iter().map(T::from_dynamic).collect()
             }
-            _ => Err(DynamicTypeError::ConversionError(
-                format!("Cannot convert {} to Vec", value.type_kind())
-            )),
+            _ => Err(DynamicTypeError::ConversionError(format!(
+                "Cannot convert {} to Vec",
+                value.type_kind()
+            ))),
         }
     }
 }
@@ -536,12 +556,10 @@ impl<T: FromDynamicValue> FromDynamicValue for Vec<T> {
 impl<T: FromDynamicValue> FromDynamicValue for Option<T> {
     fn from_dynamic(value: &DynamicValue) -> Result<Self, DynamicTypeError> {
         match value {
-            DynamicValue::Optional(opt) => {
-                match opt {
-                    Some(v) => Ok(Some(T::from_dynamic(v)?)),
-                    None => Ok(None),
-                }
-            }
+            DynamicValue::Optional(opt) => match opt {
+                Some(v) => Ok(Some(T::from_dynamic(v)?)),
+                None => Ok(None),
+            },
             DynamicValue::Null => Ok(None),
             other => Ok(Some(T::from_dynamic(other)?)),
         }
@@ -673,8 +691,8 @@ impl IntoDynamicValue for DynamicData {
 mod tests {
     use super::*;
     use crate::xtypes::{
-        CompleteStructType, CompleteStructMember, CompleteTypeObject,
-        MemberFlag, TypeFlag, TypeIdentifier,
+        CompleteStructMember, CompleteStructType, CompleteTypeObject, MemberFlag, TypeFlag,
+        TypeIdentifier,
     };
 
     fn create_test_type() -> Arc<DynamicType> {
@@ -686,13 +704,27 @@ mod tests {
 
         struct_type.add_member(CompleteStructMember::new(
             0,
-            MemberFlag::new(crate::xtypes::TryConstructKind::Discard, false, false, false, true, false),
+            MemberFlag::new(
+                crate::xtypes::TryConstructKind::Discard,
+                false,
+                false,
+                false,
+                true,
+                false,
+            ),
             TypeIdentifier::Int32,
             "id".to_string(),
         ));
         struct_type.add_member(CompleteStructMember::new(
             1,
-            MemberFlag::new(crate::xtypes::TryConstructKind::Discard, false, false, false, false, false),
+            MemberFlag::new(
+                crate::xtypes::TryConstructKind::Discard,
+                false,
+                false,
+                false,
+                false,
+                false,
+            ),
             TypeIdentifier::String8,
             "message".to_string(),
         ));

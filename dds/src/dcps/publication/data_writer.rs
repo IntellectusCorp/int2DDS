@@ -269,6 +269,14 @@ impl<Foo: 'static + Clone> EnableChild for DataWriter<Foo> {
         publication_builtin_topic_data.set_type_name(topic.get_type_name().to_string());
         publication_builtin_topic_data.set_endpoint_guid(self.guid);
 
+        // Set TypeIdentifier and TypeObject for DDS-XTypes discovery
+        if let Some(type_id) = self.type_support.get_type_identifier() {
+            publication_builtin_topic_data.set_type_identifier(Some(type_id));
+        }
+        if let Some(type_obj) = self.type_support.get_type_object() {
+            publication_builtin_topic_data.set_type_object(Some(type_obj));
+        }
+
         let status_callback = self.create_status_callback()?;
 
         let mut dcps_bridge = participant.get_dcps_bridge()?;
@@ -303,6 +311,15 @@ impl<Foo: 'static + Clone> EnableChild for DataWriter<Foo> {
         publication_builtin_topic_data.set_topic_name(topic.get_name().to_string());
         publication_builtin_topic_data.set_type_name(topic.get_type_name().to_string());
         publication_builtin_topic_data.set_endpoint_guid(self.guid);
+
+        // Set TypeIdentifier and TypeObject for DDS-XTypes discovery
+        if let Some(type_id) = self.type_support.get_type_identifier() {
+            publication_builtin_topic_data.set_type_identifier(Some(type_id));
+        }
+        if let Some(type_obj) = self.type_support.get_type_object() {
+            publication_builtin_topic_data.set_type_object(Some(type_obj));
+        }
+
         let rtps_writer = self.get_rtps_writer()?;
         rtps_writer
             .set_publication_builtin_topic_data(publication_builtin_topic_data.clone())

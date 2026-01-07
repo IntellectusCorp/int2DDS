@@ -1,7 +1,8 @@
 //! XTypes Subscriber Example
 //!
 //! This subscriber receives data WITHOUT knowing the type at compile time.
-//! It uses DynamicData to inspect fields dynamically at runtime.
+//! It discovers the TypeObject from the publisher via the Discovery protocol,
+//! then uses DynamicData to inspect fields dynamically at runtime.
 //!
 //! # Usage
 //!
@@ -11,16 +12,18 @@
 //!
 //! # How it works
 //!
-//! 1. Creates a TypeObject that describes the data structure (simulating discovery)
-//! 2. Creates DynamicTypeSupport from the TypeObject
-//! 3. Creates a DataReader<DynamicData> without compile-time type
-//! 4. Accesses fields by name: `data.get::<i32>("sensor_id")`
+//! 1. Waits for a publisher to appear via builtin DCPSPublication topic
+//! 2. Extracts TypeObject from PublicationBuiltinTopicData (sent via PID_TYPE_OBJECT)
+//! 3. Creates DynamicTypeSupport from the discovered TypeObject
+//! 4. Creates a DataReader<DynamicData> without compile-time type
+//! 5. Accesses fields by name: `data.get::<i32>("sensor_id")`
 
 use std::sync::Arc;
 
 use clap::Parser;
 use int2dds::{
     common::{
+        builtin::topic::publication_builtin_topic_data::PublicationBuiltinTopicData,
         env::{set_console_log_level, set_log_type},
         log::{LogLevel, LogType},
     },
@@ -35,12 +38,8 @@ use int2dds::{
         qos::{DataReaderQos, SubscriberQos},
         sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind},
     },
-    topic::{qos::TopicQos, TypeSupport},
-    xtypes::{
-        CompleteStructType, CompleteStructMember, CompleteTypeObject,
-        MemberFlag, TypeFlag, TypeIdentifier, TypeObject,
-        TryConstructKind, ExtensibilityKind,
-    },
+    topic::qos::TopicQos,
+    xtypes::TypeObject,
 };
 
 #[derive(Parser, Debug)]
@@ -49,54 +48,47 @@ struct Args {
     /// Domain ID
     #[arg(short, long, default_value = "0")]
     domain: i32,
+
+    /// Topic name to subscribe
+    #[arg(short, long, default_value = "SensorTopic")]
+    topic: String,
 }
 
-/// Create a TypeObject that describes the SensorData structure.
-///
-/// In a real application, this TypeObject would be received during discovery
-/// from `PublicationBuiltinTopicData::type_object()`.
-///
-/// Here we manually create it to simulate what discovery would provide.
-fn create_sensor_data_type_object() -> TypeObject {
-    let mut struct_type = CompleteStructType::new(
-        TypeFlag::new(ExtensibilityKind::Final, false, false),
-        "SensorData".to_string(),
-        None,
-    );
+/// Wait for a publisher on the specified topic and extract TypeObject from discovery
+fn wait_for_type_object(
+    builtin_subscriber: &int2dds::subscription::subscriber::Subscriber,
+    topic_name: &str,
+) -> (TypeObject, String) {
+    let publication_reader = builtin_subscriber
+        .lookup_datareader::<PublicationBuiltinTopicData>("DCPSPublication")
+        .expect("Failed to lookup DCPSPublication reader");
 
-    // sensor_id: i32 (key field)
-    struct_type.add_member(CompleteStructMember::new(
-        0, // member_id
-        MemberFlag::new(TryConstructKind::Discard, false, false, false, true, false), // is_key = true
-        TypeIdentifier::Int32,
-        "sensor_id".to_string(),
-    ));
+    let mut condition = publication_reader.get_statuscondition().unwrap().clone();
+    condition.set_enabled_statuses(StatusMask::DATA_AVAILABLE).unwrap();
+    let wait_set = WaitSet::new();
+    wait_set.attach_condition(condition).unwrap();
 
-    // temperature: f64
-    struct_type.add_member(CompleteStructMember::new(
-        1,
-        MemberFlag::new(TryConstructKind::Discard, false, false, false, false, false),
-        TypeIdentifier::Float64,
-        "temperature".to_string(),
-    ));
+    loop {
+        let _ = wait_set.wait(Duration { sec: 1, nanosec: 0 });
+        publication_reader.get_status_changes().ok();
 
-    // humidity: f64
-    struct_type.add_member(CompleteStructMember::new(
-        2,
-        MemberFlag::new(TryConstructKind::Discard, false, false, false, false, false),
-        TypeIdentifier::Float64,
-        "humidity".to_string(),
-    ));
-
-    // location: String
-    struct_type.add_member(CompleteStructMember::new(
-        3,
-        MemberFlag::new(TryConstructKind::Discard, false, false, false, false, false),
-        TypeIdentifier::String8,
-        "location".to_string(),
-    ));
-
-    TypeObject::Complete(CompleteTypeObject::Struct(struct_type))
+        if let Ok(samples) = publication_reader.read(
+            100,
+            &[SampleStateKind::ANY_SAMPLE_STATE],
+            &[ViewStateKind::ANY_VIEW_STATE],
+            &[InstanceStateKind::ALIVE_INSTANCE_STATE],
+        ) {
+            for sample in samples.iter() {
+                if let Ok(pub_data) = sample.data() {
+                    if pub_data.topic_name() == topic_name {
+                        if let Some(type_obj) = pub_data.type_object() {
+                            return (type_obj.clone(), pub_data.type_name().to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn main() {
@@ -105,49 +97,47 @@ fn main() {
 
     let args = Args::parse();
 
-    println!("Receiving data WITHOUT compile-time type knowledge.");
-    println!("Using DynamicData to access fields by name at runtime.\n");
+    println!("XTypes Subscriber - Type Discovery Demo");
+    println!("Waiting for publisher on topic '{}'...\n", args.topic);
 
-    // Step 1: Create DomainParticipant
+    // Create DomainParticipant
     let factory = DomainParticipantFactory::get_instance();
     let participant = factory
-        .create_participant(args.domain, DomainParticipantQos::default(), None, StatusMask::default())
+        .create_participant(
+            args.domain,
+            DomainParticipantQos::default(),
+            None,
+            StatusMask::default(),
+        )
         .expect("Failed to create participant");
 
-    // Step 2: Create TypeObject (simulating what discovery would provide)
-    println!("Step 1: Creating TypeObject (simulates discovery)...");
-    let type_object = create_sensor_data_type_object();
+    // Get builtin subscriber and wait for publisher with TypeObject
+    let builtin_subscriber =
+        participant.get_builtin_subscriber().expect("Failed to get builtin subscriber");
 
-    // Step 3: Create DynamicTypeSupport from TypeObject
-    println!("Step 2: Creating DynamicTypeSupport from TypeObject...");
+    let (type_object, type_name) = wait_for_type_object(&builtin_subscriber, &args.topic);
+
+    // Create DynamicTypeSupport from discovered TypeObject
     let type_support = participant
         .create_dynamic_type_from_type_object(type_object)
-        .expect("Failed to create DynamicTypeSupport");
+        .expect("Failed to create DynamicTypeSupport from TypeObject");
 
-    // Print type information
-    println!("\n  Type Information:");
-    println!("  ─────────────────");
-    println!("  Type name: {}", type_support.get_type_name());
+    // Print discovered type information
+    println!("Discovered type: {}", type_name);
     if let Some(struct_desc) = type_support.dynamic_type().as_struct() {
-        println!("  Members ({}):", struct_desc.members().len());
         for member in struct_desc.members() {
             let key_marker = if member.is_key { " [KEY]" } else { "" };
-            println!("    - {}: {:?}{}", member.name, member.member_type, key_marker);
+            println!("  - {}: {:?}{}", member.name, member.member_type, key_marker);
         }
     }
     println!();
 
     let type_support_arc = Arc::new(type_support);
 
-    // Step 4: Register type and create topic
-    println!("Step 3: Registering type and creating topic...");
-    participant
-        .register_dynamic_type(type_support_arc.clone())
-        .expect("Failed to register dynamic type");
-
+    // Create topic with discovered type
     let topic = participant
         .create_topic_dynamic(
-            "SensorTopic",
+            &args.topic,
             type_support_arc.clone(),
             TopicQos::default(),
             None,
@@ -155,8 +145,7 @@ fn main() {
         )
         .expect("Failed to create topic");
 
-    // Step 5: Create Subscriber and DataReader
-    println!("Step 4: Creating DataReader<DynamicData>...\n");
+    // Create Subscriber and DataReader
     let subscriber = participant
         .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
         .expect("Failed to create subscriber");
@@ -169,24 +158,34 @@ fn main() {
         ..Default::default()
     };
 
-    // Create DataReader for DynamicData - NO compile-time type needed!
     let reader = subscriber
-        .create_datareader_dynamic(&topic, type_support_arc, reader_qos, None, StatusMask::default())
+        .create_datareader_dynamic(
+            &topic,
+            type_support_arc,
+            reader_qos,
+            None,
+            StatusMask::default(),
+        )
         .expect("Failed to create dynamic datareader");
 
-    println!("═══════════════════════════════════════════════════════════════");
-    println!("  Waiting for data from XTypes Publisher...");
-    println!("  (Run: cargo run --example xtypes_publisher -- --domain {})", args.domain);
-    println!("═══════════════════════════════════════════════════════════════\n");
+    // Wait for subscription matched
+    let mut match_condition = reader.get_statuscondition().unwrap().clone();
+    match_condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
+    let match_wait_set = WaitSet::new();
+    match_wait_set.attach_condition(match_condition).unwrap();
+    match_wait_set.wait(Duration::infinite()).unwrap();
+    reader.get_subscription_matched_status().unwrap();
+
+    println!("Matched with publisher. Receiving data...\n");
 
     // Use WaitSet to wait for data
-    let mut condition = reader.get_statuscondition().unwrap().clone();
-    condition.set_enabled_statuses(StatusMask::DATA_AVAILABLE).unwrap();
-    let wait_set = WaitSet::new();
-    wait_set.attach_condition(condition).unwrap();
+    let mut data_condition = reader.get_statuscondition().unwrap().clone();
+    data_condition.set_enabled_statuses(StatusMask::DATA_AVAILABLE).unwrap();
+    let data_wait_set = WaitSet::new();
+    data_wait_set.attach_condition(data_condition).unwrap();
 
     loop {
-        if wait_set.wait(Duration { sec: 5, nanosec: 0 }).is_ok() {
+        if data_wait_set.wait(Duration { sec: 5, nanosec: 0 }).is_ok() {
             reader.get_status_changes().ok();
 
             match reader.take(
@@ -199,7 +198,6 @@ fn main() {
                     for sample in samples.iter() {
                         if let Ok(data) = sample.data() {
                             // Access fields DYNAMICALLY by name!
-                            // No compile-time SensorData struct needed!
                             let sensor_id: i32 = data.get("sensor_id").unwrap_or_default();
                             let temperature: f64 = data.get("temperature").unwrap_or_default();
                             let humidity: f64 = data.get("humidity").unwrap_or_default();

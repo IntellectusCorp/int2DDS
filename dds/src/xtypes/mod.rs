@@ -43,25 +43,19 @@
 //! let msg: String = data.get("message")?;
 //! ```
 
-mod type_object;
-mod dynamic_type;
 mod dynamic_data;
 mod dynamic_serialization;
+mod dynamic_type;
 mod dynamic_type_support;
+mod type_object;
 
 pub use type_object::*;
 
 // Dynamic type support
+pub use dynamic_data::{DynamicData, DynamicValue, FromDynamicValue, IntoDynamicValue};
+pub use dynamic_serialization::{deserialize_dynamic_data, serialize_dynamic_data};
 pub use dynamic_type::{
-    DynamicType, DynamicTypeKind, DynamicTypeError,
-    PrimitiveKind, StructDescriptor, MemberDescriptor,
-    EnumDescriptor, EnumLiteralDescriptor,
-};
-pub use dynamic_data::{
-    DynamicData, DynamicValue,
-    FromDynamicValue, IntoDynamicValue,
-};
-pub use dynamic_serialization::{
-    serialize_dynamic_data, deserialize_dynamic_data,
+    DynamicType, DynamicTypeError, DynamicTypeKind, EnumDescriptor, EnumLiteralDescriptor,
+    MemberDescriptor, PrimitiveKind, StructDescriptor,
 };
 pub use dynamic_type_support::DynamicTypeSupport;
