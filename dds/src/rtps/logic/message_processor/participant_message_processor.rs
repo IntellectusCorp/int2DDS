@@ -3,9 +3,9 @@
 //! This module provides a trait for handling participant discovery messages
 //! that can be implemented by both SPDP and SEDP logic components.
 
-use std::sync::{Arc, Mutex};
-
 use speedy::{Endianness, Writable};
+use std::net::IpAddr;
+use std::sync::{Arc, Mutex};
 
 use crate::{
     common::builtin::topic::{
@@ -55,7 +55,7 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
     /// Handle discovered participant data (renamed from handle_multicast_spdp_message)
     fn handle_discovered_participant_data(
         &self,
-        spdp_discovered_participant_data: SPDPDiscoveredParticipantData,
+        mut spdp_discovered_participant_data: SPDPDiscoveredParticipantData,
     ) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
 
@@ -82,9 +82,9 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
             return Ok(());
         }
 
-        // Check for duplicate participant
-        let result = match participant.remote_participant_proxy_datas().lock() {
-            Ok(remote_participant_datas) => {
+        // Check if this participant data already exists
+        let is_exist = participant.remote_participant_proxy_datas().lock().is_ok_and(
+            |remote_participant_datas| {
                 remote_participant_datas.iter().any(|remote_participant_data| {
                     if remote_participant_data.participant_guid() == participant_guid {
                         log::debug!(
@@ -97,16 +97,15 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
                         false
                     }
                 })
-            }
-            Err(e) => {
-                log::error!("Failed to lock remote_participant_datas: {:?}", e);
-                false
-            }
-        };
+            },
+        );
 
-        if result {
+        if is_exist {
             return Ok(());
         }
+
+        // Check if remote participant is from the same machine and set locators to localhost if so
+        self.set_address_to_localhost_if_same_machine(&mut spdp_discovered_participant_data)?;
 
         // Setup builtin endpoints based on available endpoints
         self.match_builtin_endpoints(&spdp_discovered_participant_data)?;
@@ -412,5 +411,47 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
         }
 
         Ok(())
+    }
+
+    fn set_address_to_localhost_if_same_machine(
+        &self,
+        spdp_discovered_participant_data: &mut SPDPDiscoveredParticipantData,
+    ) -> RtpsResult<()> {
+        let remote_ip_address = spdp_discovered_participant_data
+            .default_unicast_locator_list()
+            .first()
+            .map(|locator| locator.to_ip_v4_addr());
+
+        if let Some(remote_ip_address) = remote_ip_address {
+            let is_same_machine = Self::is_same_machine(&IpAddr::V4(remote_ip_address));
+            if is_same_machine {
+                spdp_discovered_participant_data.set_unicast_locators_to_localhost()?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Check if the given IP address belongs to the same machine
+    fn is_same_machine(remote_ip: &IpAddr) -> bool {
+        if remote_ip.is_loopback() {
+            return true;
+        }
+
+        // Same machine if it matches one of my NIC IPs
+        Self::get_local_ips().contains(remote_ip)
+    }
+
+    /// Get local machine IP addresses
+    fn get_local_ips() -> Vec<IpAddr> {
+        let mut ips = Vec::new();
+
+        if let Ok(ifaces) = get_if_addrs::get_if_addrs() {
+            for iface in ifaces {
+                ips.push(iface.ip());
+            }
+        }
+
+        ips
     }
 }
