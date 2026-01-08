@@ -8,9 +8,6 @@ use std::sync::{Arc, OnceLock, RwLock, Weak};
 
 use log::debug;
 
-use std::net::Ipv4Addr;
-use std::str::FromStr;
-
 use crate::{
     common::{
         builtin::topic::{
@@ -53,7 +50,7 @@ use crate::{
         messages::sedp_message::SEDPMessage,
         service::background_service::BackgroundService,
         task::{sending_handler::SendingHandler, thread_monitor::ThreadMonitor},
-        transport::{get_transport_type, port_manager::PortManager, socket::Socket, TransportType},
+        transport::socket::Socket,
     },
     utils::timer::timer_handler::TimerHandler,
 };
@@ -180,28 +177,10 @@ impl DcpsBridge {
 
     fn default_endpoint_info(&self) -> RtpsResult<(Vec<Locator>, Vec<Locator>)> {
         let local_participant_data = self.participant.local_participant_proxy_data();
-        let mut unicast_locator_list =
-            local_participant_data.default_unicast_locator_list().clone();
-        let multicast_locator_list =
-            local_participant_data.default_multicast_locator_list().clone();
-
-        // If unicast locator list is empty, calculate it from participant info
-        if unicast_locator_list.is_empty() {
-            if let Ok(ip) = Ipv4Addr::from_str(&self.participant.working_ip()) {
-                let port = PortManager::get_user_traffic_unicast_port(
-                    self.domain_id,
-                    self.socket.participant_id(),
-                );
-                // Use SHM locator if transport type is SHM, otherwise use UDP
-                let locator = match get_transport_type() {
-                    TransportType::SHM => Locator::from_shm(&ip, port as u32),
-                    _ => Locator::from_ip_v4_addr_and_port(&ip, port as u32),
-                };
-                unicast_locator_list.push(locator);
-            }
-        }
-
-        Ok((unicast_locator_list, multicast_locator_list))
+        Ok((
+            local_participant_data.default_unicast_locator_list().clone(),
+            local_participant_data.default_multicast_locator_list().clone(),
+        ))
     }
 
     #[allow(clippy::type_complexity)]
