@@ -44,6 +44,7 @@ pub enum Int2DdsQosPolicyId {
     Lifespan = 21,
     DurabilityService = 22,
     DataRepresentation = 23,
+    TypeConsistencyEnforcement = 24,
 }
 
 impl From<QosPolicyId> for Int2DdsQosPolicyId {
@@ -73,6 +74,7 @@ impl From<QosPolicyId> for Int2DdsQosPolicyId {
             QosPolicyId::Lifespan => Self::Lifespan,
             QosPolicyId::DurabilityService => Self::DurabilityService,
             QosPolicyId::DataRepresentation => Self::DataRepresentation,
+            QosPolicyId::TypeConsistencyEnforcement => Self::TypeConsistencyEnforcement,
         }
     }
 }

@@ -119,6 +119,10 @@ pub fn derive_struct_impl(
 
     let additional_derives = generate_additional_derives(input, name, type_config);
 
+    // Generate HasTypeObject implementation for XTypes support
+    let has_type_object_impl =
+        crate::codegen::type_object::generate_has_type_object_impl(name, fields, type_config);
+
     quote! {
         #type_support_struct
         #type_support_impl
@@ -127,6 +131,7 @@ pub fn derive_struct_impl(
         #cdr_deserialize_impl
         #xcdr_serialize_impl
         #xcdr_deserialize_impl
+        #has_type_object_impl
         #additional_derives
     }
 }
@@ -452,6 +457,16 @@ fn generate_unified_type_support_impl(
                 } else {
                     Err(#crate_path::dcps::core::error::DdsError::BadParameter)
                 }
+            }
+
+            fn get_type_identifier(&self) -> Option<#crate_path::xtypes::TypeIdentifier> {
+                Some(<#name as #crate_path::xtypes::HasTypeObject>::type_identifier())
+            }
+
+            fn get_type_object(&self) -> Option<#crate_path::xtypes::TypeObject> {
+                Some(#crate_path::xtypes::TypeObject::Complete(
+                    <#name as #crate_path::xtypes::HasTypeObject>::complete_type_object()
+                ))
             }
 
             #field_access_impl
@@ -991,12 +1006,20 @@ fn generate_mutable_deserialize_impl(
         .map(|field| {
             let field_name = field.ident.as_ref().unwrap();
             let field_name_str = field_name.to_string();
+            let field_type = &field.ty;
             let field_config = parse_field_attributes(field);
 
             if field_config.optional {
                 // Optional fields: already Option<T>, just use the value
                 quote! {
                     #field_name
+                }
+            } else if let Some(ref default_lit) = field_config.default {
+                // Field has @default annotation: use default value if not present
+                let default_value =
+                    crate::codegen::utils::literal_to_tokens(default_lit, field_type);
+                quote! {
+                    #field_name.unwrap_or_else(|| #default_value)
                 }
             } else {
                 // Required fields: must be Some, error if None
@@ -1443,6 +1466,8 @@ fn generate_tuple_type_support_impl(
                     Err(#crate_path::dcps::core::error::DdsError::BadParameter)
                 }
             }
+
+            // Tuple structs don't have HasTypeObject, use default (None)
 
             #field_access_impl
         }
