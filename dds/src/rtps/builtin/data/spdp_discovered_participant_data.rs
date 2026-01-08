@@ -253,4 +253,16 @@ impl SPDPDiscoveredParticipantData {
             .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))? += 1;
         Ok(())
     }
+
+    pub(crate) fn set_unicast_locators_to_localhost(&mut self) -> RtpsResult<()> {
+        for locator in &mut self.metatraffic_unicast_locator_list {
+            locator.set_address_to_localhost()?;
+        }
+
+        for locator in &mut self.default_unicast_locator_list {
+            locator.set_address_to_localhost()?;
+        }
+
+        Ok(())
+    }
 }
