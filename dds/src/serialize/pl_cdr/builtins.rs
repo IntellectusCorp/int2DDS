@@ -5,7 +5,8 @@ use crate::{
         DurabilityQosPolicy, DurabilityServiceQosPolicy, GroupDataQosPolicy,
         LatencyBudgetQosPolicy, LifespanQosPolicy, LivelinessQosPolicy, OwnershipQosPolicy,
         OwnershipStrengthQosPolicy, PartitionQosPolicy, PresentationQosPolicy,
-        ReliabilityQosPolicy, TimeBasedFilterQosPolicy, TopicDataQosPolicy, UserDataQosPolicy,
+        ReliabilityQosPolicy, TimeBasedFilterQosPolicy, TopicDataQosPolicy,
+        TypeConsistencyEnforcementQosPolicy, UserDataQosPolicy,
     },
     rtps::common::{
         guid::Guid,
@@ -13,6 +14,7 @@ use crate::{
         parameters::{ParameterId, ParameterValue, PlCdrParameter},
         types::SerializedData,
     },
+    xtypes::{TypeIdentifier, TypeObject},
 };
 
 use super::pl_cdr_deserialize::PlCdrParser;
@@ -62,6 +64,11 @@ pub struct ParsedBuiltinTopicData {
     // Optional fields
     pub key_hash: Option<[u8; 16]>,
     pub type_max_size_serialized: Option<u32>,
+
+    // DDS-XTypes fields
+    pub type_identifier: Option<TypeIdentifier>,
+    pub type_object: Option<TypeObject>,
+    pub type_consistency_enforcement: Option<TypeConsistencyEnforcementQosPolicy>,
 }
 
 impl ParsedBuiltinTopicData {
@@ -109,6 +116,9 @@ impl ParsedBuiltinTopicData {
             multicast_locator_list: data.multicast_locator_list(),
             key_hash: None,
             type_max_size_serialized: None,
+            type_identifier: data.type_identifier().cloned(),
+            type_object: data.type_object().cloned(),
+            type_consistency_enforcement: None,
         }
     }
 
@@ -143,6 +153,9 @@ impl ParsedBuiltinTopicData {
             multicast_locator_list: data.multicast_locator_list(),
             key_hash: None,
             type_max_size_serialized: None,
+            type_identifier: data.type_identifier().cloned(),
+            type_object: data.type_object().cloned(),
+            type_consistency_enforcement: Some(*data.type_consistency_enforcement()),
         }
     }
 
@@ -298,6 +311,21 @@ impl ParsedBuiltinTopicData {
             ParameterId::PidDataRepresentation => {
                 if let ParameterValue::DataRepresentation(data_rep) = parameter.value {
                     self.data_representation = Some(data_rep);
+                }
+            }
+            ParameterId::PidTypeInformation => {
+                if let ParameterValue::TypeInformation(type_id) = parameter.value {
+                    self.type_identifier = Some(type_id);
+                }
+            }
+            ParameterId::PidTypeConsistencyEnforcement => {
+                if let ParameterValue::TypeConsistencyEnforcement(tce) = parameter.value {
+                    self.type_consistency_enforcement = Some(tce);
+                }
+            }
+            ParameterId::PidTypeObject => {
+                if let ParameterValue::TypeObject(type_obj) = parameter.value {
+                    self.type_object = Some(type_obj);
                 }
             }
             _ => {

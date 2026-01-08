@@ -88,6 +88,14 @@ path = "examples/qos_profile/publisher.rs"
 name = "qos_profile_subscriber"
 path = "examples/qos_profile/subscriber.rs"
 
+[[example]]
+name = "xtypes_publisher"
+path = "examples/xtypes/xtypes_publisher.rs"
+
+[[example]]
+name = "xtypes_subscriber"
+path = "examples/xtypes/xtypes_subscriber.rs"
+
 [dev-dependencies]
 husky-rs = "0.1.5"
 criterion = { version = "0.7.0", features = ["html_reports"] }
