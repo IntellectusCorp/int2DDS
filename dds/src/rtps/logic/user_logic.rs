@@ -339,6 +339,7 @@ impl UserLogic {
                 }
 
                 // RTPS 2.5 - 8.4.9.1.4 This may happen when a CacheChanges is removed from the Writer cache
+                // GAP only sent on reliable communication for efficiency
                 if reader_proxy.highest_sent_change_sn() != SequenceNumber::UNKNOWN
                     && a_change_seq_num > reader_proxy.highest_sent_change_sn() + 1
                     && reader_proxy.is_reliable()
