@@ -816,8 +816,18 @@ impl UserLogic {
                     writer_proxy.add_buffered_change(change);
                 }
             }
-        } else if let Some(_stateless_reader) = reader.as_any().downcast_ref::<StatelessReader>() {
-            self.add_change_to_reader_cache_and_notify(reader, vec![change])?;
+        } else if let Some(stateless_reader) = reader.as_any().downcast_ref::<StatelessReader>() {
+            if let Ok(mut matched_writers) = stateless_reader.remote_writer_infos().lock() {
+                let remote_writer_info = matched_writers
+                    .iter_mut()
+                    .find(|info| info.remote_writer_guid() == remote_guid)
+                    .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
+
+                if change.sequence_number() >= remote_writer_info.expected_sn() {
+                    self.add_change_to_reader_cache_and_notify(reader, vec![change.clone()])?;
+                    remote_writer_info.set_expected_sn(change.sequence_number().add(1).clone());
+                }
+            }
         }
 
         Ok(())
