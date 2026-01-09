@@ -462,6 +462,7 @@ impl UserLogic {
         })?;
 
         for reader_locator in reader_locators_guard.iter_mut() {
+            // Send changes that have not been sent to this reader until none remain
             while let Some(next_sn) = cache_guard
                 .get_changes()
                 .iter()
