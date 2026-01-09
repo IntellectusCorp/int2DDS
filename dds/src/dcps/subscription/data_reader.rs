@@ -363,6 +363,14 @@ impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
                 .set_type_name(topic_description.get_type_name().to_string());
             subscription_builtin_topic_data.set_endpoint_guid(self.guid);
 
+            // Set TypeIdentifier and TypeObject for DDS-XTypes discovery
+            if let Some(type_id) = self.type_support.get_type_identifier() {
+                subscription_builtin_topic_data.set_type_identifier(Some(type_id));
+            }
+            if let Some(type_obj) = self.type_support.get_type_object() {
+                subscription_builtin_topic_data.set_type_object(Some(type_obj));
+            }
+
             let status_callback = self
                 .status_callback
                 .as_ref()
@@ -422,6 +430,15 @@ impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
         subscription_builtin_topic_data.set_topic_name(topic.get_name().to_string());
         subscription_builtin_topic_data.set_type_name(topic.get_type_name().to_string());
         subscription_builtin_topic_data.set_endpoint_guid(self.guid);
+
+        // Set TypeIdentifier and TypeObject for DDS-XTypes discovery
+        if let Some(type_id) = self.type_support.get_type_identifier() {
+            subscription_builtin_topic_data.set_type_identifier(Some(type_id));
+        }
+        if let Some(type_obj) = self.type_support.get_type_object() {
+            subscription_builtin_topic_data.set_type_object(Some(type_obj));
+        }
+
         let rtps_reader = self.get_rtps_reader()?;
         rtps_reader
             .set_subscription_builtin_topic_data(subscription_builtin_topic_data.clone())
