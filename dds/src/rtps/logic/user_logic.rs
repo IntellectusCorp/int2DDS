@@ -523,6 +523,7 @@ impl UserLogic {
                             warn!("Failed to send DATA message: {:?}", e);
                         }
 
+                        // Update highest sent change SN after sending
                         reader_locator.set_highest_sent_change_sn(change_sn);
                     }
                 }
