@@ -40,6 +40,7 @@ use crate::{
     domain::domain_participant::DomainParticipant,
     rtps::common::types::SerializedData,
     topic::sql::ast::Parameter,
+    xtypes::{TypeIdentifier, TypeObject},
 };
 
 pub use int2dds_derive::DdsType;
@@ -128,6 +129,18 @@ pub trait TypeSupport: Send + Sync + 'static {
     /// Get serialized size estimate for the type
     // Todo:()
     fn get_serialized_size_bound(&self) -> Option<usize> {
+        None
+    }
+
+    /// Get the TypeIdentifier for this type (DDS-XTypes).
+    /// Returns None if the type does not support XTypes.
+    fn get_type_identifier(&self) -> Option<TypeIdentifier> {
+        None
+    }
+
+    /// Get the TypeObject for this type (DDS-XTypes).
+    /// Returns None if the type does not support XTypes.
+    fn get_type_object(&self) -> Option<TypeObject> {
         None
     }
 

@@ -14,6 +14,7 @@ use crate::{
     publication::qos::{DataWriterQos, PublisherQos},
     rtps::common::{guid::Guid, locator::Locator, types::SerializedData},
     topic::{qos::TopicQos, type_support::DdsType},
+    xtypes::{TypeIdentifier, TypeObject},
 };
 
 use super::builtin_topic_key::BuiltinTopicKey;
@@ -46,6 +47,8 @@ pub struct PublicationBuiltinTopicData {
     unicast_locator_list: Vec<Locator>,
     multicast_locator_list: Vec<Locator>,
     data_representation: DataRepresentationQosPolicy,
+    type_identifier: Option<TypeIdentifier>,
+    type_object: Option<TypeObject>,
 }
 
 impl PublicationBuiltinTopicData {
@@ -82,6 +85,8 @@ impl PublicationBuiltinTopicData {
             unicast_locator_list: Vec::new(),
             multicast_locator_list: Vec::new(),
             data_representation: datawriter_qos.data_representation.clone(),
+            type_identifier: None,
+            type_object: None,
         }
     }
 
@@ -252,6 +257,22 @@ impl PublicationBuiltinTopicData {
         &self.data_representation
     }
 
+    pub fn type_identifier(&self) -> Option<&TypeIdentifier> {
+        self.type_identifier.as_ref()
+    }
+
+    pub fn set_type_identifier(&mut self, type_id: Option<TypeIdentifier>) {
+        self.type_identifier = type_id;
+    }
+
+    pub fn type_object(&self) -> Option<&TypeObject> {
+        self.type_object.as_ref()
+    }
+
+    pub fn set_type_object(&mut self, type_obj: Option<TypeObject>) {
+        self.type_object = type_obj;
+    }
+
     pub fn convert_u8_to_i32_array(data: [u8; 12]) -> [i32; 3] {
         [
             i32::from_be_bytes([data[0], data[1], data[2], data[3]]),
@@ -308,6 +329,10 @@ impl PublicationBuiltinTopicData {
         publication_data.type_max_size_serialized = parsed.type_max_size_serialized;
         publication_data.unicast_locator_list = parsed.unicast_locator_list;
         publication_data.multicast_locator_list = parsed.multicast_locator_list;
+
+        // DDS-XTypes fields
+        publication_data.type_identifier = parsed.type_identifier;
+        publication_data.type_object = parsed.type_object;
 
         Ok(publication_data)
     }

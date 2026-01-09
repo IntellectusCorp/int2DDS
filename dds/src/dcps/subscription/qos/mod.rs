@@ -31,7 +31,7 @@ use crate::{
         LatencyBudgetQosPolicy, LivelinessQosPolicy, OwnershipQosPolicy, PartitionQosPolicy,
         PresentationQosPolicy, Qos, ReaderDataLifecycleQosPolicy, ReliabilityQosPolicy,
         ReliabilityQosPolicyKind, ResourceLimitsQosPolicy, TimeBasedFilterQosPolicy,
-        UserDataQosPolicy,
+        TypeConsistencyEnforcementQosPolicy, UserDataQosPolicy,
     },
 };
 use const_default::ConstDefault;
@@ -55,6 +55,7 @@ pub struct DataReaderQos {
     pub time_based_filter: TimeBasedFilterQosPolicy,
     pub reader_data_lifecycle: ReaderDataLifecycleQosPolicy,
     pub data_representation: DataRepresentationQosPolicy,
+    pub type_consistency_enforcement: TypeConsistencyEnforcementQosPolicy,
 }
 
 impl Default for DataReaderQos {
@@ -76,6 +77,7 @@ impl Default for DataReaderQos {
             time_based_filter: TimeBasedFilterQosPolicy::default(),
             reader_data_lifecycle: ReaderDataLifecycleQosPolicy::default(),
             data_representation: DataRepresentationQosPolicy::default(),
+            type_consistency_enforcement: TypeConsistencyEnforcementQosPolicy::default(),
         }
     }
 }
@@ -98,6 +100,7 @@ impl ConstDefault for DataReaderQos {
         time_based_filter: TimeBasedFilterQosPolicy::DEFAULT,
         reader_data_lifecycle: ReaderDataLifecycleQosPolicy::DEFAULT,
         data_representation: DataRepresentationQosPolicy::DEFAULT,
+        type_consistency_enforcement: TypeConsistencyEnforcementQosPolicy::DEFAULT,
     };
 }
 
