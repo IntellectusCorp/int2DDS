@@ -80,7 +80,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Create Topic with type descriptor (must match waitset_subscriber)
-    ret = int2dds_create_topic(participant, "HelloWorldTopic", type_desc, NULL, &topic);
+    ret = int2dds_create_topic(participant, "HelloWorldTopic", "HelloWorldType", type_desc, NULL, &topic);
     if (ret != INT2DDS_RET_OK) {
         printf("Failed to create topic: %d\n", ret);
         goto cleanup;

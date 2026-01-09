@@ -31,26 +31,38 @@ use super::{error::*, qos::Int2DdsTopicQos, types::*};
 /// # Safety
 /// - `participant` must be a valid participant
 /// - `topic_name` must be a valid null-terminated C string
-/// - `type_desc` must be a valid type descriptor
+/// - `dds_type_name` must be a valid null-terminated C string (DDS registration name)
+/// - `type_desc` must be a valid type descriptor (contains struct name for XTypes)
 /// - `qos` can be null for default QoS
 /// - `topic_out` must be a valid pointer to a null pointer
 /// - The returned topic must be freed with `int2dds_delete_topic`
+///
+/// # Note
+/// - `type_desc->type_name`: Used for TypeObject hash calculation (XTypes compatibility)
+/// - `dds_type_name`: Used for DDS topic type registration and matching
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_create_topic(
     participant: *const Int2DdsParticipant,
     topic_name: *const std::os::raw::c_char,
+    dds_type_name: *const std::os::raw::c_char,
     type_desc: *const Int2DdsTypeDescriptor,
     qos: *const Int2DdsTopicQos,
     topic_out: *mut *mut Int2DdsTopic,
 ) -> Int2DdsRet {
     check_null!(participant);
     check_null!(topic_name);
+    check_null!(dds_type_name);
     check_null!(type_desc);
     check_null!(topic_out);
 
     let participant_ref = &*participant;
 
     let topic_name_str = match CStr::from_ptr(topic_name).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    let dds_type_name_str = match CStr::from_ptr(dds_type_name).to_str() {
         Ok(s) => s,
         Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
     };
@@ -67,23 +79,25 @@ pub unsafe extern "C" fn int2dds_create_topic(
     });
 
     // Create DynamicTypeSupport
+    // TypeSupport uses type_descriptor.type_name for TypeObject hash calculation (XTypes)
     let type_support = Arc::new(DynamicTypeSupport::new(type_descriptor.clone()));
-    let type_name = &type_descriptor.type_name;
 
     // Register the DynamicTypeSupport with the participant BEFORE creating the topic.
+    // Use dds_type_name for DDS registration (topic matching)
     // This ensures the DDS core uses our TypeSupport for serialization/deserialization
     // instead of the placeholder DynamicTypeSupportDefault.
     ffi_try!(participant_ref
         .inner
-        .register_type_support(type_support.clone() as Arc<dyn TypeSupport>, type_name));
+        .register_type_support(type_support.clone() as Arc<dyn TypeSupport>, dds_type_name_str));
 
     let topic_qos = if qos.is_null() { TopicQos::default() } else { (*qos).inner.clone() };
 
     // Create topic using Int2DdsData type
+    // Use dds_type_name for DDS topic registration
     // The registered DynamicTypeSupport will handle serialization when writing/reading
     let topic = ffi_try!(participant_ref.inner.create_topic::<Int2DdsData>(
         topic_name_str,
-        type_name,
+        dds_type_name_str,
         topic_qos,
         None,
         StatusMask::default()

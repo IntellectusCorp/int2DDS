@@ -120,13 +120,13 @@ int main(int argc, char* argv[]) {
     if (ret != INT2DDS_RET_OK) goto cleanup;
 
     // Create topics with type descriptors
-    ret = int2dds_create_topic(pub_participant, "SameDomainTopic", pub_type_desc, NULL, &pub_topic);
+    ret = int2dds_create_topic(pub_participant, "SameDomainTopic", "SameDomainType", pub_type_desc, NULL, &pub_topic);
     if (ret != INT2DDS_RET_OK) {
         printf("Failed to create publisher topic: %d\n", ret);
         goto cleanup;
     }
 
-    ret = int2dds_create_topic(sub_participant, "SameDomainTopic", sub_type_desc, NULL, &sub_topic);
+    ret = int2dds_create_topic(sub_participant, "SameDomainTopic", "SameDomainType", sub_type_desc, NULL, &sub_topic);
     if (ret != INT2DDS_RET_OK) {
         printf("Failed to create subscriber topic: %d\n", ret);
         goto cleanup;
