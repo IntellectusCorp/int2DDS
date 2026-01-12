@@ -350,6 +350,34 @@ impl PlCdrSerializer {
                     buffer.extend(std::iter::repeat_n(0u8, padding));
                 }
             }
+            ParameterValue::TypeInformation(type_id) => {
+                // Use TypeIdentifier's XCDR2 serialization
+                buffer.extend_from_slice(&type_id.serialize());
+                // CDR alignment - pad to 4-byte boundary if needed
+                let padding = (4 - (buffer.len() % 4)) % 4;
+                if padding > 0 {
+                    buffer.extend(std::iter::repeat_n(0u8, padding));
+                }
+            }
+            ParameterValue::TypeConsistencyEnforcement(tce) => {
+                // TypeConsistencyEnforcementQosPolicy: kind(2) + 5 bools(5) + padding(1)
+                self.write_u16(&mut buffer, tce.kind as u16);
+                buffer.push(if tce.ignore_sequence_bounds { 1 } else { 0 });
+                buffer.push(if tce.ignore_string_bounds { 1 } else { 0 });
+                buffer.push(if tce.ignore_member_names { 1 } else { 0 });
+                buffer.push(if tce.prevent_type_widening { 1 } else { 0 });
+                buffer.push(if tce.force_type_validation { 1 } else { 0 });
+                buffer.push(0); // padding to 8 bytes total
+            }
+            ParameterValue::TypeObject(type_obj) => {
+                // TypeObject: uses XCDR2 serialization (EK_MINIMAL/EK_COMPLETE marker included)
+                buffer.extend_from_slice(&type_obj.serialize());
+                // CDR alignment - pad to 4-byte boundary if needed
+                let padding = (4 - (buffer.len() % 4)) % 4;
+                if padding > 0 {
+                    buffer.extend(std::iter::repeat_n(0u8, padding));
+                }
+            }
             ParameterValue::ContentFilterProperty(cfp) => {
                 self.write_string(&mut buffer, &cfp.content_filtered_topic_name);
                 self.write_string(&mut buffer, &cfp.related_topic_name);
@@ -978,6 +1006,30 @@ impl super::ParsedBuiltinTopicData {
                     value: ParameterValue::DataRepresentation(data_representation.clone()),
                 });
             }
+        }
+
+        // TypeIdentifier (DDS-XTypes)
+        if let Some(type_id) = &self.type_identifier {
+            parameters.push(PlCdrParameter {
+                id: ParameterId::PidTypeInformation,
+                value: ParameterValue::TypeInformation(type_id.clone()),
+            });
+        }
+
+        // TypeConsistencyEnforcement (DDS-XTypes, subscription only)
+        if let Some(tce) = &self.type_consistency_enforcement {
+            parameters.push(PlCdrParameter {
+                id: ParameterId::PidTypeConsistencyEnforcement,
+                value: ParameterValue::TypeConsistencyEnforcement(*tce),
+            });
+        }
+
+        // TypeObject (DDS-XTypes)
+        if let Some(type_obj) = &self.type_object {
+            parameters.push(PlCdrParameter {
+                id: ParameterId::PidTypeObject,
+                value: ParameterValue::TypeObject(type_obj.clone()),
+            });
         }
 
         // Serialize parameters to PL-CDR format
