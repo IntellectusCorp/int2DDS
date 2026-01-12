@@ -190,7 +190,7 @@ fn get_feature_lib() -> Option<&'static FeatureLib> {
 ///
 /// Safe wrapper around the FFI function.
 /// If the library is not available, falls back to UDP socket detection method.
-pub fn get_working_ip() -> std::io::Result<String> {
+pub fn get_working_ip() -> std::io::Result<Option<String>> {
     // Try dynamic library first
     if let Some(lib) = get_feature_lib() {
         let mut buffer = [0i8; 64];
@@ -202,26 +202,12 @@ pub fn get_working_ip() -> std::io::Result<String> {
             let cstr = unsafe { CStr::from_ptr(buffer.as_ptr() as *const c_char) };
             let ip = cstr.to_string_lossy().into_owned();
             log::info!("[int2dds_feature] Using IP from library: {}", ip);
-            return Ok(ip);
+            return Ok(Some(ip));
         }
         log::warn!("[int2dds_feature] get_working_ip failed with code {}, using fallback", ret);
     }
 
-    // Fallback: Use UDP socket to detect local IP
-    get_working_ip_fallback()
-}
-
-/// Fallback method to get working IP using UDP socket
-fn get_working_ip_fallback() -> std::io::Result<String> {
-    use std::net::UdpSocket;
-
-    let socket = UdpSocket::bind("0.0.0.0:0")?;
-    socket.connect("8.8.8.8:80")?;
-
-    let local_addr = socket.local_addr()?;
-    let ip = local_addr.ip().to_string();
-    log::info!("[int2dds_feature] Using fallback IP detection: {}", ip);
-    Ok(ip)
+    Ok(None)
 }
 
 /// Get heartbeat period in seconds

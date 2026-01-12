@@ -103,7 +103,7 @@ pub struct Participant {
     remote_subscriptions: Arc<DashMap<String, HashMap<Guid, SubscriptionBuiltinTopicData>>>,
 
     liveliness_monitor: Arc<Mutex<Option<LivelinessMonitor>>>,
-    working_ip: String,
+    working_ips: Vec<String>,
     terminated: Arc<AtomicBool>,
 }
 impl Debug for Participant {
@@ -136,7 +136,7 @@ impl Participant {
     pub(crate) fn new(
         domain_id: DomainId,
         participant_id: ParticipantId,
-        working_ip: String,
+        working_ips: Vec<String>,
     ) -> Self {
         let guid = Guid::new(Guid::generate_unique_guid_prefix(), EntityId::PARTICIPANT);
 
@@ -147,7 +147,7 @@ impl Participant {
         );
 
         Self::init_locators(
-            &working_ip,
+            &working_ips,
             &mut local_participant_proxy_data,
             domain_id,
             participant_id,
@@ -173,7 +173,7 @@ impl Participant {
             current_entity_id: Arc::new(Mutex::new([0, 0, 0])),
             remote_publications: Arc::new(DashMap::new()),
             remote_subscriptions: Arc::new(DashMap::new()),
-            working_ip,
+            working_ips,
             terminated: Arc::new(AtomicBool::new(false)),
             liveliness_monitor: Arc::new(Mutex::new(None)),
         }
@@ -198,55 +198,62 @@ impl Participant {
     }
 
     /// Initialize locators for participant proxy data based on transport type.
+    /// Registers locators for all available NIC IPs.
     fn init_locators(
-        working_ip: &str,
+        working_ips: &Vec<String>,
         local_participant_proxy_data: &mut SPDPDiscoveredParticipantData,
         domain_id: DomainId,
         participant_id: ParticipantId,
     ) {
-        let Ok(ip) = Ipv4Addr::from_str(working_ip) else {
-            return;
-        };
-
         let transport_type = get_transport_type();
         let metatraffic_port =
             PortManager::get_discovery_traffic_unicast_port(domain_id, participant_id) as u32;
         let user_port =
             PortManager::get_user_traffic_unicast_port(domain_id, participant_id) as u32;
 
-        match transport_type {
-            TransportType::UDP => {
-                local_participant_proxy_data.add_metatraffic_unicast_locator(
-                    Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port),
-                );
-                local_participant_proxy_data
-                    .add_default_unicast_locator(Locator::from_ip_v4_addr_and_port(&ip, user_port));
-            }
-            TransportType::TCP => {
-                local_participant_proxy_data
-                    .add_metatraffic_unicast_locator(Locator::from_tcp_v4(ip, metatraffic_port));
-                local_participant_proxy_data
-                    .add_default_unicast_locator(Locator::from_tcp_v4(ip, user_port));
-            }
-            TransportType::Hybrid => {
-                // Add both UDP and TCP locators
-                local_participant_proxy_data.add_metatraffic_unicast_locator(
-                    Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port),
-                );
-                local_participant_proxy_data
-                    .add_default_unicast_locator(Locator::from_ip_v4_addr_and_port(&ip, user_port));
-                local_participant_proxy_data
-                    .add_metatraffic_unicast_locator(Locator::from_tcp_v4(ip, metatraffic_port));
-                local_participant_proxy_data
-                    .add_default_unicast_locator(Locator::from_tcp_v4(ip, user_port));
-            }
-            TransportType::SHM => {
-                // metatraffic uses UDP, default uses SHM
-                local_participant_proxy_data.add_metatraffic_unicast_locator(
-                    Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port),
-                );
-                local_participant_proxy_data
-                    .add_default_unicast_locator(Locator::from_shm(&ip, user_port));
+        for working_ip in working_ips {
+            let Ok(ip) = Ipv4Addr::from_str(working_ip) else {
+                continue;
+            };
+
+            match transport_type {
+                TransportType::UDP => {
+                    local_participant_proxy_data.add_metatraffic_unicast_locator(
+                        Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port),
+                    );
+                    local_participant_proxy_data.add_default_unicast_locator(
+                        Locator::from_ip_v4_addr_and_port(&ip, user_port),
+                    );
+                }
+                TransportType::TCP => {
+                    local_participant_proxy_data.add_metatraffic_unicast_locator(
+                        Locator::from_tcp_v4(ip, metatraffic_port),
+                    );
+                    local_participant_proxy_data
+                        .add_default_unicast_locator(Locator::from_tcp_v4(ip, user_port));
+                }
+                TransportType::Hybrid => {
+                    // Add both UDP and TCP locators
+                    local_participant_proxy_data.add_metatraffic_unicast_locator(
+                        Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port),
+                    );
+                    local_participant_proxy_data.add_default_unicast_locator(
+                        Locator::from_ip_v4_addr_and_port(&ip, user_port),
+                    );
+                    local_participant_proxy_data.add_metatraffic_unicast_locator(
+                        Locator::from_tcp_v4(ip, metatraffic_port),
+                    );
+                    local_participant_proxy_data
+                        .add_default_unicast_locator(Locator::from_tcp_v4(ip, user_port));
+                }
+                TransportType::SHM => {
+                    // metatraffic uses UDP, default uses SHM
+                    local_participant_proxy_data.add_metatraffic_unicast_locator(
+                        Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port),
+                    );
+                    local_participant_proxy_data
+                        .add_default_unicast_locator(Locator::from_shm(&ip, user_port));
+                }
             }
         }
     }
@@ -277,8 +284,8 @@ impl Participant {
         self.remote_subscriptions.clone()
     }
 
-    pub(crate) fn working_ip(&self) -> String {
-        self.working_ip.clone()
+    pub(crate) fn working_ips(&self) -> Vec<String> {
+        self.working_ips.clone()
     }
 
     pub(crate) fn participant_id(&self) -> ParticipantId {
