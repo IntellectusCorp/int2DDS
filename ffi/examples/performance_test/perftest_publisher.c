@@ -446,7 +446,7 @@ static void run_throughput_test(const publisher_args_t *args) {
     }
 
     /* Create topic */
-    ret = int2dds_create_topic(participant, "throughput_test_topic", type_desc, NULL, &topic);
+    ret = int2dds_create_topic(participant, "throughput_test_topic", "ThroughputTestType", type_desc, NULL, &topic);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create topic: %d\n", ret);
         goto cleanup;
@@ -739,13 +739,13 @@ static void run_latency_test(const publisher_args_t *args) {
     }
 
     /* Create topics */
-    ret = int2dds_create_topic(participant, "latency_test_topic", type_desc, NULL, &topic);
+    ret = int2dds_create_topic(participant, "latency_test_topic", "LatencyTestType", type_desc, NULL, &topic);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create topic: %d\n", ret);
         goto cleanup;
     }
 
-    ret = int2dds_create_topic(participant, "latency_test_topic_echo", type_desc, NULL, &echo_topic);
+    ret = int2dds_create_topic(participant, "latency_test_topic_echo", "LatencyTestType", type_desc, NULL, &echo_topic);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create echo topic: %d\n", ret);
         goto cleanup;
@@ -1209,7 +1209,7 @@ static void run_local_latency_test(const publisher_args_t *args) {
     }
 
     /* Create topic */
-    ret = int2dds_create_topic(participant, "local_latency_test_topic", type_desc, NULL, &topic);
+    ret = int2dds_create_topic(participant, "local_latency_test_topic", "LocalLatencyTestType", type_desc, NULL, &topic);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create topic: %d\n", ret);
         goto cleanup;
