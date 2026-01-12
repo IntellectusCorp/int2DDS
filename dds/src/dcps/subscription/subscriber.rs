@@ -28,6 +28,7 @@ use std::{
 use crate::{
     common::instance_handle::InstanceHandle,
     core::error::{DdsError, DdsResult},
+    dcps::topic::type_support::TypeSupport,
     domain::{
         domain_participant::DomainParticipant, domain_participant_factory::DomainParticipantFactory,
     },
@@ -249,8 +250,6 @@ impl Subscriber {
         }
         self.is_deleted()?;
 
-        let _ = self.cleanup_dead_readers();
-
         let type_support =
             self.get_participant()?.find_typesupport(topic_description.get_type_name());
         if type_support.is_none() {
@@ -258,6 +257,20 @@ impl Subscriber {
         }
         let type_support =
             type_support.ok_or(DdsError::Error("TypeSupport not found for Topic".to_string()))?;
+
+        self.create_datareader_impl(type_support, topic_description, qos, listener, mask)
+    }
+
+    /// Internal implementation for creating a DataReader with a provided TypeSupport.
+    fn create_datareader_impl<Foo: DdsType>(
+        &self,
+        type_support: Arc<dyn TypeSupport>,
+        topic_description: &dyn TopicDescription,
+        qos: DataReaderQos,
+        listener: Option<Arc<dyn DataReaderListener<Foo = Foo>>>,
+        mask: StatusMask,
+    ) -> DdsResult<DataReader<Foo>> {
+        let _ = self.cleanup_dead_readers();
 
         qos.is_consistent()?;
 
@@ -362,6 +375,62 @@ impl Subscriber {
         }
         let qos = self.get_datareader_qos_from_profile(qos_path)?;
         self.create_datareader::<Foo>(topic_description, qos, listener, mask)
+    }
+
+    /// Creates a `DataReader` for `DynamicData` using a `DynamicTypeSupport`.
+    ///
+    /// This method is used when the data type is not known at compile time.
+    /// The `DynamicTypeSupport` is typically created from a `TypeObject` received
+    /// during discovery.
+    ///
+    /// # Arguments
+    ///
+    /// * `topic_description` - The topic description to read data from.
+    /// * `type_support` - The `DynamicTypeSupport` describing the data type.
+    /// * `qos` - QoS policies for the DataReader.
+    /// * `listener` - Optional listener for status notifications.
+    /// * `mask` - Status mask indicating which status changes trigger listener callbacks.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use int2dds::xtypes::{DynamicTypeSupport, DynamicData};
+    ///
+    /// // Create DynamicTypeSupport from a TypeObject received during discovery
+    /// let type_support = DynamicTypeSupport::from_type_object(type_object)?;
+    ///
+    /// // Create a DataReader for DynamicData
+    /// let reader = subscriber.create_datareader_dynamic(
+    ///     &topic,
+    ///     Arc::new(type_support),
+    ///     DataReaderQos::default(),
+    ///     None,
+    ///     StatusMask::default(),
+    /// )?;
+    ///
+    /// // Read data
+    /// let samples = reader.take(10)?;
+    /// for sample in samples {
+    ///     if let Some(data) = sample.data() {
+    ///         let id: i32 = data.get("id")?;
+    ///         println!("Received id: {}", id);
+    ///     }
+    /// }
+    /// ```
+    pub fn create_datareader_dynamic(
+        &self,
+        topic_description: &dyn TopicDescription,
+        type_support: Arc<crate::xtypes::DynamicTypeSupport>,
+        qos: DataReaderQos,
+        listener: Option<Arc<dyn DataReaderListener<Foo = crate::xtypes::DynamicData>>>,
+        mask: StatusMask,
+    ) -> DdsResult<DataReader<crate::xtypes::DynamicData>> {
+        if self.is_builtin {
+            return Err(DdsError::PreconditionNotMet);
+        }
+        self.is_deleted()?;
+
+        self.create_datareader_impl(type_support, topic_description, qos, listener, mask)
     }
 
     pub(crate) fn create_builtin_datareader<Foo: DdsType>(

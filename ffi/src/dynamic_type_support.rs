@@ -29,6 +29,12 @@ use int2dds::{
         sql::ast::Parameter,
         type_support::{SerializationFormat, TypeSupport},
     },
+    xtypes::{
+        CollectionElementFlag, CommonStructMember, CompleteMemberDetail, CompleteStructMember,
+        CompleteStructType, EquivalenceKind as XtypesEquivalenceKind, MemberFlag,
+        MinimalStructMember, MinimalStructType, PlainCollectionHeader, TryConstructKind, TypeFlag,
+        TypeIdentifier, TypeObject,
+    },
 };
 
 use crate::data::{FieldValue, Int2DdsData};
@@ -1096,6 +1102,179 @@ impl DynamicTypeSupport {
             }
         }
     }
+
+    // ========================================================================
+    // XTypes TypeObject Generation
+    // ========================================================================
+
+    /// Convert FieldTypeInfo to TypeIdentifier
+    fn field_type_to_type_identifier(field_type: &FieldTypeInfo) -> TypeIdentifier {
+        match field_type {
+            FieldTypeInfo::Bool => TypeIdentifier::Boolean,
+            FieldTypeInfo::Int8 => TypeIdentifier::Int8,
+            FieldTypeInfo::UInt8 => TypeIdentifier::Uint8,
+            FieldTypeInfo::Int16 => TypeIdentifier::Int16,
+            FieldTypeInfo::UInt16 => TypeIdentifier::Uint16,
+            FieldTypeInfo::Int32 => TypeIdentifier::Int32,
+            FieldTypeInfo::UInt32 => TypeIdentifier::Uint32,
+            FieldTypeInfo::Int64 => TypeIdentifier::Int64,
+            FieldTypeInfo::UInt64 => TypeIdentifier::Uint64,
+            FieldTypeInfo::Float32 => TypeIdentifier::Float32,
+            FieldTypeInfo::Float64 => TypeIdentifier::Float64,
+            FieldTypeInfo::String { max_length } => {
+                if *max_length == 0 || *max_length == u32::MAX {
+                    TypeIdentifier::String8
+                } else if *max_length <= 255 {
+                    TypeIdentifier::String8Small { bound: *max_length as u8 }
+                } else {
+                    TypeIdentifier::String8Large { bound: *max_length }
+                }
+            }
+            FieldTypeInfo::Bytes { max_length } => {
+                // Bytes are serialized as octet sequence
+                let header = PlainCollectionHeader {
+                    equiv_kind: XtypesEquivalenceKind::Minimal,
+                    element_flags: CollectionElementFlag(0),
+                };
+                if *max_length <= 255 {
+                    TypeIdentifier::PlainSequenceSmall {
+                        header,
+                        bound: *max_length as u8,
+                        element_identifier: Box::new(TypeIdentifier::Uint8),
+                    }
+                } else {
+                    TypeIdentifier::PlainSequenceLarge {
+                        header,
+                        bound: *max_length,
+                        element_identifier: Box::new(TypeIdentifier::Uint8),
+                    }
+                }
+            }
+            FieldTypeInfo::Sequence { element_type, max_length } => {
+                let header = PlainCollectionHeader {
+                    equiv_kind: XtypesEquivalenceKind::Minimal,
+                    element_flags: CollectionElementFlag(0),
+                };
+                let element_id = Self::field_type_to_type_identifier(element_type);
+                if *max_length <= 255 {
+                    TypeIdentifier::PlainSequenceSmall {
+                        header,
+                        bound: *max_length as u8,
+                        element_identifier: Box::new(element_id),
+                    }
+                } else {
+                    TypeIdentifier::PlainSequenceLarge {
+                        header,
+                        bound: *max_length,
+                        element_identifier: Box::new(element_id),
+                    }
+                }
+            }
+            FieldTypeInfo::Array { element_type, length } => {
+                let header = PlainCollectionHeader {
+                    equiv_kind: XtypesEquivalenceKind::Minimal,
+                    element_flags: CollectionElementFlag(0),
+                };
+                let element_id = Self::field_type_to_type_identifier(element_type);
+                if *length <= 255 {
+                    TypeIdentifier::PlainArraySmall {
+                        header,
+                        array_bound_seq: vec![*length as u8],
+                        element_identifier: Box::new(element_id),
+                    }
+                } else {
+                    TypeIdentifier::PlainArrayLarge {
+                        header,
+                        array_bound_seq: vec![*length],
+                        element_identifier: Box::new(element_id),
+                    }
+                }
+            }
+            FieldTypeInfo::Struct { descriptor } => {
+                // Nested struct: compute hash from its minimal type
+                let nested_support = DynamicTypeSupport::new(descriptor.clone());
+                let minimal = nested_support.build_minimal_struct_type();
+                TypeIdentifier::MinimalTypeId(minimal.compute_hash())
+            }
+        }
+    }
+
+    /// Build MinimalStructType from descriptor
+    fn build_minimal_struct_type(&self) -> MinimalStructType {
+        let extensibility = match self.descriptor.extensibility {
+            ExtensibilityKind::Final => int2dds::xtypes::ExtensibilityKind::Final,
+            ExtensibilityKind::Appendable => int2dds::xtypes::ExtensibilityKind::Appendable,
+            ExtensibilityKind::Mutable => int2dds::xtypes::ExtensibilityKind::Mutable,
+        };
+        let type_flags = TypeFlag::new(extensibility, false, false);
+        let mut minimal = MinimalStructType::new(type_flags, None);
+
+        for field in &self.descriptor.fields {
+            let member_flags = MemberFlag::new(
+                TryConstructKind::Discard,
+                false,             // is_external
+                field.is_optional, // is_optional
+                false,             // is_must_understand
+                field.is_key,      // is_key
+                false,             // is_default
+            );
+            let type_id = Self::field_type_to_type_identifier(&field.field_type);
+            let member =
+                MinimalStructMember::new(field.member_id, member_flags, type_id, &field.name);
+            minimal.add_member(member);
+        }
+
+        minimal
+    }
+
+    /// Build CompleteStructType from descriptor
+    fn build_complete_struct_type(&self) -> CompleteStructType {
+        let extensibility = match self.descriptor.extensibility {
+            ExtensibilityKind::Final => int2dds::xtypes::ExtensibilityKind::Final,
+            ExtensibilityKind::Appendable => int2dds::xtypes::ExtensibilityKind::Appendable,
+            ExtensibilityKind::Mutable => int2dds::xtypes::ExtensibilityKind::Mutable,
+        };
+        let type_flags = TypeFlag::new(extensibility, false, false);
+        let mut complete =
+            CompleteStructType::new(type_flags, self.descriptor.type_name.clone(), None);
+
+        for field in &self.descriptor.fields {
+            let member_flags = MemberFlag::new(
+                TryConstructKind::Discard,
+                false,
+                field.is_optional,
+                false,
+                field.is_key,
+                false,
+            );
+            let type_id = Self::field_type_to_type_identifier(&field.field_type);
+            let common = CommonStructMember {
+                member_id: field.member_id,
+                member_flags,
+                member_type_id: type_id,
+            };
+            let detail = CompleteMemberDetail {
+                name: field.name.clone(),
+                ann_builtin: None,
+                ann_custom: Vec::new(),
+            };
+            complete.add_member(CompleteStructMember { common, detail });
+        }
+
+        complete
+    }
+
+    /// Build TypeObject from descriptor (uses CompleteTypeObject for XTypes compatibility)
+    pub fn build_type_object(&self) -> TypeObject {
+        let complete = self.build_complete_struct_type();
+        TypeObject::Complete(int2dds::xtypes::CompleteTypeObject::Struct(complete))
+    }
+
+    /// Build TypeIdentifier from descriptor (uses CompleteTypeObject hash for consistency)
+    pub fn build_type_identifier(&self) -> TypeIdentifier {
+        let type_obj = self.build_type_object();
+        TypeIdentifier::CompleteTypeId(type_obj.compute_hash())
+    }
 }
 
 impl TypeSupport for DynamicTypeSupport {
@@ -1243,6 +1422,14 @@ impl TypeSupport for DynamicTypeSupport {
 
     fn get_extensibility_kind(&self) -> ExtensibilityKind {
         self.descriptor.extensibility
+    }
+
+    fn get_type_identifier(&self) -> Option<TypeIdentifier> {
+        Some(self.build_type_identifier())
+    }
+
+    fn get_type_object(&self) -> Option<TypeObject> {
+        Some(self.build_type_object())
     }
 }
 
