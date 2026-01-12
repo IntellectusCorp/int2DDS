@@ -140,61 +140,18 @@ impl Participant {
     ) -> Self {
         let guid = Guid::new(Guid::generate_unique_guid_prefix(), EntityId::PARTICIPANT);
 
-        // Create SPDPDiscoveredParticipantData and set locators before wrapping in Arc
         let mut local_participant_proxy_data = SPDPDiscoveredParticipantData::new(
             domain_id,
             guid.prefix(),
             Participant::init_builtin_endpoints(),
         );
 
-        // Initialize locators based on transport type
-        if let Ok(ip) = Ipv4Addr::from_str(&working_ip) {
-            let transport_type = get_transport_type();
-            let metatraffic_port =
-                PortManager::get_discovery_traffic_unicast_port(domain_id, participant_id) as u32;
-            let user_port =
-                PortManager::get_user_traffic_unicast_port(domain_id, participant_id) as u32;
-
-            match transport_type {
-                TransportType::UDP => {
-                    local_participant_proxy_data.add_metatraffic_unicast_locator(
-                        Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port),
-                    );
-                    local_participant_proxy_data.add_default_unicast_locator(
-                        Locator::from_ip_v4_addr_and_port(&ip, user_port),
-                    );
-                }
-                TransportType::TCP => {
-                    local_participant_proxy_data.add_metatraffic_unicast_locator(
-                        Locator::from_tcp_v4(ip, metatraffic_port),
-                    );
-                    local_participant_proxy_data
-                        .add_default_unicast_locator(Locator::from_tcp_v4(ip, user_port));
-                }
-                TransportType::Hybrid => {
-                    // Add both UDP and TCP locators
-                    local_participant_proxy_data.add_metatraffic_unicast_locator(
-                        Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port),
-                    );
-                    local_participant_proxy_data.add_default_unicast_locator(
-                        Locator::from_ip_v4_addr_and_port(&ip, user_port),
-                    );
-                    local_participant_proxy_data.add_metatraffic_unicast_locator(
-                        Locator::from_tcp_v4(ip, metatraffic_port),
-                    );
-                    local_participant_proxy_data
-                        .add_default_unicast_locator(Locator::from_tcp_v4(ip, user_port));
-                }
-                TransportType::SHM => {
-                    // metatraffic uses UDP, default uses SHM
-                    local_participant_proxy_data.add_metatraffic_unicast_locator(
-                        Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port),
-                    );
-                    local_participant_proxy_data
-                        .add_default_unicast_locator(Locator::from_shm(&ip, user_port));
-                }
-            }
-        }
+        Self::init_locators(
+            &working_ip,
+            &mut local_participant_proxy_data,
+            domain_id,
+            participant_id,
+        );
 
         let local_participant_proxy_data = Arc::new(local_participant_proxy_data);
         let builtin_endpoints = Arc::new(BuiltinEndpoints::new(guid));
@@ -238,6 +195,60 @@ impl Participant {
         endpointset.add(BuiltinEndpointFlag::DISC_BUILTIN_ENDPOINT_TOPICS_ANNOUNCER);
         endpointset.add(BuiltinEndpointFlag::DISC_BUILTIN_ENDPOINT_TOPICS_DETECTOR);
         endpointset
+    }
+
+    /// Initialize locators for participant proxy data based on transport type.
+    fn init_locators(
+        working_ip: &str,
+        local_participant_proxy_data: &mut SPDPDiscoveredParticipantData,
+        domain_id: DomainId,
+        participant_id: ParticipantId,
+    ) {
+        let Ok(ip) = Ipv4Addr::from_str(working_ip) else {
+            return;
+        };
+
+        let transport_type = get_transport_type();
+        let metatraffic_port =
+            PortManager::get_discovery_traffic_unicast_port(domain_id, participant_id) as u32;
+        let user_port =
+            PortManager::get_user_traffic_unicast_port(domain_id, participant_id) as u32;
+
+        match transport_type {
+            TransportType::UDP => {
+                local_participant_proxy_data.add_metatraffic_unicast_locator(
+                    Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port),
+                );
+                local_participant_proxy_data
+                    .add_default_unicast_locator(Locator::from_ip_v4_addr_and_port(&ip, user_port));
+            }
+            TransportType::TCP => {
+                local_participant_proxy_data
+                    .add_metatraffic_unicast_locator(Locator::from_tcp_v4(ip, metatraffic_port));
+                local_participant_proxy_data
+                    .add_default_unicast_locator(Locator::from_tcp_v4(ip, user_port));
+            }
+            TransportType::Hybrid => {
+                // Add both UDP and TCP locators
+                local_participant_proxy_data.add_metatraffic_unicast_locator(
+                    Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port),
+                );
+                local_participant_proxy_data
+                    .add_default_unicast_locator(Locator::from_ip_v4_addr_and_port(&ip, user_port));
+                local_participant_proxy_data
+                    .add_metatraffic_unicast_locator(Locator::from_tcp_v4(ip, metatraffic_port));
+                local_participant_proxy_data
+                    .add_default_unicast_locator(Locator::from_tcp_v4(ip, user_port));
+            }
+            TransportType::SHM => {
+                // metatraffic uses UDP, default uses SHM
+                local_participant_proxy_data.add_metatraffic_unicast_locator(
+                    Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port),
+                );
+                local_participant_proxy_data
+                    .add_default_unicast_locator(Locator::from_shm(&ip, user_port));
+            }
+        }
     }
 
     pub(crate) fn builtin_endpoints(&self) -> Arc<BuiltinEndpoints> {
