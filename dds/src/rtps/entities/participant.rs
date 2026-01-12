@@ -642,30 +642,36 @@ impl Participant {
                 } else if let Some(stateless_reader) =
                     reader.as_any().downcast_ref::<StatelessReader>()
                 {
-                    if let Ok(mut writer_locator) = stateless_reader.writer_locators().lock() {
-                        let len_before_unmatch = writer_locator.len();
+                    if let Ok(mut remote_writer_info) =
+                        stateless_reader.remote_writer_infos().lock()
+                    {
+                        let len_before_unmatch = remote_writer_info.len();
                         debug!(
                             "Before unmatching with writer, this reader had {:?} matched writer",
                             len_before_unmatch
                         );
 
-                        writer_locator
-                            .retain(|locator| locator.remote_writer_guid() != writer_guid);
+                        remote_writer_info.retain(|remote_writer_info| {
+                            remote_writer_info.remote_writer_guid() != writer_guid
+                        });
 
-                        if len_before_unmatch == writer_locator.len() + 1 {
+                        if len_before_unmatch == remote_writer_info.len() + 1 {
                             stateless_reader.update_subscription_matched_status(
                                 -1,
                                 InstanceHandle::from_guid(&writer_guid),
                             );
                             info!("Unmatched with remote writer {:?}", writer_guid);
-                            debug!("Current number of matched writer: {:?}", writer_locator.len());
-                        } else if len_before_unmatch == writer_locator.len() {
+                            debug!(
+                                "Current number of matched writer: {:?}",
+                                remote_writer_info.len()
+                            );
+                        } else if len_before_unmatch == remote_writer_info.len() {
                             debug!(
                                 "No matching writer found to unmatch for GUID: {:?}",
                                 writer_guid
                             );
                         } else {
-                            log::error!("This is abnormal behavior, this reader had {:?} writer locator of same guid", len_before_unmatch - writer_locator.len());
+                            log::error!("This is abnormal behavior, this reader had {:?} writer locator of same guid", len_before_unmatch - remote_writer_info.len());
                         }
                     }
                 }
@@ -786,15 +792,15 @@ impl Participant {
                 } else if let Some(stateless_reader) =
                     reader.as_any().downcast_ref::<StatelessReader>()
                 {
-                    let writer_locators_arc = stateless_reader.writer_locators();
-                    let writer_locators = writer_locators_arc.lock().map_err(|e| {
+                    let remote_writer_infos_arc = stateless_reader.remote_writer_infos();
+                    let remote_writer_infos = remote_writer_infos_arc.lock().map_err(|e| {
                         RtpsError::new(
                             RtpsErrorCode::LockError,
                             format!("Failed to acquire writer locator lock: {:?}", e),
                         )
                     })?;
 
-                    if writer_locators.iter().any(|wl| wl.remote_writer_guid() == writer_guid) {
+                    if remote_writer_infos.iter().any(|w| w.remote_writer_guid() == writer_guid) {
                         matched_readers.push(reader.clone());
                     }
                 }
@@ -968,25 +974,27 @@ impl Participant {
                     } else if let Some(stateless_reader) =
                         reader.as_any().downcast_ref::<StatelessReader>()
                     {
-                        if let Ok(mut writer_locator) = stateless_reader.writer_locators().lock() {
+                        if let Ok(mut remote_writer_info) =
+                            stateless_reader.remote_writer_infos().lock()
+                        {
                             debug!(
                             "Before unmatching with writer, this reader had {:?} matched writer",
-                            writer_locator.len()
+                            remote_writer_info.len()
                         );
-                            for writer_locator in writer_locator.iter() {
-                                if writer_locator.remote_writer_guid().prefix()
+                            for remote_writer_info in remote_writer_info.iter() {
+                                if remote_writer_info.remote_writer_guid().prefix()
                                     == terminated_participant_guid_prefix
                                 {
                                     stateless_reader.update_subscription_matched_status(
                                         -1,
                                         InstanceHandle::from_guid(
-                                            &writer_locator.remote_writer_guid(),
+                                            &remote_writer_info.remote_writer_guid(),
                                         ),
                                     );
                                 }
                             }
-                            writer_locator.retain(|writer_locator| {
-                                writer_locator.remote_writer_guid().prefix()
+                            remote_writer_info.retain(|remote_writer_info| {
+                                remote_writer_info.remote_writer_guid().prefix()
                                     != terminated_participant_guid_prefix
                             });
 
@@ -994,7 +1002,10 @@ impl Participant {
                                 "Removed all unmatched remote writers from participant: {:?}",
                                 terminated_participant_guid_prefix
                             );
-                            debug!("Current number of matched writer: {:?}", writer_locator.len());
+                            debug!(
+                                "Current number of matched writer: {:?}",
+                                remote_writer_info.len()
+                            );
                         }
 
                         stateless_reader
