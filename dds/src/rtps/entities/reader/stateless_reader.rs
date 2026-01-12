@@ -45,7 +45,7 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 
-use super::{Reader, WriterLocator};
+use super::{Reader, RemoteWriterInfo};
 
 #[allow(dead_code)]
 pub(crate) struct StatelessReader {
@@ -59,7 +59,7 @@ pub(crate) struct StatelessReader {
     heartbeat_response_delay: RtpsDuration,
     heartbeat_suppression_duration: RtpsDuration,
     reader_cache: Arc<Mutex<ReaderHistoryCache>>,
-    matched_writers: Arc<Mutex<Vec<WriterLocator>>>,
+    matched_writers: Arc<Mutex<Vec<RemoteWriterInfo>>>,
     #[allow(clippy::type_complexity)]
     change_callback: Arc<Mutex<Option<Arc<dyn Fn(Arc<CacheChange>) + Send + Sync>>>>,
     #[allow(clippy::type_complexity)]
@@ -108,7 +108,7 @@ impl StatelessReader {
         }
     }
 
-    pub(crate) fn matched_writer_add(&self, a_writer_proxy: WriterLocator) {
+    pub(crate) fn matched_writer_add(&self, a_writer_proxy: RemoteWriterInfo) {
         match self.matched_writers.lock() {
             Ok(mut matched_writers) => {
                 matched_writers.push(a_writer_proxy);
@@ -119,7 +119,7 @@ impl StatelessReader {
         }
     }
 
-    pub(crate) fn matched_writer_remove(&self, a_writer_proxy: WriterLocator) {
+    pub(crate) fn matched_writer_remove(&self, a_writer_proxy: RemoteWriterInfo) {
         match self.matched_writers.lock() {
             Ok(mut matched_writers) => {
                 matched_writers.retain(|proxy| proxy != &a_writer_proxy);
@@ -130,7 +130,7 @@ impl StatelessReader {
         }
     }
 
-    pub(crate) fn matched_writer_lookup(&self, a_writer_guid: Guid) -> Option<WriterLocator> {
+    pub(crate) fn matched_writer_lookup(&self, a_writer_guid: Guid) -> Option<RemoteWriterInfo> {
         match self.matched_writers.lock() {
             Ok(matched_writers) => matched_writers
                 .iter()
@@ -143,7 +143,7 @@ impl StatelessReader {
         }
     }
 
-    pub(crate) fn writer_locators(&self) -> Arc<Mutex<Vec<WriterLocator>>> {
+    pub(crate) fn remote_writer_infos(&self) -> Arc<Mutex<Vec<RemoteWriterInfo>>> {
         self.matched_writers.clone()
     }
 
