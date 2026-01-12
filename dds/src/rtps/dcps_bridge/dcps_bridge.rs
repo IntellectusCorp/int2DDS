@@ -76,7 +76,8 @@ impl DcpsBridge {
         let mut socket = Socket::new(domain_id);
         socket.create_socket();
 
-        let participant = Participant::new(domain_id, socket.participant_id(), socket.working_ip());
+        let participant =
+            Participant::new(domain_id, socket.participant_id(), socket.working_ips());
         let guid_prefix = participant.guid().prefix();
         let participant = Arc::new(participant);
 

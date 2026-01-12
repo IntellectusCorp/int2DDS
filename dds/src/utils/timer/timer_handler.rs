@@ -247,7 +247,7 @@ mod tests {
 
         // Create actual Participant - this may need adjustment to match your codebase's Participant creation method
         // For now, create a simple structure
-        Arc::new(Participant::new(domain_id, participant_id, "127.0.0.1".to_string()))
+        Arc::new(Participant::new(domain_id, participant_id, vec!["127.0.0.1".to_string()]))
     }
 
     #[test]

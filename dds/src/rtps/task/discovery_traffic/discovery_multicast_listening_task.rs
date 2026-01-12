@@ -166,7 +166,7 @@ mod tests {
         let mut socket = Socket::new(domain_id); //domain_id 0
         socket.create_socket();
         let participant =
-            Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ip()));
+            Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ips()));
 
         // When socket reset is needed
         // socket.close();

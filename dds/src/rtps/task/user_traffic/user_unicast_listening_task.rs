@@ -275,7 +275,7 @@ mod tests {
         socket.create_socket();
         // When socket reset is needed
         let participant =
-            Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ip()));
+            Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ips()));
 
         //user multicast port : 7400
         //user unicast port : 7410
