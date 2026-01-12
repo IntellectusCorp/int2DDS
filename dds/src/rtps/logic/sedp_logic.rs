@@ -54,7 +54,7 @@ use crate::{
             history::{cache_change::CacheChange, history_cache::HistoryCache},
             participant::Participant,
             qos::{check_qos_compatibility, check_qos_compatibility_with_policy_id},
-            reader::{Reader, StatefulReader, StatelessReader, WriterLocator, WriterProxy},
+            reader::{Reader, RemoteWriterInfo, StatefulReader, StatelessReader, WriterProxy},
             writer::{
                 reader_locator::ReaderLocator, reader_proxy::ReaderProxy, StatefulWriter,
                 StatelessWriter, Writer,
@@ -1200,7 +1200,7 @@ impl SedpLogic {
                     endpoint_guid
                 );
                 reader
-                    .writer_locators()
+                    .remote_writer_infos()
                     .lock()
                     .map_err(|lock_err| {
                         RtpsError::new(
@@ -1208,7 +1208,9 @@ impl SedpLogic {
                             format!("Failed to lock WriterLocators: {}", lock_err),
                         )
                     })?
-                    .retain(|writer_locator| writer_locator.remote_writer_guid() != endpoint_guid);
+                    .retain(|remote_writer_info| {
+                        remote_writer_info.remote_writer_guid() != endpoint_guid
+                    });
 
                 reader.update_subscription_matched_status(
                     -1,
@@ -1233,7 +1235,7 @@ impl SedpLogic {
                 );
 
                 reader
-                    .writer_locators()
+                    .remote_writer_infos()
                     .lock()
                     .map_err(|e| {
                         RtpsError::new(
@@ -1259,13 +1261,9 @@ impl SedpLogic {
             "reader->writer",
         )?;
 
-        let writer_locator = WriterLocator::new(
-            endpoint_guid,
-            publication_builtin_topic_data.unicast_locator_list(),
-            publication_builtin_topic_data.multicast_locator_list(),
-            publication_builtin_topic_data.clone(),
-        );
-        reader.matched_writer_add(writer_locator);
+        let remote_writer_info =
+            RemoteWriterInfo::new(endpoint_guid, publication_builtin_topic_data.clone());
+        reader.matched_writer_add(remote_writer_info);
 
         let writer_guid = endpoint_guid;
         if writer_guid.entity_id().entity_kind().is_user_defined() {
