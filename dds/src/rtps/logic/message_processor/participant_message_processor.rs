@@ -105,7 +105,7 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
         }
 
         // Check if remote participant is from the same machine and set locators to localhost if so
-        self.set_address_to_localhost_if_same_machine(&mut spdp_discovered_participant_data)?;
+        // self.set_address_to_localhost_if_same_machine(&mut spdp_discovered_participant_data)?;
 
         // Setup builtin endpoints based on available endpoints
         self.match_builtin_endpoints(&spdp_discovered_participant_data)?;
@@ -427,6 +427,7 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
         if participant.check_if_contains_local_ip_address(&remote_locator_list)? {
             debug!("Remote participant is from the same machine. Setting locators to localhost.");
             spdp_discovered_participant_data.set_unicast_locators_to_localhost()?;
+            debug!("Updated discovered participant data: {:?}", spdp_discovered_participant_data);
         }
 
         Ok(())
