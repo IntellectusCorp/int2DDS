@@ -1367,13 +1367,19 @@ Int2DdsRet int2dds_subscriber_delete_contained_entities(const struct Int2DdsSubs
  * # Safety
  * - `participant` must be a valid participant
  * - `topic_name` must be a valid null-terminated C string
- * - `type_desc` must be a valid type descriptor
+ * - `dds_type_name` must be a valid null-terminated C string (DDS registration name)
+ * - `type_desc` must be a valid type descriptor (contains struct name for XTypes)
  * - `qos` can be null for default QoS
  * - `topic_out` must be a valid pointer to a null pointer
  * - The returned topic must be freed with `int2dds_delete_topic`
+ *
+ * # Note
+ * - `type_desc->type_name`: Used for TypeObject hash calculation (XTypes compatibility)
+ * - `dds_type_name`: Used for DDS topic type registration and matching
  */
 Int2DdsRet int2dds_create_topic(const struct Int2DdsParticipant *participant,
                                 const char *topic_name,
+                                const char *dds_type_name,
                                 const struct Int2DdsTypeDescriptor *type_desc,
                                 const struct Int2DdsTopicQos *qos,
                                 struct Int2DdsTopic **topic_out);
