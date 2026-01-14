@@ -12,7 +12,9 @@ use crate::{
         ReliabilityQosPolicy, ReliabilityQosPolicyKind, TopicDataQosPolicy, UserDataQosPolicy,
     },
     publication::qos::{DataWriterQos, PublisherQos},
-    rtps::common::{guid::Guid, locator::Locator, types::SerializedData},
+    rtps::common::{
+        guid::Guid, locator::Locator, rtps_error_code::RtpsResult, types::SerializedData,
+    },
     topic::{qos::TopicQos, type_support::DdsType},
     xtypes::{TypeIdentifier, TypeObject},
 };
@@ -115,6 +117,15 @@ impl PublicationBuiltinTopicData {
 
     pub fn add_unicast_locator(&mut self, locator: Locator) {
         self.unicast_locator_list.push(locator);
+    }
+
+    pub(crate) fn set_unicast_locator_to_localhost(&mut self) -> RtpsResult<()> {
+        if let Some(mut locator) = self.unicast_locator_list.first().cloned() {
+            locator.set_address_to_localhost()?;
+            self.unicast_locator_list.clear();
+            self.unicast_locator_list.push(locator);
+        }
+        Ok(())
     }
 
     pub fn multicast_locator_list(&self) -> Vec<Locator> {

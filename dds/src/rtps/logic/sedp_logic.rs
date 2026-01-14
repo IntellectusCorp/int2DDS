@@ -1765,6 +1765,7 @@ impl SedpLogic {
         };
 
         for locator in remote_participant_data.metatraffic_unicast_locator_list() {
+            debug!("[{}] SEDP Logic: Sending message to locator: {:?}", message_type, locator);
             self.send_to_single_locator(buffer, locator.clone(), message_type)?;
         }
         Ok(true)
@@ -2059,7 +2060,7 @@ impl UnicastMessageProcessor for SedpLogic {
                 })?;
 
             if data.writer_id == EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER {
-                let writer_data = SEDPMessage::<DiscoveredWriterData>::from_serialized_payload(
+                let mut writer_data = SEDPMessage::<DiscoveredWriterData>::from_serialized_payload(
                     payload.as_ref(),
                     is_big_endian,
                 )
@@ -2087,13 +2088,22 @@ impl UnicastMessageProcessor for SedpLogic {
                     }
                 }
 
+                if participant.check_if_contains_local_ip_address(
+                    &writer_data.publication_builtin_topic_data.unicast_locator_list(),
+                )? {
+                    debug!("Found local IP address in publication locators, setting unicast locator to localhost");
+                    writer_data
+                        .publication_builtin_topic_data
+                        .set_unicast_locator_to_localhost()?;
+                }
+
                 debug!("SEDP Logic: DiscoveredWriterData: {:?}", writer_data);
                 return self.handle_publication_builtin_topic_data(
                     writer_data.publication_builtin_topic_data,
                     inline_qos_params,
                 );
             } else if data.writer_id == EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_WRITER {
-                let reader_data = SEDPMessage::<DiscoveredReaderData>::from_serialized_payload(
+                let mut reader_data = SEDPMessage::<DiscoveredReaderData>::from_serialized_payload(
                     payload.as_ref(),
                     is_big_endian,
                 )
@@ -2119,6 +2129,15 @@ impl UnicastMessageProcessor for SedpLogic {
                     if let Ok(mut cache_guard) = reader.reader_cache().lock() {
                         let _ = cache_guard.add_change(cache_change);
                     }
+                }
+
+                if participant.check_if_contains_local_ip_address(
+                    &reader_data.subscription_builtin_topic_data.unicast_locator_list(),
+                )? {
+                    debug!("Found local IP address in subscription locators, setting unicast locator to localhost");
+                    reader_data
+                        .subscription_builtin_topic_data
+                        .set_unicast_locator_to_localhost()?;
                 }
 
                 debug!("SEDP Logic: DiscoveredReaderData: {:?}", reader_data);
