@@ -81,7 +81,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Create Topic with type descriptor
-    ret = int2dds_create_topic(participant, "KeyedDataTopic", type_desc, NULL, &topic);
+    ret = int2dds_create_topic(participant, "KeyedDataTopic", "KeyedDataType", type_desc, NULL, &topic);
     if (ret != INT2DDS_RET_OK) {
         printf("Failed to create topic: %d\n", ret);
         goto cleanup;
