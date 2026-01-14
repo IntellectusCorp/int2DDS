@@ -31,7 +31,7 @@ int main(int argc, char* argv[]) {
     Int2DdsTypeDescriptor* type_desc = NULL;
     Int2DdsData* data = NULL;
 
-    int32_t domain_id = 33;
+    int32_t domain_id = 0;
     int use_reliable = 0;  /* 0 = best effort, 1 = reliable */
 
     /* Parse arguments */
@@ -68,8 +68,11 @@ int main(int argc, char* argv[]) {
         goto cleanup;
     }
 
-    /* Create type descriptor for HelloWorld */
-    ret = int2dds_type_descriptor_create("HelloWorld", &type_desc);
+    /* Create type descriptor for HelloWorld
+     * The type_name here ("HelloWorldType") is used for XTypes TypeObject hash calculation
+     * to match with Rust struct name
+     */
+    ret = int2dds_type_descriptor_create("HelloWorldType", &type_desc);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create type descriptor: %d\n", ret);
         goto cleanup;
@@ -82,14 +85,17 @@ int main(int argc, char* argv[]) {
         goto cleanup;
     }
 
-    ret = int2dds_type_descriptor_add_string(type_desc, "message", 256, false);
+    ret = int2dds_type_descriptor_add_string(type_desc, "message", 0, false);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to add message field: %d\n", ret);
         goto cleanup;
     }
 
-    /* Create topic with type descriptor (after all fields are added) */
-    ret = int2dds_create_topic(participant, "hello_world_topic", type_desc, NULL, &topic);
+    /* Create topic with type descriptor (after all fields are added)
+     * - type_desc->type_name ("HelloWorldType"): Used for XTypes TypeObject hash
+     * - dds_type_name ("HelloWorld"): Used for DDS type registration/matching
+     */
+    ret = int2dds_create_topic(participant, "hello_world_topic", "HelloWorld", type_desc, NULL, &topic);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create topic: %d\n", ret);
         goto cleanup;

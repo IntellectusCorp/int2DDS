@@ -176,7 +176,7 @@ int main(int argc, char* argv[]) {
     }
 
     /* Create topic with type descriptor */
-    ret = int2dds_create_topic(participant, "HelloWorldTopic", type_desc, NULL, &topic);
+    ret = int2dds_create_topic(participant, "HelloWorldTopic", "HelloWorldType", type_desc, NULL, &topic);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create topic: %d\n", ret);
         goto cleanup_type_desc;
