@@ -3,8 +3,8 @@
 //! This module provides a trait for handling participant discovery messages
 //! that can be implemented by both SPDP and SEDP logic components.
 
+use log::debug;
 use speedy::{Endianness, Writable};
-use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 
 use crate::{
@@ -417,41 +417,18 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
         &self,
         spdp_discovered_participant_data: &mut SPDPDiscoveredParticipantData,
     ) -> RtpsResult<()> {
-        let remote_ip_address = spdp_discovered_participant_data
-            .default_unicast_locator_list()
-            .first()
-            .map(|locator| locator.to_ip_v4_addr());
+        let mut remote_locator_list =
+            spdp_discovered_participant_data.default_unicast_locator_list().clone();
+        remote_locator_list
+            .extend(spdp_discovered_participant_data.metatraffic_unicast_locator_list().clone());
 
-        if let Some(remote_ip_address) = remote_ip_address {
-            let is_same_machine = Self::is_same_machine(&IpAddr::V4(remote_ip_address));
-            if is_same_machine {
-                spdp_discovered_participant_data.set_unicast_locators_to_localhost()?;
-            }
+        let participant = self.get_upgraded_participant()?;
+
+        if participant.check_if_contains_local_ip_address(&remote_locator_list)? {
+            debug!("Remote participant is from the same machine. Setting locators to localhost.");
+            spdp_discovered_participant_data.set_unicast_locators_to_localhost()?;
         }
 
         Ok(())
-    }
-
-    /// Check if the given IP address belongs to the same machine
-    fn is_same_machine(remote_ip: &IpAddr) -> bool {
-        if remote_ip.is_loopback() {
-            return true;
-        }
-
-        // Same machine if it matches one of my NIC IPs
-        Self::get_local_ips().contains(remote_ip)
-    }
-
-    /// Get local machine IP addresses
-    fn get_local_ips() -> Vec<IpAddr> {
-        let mut ips = Vec::new();
-
-        if let Ok(ifaces) = get_if_addrs::get_if_addrs() {
-            for iface in ifaces {
-                ips.push(iface.ip());
-            }
-        }
-
-        ips
     }
 }
