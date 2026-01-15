@@ -1322,6 +1322,17 @@ impl UnicastMessageProcessor for UserLogic {
                         )
                     })?;
 
+                if heartbeat.count <= writer_proxy.last_heartbeat_count() {
+                    debug!(
+                        "[UserLogic] [Heartbeat] Ignoring old Heartbeat: count={} <= last_count={}",
+                        heartbeat.count,
+                        writer_proxy.last_heartbeat_count()
+                    );
+                    return Ok(());
+                }
+
+                writer_proxy.set_last_heartbeat_count(heartbeat.count);
+
                 let missing_changes =
                     writer_proxy.process_heartbeat(heartbeat.first_sn, heartbeat.last_sn);
 
