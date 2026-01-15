@@ -3,7 +3,7 @@
 //! This module defines `Locator` for identifying network endpoints in RTPS communication.
 //! Supports UDP and TCP transports with IPv4/IPv6 addressing. Locators specify both the
 //! transport type and network address for sending and receiving RTPS messages.
-use crate::{dcps::topic::type_support::DdsType, rtps::common::rtps_error_code::RtpsResult};
+use crate::dcps::topic::type_support::DdsType;
 
 use std::{fmt::Debug, net::IpAddr};
 
@@ -236,20 +236,6 @@ impl Locator {
     /// `true` if the locator has a valid kind, `false` otherwise
     pub fn is_valid(&self) -> bool {
         self.kind != LOCATOR_KIND_INVALID && self.kind != LOCATOR_KIND_RESERVED
-    }
-
-    pub fn set_address_to_localhost(&mut self) -> RtpsResult<()> {
-        match self.kind {
-            LOCATOR_KIND_UDP_V6 | LOCATOR_KIND_TCP_V6 => {
-                // ::1 - IPv6 localhost address
-                self.address = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
-            }
-            _ => {
-                // 127.0.0.1 - IPv4 localhost address
-                self.address = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 127, 0, 0, 1];
-            }
-        }
-        Ok(())
     }
 }
 
