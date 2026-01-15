@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::vec;
 
 use crate::rtps::common::types::{DomainId, ParticipantId};
 use crate::rtps::transport::port_manager::PortManager;
@@ -472,14 +473,21 @@ impl Socket {
     }
 
     fn new_working_ips() -> std::io::Result<Vec<String>> {
+        let use_loopback = crate::common::env::get_use_loopback_interface();
+
         if let Ok(Some(ip)) = crate::common::int2dds_feature_ffi::get_working_ip() {
-            return Ok(vec![ip]);
+            let mut ips = vec![ip.clone()];
+            if use_loopback && ip != "127.0.0.1" {
+                ips.push("127.0.0.1".to_string());
+            }
+            return Ok(ips);
         } else {
             let mut ips = Vec::new();
 
             if let Ok(ifaces) = get_if_addrs::get_if_addrs() {
                 for iface in ifaces {
-                    if !iface.ip().is_loopback() {
+                    // Skip loopback unless explicitly allowed
+                    if !iface.ip().is_loopback() || use_loopback {
                         ips.push(iface.ip().to_string());
                     }
                 }
