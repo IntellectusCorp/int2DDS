@@ -2092,9 +2092,9 @@ impl UnicastMessageProcessor for SedpLogic {
                     &writer_data.publication_builtin_topic_data.unicast_locator_list(),
                 )? {
                     debug!("Found local IP address in publication locators, setting unicast locator to localhost");
-                    writer_data
-                        .publication_builtin_topic_data
-                        .set_unicast_locator_to_localhost()?;
+                    // writer_data
+                    //     .publication_builtin_topic_data
+                    //     .set_unicast_locator_to_localhost()?;
                 }
 
                 debug!("SEDP Logic: DiscoveredWriterData: {:?}", writer_data);
@@ -2135,9 +2135,9 @@ impl UnicastMessageProcessor for SedpLogic {
                     &reader_data.subscription_builtin_topic_data.unicast_locator_list(),
                 )? {
                     debug!("Found local IP address in subscription locators, setting unicast locator to localhost");
-                    reader_data
-                        .subscription_builtin_topic_data
-                        .set_unicast_locator_to_localhost()?;
+                    // reader_data
+                    //     .subscription_builtin_topic_data
+                    //     .set_unicast_locator_to_localhost()?;
                 }
 
                 debug!("SEDP Logic: DiscoveredReaderData: {:?}", reader_data);
