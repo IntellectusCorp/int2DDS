@@ -13,6 +13,7 @@ This document describes the environment variables available in int2dds. All envi
 | `INT2DDS_FILE_LOG_LEVEL`             | `--int2dds-file-log-level`             | File log level                             | info                    |
 | `INT2DDS_NETWORK_INTERFACE`          | `--int2dds-network-interface`          | Network interface name                     | auto                    |
 | `INT2DDS_NETWORK_IP`                 | `--int2dds-network-ip`                 | Network IP address                         | auto                    |
+| `INT2DDS_USE_LOOPBACK_INTERFACE`     | `--int2dds-use-loopback-interface`     | Enable loopback interface                  | false                   |
 | `INT2DDS_UDP_SOCKET_BUFFER`          | `--int2dds-udp-socket-buffer`          | UDP socket buffer size (bytes)             | OS default              |
 | `INT2DDS_EXTENDED_DISCOVERY`         | `--int2dds-extended-discovery`         | Enable extended discovery                  | false                   |
 | `INT2DDS_TCP_CONNECT_TIMEOUT`        | `--int2dds-tcp-connect-timeout`        | TCP connection timeout (ms)                | 5000                    |
@@ -176,6 +177,7 @@ cargo run --example hello_world -- --int2dds-file-log-level trace
 ### INT2DDS_NETWORK_INTERFACE
 
 Specifies the network interface name to use (e.g., eth0, wlan0, en0).
+If not specified, all available interfaces will be used.
 
 #### Configuration
 
@@ -198,6 +200,7 @@ cargo run --example hello_world -- --int2dds-network-interface eth0
 ### INT2DDS_NETWORK_IP
 
 Directly specifies the network IP address to use.
+If not specified, all available addresses will be used.
 
 #### Configuration
 
@@ -215,6 +218,35 @@ export INT2DDS_NETWORK_IP=192.168.1.100
 
 # CLI argument
 cargo run --example hello_world -- --int2dds-network-ip 192.168.1.100
+```
+
+### INT2DDS_USE_LOOPBACK_INTERFACE
+
+Enables the loopback interface for discovery and endpoint communication.
+When enabled, the loopback address (127.0.0.1) is added to the available IP address list.
+This is useful when the NIC may go down during communication and loopback communication still needs to continue.
+주
+#### Behavior
+
+- Even if specific IPs are already configured via `INT2DDS_NETWORK_IP` or `INT2DDS_NETWORK_INTERFACE`, the loopback address will be added to the available IP list when this option is enabled.
+- If the loopback address is already in the list, this setting is ignored (no duplicates).
+
+#### Configuration
+
+```powershell
+# Windows PowerShell - Environment variable
+$env:INT2DDS_USE_LOOPBACK_INTERFACE = "true"
+
+# CLI argument (flag type)
+cargo run --example hello_world -- --int2dds-use-loopback-interface
+```
+
+```bash
+# Linux/macOS - Environment variable
+export INT2DDS_USE_LOOPBACK_INTERFACE=true
+
+# CLI argument (flag type)
+cargo run --example hello_world -- --int2dds-use-loopback-interface
 ```
 
 ### INT2DDS_UDP_SOCKET_BUFFER
