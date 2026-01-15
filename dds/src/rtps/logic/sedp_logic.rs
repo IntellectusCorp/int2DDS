@@ -1827,7 +1827,7 @@ impl SedpLogic {
                 }
             }
             _ => {
-                warn!(
+                debug!(
                     "[{}] SEDP Logic: Unsupported locator kind: {}",
                     message_type,
                     locator.kind()
