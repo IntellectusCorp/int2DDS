@@ -230,6 +230,7 @@ This is useful when the NIC may go down during communication and loopback commun
 
 - Even if specific IPs are already configured via `INT2DDS_NETWORK_IP` or `INT2DDS_NETWORK_INTERFACE`, the loopback address will be added to the available IP list when this option is enabled.
 - If the loopback address is already in the list, this setting is ignored (no duplicates).
+- If no network interfaces are available (e.g., WiFi and Ethernet disconnected), loopback is automatically used without setting this variable.
 
 #### Configuration
 

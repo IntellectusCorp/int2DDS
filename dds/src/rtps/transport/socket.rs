@@ -98,7 +98,7 @@ impl Socket {
 
         match transport_type {
             TransportType::UDP => {
-                self.sender = match UdpSender::new("0.0.0.0".to_string()) {
+                self.sender = match UdpSender::new(self.get_ip_to_bind()) {
                     Ok(udp_sender) => {
                         let transport_sender = TransportSender::Udp(udp_sender);
                         Some(Arc::new(transport_sender))
@@ -110,7 +110,7 @@ impl Socket {
                 };
             }
             TransportType::TCP => {
-                let tcp_sender_arc = match TcpSender::new("0.0.0.0".to_string()) {
+                let tcp_sender_arc = match TcpSender::new(self.get_ip_to_bind()) {
                     Ok(tcp_sender) => {
                         let transport_sender = TransportSender::Tcp(tcp_sender);
                         log::info!("[socket] TCP sender created");
@@ -128,7 +128,7 @@ impl Socket {
             }
             TransportType::Hybrid => {
                 // Create UDP sender as primary
-                self.sender = match UdpSender::new("0.0.0.0".to_string()) {
+                self.sender = match UdpSender::new(self.get_ip_to_bind()) {
                     Ok(udp_sender) => {
                         let transport_sender = TransportSender::Udp(udp_sender);
                         log::info!("[socket] Hybrid mode: UDP sender created");
@@ -141,7 +141,7 @@ impl Socket {
                 };
 
                 // Create TCP sender as secondary
-                self.tcp_sender = match TcpSender::new("0.0.0.0".to_string()) {
+                self.tcp_sender = match TcpSender::new(self.get_ip_to_bind()) {
                     Ok(tcp_sender) => {
                         log::info!("[socket] Hybrid mode: TCP sender created");
                         Some(Arc::new(TransportSender::Tcp(tcp_sender)))
@@ -154,7 +154,7 @@ impl Socket {
             }
             TransportType::SHM => {
                 // SHM mode uses UDP for discovery (SPDP, SEDP)
-                self.sender = match UdpSender::new("0.0.0.0".to_string()) {
+                self.sender = match UdpSender::new(self.get_ip_to_bind()) {
                     Ok(udp_sender) => {
                         let transport_sender = TransportSender::Udp(udp_sender);
                         log::info!("[socket] SHM mode: UDP sender created for discovery");
@@ -243,6 +243,15 @@ impl Socket {
         self.create_user_traffic_multicast_listener(self.domain_id);
     }
 
+    fn get_ip_to_bind(&self) -> String {
+        let only_loopback = self.working_ips.len() == 1 && self.working_ips[0] == "127.0.0.1";
+        if only_loopback {
+            "127.0.0.1".to_string()
+        } else {
+            "0.0.0.0".to_string()
+        }
+    }
+
     fn create_unicast_listener(&mut self) {
         // If port acquisition fails, change participant and retry
         self.create_discovery_unicast_listener(self.domain_id, self.participant_id);
@@ -254,7 +263,7 @@ impl Socket {
     fn create_discovery_multicast_listener(&mut self, domain_id: u32) {
         let udp_listener: Option<UdpListener> = UdpListener::new_multicast(
             PortManager::get_discovery_traffic_multicast_port(domain_id),
-            "0.0.0.0".to_string(),
+            self.get_ip_to_bind(),
         )
         .ok();
         self.discovery_traffic_multicast_listener = udp_listener;
@@ -285,7 +294,7 @@ impl Socket {
     fn create_user_traffic_multicast_listener(&mut self, domain_id: u32) {
         let udp_listener: Option<UdpListener> = UdpListener::new_multicast(
             PortManager::get_user_traffic_multicast_port(domain_id),
-            "0.0.0.0".to_string(),
+            self.get_ip_to_bind(),
         )
         .ok();
         self.user_traffic_multicast_listener = udp_listener;
@@ -473,28 +482,28 @@ impl Socket {
     }
 
     fn new_working_ips() -> std::io::Result<Vec<String>> {
-        let use_loopback = crate::common::env::get_use_loopback_interface();
+        let mut ips: Vec<String> = Vec::new();
 
         if let Ok(Some(ip)) = crate::common::int2dds_feature_ffi::get_working_ip() {
-            let mut ips = vec![ip.clone()];
-            if use_loopback && ip != "127.0.0.1" {
-                ips.push("127.0.0.1".to_string());
-            }
-            return Ok(ips);
+            ips.push(ip.clone());
         } else {
-            let mut ips = Vec::new();
-
             if let Ok(ifaces) = get_if_addrs::get_if_addrs() {
                 for iface in ifaces {
-                    // Skip loopback unless explicitly allowed
-                    if !iface.ip().is_loopback() || use_loopback {
+                    if !iface.ip().is_loopback() {
                         ips.push(iface.ip().to_string());
                     }
                 }
             }
-
-            Ok(ips)
         }
+
+        let use_loopback = crate::common::env::get_use_loopback_interface();
+
+        // If no NIC available or loopback is set to use, use loopback
+        if ips.is_empty() || (!ips.contains(&"127.0.0.1".to_string()) && use_loopback) {
+            ips.push("127.0.0.1".to_string());
+        }
+
+        Ok(ips)
     }
 
     pub(crate) fn working_ips(&self) -> Vec<String> {
