@@ -1069,7 +1069,7 @@ impl UserLogic {
                             is_sent = true;
                         }
                         Err(e) => {
-                            warn!("Failed to send message to locator {:?}: {:?}", socket_addr, e);
+                            debug!("Failed to send message to locator {:?}: {:?}", socket_addr, e);
                             last_error = Some(e);
                             continue;
                         }
