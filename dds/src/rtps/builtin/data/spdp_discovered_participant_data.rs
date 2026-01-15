@@ -255,18 +255,12 @@ impl SPDPDiscoveredParticipantData {
     }
 
     pub(crate) fn set_unicast_locators_to_localhost(&mut self) -> RtpsResult<()> {
-        // Keep only first element and set to localhost for metatraffic
-        if let Some(mut locator) = self.metatraffic_unicast_locator_list.first().cloned() {
+        for locator in &mut self.metatraffic_unicast_locator_list {
             locator.set_address_to_localhost()?;
-            self.metatraffic_unicast_locator_list.clear();
-            self.metatraffic_unicast_locator_list.push(locator);
         }
 
-        // Keep only first element and set to localhost for default
-        if let Some(mut locator) = self.default_unicast_locator_list.first().cloned() {
+        for locator in &mut self.default_unicast_locator_list {
             locator.set_address_to_localhost()?;
-            self.default_unicast_locator_list.clear();
-            self.default_unicast_locator_list.push(locator);
         }
 
         Ok(())
