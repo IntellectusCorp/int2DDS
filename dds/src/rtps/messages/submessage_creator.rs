@@ -363,4 +363,120 @@ mod tests {
         assert_eq!(res[2].1.bitmap_base(), SequenceNumber::new(0, 516));
         assert!(res[2].1.extract_numbers().is_empty());
     }
+
+    // Helper function that mimics the current ACKNACK logic (same signature as GAP)
+    fn calculate_acknack_sns_from_vec(
+        missing_changes: &mut Vec<SequenceNumber>,
+    ) -> SequenceNumberSet {
+        // Current ACKNACK logic (from create_acknack_submessage)
+        // NOTE: This does NOT handle 256-bit limit like GAP does
+        if missing_changes.is_empty() {
+            SequenceNumberSet::new_empty_with_base(SequenceNumber::new(0, 1))
+        } else {
+            let base_sn = missing_changes[0];
+            let result = SequenceNumberSet::from_vec(base_sn, missing_changes.clone());
+            missing_changes.clear(); // Current logic consumes all at once (no remaining)
+            result
+        }
+    }
+
+    #[test]
+    fn test_calculate_acknack_sns_from_vec_empty_sns() {
+        let mut missing_changes = vec![SequenceNumber::new(0, 1)];
+
+        let sns = calculate_acknack_sns_from_vec(&mut missing_changes);
+
+        // Expected: same as GAP test
+        assert_eq!(sns.bitmap_base(), SequenceNumber::new(0, 2));
+        assert!(sns.extract_numbers().is_empty());
+    }
+
+    #[test]
+    fn test_calculate_acknack_sns_from_vec_sparse_sns() {
+        let mut missing_changes =
+            vec![SequenceNumber::new(0, 1), SequenceNumber::new(0, 5), SequenceNumber::new(0, 8)];
+
+        let sns = calculate_acknack_sns_from_vec(&mut missing_changes);
+
+        // Expected: same as GAP test
+        assert_eq!(sns.bitmap_base(), SequenceNumber::new(0, 2));
+        assert_eq!(
+            sns.extract_numbers(),
+            vec![SequenceNumber::new(0, 5), SequenceNumber::new(0, 8),]
+        );
+    }
+
+    #[test]
+    fn test_calculate_acknack_sns_from_vec_continuous_with_sparse() {
+        let mut missing_changes = vec![
+            SequenceNumber::new(0, 1),
+            SequenceNumber::new(0, 2),
+            SequenceNumber::new(0, 3),
+            SequenceNumber::new(0, 4),
+            SequenceNumber::new(0, 7),
+            SequenceNumber::new(0, 10),
+        ];
+
+        let sns = calculate_acknack_sns_from_vec(&mut missing_changes);
+
+        // Expected: same as GAP test
+        assert_eq!(sns.bitmap_base(), SequenceNumber::new(0, 5));
+        assert_eq!(
+            sns.extract_numbers(),
+            vec![SequenceNumber::new(0, 7), SequenceNumber::new(0, 10),]
+        );
+    }
+
+    #[test]
+    fn test_calculate_acknack_sns_from_vec_continuous_with_sparse_over_256() {
+        let mut missing_changes = vec![
+            SequenceNumber::new(0, 1),
+            SequenceNumber::new(0, 2),
+            SequenceNumber::new(0, 3),
+            SequenceNumber::new(0, 4),
+            SequenceNumber::new(0, 7),
+            SequenceNumber::new(0, 260), // bitmap_base = 5, 5 + 255 = 260
+            SequenceNumber::new(0, 261), // this is over 256
+        ];
+
+        let sns = calculate_acknack_sns_from_vec(&mut missing_changes);
+
+        // Expected: same as GAP test
+        assert_eq!(sns.bitmap_base(), SequenceNumber::new(0, 5));
+        assert_eq!(
+            sns.extract_numbers(),
+            vec![SequenceNumber::new(0, 7), SequenceNumber::new(0, 260),]
+        );
+        assert!(missing_changes == vec![SequenceNumber::new(0, 261)]);
+    }
+
+    #[test]
+    fn test_calculate_acknack_sns_from_vec_sparse_with_3_msgs() {
+        let mut missing_changes = vec![
+            SequenceNumber::new(0, 1), // bitmap_base = 2, 2 + 255 = 257 so below is over 256
+            SequenceNumber::new(0, 258), // bitmap_base = 259, 259 + 255 = 514 so below is over 256
+            SequenceNumber::new(0, 515),
+        ];
+
+        let mut res: Vec<SequenceNumberSet> = Vec::new();
+
+        while !missing_changes.is_empty() {
+            res.push(calculate_acknack_sns_from_vec(&mut missing_changes));
+        }
+
+        // Expected: same as GAP test - should make 3 rtps acknack messages
+        assert_eq!(res.len(), 3);
+
+        // ACKNACK 1
+        assert_eq!(res[0].bitmap_base(), SequenceNumber::new(0, 2));
+        assert!(res[0].extract_numbers().is_empty());
+
+        // ACKNACK 2
+        assert_eq!(res[1].bitmap_base(), SequenceNumber::new(0, 259));
+        assert!(res[1].extract_numbers().is_empty());
+
+        // ACKNACK 3
+        assert_eq!(res[2].bitmap_base(), SequenceNumber::new(0, 516));
+        assert!(res[2].extract_numbers().is_empty());
+    }
 }
