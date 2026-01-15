@@ -33,6 +33,7 @@ pub(crate) struct WriterProxy {
     acknack_count: i32,
     nackfrag_count: i32,
     expected_sn: SequenceNumber, // Expected next sequence number from writer
+    last_heartbeat_count: i32,
     buffered_change: Vec<CacheChange>, // Changes that reader has not processed yet
     publication_builtin_topic_data: PublicationBuiltinTopicData,
     #[allow(clippy::type_complexity)]
@@ -69,6 +70,7 @@ impl WriterProxy {
             acknack_count: 0,
             nackfrag_count: 0,
             expected_sn: SequenceNumber::UNKNOWN,
+            last_heartbeat_count: 0,
             buffered_change: Vec::new(),
             publication_builtin_topic_data,
             status_callback,
@@ -93,6 +95,14 @@ impl WriterProxy {
 
     pub(crate) fn expected_sn(&self) -> SequenceNumber {
         self.expected_sn
+    }
+
+    pub(crate) fn last_heartbeat_count(&self) -> i32 {
+        self.last_heartbeat_count
+    }
+
+    pub(crate) fn set_last_heartbeat_count(&mut self, count: i32) {
+        self.last_heartbeat_count = count;
     }
 
     pub(crate) fn add_new_changes_from_writer(&mut self, change_from_writer: ChangeFromWriter) {
