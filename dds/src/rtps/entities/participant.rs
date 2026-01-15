@@ -8,7 +8,7 @@
 #![allow(unused_variables)]
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fmt::Debug,
     net::Ipv4Addr,
     str::FromStr,
@@ -1271,21 +1271,5 @@ impl Participant {
             }
             *monitor = None;
         }
-    }
-
-    pub(crate) fn check_if_contains_local_ip_address(
-        &self,
-        locators: &Vec<Locator>,
-    ) -> RtpsResult<bool> {
-        let local_ips = self.working_ips();
-        let ip_set = HashSet::<String>::from_iter(local_ips);
-
-        for locator in locators.iter() {
-            if ip_set.contains(&locator.to_ip_v4_addr_string()) {
-                return Ok(true);
-            }
-        }
-
-        Ok(false)
     }
 }
