@@ -888,7 +888,7 @@ impl UserLogic {
 
                 if change.sequence_number() >= remote_writer_info.expected_sn() {
                     self.add_change_to_reader_cache_and_notify(reader, vec![change.clone()])?;
-                    remote_writer_info.set_expected_sn(change.sequence_number().add(1).clone());
+                    remote_writer_info.set_expected_sn(change.sequence_number().add(1));
                 }
             }
         }
