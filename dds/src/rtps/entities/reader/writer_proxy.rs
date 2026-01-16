@@ -2,6 +2,7 @@
 #![allow(unused_variables)]
 
 use std::{
+    collections::BTreeSet,
     sync::{Arc, Mutex},
     {cmp::max, collections::BTreeMap},
 };
@@ -34,7 +35,7 @@ pub(crate) struct WriterProxy {
     nackfrag_count: i32,
     expected_sn: SequenceNumber, // Expected next sequence number from writer
     last_heartbeat_count: i32,
-    buffered_change: Vec<CacheChange>, // Changes that reader has not processed yet
+    buffered_change: BTreeSet<CacheChange>, // Changes that reader has not processed yet
     publication_builtin_topic_data: PublicationBuiltinTopicData,
     #[allow(clippy::type_complexity)]
     status_callback:
@@ -71,7 +72,7 @@ impl WriterProxy {
             nackfrag_count: 0,
             expected_sn: SequenceNumber::UNKNOWN,
             last_heartbeat_count: 0,
-            buffered_change: Vec::new(),
+            buffered_change: BTreeSet::new(),
             publication_builtin_topic_data,
             status_callback,
         }
@@ -110,8 +111,7 @@ impl WriterProxy {
     }
 
     pub(crate) fn add_buffered_change(&mut self, change: CacheChange) {
-        self.buffered_change.push(change);
-        self.buffered_change.sort_by_key(|c| c.sequence_number);
+        self.buffered_change.insert(change);
     }
 
     pub(crate) fn flush_buffered_changes(&mut self) -> Vec<CacheChange> {
@@ -119,8 +119,8 @@ impl WriterProxy {
 
         while let Some(change) = self.buffered_change.first() {
             if change.sequence_number <= self.expected_sn {
-                flushed_changes.push(change.clone());
-                self.buffered_change.remove(0);
+                let change = self.buffered_change.pop_first().unwrap();
+                flushed_changes.push(change);
                 self.increment_expected_sn();
             } else {
                 break;

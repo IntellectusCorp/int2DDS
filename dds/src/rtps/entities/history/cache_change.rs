@@ -42,6 +42,18 @@ pub(crate) struct CacheChange {
     lifespan_duration: Option<Duration>,
 }
 
+impl PartialOrd for CacheChange {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for CacheChange {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.sequence_number.cmp(&other.sequence_number)
+    }
+}
+
 impl CacheChange {
     pub(crate) fn new(
         kind: ChangeKind,
