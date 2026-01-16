@@ -357,7 +357,7 @@ jobs:
             executables
             dds-rtps-files
             junit_report_*
-            test_log_*
+            logs_*
             tshark_*
             xml_report
           failOnError: false
