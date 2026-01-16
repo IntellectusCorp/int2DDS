@@ -340,6 +340,7 @@ impl UserLogic {
                 }
 
                 // RTPS 2.5 - 8.4.9.1.4 This may happen when a CacheChanges is removed from the Writer cache
+                // GAP only sent on reliable communication for efficiency
                 if reader_proxy.highest_sent_change_sn() != SequenceNumber::UNKNOWN
                     && a_change_seq_num > reader_proxy.highest_sent_change_sn() + 1
                     && reader_proxy.is_reliable()
@@ -495,34 +496,8 @@ impl UserLogic {
             return Ok(()); // Nothing to send
         }
 
-        let participant = self.get_upgraded_participant()?;
-
         for (reader_locator, changes) in reader_tasks.iter() {
-            let mut prev_sn = reader_locator.highest_sent_change_sn();
-
             for change in changes.iter() {
-                let change_sn = change.sequence_number();
-
-                // RTPS 2.5 - 8.4.8.2.4 Create GAP message
-                if prev_sn != SequenceNumber::UNKNOWN && change_sn > prev_sn + 1 {
-                    let buf = MessageCreator::create_gap_msg_consecutive(
-                        participant.guid(),
-                        Guid::new(reader_locator.guid_prefix(), reader_locator.remote_entity_id()),
-                        reader_locator.remote_entity_id(),
-                        writer.endpoint_id(),
-                        prev_sn + 1,
-                        SequenceNumber::from_i64(change_sn.to_i64() - 1),
-                    )
-                    .map_err(|e| RtpsError::new(RtpsErrorCode::Io, e.to_string()))?;
-
-                    // Send GAP message immediately
-                    if let Err(e) =
-                        self.send_rtps_message_to_locators([reader_locator.locator()], &buf)
-                    {
-                        warn!("Failed to send GAP message: {:?}", e);
-                    }
-                }
-
                 // Create DATA or DATA_FRAG message
                 if change.is_fragmented() {
                     let timestamp = Utc::now();
@@ -573,8 +548,6 @@ impl UserLogic {
                         // Continue sending other messages instead of aborting
                     }
                 }
-
-                prev_sn = change_sn;
             }
         }
 
@@ -887,8 +860,18 @@ impl UserLogic {
                     writer_proxy.add_buffered_change(change);
                 }
             }
-        } else if let Some(_stateless_reader) = reader.as_any().downcast_ref::<StatelessReader>() {
-            self.add_change_to_reader_cache_and_notify(reader, vec![change])?;
+        } else if let Some(stateless_reader) = reader.as_any().downcast_ref::<StatelessReader>() {
+            if let Ok(mut matched_writers) = stateless_reader.remote_writer_infos().lock() {
+                let remote_writer_info = matched_writers
+                    .iter_mut()
+                    .find(|info| info.remote_writer_guid() == remote_guid)
+                    .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
+
+                if change.sequence_number() >= remote_writer_info.expected_sn() {
+                    self.add_change_to_reader_cache_and_notify(reader, vec![change.clone()])?;
+                    remote_writer_info.set_expected_sn(change.sequence_number().add(1).clone());
+                }
+            }
         }
 
         Ok(())

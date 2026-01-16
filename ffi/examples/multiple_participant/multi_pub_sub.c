@@ -100,7 +100,7 @@ int main(int argc, char* argv[]) {
     ret = int2dds_type_descriptor_add_string(type_desc1, "message", 256, false);
     if (ret != INT2DDS_RET_OK) goto cleanup;
 
-    ret = int2dds_create_topic(participant1, "HelloWorld", type_desc1, NULL, &topic1);
+    ret = int2dds_create_topic(participant1, "HelloWorld", "HelloWorldType", type_desc1, NULL, &topic1);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create topic1: %d\n", ret);
         goto cleanup;
@@ -155,7 +155,7 @@ int main(int argc, char* argv[]) {
     ret = int2dds_type_descriptor_add_string(type_desc2, "message", 256, false);
     if (ret != INT2DDS_RET_OK) goto cleanup;
 
-    ret = int2dds_create_topic(participant2, "HelloWorld", type_desc2, NULL, &topic2);
+    ret = int2dds_create_topic(participant2, "HelloWorld", "HelloWorldType", type_desc2, NULL, &topic2);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create topic2: %d\n", ret);
         goto cleanup;
