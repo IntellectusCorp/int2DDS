@@ -1691,16 +1691,27 @@ impl UnicastMessageProcessor for UserLogic {
 
         // Lock acquisition order to prevent deadlock: reader_proxies -> history_cache
         let reader_proxies = stateful_writer.reader_proxies();
-        let reader_proxies_guard = reader_proxies.lock().map_err(|_| {
+        let mut reader_proxies_guard = reader_proxies.lock().map_err(|_| {
             RtpsError::new(RtpsErrorCode::LockError, "Failed to acquire reader_proxies lock")
         })?;
 
         let reader_proxy = reader_proxies_guard
-            .iter()
+            .iter_mut()
             .find(|proxy| proxy.remote_reader_guid() == remote_reader_guid)
             .ok_or_else(|| {
                 RtpsError::new(RtpsErrorCode::InvalidEntityKind, "Reader proxy not found")
             })?;
+
+        // Check for duplicate NACK_FRAG
+        if nack_frag.count <= reader_proxy.last_nackfrag_count() {
+            debug!(
+                "[UserLogic] [NackFrag] Ignoring old NACK_FRAG: count={} <= last_count={}",
+                nack_frag.count,
+                reader_proxy.last_nackfrag_count()
+            );
+            return Ok(());
+        }
+        reader_proxy.set_last_nackfrag_count(nack_frag.count);
 
         let writer_cache = stateful_writer.writer_cache();
         let history_cache_guard = writer_cache.lock().map_err(|_| {
