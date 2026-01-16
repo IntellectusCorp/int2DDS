@@ -846,17 +846,36 @@ impl UserLogic {
 
                 // Deliver change if sequence number is in order
                 if change.sequence_number() == writer_proxy.expected_sn() {
+                    debug!(
+                        "Delivering in-order change: {:?}, expected_sn: {:?}",
+                        change.sequence_number(),
+                        writer_proxy.expected_sn()
+                    );
+
                     let mut change_to_add: Vec<CacheChange> = vec![change.clone()];
 
                     writer_proxy.increment_expected_sn();
 
-                    let flushed_changes = writer_proxy.flush_buffered_changes();
-                    change_to_add.extend(flushed_changes.clone());
+                    debug!("After delivering, new expected_sn: {:?}", writer_proxy.expected_sn());
 
+                    let flushed_changes = writer_proxy.flush_buffered_changes();
+
+                    debug!(
+                        "Flushed buffered changes from {:?} to {:?} after delivering in-order change.",
+                        flushed_changes.first().map(|c| c.sequence_number()),
+                        flushed_changes.last().map(|c| c.sequence_number())
+                    );
+
+                    change_to_add.extend(flushed_changes.clone());
                     self.add_change_to_reader_cache_and_notify(reader, change_to_add)?;
                 }
                 // Buffer out-of-order changes
                 else if change.sequence_number() > writer_proxy.expected_sn() {
+                    debug!(
+                        "Buffering out-of-order change: {:?}, expected_sn: {:?}",
+                        change.sequence_number(),
+                        writer_proxy.expected_sn()
+                    );
                     writer_proxy.add_buffered_change(change);
                 }
             }
@@ -1507,10 +1526,18 @@ impl UnicastMessageProcessor for UserLogic {
         reader_proxy.acked_changes_set(SequenceNumber::from_i64(
             acknack.reader_sn_state.bitmap_base().to_i64() - 1,
         ));
+
+        debug!(
+            "[UserLogic] [AckNack] ACK received up to seq_num={:?}",
+            SequenceNumber::from_i64(acknack.reader_sn_state.bitmap_base().to_i64() - 1)
+        );
+
         reader_proxy.set_last_acknack_count(acknack.count);
 
         // NACK
         if !missing_seq_numbers.is_empty() {
+            debug!("Sending AckNack - missing changes: {:?}", missing_seq_numbers);
+
             reader_proxy.requested_changes_set(missing_seq_numbers);
 
             let participant = self.get_upgraded_participant()?;
