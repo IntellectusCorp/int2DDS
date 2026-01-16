@@ -24,7 +24,10 @@ use crate::{
         instance_handle::InstanceHandle,
     },
     dcps::topic::type_support::DdsType,
-    infrastructure::qos_policy::{DurabilityQosPolicyKind, QosPolicyId, ReliabilityQosPolicyKind},
+    infrastructure::qos_policy::{
+        DurabilityQosPolicyKind, QosPolicyId, ReliabilityQosPolicyKind,
+        TypeConsistencyEnforcementQosPolicy, TypeConsistencyKind,
+    },
     rtps::{
         builtin::{
             builtin_endpoints::BuiltinEndpoints,
@@ -51,7 +54,7 @@ use crate::{
             history::{cache_change::CacheChange, history_cache::HistoryCache},
             participant::Participant,
             qos::{check_qos_compatibility, check_qos_compatibility_with_policy_id},
-            reader::{Reader, StatefulReader, StatelessReader, WriterLocator, WriterProxy},
+            reader::{Reader, RemoteWriterInfo, StatefulReader, StatelessReader, WriterProxy},
             writer::{
                 reader_locator::ReaderLocator, reader_proxy::ReaderProxy, StatefulWriter,
                 StatelessWriter, Writer,
@@ -91,6 +94,7 @@ use crate::{
     },
     serialize::pl_cdr::InlineQosParameters,
     utils::timer::timer_handler::TimerHandler,
+    xtypes::TypeIdentifier,
 };
 
 enum MatchType {
@@ -141,6 +145,25 @@ fn validate_endpoint_compatibility<L>(
         return Err(err);
     }
 
+    // Type Compatibility (DDS-XTypes)
+    if !check_type_compatibility(
+        offered.type_identifier(),
+        requested.type_identifier(),
+        requested.type_consistency_enforcement(),
+    ) {
+        debug!(
+            "[{}] Type compatibility check failed: writer={:?}, reader={:?}",
+            who,
+            offered.type_identifier(),
+            requested.type_identifier()
+        );
+        let err = RtpsError::new(
+            RtpsErrorCode::QosIncompatible,
+            format!("[Type compatibility failed :{}]", who),
+        );
+        return Err(err);
+    }
+
     Ok(())
 }
 
@@ -169,6 +192,118 @@ fn is_partition_compatible(requested: &[String], offered: &[String]) -> bool {
         }
     }
     false
+}
+
+/// Check type compatibility based on DDS-XTypes 1.3 specification.
+///
+/// This function verifies that the writer's TypeIdentifier is compatible with
+/// the reader's TypeIdentifier according to the reader's TypeConsistencyEnforcementQosPolicy.
+///
+/// # Arguments
+/// * `writer_type_id` - TypeIdentifier from the writer (offered)
+/// * `reader_type_id` - TypeIdentifier from the reader (requested)
+/// * `type_consistency` - TypeConsistencyEnforcementQosPolicy from the reader
+///
+/// # Returns
+/// * `true` if types are compatible
+/// * `false` if types are incompatible
+fn check_type_compatibility(
+    writer_type_id: Option<&TypeIdentifier>,
+    reader_type_id: Option<&TypeIdentifier>,
+    type_consistency: &TypeConsistencyEnforcementQosPolicy,
+) -> bool {
+    match (writer_type_id, reader_type_id) {
+        (Some(writer_id), Some(reader_id)) => {
+            // Both have TypeIdentifier - check based on consistency policy
+            match type_consistency.kind {
+                TypeConsistencyKind::DisallowTypeCoercion => {
+                    // Strict mode: types must be identical
+                    // For complex types, compare equivalence hashes
+                    // For primitive types, compare discriminators
+                    if writer_id.is_complex() && reader_id.is_complex() {
+                        // Compare equivalence hashes for complex types
+                        writer_id.equivalence_hash() == reader_id.equivalence_hash()
+                    } else {
+                        // For primitive types, exact match required
+                        writer_id == reader_id
+                    }
+                }
+                TypeConsistencyKind::AllowTypeCoercion => {
+                    // Permissive mode: allow compatible type coercion
+                    // For now, we allow matching if:
+                    // 1. Types are identical
+                    // 2. Both are complex types (struct compatibility will be checked at runtime)
+                    // 3. Primitive types can be coerced (e.g., int8 -> int32)
+
+                    if writer_id == reader_id {
+                        return true;
+                    }
+
+                    // Allow complex type matching (actual compatibility checked at deserialization)
+                    if writer_id.is_complex() && reader_id.is_complex() {
+                        // When AllowTypeCoercion is set, we trust that the types
+                        // are compatible enough for communication. The actual
+                        // structural compatibility will be enforced during deserialization.
+                        return true;
+                    }
+
+                    // For primitive types, check if coercion is possible
+                    is_primitive_coercion_allowed(writer_id, reader_id)
+                }
+            }
+        }
+        (None, None) => {
+            // Neither has TypeIdentifier - rely on type_name matching (handled elsewhere)
+            // This is backward compatible with non-XTypes implementations
+            true
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            // One has TypeIdentifier, the other doesn't
+            // If force_type_validation is true, this is incompatible
+            // Otherwise, fall back to type_name matching
+            !type_consistency.force_type_validation
+        }
+    }
+}
+
+/// Check if primitive type coercion is allowed between two TypeIdentifiers.
+///
+/// According to DDS-XTypes, certain primitive type coercions are allowed
+/// when AllowTypeCoercion policy is set:
+/// - Widening integer conversions (int8 -> int16 -> int32 -> int64)
+/// - Widening float conversions (float32 -> float64)
+fn is_primitive_coercion_allowed(writer_id: &TypeIdentifier, reader_id: &TypeIdentifier) -> bool {
+    // Same types are always compatible
+    if writer_id == reader_id {
+        return true;
+    }
+
+    match (writer_id, reader_id) {
+        // Integer widening (signed)
+        (TypeIdentifier::Int8, TypeIdentifier::Int16)
+        | (TypeIdentifier::Int8, TypeIdentifier::Int32)
+        | (TypeIdentifier::Int8, TypeIdentifier::Int64) => true,
+        (TypeIdentifier::Int16, TypeIdentifier::Int32)
+        | (TypeIdentifier::Int16, TypeIdentifier::Int64) => true,
+        (TypeIdentifier::Int32, TypeIdentifier::Int64) => true,
+
+        // Integer widening (unsigned)
+        (TypeIdentifier::Uint8, TypeIdentifier::Uint16)
+        | (TypeIdentifier::Uint8, TypeIdentifier::Uint32)
+        | (TypeIdentifier::Uint8, TypeIdentifier::Uint64) => true,
+        (TypeIdentifier::Uint16, TypeIdentifier::Uint32)
+        | (TypeIdentifier::Uint16, TypeIdentifier::Uint64) => true,
+        (TypeIdentifier::Uint32, TypeIdentifier::Uint64) => true,
+
+        // Float widening
+        (TypeIdentifier::Float32, TypeIdentifier::Float64) => true,
+
+        // Char widening
+        (TypeIdentifier::Char8, TypeIdentifier::Char16) => true,
+
+        // All other cases are not allowed
+        _ => false,
+    }
 }
 
 /// Initialization
@@ -1065,7 +1200,7 @@ impl SedpLogic {
                     endpoint_guid
                 );
                 reader
-                    .writer_locators()
+                    .remote_writer_infos()
                     .lock()
                     .map_err(|lock_err| {
                         RtpsError::new(
@@ -1073,7 +1208,9 @@ impl SedpLogic {
                             format!("Failed to lock WriterLocators: {}", lock_err),
                         )
                     })?
-                    .retain(|writer_locator| writer_locator.remote_writer_guid() != endpoint_guid);
+                    .retain(|remote_writer_info| {
+                        remote_writer_info.remote_writer_guid() != endpoint_guid
+                    });
 
                 reader.update_subscription_matched_status(
                     -1,
@@ -1098,7 +1235,7 @@ impl SedpLogic {
                 );
 
                 reader
-                    .writer_locators()
+                    .remote_writer_infos()
                     .lock()
                     .map_err(|e| {
                         RtpsError::new(
@@ -1124,13 +1261,9 @@ impl SedpLogic {
             "reader->writer",
         )?;
 
-        let writer_locator = WriterLocator::new(
-            endpoint_guid,
-            publication_builtin_topic_data.unicast_locator_list(),
-            publication_builtin_topic_data.multicast_locator_list(),
-            publication_builtin_topic_data.clone(),
-        );
-        reader.matched_writer_add(writer_locator);
+        let remote_writer_info =
+            RemoteWriterInfo::new(endpoint_guid, publication_builtin_topic_data.clone());
+        reader.matched_writer_add(remote_writer_info);
 
         let writer_guid = endpoint_guid;
         if writer_guid.entity_id().entity_kind().is_user_defined() {
