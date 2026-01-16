@@ -486,12 +486,10 @@ impl Socket {
 
         if let Ok(Some(ip)) = crate::common::int2dds_feature_ffi::get_working_ip() {
             ips.push(ip.clone());
-        } else {
-            if let Ok(ifaces) = get_if_addrs::get_if_addrs() {
-                for iface in ifaces {
-                    if !iface.ip().is_loopback() {
-                        ips.push(iface.ip().to_string());
-                    }
+        } else if let Ok(ifaces) = get_if_addrs::get_if_addrs() {
+            for iface in ifaces {
+                if !iface.ip().is_loopback() {
+                    ips.push(iface.ip().to_string());
                 }
             }
         }
