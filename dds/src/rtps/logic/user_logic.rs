@@ -1485,13 +1485,6 @@ impl UnicastMessageProcessor for UserLogic {
         rtps_header: &Header,
         acknack: &AckNack,
     ) -> RtpsResult<()> {
-        if acknack.reader_sn_state.bitmap_base() == SequenceNumber::from_i64(0)
-            && acknack.reader_sn_state.num_bits() == 0
-        {
-            self.handle_preemptive_acknack_message(rtps_header, acknack)?;
-            return Ok(());
-        }
-
         let remote_reader_guid = Guid::new(rtps_header.guid_prefix(), acknack.reader_id);
 
         let writer = self.find_stateful_writer(acknack.writer_id)?;
@@ -1516,6 +1509,13 @@ impl UnicastMessageProcessor for UserLogic {
                 "[UserLogic] [AckNack] Ignoring old ACKNACK: count={} <= last_count={}",
                 acknack.count, last_acknack_count
             );
+            return Ok(());
+        }
+
+        if acknack.reader_sn_state.bitmap_base() == SequenceNumber::from_i64(0)
+            && acknack.reader_sn_state.num_bits() == 0
+        {
+            self.handle_preemptive_acknack_message(rtps_header, acknack)?;
             return Ok(());
         }
 
