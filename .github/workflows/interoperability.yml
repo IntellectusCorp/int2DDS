@@ -70,12 +70,12 @@ jobs:
       - name: Build shapes demo
         run: |
           cd shapes-demo/shapes-demo-interoperability
-          cargo build --release
+          cargo build
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
           name: int2DDS_shapes_demo
-          path: shapes-demo/shapes-demo-interoperability/target/release/shapes-demo-interoperability
+          path: shapes-demo/shapes-demo-interoperability/target/debug/shapes-demo-interoperability
   download_binaries:
     needs: build_binary
     runs-on: ubuntu-latest
@@ -220,7 +220,7 @@ jobs:
       - name: Upload test logs archive
         uses: actions/upload-artifact@v4
         with:
-          name: test_logs
+          name: logs
           path: test_logs.zip
       - name: Upload packet captures archive
         if: hashFiles('packet_captures.zip') != ''
