@@ -179,6 +179,7 @@ jobs:
           pattern: logs_*
           merge-multiple: true
           path: ./logs
+        continue-on-error: true
       - name: Download all packet captures
         uses: actions/download-artifact@v4
         with:
@@ -197,10 +198,15 @@ jobs:
           cd ..
       - name: Create test logs archive
         run: |
-          cd logs
-          ls -la
-          zip -r ../test_logs.zip *.log
-          cd ..
+          if [ -d "./logs" ] && [ "$(ls -A ./logs)" ]; then
+            cd logs
+            ls -la
+            zip -r ../test_logs.zip *.log
+            cd ..
+          else
+            echo "No logs found, skipping archive creation"
+          fi
+        continue-on-error: true
       - name: Create packet captures archive
         run: |
           if [ -d "./packets" ] && [ "$(ls -A ./packets)" ]; then
@@ -218,6 +224,7 @@ jobs:
           name: xml_report
           path: ./junit_interoperability_report.xml
       - name: Upload test logs archive
+        if: hashFiles('test_logs.zip') != ''
         uses: actions/upload-artifact@v4
         with:
           name: logs
