@@ -3,6 +3,11 @@ run-name: "Interop test ${{ github.head_ref }}"
 on:
   workflow_dispatch:
     inputs:
+      enable_int2dds_logging:
+        description: "Enable int2DDS logging"
+        required: false
+        type: boolean
+        default: false
       enable_packet_dump:
         description: "Enable packet capture for debugging"
         required: false
@@ -46,6 +51,7 @@ jobs:
           repository: IntellectusCorp/int2DDS-shapes-demo
           token: ${{ secrets.ORG_PAT }}
           path: shapes-demo
+          ref: ${{ inputs.enable_int2dds_logging && 'log' || 'main' }}
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -155,6 +161,7 @@ jobs:
           executable-pattern: ${{ matrix.dds.pattern }}
           role: ${{ matrix.role }}
           dump-packet: ${{ inputs.enable_packet_dump && (inputs.dump_dds_name == 'all' || inputs.dump_dds_name == matrix.dds.name) && (inputs.dump_role == 'both' || inputs.dump_role == matrix.role) }}
+          enable-int2dds-logging: ${{ inputs.enable_int2dds_logging }}
 
   merge_files:
     needs: test_all_dds
@@ -169,7 +176,7 @@ jobs:
       - name: Download all test logs
         uses: actions/download-artifact@v4
         with:
-          pattern: test_log_*
+          pattern: *.log
           merge-multiple: true
           path: ./logs
       - name: Download all packet captures
