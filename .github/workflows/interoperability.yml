@@ -176,7 +176,7 @@ jobs:
       - name: Download all test logs
         uses: actions/download-artifact@v4
         with:
-          pattern: *.log
+          pattern: logs_*
           merge-multiple: true
           path: ./logs
       - name: Download all packet captures
