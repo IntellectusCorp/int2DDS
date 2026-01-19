@@ -732,7 +732,8 @@ impl SedpLogic {
                 return Err(e);
             }
 
-            // Still compatible - just update builtin_topic_data
+            // Still compatible - update builtin_topic_data just in case QoS has changed
+            // it is idempotent behavior
             if writer
                 .matched_reader_lookup(endpoint_guid)
                 .ok_or(RtpsError::new(
@@ -743,7 +744,7 @@ impl SedpLogic {
                 .changeable_qos_equals(&subscription_builtin_topic_data)
             {
                 debug!(
-                    "QoS changed for remote reader {:?}, still compatible - updating builtin_topic_data",
+                    "Syncing subscription_builtin_topic_data for compatible remote reader {:?}",
                     endpoint_guid
                 );
                 writer
@@ -863,7 +864,8 @@ impl SedpLogic {
                 return Err(e);
             }
 
-            // Still compatible - just update builtin_topic_data
+            // Still compatible - update builtin_topic_data just in case QoS has changed
+            // it is idempotent behavior
             if writer
                 .matched_reader_lookup(endpoint_guid)
                 .ok_or(RtpsError::new(
@@ -874,7 +876,7 @@ impl SedpLogic {
                 .changeable_qos_equals(&subscription_builtin_topic_data)
             {
                 debug!(
-                    "QoS changed for remote reader {:?}, still compatible - updating builtin_topic_data",
+                    "Syncing subscription_builtin_topic_data for compatible remote reader {:?}",
                     endpoint_guid
                 );
                 writer
