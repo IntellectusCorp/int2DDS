@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::vec;
 
 use crate::rtps::common::types::{DomainId, ParticipantId};
 use crate::rtps::transport::port_manager::PortManager;
@@ -39,16 +40,16 @@ pub(crate) struct Socket {
 
     domain_id: DomainId,
     participant_id: ParticipantId,
-    working_ip: String,
+    working_ips: Vec<String>,
 }
 
 pub const MAX_EVENTS: usize = 512;
 
 impl Socket {
     pub(crate) fn new(domain_id: DomainId) -> Self {
-        let working_ip = Self::new_working_ip().unwrap_or_else(|e| {
+        let working_ip = Self::new_working_ips().unwrap_or_else(|e| {
             log::error!("[socket] Failed to determine working IP: {}. Using fallback 127.0.0.1", e);
-            "127.0.0.1".to_string()
+            vec!["127.0.0.1".to_string()]
         });
         Self {
             //sender
@@ -78,7 +79,7 @@ impl Socket {
 
             domain_id,
             participant_id: 0,
-            working_ip,
+            working_ips: working_ip,
         }
     }
 
@@ -97,7 +98,7 @@ impl Socket {
 
         match transport_type {
             TransportType::UDP => {
-                self.sender = match UdpSender::new(self.working_ip.clone()) {
+                self.sender = match UdpSender::new(self.get_ip_to_bind()) {
                     Ok(udp_sender) => {
                         let transport_sender = TransportSender::Udp(udp_sender);
                         Some(Arc::new(transport_sender))
@@ -109,7 +110,7 @@ impl Socket {
                 };
             }
             TransportType::TCP => {
-                let tcp_sender_arc = match TcpSender::new(self.working_ip.clone()) {
+                let tcp_sender_arc = match TcpSender::new(self.get_ip_to_bind()) {
                     Ok(tcp_sender) => {
                         let transport_sender = TransportSender::Tcp(tcp_sender);
                         log::info!("[socket] TCP sender created");
@@ -127,7 +128,7 @@ impl Socket {
             }
             TransportType::Hybrid => {
                 // Create UDP sender as primary
-                self.sender = match UdpSender::new(self.working_ip.clone()) {
+                self.sender = match UdpSender::new(self.get_ip_to_bind()) {
                     Ok(udp_sender) => {
                         let transport_sender = TransportSender::Udp(udp_sender);
                         log::info!("[socket] Hybrid mode: UDP sender created");
@@ -140,7 +141,7 @@ impl Socket {
                 };
 
                 // Create TCP sender as secondary
-                self.tcp_sender = match TcpSender::new(self.working_ip.clone()) {
+                self.tcp_sender = match TcpSender::new(self.get_ip_to_bind()) {
                     Ok(tcp_sender) => {
                         log::info!("[socket] Hybrid mode: TCP sender created");
                         Some(Arc::new(TransportSender::Tcp(tcp_sender)))
@@ -153,7 +154,7 @@ impl Socket {
             }
             TransportType::SHM => {
                 // SHM mode uses UDP for discovery (SPDP, SEDP)
-                self.sender = match UdpSender::new(self.working_ip.clone()) {
+                self.sender = match UdpSender::new(self.get_ip_to_bind()) {
                     Ok(udp_sender) => {
                         let transport_sender = TransportSender::Udp(udp_sender);
                         log::info!("[socket] SHM mode: UDP sender created for discovery");
@@ -242,6 +243,15 @@ impl Socket {
         self.create_user_traffic_multicast_listener(self.domain_id);
     }
 
+    fn get_ip_to_bind(&self) -> String {
+        let only_loopback = self.working_ips.len() == 1 && self.working_ips[0] == "127.0.0.1";
+        if only_loopback {
+            "127.0.0.1".to_string()
+        } else {
+            "0.0.0.0".to_string()
+        }
+    }
+
     fn create_unicast_listener(&mut self) {
         // If port acquisition fails, change participant and retry
         self.create_discovery_unicast_listener(self.domain_id, self.participant_id);
@@ -253,7 +263,7 @@ impl Socket {
     fn create_discovery_multicast_listener(&mut self, domain_id: u32) {
         let udp_listener: Option<UdpListener> = UdpListener::new_multicast(
             PortManager::get_discovery_traffic_multicast_port(domain_id),
-            self.working_ip.clone(),
+            self.get_ip_to_bind(),
         )
         .ok();
         self.discovery_traffic_multicast_listener = udp_listener;
@@ -284,7 +294,7 @@ impl Socket {
     fn create_user_traffic_multicast_listener(&mut self, domain_id: u32) {
         let udp_listener: Option<UdpListener> = UdpListener::new_multicast(
             PortManager::get_user_traffic_multicast_port(domain_id),
-            self.working_ip.clone(),
+            self.get_ip_to_bind(),
         )
         .ok();
         self.user_traffic_multicast_listener = udp_listener;
@@ -471,12 +481,31 @@ impl Socket {
         log::info!("[socket] all listeners and senders closed");
     }
 
-    fn new_working_ip() -> std::io::Result<String> {
-        crate::common::int2dds_feature_ffi::get_working_ip()
+    fn new_working_ips() -> std::io::Result<Vec<String>> {
+        let mut ips: Vec<String> = Vec::new();
+
+        if let Ok(Some(ip)) = crate::common::int2dds_feature_ffi::get_working_ip() {
+            ips.push(ip.clone());
+        } else if let Ok(ifaces) = get_if_addrs::get_if_addrs() {
+            for iface in ifaces {
+                if !iface.ip().is_loopback() {
+                    ips.push(iface.ip().to_string());
+                }
+            }
+        }
+
+        let use_loopback = crate::common::env::get_use_loopback_interface();
+
+        // If no NIC available or loopback is set to use, use loopback
+        if ips.is_empty() || (!ips.contains(&"127.0.0.1".to_string()) && use_loopback) {
+            ips.push("127.0.0.1".to_string());
+        }
+
+        Ok(ips)
     }
 
-    pub(crate) fn working_ip(&self) -> String {
-        self.working_ip.clone()
+    pub(crate) fn working_ips(&self) -> Vec<String> {
+        self.working_ips.clone()
     }
 }
 

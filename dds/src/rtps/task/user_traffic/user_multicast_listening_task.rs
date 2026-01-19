@@ -84,7 +84,7 @@ mod tests {
                                                  // Create both sender and listener
         socket.create_socket();
         let participant =
-            Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ip()));
+            Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ips()));
 
         // socket.close();
         // return;

@@ -732,7 +732,8 @@ impl SedpLogic {
                 return Err(e);
             }
 
-            // Still compatible - just update builtin_topic_data
+            // Still compatible - update builtin_topic_data just in case QoS has changed
+            // it is idempotent behavior
             if writer
                 .matched_reader_lookup(endpoint_guid)
                 .ok_or(RtpsError::new(
@@ -743,7 +744,7 @@ impl SedpLogic {
                 .changeable_qos_equals(&subscription_builtin_topic_data)
             {
                 debug!(
-                    "QoS changed for remote reader {:?}, still compatible - updating builtin_topic_data",
+                    "Syncing subscription_builtin_topic_data for compatible remote reader {:?}",
                     endpoint_guid
                 );
                 writer
@@ -863,7 +864,8 @@ impl SedpLogic {
                 return Err(e);
             }
 
-            // Still compatible - just update builtin_topic_data
+            // Still compatible - update builtin_topic_data just in case QoS has changed
+            // it is idempotent behavior
             if writer
                 .matched_reader_lookup(endpoint_guid)
                 .ok_or(RtpsError::new(
@@ -874,7 +876,7 @@ impl SedpLogic {
                 .changeable_qos_equals(&subscription_builtin_topic_data)
             {
                 debug!(
-                    "QoS changed for remote reader {:?}, still compatible - updating builtin_topic_data",
+                    "Syncing subscription_builtin_topic_data for compatible remote reader {:?}",
                     endpoint_guid
                 );
                 writer
@@ -1827,7 +1829,7 @@ impl SedpLogic {
                 }
             }
             _ => {
-                warn!(
+                debug!(
                     "[{}] SEDP Logic: Unsupported locator kind: {}",
                     message_type,
                     locator.kind()
@@ -2210,6 +2212,17 @@ impl UnicastMessageProcessor for SedpLogic {
             .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::RtpsEntityNotFound, None))?;
 
+        // Check for duplicate Heartbeat
+        if heartbeat.count <= writer_proxy.last_heartbeat_count() {
+            debug!(
+                "[SEDP] [Heartbeat] Ignoring old Heartbeat: count={} <= last_count={}",
+                heartbeat.count,
+                writer_proxy.last_heartbeat_count()
+            );
+            return Ok(());
+        }
+        writer_proxy.set_last_heartbeat_count(heartbeat.count);
+
         let missing_changes = writer_proxy.process_heartbeat(heartbeat.first_sn, heartbeat.last_sn);
         let bitmap_base = writer_proxy.expected_sn();
 
@@ -2280,6 +2293,30 @@ impl UnicastMessageProcessor for SedpLogic {
                 "Failed to find matched SEDP reader for AckNack",
             ));
         }
+
+        // Check for duplicate AckNack
+        let stateful_writer =
+            local_writer.as_any().downcast_ref::<StatefulWriter>().ok_or_else(|| {
+                RtpsError::new(RtpsErrorCode::DowncastError, "Failed to downcast to StatefulWriter")
+            })?;
+        let reader_proxies = stateful_writer.reader_proxies();
+        let mut reader_proxies_guard =
+            reader_proxies.lock().map_err(|_| RtpsError::new(RtpsErrorCode::LockError, None))?;
+        let reader_proxy = reader_proxies_guard
+            .iter_mut()
+            .find(|rp| rp.remote_reader_guid() == remote_reader_guid)
+            .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
+
+        if acknack.count <= reader_proxy.last_acknack_count() {
+            debug!(
+                "[SEDP] [AckNack] Ignoring old AckNack: count={} <= last_count={}",
+                acknack.count,
+                reader_proxy.last_acknack_count()
+            );
+            return Ok(());
+        }
+        reader_proxy.set_last_acknack_count(acknack.count);
+        drop(reader_proxies_guard);
 
         let missing_sequence_numbers = acknack.reader_sn_state.extract_numbers();
 
@@ -2414,7 +2451,7 @@ mod tests {
         let mut socket = Socket::new(domain_id); //domain_id 0
         socket.create_socket();
         let participant =
-            Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ip()));
+            Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ips()));
 
         // Socket reset required??
         // socket.close();
@@ -2466,7 +2503,7 @@ mod tests {
         let mut socket = Socket::new(domain_id); //domain_id 0
         socket.create_socket();
         let participant =
-            Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ip()));
+            Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ips()));
 
         let _ = SendingHandler::get_instance(participant.clone(), Some(socket.sender()), None);
 

@@ -3,6 +3,11 @@ run-name: "Interop test ${{ github.head_ref }}"
 on:
   workflow_dispatch:
     inputs:
+      enable_int2dds_logging:
+        description: "Enable int2DDS logging"
+        required: false
+        type: boolean
+        default: false
       enable_packet_dump:
         description: "Enable packet capture for debugging"
         required: false
@@ -46,6 +51,7 @@ jobs:
           repository: IntellectusCorp/int2DDS-shapes-demo
           token: ${{ secrets.ORG_PAT }}
           path: shapes-demo
+          ref: ${{ inputs.enable_int2dds_logging && 'log' || 'main' }}
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -64,12 +70,12 @@ jobs:
       - name: Build shapes demo
         run: |
           cd shapes-demo/shapes-demo-interoperability
-          cargo build --release
+          cargo build
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
           name: int2DDS_shapes_demo
-          path: shapes-demo/shapes-demo-interoperability/target/release/shapes-demo-interoperability
+          path: shapes-demo/shapes-demo-interoperability/target/debug/shapes-demo-interoperability
   download_binaries:
     needs: build_binary
     runs-on: ubuntu-latest
@@ -155,6 +161,7 @@ jobs:
           executable-pattern: ${{ matrix.dds.pattern }}
           role: ${{ matrix.role }}
           dump-packet: ${{ inputs.enable_packet_dump && (inputs.dump_dds_name == 'all' || inputs.dump_dds_name == matrix.dds.name) && (inputs.dump_role == 'both' || inputs.dump_role == matrix.role) }}
+          enable-int2dds-logging: ${{ inputs.enable_int2dds_logging }}
 
   merge_files:
     needs: test_all_dds
@@ -169,9 +176,10 @@ jobs:
       - name: Download all test logs
         uses: actions/download-artifact@v4
         with:
-          pattern: test_log_*
-          merge-multiple: true
+          pattern: logs_*
+          merge-multiple: false
           path: ./logs
+        continue-on-error: true
       - name: Download all packet captures
         uses: actions/download-artifact@v4
         with:
@@ -190,10 +198,15 @@ jobs:
           cd ..
       - name: Create test logs archive
         run: |
-          cd logs
-          ls -la
-          zip -r ../test_logs.zip *.log
-          cd ..
+          if [ -d "./logs" ] && [ "$(ls -A ./logs)" ]; then
+            cd logs
+            ls -la
+            zip -r ../logs.zip .
+            cd ..
+          else
+            echo "No logs found, skipping archive creation"
+          fi
+        continue-on-error: true
       - name: Create packet captures archive
         run: |
           if [ -d "./packets" ] && [ "$(ls -A ./packets)" ]; then
@@ -211,10 +224,11 @@ jobs:
           name: xml_report
           path: ./junit_interoperability_report.xml
       - name: Upload test logs archive
+        if: hashFiles('logs.zip') != ''
         uses: actions/upload-artifact@v4
         with:
-          name: test_logs
-          path: test_logs.zip
+          name: logs
+          path: logs.zip
       - name: Upload packet captures archive
         if: hashFiles('packet_captures.zip') != ''
         uses: actions/upload-artifact@v4
@@ -343,7 +357,7 @@ jobs:
             executables
             dds-rtps-files
             junit_report_*
-            test_log_*
+            logs_*
             tshark_*
             xml_report
           failOnError: false
