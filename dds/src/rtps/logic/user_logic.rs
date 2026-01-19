@@ -1516,6 +1516,7 @@ impl UnicastMessageProcessor for UserLogic {
         if acknack.reader_sn_state.bitmap_base() == SequenceNumber::from_i64(0)
             && acknack.reader_sn_state.num_bits() == 0
         {
+            drop(reader_proxies);
             self.handle_preemptive_acknack_message(rtps_header, acknack)?;
             return Ok(());
         }
