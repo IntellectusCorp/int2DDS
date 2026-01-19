@@ -814,8 +814,6 @@ impl Participant {
                                 "No matching reader found to unmatch for GUID: {:?}",
                                 reader_guid
                             );
-                        } else {
-                            log::error!("This is abnormal behavior, this writer had {:?} reader locator of same guid", len_before_unmatch - reader_locator.len());
                         }
                     }
                 }
