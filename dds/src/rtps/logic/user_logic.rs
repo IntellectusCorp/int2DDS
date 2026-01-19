@@ -26,7 +26,6 @@ use crate::rtps::entities::history::history_cache::HistoryCache;
 use crate::rtps::entities::reader::{
     FragmentInfo, Reader, StatefulReader, StatelessReader, WriterProxy,
 };
-use crate::rtps::entities::writer::reader_locator::ReaderLocator;
 use crate::rtps::entities::writer::reader_proxy::ReaderProxy;
 use crate::rtps::entities::writer::{StatefulWriter, StatelessWriter, Writer};
 use crate::rtps::logic::common::{
@@ -447,129 +446,88 @@ impl UserLogic {
     }
 
     fn send_unsent_changes_of_stateless_writer(&self, writer: &StatelessWriter) -> RtpsResult<()> {
-        let reader_tasks: Vec<(ReaderLocator, Vec<Arc<CacheChange>>)> = {
-            let reader_locators = writer.reader_locator();
-            let reader_locators_guard = reader_locators.lock().map_err(|e| {
-                RtpsError::new(
-                    RtpsErrorCode::LockError,
-                    format!("Failed to acquire reader_locators lock: {}", e),
-                )
-            })?;
+        let reader_locators = writer.reader_locator();
+        let mut reader_locators_guard = reader_locators.lock().map_err(|e| {
+            RtpsError::new(
+                RtpsErrorCode::LockError,
+                format!("Failed to acquire reader_locators lock: {}", e),
+            )
+        })?;
 
-            let writer_cache = writer.writer_cache();
-            let cache_guard = writer_cache.lock().map_err(|e| {
-                RtpsError::new(
-                    RtpsErrorCode::LockError,
-                    format!("Failed to acquire writer_cache lock: {}", e),
-                )
-            })?;
+        let writer_cache = writer.writer_cache();
+        let cache_guard = writer_cache.lock().map_err(|e| {
+            RtpsError::new(
+                RtpsErrorCode::LockError,
+                format!("Failed to acquire writer_cache lock: {}", e),
+            )
+        })?;
 
-            let mut tasks = Vec::new();
-            for reader_locator in reader_locators_guard.iter() {
-                let mut changes_to_send = Vec::new();
-                let mut current_sn = reader_locator.highest_sent_change_sn();
+        for reader_locator in reader_locators_guard.iter_mut() {
+            // Send changes that have not been sent to this reader until none remain
+            while let Some(next_sn) = cache_guard
+                .get_changes()
+                .iter()
+                .filter(|c| c.sequence_number() > reader_locator.highest_sent_change_sn())
+                .map(|c| c.sequence_number())
+                .min()
+            {
+                if let Some(change) = cache_guard.get_change(next_sn) {
+                    let change_sn = change.sequence_number();
 
-                // Collect cache changes not yet sent to the Remote Reader (Arc clone occurs)
-                while let Some(next_sn) = cache_guard
-                    .get_changes()
-                    .iter()
-                    .filter(|c| c.sequence_number() > current_sn)
-                    .map(|c| c.sequence_number())
-                    .min()
-                {
-                    if let Some(change) = cache_guard.get_change(next_sn) {
-                        changes_to_send.push(change);
-                        current_sn = next_sn;
-                    } else {
-                        break;
-                    }
-                }
+                    // Create DATA or DATA_FRAG message
+                    if change.is_fragmented() {
+                        let timestamp = Utc::now();
+                        // Send each fragment as DATA_FRAG submessage immediately
+                        for fragment_num in 1..=change.total_fragments() {
+                            if let Some(fragment_data) = change.get_fragment_data(fragment_num) {
+                                let buffer = MessageCreator::create_data_frag_msg(
+                                    change.clone(),
+                                    Guid::new(reader_locator.guid_prefix(), EntityId::PARTICIPANT),
+                                    reader_locator.remote_entity_id(),
+                                    writer.endpoint_id(),
+                                    fragment_num,
+                                    1,
+                                    change.fragment_size() as u16,
+                                    change.data_value().len() as u32,
+                                    fragment_data,
+                                    None,
+                                    timestamp,
+                                );
 
-                if !changes_to_send.is_empty() {
-                    tasks.push((reader_locator.clone(), changes_to_send));
-                }
-            }
-            tasks
-        };
-
-        if reader_tasks.is_empty() {
-            return Ok(()); // Nothing to send
-        }
-
-        for (reader_locator, changes) in reader_tasks.iter() {
-            for change in changes.iter() {
-                // Create DATA or DATA_FRAG message
-                if change.is_fragmented() {
-                    let timestamp = Utc::now();
-                    // Send each fragment as DATA_FRAG submessage immediately
-                    for fragment_num in 1..=change.total_fragments() {
-                        if let Some(fragment_data) = change.get_fragment_data(fragment_num) {
-                            let buffer = MessageCreator::create_data_frag_msg(
-                                Arc::clone(change),
-                                Guid::new(reader_locator.guid_prefix(), EntityId::PARTICIPANT),
-                                reader_locator.remote_entity_id(),
-                                writer.endpoint_id(),
-                                fragment_num,
-                                1,
-                                change.fragment_size() as u16,
-                                change.data_value().len() as u32,
-                                fragment_data,
-                                None,
-                                timestamp,
-                            );
-
-                            if let Ok(buf) = buffer {
-                                // Send fragmented message immediately
-                                if let Err(e) = self
-                                    .send_rtps_message_to_locators([reader_locator.locator()], &buf)
-                                {
-                                    warn!("Failed to send DATA_FRAG message: {:?}", e);
+                                if let Ok(buf) = buffer {
+                                    // Send fragmented message immediately
+                                    if let Err(e) = self.send_rtps_message_to_locators(
+                                        [reader_locator.locator()],
+                                        &buf,
+                                    ) {
+                                        warn!("Failed to send DATA_FRAG message: {:?}", e);
+                                    }
                                 }
                             }
                         }
-                    }
-                } else {
-                    // Send as regular DATA message
-                    let buffer = MessageCreator::create_data_msg(
-                        Arc::clone(change),
-                        Guid::new(reader_locator.guid_prefix(), EntityId::PARTICIPANT),
-                        reader_locator.remote_entity_id(),
-                        writer.endpoint_id(),
-                        None, // No heartbeat
-                        true, // Use inline QoS (default)
-                        None, // No content filter for stateless writer
-                    )
-                    .map_err(|e| RtpsError::new(RtpsErrorCode::Io, e.to_string()))?;
+                        // Update highest sent change SN after sending all fragments
+                        reader_locator.set_highest_sent_change_sn(change_sn);
+                    } else {
+                        // Send as regular DATA message
+                        let buffer = MessageCreator::create_data_msg(
+                            change.clone(),
+                            Guid::new(reader_locator.guid_prefix(), EntityId::PARTICIPANT),
+                            reader_locator.remote_entity_id(),
+                            writer.endpoint_id(),
+                            None, // No heartbeat
+                            true, // Use inline QoS (default)
+                            None, // No content filter for stateless writer
+                        )
+                        .map_err(|e| RtpsError::new(RtpsErrorCode::Io, e.to_string()))?;
 
-                    if let Err(e) =
-                        self.send_rtps_message_to_locators([reader_locator.locator()], &buffer)
-                    {
-                        warn!("Failed to send DATA message: {:?}", e);
-                        // Continue sending other messages instead of aborting
-                    }
-                }
-            }
-        }
+                        if let Err(e) =
+                            self.send_rtps_message_to_locators([reader_locator.locator()], &buffer)
+                        {
+                            warn!("Failed to send DATA message: {:?}", e);
+                        }
 
-        {
-            let reader_locators = writer.reader_locator();
-            let mut reader_locators_guard = reader_locators.lock().map_err(|e| {
-                RtpsError::new(
-                    RtpsErrorCode::LockError,
-                    format!("Failed to acquire reader_locators lock for update: {}", e),
-                )
-            })?;
-
-            for (task_reader, changes) in reader_tasks.iter() {
-                if let Some(last_change) = changes.last() {
-                    let last_sn = last_change.sequence_number();
-
-                    // Find and update matching reader_locator
-                    if let Some(reader_locator) = reader_locators_guard.iter_mut().find(|rl| {
-                        rl.guid_prefix() == task_reader.guid_prefix()
-                            && rl.remote_entity_id() == task_reader.remote_entity_id()
-                    }) {
-                        reader_locator.set_highest_sent_change_sn(last_sn);
+                        // Update highest sent change SN after sending
+                        reader_locator.set_highest_sent_change_sn(change_sn);
                     }
                 }
             }
