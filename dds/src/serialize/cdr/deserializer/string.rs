@@ -101,9 +101,6 @@ impl<'a> CdrDeserializer<'a> {
             string_data
         };
 
-        // Align to 4-byte boundary after reading string data (CDR spec requirement)
-        self.align(4);
-
         // Optimized: validate UTF-8 without copying, then convert to String
         let result =
             std::str::from_utf8(string_bytes).map_err(|_| CdrError::InvalidString)?.to_string();
@@ -196,7 +193,6 @@ impl<'a> Xcdr2Deserializer<'a> {
         } else {
             string_data
         };
-        self.align(4);
         let result =
             std::str::from_utf8(string_bytes).map_err(|_| CdrError::InvalidString)?.to_string();
         Ok(result)
