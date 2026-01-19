@@ -9,12 +9,15 @@ use crate::serialize::{align_position_with_header_offset, BufferManager, Deseria
 pub struct CdrSerializer {
     pub(super) endianness: Endianness,
     pub(super) buffer: Vec<u8>,
+    /// Size of encapsulation header (0 if no header written, 4 after header is written)
+    /// Used for alignment calculation relative to data stream start
+    pub(super) header_size: usize,
 }
 
 impl CdrSerializer {
     /// Create a new CDR serializer
     pub fn new(little_endian: bool) -> Self {
-        Self { endianness: endianness_from_bool(little_endian), buffer: Vec::new() }
+        Self { endianness: endianness_from_bool(little_endian), buffer: Vec::new(), header_size: 0 }
     }
 
     /// Create CDR serializer with pre-allocated capacity
@@ -22,6 +25,7 @@ impl CdrSerializer {
         Self {
             endianness: endianness_from_bool(little_endian),
             buffer: Vec::with_capacity(capacity),
+            header_size: 0,
         }
     }
 
@@ -39,7 +43,15 @@ impl CdrSerializer {
         // Options (2 bytes) - reserved, always 0x0000
         self.buffer.extend_from_slice(&0x0000u16.to_be_bytes());
 
+        // Mark that header has been written (4 bytes)
+        self.header_size = 4;
+
         Ok(())
+    }
+
+    /// Get the header size (for alignment calculations)
+    pub fn get_header_size(&self) -> usize {
+        self.header_size
     }
 }
 
@@ -76,6 +88,7 @@ impl<'a> CdrDeserializer<'a> {
 
         // Read encapsulation header
         let encap_id = u16::from_be_bytes([data[0], data[1]]);
+
         let endianness = match encap_id {
             0x0000 => Endianness::BigEndian,    // CDR_BE
             0x0001 => Endianness::LittleEndian, // CDR_LE
@@ -94,9 +107,11 @@ impl<'a> CdrDeserializer<'a> {
         Self { endianness: endianness_from_bool(little_endian), data, position: 0 }
     }
 
-    /// Align position to boundary (accounting for removed header)
+    /// Align position to boundary
+    /// In CDR (XCDR1), alignment is calculated from the start of the serialized data
+    /// (after the encapsulation header), so header_offset should be 0
     pub(super) fn align(&mut self, alignment: usize) {
-        align_position_with_header_offset(&mut self.position, alignment, 4);
+        align_position_with_header_offset(&mut self.position, alignment, 0);
     }
 
     /// Check if enough data is available
