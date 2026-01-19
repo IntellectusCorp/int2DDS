@@ -222,14 +222,16 @@ cargo run --example hello_world -- --int2dds-network-ip 192.168.1.100
 
 ### INT2DDS_USE_LOOPBACK_INTERFACE
 
-Enables the loopback interface for discovery and endpoint communication.
+Enables the loopback interface for endpoint communication. <br>
 When enabled, the loopback address (127.0.0.1) is added to the available IP address list.
-This is useful when the NIC may go down during communication and loopback communication still needs to continue.
-주
-#### Behavior
+
+This is useful when the NIC may go down during communication—previously matched entities can continue exchanging data via loopback.
+However, new participants will not be discovered since loopback multicast discovery is still not supported in int2DDS.
+
+#### Interaction with Other Settings
 
 - Even if specific IPs are already configured via `INT2DDS_NETWORK_IP` or `INT2DDS_NETWORK_INTERFACE`, the loopback address will be added to the available IP list when this option is enabled.
-- If the loopback address is already in the list, this setting is ignored (no duplicates).
+  If the loopback address is already set through these variables, this setting is ignored.
 - If no network interfaces are available (e.g., WiFi and Ethernet disconnected), loopback is automatically used without setting this variable.
 
 #### Configuration
