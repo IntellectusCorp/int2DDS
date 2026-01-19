@@ -568,6 +568,7 @@ impl UserLogic {
                     if let Some(reader_locator) = reader_locators_guard.iter_mut().find(|rl| {
                         rl.guid_prefix() == task_reader.guid_prefix()
                             && rl.remote_entity_id() == task_reader.remote_entity_id()
+                            && rl.locator() == task_reader.locator()
                     }) {
                         reader_locator.set_highest_sent_change_sn(last_sn);
                     }
