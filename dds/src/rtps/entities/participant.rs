@@ -797,12 +797,20 @@ impl Participant {
                             len_before_unmatch
                         );
 
+                        let matching_count = reader_locator
+                            .iter()
+                            .filter(|locator| {
+                                locator.guid_prefix() == reader_guid.prefix()
+                                    && locator.remote_entity_id() == reader_guid.entity_id()
+                            })
+                            .count();
+
                         reader_locator.retain(|locator| {
                             locator.guid_prefix() != reader_guid.prefix()
                                 || locator.remote_entity_id() != reader_guid.entity_id()
                         });
 
-                        if len_before_unmatch == reader_locator.len() + 1 {
+                        if matching_count > 0 {
                             stateless_writer.update_publication_matched_status(
                                 -1,
                                 InstanceHandle::from_guid(&reader_guid),
@@ -1125,17 +1133,26 @@ impl Participant {
                             "Before unmatching with reader, this writer had {:?} matched readers",
                             reader_locator.len()
                         );
-                        for locator in reader_locator.iter() {
-                            if locator.guid_prefix() == terminated_participant_guid_prefix {
-                                stateless_writer.update_publication_matched_status(
-                                    -1,
-                                    InstanceHandle::from_guid(&Guid::new(
-                                        locator.guid_prefix(),
-                                        locator.remote_entity_id(),
-                                    )),
-                                );
-                            }
+
+                        // Collect unique entity IDs to avoid duplicate callbacks
+                        let unique_entity_ids: std::collections::HashSet<_> = reader_locator
+                            .iter()
+                            .filter(|locator| {
+                                locator.guid_prefix() == terminated_participant_guid_prefix
+                            })
+                            .map(|locator| locator.remote_entity_id())
+                            .collect();
+
+                        for entity_id in unique_entity_ids {
+                            stateless_writer.update_publication_matched_status(
+                                -1,
+                                InstanceHandle::from_guid(&Guid::new(
+                                    terminated_participant_guid_prefix,
+                                    entity_id,
+                                )),
+                            );
                         }
+
                         reader_locator.retain(|locator| {
                             locator.guid_prefix() != terminated_participant_guid_prefix
                         });
