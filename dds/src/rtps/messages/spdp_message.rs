@@ -1,11 +1,10 @@
 use chrono::Utc;
-use std::{net::Ipv4Addr, str::FromStr, sync::Arc};
+use std::sync::Arc;
 
 use crate::{
     rtps::{
         common::{
             entity_id::EntityId,
-            locator::Locator,
             parameters::{ParameterId, ParameterList},
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
             sequence::SequenceNumber,
@@ -22,7 +21,6 @@ use crate::{
             submessage_id::SubmessageId,
             submessages::{data::Data, info::InfoTimestamp},
         },
-        transport::{get_transport_type, port_manager::PortManager, TransportType},
     },
     serialize::pl_cdr::{discovery_helpers, RtpsMessageBuilder},
 };
@@ -101,171 +99,30 @@ impl SpdpMessage {
     fn create_serialized_data(participant: Arc<Participant>) -> RtpsResult<SerializedData> {
         let domain_id = participant.domain_id();
         let participant_guid = participant.guid();
+        let local_participant_proxy_data = participant.local_participant_proxy_data();
 
-        let (vendor_id, entity_name) = {
-            let local_participant_proxy_data = participant.local_participant_proxy_data();
-            (
-                local_participant_proxy_data.vendor_id(),
-                Some(local_participant_proxy_data.entity_name().to_string()),
-            )
-        };
+        let vendor_id = local_participant_proxy_data.vendor_id();
+        let entity_name = Some(local_participant_proxy_data.entity_name().to_string());
 
+        // Use pre-computed locators from local_participant_proxy_data
         let mut locators = Vec::new();
 
-        // Get transport type from environment variable
-        let transport_type = get_transport_type();
-        let participant_ip = Ipv4Addr::from_str(&participant.working_ip()).unwrap();
+        for locator in local_participant_proxy_data.metatraffic_unicast_locator_list() {
+            locators.push((
+                ParameterId::PidMetatrafficUnicastLocator,
+                locator.kind(),
+                locator.port(),
+                locator.address,
+            ));
+        }
 
-        // Create locators based on transport type
-        match transport_type {
-            TransportType::TCP => {
-                // Use TCP locators for TCP transport
-                let metatraffic = Locator::from_tcp_v4(
-                    participant_ip,
-                    PortManager::get_discovery_traffic_unicast_port(
-                        participant.domain_id(),
-                        participant.participant_id(),
-                    ) as u32,
-                );
-                let default = Locator::from_tcp_v4(
-                    participant_ip,
-                    PortManager::get_user_traffic_unicast_port(
-                        participant.domain_id(),
-                        participant.participant_id(),
-                    ) as u32,
-                );
-                locators.push((
-                    ParameterId::PidMetatrafficUnicastLocator,
-                    metatraffic.kind(),
-                    metatraffic.port(),
-                    metatraffic.address,
-                ));
-                locators.push((
-                    ParameterId::PidDefaultUnicastLocator,
-                    default.kind(),
-                    default.port(),
-                    default.address,
-                ));
-            }
-            TransportType::UDP => {
-                // Use UDP locators for UDP transport (default)
-                let metatraffic = Locator::from_ip_v4_addr_and_port(
-                    &participant_ip,
-                    PortManager::get_discovery_traffic_unicast_port(
-                        participant.domain_id(),
-                        participant.participant_id(),
-                    ) as u32,
-                );
-                let default = Locator::from_ip_v4_addr_and_port(
-                    &participant_ip,
-                    PortManager::get_user_traffic_unicast_port(
-                        participant.domain_id(),
-                        participant.participant_id(),
-                    ) as u32,
-                );
-                locators.push((
-                    ParameterId::PidMetatrafficUnicastLocator,
-                    metatraffic.kind(),
-                    metatraffic.port(),
-                    metatraffic.address,
-                ));
-                locators.push((
-                    ParameterId::PidDefaultUnicastLocator,
-                    default.kind(),
-                    default.port(),
-                    default.address,
-                ));
-            }
-            TransportType::Hybrid => {
-                // Hybrid mode: Include BOTH UDP and TCP locators
-                // UDP locators
-                let udp_metatraffic = Locator::from_ip_v4_addr_and_port(
-                    &participant_ip,
-                    PortManager::get_discovery_traffic_unicast_port(
-                        participant.domain_id(),
-                        participant.participant_id(),
-                    ) as u32,
-                );
-                let udp_default = Locator::from_ip_v4_addr_and_port(
-                    &participant_ip,
-                    PortManager::get_user_traffic_unicast_port(
-                        participant.domain_id(),
-                        participant.participant_id(),
-                    ) as u32,
-                );
-
-                // TCP locators
-                let tcp_metatraffic = Locator::from_tcp_v4(
-                    participant_ip,
-                    PortManager::get_discovery_traffic_unicast_port(
-                        participant.domain_id(),
-                        participant.participant_id(),
-                    ) as u32,
-                );
-                let tcp_default = Locator::from_tcp_v4(
-                    participant_ip,
-                    PortManager::get_user_traffic_unicast_port(
-                        participant.domain_id(),
-                        participant.participant_id(),
-                    ) as u32,
-                );
-
-                // Add all four locators (UDP + TCP)
-                locators.push((
-                    ParameterId::PidMetatrafficUnicastLocator,
-                    udp_metatraffic.kind(),
-                    udp_metatraffic.port(),
-                    udp_metatraffic.address,
-                ));
-                locators.push((
-                    ParameterId::PidDefaultUnicastLocator,
-                    udp_default.kind(),
-                    udp_default.port(),
-                    udp_default.address,
-                ));
-                locators.push((
-                    ParameterId::PidMetatrafficUnicastLocator,
-                    tcp_metatraffic.kind(),
-                    tcp_metatraffic.port(),
-                    tcp_metatraffic.address,
-                ));
-                locators.push((
-                    ParameterId::PidDefaultUnicastLocator,
-                    tcp_default.kind(),
-                    tcp_default.port(),
-                    tcp_default.address,
-                ));
-            }
-            TransportType::SHM => {
-                // SHM mode uses UDP locators for discovery (SPDP, SEDP)
-                let metatraffic = Locator::from_ip_v4_addr_and_port(
-                    &participant_ip,
-                    PortManager::get_discovery_traffic_unicast_port(
-                        participant.domain_id(),
-                        participant.participant_id(),
-                    ) as u32,
-                );
-                let default = Locator::from_shm(
-                    &participant_ip,
-                    PortManager::get_user_traffic_unicast_port(
-                        participant.domain_id(),
-                        participant.participant_id(),
-                    ) as u32,
-                );
-                locators.push((
-                    ParameterId::PidMetatrafficUnicastLocator,
-                    metatraffic.kind(),
-                    metatraffic.port(),
-                    metatraffic.address,
-                ));
-                locators.push((
-                    ParameterId::PidDefaultUnicastLocator,
-                    default.kind(),
-                    default.port(),
-                    default.address,
-                ));
-                // TODO: Add SHM locator for user data when implemented
-            }
+        for locator in local_participant_proxy_data.default_unicast_locator_list() {
+            locators.push((
+                ParameterId::PidDefaultUnicastLocator,
+                locator.kind(),
+                locator.port(),
+                locator.address,
+            ));
         }
 
         match discovery_helpers::create_spdp_participant_message(

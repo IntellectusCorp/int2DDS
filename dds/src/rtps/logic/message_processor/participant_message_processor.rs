@@ -3,9 +3,8 @@
 //! This module provides a trait for handling participant discovery messages
 //! that can be implemented by both SPDP and SEDP logic components.
 
-use std::sync::{Arc, Mutex};
-
 use speedy::{Endianness, Writable};
+use std::sync::{Arc, Mutex};
 
 use crate::{
     common::builtin::topic::{
@@ -82,9 +81,9 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
             return Ok(());
         }
 
-        // Check for duplicate participant
-        let result = match participant.remote_participant_proxy_datas().lock() {
-            Ok(remote_participant_datas) => {
+        // Check if this participant data already exists
+        let is_exist = participant.remote_participant_proxy_datas().lock().is_ok_and(
+            |remote_participant_datas| {
                 remote_participant_datas.iter().any(|remote_participant_data| {
                     if remote_participant_data.participant_guid() == participant_guid {
                         log::debug!(
@@ -97,14 +96,10 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
                         false
                     }
                 })
-            }
-            Err(e) => {
-                log::error!("Failed to lock remote_participant_datas: {:?}", e);
-                false
-            }
-        };
+            },
+        );
 
-        if result {
+        if is_exist {
             return Ok(());
         }
 

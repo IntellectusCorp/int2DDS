@@ -300,7 +300,7 @@ mod tests {
         let mut socket = Socket::new(domain_id);
         socket.create_socket();
         let participant =
-            Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ip()));
+            Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ips()));
 
         // socket.create_sender();
         let _ = SendingHandler::get_instance(

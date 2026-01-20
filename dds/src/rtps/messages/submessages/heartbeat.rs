@@ -25,7 +25,7 @@ pub(crate) struct Heartbeat {
     pub writer_id: EntityId,
     pub first_sn: SequenceNumber,
     pub last_sn: SequenceNumber,
-    count: Count,
+    pub count: Count,
 }
 
 impl Heartbeat {
