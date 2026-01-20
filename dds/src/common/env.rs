@@ -28,6 +28,7 @@ pub fn init_from_env() {
 
     // - INT2DDS_NETWORK_INTERFACE: Set network interface name to use (e.g., eth0, wlan0) - Default: automatic selection
     // - INT2DDS_NETWORK_IP: Set network IP address directly (e.g., 192.168.1.100) - Default: automatic selection
+    // - INT2DDS_USE_LOOPBACK_INTERFACE: Enable loopback interface for discovery and endpoint communication (true, false) - Default: false
     // - INT2DDS_UDP_SOCKET_BUFFER: Set UDP socket buffer size (bytes) - Default: OS default
     // - INT2DDS_SHM_BUFFER_SIZE: Set shared memory buffer size (bytes) - Default: 1048576 (1MB)
 
@@ -135,6 +136,12 @@ fn apply_cli_args_to_env() {
                     .value_hint(ValueHint::Other),
             )
             .arg(
+                Arg::new("int2dds_use_loopback_interface")
+                    .long("int2dds-use-loopback-interface")
+                    .help("Enable loopback interface for discovery and endpoint communication")
+                    .action(ArgAction::SetTrue),
+            )
+            .arg(
                 Arg::new("int2dds_udp_socket_buffer")
                     .long("int2dds-udp-socket-buffer")
                     .value_name("SIZE")
@@ -234,6 +241,10 @@ fn apply_cli_args_to_env() {
         log::info!("Environment variable set: INT2DDS_NETWORK_IP = {}", v);
         unsafe { std::env::set_var("INT2DDS_NETWORK_IP", v) };
     }
+    if matches.get_flag("int2dds_use_loopback_interface") {
+        log::info!("Environment variable set: INT2DDS_USE_LOOPBACK_INTERFACE = true");
+        unsafe { std::env::set_var("INT2DDS_USE_LOOPBACK_INTERFACE", "true") };
+    }
     if let Some(v) = matches.get_one::<String>("int2dds_udp_socket_buffer") {
         log::info!("Environment variable set: INT2DDS_UDP_SOCKET_BUFFER = {}", v);
         unsafe { std::env::set_var("INT2DDS_UDP_SOCKET_BUFFER", v) };
@@ -324,6 +335,19 @@ pub fn set_network_interface(interface: &str) {
 pub fn set_network_ip(ip: &str) {
     log::info!("Environment variable set: INT2DDS_NETWORK_IP = {}", ip);
     unsafe { std::env::set_var("INT2DDS_NETWORK_IP", ip) };
+}
+
+/// Get the use loopback interface setting from environment variable
+pub fn get_use_loopback_interface() -> bool {
+    std::env::var("INT2DDS_USE_LOOPBACK_INTERFACE")
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false)
+}
+
+/// Set the use loopback interface via environment variable
+pub fn set_use_loopback_interface(enabled: bool) {
+    log::info!("Environment variable set: INT2DDS_USE_LOOPBACK_INTERFACE = {}", enabled);
+    unsafe { std::env::set_var("INT2DDS_USE_LOOPBACK_INTERFACE", enabled.to_string()) };
 }
 
 /// Set the UDP socket buffer size via environment variable

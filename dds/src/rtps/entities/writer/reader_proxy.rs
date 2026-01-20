@@ -22,6 +22,7 @@ pub(crate) struct ReaderProxy {
     expects_inline_qos: bool, // false
     is_active: bool,
     last_acknack_count: i32,
+    last_nackfrag_count: i32,
     content_filter_signatures: Option<Vec<FilterSignature>>, // Content filter signatures for this reader
     subscription_builtin_topic_data: SubscriptionBuiltinTopicData,
 }
@@ -66,6 +67,7 @@ impl ReaderProxy {
             expects_inline_qos,
             is_active,
             last_acknack_count: 0,
+            last_nackfrag_count: 0,
             content_filter_signatures: None,
             subscription_builtin_topic_data,
         }
@@ -188,6 +190,14 @@ impl ReaderProxy {
 
     pub(crate) fn set_last_acknack_count(&mut self, last_acknack_count: i32) {
         self.last_acknack_count = last_acknack_count;
+    }
+
+    pub(crate) fn last_nackfrag_count(&self) -> i32 {
+        self.last_nackfrag_count
+    }
+
+    pub(crate) fn set_last_nackfrag_count(&mut self, last_nackfrag_count: i32) {
+        self.last_nackfrag_count = last_nackfrag_count;
     }
 
     pub(crate) fn content_filter_signatures(&self) -> Option<&Vec<FilterSignature>> {

@@ -185,25 +185,6 @@ impl StatefulWriter {
         self.preemptive_heartbeat_delay
     }
 
-    pub(crate) fn update_to_sent(
-        &self,
-        reader_proxy: ReaderProxy,
-        sequence_number: SequenceNumber,
-    ) {
-        match self.matched_readers.lock() {
-            Ok(mut matched_readers) => {
-                matched_readers.iter_mut().for_each(|proxy| {
-                    if proxy.remote_reader_guid() == reader_proxy.remote_reader_guid() {
-                        proxy.set_highest_sent_change_sn(sequence_number);
-                    }
-                });
-            }
-            Err(e) => {
-                error!("Failed to acquire matched_readers lock: {}", e);
-            }
-        }
-    }
-
     pub(crate) fn publication_builtin_topic_data(&self) -> RtpsResult<PublicationBuiltinTopicData> {
         Ok(self
             .publication_builtin_topic_data

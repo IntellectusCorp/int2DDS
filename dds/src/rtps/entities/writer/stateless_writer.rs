@@ -154,24 +154,6 @@ impl StatelessWriter {
     pub(crate) fn reader_locator(&self) -> Arc<Mutex<Vec<ReaderLocator>>> {
         self.reader_locators.clone()
     }
-    pub(crate) fn update_to_sent(
-        &self,
-        reader_locator: ReaderLocator,
-        sequence_number: SequenceNumber,
-    ) {
-        match self.reader_locators.lock() {
-            Ok(mut reader_locators) => {
-                for locator in reader_locators.iter_mut() {
-                    if locator.locator() == reader_locator.locator() {
-                        locator.set_highest_sent_change_sn(sequence_number);
-                    }
-                }
-            }
-            Err(e) => {
-                error!("Failed to lock reader_locators: {}", e);
-            }
-        }
-    }
 
     pub(crate) fn publication_builtin_topic_data(&self) -> RtpsResult<PublicationBuiltinTopicData> {
         Ok(self
