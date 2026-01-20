@@ -36,6 +36,7 @@ pub use crate::infrastructure::qos_policy::DataRepresentationId;
 pub use core::{
     // Alignment utilities
     align_buffer,
+    align_buffer_with_header_offset,
     align_position_with_header_offset,
     deserialize_array_common,
     // Data payload deserialization
