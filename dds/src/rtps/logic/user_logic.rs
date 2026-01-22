@@ -21,6 +21,7 @@ use crate::rtps::common::types::DomainId;
 use crate::rtps::common::types::{ChangeKind, SerializedData};
 use crate::rtps::entities::endpoint::Endpoint;
 use crate::rtps::entities::entity::Entity;
+use crate::rtps::entities::history;
 use crate::rtps::entities::history::cache_change::CacheChange;
 use crate::rtps::entities::history::history_cache::HistoryCache;
 use crate::rtps::entities::reader::{
@@ -655,7 +656,8 @@ impl UserLogic {
 
         let latest_sn = history_cache.get_seq_num_max();
 
-        if writer.is_acked_by_all(latest_sn) {
+        // If no samples are available or all readers have acknowledged up to latest sequence number, stop heartbeat
+        if history_cache.is_empty() || writer.is_acked_by_all(latest_sn) {
             debug!("All readers have acknowledged up to the latest sequence number, stopping heartbeat.");
 
             if let Ok(locked_timer_handler) =
