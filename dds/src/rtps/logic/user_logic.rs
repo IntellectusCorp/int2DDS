@@ -5,7 +5,6 @@
 
 use chrono::{DateTime, Utc};
 use log::{debug, trace, warn};
-use std::cmp::max;
 use std::ops::Add;
 use std::time::Duration;
 
@@ -440,6 +439,12 @@ impl UserLogic {
             }
         }
 
+        if !writer.heartbeat_timer_running() {
+            writer.register_periodic_heartbeat_timer(TimerHandler::get_instance(
+                participant.guid().prefix(),
+            ))?;
+        }
+
         Ok(())
     }
 
@@ -619,27 +624,51 @@ impl UserLogic {
     ) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
 
-        let writer = participant.find_writer_from_entity_id(entity_id);
+        let found_writer = participant
+            .find_writer_from_entity_id(entity_id)
+            .ok_or_else(|| RtpsError::new(RtpsErrorCode::RtpsEntityNotFound, None))?;
 
-        if let Some(writer) = writer {
-            if let Some(writer) = writer.as_any().downcast_ref::<StatefulWriter>() {
-                let reader_proxies_lock = writer.reader_proxies();
-                let reader_proxies = reader_proxies_lock.lock().map_err(|e| {
-                    RtpsError::new(
-                        RtpsErrorCode::LockError,
-                        format!("Failed to acquire reader_proxies lock: {}", e),
-                    )
-                })?;
+        let writer = found_writer
+            .as_any()
+            .downcast_ref::<StatefulWriter>()
+            .ok_or_else(|| RtpsError::new(RtpsErrorCode::DowncastError, "Not a stateful writer"))?;
 
-                for reader_proxy in reader_proxies.iter() {
-                    self.send_heartbeat_to_a_reader_proxy_inner(writer, &mut reader_proxy.clone())?;
-                }
-            } else {
+        let reader_proxies_lock = writer.reader_proxies();
+        let reader_proxies = reader_proxies_lock.lock().map_err(|e| {
+            RtpsError::new(
+                RtpsErrorCode::LockError,
+                format!("Failed to acquire reader_proxies lock: {}", e),
+            )
+        })?;
+
+        let writer_cache_lock = writer.writer_cache();
+        let history_cache = match writer_cache_lock.lock() {
+            Ok(cache) => cache,
+            Err(e) => {
                 return Err(RtpsError::new(
-                    RtpsErrorCode::DowncastError,
-                    "Failed to downcast writer",
+                    RtpsErrorCode::LockError,
+                    format!("Failed to acquire writer cache lock for heartbeat: {:?}", e),
                 ));
             }
+        };
+
+        let latest_sn = history_cache.get_seq_num_max();
+
+        if writer.is_acked_by_all(latest_sn) {
+            debug!("All readers have acknowledged up to the latest sequence number, stopping heartbeat.");
+
+            if let Ok(locked_timer_handler) =
+                TimerHandler::get_instance(participant.guid().prefix()).lock()
+            {
+                locked_timer_handler.remove_timer(writer.periodic_heartbeat_timer_id());
+            }
+
+            // remove timer
+            return Ok(());
+        }
+
+        for reader_proxy in reader_proxies.iter() {
+            self.send_heartbeat_to_a_reader_proxy_inner(writer, &mut reader_proxy.clone())?;
         }
 
         Ok(())

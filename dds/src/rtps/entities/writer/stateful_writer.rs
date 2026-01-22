@@ -64,6 +64,7 @@ pub(crate) struct StatefulWriter {
     preemptive_heartbeat_delay: RtpsDuration,
     last_change_sequence_number: Arc<Mutex<SequenceNumber>>,
     heartbeat_period: RtpsDuration,
+    periodic_heartbeat_timer_id: String,
     data_max_size_serialized: i32,
     matched_readers: Arc<Mutex<Vec<ReaderProxy>>>,
     writer_cache: Arc<Mutex<WriterHistoryCache>>,
@@ -72,7 +73,7 @@ pub(crate) struct StatefulWriter {
     callback:
         Arc<Mutex<Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>>>,
     publication_builtin_topic_data: Arc<Mutex<PublicationBuiltinTopicData>>,
-    heartbeat_thread_started: Arc<AtomicBool>,
+    heartbeat_timer_running: Arc<AtomicBool>,
     publication_matched_status: Arc<Mutex<PublicationMatchedStatus>>,
     offered_incompatible_qos_status: Arc<Mutex<OfferedIncompatibleQosStatus>>,
 }
@@ -114,6 +115,10 @@ impl StatefulWriter {
             preemptive_heartbeat_delay,
             last_change_sequence_number: Arc::new(Mutex::new(SequenceNumber::new(0, 0))), // Assuming SequenceNumber has a new method
             heartbeat_period,
+            periodic_heartbeat_timer_id: format!(
+                "periodic_heartbeat_writer_{:?}",
+                guid.entity_id().entity_key
+            ),
             data_max_size_serialized,
             matched_readers: Arc::new(Mutex::new(Vec::new())),
             writer_cache: Arc::new(Mutex::new(WriterHistoryCache::new(
@@ -123,7 +128,7 @@ impl StatefulWriter {
             heartbeat_count: Arc::new(Mutex::new(1)),
             callback: Arc::new(Mutex::new(callback)),
             publication_builtin_topic_data: Arc::new(Mutex::new(publication_builtin_topic_data)),
-            heartbeat_thread_started: Arc::new(AtomicBool::new(false)),
+            heartbeat_timer_running: Arc::new(AtomicBool::new(false)),
             publication_matched_status: Arc::new(Mutex::new(PublicationMatchedStatus::default())),
             offered_incompatible_qos_status: Arc::new(Mutex::new(
                 OfferedIncompatibleQosStatus::default(),
@@ -185,6 +190,14 @@ impl StatefulWriter {
         self.preemptive_heartbeat_delay
     }
 
+    pub(crate) fn periodic_heartbeat_timer_id(&self) -> String {
+        self.periodic_heartbeat_timer_id.clone()
+    }
+
+    pub(crate) fn heartbeat_timer_running(&self) -> bool {
+        self.heartbeat_timer_running.load(Ordering::Acquire)
+    }
+
     pub(crate) fn publication_builtin_topic_data(&self) -> RtpsResult<PublicationBuiltinTopicData> {
         Ok(self
             .publication_builtin_topic_data
@@ -197,14 +210,8 @@ impl StatefulWriter {
     pub(crate) fn register_periodic_heartbeat_timer(
         &self,
         timer_handler: Arc<Mutex<TimerHandler>>,
-    ) {
-        if self
-            .heartbeat_thread_started
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            return;
-        }
+    ) -> RtpsResult<()> {
+        self.compare_and_set_heartbeat_timer_running(false, true)?;
 
         let guid = self.guid;
         let heartbeat_period = self.heartbeat_period;
@@ -212,16 +219,12 @@ impl StatefulWriter {
         let heartbeat_count = self.heartbeat_count.clone();
 
         // Generate unique timer ID for this writer's heartbeat
-        let timer_id = format!("periodic_heartbeat_writer_{:?}", guid.entity_id().entity_key);
-
         if let Ok(timer_handler) = timer_handler.lock() {
             timer_handler.add_timer(
-                timer_id,
+                self.periodic_heartbeat_timer_id(),
                 heartbeat_period.to_std_duration(),
                 true, // repeating timer
                 {
-                    let writer_cache = writer_cache.clone();
-                    let heartbeat_count = heartbeat_count.clone();
                     move || {
                         // Send heartbeat
                         Self::send_heartbeat_to_readers(guid);
@@ -231,6 +234,19 @@ impl StatefulWriter {
         } else {
             log::error!("Failed to acquire timer handler lock for heartbeat timer");
         }
+
+        Ok(())
+    }
+
+    pub(crate) fn compare_and_set_heartbeat_timer_running(
+        &self,
+        expected: bool,
+        new: bool,
+    ) -> RtpsResult<bool> {
+        Ok(self
+            .heartbeat_timer_running
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok())
     }
 
     pub(crate) fn increase_heartbeat_count(&self) {
