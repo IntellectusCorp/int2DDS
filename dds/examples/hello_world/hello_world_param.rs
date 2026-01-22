@@ -11,7 +11,6 @@ use int2dds::{
         log::{LogLevel, LogType},
     },
     core::time::Duration,
-    dcps::infrastructure::qos_policy::HistoryQosPolicy,
     domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
     infrastructure::{
         qos_policy::{ReliabilityQosPolicy, ReliabilityQosPolicyKind},
@@ -169,9 +168,6 @@ fn run_publisher(domain_id: i32, reliability: Reliability) {
             kind: reliability_kind,
             max_blocking_time: Duration { sec: 0, nanosec: 100_000_000 },
         },
-        history: HistoryQosPolicy {
-            kind: int2dds::dcps::infrastructure::qos_policy::HistoryQosPolicyKind::KeepLast(5),
-        },
         ..Default::default()
     };
 
@@ -217,7 +213,7 @@ fn run_publisher(domain_id: i32, reliability: Reliability) {
         };
         writer.write(&data, InstanceHandle::NIL).unwrap();
         info!("Published {:?}", data);
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(std::time::Duration::from_millis(1000));
         i += 1;
     }
 }
