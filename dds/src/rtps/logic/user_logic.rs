@@ -5,13 +5,14 @@
 
 use chrono::{DateTime, Utc};
 use log::{debug, trace, warn};
+use std::collections::HashMap;
 use std::ops::Add;
 use std::time::Duration;
 
 use crate::common::builtin::topic::publication_builtin_topic_data::PublicationBuiltinTopicData;
 use crate::common::instance_handle::InstanceHandle;
 use crate::rtps::common::entity_id::EntityId;
-use crate::rtps::common::guid::Guid;
+use crate::rtps::common::guid::{Guid, GuidPrefix};
 use crate::rtps::common::locator::Locator;
 use crate::rtps::common::parameters::ParameterList;
 use crate::rtps::common::rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult};
@@ -667,8 +668,43 @@ impl UserLogic {
             return Ok(());
         }
 
+        // Group by participant: participant_guid -> first locator
+        let mut participant_locators: HashMap<GuidPrefix, Locator> = HashMap::new();
+
         for reader_proxy in reader_proxies.iter() {
-            self.send_heartbeat_to_a_reader_proxy_inner(writer, &mut reader_proxy.clone())?;
+            if !reader_proxy.is_reliable() {
+                continue;
+            }
+            let participant_guid_prefix = reader_proxy.remote_reader_guid().prefix();
+            // Use first locator for each participant (skip if already added)
+            if !participant_locators.contains_key(&participant_guid_prefix) {
+                if let Some(locator) = reader_proxy.unicast_locator_list().into_iter().next() {
+                    participant_locators.insert(participant_guid_prefix, locator);
+                }
+            }
+        }
+
+        // Send heartbeat once per participant
+        for (target_participant_prefix, locator) in participant_locators.iter() {
+            let buffer = MessageCreator::create_heartbeat_message(
+                writer.guid(),
+                Guid::new(*target_participant_prefix, EntityId::UNKNOWN),
+                writer.heartbeat_count(),
+                EntityId::UNKNOWN,
+                writer.endpoint_id(),
+                history_cache.get_seq_num_min(),
+                history_cache.get_seq_num_max(),
+                false,
+                false,
+            );
+
+            if let Ok(buf) = buffer {
+                self.send_rtps_message_to_locators([locator.clone()], &buf)?;
+            }
+        }
+
+        if !participant_locators.is_empty() {
+            writer.increase_heartbeat_count();
         }
 
         Ok(())
