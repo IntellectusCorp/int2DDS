@@ -361,9 +361,6 @@ impl UserLogic {
                     )?;
                 }
 
-                let first_available_sn =
-                    max(history_cache.get_seq_num_min(), reader_proxy.max_acked_sn().add(1));
-
                 // TODO: Filter message according to Reader Proxy's request (time based filter, content filtered topic, etc)
                 // Send DATA message or GAP message depending on filter result
                 if let Some(a_change) = history_cache.get_change(a_change_seq_num) {
@@ -376,7 +373,7 @@ impl UserLogic {
                             if reader_proxy.is_reliable() {
                                 heartbeat_info = Some((
                                     writer.heartbeat_count(),
-                                    first_available_sn,
+                                    history_cache.get_seq_num_min(),
                                     history_cache.get_seq_num_max(),
                                     false,
                                     false,
@@ -402,7 +399,7 @@ impl UserLogic {
                         if reader_proxy.is_reliable() {
                             heartbeat_info = Some((
                                 writer.heartbeat_count(),
-                                first_available_sn,
+                                history_cache.get_seq_num_min(),
                                 history_cache.get_seq_num_max(),
                                 false,
                                 false,
@@ -709,16 +706,13 @@ impl UserLogic {
             }
         };
 
-        let first_available_sn =
-            max(history_cache.get_seq_num_min(), reader_proxy.max_acked_sn().add(1));
-
         let buffer = MessageCreator::create_heartbeat_message(
             writer.guid(),
             reader_proxy.remote_reader_guid(),
             writer.heartbeat_count(),
             reader_proxy.remote_group_entity_id(),
             writer.endpoint_id(),
-            first_available_sn,
+            history_cache.get_seq_num_min(),
             history_cache.get_seq_num_max(),
             false,
             false,
