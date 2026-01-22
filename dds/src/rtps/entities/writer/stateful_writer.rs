@@ -194,7 +194,10 @@ impl StatefulWriter {
     }
 
     /// Start heartbeat timer in a separate thread (thread-safe approach)
-    pub(crate) fn start_heartbeat_timer(&self, timer_handler: Arc<Mutex<TimerHandler>>) {
+    pub(crate) fn register_periodic_heartbeat_timer(
+        &self,
+        timer_handler: Arc<Mutex<TimerHandler>>,
+    ) {
         if self
             .heartbeat_thread_started
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -209,7 +212,7 @@ impl StatefulWriter {
         let heartbeat_count = self.heartbeat_count.clone();
 
         // Generate unique timer ID for this writer's heartbeat
-        let timer_id = format!("heartbeat_writer_{:?}", guid.entity_id().entity_key);
+        let timer_id = format!("periodic_heartbeat_writer_{:?}", guid.entity_id().entity_key);
 
         if let Ok(timer_handler) = timer_handler.lock() {
             timer_handler.add_timer(
