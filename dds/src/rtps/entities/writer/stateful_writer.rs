@@ -22,7 +22,10 @@ use crate::{
     },
     core::time::Duration as DcpsDuration,
     infrastructure::{
-        qos_policy::{LivelinessQosPolicy, QosPolicyId, ReliabilityQosPolicyKind},
+        qos_policy::{
+            LivelinessQosPolicy, QosPolicyId, ReliabilityExtensionQosPolicy,
+            ReliabilityQosPolicyKind,
+        },
         status::{
             OfferedIncompatibleQosStatus, PublicationMatchedStatus, QosPolicyCount, StatusInfo,
             StatusKind,
@@ -58,12 +61,7 @@ pub(crate) struct StatefulWriter {
     unicast_locator_list: Vec<Locator>,
     multicast_locator_list: Vec<Locator>,
     endpoint_id: EntityId,
-    push_mode: bool,
-    nack_suppression_duration: RtpsDuration,
-    nack_response_delay: RtpsDuration,
-    preemptive_heartbeat_delay: RtpsDuration,
     last_change_sequence_number: Arc<Mutex<SequenceNumber>>,
-    heartbeat_period: RtpsDuration,
     periodic_heartbeat_timer_id: String,
     data_max_size_serialized: i32,
     matched_readers: Arc<Mutex<Vec<ReaderProxy>>>,
@@ -76,7 +74,7 @@ pub(crate) struct StatefulWriter {
     heartbeat_timer_running: Arc<AtomicBool>,
     publication_matched_status: Arc<Mutex<PublicationMatchedStatus>>,
     offered_incompatible_qos_status: Arc<Mutex<OfferedIncompatibleQosStatus>>,
-    disable_piggyback_heartbeat: bool,
+    reliability_extension: ReliabilityExtensionQosPolicy,
 }
 
 impl StatefulWriter {
@@ -89,21 +87,12 @@ impl StatefulWriter {
         reliability_level: ReliabilityQosPolicyKind,
         topic_kind: TopicKind,
         endpoint_id: EntityId,
-        push_mode: bool,
-        heartbeat_period: RtpsDuration,
         data_max_size_serialized: i32,
         callback: Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>,
         publication_builtin_topic_data: PublicationBuiltinTopicData,
         participant_guid: Guid,
     ) -> Self {
-        // in:attribute_values
-        // 8.4.7.1.1 & 8.4.7.1.2 & 8.4.7.2.1
-
-        let nack_response_delay = RtpsDuration::new(0, 200 * 1000 * 1000); // 200 milliseconds
-        let nack_suppression_duration = RtpsDuration::new(0, 0);
-        let preemptive_heartbeat_delay = RtpsDuration::new(0, 10 * 1000 * 1000);
-        let disable_piggyback_heartbeat =
-            publication_builtin_topic_data.reliability_extension().disable_piggyback_heartbeat;
+        let reliability_extension = *publication_builtin_topic_data.reliability_extension();
 
         Self {
             guid,
@@ -112,12 +101,7 @@ impl StatefulWriter {
             reliability_level,
             topic_kind,
             endpoint_id,
-            push_mode,
-            nack_response_delay,
-            nack_suppression_duration,
-            preemptive_heartbeat_delay,
-            last_change_sequence_number: Arc::new(Mutex::new(SequenceNumber::new(0, 0))), // Assuming SequenceNumber has a new method
-            heartbeat_period,
+            last_change_sequence_number: Arc::new(Mutex::new(SequenceNumber::new(0, 0))),
             periodic_heartbeat_timer_id: format!(
                 "periodic_heartbeat_writer_{:?}",
                 guid.entity_id().entity_key
@@ -136,7 +120,7 @@ impl StatefulWriter {
             offered_incompatible_qos_status: Arc::new(Mutex::new(
                 OfferedIncompatibleQosStatus::default(),
             )),
-            disable_piggyback_heartbeat,
+            reliability_extension,
         }
     }
 
@@ -191,7 +175,7 @@ impl StatefulWriter {
     }
 
     pub(crate) fn preemptive_heartbeat_delay(&self) -> RtpsDuration {
-        self.preemptive_heartbeat_delay
+        RtpsDuration::from(self.reliability_extension.preemptive_heartbeat_delay)
     }
 
     pub(crate) fn periodic_heartbeat_timer_id(&self) -> String {
@@ -218,7 +202,7 @@ impl StatefulWriter {
         self.compare_and_set_heartbeat_timer_running(false, true)?;
 
         let guid = self.guid;
-        let heartbeat_period = self.heartbeat_period;
+        let heartbeat_period = self.heartbeat_period();
         let writer_cache = Arc::clone(&self.writer_cache);
         let heartbeat_count = self.heartbeat_count.clone();
 
@@ -275,7 +259,7 @@ impl StatefulWriter {
     }
 
     pub(crate) fn disable_piggyback_heartbeat(&self) -> bool {
-        self.disable_piggyback_heartbeat
+        self.reliability_extension.disable_piggyback_heartbeat
     }
 
     fn send_heartbeat_to_readers(writer_guid: Guid) {
@@ -487,7 +471,7 @@ impl Writer for StatefulWriter {
     }
 
     fn heartbeat_period(&self) -> RtpsDuration {
-        self.heartbeat_period
+        RtpsDuration::from(self.reliability_extension.heartbeat_period)
     }
 
     fn last_change_sequence_number(&self) -> SequenceNumber {
@@ -501,15 +485,15 @@ impl Writer for StatefulWriter {
     }
 
     fn nack_response_delay(&self) -> RtpsDuration {
-        self.nack_response_delay
+        RtpsDuration::from(self.reliability_extension.nack_response_delay)
     }
 
     fn nack_suppression_duration(&self) -> RtpsDuration {
-        self.nack_suppression_duration
+        RtpsDuration::from(self.reliability_extension.nack_suppression_duration)
     }
 
     fn push_mode(&self) -> bool {
-        self.push_mode
+        self.reliability_extension.push_mode
     }
 
     fn wait_for_all_acked(&self, max_wait: DcpsDuration) -> bool {
@@ -685,7 +669,7 @@ mod tests {
         rtps::{
             common::{
                 entity_id::EntityId, entity_kind::EntityKind, guid::Guid, sequence::SequenceNumber,
-                time::RtpsDuration, types::TopicKind,
+                types::TopicKind,
             },
             entities::writer::reader_proxy::ReaderProxy,
         },
@@ -703,8 +687,6 @@ mod tests {
             ReliabilityQosPolicyKind::Reliable,
             TopicKind::NoKey,
             EntityId::new([0, 0, 1], EntityKind::USER_DEFINED_WRITER_NO_KEY),
-            true,
-            RtpsDuration::new(2, 0),
             65000,
             None,
             PublicationBuiltinTopicData::default(),
@@ -775,8 +757,6 @@ mod tests {
             ReliabilityQosPolicyKind::Reliable,
             TopicKind::NoKey,
             EntityId::new([0, 0, 1], EntityKind::USER_DEFINED_WRITER_NO_KEY),
-            true,
-            RtpsDuration::new(2, 0),
             65000,
             None,
             PublicationBuiltinTopicData::default(),

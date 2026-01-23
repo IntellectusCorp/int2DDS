@@ -132,6 +132,16 @@ impl Qos for DataWriterQos {
             return Err(DdsError::Unsupported);
         }
 
+        // ReliabilityExtensionQosPolicy unsupported fields check
+        let ext_default = ReliabilityExtensionQosPolicy::DEFAULT;
+        if self.reliability_extension.push_mode != ext_default.push_mode
+            || self.reliability_extension.nack_suppression_duration
+                != ext_default.nack_suppression_duration
+            || self.reliability_extension.nack_response_delay != ext_default.nack_response_delay
+        {
+            return Err(DdsError::Unsupported);
+        }
+
         Ok(())
     }
 
