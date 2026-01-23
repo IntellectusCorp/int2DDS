@@ -21,7 +21,6 @@ use crate::rtps::common::types::DomainId;
 use crate::rtps::common::types::{ChangeKind, SerializedData};
 use crate::rtps::entities::endpoint::Endpoint;
 use crate::rtps::entities::entity::Entity;
-use crate::rtps::entities::history;
 use crate::rtps::entities::history::cache_change::CacheChange;
 use crate::rtps::entities::history::history_cache::HistoryCache;
 use crate::rtps::entities::reader::{
@@ -670,29 +669,27 @@ impl UserLogic {
             return Ok(());
         }
 
-        // Group by participant: participant_guid -> first locator
-        let mut participant_locators: HashMap<GuidPrefix, Locator> = HashMap::new();
+        // Group by participant: participant_guid -> all locators
+        // This ensures only one heartbeat is sent per participant
+        let mut participant_locators: HashMap<GuidPrefix, Vec<Locator>> = HashMap::new();
 
         for reader_proxy in reader_proxies.iter() {
             if !reader_proxy.is_reliable() {
                 continue;
             }
             let participant_guid_prefix = reader_proxy.remote_reader_guid().prefix();
-            // Use first locator for each participant (skip if already added)
-            if !participant_locators.contains_key(&participant_guid_prefix) {
-                if let Some(locator) = reader_proxy.unicast_locator_list().into_iter().next() {
-                    participant_locators.insert(participant_guid_prefix, locator);
-                }
-            }
+            participant_locators
+                .entry(participant_guid_prefix)
+                .or_insert_with(|| reader_proxy.unicast_locator_list().to_vec());
         }
 
         // Send heartbeat once per participant
-        for (target_participant_prefix, locator) in participant_locators.iter() {
+        for (target_participant_prefix, locators) in participant_locators.iter() {
             let buffer = MessageCreator::create_heartbeat_message(
                 writer.guid(),
                 Guid::new(*target_participant_prefix, EntityId::UNKNOWN),
                 writer.heartbeat_count(),
-                EntityId::UNKNOWN,
+                EntityId::UNKNOWN, // This ensures all readers in the participant receive the heartbeat
                 writer.endpoint_id(),
                 history_cache.get_seq_num_min(),
                 history_cache.get_seq_num_max(),
@@ -701,7 +698,7 @@ impl UserLogic {
             );
 
             if let Ok(buf) = buffer {
-                self.send_rtps_message_to_locators([locator.clone()], &buf)?;
+                self.send_rtps_message_to_locators(locators.clone(), &buf)?;
             }
         }
 
