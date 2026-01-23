@@ -217,8 +217,6 @@ impl DcpsBridge {
                 ReliabilityQosPolicyKind::Reliable,
                 topic_kind,
                 datawriter_guid.entity_id(),
-                true,
-                RtpsDuration::new(2, 0),
                 65000,
                 f,
                 publication_builtin_topic_data.clone(),
