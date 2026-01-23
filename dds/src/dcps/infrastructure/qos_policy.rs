@@ -1855,7 +1855,7 @@ impl QosPolicy for TypeConsistencyEnforcementQosPolicy {
 /// # Default
 /// - `disable_piggyback_heartbeat: false` - Piggybacked heartbeats are enabled by default.
 /// - `heartbeat_period: 2 seconds` - Period for sending periodic heartbeat messages.
-/// - `preemptive_heartbeat_delay: 10ms` - Delay before sending preemptive heartbeat after reader discovery.
+/// - `initial_heartbeat_delay: 10ms` - Delay before sending initial heartbeat after reader discovery.
 /// - `push_mode: true` - (Unsupported) Writer pushes data to readers.
 /// - `nack_suppression_duration: 0` - (Unsupported) Duration to suppress NACKs.
 /// - `nack_response_delay: 200ms` - (Unsupported) Delay before responding to a NACK.
@@ -1871,9 +1871,9 @@ pub struct ReliabilityExtensionQosPolicy {
     /// Default: 2 seconds
     pub heartbeat_period: Duration,
 
-    /// Delay before sending preemptive heartbeat after reader discovery.
+    /// Delay before sending initial heartbeat after reader discovery.
     /// Default: 10ms
-    pub preemptive_heartbeat_delay: Duration,
+    pub initial_heartbeat_delay: Duration,
 
     /// (Unsupported) When `true`, writer pushes data to readers.
     /// When `false`, reader pulls data (not implemented).
@@ -1899,7 +1899,7 @@ impl ConstDefault for ReliabilityExtensionQosPolicy {
     const DEFAULT: Self = Self {
         disable_piggyback_heartbeat: false,
         heartbeat_period: Duration { sec: 2, nanosec: 0 },
-        preemptive_heartbeat_delay: Duration { sec: 0, nanosec: 10_000_000 },
+        initial_heartbeat_delay: Duration { sec: 0, nanosec: 10_000_000 },
         push_mode: true,
         nack_suppression_duration: Duration { sec: 0, nanosec: 0 },
         nack_response_delay: Duration { sec: 0, nanosec: 200_000_000 },

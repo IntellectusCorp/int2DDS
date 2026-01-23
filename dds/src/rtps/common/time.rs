@@ -317,6 +317,24 @@ impl RtpsDuration {
         Self { seconds, fraction }
     }
 
+    /// Creates a duration from milliseconds
+    pub fn from_millis(millis: u64) -> Self {
+        let seconds = (millis / 1000) as i32;
+        let remaining_millis = millis % 1000;
+        // fraction = remaining_millis * 2^32 / 1000
+        let fraction = ((remaining_millis << 32) / 1000) as u32;
+        Self { seconds, fraction }
+    }
+
+    /// Creates a duration from nanoseconds
+    pub fn from_nanos(nanos: u64) -> Self {
+        let seconds = (nanos / 1_000_000_000) as i32;
+        let remaining_nanos = nanos % 1_000_000_000;
+        // fraction = remaining_nanos * 2^32 / 1_000_000_000
+        let fraction = ((remaining_nanos << 32) / 1_000_000_000) as u32;
+        Self { seconds, fraction }
+    }
+
     /// Gets the seconds component
     #[inline]
     pub const fn seconds(&self) -> i32 {
