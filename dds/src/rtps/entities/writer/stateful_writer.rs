@@ -791,6 +791,7 @@ mod tests {
                 &SubscriberQos::default(),
                 &TopicQos::default(),
             ),
+            SequenceNumber::new(0, 0),
         );
 
         // Reader initially hasn't acked anything
@@ -861,6 +862,7 @@ mod tests {
                 &SubscriberQos::default(),
                 &TopicQos::default(),
             ),
+            SequenceNumber::new(0, 0),
         );
 
         stateful_writer.matched_reader_add(reader_proxy);

@@ -662,6 +662,7 @@ mod tests {
             false,
             true,
             SubscriptionBuiltinTopicData::default(),
+            SequenceNumber::new(0, 0),
         );
 
         // Reader that has not acked anything initially
@@ -750,6 +751,7 @@ mod tests {
             false,
             true,
             subscription_builtin_topic_data,
+            SequenceNumber::new(0, 0),
         );
 
         // Reader that has not acked anything initially
@@ -807,6 +809,7 @@ mod tests {
             false,
             true,
             SubscriptionBuiltinTopicData::default(),
+            SequenceNumber::new(0, 0),
         );
 
         // Reader that has not acked anything initially
@@ -863,6 +866,7 @@ mod tests {
             false,
             true,
             SubscriptionBuiltinTopicData::default(),
+            SequenceNumber::new(0, 0),
         );
 
         // Reader that has not acked anything initially
@@ -932,6 +936,7 @@ mod tests {
             false,
             true,
             subscription_builtin_topic_data,
+            SequenceNumber::new(0, 0),
         );
 
         // Reader that has not acked anything initially
@@ -987,6 +992,7 @@ mod tests {
             false,
             true,
             SubscriptionBuiltinTopicData::default(),
+            SequenceNumber::new(0, 0),
         );
 
         // Reader that has not acked anything initially
@@ -1052,6 +1058,7 @@ mod tests {
             false,
             true,
             SubscriptionBuiltinTopicData::default(),
+            SequenceNumber::new(0, 0),
         ));
 
         // This reader didn't ack 2
@@ -1065,6 +1072,7 @@ mod tests {
             false,
             true,
             SubscriptionBuiltinTopicData::default(),
+            SequenceNumber::new(0, 0),
         ));
 
         // This reader acked 1, 2
@@ -1078,6 +1086,7 @@ mod tests {
             false,
             true,
             SubscriptionBuiltinTopicData::default(),
+            SequenceNumber::new(0, 0),
         ));
 
         let change1 = create_change(1, InstanceHandle::new([1; 16]));
@@ -1120,6 +1129,7 @@ mod tests {
             false,
             true,
             SubscriptionBuiltinTopicData::default(),
+            SequenceNumber::new(0, 0),
         );
 
         // Reader that has not acked anything initially
@@ -1195,6 +1205,7 @@ mod tests {
             false,
             true,
             subscription_builtin_topic_data,
+            SequenceNumber::new(0, 0),
         );
 
         // Reader that has not acked anything initially
