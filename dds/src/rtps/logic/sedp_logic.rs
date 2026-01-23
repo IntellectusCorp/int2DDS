@@ -774,26 +774,25 @@ impl SedpLogic {
             "writer->reader",
         )?;
 
-        let mut highest_sent_change_sn = SequenceNumber::UNKNOWN;
-        let mut max_acked_sn = SequenceNumber::new(0, 0);
-
-        // For Volatile, assume CacheChanges before matching were already sent and ACKed, so don't resend
-        if subscription_builtin_topic_data.durability().kind == DurabilityQosPolicyKind::Volatile {
-            let last_sn = writer.last_change_sequence_number();
-            highest_sent_change_sn = last_sn;
-            max_acked_sn = last_sn;
-        }
+        let last_irrelevant_sn = if subscription_builtin_topic_data.durability().kind
+            == DurabilityQosPolicyKind::Volatile
+        {
+            writer.last_change_sequence_number()
+        } else {
+            SequenceNumber::new(0, 0)
+        };
 
         let reader_proxy = ReaderProxy::new(
             subscription_builtin_topic_data.endpoint_guid(),
             subscription_builtin_topic_data.endpoint_guid().entity_id(),
             subscription_builtin_topic_data.unicast_locator_list(),
             subscription_builtin_topic_data.multicast_locator_list(),
-            highest_sent_change_sn,
-            max_acked_sn,
+            SequenceNumber::UNKNOWN,
+            SequenceNumber::UNKNOWN,
             false,
             true,
             subscription_builtin_topic_data.clone(),
+            last_irrelevant_sn,
         );
 
         writer.matched_reader_add(reader_proxy);

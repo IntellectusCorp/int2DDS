@@ -25,6 +25,7 @@ pub(crate) struct ReaderProxy {
     last_nackfrag_count: i32,
     content_filter_signatures: Option<Vec<FilterSignature>>, // Content filter signatures for this reader
     subscription_builtin_topic_data: SubscriptionBuiltinTopicData,
+    last_irrelevant_sn: SequenceNumber, // Sequence numbers <= this value are irrelevant for this reader and should be responded with GAP.
 }
 
 use std::hash::{Hash, Hasher};
@@ -55,6 +56,7 @@ impl ReaderProxy {
         expects_inline_qos: bool,
         is_active: bool,
         subscription_builtin_topic_data: SubscriptionBuiltinTopicData,
+        last_irrelevant_sn: SequenceNumber,
     ) -> Self {
         Self {
             remote_reader_guid,
@@ -70,6 +72,7 @@ impl ReaderProxy {
             last_nackfrag_count: 0,
             content_filter_signatures: None,
             subscription_builtin_topic_data,
+            last_irrelevant_sn,
         }
     }
 
@@ -209,6 +212,10 @@ impl ReaderProxy {
         signatures: Option<Vec<FilterSignature>>,
     ) {
         self.content_filter_signatures = signatures;
+    }
+
+    pub(crate) fn last_irrelevant_sn(&self) -> SequenceNumber {
+        self.last_irrelevant_sn
     }
 
     /// Generate ContentFilterInfo for this ReaderProxy
