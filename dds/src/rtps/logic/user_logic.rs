@@ -370,7 +370,7 @@ impl UserLogic {
                             let mut heartbeat_info = None;
 
                             // Send piggybacked heartbeat only to reliable readers
-                            if reader_proxy.is_reliable() {
+                            if reader_proxy.is_reliable() && !writer.disable_piggyback_heartbeat() {
                                 heartbeat_info = Some((
                                     writer.heartbeat_count(),
                                     history_cache.get_seq_num_min(),
@@ -396,7 +396,7 @@ impl UserLogic {
                         let mut heartbeat_info = None;
 
                         // Send piggybacked heartbeat only to reliable readers
-                        if reader_proxy.is_reliable() {
+                        if reader_proxy.is_reliable() && !writer.disable_piggyback_heartbeat() {
                             heartbeat_info = Some((
                                 writer.heartbeat_count(),
                                 history_cache.get_seq_num_min(),

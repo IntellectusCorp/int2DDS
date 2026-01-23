@@ -101,6 +101,7 @@ const LIFESPAN_QOS_POLICY_NAME: &str = "Lifespan";
 const DURABILITYSERVICE_QOS_POLICY_NAME: &str = "DurabilityService";
 const DATAREPRESENTATION_QOS_POLICY_NAME: &str = "DataRepresentation";
 const TYPECONSISTENCYENFORCEMENT_QOS_POLICY_NAME: &str = "TypeConsistencyEnforcement";
+const RELIABILITY_EXTENSION_QOS_POLICY_NAME: &str = "ReliabilityExtension";
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash, Readable, Writable)]
 pub enum QosPolicyId {
@@ -1845,5 +1846,29 @@ impl ConstDefault for TypeConsistencyEnforcementQosPolicy {
 impl QosPolicy for TypeConsistencyEnforcementQosPolicy {
     fn name(&self) -> &str {
         TYPECONSISTENCYENFORCEMENT_QOS_POLICY_NAME
+    }
+}
+
+/// Extension to ReliabilityQosPolicy for int2DDS-specific reliability options.
+/// This policy provides additional control over reliable communication behavior.
+///
+/// # Default
+/// - `disable_piggyback_heartbeat: false` - Piggybacked heartbeats are enabled by default.
+#[derive(DdsType, Copy, Eq)]
+#[dds_type(crate_path = "crate")]
+pub struct ReliabilityExtensionQosPolicy {
+    /// When `true`, heartbeat messages will not be piggybacked with DATA messages.
+    /// Instead, heartbeats will only be sent via the periodic heartbeat timer.
+    /// This can reduce network congestion but may increase latency for acknowledgments.ㅎ
+    pub disable_piggyback_heartbeat: bool,
+}
+
+impl ConstDefault for ReliabilityExtensionQosPolicy {
+    const DEFAULT: Self = Self { disable_piggyback_heartbeat: false };
+}
+
+impl QosPolicy for ReliabilityExtensionQosPolicy {
+    fn name(&self) -> &str {
+        RELIABILITY_EXTENSION_QOS_POLICY_NAME
     }
 }

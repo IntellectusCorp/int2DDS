@@ -76,6 +76,7 @@ pub(crate) struct StatefulWriter {
     heartbeat_timer_running: Arc<AtomicBool>,
     publication_matched_status: Arc<Mutex<PublicationMatchedStatus>>,
     offered_incompatible_qos_status: Arc<Mutex<OfferedIncompatibleQosStatus>>,
+    disable_piggyback_heartbeat: bool,
 }
 
 impl StatefulWriter {
@@ -101,6 +102,8 @@ impl StatefulWriter {
         let nack_response_delay = RtpsDuration::new(0, 200 * 1000 * 1000); // 200 milliseconds
         let nack_suppression_duration = RtpsDuration::new(0, 0);
         let preemptive_heartbeat_delay = RtpsDuration::new(0, 10 * 1000 * 1000);
+        let disable_piggyback_heartbeat =
+            publication_builtin_topic_data.reliability_extension().disable_piggyback_heartbeat;
 
         Self {
             guid,
@@ -133,6 +136,7 @@ impl StatefulWriter {
             offered_incompatible_qos_status: Arc::new(Mutex::new(
                 OfferedIncompatibleQosStatus::default(),
             )),
+            disable_piggyback_heartbeat,
         }
     }
 
@@ -268,6 +272,10 @@ impl StatefulWriter {
                 0
             }
         }
+    }
+
+    pub(crate) fn disable_piggyback_heartbeat(&self) -> bool {
+        self.disable_piggyback_heartbeat
     }
 
     fn send_heartbeat_to_readers(writer_guid: Guid) {
