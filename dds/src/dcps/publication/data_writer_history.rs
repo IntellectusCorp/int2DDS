@@ -411,7 +411,7 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
             .ok_or_else(|| DdsError::Error("Failed to downcast to StatefulWriter".to_string()))?;
 
         for change in changes.iter() {
-            if stateful_writer.is_acked_by_all(change.sequence_number()) {
+            if stateful_writer.is_change_acked_by_all(change.sequence_number()) {
                 return Ok(Some(change.clone()));
             }
         }

@@ -17,6 +17,7 @@ use crate::rtps::common::locator::Locator;
 use crate::rtps::common::parameters::ParameterList;
 use crate::rtps::common::rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult};
 use crate::rtps::common::sequence::SequenceNumber;
+use crate::rtps::common::time::RtpsDuration;
 use crate::rtps::common::types::DomainId;
 use crate::rtps::common::types::{ChangeKind, SerializedData};
 use crate::rtps::entities::endpoint::Endpoint;
@@ -440,10 +441,11 @@ impl UserLogic {
             }
         }
 
+        drop(reader_proxies);
+
         if !writer.heartbeat_timer_running() {
-            writer.register_periodic_heartbeat_timer(TimerHandler::get_instance(
-                participant.guid().prefix(),
-            ))?;
+            // Register after delay to give some time for ACKNACK to arrive
+            writer.register_periodic_heartbeat_timer_after_delay(RtpsDuration::from_millis(100))?;
         }
 
         Ok(())
@@ -634,22 +636,10 @@ impl UserLogic {
             .downcast_ref::<StatefulWriter>()
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::DowncastError, "Not a stateful writer"))?;
 
-        let writer_cache_lock = writer.writer_cache();
-        let history_cache = match writer_cache_lock.lock() {
-            Ok(cache) => cache,
-            Err(e) => {
-                return Err(RtpsError::new(
-                    RtpsErrorCode::LockError,
-                    format!("Failed to acquire writer cache lock for heartbeat: {:?}", e),
-                ));
-            }
-        };
-
-        let latest_sn = history_cache.get_seq_num_max();
-
         // If no samples are available or all readers have acknowledged up to latest sequence number, stop heartbeat
-        if history_cache.is_empty() || writer.is_acked_by_all(latest_sn) {
+        if writer.is_acked_by_all()? {
             debug!("All readers have acknowledged up to the latest sequence number, stopping heartbeat.");
+            writer.compare_and_set_heartbeat_timer_running(true, false)?;
 
             if let Ok(locked_timer_handler) =
                 TimerHandler::get_instance(participant.guid().prefix()).lock()
@@ -660,6 +650,17 @@ impl UserLogic {
             // remove timer
             return Ok(());
         }
+
+        let writer_cache_lock = writer.writer_cache();
+        let history_cache = match writer_cache_lock.lock() {
+            Ok(cache) => cache,
+            Err(e) => {
+                return Err(RtpsError::new(
+                    RtpsErrorCode::LockError,
+                    format!("Failed to acquire writer cache lock for heartbeat: {:?}", e),
+                ));
+            }
+        };
 
         let reader_proxies_lock = writer.reader_proxies();
         let reader_proxies = reader_proxies_lock.lock().map_err(|e| {

@@ -1909,7 +1909,7 @@ impl SedpLogic {
         if let Ok(timer_handler) = self.timer_handler.lock() {
             timer_handler.add_timer(
                 timer_id,
-                stateful_writer.preemptive_heartbeat_delay().to_std_duration(),
+                stateful_writer.initial_heartbeat_delay().to_std_duration(),
                 false,
                 callback,
             );
