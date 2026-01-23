@@ -634,14 +634,6 @@ impl UserLogic {
             .downcast_ref::<StatefulWriter>()
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::DowncastError, "Not a stateful writer"))?;
 
-        let reader_proxies_lock = writer.reader_proxies();
-        let reader_proxies = reader_proxies_lock.lock().map_err(|e| {
-            RtpsError::new(
-                RtpsErrorCode::LockError,
-                format!("Failed to acquire reader_proxies lock: {}", e),
-            )
-        })?;
-
         let writer_cache_lock = writer.writer_cache();
         let history_cache = match writer_cache_lock.lock() {
             Ok(cache) => cache,
@@ -668,6 +660,14 @@ impl UserLogic {
             // remove timer
             return Ok(());
         }
+
+        let reader_proxies_lock = writer.reader_proxies();
+        let reader_proxies = reader_proxies_lock.lock().map_err(|e| {
+            RtpsError::new(
+                RtpsErrorCode::LockError,
+                format!("Failed to acquire reader_proxies lock: {}", e),
+            )
+        })?;
 
         // Group by participant: participant_guid -> all locators
         // This ensures only one heartbeat is sent per participant
