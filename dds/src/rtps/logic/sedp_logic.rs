@@ -1434,8 +1434,8 @@ impl SedpLogic {
                         continue;
                     }
                     let buffer = MessageCreator::create_heartbeat_message(
-                        participant_guid,
-                        Guid::new(reader_proxy.remote_reader_guid().prefix(), EntityId::UNKNOWN),
+                        participant_guid.prefix(),
+                        reader_proxy.remote_reader_guid().prefix(),
                         heartbeat_count,
                         reader_entity_id,
                         writer_entity_id,

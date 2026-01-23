@@ -618,7 +618,7 @@ impl UserLogic {
         false
     }
 
-    // Heartbeat message sending is done from stateful writer, check reader proxy
+    /// Sending hearrtbeat message to all matched reader proxies of the given writer
     pub(crate) fn send_heartbeat_message_to_all_reader_proxies(
         &self,
         entity_id: EntityId,
@@ -686,8 +686,8 @@ impl UserLogic {
         // Send heartbeat once per participant
         for (target_participant_prefix, locators) in participant_locators.iter() {
             let buffer = MessageCreator::create_heartbeat_message(
-                writer.guid(),
-                Guid::new(*target_participant_prefix, EntityId::UNKNOWN),
+                writer.guid().prefix(),
+                *target_participant_prefix,
                 writer.heartbeat_count(),
                 EntityId::UNKNOWN, // This ensures all readers in the participant receive the heartbeat
                 writer.endpoint_id(),
@@ -771,8 +771,8 @@ impl UserLogic {
         };
 
         let buffer = MessageCreator::create_heartbeat_message(
-            writer.guid(),
-            reader_proxy.remote_reader_guid(),
+            writer.guid().prefix(),
+            reader_proxy.remote_reader_guid().prefix(),
             writer.heartbeat_count(),
             reader_proxy.remote_group_entity_id(),
             writer.endpoint_id(),
