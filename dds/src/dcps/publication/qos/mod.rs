@@ -149,6 +149,7 @@ impl Qos for DataWriterQos {
         if self.durability != new_qos.durability
             || self.ownership != new_qos.ownership
             || self.reliability != new_qos.reliability
+            || self.reliability_extension != new_qos.reliability_extension
             || self.liveliness != new_qos.liveliness
             || self.history != new_qos.history
             || self.resource_limits != new_qos.resource_limits
