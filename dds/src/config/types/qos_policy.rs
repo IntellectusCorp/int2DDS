@@ -547,3 +547,104 @@ impl From<qos_policy::DestinationOrderQosPolicy> for DestinationOrderQosPolicy {
         }
     }
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct ReliabilityExtensionQosPolicy {
+    pub(crate) disable_piggyback_heartbeat: bool,
+    pub(crate) heartbeat_period: Duration,
+    pub(crate) initial_heartbeat_delay: Duration,
+    pub(crate) push_mode: bool,
+    pub(crate) nack_suppression_duration: Duration,
+    pub(crate) nack_response_delay: Duration,
+}
+
+impl Default for ReliabilityExtensionQosPolicy {
+    fn default() -> Self {
+        Self {
+            disable_piggyback_heartbeat: false,
+            heartbeat_period: Duration { sec: 2, nanosec: 0 },
+            initial_heartbeat_delay: Duration { sec: 0, nanosec: 10_000_000 },
+            push_mode: true,
+            nack_suppression_duration: Duration { sec: 0, nanosec: 0 },
+            nack_response_delay: Duration { sec: 0, nanosec: 200_000_000 },
+        }
+    }
+}
+
+impl From<ReliabilityExtensionQosPolicy> for qos_policy::ReliabilityExtensionQosPolicy {
+    fn from(external: ReliabilityExtensionQosPolicy) -> Self {
+        Self {
+            disable_piggyback_heartbeat: external.disable_piggyback_heartbeat,
+            heartbeat_period: external.heartbeat_period,
+            initial_heartbeat_delay: external.initial_heartbeat_delay,
+            push_mode: external.push_mode,
+            nack_suppression_duration: external.nack_suppression_duration,
+            nack_response_delay: external.nack_response_delay,
+        }
+    }
+}
+
+impl From<qos_policy::ReliabilityExtensionQosPolicy> for ReliabilityExtensionQosPolicy {
+    fn from(internal: qos_policy::ReliabilityExtensionQosPolicy) -> Self {
+        Self {
+            disable_piggyback_heartbeat: internal.disable_piggyback_heartbeat,
+            heartbeat_period: internal.heartbeat_period,
+            initial_heartbeat_delay: internal.initial_heartbeat_delay,
+            push_mode: internal.push_mode,
+            nack_suppression_duration: internal.nack_suppression_duration,
+            nack_response_delay: internal.nack_response_delay,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct DataRepresentationQosPolicy {
+    pub(crate) value: Vec<DataRepresentationId>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub(crate) enum DataRepresentationId {
+    #[default]
+    XcdrDataRepresentation,
+    XmlDataRepresentation,
+    Xcdr2DataRepresentation,
+}
+
+impl From<DataRepresentationQosPolicy> for qos_policy::DataRepresentationQosPolicy {
+    fn from(external: DataRepresentationQosPolicy) -> Self {
+        Self { value: external.value.into_iter().map(|id| id.into()).collect() }
+    }
+}
+
+impl From<qos_policy::DataRepresentationQosPolicy> for DataRepresentationQosPolicy {
+    fn from(internal: qos_policy::DataRepresentationQosPolicy) -> Self {
+        Self { value: internal.value.into_iter().map(|id| id.into()).collect() }
+    }
+}
+
+impl From<DataRepresentationId> for qos_policy::DataRepresentationId {
+    fn from(external: DataRepresentationId) -> Self {
+        match external {
+            DataRepresentationId::XcdrDataRepresentation => Self::XcdrDataRepresentation,
+            DataRepresentationId::XmlDataRepresentation => Self::XmlDataRepresentation,
+            DataRepresentationId::Xcdr2DataRepresentation => Self::Xcdr2DataRepresentation,
+        }
+    }
+}
+
+impl From<qos_policy::DataRepresentationId> for DataRepresentationId {
+    fn from(internal: qos_policy::DataRepresentationId) -> Self {
+        match internal {
+            qos_policy::DataRepresentationId::XcdrDataRepresentation => {
+                Self::XcdrDataRepresentation
+            }
+            qos_policy::DataRepresentationId::XmlDataRepresentation => Self::XmlDataRepresentation,
+            qos_policy::DataRepresentationId::Xcdr2DataRepresentation => {
+                Self::Xcdr2DataRepresentation
+            }
+        }
+    }
+}
