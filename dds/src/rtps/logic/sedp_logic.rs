@@ -774,15 +774,24 @@ impl SedpLogic {
             "writer->reader",
         )?;
 
-        let mut highest_sent_change_sn = SequenceNumber::UNKNOWN;
-        let mut max_acked_sn = SequenceNumber::new(0, 0);
+        let is_volatile =
+            subscription_builtin_topic_data.durability().kind == DurabilityQosPolicyKind::Volatile;
+        let is_best_effort = subscription_builtin_topic_data.reliability().kind
+            == ReliabilityQosPolicyKind::BestEffort;
 
-        // For Volatile, assume CacheChanges before matching were already sent and ACKed, so don't resend
-        if subscription_builtin_topic_data.durability().kind == DurabilityQosPolicyKind::Volatile {
-            let last_sn = writer.last_change_sequence_number();
-            highest_sent_change_sn = last_sn;
-            max_acked_sn = last_sn;
-        }
+        // For reliable volatile readers, last irrelevant SN is last change SN to avoid resending old changes
+        let last_irrelevant_sn = if is_volatile {
+            writer.last_change_sequence_number()
+        } else {
+            SequenceNumber::new(0, 0)
+        };
+
+        // For best-effort volatile readers, simply use hightest sent change SN to avoid resending old changes
+        let highest_sent_change_sn = if is_volatile && is_best_effort {
+            writer.last_change_sequence_number()
+        } else {
+            SequenceNumber::UNKNOWN
+        };
 
         let reader_proxy = ReaderProxy::new(
             subscription_builtin_topic_data.endpoint_guid(),
@@ -790,10 +799,11 @@ impl SedpLogic {
             subscription_builtin_topic_data.unicast_locator_list(),
             subscription_builtin_topic_data.multicast_locator_list(),
             highest_sent_change_sn,
-            max_acked_sn,
+            SequenceNumber::UNKNOWN,
             false,
             true,
             subscription_builtin_topic_data.clone(),
+            last_irrelevant_sn,
         );
 
         writer.matched_reader_add(reader_proxy);
@@ -1434,8 +1444,8 @@ impl SedpLogic {
                         continue;
                     }
                     let buffer = MessageCreator::create_heartbeat_message(
-                        participant_guid,
-                        Guid::new(reader_proxy.remote_reader_guid().prefix(), EntityId::UNKNOWN),
+                        participant_guid.prefix(),
+                        reader_proxy.remote_reader_guid().prefix(),
                         heartbeat_count,
                         reader_entity_id,
                         writer_entity_id,
@@ -1909,7 +1919,7 @@ impl SedpLogic {
         if let Ok(timer_handler) = self.timer_handler.lock() {
             timer_handler.add_timer(
                 timer_id,
-                stateful_writer.preemptive_heartbeat_delay().to_std_duration(),
+                stateful_writer.initial_heartbeat_delay().to_std_duration(),
                 false,
                 callback,
             );
