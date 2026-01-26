@@ -329,9 +329,8 @@ impl RtpsDuration {
     /// Creates a duration from nanoseconds
     pub fn from_nanos(nanos: u64) -> Self {
         let seconds = (nanos / 1_000_000_000) as i32;
-        let remaining_nanos = nanos % 1_000_000_000;
-        // fraction = remaining_nanos * 2^32 / 1_000_000_000
-        let fraction = ((remaining_nanos << 32) / 1_000_000_000) as u32;
+        let remaining_nanos = (nanos % 1_000_000_000) as u32;
+        let fraction = nano_to_frac(remaining_nanos);
         Self { seconds, fraction }
     }
 
