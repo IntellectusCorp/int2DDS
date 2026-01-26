@@ -217,8 +217,6 @@ impl DcpsBridge {
                 ReliabilityQosPolicyKind::Reliable,
                 topic_kind,
                 datawriter_guid.entity_id(),
-                true,
-                RtpsDuration::new(2, 0),
                 65000,
                 f,
                 publication_builtin_topic_data.clone(),
@@ -1557,6 +1555,7 @@ mod tests {
             false,
             true,
             SubscriptionBuiltinTopicData::default(),
+            SequenceNumber::new(0, 0),
         ));
         assert!(
             stateful_writer.reader_proxies().lock().unwrap().len() == 1,
@@ -1642,6 +1641,7 @@ mod tests {
             false,
             true,
             SubscriptionBuiltinTopicData::default(),
+            SequenceNumber::new(0, 0),
         ));
 
         stateful_writer_1.matched_reader_add(ReaderProxy::new(
@@ -1654,6 +1654,7 @@ mod tests {
             false,
             true,
             SubscriptionBuiltinTopicData::default(),
+            SequenceNumber::new(0, 0),
         ));
 
         stateful_writer_2.matched_reader_add(ReaderProxy::new(
@@ -1666,6 +1667,7 @@ mod tests {
             false,
             true,
             SubscriptionBuiltinTopicData::default(),
+            SequenceNumber::new(0, 0),
         ));
         assert!(
             stateful_writer_1.reader_proxies().lock().unwrap().len() == 2,
@@ -1731,6 +1733,7 @@ mod tests {
             false,
             true,
             SubscriptionBuiltinTopicData::default(),
+            SequenceNumber::new(0, 0),
         ));
 
         stateful_writer.matched_reader_add(ReaderProxy::new(
@@ -1749,6 +1752,7 @@ mod tests {
             false,
             true,
             SubscriptionBuiltinTopicData::default(),
+            SequenceNumber::new(0, 0),
         ));
 
         stateful_writer.matched_reader_add(ReaderProxy::new(
@@ -1767,6 +1771,7 @@ mod tests {
             false,
             true,
             SubscriptionBuiltinTopicData::default(),
+            SequenceNumber::new(0, 0),
         ));
 
         assert!(

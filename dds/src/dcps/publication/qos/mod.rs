@@ -31,9 +31,9 @@ use crate::{
         DurabilityQosPolicy, DurabilityServiceQosPolicy, EntityFactoryQosPolicy,
         GroupDataQosPolicy, HistoryQosPolicy, LatencyBudgetQosPolicy, LifespanQosPolicy,
         LivelinessQosPolicy, OwnershipQosPolicy, OwnershipStrengthQosPolicy, PartitionQosPolicy,
-        PresentationQosPolicy, Qos, ReliabilityQosPolicy, ReliabilityQosPolicyKind,
-        ResourceLimitsQosPolicy, TransportPriorityQosPolicy, UserDataQosPolicy,
-        WriterDataLifecycleQosPolicy,
+        PresentationQosPolicy, Qos, ReliabilityExtensionQosPolicy, ReliabilityQosPolicy,
+        ReliabilityQosPolicyKind, ResourceLimitsQosPolicy, TransportPriorityQosPolicy,
+        UserDataQosPolicy, WriterDataLifecycleQosPolicy,
     },
 };
 use const_default::ConstDefault;
@@ -60,6 +60,7 @@ pub struct DataWriterQos {
     pub ownership_strength: OwnershipStrengthQosPolicy,
     pub writer_data_lifecycle: WriterDataLifecycleQosPolicy,
     pub data_representation: DataRepresentationQosPolicy,
+    pub reliability_extension: ReliabilityExtensionQosPolicy,
 }
 
 impl Default for DataWriterQos {
@@ -84,6 +85,7 @@ impl Default for DataWriterQos {
             ownership_strength: OwnershipStrengthQosPolicy::default(),
             writer_data_lifecycle: WriterDataLifecycleQosPolicy::default(),
             data_representation: DataRepresentationQosPolicy::default(),
+            reliability_extension: ReliabilityExtensionQosPolicy::default(),
         }
     }
 }
@@ -109,6 +111,7 @@ impl ConstDefault for DataWriterQos {
         ownership_strength: OwnershipStrengthQosPolicy::DEFAULT,
         writer_data_lifecycle: WriterDataLifecycleQosPolicy::DEFAULT,
         data_representation: DataRepresentationQosPolicy::DEFAULT,
+        reliability_extension: ReliabilityExtensionQosPolicy::DEFAULT,
     };
 }
 
@@ -125,6 +128,16 @@ impl Qos for DataWriterQos {
         // || self.ownership != OwnershipQosPolicy::default()
         // || self.ownership_strength != OwnershipStrengthQosPolicy::default()
         // || self.writer_data_lifecycle != WriterDataLifecycleQosPolicy::default()
+        {
+            return Err(DdsError::Unsupported);
+        }
+
+        // ReliabilityExtensionQosPolicy unsupported fields check
+        let ext_default = ReliabilityExtensionQosPolicy::DEFAULT;
+        if self.reliability_extension.push_mode != ext_default.push_mode
+            || self.reliability_extension.nack_suppression_duration
+                != ext_default.nack_suppression_duration
+            || self.reliability_extension.nack_response_delay != ext_default.nack_response_delay
         {
             return Err(DdsError::Unsupported);
         }

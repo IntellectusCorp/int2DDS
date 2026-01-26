@@ -503,8 +503,8 @@ impl WlpLogic {
             let participant_guid = participant.local_participant_proxy_data().participant_guid();
 
             let buffer = match MessageCreator::create_heartbeat_message(
-                participant_guid,
-                reader_proxy.remote_reader_guid(),
+                participant_guid.prefix(),
+                reader_proxy.remote_reader_guid().prefix(),
                 heartbeat_count,
                 actual_reader_entity_id,
                 writer_entity_id,

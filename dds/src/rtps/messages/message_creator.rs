@@ -14,7 +14,7 @@ use crate::rtps::{
     builtin::data::content_filtered_topic::ContentFilterInfo,
     common::{
         entity_id::EntityId,
-        guid::Guid,
+        guid::{Guid, GuidPrefix},
         parameters::{Parameter, ParameterId, ParameterList, StatusInfo},
         rtps_error_code::RtpsResult,
         sequence::{FragmentNumberSet, SequenceNumber},
@@ -77,8 +77,8 @@ impl MessageCreator {
 
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn create_heartbeat_message(
-        local_participant_guid: Guid,
-        target_participant_guid: Guid,
+        local_guid_prefix: GuidPrefix,
+        target_guid_prefix: GuidPrefix,
         heartbeat_count: i32,
         reader_entity_id: EntityId,
         writer_entity_id: EntityId,
@@ -87,11 +87,10 @@ impl MessageCreator {
         final_flag: bool,
         liveliness_flag: bool,
     ) -> Result<Arc<Vec<u8>>, Box<dyn std::error::Error>> {
-        let mut rtps_message = RtpsMessage::new(Header::new(local_participant_guid.prefix()));
+        let mut rtps_message = RtpsMessage::new(Header::new(local_guid_prefix));
 
-        rtps_message.add_submessage(SubmessageCreator::create_info_dst_submessage(
-            target_participant_guid.prefix(),
-        ));
+        rtps_message
+            .add_submessage(SubmessageCreator::create_info_dst_submessage(target_guid_prefix));
         rtps_message.add_submessage(SubmessageCreator::create_heartbeat_submessage(
             heartbeat_count,
             reader_entity_id,

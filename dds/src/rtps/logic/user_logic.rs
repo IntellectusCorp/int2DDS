@@ -5,18 +5,19 @@
 
 use chrono::{DateTime, Utc};
 use log::{debug, trace, warn};
-use std::cmp::max;
+use std::collections::HashMap;
 use std::ops::Add;
 use std::time::Duration;
 
 use crate::common::builtin::topic::publication_builtin_topic_data::PublicationBuiltinTopicData;
 use crate::common::instance_handle::InstanceHandle;
 use crate::rtps::common::entity_id::EntityId;
-use crate::rtps::common::guid::Guid;
+use crate::rtps::common::guid::{Guid, GuidPrefix};
 use crate::rtps::common::locator::Locator;
 use crate::rtps::common::parameters::ParameterList;
 use crate::rtps::common::rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult};
 use crate::rtps::common::sequence::SequenceNumber;
+use crate::rtps::common::time::RtpsDuration;
 use crate::rtps::common::types::DomainId;
 use crate::rtps::common::types::{ChangeKind, SerializedData};
 use crate::rtps::entities::endpoint::Endpoint;
@@ -192,6 +193,12 @@ impl UserLogic {
 
         // Send RequestedChanges that ReaderProxy requested via Nack
         for requested_change_sn in reader_proxy.requested_changes().iter() {
+            // For volatile readers, sequence numbers <= last_irrelevant_sn should be responded with GAP
+            if *requested_change_sn <= reader_proxy.last_irrelevant_sn() {
+                gap_list.push(*requested_change_sn);
+                continue;
+            }
+
             let writer_cache = stateful_writer.writer_cache();
             let cache_guard = writer_cache.lock().map_err(|e| {
                 RtpsError::new(
@@ -284,25 +291,7 @@ impl UserLogic {
             }
         }
 
-        if !gap_list.is_empty() {
-            let buffer_list = MessageCreator::create_multiple_gap_msgs(
-                writer.guid(),
-                reader_proxy.remote_reader_guid(),
-                reader_proxy.remote_group_entity_id(),
-                writer.endpoint_id(),
-                &mut gap_list,
-            )
-            .map_err(|e| RtpsError::new(RtpsErrorCode::Io, e.to_string()))?;
-
-            for buf in buffer_list {
-                if let Err(e) = self.send_rtps_message_to_locators(
-                    reader_proxy.unicast_locator_list(),
-                    buf.as_slice(),
-                ) {
-                    warn!("Failed to send GAP for requested changes: {:?}", e);
-                }
-            }
-        }
+        self.send_gap_for_vec(writer.guid(), reader_proxy, writer.endpoint_id(), &mut gap_list)?;
 
         // Clear after sending all requested changes to prevent duplicate transmission. Can safely clear since Lock has been acquired.
         reader_proxy.empty_requested_changes();
@@ -345,24 +334,14 @@ impl UserLogic {
                     && a_change_seq_num > reader_proxy.highest_sent_change_sn() + 1
                     && reader_proxy.is_reliable()
                 {
-                    let buffer = MessageCreator::create_gap_msg_consecutive(
+                    self.send_gap_for_range(
                         participant.guid(),
-                        reader_proxy.remote_reader_guid(),
-                        reader_proxy.remote_reader_guid().entity_id(),
+                        reader_proxy,
                         writer.endpoint_id(),
                         reader_proxy.highest_sent_change_sn() + 1,
                         SequenceNumber::from_i64(a_change_seq_num.to_i64() - 1),
-                    )
-                    .map_err(|e| RtpsError::new(RtpsErrorCode::Io, e.to_string()))?;
-
-                    self.send_rtps_message_to_locators(
-                        reader_proxy.unicast_locator_list(),
-                        buffer.as_slice(),
                     )?;
                 }
-
-                let first_available_sn =
-                    max(history_cache.get_seq_num_min(), reader_proxy.max_acked_sn().add(1));
 
                 // TODO: Filter message according to Reader Proxy's request (time based filter, content filtered topic, etc)
                 // Send DATA message or GAP message depending on filter result
@@ -373,10 +352,10 @@ impl UserLogic {
                             let mut heartbeat_info = None;
 
                             // Send piggybacked heartbeat only to reliable readers
-                            if reader_proxy.is_reliable() {
+                            if reader_proxy.is_reliable() && !writer.disable_piggyback_heartbeat() {
                                 heartbeat_info = Some((
                                     writer.heartbeat_count(),
-                                    first_available_sn,
+                                    history_cache.get_seq_num_min(),
                                     history_cache.get_seq_num_max(),
                                     false,
                                     false,
@@ -399,10 +378,10 @@ impl UserLogic {
                         let mut heartbeat_info = None;
 
                         // Send piggybacked heartbeat only to reliable readers
-                        if reader_proxy.is_reliable() {
+                        if reader_proxy.is_reliable() && !writer.disable_piggyback_heartbeat() {
                             heartbeat_info = Some((
                                 writer.heartbeat_count(),
-                                first_available_sn,
+                                history_cache.get_seq_num_min(),
                                 history_cache.get_seq_num_max(),
                                 false,
                                 false,
@@ -441,6 +420,13 @@ impl UserLogic {
                     continue;
                 }
             }
+        }
+
+        drop(reader_proxies);
+
+        if !writer.heartbeat_timer_running() {
+            // Register after delay to give some time for ACKNACK to arrive
+            writer.register_periodic_heartbeat_timer_after_delay(RtpsDuration::from_millis(100))?;
         }
 
         Ok(())
@@ -615,34 +601,91 @@ impl UserLogic {
         false
     }
 
-    // Heartbeat message sending is done from stateful writer, check reader proxy
+    /// Sending hearrtbeat message to all matched reader proxies of the given writer
     pub(crate) fn send_heartbeat_message_to_all_reader_proxies(
         &self,
         entity_id: EntityId,
     ) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
 
-        let writer = participant.find_writer_from_entity_id(entity_id);
+        let found_writer = participant
+            .find_writer_from_entity_id(entity_id)
+            .ok_or_else(|| RtpsError::new(RtpsErrorCode::RtpsEntityNotFound, None))?;
 
-        if let Some(writer) = writer {
-            if let Some(writer) = writer.as_any().downcast_ref::<StatefulWriter>() {
-                let reader_proxies_lock = writer.reader_proxies();
-                let reader_proxies = reader_proxies_lock.lock().map_err(|e| {
-                    RtpsError::new(
-                        RtpsErrorCode::LockError,
-                        format!("Failed to acquire reader_proxies lock: {}", e),
-                    )
-                })?;
+        let writer = found_writer
+            .as_any()
+            .downcast_ref::<StatefulWriter>()
+            .ok_or_else(|| RtpsError::new(RtpsErrorCode::DowncastError, "Not a stateful writer"))?;
 
-                for reader_proxy in reader_proxies.iter() {
-                    self.send_heartbeat_to_a_reader_proxy_inner(writer, &mut reader_proxy.clone())?;
-                }
-            } else {
+        // If no samples are available or all readers have acknowledged up to latest sequence number, stop heartbeat
+        if writer.is_acked_by_all()? {
+            debug!("All readers have acknowledged up to the latest sequence number, stopping heartbeat.");
+            writer.compare_and_set_heartbeat_timer_running(true, false)?;
+
+            if let Ok(locked_timer_handler) =
+                TimerHandler::get_instance(participant.guid().prefix()).lock()
+            {
+                locked_timer_handler.remove_timer(writer.periodic_heartbeat_timer_id());
+            }
+
+            // remove timer
+            return Ok(());
+        }
+
+        let writer_cache_lock = writer.writer_cache();
+        let history_cache = match writer_cache_lock.lock() {
+            Ok(cache) => cache,
+            Err(e) => {
                 return Err(RtpsError::new(
-                    RtpsErrorCode::DowncastError,
-                    "Failed to downcast writer",
+                    RtpsErrorCode::LockError,
+                    format!("Failed to acquire writer cache lock for heartbeat: {:?}", e),
                 ));
             }
+        };
+
+        let reader_proxies_lock = writer.reader_proxies();
+        let reader_proxies = reader_proxies_lock.lock().map_err(|e| {
+            RtpsError::new(
+                RtpsErrorCode::LockError,
+                format!("Failed to acquire reader_proxies lock: {}", e),
+            )
+        })?;
+
+        // Group by participant: participant_guid -> all locators
+        // This ensures only one heartbeat is sent per participant
+        let mut participant_locators: HashMap<GuidPrefix, Vec<Locator>> = HashMap::new();
+
+        for reader_proxy in reader_proxies.iter() {
+            if !reader_proxy.is_reliable() {
+                continue;
+            }
+            let participant_guid_prefix = reader_proxy.remote_reader_guid().prefix();
+            participant_locators
+                .entry(participant_guid_prefix)
+                .or_insert_with(|| reader_proxy.unicast_locator_list().to_vec());
+        }
+
+        // Send heartbeat once per participant
+        for (target_participant_prefix, locators) in participant_locators.iter() {
+            let buffer = MessageCreator::create_heartbeat_message(
+                writer.guid().prefix(),
+                *target_participant_prefix,
+                writer.heartbeat_count(),
+                EntityId::UNKNOWN, // This ensures all readers in the participant receive the heartbeat
+                writer.endpoint_id(),
+                history_cache.get_seq_num_min(),
+                history_cache.get_seq_num_max(),
+                false,
+                false,
+            );
+
+            if let Ok(buf) = buffer {
+                self.send_rtps_message_to_locators(locators.clone(), &buf)?;
+            }
+        }
+
+        if !participant_locators.is_empty() {
+            writer.increase_heartbeat_count();
         }
 
         Ok(())
@@ -683,7 +726,7 @@ impl UserLogic {
             return Ok(());
         }
 
-        self.send_heartbeat_to_a_reader_proxy_inner(stateful_writer, reader_proxy)?;
+        self.send_heartbeat_to_a_reader_proxy_inner(stateful_writer, reader_proxy, true)?;
 
         Ok(())
     }
@@ -692,6 +735,7 @@ impl UserLogic {
         &self,
         writer: &StatefulWriter,
         reader_proxy: &mut ReaderProxy,
+        should_send_gap: bool,
     ) -> RtpsResult<()> {
         if !reader_proxy.is_reliable() {
             trace!("Remote reader is not reliable, skipping heartbeat.");
@@ -709,16 +753,13 @@ impl UserLogic {
             }
         };
 
-        let first_available_sn =
-            max(history_cache.get_seq_num_min(), reader_proxy.max_acked_sn().add(1));
-
         let buffer = MessageCreator::create_heartbeat_message(
-            writer.guid(),
-            reader_proxy.remote_reader_guid(),
+            writer.guid().prefix(),
+            reader_proxy.remote_reader_guid().prefix(),
             writer.heartbeat_count(),
             reader_proxy.remote_group_entity_id(),
             writer.endpoint_id(),
-            first_available_sn,
+            history_cache.get_seq_num_min(),
             history_cache.get_seq_num_max(),
             false,
             false,
@@ -727,13 +768,83 @@ impl UserLogic {
         if let Ok(buf) = buffer {
             self.send_rtps_message_to_locators(reader_proxy.unicast_locator_list(), &buf)?;
             writer.increase_heartbeat_count();
-            Ok(())
         } else {
-            Err(RtpsError::new(
+            return Err(RtpsError::new(
                 RtpsErrorCode::Io,
                 "Failed to create heartbeat message for reader proxy",
-            ))
+            ));
         }
+
+        if should_send_gap {
+            // For volatile readers, send GAP for irrelevant sequence numbers
+            let last_irrelevant = reader_proxy.last_irrelevant_sn();
+            let cache_min = history_cache.get_seq_num_min();
+            if last_irrelevant > SequenceNumber::new(0, 0) && cache_min <= last_irrelevant {
+                self.send_gap_for_range(
+                    writer.guid(),
+                    reader_proxy,
+                    writer.endpoint_id(),
+                    cache_min,
+                    last_irrelevant,
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn send_gap_for_vec(
+        &self,
+        local_guid: Guid,
+        reader_proxy: &ReaderProxy,
+        writer_entity_id: EntityId,
+        gap_list: &mut Vec<SequenceNumber>,
+    ) -> RtpsResult<()> {
+        if gap_list.is_empty() {
+            return Ok(());
+        }
+
+        let buffer_list = MessageCreator::create_multiple_gap_msgs(
+            local_guid,
+            reader_proxy.remote_reader_guid(),
+            reader_proxy.remote_group_entity_id(),
+            writer_entity_id,
+            gap_list,
+        )
+        .map_err(|e| RtpsError::new(RtpsErrorCode::Io, e.to_string()))?;
+
+        for buf in buffer_list {
+            if let Err(e) = self
+                .send_rtps_message_to_locators(reader_proxy.unicast_locator_list(), buf.as_slice())
+            {
+                warn!("Failed to send GAP: {:?}", e);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn send_gap_for_range(
+        &self,
+        local_guid: Guid,
+        reader_proxy: &ReaderProxy,
+        writer_entity_id: EntityId,
+        gap_start: SequenceNumber,
+        gap_end: SequenceNumber,
+    ) -> RtpsResult<()> {
+        let buffer = MessageCreator::create_gap_msg_consecutive(
+            local_guid,
+            reader_proxy.remote_reader_guid(),
+            reader_proxy.remote_reader_guid().entity_id(),
+            writer_entity_id,
+            gap_start,
+            gap_end,
+        )
+        .map_err(|e| RtpsError::new(RtpsErrorCode::Io, e.to_string()))?;
+
+        self.send_rtps_message_to_locators(reader_proxy.unicast_locator_list(), buffer.as_slice())?;
+
+        Ok(())
     }
 }
 
@@ -1569,7 +1680,7 @@ impl UnicastMessageProcessor for UserLogic {
                 RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, "ReaderProxy not found")
             })?;
 
-        self.send_heartbeat_to_a_reader_proxy_inner(stateful_writer, &mut reader_proxy)
+        self.send_heartbeat_to_a_reader_proxy_inner(stateful_writer, &mut reader_proxy, true)
     }
 
     fn handle_datafrag_message(
