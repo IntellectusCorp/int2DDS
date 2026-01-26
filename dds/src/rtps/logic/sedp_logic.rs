@@ -774,12 +774,23 @@ impl SedpLogic {
             "writer->reader",
         )?;
 
-        let last_irrelevant_sn = if subscription_builtin_topic_data.durability().kind
-            == DurabilityQosPolicyKind::Volatile
-        {
+        let is_volatile =
+            subscription_builtin_topic_data.durability().kind == DurabilityQosPolicyKind::Volatile;
+        let is_best_effort = subscription_builtin_topic_data.reliability().kind
+            == ReliabilityQosPolicyKind::BestEffort;
+
+        // For reliable volatile readers, last irrelevant SN is last change SN to avoid resending old changes
+        let last_irrelevant_sn = if is_volatile {
             writer.last_change_sequence_number()
         } else {
             SequenceNumber::new(0, 0)
+        };
+
+        // For best-effort volatile readers, simply use hightest sent change SN to avoid resending old changes
+        let highest_sent_change_sn = if is_volatile && is_best_effort {
+            writer.last_change_sequence_number()
+        } else {
+            SequenceNumber::UNKNOWN
         };
 
         let reader_proxy = ReaderProxy::new(
@@ -787,7 +798,7 @@ impl SedpLogic {
             subscription_builtin_topic_data.endpoint_guid().entity_id(),
             subscription_builtin_topic_data.unicast_locator_list(),
             subscription_builtin_topic_data.multicast_locator_list(),
-            SequenceNumber::UNKNOWN,
+            highest_sent_change_sn,
             SequenceNumber::UNKNOWN,
             false,
             true,

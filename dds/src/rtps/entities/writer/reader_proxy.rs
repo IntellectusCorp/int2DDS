@@ -122,7 +122,10 @@ impl ReaderProxy {
         history_cache
             .get_changes()
             .iter()
-            .filter(|change| change.sequence_number() > self.highest_sent_change_sn)
+            .filter(|change| {
+                change.sequence_number() > self.highest_sent_change_sn
+                    && change.sequence_number() > self.last_irrelevant_sn
+            })
             .map(|change| change.sequence_number())
             .min()
             .unwrap_or(SequenceNumber::UNKNOWN)
