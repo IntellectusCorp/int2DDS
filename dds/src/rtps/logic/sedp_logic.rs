@@ -1871,9 +1871,11 @@ impl SedpLogic {
             if let Some(sending_handler) =
                 SendingHandler::get_instance_by_participant_guid(participant.guid())
             {
-                sending_handler.push_message_and_wake(MessageType::UserPreemptiveAcknack(
+                sending_handler.push_message_and_wake(MessageType::UserAcknack(
                     stateful_reader_id,
                     remote_writer_guid,
+                    false, // final_flag
+                    true,  // is_preemptive
                 ));
             }
         };
