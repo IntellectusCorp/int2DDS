@@ -1874,7 +1874,7 @@ impl QosPolicy for TypeConsistencyEnforcementQosPolicy {
 /// - `initial_heartbeat_delay: 10ms` - Delay before sending initial heartbeat after reader discovery.
 /// - `push_mode: true` - (Unsupported) Writer pushes data to readers.
 /// - `nack_suppression_duration: 0` - (Unsupported) Duration to suppress NACKs.
-/// - `nack_response_delay: 200ms` - Delay before responding to a NACK.
+/// - `nack_response_delay: 10ms` - Delay before responding to a NACK.
 #[derive(DdsType, Copy, Eq)]
 #[dds_type(crate_path = "crate", no_default)]
 pub struct WriterReliabilityExtensionQosPolicy {
@@ -1901,7 +1901,7 @@ pub struct WriterReliabilityExtensionQosPolicy {
     pub nack_suppression_duration: Duration,
 
     /// Delay before responding to a NACK.
-    /// Default: 200ms
+    /// Default: 10ms
     pub nack_response_delay: Duration,
 }
 
@@ -1918,7 +1918,7 @@ impl ConstDefault for WriterReliabilityExtensionQosPolicy {
         initial_heartbeat_delay: Duration { sec: 0, nanosec: 10_000_000 },
         push_mode: true,
         nack_suppression_duration: Duration { sec: 0, nanosec: 0 },
-        nack_response_delay: Duration { sec: 0, nanosec: 200_000_000 },
+        nack_response_delay: Duration { sec: 0, nanosec: 10_000_000 },
     };
 }
 
@@ -1932,14 +1932,14 @@ impl QosPolicy for WriterReliabilityExtensionQosPolicy {
 /// This policy provides additional control over reliable communication behavior.
 ///
 /// # Default
-/// - `heartbeat_response_delay: 500ms` - Delay before responding to a heartbeat.
+/// - `heartbeat_response_delay: 10ms` - Delay before responding to a heartbeat.
 /// - `heartbeat_suppression_duration: 0` - (Unsupported) Duration to suppress heartbeats.
 /// - `preemptive_acknack_delay: 80ms` - Delay before sending preemptive ACKNACK.
 #[derive(DdsType, Copy, Eq)]
 #[dds_type(crate_path = "crate", no_default)]
 pub struct ReaderReliabilityExtensionQosPolicy {
     /// Delay before responding to a heartbeat.
-    /// Default: 500ms
+    /// Default: 10ms
     pub heartbeat_response_delay: Duration,
 
     /// (Unsupported) Duration to suppress heartbeats from the same writer.
@@ -1959,7 +1959,7 @@ impl Default for ReaderReliabilityExtensionQosPolicy {
 
 impl ConstDefault for ReaderReliabilityExtensionQosPolicy {
     const DEFAULT: Self = Self {
-        heartbeat_response_delay: Duration { sec: 0, nanosec: 100_000_000 },
+        heartbeat_response_delay: Duration { sec: 0, nanosec: 10_000_000 },
         heartbeat_suppression_duration: Duration { sec: 0, nanosec: 0 },
         preemptive_acknack_delay: Duration { sec: 0, nanosec: 80_000_000 },
     };

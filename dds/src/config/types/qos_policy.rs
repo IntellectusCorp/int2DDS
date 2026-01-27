@@ -567,7 +567,7 @@ impl Default for WriterReliabilityExtensionQosPolicy {
             initial_heartbeat_delay: Duration { sec: 0, nanosec: 10_000_000 },
             push_mode: true,
             nack_suppression_duration: Duration { sec: 0, nanosec: 0 },
-            nack_response_delay: Duration { sec: 0, nanosec: 200_000_000 },
+            nack_response_delay: Duration { sec: 0, nanosec: 10_000_000 },
         }
     }
 }
@@ -609,7 +609,7 @@ pub(crate) struct ReaderReliabilityExtensionQosPolicy {
 impl Default for ReaderReliabilityExtensionQosPolicy {
     fn default() -> Self {
         Self {
-            heartbeat_response_delay: Duration { sec: 0, nanosec: 500_000_000 },
+            heartbeat_response_delay: Duration { sec: 0, nanosec: 10_000_000 },
             heartbeat_suppression_duration: Duration { sec: 0, nanosec: 0 },
             preemptive_acknack_delay: Duration { sec: 0, nanosec: 80_000_000 },
         }
