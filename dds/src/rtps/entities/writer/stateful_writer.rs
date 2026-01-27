@@ -293,7 +293,7 @@ impl StatefulWriter {
             writer_guid.prefix(),
             EntityId::PARTICIPANT,
         )) {
-            handler.push_message(MessageType::UserHeartbeatToAll(writer_guid.entity_id()));
+            handler.push_message_and_wake(MessageType::UserHeartbeatToAll(writer_guid.entity_id()));
         }
     }
 
