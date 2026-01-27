@@ -230,18 +230,18 @@ impl SendingHandler {
         self.wake_event_loop();
     }
 
-    // Add message to message queue
-    pub(crate) fn push_message(&self, message: MessageType) {
-        match self.message_queue.lock() {
-            Ok(mut queue_guard) => {
-                queue_guard.push(message);
-            }
-            Err(e) => {
-                error!("Failed to acquire message queue lock: {}", e);
-                self.push_message_and_wake(message);
-            }
-        }
-    }
+    // // Add message to message queue
+    // pub(crate) fn push_message(&self, message: MessageType) {
+    //     match self.message_queue.lock() {
+    //         Ok(mut queue_guard) => {
+    //             queue_guard.push(message);
+    //         }
+    //         Err(e) => {
+    //             error!("Failed to acquire message queue lock: {}", e);
+    //             self.push_message_and_wake(message);
+    //         }
+    //     }
+    // }
 
     /// Allows direct access to SendingTask when synchronous transmission is needed instead of event loop
     pub(crate) fn get_sending_task(&self) -> Option<Arc<Mutex<SendingTask>>> {
