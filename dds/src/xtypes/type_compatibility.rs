@@ -307,11 +307,7 @@ fn check_allow_type_coercion(
 
     // Collection types: check element type and bounds
     if writer_id.is_collection() && reader_id.is_collection() {
-        return check_collection_compatibility(
-            writer_id,
-            reader_id,
-            tce_policy.ignore_sequence_bounds,
-        );
+        return check_collection_compatibility(writer_id, reader_id, tce_policy);
     }
 
     // Different type categories
@@ -692,24 +688,20 @@ fn is_wide_string(type_id: &TypeIdentifier) -> bool {
 fn check_collection_compatibility(
     writer_type: &TypeIdentifier,
     reader_type: &TypeIdentifier,
-    ignore_sequence_bounds: bool,
+    tce_policy: &TypeConsistencyEnforcementQosPolicy,
 ) -> TypeCompatibilityResult {
     // Sequences
     if is_sequence_type(writer_type) && is_sequence_type(reader_type) {
         let w_elem = get_sequence_element(writer_type);
         let r_elem = get_sequence_element(reader_type);
 
-        // Check element type compatibility
-        if w_elem != r_elem {
-            return Err(TypeCompatibilityError::MemberTypeMismatch {
-                member_name: "sequence_element".to_string(),
-                writer_type: format!("{:?}", w_elem),
-                reader_type: format!("{:?}", r_elem),
-            });
+        // Check element type compatibility (with type coercion support)
+        if let (Some(w), Some(r)) = (w_elem, r_elem) {
+            check_member_type_compatibility(w, r, "sequence_element", tce_policy)?;
         }
 
         // Check bounds
-        if !ignore_sequence_bounds {
+        if !tce_policy.ignore_sequence_bounds {
             let w_bound = get_sequence_bound(writer_type);
             let r_bound = get_sequence_bound(reader_type);
 
@@ -739,14 +731,8 @@ fn check_collection_compatibility(
                 });
             }
 
-            // Check element type
-            if w_elem != r_elem {
-                return Err(TypeCompatibilityError::MemberTypeMismatch {
-                    member_name: "array_element".to_string(),
-                    writer_type: format!("{:?}", w_elem),
-                    reader_type: format!("{:?}", r_elem),
-                });
-            }
+            // Check element type compatibility (with type coercion support)
+            check_member_type_compatibility(w_elem, r_elem, "array_element", tce_policy)?;
         }
 
         return Ok(());
@@ -758,21 +744,9 @@ fn check_collection_compatibility(
         let r_info = get_map_info(reader_type);
 
         if let (Some((w_key, w_elem)), Some((r_key, r_elem))) = (w_info, r_info) {
-            // Check key and element types
-            if w_key != r_key {
-                return Err(TypeCompatibilityError::MemberTypeMismatch {
-                    member_name: "map_key".to_string(),
-                    writer_type: format!("{:?}", w_key),
-                    reader_type: format!("{:?}", r_key),
-                });
-            }
-            if w_elem != r_elem {
-                return Err(TypeCompatibilityError::MemberTypeMismatch {
-                    member_name: "map_element".to_string(),
-                    writer_type: format!("{:?}", w_elem),
-                    reader_type: format!("{:?}", r_elem),
-                });
-            }
+            // Check key and element types (with type coercion support)
+            check_member_type_compatibility(w_key, r_key, "map_key", tce_policy)?;
+            check_member_type_compatibility(w_elem, r_elem, "map_element", tce_policy)?;
         }
 
         return Ok(());
