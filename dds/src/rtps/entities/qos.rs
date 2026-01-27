@@ -28,8 +28,8 @@ pub(crate) fn check_qos_compatibility(
         || offered.latency_budget().duration > requested.latency_budget().duration
         || offered.type_name() != requested.type_name()
         || !is_data_representation_compatible(
-            &mut requested.data_representation().clone(),
-            &mut offered.data_representation().clone(),
+            requested.data_representation(),
+            offered.data_representation(),
         )
     {
         return false;
@@ -39,25 +39,23 @@ pub(crate) fn check_qos_compatibility(
 }
 
 pub(crate) fn is_data_representation_compatible(
-    requested: &mut DataRepresentationQosPolicy,
-    offered: &mut DataRepresentationQosPolicy,
+    requested: &DataRepresentationQosPolicy,
+    offered: &DataRepresentationQosPolicy,
 ) -> bool {
-    if requested.value.is_empty() && offered.value.is_empty() {
-        return true;
-    }
+    // Default representation when empty (backward compatibility for ConstDefault)
+    const DEFAULT_REP: [DataRepresentationId; 1] = [DataRepresentationId::XcdrDataRepresentation];
 
-    if requested.value.is_empty() {
-        requested.value.push(DataRepresentationId::XcdrDataRepresentation);
-    }
+    // Get effective representations (empty treated as XCDR1 per spec)
+    let requested_reps: &[DataRepresentationId] =
+        if requested.value.is_empty() { &DEFAULT_REP } else { &requested.value };
 
-    if offered.value.is_empty() {
-        offered.value.push(DataRepresentationId::XcdrDataRepresentation);
-    }
+    let offered_reps: &[DataRepresentationId] =
+        if offered.value.is_empty() { &DEFAULT_REP } else { &offered.value };
 
     // DDS-XTypes spec 7.6.3.4.1:
     // DataRepresentation QoS is compatible if the intersection of Writer and Reader is not empty
-    for offered_id in &offered.value {
-        if requested.value.contains(offered_id) {
+    for offered_id in offered_reps {
+        if requested_reps.contains(offered_id) {
             return true;
         }
     }
@@ -104,8 +102,8 @@ pub(crate) fn check_qos_compatibility_with_policy_id(
         return Some(QosPolicyId::LatencyBudget);
     }
     if !is_data_representation_compatible(
-        &mut requested.data_representation().clone(),
-        &mut offered.data_representation().clone(),
+        requested.data_representation(),
+        offered.data_representation(),
     ) {
         return Some(QosPolicyId::DataRepresentation);
     }
