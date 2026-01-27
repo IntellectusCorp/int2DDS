@@ -118,21 +118,24 @@ static void signal_handler(int sig) {
 
 static uint64_t get_current_time_ns(void) {
 #ifdef _WIN32
-    static LARGE_INTEGER frequency = {0};
-    static bool frequency_initialized = false;
+    FILETIME ft;
+    ULARGE_INTEGER uli;
 
-    if (!frequency_initialized) {
-        QueryPerformanceFrequency(&frequency);
-        frequency_initialized = true;
-    }
+    /* GetSystemTimePreciseAsFileTime provides higher precision than GetSystemTimeAsFileTime */
+    GetSystemTimePreciseAsFileTime(&ft);
 
-    LARGE_INTEGER counter;
-    QueryPerformanceCounter(&counter);
+    uli.LowPart = ft.dwLowDateTime;
+    uli.HighPart = ft.dwHighDateTime;
 
-    return (uint64_t)((counter.QuadPart * 1000000000ULL) / frequency.QuadPart);
+    /* Convert from 100-nanosecond intervals since 1601-01-01 to nanoseconds since 1970-01-01 */
+    /* 116444736000000000 is the number of 100-ns intervals between 1601-01-01 and 1970-01-01 */
+    uli.QuadPart -= 116444736000000000ULL;
+
+    /* Convert 100-nanosecond intervals to nanoseconds */
+    return uli.QuadPart * 100ULL;
 #else
     struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
+    clock_gettime(CLOCK_REALTIME, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 #endif
 }
@@ -143,7 +146,7 @@ static Int2DdsTypeDescriptor* create_performance_type_descriptor(uint32_t max_da
     Int2DdsTypeDescriptor* type_desc = NULL;
     Int2DdsRet ret;
 
-    ret = int2dds_type_descriptor_create("PerformanceData", &type_desc);
+    ret = int2dds_type_descriptor_create("PerformanceTestData", &type_desc);
     if (ret != INT2DDS_RET_OK) return NULL;
 
     ret = int2dds_type_descriptor_add_u64(type_desc, "seq_num", false);
@@ -152,7 +155,7 @@ static Int2DdsTypeDescriptor* create_performance_type_descriptor(uint32_t max_da
     ret = int2dds_type_descriptor_add_u64(type_desc, "timestamp", false);
     if (ret != INT2DDS_RET_OK) { int2dds_type_descriptor_delete(type_desc); return NULL; }
 
-    ret = int2dds_type_descriptor_add_bytes(type_desc, "data", max_data_size, false);
+    ret = int2dds_type_descriptor_add_bytes(type_desc, "data", 0, false);  // 0 = unbounded, compatible with Rust Vec<u8>
     if (ret != INT2DDS_RET_OK) { int2dds_type_descriptor_delete(type_desc); return NULL; }
 
     return type_desc;
@@ -176,7 +179,7 @@ static Int2DdsTypeDescriptor* create_latency_type_descriptor(uint32_t max_data_s
     ret = int2dds_type_descriptor_add_u64(type_desc, "echo_timestamp", false);
     if (ret != INT2DDS_RET_OK) { int2dds_type_descriptor_delete(type_desc); return NULL; }
 
-    ret = int2dds_type_descriptor_add_bytes(type_desc, "data", max_data_size, false);
+    ret = int2dds_type_descriptor_add_bytes(type_desc, "data", 0, false);  // 0 = unbounded, compatible with Rust Vec<u8>
     if (ret != INT2DDS_RET_OK) { int2dds_type_descriptor_delete(type_desc); return NULL; }
 
     return type_desc;
@@ -446,7 +449,7 @@ static void run_throughput_test(const publisher_args_t *args) {
     }
 
     /* Create topic */
-    ret = int2dds_create_topic(participant, "throughput_test_topic", "ThroughputTestType", type_desc, NULL, &topic);
+    ret = int2dds_create_topic(participant, "throughput_test_topic", "ThroughputTestData", type_desc, NULL, &topic);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create topic: %d\n", ret);
         goto cleanup;
@@ -626,10 +629,10 @@ static void run_throughput_test(const publisher_args_t *args) {
     double mbps = (stats.total_sent * args->data_len * 8.0) / (final_elapsed * 1e6);
 
     printf("\n=== Throughput Test Publisher Results ===\n");
-    printf("Total samples sent: %" PRIu64 "\n", stats.total_sent);
-    printf("Test duration: %.2f seconds\n", final_elapsed);
-    printf("Send rate: %.2f msg/s\n", final_rate);
-    printf("Throughput: %.2f Mbps\n", mbps);
+    printf("[INFO] Total samples sent: %" PRIu64 "\n", stats.total_sent);
+    printf("[INFO] Test duration: %.2f seconds\n", final_elapsed);
+    printf("[INFO] Send rate: %.2f msg/s\n", final_rate);
+    printf("[INFO] Throughput: %.2f Mbps\n", mbps);
 
     /* Save results to CSV file */
     char filename[256];
@@ -739,13 +742,13 @@ static void run_latency_test(const publisher_args_t *args) {
     }
 
     /* Create topics */
-    ret = int2dds_create_topic(participant, "latency_test_topic", "LatencyTestType", type_desc, NULL, &topic);
+    ret = int2dds_create_topic(participant, "latency_test_topic", "LatencyTestData", type_desc, NULL, &topic);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create topic: %d\n", ret);
         goto cleanup;
     }
 
-    ret = int2dds_create_topic(participant, "latency_test_topic_echo", "LatencyTestType", type_desc, NULL, &echo_topic);
+    ret = int2dds_create_topic(participant, "latency_test_topic_echo", "LatencyTestData", type_desc, NULL, &echo_topic);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create echo topic: %d\n", ret);
         goto cleanup;
@@ -1083,20 +1086,20 @@ static void run_latency_test(const publisher_args_t *args) {
                           (end_time.tv_nsec - start_time.tv_nsec) / 1e9;
 
     printf("\n=== Latency Test Publisher Results ===\n");
-    printf("Total samples sent: %" PRIu64 "\n", seq_num);
-    printf("Test duration: %.2f seconds\n", final_elapsed);
+    printf("[INFO] Total samples sent: %" PRIu64 "\n", seq_num);
+    printf("[INFO] Test duration: %.2f seconds\n", final_elapsed);
 
     if (g_latency_stats.latency_samples > 0) {
         double avg_latency_ns = g_latency_stats.sum_latency / g_latency_stats.latency_samples;
         double avg_latency_ms = avg_latency_ns / 1000000.0;
         double max_latency_ms = g_latency_stats.max_latency / 1000000.0;
-        printf("Latency samples: %" PRIu64 "\n", g_latency_stats.latency_samples);
-        printf("Average latency: %.3f ms\n", avg_latency_ms);
+        printf("[INFO] Latency samples: %" PRIu64 "\n", g_latency_stats.latency_samples);
+        printf("[INFO] Average latency: %.3f ms\n", avg_latency_ms);
         if (g_latency_stats.min_latency >= 0) {
             double min_latency_ms = g_latency_stats.min_latency / 1000000.0;
-            printf("Minimum latency: %.3f ms\n", min_latency_ms);
+            printf("[INFO] Minimum latency: %.3f ms\n", min_latency_ms);
         }
-        printf("Maximum latency: %.3f ms\n", max_latency_ms);
+        printf("[INFO] Maximum latency: %.3f ms\n", max_latency_ms);
 
         /* Save results to CSV file */
         char filename[256];
@@ -1209,7 +1212,7 @@ static void run_local_latency_test(const publisher_args_t *args) {
     }
 
     /* Create topic */
-    ret = int2dds_create_topic(participant, "local_latency_test_topic", "LocalLatencyTestType", type_desc, NULL, &topic);
+    ret = int2dds_create_topic(participant, "local_latency_test_topic", "ThroughputTestData", type_desc, NULL, &topic);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create topic: %d\n", ret);
         goto cleanup;
@@ -1388,10 +1391,10 @@ static void run_local_latency_test(const publisher_args_t *args) {
                           (end_time.tv_nsec - start_time.tv_nsec) / 1e9;
     double final_rate = stats.total_sent / final_elapsed;
 
-    printf("\n=== Local Latency Test Publisher Results ===\n");
-    printf("Total samples sent: %" PRIu64 "\n", stats.total_sent);
-    printf("Test duration: %.2f seconds\n", final_elapsed);
-    printf("Send rate: %.2f msg/s\n", final_rate);
+    printf("\n [INFO] === Local Latency Test Publisher Results ===\n");
+    printf("[INFO] Total samples sent: %" PRIu64 "\n", stats.total_sent);
+    printf("[INFO] Test duration: %.2f seconds\n", final_elapsed);
+    printf("[INFO] Send rate: %.2f msg/s\n", final_rate);
 
     /* Save results to CSV file */
     char filename[256];
