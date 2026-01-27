@@ -25,6 +25,8 @@
 //! | [`LifespanQosPolicy`] | Sample expiration duration | DataWriter, Topic |
 //! | [`DataRepresentationQosPolicy`] | Data encoding (XCDR1, XCDR2) | DataWriter, DataReader, Topic |
 //! | [`TypeConsistencyEnforcementQosPolicy`] | Type consistency enforcement for DDS-XTypes | DataReader |
+//! | [`WriterDataLifecycleQosPolicy`] | Auto-disposal of unregistered instances | DataWriter |
+//! | [`ReaderDataLifecycleQosPolicy`] | Auto-purge of disposed samples | DataReader |
 //!
 //! ## int2DDS Extension QoS Policies
 //!
@@ -44,8 +46,6 @@
 //! | [`LatencyBudgetQosPolicy`] | Acceptable delivery delay hint | DataWriter, DataReader, Topic |
 //! | [`TransportPriorityQosPolicy`] | Transport priority for delivery | DataWriter, Topic |
 //! | [`TimeBasedFilterQosPolicy`] | Minimum separation between samples | DataReader |
-//! | [`WriterDataLifecycleQosPolicy`] | Auto-disposal of unregistered instances | DataWriter |
-//! | [`ReaderDataLifecycleQosPolicy`] | Auto-purge of disposed samples | DataReader |
 //! | [`TopicDataQosPolicy`] | Arbitrary data attached to Topic | Topic |
 //! | [`GroupDataQosPolicy`] | Arbitrary data attached to Publisher/Subscriber | Publisher, Subscriber |
 //! | [`DurabilityServiceQosPolicy`] | Transient/Persistent service config | DataWriter, Topic |
@@ -521,8 +521,6 @@ impl QosPolicy for OwnershipStrengthQosPolicy {
 
 /// Controls automatic disposal of instances when unregistered by DataWriter.
 ///
-/// **Note**: This QoS policy is currently unsupported.
-///
 /// # Default
 /// `autodispose_unregistered_instances: true`
 #[derive(DdsType, Copy, Eq, Deserialize, Serialize)]
@@ -550,8 +548,6 @@ impl QosPolicy for WriterDataLifecycleQosPolicy {
 }
 
 /// Controls automatic purging of samples from disposed or no-writer instances.
-///
-/// **Note**: This QoS policy is currently unsupported.
 ///
 /// # Default
 /// Both delays are `Duration::INFINITE` - samples are never automatically purged.
