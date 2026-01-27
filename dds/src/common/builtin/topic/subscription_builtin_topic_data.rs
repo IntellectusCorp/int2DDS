@@ -8,9 +8,10 @@ use crate::{
     infrastructure::qos_policy::{
         DataRepresentationQosPolicy, DeadlineQosPolicy, DestinationOrderQosPolicy,
         DurabilityQosPolicy, GroupDataQosPolicy, LatencyBudgetQosPolicy, LivelinessQosPolicy,
-        OwnershipQosPolicy, PartitionQosPolicy, PresentationQosPolicy, ReliabilityQosPolicy,
-        ReliabilityQosPolicyKind, TimeBasedFilterQosPolicy, TopicDataQosPolicy,
-        TypeConsistencyEnforcementQosPolicy, UserDataQosPolicy,
+        OwnershipQosPolicy, PartitionQosPolicy, PresentationQosPolicy,
+        ReaderReliabilityExtensionQosPolicy, ReliabilityQosPolicy, ReliabilityQosPolicyKind,
+        TimeBasedFilterQosPolicy, TopicDataQosPolicy, TypeConsistencyEnforcementQosPolicy,
+        UserDataQosPolicy,
     },
     rtps::common::{guid::Guid, locator::Locator, types::SerializedData},
     subscription::qos::{DataReaderQos, SubscriberQos},
@@ -44,6 +45,7 @@ pub struct SubscriptionBuiltinTopicData {
     type_identifier: Option<TypeIdentifier>,
     type_object: Option<TypeObject>,
     type_consistency_enforcement: TypeConsistencyEnforcementQosPolicy,
+    reader_reliability_extension: ReaderReliabilityExtensionQosPolicy,
 }
 
 impl SubscriptionBuiltinTopicData {
@@ -79,6 +81,7 @@ impl SubscriptionBuiltinTopicData {
             type_identifier: None,
             type_object: None,
             type_consistency_enforcement: datareader_qos.type_consistency_enforcement,
+            reader_reliability_extension: datareader_qos.reader_reliability_extension,
         }
     }
 
@@ -263,6 +266,10 @@ impl SubscriptionBuiltinTopicData {
 
     pub fn type_consistency_enforcement(&self) -> &TypeConsistencyEnforcementQosPolicy {
         &self.type_consistency_enforcement
+    }
+
+    pub fn reader_reliability_extension(&self) -> &ReaderReliabilityExtensionQosPolicy {
+        &self.reader_reliability_extension
     }
 
     pub fn convert_u8_to_i32_array(data: [u8; 12]) -> [i32; 3] {
