@@ -1077,6 +1077,7 @@ impl Subscriber {
         datareader_qos.history = topic_qos.history;
         datareader_qos.resource_limits = topic_qos.resource_limits;
         datareader_qos.ownership = topic_qos.ownership;
+        datareader_qos.data_representation = topic_qos.data_representation.clone();
         Ok(datareader_qos)
     }
 
