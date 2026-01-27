@@ -137,7 +137,6 @@ impl Qos for DataWriterQos {
         if self.reliability_extension.push_mode != ext_default.push_mode
             || self.reliability_extension.nack_suppression_duration
                 != ext_default.nack_suppression_duration
-            || self.reliability_extension.nack_response_delay != ext_default.nack_response_delay
         {
             return Err(DdsError::Unsupported);
         }
@@ -156,6 +155,7 @@ impl Qos for DataWriterQos {
             || self.durability_service != new_qos.durability_service
             || self.destination_order != new_qos.destination_order
             || self.data_representation != new_qos.data_representation
+            || self.reliability_extension != new_qos.reliability_extension
         {
             return Err(DdsError::ImmutablePolicy);
         }

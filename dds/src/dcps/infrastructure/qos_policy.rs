@@ -1884,7 +1884,7 @@ pub struct ReliabilityExtensionQosPolicy {
     /// Default: 0 (no suppression)
     pub nack_suppression_duration: Duration,
 
-    /// (Unsupported) Delay before responding to a NACK.
+    /// Delay before responding to a NACK.
     /// Default: 200ms
     pub nack_response_delay: Duration,
 }
