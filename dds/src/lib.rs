@@ -267,7 +267,7 @@
 //!
 //! ### Transport & Discovery
 //!
-//! - `INT2DDS_TRANSPORT`: Transport protocol type (`udp`, `tcp`) - Default: `udp`
+//! - `INT2DDS_TRANSPORT`: Transport protocol type (`udp`, `tcp`, `hybrid`, `shm`) - Default: `udp`
 //! - `INT2DDS_DISCOVERY_MODE`: Discovery mode (`udp`, `tcp`, `hybrid`) - Default: `udp`
 //!   - `udp`: UDP-only discovery and user data
 //!   - `tcp`: TCP-only discovery and user data (requires `INT2DDS_INITIAL_PEERS`)
