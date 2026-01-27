@@ -24,6 +24,14 @@
 //! | [`EntityFactoryQosPolicy`] | Manual entity enabling | DomainParticipantFactory, DomainParticipant, Publisher, Subscriber |
 //! | [`LifespanQosPolicy`] | Sample expiration duration | DataWriter, Topic |
 //! | [`DataRepresentationQosPolicy`] | Data encoding (XCDR1, XCDR2) | DataWriter, DataReader, Topic |
+//! | [`TypeConsistencyEnforcementQosPolicy`] | Type consistency enforcement for DDS-XTypes | DataReader |
+//!
+//! ## int2DDS Extension QoS Policies
+//!
+//! | Policy | Description | Applicable to |
+//! |--------|-------------|---------------|
+//! | [`WriterReliabilityExtensionQosPolicy`] | Writer reliability options | DataWriter |
+//! | [`ReaderReliabilityExtensionQosPolicy`] | Reader reliability options | DataReader |
 //!
 //! # Unsupported QoS Policies
 //!
