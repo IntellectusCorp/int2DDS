@@ -617,20 +617,7 @@ impl UserLogic {
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::DowncastError, "Not a stateful writer"))?;
 
         // If no samples are available or all readers have acknowledged up to latest sequence number, stop heartbeat
-        if writer.is_acked_by_all()? {
-            debug!("All readers have acknowledged up to the latest sequence number, stopping heartbeat.");
-            // println!(
-            //     "[HEARTBEAT] All readers have acknowledged up to the latest sequence number, removing timer."
-            // );
-            writer.compare_and_set_heartbeat_timer_running(true, false)?;
-
-            if let Ok(locked_timer_handler) =
-                TimerHandler::get_instance(participant.guid().prefix()).lock()
-            {
-                locked_timer_handler.remove_timer(writer.periodic_heartbeat_timer_id());
-            }
-
-            // remove timer
+        if writer.stop_heartbeat_if_acked_by_all()? {
             return Ok(());
         }
 
@@ -1797,20 +1784,7 @@ impl UnicastMessageProcessor for UserLogic {
 
         drop(reader_proxies);
 
-        if stateful_writer.heartbeat_timer_running() && stateful_writer.is_acked_by_all()? {
-            debug!("All readers have acknowledged up to the latest sequence number, stopping heartbeat.");
-            // println!(
-            //     "[ACKNACK] All readers have acknowledged up to the latest sequence number, removing timer."
-            // );
-
-            stateful_writer.compare_and_set_heartbeat_timer_running(true, false)?;
-
-            if let Ok(locked_timer_handler) =
-                TimerHandler::get_instance(stateful_writer.guid().prefix()).lock()
-            {
-                locked_timer_handler.remove_timer(stateful_writer.periodic_heartbeat_timer_id());
-            }
-        }
+        stateful_writer.stop_heartbeat_if_acked_by_all()?;
 
         Ok(())
     }
