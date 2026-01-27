@@ -1536,8 +1536,10 @@ impl UnicastMessageProcessor for UserLogic {
                         let reader_entity_id = stateful_reader.guid().entity_id();
                         let participant_guid = participant.guid();
 
-                        let timer_id =
-                            format!("hb_response_{:?}_{:?}", reader_entity_id, remote_writer_guid);
+                        let timer_id = format!(
+                            "hb_response_{:?}_{:?}_{:?}",
+                            reader_entity_id, remote_writer_guid, heartbeat.count
+                        );
 
                         if let Ok(locked_timer_handler) =
                             TimerHandler::get_instance(participant.guid().prefix()).lock()
@@ -1752,14 +1754,15 @@ impl UnicastMessageProcessor for UserLogic {
                 let writer_entity_id = acknack.writer_id;
                 let participant_guid = participant.guid();
 
-                let timer_id =
-                    format!("nack_response_{:?}_{:?}", writer_entity_id, remote_reader_guid);
+                let timer_id = format!(
+                    "nack_response_{:?}_{:?}_{:?}",
+                    writer_entity_id, remote_reader_guid, acknack.count
+                );
 
                 if let Ok(locked_timer_handler) =
                     TimerHandler::get_instance(participant.guid().prefix()).lock()
                 {
                     // Remove existing timer for this writer-reader pair to reset delay
-                    locked_timer_handler.remove_timer(timer_id.clone());
                     locked_timer_handler.add_timer(
                         timer_id,
                         delay_duration,
