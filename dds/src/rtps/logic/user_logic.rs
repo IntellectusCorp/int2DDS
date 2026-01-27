@@ -869,9 +869,8 @@ impl UserLogic {
             })?;
 
         let bitmap_base = writer_proxy.expected_sn();
-        let available_max = writer_proxy.available_changes_max();
-        let missing_changes =
-            writer_proxy.missing_changes_for_heartbeat(bitmap_base, available_max);
+        let last_sn = writer_proxy.changes_from_writer_max();
+        let missing_changes = writer_proxy.missing_changes_for_heartbeat(bitmap_base, last_sn);
 
         self.send_acknack_to_writer_proxy_inner(
             writer_proxy,
