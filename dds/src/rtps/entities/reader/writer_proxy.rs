@@ -231,6 +231,14 @@ impl WriterProxy {
             .unwrap_or(SequenceNumber::UNKNOWN)
     }
 
+    /// Get the maximum sequence number from changes_from_writer (regardless of status).
+    pub(crate) fn changes_from_writer_max(&self) -> SequenceNumber {
+        self.changes_from_writer
+            .last_key_value()
+            .map(|(k, _)| *k)
+            .unwrap_or(SequenceNumber::UNKNOWN)
+    }
+
     pub(crate) fn irrelevant_change_set(&mut self, a_seq_num: SequenceNumber) {
         let change = self.changes_from_writer.entry(a_seq_num).or_insert(ChangeFromWriter {
             sequence_number: a_seq_num,

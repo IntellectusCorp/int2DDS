@@ -101,7 +101,8 @@ const LIFESPAN_QOS_POLICY_NAME: &str = "Lifespan";
 const DURABILITYSERVICE_QOS_POLICY_NAME: &str = "DurabilityService";
 const DATAREPRESENTATION_QOS_POLICY_NAME: &str = "DataRepresentation";
 const TYPECONSISTENCYENFORCEMENT_QOS_POLICY_NAME: &str = "TypeConsistencyEnforcement";
-const RELIABILITY_EXTENSION_QOS_POLICY_NAME: &str = "ReliabilityExtension";
+const WRITER_RELIABILITY_EXTENSION_QOS_POLICY_NAME: &str = "WriterReliabilityExtension";
+const READER_RELIABILITY_EXTENSION_QOS_POLICY_NAME: &str = "ReaderReliabilityExtension";
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash, Readable, Writable)]
 pub enum QosPolicyId {
@@ -1864,7 +1865,7 @@ impl QosPolicy for TypeConsistencyEnforcementQosPolicy {
     }
 }
 
-/// Extension to ReliabilityQosPolicy for int2DDS-specific reliability options.
+/// Extension to ReliabilityQosPolicy for int2DDS-specific writer reliability options.
 /// This policy provides additional control over reliable communication behavior.
 ///
 /// # Default
@@ -1873,10 +1874,10 @@ impl QosPolicy for TypeConsistencyEnforcementQosPolicy {
 /// - `initial_heartbeat_delay: 10ms` - Delay before sending initial heartbeat after reader discovery.
 /// - `push_mode: true` - (Unsupported) Writer pushes data to readers.
 /// - `nack_suppression_duration: 0` - (Unsupported) Duration to suppress NACKs.
-/// - `nack_response_delay: 200ms` - (Unsupported) Delay before responding to a NACK.
+/// - `nack_response_delay: 10ms` - Delay before responding to a NACK.
 #[derive(DdsType, Copy, Eq)]
 #[dds_type(crate_path = "crate", no_default)]
-pub struct ReliabilityExtensionQosPolicy {
+pub struct WriterReliabilityExtensionQosPolicy {
     /// When `true`, heartbeat messages will not be piggybacked with DATA messages.
     /// Instead, heartbeats will only be sent via the periodic heartbeat timer.
     /// This can reduce network congestion but may increase latency for acknowledgments.
@@ -1899,30 +1900,73 @@ pub struct ReliabilityExtensionQosPolicy {
     /// Default: 0 (no suppression)
     pub nack_suppression_duration: Duration,
 
-    /// (Unsupported) Delay before responding to a NACK.
-    /// Default: 200ms
+    /// Delay before responding to a NACK.
+    /// Default: 10ms
     pub nack_response_delay: Duration,
 }
 
-impl Default for ReliabilityExtensionQosPolicy {
+impl Default for WriterReliabilityExtensionQosPolicy {
     fn default() -> Self {
         Self::DEFAULT
     }
 }
 
-impl ConstDefault for ReliabilityExtensionQosPolicy {
+impl ConstDefault for WriterReliabilityExtensionQosPolicy {
     const DEFAULT: Self = Self {
         disable_piggyback_heartbeat: false,
         heartbeat_period: Duration { sec: 2, nanosec: 0 },
         initial_heartbeat_delay: Duration { sec: 0, nanosec: 10_000_000 },
         push_mode: true,
         nack_suppression_duration: Duration { sec: 0, nanosec: 0 },
-        nack_response_delay: Duration { sec: 0, nanosec: 200_000_000 },
+        nack_response_delay: Duration { sec: 0, nanosec: 10_000_000 },
     };
 }
 
-impl QosPolicy for ReliabilityExtensionQosPolicy {
+impl QosPolicy for WriterReliabilityExtensionQosPolicy {
     fn name(&self) -> &str {
-        RELIABILITY_EXTENSION_QOS_POLICY_NAME
+        WRITER_RELIABILITY_EXTENSION_QOS_POLICY_NAME
+    }
+}
+
+/// Extension to ReliabilityQosPolicy for int2DDS-specific reader reliability options.
+/// This policy provides additional control over reliable communication behavior.
+///
+/// # Default
+/// - `heartbeat_response_delay: 10ms` - Delay before responding to a heartbeat.
+/// - `heartbeat_suppression_duration: 0` - (Unsupported) Duration to suppress heartbeats.
+/// - `preemptive_acknack_delay: 80ms` - Delay before sending preemptive ACKNACK.
+#[derive(DdsType, Copy, Eq)]
+#[dds_type(crate_path = "crate", no_default)]
+pub struct ReaderReliabilityExtensionQosPolicy {
+    /// Delay before responding to a heartbeat.
+    /// Default: 10ms
+    pub heartbeat_response_delay: Duration,
+
+    /// (Unsupported) Duration to suppress heartbeats from the same writer.
+    /// Default: 0 (no suppression)
+    pub heartbeat_suppression_duration: Duration,
+
+    /// Delay before sending preemptive ACKNACK after writer discovery.
+    /// Default: 80ms
+    pub preemptive_acknack_delay: Duration,
+}
+
+impl Default for ReaderReliabilityExtensionQosPolicy {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl ConstDefault for ReaderReliabilityExtensionQosPolicy {
+    const DEFAULT: Self = Self {
+        heartbeat_response_delay: Duration { sec: 0, nanosec: 10_000_000 },
+        heartbeat_suppression_duration: Duration { sec: 0, nanosec: 0 },
+        preemptive_acknack_delay: Duration { sec: 0, nanosec: 80_000_000 },
+    };
+}
+
+impl QosPolicy for ReaderReliabilityExtensionQosPolicy {
+    fn name(&self) -> &str {
+        READER_RELIABILITY_EXTENSION_QOS_POLICY_NAME
     }
 }
