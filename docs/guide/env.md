@@ -6,7 +6,7 @@ This document describes the environment variables available in int2dds. All envi
 
 | Environment Variable                 | CLI Argument                           | Description                                | Default                 |
 | ------------------------------------ | -------------------------------------- | ------------------------------------------ | ----------------------- |
-| `INT2DDS_TRANSPORT`                  | `--int2dds-transport`                  | Transport protocol (udp, tcp, hybrid)      | udp                     |
+| `INT2DDS_TRANSPORT`                  | `--int2dds-transport`                  | Transport protocol (udp, tcp, hybrid, shm) | udp                     |
 | `INT2DDS_DISCOVERY_MODE`             | `--int2dds-discovery-mode`             | Discovery mode (udp, tcp, hybrid)          | udp                     |
 | `INT2DDS_LOG_TYPE`                   | `--int2dds-log-type`                   | Log output type (console, file, all, none) | none                    |
 | `INT2DDS_CONSOLE_LOG_LEVEL`          | `--int2dds-console-log-level`          | Console log level                          | info                    |
@@ -33,11 +33,12 @@ This document describes the environment variables available in int2dds. All envi
 
 Sets the transport protocol type.
 
-| Value    | Description                |
-| -------- | -------------------------- |
-| `udp`    | UDP transport (default)    |
-| `tcp`    | TCP transport              |
-| `hybrid` | UDP + TCP simultaneous use |
+| Value    | Description                                      |
+| -------- | ------------------------------------------------ |
+| `udp`    | UDP transport (default)                          |
+| `tcp`    | TCP transport                                    |
+| `hybrid` | UDP + TCP simultaneous use                       |
+| `shm`    | Shared memory for high-performance intra-host    |
 
 #### Configuration
 

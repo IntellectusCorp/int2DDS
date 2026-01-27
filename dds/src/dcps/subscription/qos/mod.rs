@@ -15,6 +15,8 @@
 //! - **History**: Number of samples to keep
 //! - **Deadline**: Maximum time between received samples
 //! - **Liveliness**: Writer activity monitoring
+//! - **TypeConsistencyEnforcement**: Type consistency enforcement for DDS-XTypes
+//! - **ReaderReliabilityExtension**: int2DDS extension for reader reliability options (heartbeat response, preemptive ACKNACK)
 //! - And many more...
 //!
 //! Default QoS can be accessed via `SUBSCRIBER_QOS_DEFAULT` and `DATAREADER_QOS_DEFAULT`.
