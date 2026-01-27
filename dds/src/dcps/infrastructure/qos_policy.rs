@@ -1649,7 +1649,10 @@ impl DataRepresentationId {
 /// DataWriters and DataReaders must have at least one common representation to match.
 ///
 /// # Default
-/// Empty vector (uses XCDR1 by default).
+/// `vec![XcdrDataRepresentation]` (XCDR1) per DDS-XTypes 1.3 specification.
+///
+/// Note: `ConstDefault::DEFAULT` is an empty vector due to Rust const limitations,
+/// but the compatibility check treats empty as XCDR1 for backward compatibility.
 ///
 /// # Example
 /// ```no_run
@@ -1705,11 +1708,23 @@ impl DataRepresentationId {
 ///     .create_datareader::<HelloWorldType>(&topic, reader_qos, None, StatusMask::default())
 ///     .unwrap();
 /// ```
-#[derive(DdsType, Eq, ConstDefault)]
-#[dds_type(crate_path = "crate")]
+#[derive(DdsType, Eq)]
+#[dds_type(crate_path = "crate", no_default)]
 pub struct DataRepresentationQosPolicy {
     /// List of supported data representations.
     pub value: Vec<DataRepresentationId>,
+}
+
+impl Default for DataRepresentationQosPolicy {
+    fn default() -> Self {
+        Self { value: vec![DataRepresentationId::XcdrDataRepresentation] }
+    }
+}
+
+impl ConstDefault for DataRepresentationQosPolicy {
+    // Note: Rust const context doesn't support heap allocation,
+    // so DEFAULT is empty. Compatibility check treats empty as XCDR1.
+    const DEFAULT: Self = Self { value: Vec::new() };
 }
 
 impl QosPolicy for DataRepresentationQosPolicy {
