@@ -5,6 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use log::{debug, trace, warn};
+// use rand::Rng;
 use std::collections::HashMap;
 use std::ops::Add;
 use std::time::Duration;
@@ -17,7 +18,6 @@ use crate::rtps::common::locator::Locator;
 use crate::rtps::common::parameters::ParameterList;
 use crate::rtps::common::rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult};
 use crate::rtps::common::sequence::SequenceNumber;
-use crate::rtps::common::time::RtpsDuration;
 use crate::rtps::common::types::DomainId;
 use crate::rtps::common::types::{ChangeKind, SerializedData};
 use crate::rtps::entities::endpoint::Endpoint;
@@ -425,8 +425,7 @@ impl UserLogic {
         drop(reader_proxies);
 
         if !writer.heartbeat_timer_running() {
-            // Register after delay to give some time for ACKNACK to arrive
-            writer.register_periodic_heartbeat_timer_after_delay(RtpsDuration::from_millis(100))?;
+            writer.register_periodic_heartbeat_timer();
         }
 
         Ok(())
@@ -618,17 +617,7 @@ impl UserLogic {
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::DowncastError, "Not a stateful writer"))?;
 
         // If no samples are available or all readers have acknowledged up to latest sequence number, stop heartbeat
-        if writer.is_acked_by_all()? {
-            debug!("All readers have acknowledged up to the latest sequence number, stopping heartbeat.");
-            writer.compare_and_set_heartbeat_timer_running(true, false)?;
-
-            if let Ok(locked_timer_handler) =
-                TimerHandler::get_instance(participant.guid().prefix()).lock()
-            {
-                locked_timer_handler.remove_timer(writer.periodic_heartbeat_timer_id());
-            }
-
-            // remove timer
+        if writer.stop_heartbeat_if_acked_by_all()? {
             return Ok(());
         }
 
@@ -850,6 +839,51 @@ impl UserLogic {
 
 /// Reader ACKNACK Sending (Local Reader -> Remote Writer)
 impl UserLogic {
+    pub(crate) fn send_acknack(
+        &self,
+        reader_id: EntityId,
+        remote_writer_guid: Guid,
+        final_flag: bool,
+    ) -> RtpsResult<()> {
+        let participant = self.get_upgraded_participant()?;
+
+        let reader = participant
+            .find_reader_from_entity_id(reader_id)
+            .ok_or_else(|| RtpsError::new(RtpsErrorCode::RtpsEntityNotFound, None))?;
+        let stateful_reader = reader
+            .as_any()
+            .downcast_ref::<StatefulReader>()
+            .ok_or_else(|| RtpsError::new(RtpsErrorCode::DowncastError, "Not a StatefulReader"))?;
+        let writer_proxies = stateful_reader.writer_proxies();
+        let mut writer_proxies_guard = writer_proxies.lock().map_err(|e| {
+            RtpsError::new(
+                RtpsErrorCode::LockError,
+                format!("Failed to acquire writer_proxies lock: {}", e),
+            )
+        })?;
+        let writer_proxy = writer_proxies_guard
+            .iter_mut()
+            .find(|wp| wp.remote_writer_guid() == remote_writer_guid)
+            .ok_or_else(|| {
+                RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, "WriterProxy not found")
+            })?;
+
+        let bitmap_base = writer_proxy.expected_sn();
+        let last_sn = writer_proxy.changes_from_writer_max();
+        let missing_changes = writer_proxy.missing_changes_for_heartbeat(bitmap_base, last_sn);
+
+        self.send_acknack_to_writer_proxy_inner(
+            writer_proxy,
+            stateful_reader,
+            missing_changes,
+            bitmap_base,
+            final_flag,
+            false,
+        )?;
+
+        Ok(())
+    }
+
     pub(crate) fn send_preemptive_acknack(
         &self,
         reader_id: EntityId,
@@ -1481,16 +1515,65 @@ impl UnicastMessageProcessor for UserLogic {
                     let change_to_add = writer_proxy.flush_buffered_changes();
                     self.add_change_to_reader_cache_and_notify(reader.as_ref(), change_to_add)?;
 
-                    let bitmap_base = writer_proxy.expected_sn();
+                    // Apply heartbeat response delay
+                    let heartbeat_response_delay = stateful_reader.heartbeat_response_delay();
+                    let delay_duration = heartbeat_response_delay.to_std_duration();
 
-                    self.send_acknack_to_writer_proxy_inner(
-                        writer_proxy,
-                        stateful_reader,
-                        missing_changes,
-                        bitmap_base,
-                        final_flag,
-                        false,
-                    )?;
+                    if delay_duration.is_zero() {
+                        // No delay - send immediately
+                        let bitmap_base = writer_proxy.expected_sn();
+                        self.send_acknack_to_writer_proxy_inner(
+                            writer_proxy,
+                            stateful_reader,
+                            missing_changes,
+                            bitmap_base,
+                            final_flag,
+                            false,
+                        )?;
+                    } else {
+                        // Schedule delayed ACKNACK via SendingHandler
+                        let remote_writer_guid = writer_proxy.remote_writer_guid();
+                        let reader_entity_id = stateful_reader.guid().entity_id();
+                        let participant_guid = participant.guid();
+
+                        let timer_id = format!(
+                            "hb_response_{:?}_{:?}_{:?}",
+                            reader_entity_id, remote_writer_guid, heartbeat.count
+                        );
+
+                        if let Ok(locked_timer_handler) =
+                            TimerHandler::get_instance(participant.guid().prefix()).lock()
+                        {
+                            // Remove existing timer for this reader-writer pair to reset delay
+                            locked_timer_handler.remove_timer(timer_id.clone());
+                            locked_timer_handler.add_timer(
+                                timer_id,
+                                delay_duration,
+                                false, // one-shot
+                                move || {
+                                    // if rand::rng().random_bool(0.5) {
+                                    //     log::warn!("TEST: Dropping delayed ACKNACK response to heartbeat");
+                                    //     return;
+                                    // }
+
+                                    if let Some(sending_handler) =
+                                        SendingHandler::get_instance_by_participant_guid(
+                                            participant_guid,
+                                        )
+                                    {
+                                        sending_handler.push_message_and_wake(
+                                            MessageType::UserAcknack(
+                                                reader_entity_id,
+                                                remote_writer_guid,
+                                                final_flag,
+                                                false, // is_preemptive
+                                            ),
+                                        );
+                                    }
+                                },
+                            );
+                        }
+                    }
                 } else {
                     // Case when fragments are not completely received yet - apply suppression delay
                     let missing_fragments = writer_proxy
@@ -1655,13 +1738,56 @@ impl UnicastMessageProcessor for UserLogic {
 
             let participant = self.get_upgraded_participant()?;
 
-            // Notify Writer that Reader has requested CacheChanges
-            let handler = SendingHandler::get_instance(participant.clone(), None, None);
-            handler.push_message_and_wake(MessageType::UserRequestedChanges(
-                acknack.writer_id,
-                remote_reader_guid,
-            ));
+            // Apply nack response delay
+            let nack_response_delay = stateful_writer.nack_response_delay();
+            let delay_duration = nack_response_delay.to_std_duration();
+
+            if delay_duration.is_zero() {
+                // No delay - send immediately
+                let handler = SendingHandler::get_instance(participant.clone(), None, None);
+                handler.push_message_and_wake(MessageType::UserRequestedChanges(
+                    acknack.writer_id,
+                    remote_reader_guid,
+                ));
+            } else {
+                // Schedule delayed response via timer
+                let writer_entity_id = acknack.writer_id;
+                let participant_guid = participant.guid();
+
+                let timer_id = format!(
+                    "nack_response_{:?}_{:?}_{:?}",
+                    writer_entity_id, remote_reader_guid, acknack.count
+                );
+
+                if let Ok(locked_timer_handler) =
+                    TimerHandler::get_instance(participant.guid().prefix()).lock()
+                {
+                    // Remove existing timer for this writer-reader pair to reset delay
+                    locked_timer_handler.add_timer(
+                        timer_id,
+                        delay_duration,
+                        false, // one-shot
+                        move || {
+                            if let Some(sending_handler) =
+                                SendingHandler::get_instance_by_participant_guid(participant_guid)
+                            {
+                                sending_handler.push_message_and_wake(
+                                    MessageType::UserRequestedChanges(
+                                        writer_entity_id,
+                                        remote_reader_guid,
+                                    ),
+                                );
+                            }
+                        },
+                    );
+                }
+            }
         }
+
+        drop(reader_proxies);
+
+        stateful_writer.stop_heartbeat_if_acked_by_all()?;
+
         Ok(())
     }
 

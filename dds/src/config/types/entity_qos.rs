@@ -2,10 +2,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     config::types::qos_policy::{
-        DestinationOrderQosPolicy, DurabilityQosPolicy, DurabilityServiceQosPolicy,
-        GroupDataQosPolicy, HistoryQosPolicy, LivelinessQosPolicy, OwnershipQosPolicy,
-        PartitionQosPolicy, PresentationQosPolicy, ReliabilityQosPolicy, TopicDataQosPolicy,
-        UserDataQosPolicy, DEFAULT_MAX_BLOCKING_TIME,
+        DataRepresentationQosPolicy, DestinationOrderQosPolicy, DurabilityQosPolicy,
+        DurabilityServiceQosPolicy, GroupDataQosPolicy, HistoryQosPolicy, LivelinessQosPolicy,
+        OwnershipQosPolicy, PartitionQosPolicy, PresentationQosPolicy,
+        ReaderReliabilityExtensionQosPolicy, ReliabilityQosPolicy, TopicDataQosPolicy,
+        UserDataQosPolicy, WriterReliabilityExtensionQosPolicy, DEFAULT_MAX_BLOCKING_TIME,
     },
     domain,
     infrastructure::qos_policy as internal_qos_policy,
@@ -56,6 +57,10 @@ pub(crate) struct DataWriterQos {
     pub(crate) ownership_strength: Option<OwnershipStrengthQosPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) writer_data_lifecycle: Option<WriterDataLifecycleQosPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) data_representation: Option<DataRepresentationQosPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) writer_reliability_extension: Option<WriterReliabilityExtensionQosPolicy>,
 }
 
 impl MergeQos for DataWriterQos {
@@ -77,6 +82,14 @@ impl MergeQos for DataWriterQos {
             ownership: self.ownership.clone().or(base.ownership.clone()),
             ownership_strength: self.ownership_strength.or(base.ownership_strength),
             writer_data_lifecycle: self.writer_data_lifecycle.or(base.writer_data_lifecycle),
+            data_representation: self
+                .data_representation
+                .clone()
+                .or(base.data_representation.clone()),
+            writer_reliability_extension: self
+                .writer_reliability_extension
+                .clone()
+                .or(base.writer_reliability_extension.clone()),
         }
     }
 }
@@ -167,6 +180,14 @@ impl From<DataWriterQos> for publication::qos::DataWriterQos {
             qos.writer_data_lifecycle = writer_data_lifecycle;
         }
 
+        if let Some(data_representation) = external.data_representation {
+            qos.data_representation = data_representation.into();
+        }
+
+        if let Some(writer_reliability_extension) = external.writer_reliability_extension {
+            qos.writer_reliability_extension = writer_reliability_extension.into();
+        }
+
         qos
     }
 }
@@ -190,6 +211,8 @@ impl From<publication::qos::DataWriterQos> for DataWriterQos {
             ownership: Some(internal.ownership.into()),
             ownership_strength: Some(internal.ownership_strength),
             writer_data_lifecycle: Some(internal.writer_data_lifecycle),
+            data_representation: Some(internal.data_representation.into()),
+            writer_reliability_extension: Some(internal.writer_reliability_extension.into()),
         }
     }
 }
@@ -223,6 +246,8 @@ pub(crate) struct DataReaderQos {
     pub(crate) time_based_filter: Option<TimeBasedFilterQosPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reader_data_lifecycle: Option<ReaderDataLifecycleQosPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reader_reliability_extension: Option<ReaderReliabilityExtensionQosPolicy>,
 }
 
 impl MergeQos for DataReaderQos {
@@ -241,6 +266,10 @@ impl MergeQos for DataReaderQos {
             ownership: self.ownership.clone().or(base.ownership.clone()),
             time_based_filter: self.time_based_filter.or(base.time_based_filter),
             reader_data_lifecycle: self.reader_data_lifecycle.or(base.reader_data_lifecycle),
+            reader_reliability_extension: self
+                .reader_reliability_extension
+                .clone()
+                .or(base.reader_reliability_extension.clone()),
         }
     }
 }
@@ -319,6 +348,10 @@ impl From<DataReaderQos> for subscription::qos::DataReaderQos {
             qos.reader_data_lifecycle = reader_data_lifecycle;
         }
 
+        if let Some(reader_reliability_extension) = external.reader_reliability_extension {
+            qos.reader_reliability_extension = reader_reliability_extension.into();
+        }
+
         qos
     }
 }
@@ -339,6 +372,7 @@ impl From<subscription::qos::DataReaderQos> for DataReaderQos {
             ownership: Some(internal.ownership.into()),
             time_based_filter: Some(internal.time_based_filter),
             reader_data_lifecycle: Some(internal.reader_data_lifecycle),
+            reader_reliability_extension: Some(internal.reader_reliability_extension.into()),
         }
     }
 }

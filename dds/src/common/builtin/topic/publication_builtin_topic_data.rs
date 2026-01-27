@@ -9,8 +9,8 @@ use crate::{
         DurabilityQosPolicy, DurabilityServiceQosPolicy, GroupDataQosPolicy,
         LatencyBudgetQosPolicy, LifespanQosPolicy, LivelinessQosPolicy, OwnershipQosPolicy,
         OwnershipStrengthQosPolicy, PartitionQosPolicy, PresentationQosPolicy,
-        ReliabilityExtensionQosPolicy, ReliabilityQosPolicy, ReliabilityQosPolicyKind,
-        TopicDataQosPolicy, UserDataQosPolicy,
+        ReliabilityQosPolicy, ReliabilityQosPolicyKind, TopicDataQosPolicy, UserDataQosPolicy,
+        WriterReliabilityExtensionQosPolicy,
     },
     publication::qos::{DataWriterQos, PublisherQos},
     rtps::common::{guid::Guid, locator::Locator, types::SerializedData},
@@ -50,7 +50,7 @@ pub struct PublicationBuiltinTopicData {
     data_representation: DataRepresentationQosPolicy,
     type_identifier: Option<TypeIdentifier>,
     type_object: Option<TypeObject>,
-    reliability_extension: ReliabilityExtensionQosPolicy,
+    writer_reliability_extension: WriterReliabilityExtensionQosPolicy,
 }
 
 impl PublicationBuiltinTopicData {
@@ -89,7 +89,7 @@ impl PublicationBuiltinTopicData {
             data_representation: datawriter_qos.data_representation.clone(),
             type_identifier: None,
             type_object: None,
-            reliability_extension: datawriter_qos.reliability_extension,
+            writer_reliability_extension: datawriter_qos.writer_reliability_extension,
         }
     }
 
@@ -276,8 +276,8 @@ impl PublicationBuiltinTopicData {
         self.type_object = type_obj;
     }
 
-    pub fn reliability_extension(&self) -> &ReliabilityExtensionQosPolicy {
-        &self.reliability_extension
+    pub fn writer_reliability_extension(&self) -> &WriterReliabilityExtensionQosPolicy {
+        &self.writer_reliability_extension
     }
 
     pub fn convert_u8_to_i32_array(data: [u8; 12]) -> [i32; 3] {
