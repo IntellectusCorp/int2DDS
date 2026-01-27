@@ -1128,7 +1128,7 @@ impl SedpLogic {
             {
                 // Still compatible - just update builtin_topic_data
                 debug!(
-                    "QoS changed for remote writer {:?}, still compatible - updating builtin_topic_data",
+                    "Syncing publication_builtin_topic_data for compatible remote writer {:?}",
                     endpoint_guid
                 );
                 reader
@@ -1242,7 +1242,7 @@ impl SedpLogic {
                 .changeable_qos_equals(&publication_builtin_topic_data)
             {
                 debug!(
-                    "QoS changed for remote writer {:?}, still compatible - updating builtin_topic_data",
+                    "Syncing publication_builtin_topic_data for compatible remote writer {:?}",
                     endpoint_guid
                 );
 
