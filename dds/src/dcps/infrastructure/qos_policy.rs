@@ -1959,7 +1959,7 @@ impl Default for ReaderReliabilityExtensionQosPolicy {
 
 impl ConstDefault for ReaderReliabilityExtensionQosPolicy {
     const DEFAULT: Self = Self {
-        heartbeat_response_delay: Duration { sec: 0, nanosec: 500_000_000 },
+        heartbeat_response_delay: Duration { sec: 0, nanosec: 100_000_000 },
         heartbeat_suppression_duration: Duration { sec: 0, nanosec: 0 },
         preemptive_acknack_delay: Duration { sec: 0, nanosec: 80_000_000 },
     };
