@@ -81,10 +81,6 @@ pub(crate) struct StatefulWriter {
 }
 
 impl StatefulWriter {
-    // ========================================
-    // Constructor
-    // ========================================
-
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::type_complexity)]
     pub(crate) fn new(
@@ -262,10 +258,12 @@ impl StatefulWriter {
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
+            debug!("Tried to run a new heartbeat timer but there is already one");
             return;
         }
 
         if let Ok(handler) = TimerHandler::get_instance(guid_prefix).lock() {
+            debug!("Adding a new heartbeat timer");
             handler.add_timer(
                 timer_id,
                 heartbeat_period,
@@ -326,9 +324,26 @@ impl StatefulWriter {
         Ok(Self::is_acked_by_all_impl(&self.writer_cache, &self.matched_readers))
     }
 
+    /// Stop heartbeat timer if all readers have acknowledged the latest change.
+    /// Returns true if heartbeat was stopped, false otherwise.
+    pub(crate) fn stop_heartbeat_if_acked_by_all(&self) -> RtpsResult<bool> {
+        if !self.heartbeat_timer_running() || !self.is_acked_by_all()? {
+            return Ok(false);
+        }
+
+        debug!(
+            "All readers have acknowledged up to the latest sequence number, stopping heartbeat."
+        );
+        self.compare_and_set_heartbeat_timer_running(true, false)?;
+
+        if let Ok(locked_timer_handler) = TimerHandler::get_instance(self.guid().prefix()).lock() {
+            locked_timer_handler.remove_timer(self.periodic_heartbeat_timer_id());
+        }
+
+        Ok(true)
+    }
+
     /// Check if all readers have acked a specific change
-    /// Late joining volatile reader's ack status should not be considered here,
-    /// but there's no problem because when matched_reader_add is called in SEDP, existing caches are already added in acked state
     pub(crate) fn is_change_acked_by_all(&self, a_change_seq_num: SequenceNumber) -> bool {
         Self::is_change_acked_by_all_impl(&self.matched_readers, a_change_seq_num)
     }
