@@ -23,8 +23,8 @@ use crate::{
     core::time::Duration as DcpsDuration,
     infrastructure::{
         qos_policy::{
-            LivelinessQosPolicy, QosPolicyId, ReliabilityExtensionQosPolicy,
-            ReliabilityQosPolicyKind,
+            LivelinessQosPolicy, QosPolicyId, ReliabilityQosPolicyKind,
+            WriterReliabilityExtensionQosPolicy,
         },
         status::{
             OfferedIncompatibleQosStatus, PublicationMatchedStatus, QosPolicyCount, StatusInfo,
@@ -77,7 +77,7 @@ pub(crate) struct StatefulWriter {
     heartbeat_timer_running: Arc<AtomicBool>,
     publication_matched_status: Arc<Mutex<PublicationMatchedStatus>>,
     offered_incompatible_qos_status: Arc<Mutex<OfferedIncompatibleQosStatus>>,
-    reliability_extension: ReliabilityExtensionQosPolicy,
+    writer_reliability_extension: WriterReliabilityExtensionQosPolicy,
 }
 
 impl StatefulWriter {
@@ -95,7 +95,8 @@ impl StatefulWriter {
         publication_builtin_topic_data: PublicationBuiltinTopicData,
         participant_guid: Guid,
     ) -> Self {
-        let reliability_extension = *publication_builtin_topic_data.reliability_extension();
+        let writer_reliability_extension =
+            *publication_builtin_topic_data.writer_reliability_extension();
 
         Self {
             guid,
@@ -123,7 +124,7 @@ impl StatefulWriter {
             offered_incompatible_qos_status: Arc::new(Mutex::new(
                 OfferedIncompatibleQosStatus::default(),
             )),
-            reliability_extension,
+            writer_reliability_extension,
         }
     }
 
@@ -132,7 +133,7 @@ impl StatefulWriter {
     }
 
     pub(crate) fn initial_heartbeat_delay(&self) -> RtpsDuration {
-        RtpsDuration::from(self.reliability_extension.initial_heartbeat_delay)
+        RtpsDuration::from(self.writer_reliability_extension.initial_heartbeat_delay)
     }
 
     pub(crate) fn periodic_heartbeat_timer_id(&self) -> String {
@@ -144,7 +145,7 @@ impl StatefulWriter {
     }
 
     pub(crate) fn disable_piggyback_heartbeat(&self) -> bool {
-        self.reliability_extension.disable_piggyback_heartbeat
+        self.writer_reliability_extension.disable_piggyback_heartbeat
     }
 
     pub(crate) fn publication_builtin_topic_data(&self) -> RtpsResult<PublicationBuiltinTopicData> {
@@ -559,7 +560,7 @@ impl Writer for StatefulWriter {
     }
 
     fn heartbeat_period(&self) -> RtpsDuration {
-        RtpsDuration::from(self.reliability_extension.heartbeat_period)
+        RtpsDuration::from(self.writer_reliability_extension.heartbeat_period)
     }
 
     fn last_change_sequence_number(&self) -> SequenceNumber {
@@ -573,15 +574,15 @@ impl Writer for StatefulWriter {
     }
 
     fn nack_response_delay(&self) -> RtpsDuration {
-        RtpsDuration::from(self.reliability_extension.nack_response_delay)
+        RtpsDuration::from(self.writer_reliability_extension.nack_response_delay)
     }
 
     fn nack_suppression_duration(&self) -> RtpsDuration {
-        RtpsDuration::from(self.reliability_extension.nack_suppression_duration)
+        RtpsDuration::from(self.writer_reliability_extension.nack_suppression_duration)
     }
 
     fn push_mode(&self) -> bool {
-        self.reliability_extension.push_mode
+        self.writer_reliability_extension.push_mode
     }
 
     fn wait_for_all_acked(&self, max_wait: DcpsDuration) -> bool {

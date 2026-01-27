@@ -31,9 +31,9 @@ use crate::{
         DurabilityQosPolicy, DurabilityServiceQosPolicy, EntityFactoryQosPolicy,
         GroupDataQosPolicy, HistoryQosPolicy, LatencyBudgetQosPolicy, LifespanQosPolicy,
         LivelinessQosPolicy, OwnershipQosPolicy, OwnershipStrengthQosPolicy, PartitionQosPolicy,
-        PresentationQosPolicy, Qos, ReliabilityExtensionQosPolicy, ReliabilityQosPolicy,
-        ReliabilityQosPolicyKind, ResourceLimitsQosPolicy, TransportPriorityQosPolicy,
-        UserDataQosPolicy, WriterDataLifecycleQosPolicy,
+        PresentationQosPolicy, Qos, ReliabilityQosPolicy, ReliabilityQosPolicyKind,
+        ResourceLimitsQosPolicy, TransportPriorityQosPolicy, UserDataQosPolicy,
+        WriterDataLifecycleQosPolicy, WriterReliabilityExtensionQosPolicy,
     },
 };
 use const_default::ConstDefault;
@@ -60,7 +60,7 @@ pub struct DataWriterQos {
     pub ownership_strength: OwnershipStrengthQosPolicy,
     pub writer_data_lifecycle: WriterDataLifecycleQosPolicy,
     pub data_representation: DataRepresentationQosPolicy,
-    pub reliability_extension: ReliabilityExtensionQosPolicy,
+    pub writer_reliability_extension: WriterReliabilityExtensionQosPolicy,
 }
 
 impl Default for DataWriterQos {
@@ -85,7 +85,7 @@ impl Default for DataWriterQos {
             ownership_strength: OwnershipStrengthQosPolicy::default(),
             writer_data_lifecycle: WriterDataLifecycleQosPolicy::default(),
             data_representation: DataRepresentationQosPolicy::default(),
-            reliability_extension: ReliabilityExtensionQosPolicy::default(),
+            writer_reliability_extension: WriterReliabilityExtensionQosPolicy::default(),
         }
     }
 }
@@ -111,7 +111,7 @@ impl ConstDefault for DataWriterQos {
         ownership_strength: OwnershipStrengthQosPolicy::DEFAULT,
         writer_data_lifecycle: WriterDataLifecycleQosPolicy::DEFAULT,
         data_representation: DataRepresentationQosPolicy::DEFAULT,
-        reliability_extension: ReliabilityExtensionQosPolicy::DEFAULT,
+        writer_reliability_extension: WriterReliabilityExtensionQosPolicy::DEFAULT,
     };
 }
 
@@ -132,10 +132,10 @@ impl Qos for DataWriterQos {
             return Err(DdsError::Unsupported);
         }
 
-        // ReliabilityExtensionQosPolicy unsupported fields check
-        let ext_default = ReliabilityExtensionQosPolicy::DEFAULT;
-        if self.reliability_extension.push_mode != ext_default.push_mode
-            || self.reliability_extension.nack_suppression_duration
+        // WriterReliabilityExtensionQosPolicy unsupported fields check
+        let ext_default = WriterReliabilityExtensionQosPolicy::DEFAULT;
+        if self.writer_reliability_extension.push_mode != ext_default.push_mode
+            || self.writer_reliability_extension.nack_suppression_duration
                 != ext_default.nack_suppression_duration
         {
             return Err(DdsError::Unsupported);
@@ -148,14 +148,13 @@ impl Qos for DataWriterQos {
         if self.durability != new_qos.durability
             || self.ownership != new_qos.ownership
             || self.reliability != new_qos.reliability
-            || self.reliability_extension != new_qos.reliability_extension
+            || self.writer_reliability_extension != new_qos.writer_reliability_extension
             || self.liveliness != new_qos.liveliness
             || self.history != new_qos.history
             || self.resource_limits != new_qos.resource_limits
             || self.durability_service != new_qos.durability_service
             || self.destination_order != new_qos.destination_order
             || self.data_representation != new_qos.data_representation
-            || self.reliability_extension != new_qos.reliability_extension
         {
             return Err(DdsError::ImmutablePolicy);
         }

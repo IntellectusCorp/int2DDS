@@ -550,7 +550,7 @@ impl From<qos_policy::DestinationOrderQosPolicy> for DestinationOrderQosPolicy {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
-pub(crate) struct ReliabilityExtensionQosPolicy {
+pub(crate) struct WriterReliabilityExtensionQosPolicy {
     pub(crate) disable_piggyback_heartbeat: bool,
     pub(crate) heartbeat_period: Duration,
     pub(crate) initial_heartbeat_delay: Duration,
@@ -559,7 +559,7 @@ pub(crate) struct ReliabilityExtensionQosPolicy {
     pub(crate) nack_response_delay: Duration,
 }
 
-impl Default for ReliabilityExtensionQosPolicy {
+impl Default for WriterReliabilityExtensionQosPolicy {
     fn default() -> Self {
         Self {
             disable_piggyback_heartbeat: false,
@@ -572,8 +572,8 @@ impl Default for ReliabilityExtensionQosPolicy {
     }
 }
 
-impl From<ReliabilityExtensionQosPolicy> for qos_policy::ReliabilityExtensionQosPolicy {
-    fn from(external: ReliabilityExtensionQosPolicy) -> Self {
+impl From<WriterReliabilityExtensionQosPolicy> for qos_policy::WriterReliabilityExtensionQosPolicy {
+    fn from(external: WriterReliabilityExtensionQosPolicy) -> Self {
         Self {
             disable_piggyback_heartbeat: external.disable_piggyback_heartbeat,
             heartbeat_period: external.heartbeat_period,
@@ -585,8 +585,8 @@ impl From<ReliabilityExtensionQosPolicy> for qos_policy::ReliabilityExtensionQos
     }
 }
 
-impl From<qos_policy::ReliabilityExtensionQosPolicy> for ReliabilityExtensionQosPolicy {
-    fn from(internal: qos_policy::ReliabilityExtensionQosPolicy) -> Self {
+impl From<qos_policy::WriterReliabilityExtensionQosPolicy> for WriterReliabilityExtensionQosPolicy {
+    fn from(internal: qos_policy::WriterReliabilityExtensionQosPolicy) -> Self {
         Self {
             disable_piggyback_heartbeat: internal.disable_piggyback_heartbeat,
             heartbeat_period: internal.heartbeat_period,
@@ -594,6 +594,44 @@ impl From<qos_policy::ReliabilityExtensionQosPolicy> for ReliabilityExtensionQos
             push_mode: internal.push_mode,
             nack_suppression_duration: internal.nack_suppression_duration,
             nack_response_delay: internal.nack_response_delay,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct ReaderReliabilityExtensionQosPolicy {
+    pub(crate) heartbeat_response_delay: Duration,
+    pub(crate) heartbeat_suppression_duration: Duration,
+    pub(crate) preemptive_acknack_delay: Duration,
+}
+
+impl Default for ReaderReliabilityExtensionQosPolicy {
+    fn default() -> Self {
+        Self {
+            heartbeat_response_delay: Duration { sec: 0, nanosec: 500_000_000 },
+            heartbeat_suppression_duration: Duration { sec: 0, nanosec: 0 },
+            preemptive_acknack_delay: Duration { sec: 0, nanosec: 80_000_000 },
+        }
+    }
+}
+
+impl From<ReaderReliabilityExtensionQosPolicy> for qos_policy::ReaderReliabilityExtensionQosPolicy {
+    fn from(external: ReaderReliabilityExtensionQosPolicy) -> Self {
+        Self {
+            heartbeat_response_delay: external.heartbeat_response_delay,
+            heartbeat_suppression_duration: external.heartbeat_suppression_duration,
+            preemptive_acknack_delay: external.preemptive_acknack_delay,
+        }
+    }
+}
+
+impl From<qos_policy::ReaderReliabilityExtensionQosPolicy> for ReaderReliabilityExtensionQosPolicy {
+    fn from(internal: qos_policy::ReaderReliabilityExtensionQosPolicy) -> Self {
+        Self {
+            heartbeat_response_delay: internal.heartbeat_response_delay,
+            heartbeat_suppression_duration: internal.heartbeat_suppression_duration,
+            preemptive_acknack_delay: internal.preemptive_acknack_delay,
         }
     }
 }
