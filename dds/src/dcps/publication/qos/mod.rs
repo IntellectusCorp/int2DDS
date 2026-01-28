@@ -16,6 +16,7 @@
 //! - **Deadline**: Maximum allowed time between data writes
 //! - **Liveliness**: Mechanism for asserting the writer's activity
 //! - **Ownership**: Shared or exclusive ownership of instances
+//! - **WriterReliabilityExtension**: int2DDS extension for writer reliability options (heartbeat, NACK response)
 //! - And many more...
 //!
 //! Default QoS can be accessed via `PUBLISHER_QOS_DEFAULT` and `DATAWRITER_QOS_DEFAULT`.

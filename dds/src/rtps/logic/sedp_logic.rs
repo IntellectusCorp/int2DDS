@@ -473,6 +473,7 @@ impl SedpLogic {
                         debug!("match_endpoint failed: {:?}", e);
                     }
 
+                    // Match for local endpoints only if not skipped
                     if !skip_cross_match {
                         self.check_if_local_and_cross_match(
                             publication_data.endpoint_guid(),
@@ -494,6 +495,7 @@ impl SedpLogic {
                         debug!("match_endpoint failed: {:?}", e);
                     }
 
+                    // Match for local endpoints only if not skipped
                     if !skip_cross_match {
                         self.check_if_local_and_cross_match(
                             publication_data.endpoint_guid(),
@@ -526,6 +528,7 @@ impl SedpLogic {
                         debug!("match_endpoint failed: {:?}", e);
                     }
 
+                    // Match for local endpoints only if not skipped
                     if !skip_cross_match {
                         self.check_if_local_and_cross_match(
                             subscription_data.endpoint_guid(),
@@ -544,6 +547,7 @@ impl SedpLogic {
                         debug!("match_endpoint failed: {:?}", e);
                     }
 
+                    // Match for local endpoints only if not skipped
                     if !skip_cross_match {
                         self.check_if_local_and_cross_match(
                             subscription_data.endpoint_guid(),
@@ -636,10 +640,9 @@ impl SedpLogic {
 
         let participant = self.get_upgraded_participant()?;
 
+        // If STATUS_INFO indicates disposed or unregistered, remove remote reader and return early
         if let Some(inline_qos_params) = inline_qos_params {
             if let Some(status_info) = inline_qos_params.get_status_info() {
-                // According to RTPS spec, entity termination requires both
-                // DISPOSED and UNREGISTERED status flags to be set
                 if status_info.disposed() || status_info.unregistered() {
                     debug!("Received Data(r[UD])");
 
@@ -1397,7 +1400,8 @@ impl SedpLogic {
         Ok(())
     }
 
-    // SEDP HEARTBEAT message connection and unsent / reader proxy check unsent
+    /// Sends periodic SEDP HEARTBEAT messages to reader proxies
+    /// and checks for unsent changes in the writer cache.
     #[allow(unused_variables)]
     pub(crate) fn send_sedp_periodic_heartbeat_message(
         &self,
