@@ -46,11 +46,15 @@ examples/
 cd ffi/examples
 mkdir build
 cd build
+# Debug
 cmake ..
-# Build Debug version (default)
-cmake --build . --config Debug
-# Or build Release version
+cmake --build .
+# or cmake --build . --config Debug
+
+#Release
+cmake .. -DCMAKE_BUILD_TYPE=Release
 cmake --build . --config Release
+# or cmake --build .
 ```
 
 **Note:** Visual Studio is a multi-configuration generator, so you must specify `--config Debug` or `--config Release` when building.
