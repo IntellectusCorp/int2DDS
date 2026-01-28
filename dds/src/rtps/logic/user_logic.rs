@@ -713,7 +713,8 @@ impl UserLogic {
             return Ok(());
         }
 
-        self.send_heartbeat_to_a_reader_proxy_inner(stateful_writer, reader_proxy, true)?;
+        // Send with GAP if preemptive
+        self.send_heartbeat_to_a_reader_proxy_inner(stateful_writer, reader_proxy, is_preemptive)?;
 
         Ok(())
     }
