@@ -176,7 +176,7 @@ int main(int argc, char* argv[]) {
     size_t message_len;
     int received_count = 0;
 
-    while (received_count < 100) {
+    while (1) {
         ret = int2dds_take(reader, data, &valid_data);
 
         if (ret == INT2DDS_RET_OK && valid_data) {
@@ -195,12 +195,6 @@ int main(int argc, char* argv[]) {
 
             printf("[%u] Received: %s\n", index, message);
             received_count++;
-        } else if (ret == INT2DDS_RET_NO_DATA) {
-            /* No data available, wait and try again */
-            sleep_ms(100);
-        } else if (ret != INT2DDS_RET_OK) {
-            fprintf(stderr, "Failed to take: %d\n", ret);
-            sleep_ms(100);
         }
     }
 

@@ -169,8 +169,9 @@ int main(int argc, char* argv[]) {
 
     /* Publish messages */
     char message[256];
-
-    for (uint32_t i = 0; i < 100; i++) {
+    uint32_t i = 0;
+    while (1) {
+        i++;
         /* Set field values */
         ret = int2dds_data_set_u32(data, "index", i);
         if (ret != INT2DDS_RET_OK) {
