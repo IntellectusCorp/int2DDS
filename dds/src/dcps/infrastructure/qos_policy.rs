@@ -551,8 +551,26 @@ impl QosPolicy for OwnershipStrengthQosPolicy {
 
 /// Controls automatic disposal of instances when unregistered by DataWriter.
 ///
-/// # Default
-/// `autodispose_unregistered_instances: true`
+/// This policy determines what happens to an instance when `unregister_instance()` is called.
+///
+/// # Values
+/// - `autodispose_unregistered_instances: true` (default): Instance is automatically disposed when unregistered.
+///   DataReader sees `NOT_ALIVE_DISPOSED_INSTANCE_STATE`.
+/// - `autodispose_unregistered_instances: false`: Instance is NOT disposed when unregistered.
+///   DataReader sees `NOT_ALIVE_NO_WRITERS_INSTANCE_STATE`.
+///
+/// # Behavior
+///
+/// When `autodispose_unregistered_instances = true`:
+/// - Calling `unregister_instance()` implicitly calls `dispose()` on the instance
+/// - The instance transitions to DISPOSED state
+/// - Matched DataReaders receive a dispose notification
+///
+/// When `autodispose_unregistered_instances = false`:
+/// - Calling `unregister_instance()` only removes the writer's claim on the instance
+/// - The instance transitions to NO_WRITERS state (if no other writers exist)
+/// - The instance data remains available to DataReaders
+/// - Useful when multiple DataWriters share ownership of instances
 #[derive(DdsType, Copy, Eq, Deserialize, Serialize)]
 #[dds_type(crate_path = "crate", no_default)]
 pub struct WriterDataLifecycleQosPolicy {
@@ -579,15 +597,30 @@ impl QosPolicy for WriterDataLifecycleQosPolicy {
 
 /// Controls automatic purging of samples from disposed or no-writer instances.
 ///
-/// # Default
-/// Both delays are `Duration::INFINITE` - samples are never automatically purged.
+/// This policy determines when the DataReader automatically removes samples from instances
+/// that are no longer actively maintained by any DataWriter.
+/// Useful for memory management when instances frequently come and go.
+///
+/// # Fields
+///
+/// ## autopurge_nowriter_samples_delay
+/// Delay before purging samples when an instance has no more writers (`NOT_ALIVE_NO_WRITERS` state).
+/// - This occurs when all DataWriters unregister the instance (with `autodispose_unregistered_instances = false`)
+/// - After the delay, all samples for that instance are removed from the DataReader's cache
+/// - Default: `Duration::INFINITE` (never purge)
+///
+/// ## autopurge_disposed_samples_delay
+/// Delay before purging samples when an instance is disposed (`NOT_ALIVE_DISPOSED` state).
+/// - This occurs when a DataWriter calls `dispose()` or unregisters with `autodispose_unregistered_instances = true`
+/// - After the delay, all samples for that instance are removed from the DataReader's cache
+/// - Default: `Duration::INFINITE` (never purge)
 #[derive(DdsType, Copy, Eq, Deserialize, Serialize)]
 #[dds_type(crate_path = "crate", no_default)]
 pub struct ReaderDataLifecycleQosPolicy {
-    /// Delay before purging samples from instances with no writers.
+    /// Delay before purging samples from instances with no writers (`NOT_ALIVE_NO_WRITERS` state).
     #[serde(default)]
     pub autopurge_nowriter_samples_delay: Duration,
-    /// Delay before purging samples from disposed instances.
+    /// Delay before purging samples from disposed instances (`NOT_ALIVE_DISPOSED` state).
     #[serde(default)]
     pub autopurge_disposed_samples_delay: Duration,
 }
