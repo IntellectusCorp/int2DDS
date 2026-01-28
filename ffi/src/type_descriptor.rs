@@ -123,6 +123,7 @@ pub enum FieldTypeInfo {
     },
     /// Optimized byte sequence - stored as Arc<[u8]> for zero-copy
     /// Serialized as CDR octet sequence for wire compatibility
+    /// max_length = 0 means unbounded sequence
     Bytes {
         max_length: u32,
     },
@@ -790,6 +791,9 @@ pub unsafe extern "C" fn int2dds_type_descriptor_add_struct(
 /// This creates a field that stores byte data efficiently using Arc<[u8]>,
 /// avoiding the overhead of individual FieldValue::UInt8 allocations.
 /// Ideal for payloads 1KB-1MB where performance is critical.
+///
+/// # Parameters
+/// - `max_length`: DDS type bound (0 = unbounded sequence)
 ///
 /// # Safety
 /// - `desc` must be a valid type descriptor
