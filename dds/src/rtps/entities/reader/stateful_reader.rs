@@ -19,7 +19,7 @@ use crate::{
     },
     infrastructure::{
         history_cache::HistoryCache as dcps_history_cache,
-        qos_policy::{QosPolicyId, ReliabilityQosPolicyKind},
+        qos_policy::{QosPolicyId, ReaderReliabilityExtensionQosPolicy, ReliabilityQosPolicyKind},
         status::{
             QosPolicyCount, RequestedIncompatibleQosStatus, StatusInfo, StatusKind,
             SubscriptionMatchedStatus,
@@ -56,9 +56,7 @@ pub(crate) struct StatefulReader {
     multicast_locator_list: Vec<Locator>,
     endpoint_id: EntityId,
     expects_inline_qos: bool,
-    heartbeat_response_delay: RtpsDuration,
-    heartbeat_suppression_duration: RtpsDuration,
-    preemptive_acknack_delay: RtpsDuration,
+    reader_reliability_extension: ReaderReliabilityExtensionQosPolicy,
     reader_cache: Arc<Mutex<ReaderHistoryCache>>,
     matched_writers: Arc<Mutex<Vec<WriterProxy>>>,
     #[allow(clippy::type_complexity)]
@@ -87,6 +85,9 @@ impl StatefulReader {
         subscription_builtin_topic_data: SubscriptionBuiltinTopicData,
         participant_guid: Guid,
     ) -> Self {
+        let reader_reliability_extension =
+            *subscription_builtin_topic_data.reader_reliability_extension();
+
         Self {
             guid,
             topic_kind,
@@ -95,9 +96,7 @@ impl StatefulReader {
             multicast_locator_list,
             endpoint_id,
             expects_inline_qos,
-            heartbeat_response_delay: RtpsDuration::new(0, 500 * 1000 * 1000),
-            heartbeat_suppression_duration: RtpsDuration::new(0, 0),
-            preemptive_acknack_delay: RtpsDuration::new(0, 80 * 1000 * 1000),
+            reader_reliability_extension,
             reader_cache: Arc::new(Mutex::new(ReaderHistoryCache::new(endpoint_id, None))),
             matched_writers: Arc::new(Mutex::new(Vec::new())),
             change_callback: Arc::new(Mutex::new(change_callback)),
@@ -111,7 +110,7 @@ impl StatefulReader {
     }
 
     pub(crate) fn preemptive_acknack_delay(&self) -> RtpsDuration {
-        self.preemptive_acknack_delay
+        RtpsDuration::from(self.reader_reliability_extension.preemptive_acknack_delay)
     }
 
     pub(crate) fn matched_writer_add(&self, a_writer_proxy: WriterProxy) {
@@ -332,11 +331,11 @@ impl Reader for StatefulReader {
     }
 
     fn heartbeat_response_delay(&self) -> RtpsDuration {
-        self.heartbeat_response_delay
+        RtpsDuration::from(self.reader_reliability_extension.heartbeat_response_delay)
     }
 
     fn heartbeat_suppression_duration(&self) -> RtpsDuration {
-        self.heartbeat_suppression_duration
+        RtpsDuration::from(self.reader_reliability_extension.heartbeat_suppression_duration)
     }
 
     fn matched_writer_is_matched(&self, writer_guid: Guid) -> bool {
