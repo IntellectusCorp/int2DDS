@@ -72,7 +72,7 @@ pub(crate) struct UserLogic {
     unicast_listening_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
-/// Initialization
+// Initialization
 impl UserLogic {
     pub(crate) fn new(
         participant: Arc<Participant>,
@@ -143,7 +143,7 @@ impl UserLogic {
     }
 }
 
-/// Writer Message Sending (Local Writer -> Remote Reader)
+// Writer Message Sending (Local Writer -> Remote Reader)
 impl UserLogic {
     pub(crate) fn send_unsent_changes(&self, entity_id: EntityId) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
@@ -344,6 +344,7 @@ impl UserLogic {
                 }
 
                 // TODO: Filter message according to Reader Proxy's request (time based filter, content filtered topic, etc)
+
                 // Send DATA message or GAP message depending on filter result
                 if let Some(a_change) = history_cache.get_change(a_change_seq_num) {
                     if a_change.is_fragmented() {
@@ -351,7 +352,6 @@ impl UserLogic {
                         for fragment_num in 1..=a_change.total_fragments() {
                             let mut heartbeat_info = None;
 
-                            // Send piggybacked heartbeat only to reliable readers
                             if reader_proxy.is_reliable() && !writer.disable_piggyback_heartbeat() {
                                 heartbeat_info = Some((
                                     writer.heartbeat_count(),
@@ -377,7 +377,6 @@ impl UserLogic {
                         // TODO: Fill in inlineQos if ReaderProxy.expects_inline_qos() == true
                         let mut heartbeat_info = None;
 
-                        // Send piggybacked heartbeat only to reliable readers
                         if reader_proxy.is_reliable() && !writer.disable_piggyback_heartbeat() {
                             heartbeat_info = Some((
                                 writer.heartbeat_count(),
@@ -409,21 +408,20 @@ impl UserLogic {
                             writer.increase_heartbeat_count();
                         }
                     }
-
-                    reader_proxy.set_highest_sent_change_sn(a_change_seq_num);
                 } else {
                     warn!(
                         "[Data] Failed to find change in history cache for seq_num: {:?}",
                         a_change_seq_num
                     );
-                    reader_proxy.set_highest_sent_change_sn(a_change_seq_num);
-                    continue;
                 }
+
+                reader_proxy.set_highest_sent_change_sn(a_change_seq_num);
             }
         }
 
         drop(reader_proxies);
 
+        // Periodic heartbeat timer resuming when new changes are sent
         if !writer.heartbeat_timer_running() {
             writer.register_periodic_heartbeat_timer();
         }
@@ -600,8 +598,8 @@ impl UserLogic {
         false
     }
 
-    /// Sending hearrtbeat message to all matched reader proxies of the given writer
-    pub(crate) fn send_heartbeat_message_to_all_reader_proxies(
+    // Sending heartbeat message to all matched reader proxies of the given writer
+    pub(crate) fn send_heartbeat_to_all_reader_proxies(
         &self,
         entity_id: EntityId,
     ) -> RtpsResult<()> {
@@ -837,7 +835,7 @@ impl UserLogic {
     }
 }
 
-/// Reader ACKNACK Sending (Local Reader -> Remote Writer)
+// Reader ACKNACK Sending (Local Reader -> Remote Writer)
 impl UserLogic {
     pub(crate) fn send_acknack(
         &self,
@@ -969,7 +967,7 @@ impl UserLogic {
     }
 }
 
-/// Reader Data Delivery (Received Data -> Local Reader)
+// Reader Data Delivery (Received Data -> Local Reader)
 impl UserLogic {
     fn deliver_change_to_reader(
         &self,
@@ -1032,6 +1030,9 @@ impl UserLogic {
                     .find(|info| info.remote_writer_guid() == remote_guid)
                     .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
 
+                // Deliver change only when sequence number is equal to or greater than expected_sn
+                // 8.4.12.1.2 The Best-Effort reader checks that the sequence number associated with the change is strictly greater than
+                // the highest sequence number of all changes received in the past from this RTPS Writer
                 if change.sequence_number() >= remote_writer_info.expected_sn() {
                     self.add_change_to_reader_cache_and_notify(reader, vec![change.clone()])?;
                     remote_writer_info.set_expected_sn(change.sequence_number().add(1));
@@ -1064,7 +1065,7 @@ impl UserLogic {
     }
 }
 
-/// Utilities
+// Utilities
 impl UserLogic {
     pub(crate) fn on_writer_cache_change_removal(
         &self,
@@ -1544,18 +1545,11 @@ impl UnicastMessageProcessor for UserLogic {
                         if let Ok(locked_timer_handler) =
                             TimerHandler::get_instance(participant.guid().prefix()).lock()
                         {
-                            // Remove existing timer for this reader-writer pair to reset delay
-                            locked_timer_handler.remove_timer(timer_id.clone());
                             locked_timer_handler.add_timer(
                                 timer_id,
                                 delay_duration,
                                 false, // one-shot
                                 move || {
-                                    // if rand::rng().random_bool(0.5) {
-                                    //     log::warn!("TEST: Dropping delayed ACKNACK response to heartbeat");
-                                    //     return;
-                                    // }
-
                                     if let Some(sending_handler) =
                                         SendingHandler::get_instance_by_participant_guid(
                                             participant_guid,
@@ -1762,7 +1756,6 @@ impl UnicastMessageProcessor for UserLogic {
                 if let Ok(locked_timer_handler) =
                     TimerHandler::get_instance(participant.guid().prefix()).lock()
                 {
-                    // Remove existing timer for this writer-reader pair to reset delay
                     locked_timer_handler.add_timer(
                         timer_id,
                         delay_duration,
@@ -1806,6 +1799,7 @@ impl UnicastMessageProcessor for UserLogic {
                 RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, "ReaderProxy not found")
             })?;
 
+        // Directly send heartbeat response to let the reader know about the writer's status
         self.send_heartbeat_to_a_reader_proxy_inner(stateful_writer, &mut reader_proxy, true)
     }
 
