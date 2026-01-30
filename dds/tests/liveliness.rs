@@ -69,8 +69,8 @@ fn test_manual_by_participant() {
 
     let topic = participant
         .create_topic::<KeyedDataType>(
-            "test_topic",
-            "KeyedDataType",
+            KeyedDataType::get_topic_name(),
+            KeyedDataType::get_type_name(),
             TopicQos::default(),
             None,
             StatusMask::default(),
@@ -177,8 +177,8 @@ fn test_manual_by_topic() {
 
     let topic = participant
         .create_topic::<KeyedDataType>(
-            "test_topic",
-            "KeyedDataType",
+            KeyedDataType::get_topic_name(),
+            KeyedDataType::get_type_name(),
             TopicQos::default(),
             None,
             StatusMask::default(),

@@ -555,7 +555,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             log::warn!("dispose on no-key topic has no effect");
             return Ok(());
         }
-        
+
         if timestamp.is_infinite() || timestamp.sec < 0 || !timestamp.is_valid() {
             return Err(DdsError::BadParameter);
         }
@@ -1454,7 +1454,7 @@ where
         */
         // let start_time = Time::now();
         self.is_enabled()?;
-        
+
         if !self.type_support.is_compute_key_provided() {
             log::warn!("register_instance on no-key topic has no effect");
             return Ok(InstanceHandle::NIL);
