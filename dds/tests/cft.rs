@@ -26,8 +26,8 @@ fn test_datareader_with_topic() {
 
     let topic = participant
         .create_topic::<KeyedDataType>(
-            "test_topic",
-            "KeyedDataType",
+            KeyedDataType::get_topic_name(),
+            KeyedDataType::get_type_name(),
             TopicQos::default(),
             None,
             StatusMask::default(),
@@ -68,12 +68,12 @@ fn test_datareader_with_topic() {
 
     // Verify get_topicdescription returns the Topic
     let topic_desc = reader.get_topicdescription().unwrap();
-    assert_eq!(topic_desc.get_name(), "test_topic");
-    assert_eq!(topic_desc.get_type_name(), "KeyedDataType");
+    assert_eq!(topic_desc.get_name(), KeyedDataType::get_topic_name());
+    assert_eq!(topic_desc.get_type_name(), KeyedDataType::get_type_name());
 
     let topic_desc = cft_reader.get_topicdescription().unwrap();
     assert_eq!(topic_desc.get_name(), "filtered_topic");
-    assert_eq!(topic_desc.get_type_name(), "KeyedDataType");
+    assert_eq!(topic_desc.get_type_name(), KeyedDataType::get_type_name());
 }
 
 #[test]
@@ -87,7 +87,7 @@ fn test_content_filtered_topic_read() {
     let topic = participant
         .create_topic::<KeyedDataType>(
             "CFT_Read_Test",
-            "KeyedDataType",
+            KeyedDataType::get_type_name(),
             TopicQos::default(),
             None,
             StatusMask::default(),
@@ -181,7 +181,7 @@ fn test_content_filtered_topic_with_read_condition() {
     let topic = participant
         .create_topic::<KeyedDataType>(
             "CFT_ReadCondition_Test",
-            "KeyedDataType",
+            KeyedDataType::get_type_name(),
             TopicQos::default(),
             None,
             StatusMask::default(),
@@ -282,7 +282,7 @@ fn test_content_filtered_topic_with_query_condition() {
     let topic = participant
         .create_topic::<KeyedDataType>(
             "CFT_QueryCondition_Test",
-            "KeyedDataType",
+            KeyedDataType::get_type_name(),
             TopicQos::default(),
             None,
             StatusMask::default(),

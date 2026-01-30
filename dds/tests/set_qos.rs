@@ -59,8 +59,8 @@ fn test_unmatch_after_set_qos() {
 
     let topic = participant
         .create_topic::<KeyedDataType>(
-            "test_topic",
-            "KeyedDataType",
+            KeyedDataType::get_topic_name(),
+            KeyedDataType::get_type_name(),
             TopicQos::default(),
             None,
             StatusMask::default(),
@@ -111,8 +111,8 @@ fn test_match_after_set_qos() {
 
     let topic = participant
         .create_topic::<KeyedDataType>(
-            "test_topic",
-            "KeyedDataType",
+            KeyedDataType::get_topic_name(),
+            KeyedDataType::get_type_name(),
             TopicQos::default(),
             None,
             StatusMask::default(),
