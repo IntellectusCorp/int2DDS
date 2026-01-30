@@ -2,7 +2,8 @@
 
 <div align="center">
 
-A **Rust implementation** of the [Data Distribution Service (DDS)](https://www.omg.org/spec/DDS/) middleware standard, following the Real-Time Publish-Subscribe (RTPS)
+A **Rust implementation** of the [Data Distribution Service (DDS)](https://www.omg.org/spec/DDS/) middleware standard,  
+following the Real-Time Publish-Subscribe (RTPS)
 
 </div>
 
@@ -41,7 +42,7 @@ int2dds-derive = "0.0.1"
 <details>
 <summary><strong>Publisher:</strong></summary>
 
-```rust
+```rust,ignore
 use int2dds::{
     common::instance_handle::InstanceHandle,
     core::time::Duration,
@@ -56,7 +57,8 @@ use int2dds::{
     topic::{qos::TopicQos, type_support::DdsType},
 };
 
-
+// Define custom DDS type with #[derive(DdsType)]
+// Use #[dds(key)] attribute to mark key fields
 #[derive(DdsType)]
 #[dds_type(crate_path = "int2dds")]
 struct HelloWorld {
@@ -112,7 +114,7 @@ fn main() {
 <details>
 <summary><strong>Subscriber:</strong></summary>
 
-```rust
+```rust,ignore
 use std::sync::Arc;
 use int2dds::{
     core::time::Duration,
@@ -129,6 +131,8 @@ use int2dds::{
     topic::{qos::TopicQos, type_support::DdsType},
 };
 
+// Define custom DDS type with #[derive(DdsType)]
+// Use #[dds(key)] attribute to mark key fields
 #[derive(DdsType)]
 #[dds_type(crate_path = "int2dds")]
 struct HelloWorld {
@@ -239,8 +243,8 @@ cargo run --example hello_world_param -- --role sub --domain 0 --reliability rel
 ## Documentation
 
 - **API Documentation**: Run `cargo doc --open --no-deps` to generate and view API docs
-- **Contributing**: See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines
-- **Examples**: Check the [dds/examples/](dds/examples/) directory for comprehensive examples
+- **Contributing**: See [CONTRIBUTING.md](https://github.com/IntellectusCorp/int2DDS/blob/main/CONTRIBUTING.md) for contribution guidelines
+- **Examples**: Check the [dds/examples/](https://github.com/IntellectusCorp/int2DDS/tree/main/dds/examples) directory for comprehensive examples
 
 ## Environment Variables
 
@@ -248,10 +252,20 @@ int2DDS supports various environment variables for configuration:
 
 ### Basic Environment Variables
 
+- `INT2DDS_TRANSPORT`: Transport protocol (udp, tcp, hybrid, shm)
+- `INT2DDS_DISCOVERY_MODE`: Discovery mode (udp, tcp, hybrid)
 - `INT2DDS_LOG_TYPE`: Log output type (console, file, all, none)
 - `INT2DDS_CONSOLE_LOG_LEVEL`: Console log level (error, warn, info, debug, trace)
 - `INT2DDS_FILE_LOG_LEVEL`: File log level (error, warn, info, debug, trace)
 - `INT2DDS_UDP_SOCKET_BUFFER`: UDP socket buffer size (bytes), increase up to 8388608(8MB) for large payloads
+- `INT2DDS_USE_LOOPBACK_INTERFACE`: Enable loopback interface for endpoint communication
+
+### TCP Environment Variables
+
+- `INT2DDS_TCP_CONNECT_TIMEOUT`: TCP connection timeout in milliseconds (default: 5000)
+- `INT2DDS_TCP_WRITE_TIMEOUT`: TCP write timeout in milliseconds (default: 10000)
+- `INT2DDS_TCP_NODELAY`: Enable TCP Nodelay, disables Nagle algorithm (default: true)
+- `INT2DDS_INITIAL_PEERS`: Initial peer list for TCP/Hybrid mode (format: "ip:port,ip:port,...")
 
 ### int2DDS-feature dependent Environment Variables
 
@@ -261,13 +275,20 @@ These variables require [int2DDS-feature](https://github.com/IntellectusCorp/int
 - `INT2DDS_NETWORK_IP`: Specify network IP address directly
 - `INT2DDS_EXTENDED_DISCOVERY`: Enable extended discovery alongside multicast
 
+### Performance Monitoring Environment Variables
+
+- `INT2DDS_THREAD_MONITORING`: Enable thread monitoring (default: false)
+- `INT2DDS_THREAD_MONITORING_LOG_PATH`: Thread monitoring log file path (default: ./thread_monitoring.log)
+- `INT2DDS_FUNCTION_TIMING`: Enable function execution time measurement (default: false)
+- `INT2DDS_FUNCTION_TIMING_LOG_PATH`: Function timing log file path (default: ./function_timing.log)
+
 ### Additional Environment Variables
 
-- For detailed environment variable documentation, see [docs/guide/env.md](docs/guide/env.md).
+- For detailed environment variable documentation, see [docs/guide/env.md](https://github.com/IntellectusCorp/int2DDS/blob/main/docs/guide/env.md).
 
 ## Project Structure
 
-```
+```text
 int2DDS/
 ├── dds/              # Main DDS library implementation
 │   ├── src/
@@ -283,7 +304,7 @@ int2DDS/
 
 ## Contributing
 
-We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details on:
+We welcome contributions! Please see [CONTRIBUTING.md](https://github.com/IntellectusCorp/int2DDS/blob/main/CONTRIBUTING.md) for details on:
 
 - Setting up your development environment
 - Code style guidelines
@@ -292,8 +313,8 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for deta
 
 All contributors must agree to a **Contributor License Agreement (CLA)** before contributions can be merged.
 
-- Individual contributors: [`CLA-Individual.md`](./CLA-Individual.md)
-- Corporate / organizational contributors: [`CLA-Corporate.md`](./CLA-Corporate.md)
+- Individual contributors: [`CLA-Individual.md`](https://github.com/IntellectusCorp/int2DDS/blob/main/CLA-Individual.md)
+- Corporate / organizational contributors: [`CLA-Corporate.md`](https://github.com/IntellectusCorp/int2DDS/blob/main/CLA-Corporate.md)
 
 ## Scope of int2DDS
 
@@ -318,7 +339,7 @@ These advanced capabilities are provided through commercial products such as **i
 
 ## License
 
-This project is licensed under the [Apache License 2.0](LICENSE).
+This project is licensed under the [Apache License 2.0](https://github.com/IntellectusCorp/int2DDS/blob/main/LICENSE).
 
 ## Acknowledgments
 
