@@ -206,22 +206,22 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
         drop(cache_change_guard);
 
         // Check ownership
-        if immutable_change.instance_handle().is_nil() {
-            if !self.is_writer_owner_of_instance(
-                immutable_change.writer_guid(),
-                immutable_change.instance_handle(),
-            )? {
-                debug!(
-                    "Rejecting change, writer {:?} is not owner of instance (which is the whole non keyed topic)",
-                    immutable_change.writer_guid()
-                );
-                return Err(DdsError::IllegalOperation);
-            }
-        }
+        // if immutable_change.instance_handle().is_nil() {
+        //     if !self.is_writer_owner_of_instance(
+        //         immutable_change.writer_guid(),
+        //         immutable_change.instance_handle(),
+        //     )? {
+        //         debug!(
+        //             "Rejecting change, writer {:?} is not owner of instance (which is the whole non keyed topic)",
+        //             immutable_change.writer_guid()
+        //         );
+        //         return Err(DdsError::IllegalOperation);
+        //     }
+        // }
         // Check ownership & update instance state
-        else {
-            self.update_instance_state(&immutable_change)?;
-        }
+        // else {
+        self.update_instance_state(&immutable_change)?;
+        // }
 
         // Check lifespan qos
         let lifespan_duration =
@@ -451,9 +451,9 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
 
     // Updates the instance state based on the CacheChange kind.
     fn update_instance_state(&self, cache_change: &CacheChange) -> DdsResult<()> {
-        if cache_change.instance_handle().is_nil() {
-            return Ok(());
-        }
+        // if cache_change.instance_handle().is_nil() {
+        //     return Ok(());
+        // }
 
         let data_reader = self
             .data_reader
@@ -1554,7 +1554,11 @@ mod tests {
                 writer_a.clone(), // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![1, 2, 3, 4]),
+                Arc::from(vec![
+                    0, 1, 0, 0, 0, 0, 0, 0, 52, 0, 0, 0, 72, 101, 108, 108, 111, 87, 111, 114,
+                    108, 100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                ]),
                 Some(RtpsTime::now()),
             );
 
@@ -1563,7 +1567,11 @@ mod tests {
                 writer_b.clone(), // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![1, 2, 3, 4]),
+                Arc::from(vec![
+                    0, 1, 0, 0, 0, 0, 0, 0, 52, 0, 0, 0, 72, 101, 108, 108, 111, 87, 111, 114,
+                    108, 100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                ]),
                 Some(RtpsTime::now()),
             );
 
