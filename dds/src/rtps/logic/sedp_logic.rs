@@ -94,7 +94,7 @@ use crate::{
     },
     serialize::pl_cdr::InlineQosParameters,
     utils::timer::timer_handler::TimerHandler,
-    xtypes::TypeIdentifier,
+    xtypes::{check_structural_compatibility, TypeIdentifier, TypeObject},
 };
 
 enum MatchType {
@@ -149,6 +149,8 @@ fn validate_endpoint_compatibility<L>(
     if !check_type_compatibility(
         offered.type_identifier(),
         requested.type_identifier(),
+        offered.type_object(),
+        requested.type_object(),
         requested.type_consistency_enforcement(),
     ) {
         debug!(
@@ -202,6 +204,8 @@ fn is_partition_compatible(requested: &[String], offered: &[String]) -> bool {
 /// # Arguments
 /// * `writer_type_id` - TypeIdentifier from the writer (offered)
 /// * `reader_type_id` - TypeIdentifier from the reader (requested)
+/// * `writer_type_obj` - Optional TypeObject from the writer (for structural check)
+/// * `reader_type_obj` - Optional TypeObject from the reader (for structural check)
 /// * `type_consistency` - TypeConsistencyEnforcementQosPolicy from the reader
 ///
 /// # Returns
@@ -210,6 +214,8 @@ fn is_partition_compatible(requested: &[String], offered: &[String]) -> bool {
 fn check_type_compatibility(
     writer_type_id: Option<&TypeIdentifier>,
     reader_type_id: Option<&TypeIdentifier>,
+    writer_type_obj: Option<&TypeObject>,
+    reader_type_obj: Option<&TypeObject>,
     type_consistency: &TypeConsistencyEnforcementQosPolicy,
 ) -> bool {
     match (writer_type_id, reader_type_id) {
@@ -230,24 +236,36 @@ fn check_type_compatibility(
                 }
                 TypeConsistencyKind::AllowTypeCoercion => {
                     // Permissive mode: allow compatible type coercion
-                    // For now, we allow matching if:
-                    // 1. Types are identical
-                    // 2. Both are complex types (struct compatibility will be checked at runtime)
-                    // 3. Primitive types can be coerced (e.g., int8 -> int32)
-
+                    // 1. Types are identical - fast path
                     if writer_id == reader_id {
                         return true;
                     }
 
-                    // Allow complex type matching (actual compatibility checked at deserialization)
+                    // 2. Complex types: check hash first, then structural if needed
                     if writer_id.is_complex() && reader_id.is_complex() {
-                        // When AllowTypeCoercion is set, we trust that the types
-                        // are compatible enough for communication. The actual
-                        // structural compatibility will be enforced during deserialization.
+                        // Fast path: same hash means compatible
+                        if writer_id.equivalence_hash() == reader_id.equivalence_hash() {
+                            return true;
+                        }
+
+                        // Hash differs - use structural check if TypeObjects available
+                        // This enforces TCE flags (ignore_sequence_bounds, prevent_type_widening, etc.)
+                        if writer_type_obj.is_some() || reader_type_obj.is_some() {
+                            return check_structural_compatibility(
+                                writer_type_id,
+                                reader_type_id,
+                                writer_type_obj,
+                                reader_type_obj,
+                                type_consistency,
+                            )
+                            .is_ok();
+                        }
+
+                        // No TypeObjects available - trust type_name matching (backward compatible)
                         return true;
                     }
 
-                    // For primitive types, check if coercion is possible
+                    // 3. Primitive types: check if coercion is possible
                     is_primitive_coercion_allowed(writer_id, reader_id)
                 }
             }
@@ -455,6 +473,7 @@ impl SedpLogic {
                         debug!("match_endpoint failed: {:?}", e);
                     }
 
+                    // Match for local endpoints only if not skipped
                     if !skip_cross_match {
                         self.check_if_local_and_cross_match(
                             publication_data.endpoint_guid(),
@@ -476,6 +495,7 @@ impl SedpLogic {
                         debug!("match_endpoint failed: {:?}", e);
                     }
 
+                    // Match for local endpoints only if not skipped
                     if !skip_cross_match {
                         self.check_if_local_and_cross_match(
                             publication_data.endpoint_guid(),
@@ -508,6 +528,7 @@ impl SedpLogic {
                         debug!("match_endpoint failed: {:?}", e);
                     }
 
+                    // Match for local endpoints only if not skipped
                     if !skip_cross_match {
                         self.check_if_local_and_cross_match(
                             subscription_data.endpoint_guid(),
@@ -526,6 +547,7 @@ impl SedpLogic {
                         debug!("match_endpoint failed: {:?}", e);
                     }
 
+                    // Match for local endpoints only if not skipped
                     if !skip_cross_match {
                         self.check_if_local_and_cross_match(
                             subscription_data.endpoint_guid(),
@@ -618,10 +640,9 @@ impl SedpLogic {
 
         let participant = self.get_upgraded_participant()?;
 
+        // If STATUS_INFO indicates disposed or unregistered, remove remote reader and return early
         if let Some(inline_qos_params) = inline_qos_params {
             if let Some(status_info) = inline_qos_params.get_status_info() {
-                // According to RTPS spec, entity termination requires both
-                // DISPOSED and UNREGISTERED status flags to be set
                 if status_info.disposed() || status_info.unregistered() {
                     debug!("Received Data(r[UD])");
 
@@ -1379,7 +1400,8 @@ impl SedpLogic {
         Ok(())
     }
 
-    // SEDP HEARTBEAT message connection and unsent / reader proxy check unsent
+    /// Sends periodic SEDP HEARTBEAT messages to reader proxies
+    /// and checks for unsent changes in the writer cache.
     #[allow(unused_variables)]
     pub(crate) fn send_sedp_periodic_heartbeat_message(
         &self,

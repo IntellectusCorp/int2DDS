@@ -39,7 +39,6 @@ use crate::{
             history::{
                 cache_change::CacheChange, history_cache::HistoryCache as rtps_history_cache,
             },
-            participant::Participant,
             writer::{StatefulWriter, Writer},
         },
     },
@@ -64,80 +63,45 @@ pub(crate) struct DataWriterHistoryCache<Foo> {
 impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
     type CacheChangeInputType = Arc<CacheChange>;
 
+    // Returns a reference to the list of CacheChanges.
     fn get_changes(&self) -> &Vec<Arc<CacheChange>> {
         &self.changes
     }
 
+    // Returns a mutable reference to the list of CacheChanges.
     fn get_changes_mut(&mut self) -> &mut Vec<Arc<CacheChange>> {
         &mut self.changes
     }
 
+    // Returns the instance map that tracks CacheChanges per instance.
     fn get_instance_map(
         &self,
     ) -> Arc<Mutex<HashMap<InstanceHandle, Vec<std::sync::Weak<CacheChange>>>>> {
         self.instance_map.clone()
     }
 
-    fn lifespan_timers(&self) -> Arc<Mutex<HashMap<Guid, String>>> {
-        self.lifespan_timers.clone()
-    }
-
-    fn get_rtps_participant(&self) -> DdsResult<Arc<Participant>> {
-        let data_writer = self
-            .data_writer
-            .upgrade()
-            .ok_or_else(|| DdsError::Error("DataWriter has been dropped".to_string()))?;
-        let participant = data_writer.get_publisher()?.get_participant()?;
-        let rtps_participant = participant.get_rtps_participant()?;
-        Ok(Arc::new(rtps_participant))
-    }
-
-    fn lifespan_timer(
-        &self,
-        writer_guid: Guid,
-        lifespan_duration: Duration,
-        timer_id_prefix: &str,
-    ) -> DdsResult<()> {
-        let data_writer_weak = if let Some(data_writer) = self.data_writer.upgrade() {
-            Arc::downgrade(&data_writer)
-        } else {
-            return Err(DdsError::Error("DataWriter has been dropped".to_string()));
-        };
-
-        let lifespan_duration_clone = lifespan_duration;
-        let writer_guid_clone = writer_guid;
-
-        let callback: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-            if let Some(data_writer) = data_writer_weak.upgrade() {
-                if let Ok(cache_arc) = data_writer.get_datawriter_cache() {
-                    if let Ok(mut cache_guard) = cache_arc.lock() {
-                        if let Err(e) =
-                            cache_guard.lifespan_expired(writer_guid_clone, lifespan_duration_clone)
-                        {
-                            debug!("Failed to check lifespan samples: {:?}", e);
-                        }
-                    }
-                }
-            }
-        });
-
-        self.lifespan_timer_with_callback(writer_guid, lifespan_duration, timer_id_prefix, callback)
-    }
-
+    // Returns the maximum number of samples allowed.
     fn get_max_samples(&self) -> i32 {
         self.max_samples
     }
 
+    // Returns the maximum number of instances allowed.
     fn get_max_instances(&self) -> i32 {
         self.max_instances
     }
 
+    // Returns the maximum number of samples per instance allowed.
     fn get_max_samples_per_instance(&self) -> i32 {
         self.max_samples_per_instance
     }
 
-    /// Adds the given CacheChange to the history vector and map,
-    /// and returns any CacheChange that was removed during space allocation before adding.
+    // Returns the map of lifespan timers keyed by writer GUID.
+    fn get_lifespan_timers(&self) -> Arc<Mutex<HashMap<Guid, String>>> {
+        self.lifespan_timers.clone()
+    }
+
+    // Adds the given CacheChange to the history vector and map,
+    // and returns any CacheChange that was removed during space allocation before adding.
     fn add_change_with_cleanup(
         &mut self,
         a_change: Arc<CacheChange>,
@@ -156,13 +120,14 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
         // Create timer only if it doesn't exist
         if let Some(duration) = lifespan_duration {
             let writer_guid = a_change.writer_guid();
-            let timers = self.lifespan_timers();
+            let timers = self.get_lifespan_timers();
             let timers_guard = timers.lock().map_err(|e| DdsError::Error(e.to_string()))?;
             let timer_exists = timers_guard.contains_key(&writer_guid);
             drop(timers_guard);
 
             if !timer_exists {
-                if let Err(e) = self.lifespan_timer(writer_guid, duration, "lifespan_timer_writer")
+                if let Err(e) =
+                    self.register_lifespan_timer(writer_guid, duration, "lifespan_timer_writer")
                 {
                     debug!("Failed to ensure lifespan timer: {:?}", e);
                 }
@@ -184,7 +149,7 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
         Ok(removed)
     }
 
-    /// Removes the given CacheChange from the history vector and map.
+    // Removes the given CacheChange from the history vector and map.
     fn remove_change(&mut self, a_change: Arc<CacheChange>) -> DdsResult<()> {
         self.changes.retain(|c| !Arc::ptr_eq(c, &a_change));
         self.remove_change_from_instance_map(&a_change)?;
@@ -192,9 +157,9 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
         Ok(())
     }
 
-    /// Ensures capacity before adding a new CacheChange to the history.
-    /// Returns Ok(None) if space is already available, or Ok(Some(CacheChange)) if space was secured after removing an existing CacheChange.
-    /// Returns Err(DdsError::OutOfResources) if space cannot be secured, in which case the Sample is rejected.
+    // Ensures capacity before adding a new CacheChange to the history.
+    // Returns Ok(None) if space is already available, or Ok(Some(CacheChange)) if space was secured after removing an existing CacheChange.
+    // Returns Err(DdsError::OutOfResources) if space cannot be secured, in which case the Sample is rejected.
     fn ensure_capacity(
         &mut self,
         instance_handle: InstanceHandle,
@@ -219,7 +184,16 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
         Ok(None)
     }
 
-    /// Removes the oldest change from the given instance.
+    // Removes the oldest change from all instances.
+    fn try_remove_oldest_change_of_all(&mut self) -> DdsResult<Arc<CacheChange>> {
+        if self.is_reliable {
+            self.remove_oldest_change_of_all_reliable()
+        } else {
+            self.remove_oldest_change_of_all()
+        }
+    }
+
+    // Removes the oldest change from the given instance.
     fn try_remove_oldest_change_of_instance(
         &mut self,
         instance_handle: InstanceHandle,
@@ -231,13 +205,43 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
         }
     }
 
-    /// Removes the oldest change from all instances.
-    fn try_remove_oldest_change_of_all(&mut self) -> DdsResult<Arc<CacheChange>> {
-        if self.is_reliable {
-            self.remove_oldest_change_of_all_reliable()
+    // Registers a periodic timer that removes expired samples based on Lifespan QoS.
+    fn register_lifespan_timer(
+        &self,
+        writer_guid: Guid,
+        lifespan_duration: Duration,
+        timer_id_prefix: &str,
+    ) -> DdsResult<()> {
+        let data_writer_weak = if let Some(data_writer) = self.data_writer.upgrade() {
+            Arc::downgrade(&data_writer)
         } else {
-            self.remove_oldest_change_of_all()
-        }
+            return Err(DdsError::Error("DataWriter has been dropped".to_string()));
+        };
+
+        let lifespan_duration_clone = lifespan_duration;
+        let writer_guid_clone = writer_guid;
+
+        let callback: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            if let Some(data_writer) = data_writer_weak.upgrade() {
+                if let Ok(cache_arc) = data_writer.get_datawriter_cache() {
+                    if let Ok(mut cache_guard) = cache_arc.lock() {
+                        if let Err(e) = cache_guard.remove_lifespan_expired_changes(
+                            writer_guid_clone,
+                            lifespan_duration_clone,
+                        ) {
+                            debug!("Failed to check lifespan samples: {:?}", e);
+                        }
+                    }
+                }
+            }
+        });
+
+        self.register_lifespan_timer_with_callback(
+            writer_guid,
+            lifespan_duration,
+            timer_id_prefix,
+            callback,
+        )
     }
 }
 
@@ -297,15 +301,17 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
         }
     }
 
+    // Must be called immediately after DataWriterHistoryCache creation.
     pub(crate) fn set_datawriter(&mut self, data_writer: Weak<DataWriter<Foo>>) {
         self.data_writer = data_writer;
     }
 
+    // Sets the RTPS writer reference.
     pub(crate) fn set_rtpswriter(&mut self, rtps_writer: Option<Weak<dyn Writer + Send + Sync>>) {
         self.rtps_writer = rtps_writer;
     }
 
-    /// Removes the oldest change from all instances in reliable mode.
+    // Removes the oldest change from all instances in reliable mode.
     fn remove_oldest_change_of_all_reliable(&mut self) -> DdsResult<Arc<CacheChange>> {
         // Get removable changes based on instance conditions
         let removable_changes = self.get_removable_changes()?;
@@ -327,7 +333,7 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
         }
     }
 
-    /// Removes the oldest change from the given instance in reliable mode.
+    // Removes the oldest change from the given instance in reliable mode.
     fn remove_oldest_change_of_instance_reliable(
         &mut self,
         instance_handle: InstanceHandle,
@@ -350,7 +356,7 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
         }
     }
 
-    /// Removes the first acknowledged change, or blocks for max_blocking_time if none exists.
+    // Removes the first acknowledged change, or blocks for max_blocking_time if none exists.
     fn remove_first_acked_change_or_block(
         &mut self,
         changes: &Vec<Arc<CacheChange>>,
@@ -386,7 +392,7 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
         }
     }
 
-    /// Removes and returns the oldest change from all instances.
+    // Removes and returns the oldest change from all instances.
     fn remove_oldest_change_of_all(&mut self) -> DdsResult<Arc<CacheChange>> {
         let oldest_change = self.get_changes().iter().min_by_key(|c| c.sequence_number()).cloned();
         match oldest_change {
@@ -398,7 +404,7 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
         }
     }
 
-    /// Returns the oldest acknowledged change from the given change vector.
+    // Returns the oldest acknowledged change from the given change vector.
     #[allow(clippy::ptr_arg)]
     fn get_first_acked_change_from_vec(
         &self,
@@ -418,7 +424,7 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
         Ok(None)
     }
 
-    /// Triggers unacked_sample_removed state if the given change is in unacked state.
+    // Triggers unacked_sample_removed state if the given change is in unacked state.
     fn trigger_status_if_unacked(&self, change: &Arc<CacheChange>) -> DdsResult<()> {
         if self.get_first_acked_change_from_vec(&vec![change.clone()])?.is_none() {
             // TODO: trigger unacked_sample_removed status
@@ -430,7 +436,7 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
         Ok(())
     }
 
-    /// Returns the change with the smallest sequence number from the given instance.
+    // Returns the change with the smallest sequence number from the given instance.
     fn get_oldest_change_of_instance(
         &self,
         instance_handle: InstanceHandle,
@@ -453,7 +459,7 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
         }
     }
 
-    /// Returns all changes for the given instance.
+    // Returns all changes for the given instance.
     fn get_changes_of_instance(
         &self,
         instance_handle: InstanceHandle,
@@ -469,7 +475,7 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
         }
     }
 
-    /// Upgrades the weak reference to rtps_writer to a strong reference.
+    // Upgrades the weak reference to rtps_writer to a strong reference.
     fn get_upgraded_rtps_writer(&self) -> DdsResult<Arc<dyn Writer + Send + Sync>> {
         self.rtps_writer
             .as_ref()
@@ -478,8 +484,8 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
             .ok_or_else(|| DdsError::Error("Failed to upgrade rtps writer weak".to_string()))
     }
 
-    /// Checks the following conditions and returns changes that can be removed.
-    /// 2.2.2.4.2.11 Service is allowed to discard samples of some other instance as long as at least one sample remains for such an instance.
+    // Checks the following conditions and returns changes that can be removed.
+    // 2.2.2.4.2.11 Service is allowed to discard samples of some other instance as long as at least one sample remains for such an instance.
     fn get_removable_changes(&self) -> DdsResult<Vec<Arc<CacheChange>>> {
         let instance_map = self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
@@ -494,6 +500,7 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
         Ok(removable_changes)
     }
 
+    // Adds CacheChange to the instance map.
     fn add_change_to_instance_map(&self, a_change: Arc<CacheChange>) -> DdsResult<()> {
         let mut instance_map =
             self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
@@ -504,6 +511,7 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
         Ok(())
     }
 
+    // Removes CacheChange from the instance map.
     fn remove_change_from_instance_map(&self, a_change: &Arc<CacheChange>) -> DdsResult<()> {
         let mut instance_map =
             self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
@@ -519,6 +527,7 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
         Ok(())
     }
 
+    // Adds CacheChange to the corresponding RTPS writer cache.
     fn add_change_to_rtps_writer_cache(&self, a_change: Arc<CacheChange>) -> DdsResult<()> {
         if let Some(rtps_writer) = self
             .rtps_writer
@@ -543,6 +552,7 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
         }
     }
 
+    // Removes CacheChange from the corresponding RTPS writer cache.
     fn remove_change_from_rtps_writer_cache(&self, a_change: Arc<CacheChange>) -> DdsResult<()> {
         if let Some(rtps_writer) = self
             .rtps_writer
@@ -590,7 +600,7 @@ mod tests {
         topic::qos::TopicQos,
     };
 
-    /// Helper function to create a test CacheChange
+    // Helper function to create a test CacheChange
     fn create_change(seq: i64, handle: InstanceHandle) -> Arc<CacheChange> {
         Arc::new(CacheChange::new(
             ChangeKind::Alive,

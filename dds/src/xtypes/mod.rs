@@ -47,8 +47,12 @@ mod dynamic_data;
 mod dynamic_serialization;
 mod dynamic_type;
 mod dynamic_type_support;
+mod type_compatibility;
 mod type_object;
 
+pub use type_compatibility::{
+    check_structural_compatibility, TypeCompatibilityError, TypeCompatibilityResult,
+};
 pub use type_object::*;
 
 // Dynamic type support

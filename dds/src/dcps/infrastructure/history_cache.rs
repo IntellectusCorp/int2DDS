@@ -20,8 +20,11 @@ use crate::{
         time::Duration,
     },
     rtps::{
-        common::{guid::Guid, time::RtpsTime},
-        entities::{entity::Entity, history::cache_change::CacheChange, participant::Participant},
+        common::{
+            guid::{Guid, GuidPrefix},
+            time::RtpsTime,
+        },
+        entities::history::cache_change::CacheChange,
     },
     utils::timer::timer_handler::TimerHandler,
 };
@@ -34,7 +37,13 @@ pub(crate) trait HistoryCache {
     fn get_instance_map(
         &self,
     ) -> Arc<Mutex<HashMap<InstanceHandle, Vec<std::sync::Weak<CacheChange>>>>>;
-    fn get_rtps_participant(&self) -> DdsResult<Arc<Participant>>;
+    fn get_max_samples(&self) -> i32;
+    fn get_max_instances(&self) -> i32;
+    fn get_max_samples_per_instance(&self) -> i32;
+    fn get_lifespan_timers(&self) -> Arc<Mutex<HashMap<Guid, String>>>;
+    fn get_timer_handler(&self, guid_prefix: GuidPrefix) -> DdsResult<Arc<Mutex<TimerHandler>>> {
+        Ok(TimerHandler::get_instance(guid_prefix))
+    }
     fn add_change_with_cleanup(
         &mut self,
         a_change: Self::CacheChangeInputType,
@@ -49,9 +58,6 @@ pub(crate) trait HistoryCache {
         &mut self,
         instance_handle: InstanceHandle,
     ) -> DdsResult<Arc<CacheChange>>;
-    fn get_max_samples(&self) -> i32;
-    fn get_max_instances(&self) -> i32;
-    fn get_max_samples_per_instance(&self) -> i32;
 
     fn is_max_instances_exceeded(&self, instance_handle: InstanceHandle) -> DdsResult<bool> {
         if instance_handle.is_nil() {
@@ -104,21 +110,21 @@ pub(crate) trait HistoryCache {
         changes.insert(pos, change);
     }
 
-    fn lifespan_timers(&self) -> Arc<Mutex<HashMap<Guid, String>>>;
+    fn register_lifespan_timer(
+        &self,
+        writer_guid: Guid,
+        lifespan_duration: Duration,
+        timer_id_prefix: &str,
+    ) -> DdsResult<()>;
 
-    fn get_timer_handler(&self) -> DdsResult<Arc<Mutex<TimerHandler>>> {
-        let rtps_participant = self.get_rtps_participant()?;
-        Ok(TimerHandler::get_instance(rtps_participant.guid().prefix()))
-    }
-
-    fn lifespan_timer_with_callback(
+    fn register_lifespan_timer_with_callback(
         &self,
         writer_guid: Guid,
         lifespan_duration: Duration,
         timer_id_prefix: &str,
         callback: Arc<dyn Fn() + Send + Sync>,
     ) -> DdsResult<()> {
-        let lifespan_timers = self.lifespan_timers();
+        let lifespan_timers = self.get_lifespan_timers();
         let mut timers_guard = lifespan_timers
             .lock()
             .map_err(|e| DdsError::Error(format!("Failed to lock lifespan_timers: {}", e)))?;
@@ -133,7 +139,7 @@ pub(crate) trait HistoryCache {
             .map_err(|e| DdsError::Error(format!("Failed to convert Duration: {:?}", e)))?;
 
         let timer_id = format!("{}_{:?}", timer_id_prefix, writer_guid);
-        let timer_handler = self.get_timer_handler()?;
+        let timer_handler = self.get_timer_handler(writer_guid.prefix())?;
 
         {
             let handler = timer_handler
@@ -149,20 +155,13 @@ pub(crate) trait HistoryCache {
         Ok(())
     }
 
-    fn lifespan_timer(
-        &self,
-        writer_guid: Guid,
-        lifespan_duration: Duration,
-        timer_id_prefix: &str,
-    ) -> DdsResult<()>;
-
     fn update_lifespan_timer_interval(
         &self,
         writer_guid: Guid,
         interval_duration: std::time::Duration,
     ) -> DdsResult<()> {
-        let timer_handler = self.get_timer_handler()?;
-        let lifespan_timers = self.lifespan_timers();
+        let timer_handler = self.get_timer_handler(writer_guid.prefix())?;
+        let lifespan_timers = self.get_lifespan_timers();
         let timer_id = {
             let timers_guard = lifespan_timers
                 .lock()
@@ -179,7 +178,7 @@ pub(crate) trait HistoryCache {
         Ok(())
     }
 
-    fn lifespan_expired(
+    fn remove_lifespan_expired_changes(
         &mut self,
         writer_guid: Guid,
         lifespan_duration: Duration,
