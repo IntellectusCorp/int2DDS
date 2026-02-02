@@ -2366,12 +2366,12 @@ impl UnicastMessageProcessor for SedpLogic {
         let mut missing_changes = Vec::new();
         let writer_cache = local_writer.writer_cache();
 
-        for seq_num in missing_sequence_numbers {
-            let all_changes = writer_cache.lock().unwrap().get_changes();
-            if let Some(change) =
-                all_changes.iter().find(|c| c.sequence_number() == seq_num).cloned()
-            {
-                missing_changes.push(change);
+        {
+            let cache_guard = writer_cache.lock().unwrap();
+            for seq_num in missing_sequence_numbers {
+                if let Some(change) = cache_guard.get_change(seq_num) {
+                    missing_changes.push(change);
+                }
             }
         }
 
