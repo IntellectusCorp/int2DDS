@@ -40,7 +40,7 @@ fn autoenable_created_entities_false_direct_parent() {
 
     let topic = participant
         .create_topic::<KeyedDataType>(
-            "test_topic",
+            KeyedDataType::get_topic_name(),
             "KeyedData",
             TopicQos::default(),
             None,
@@ -91,8 +91,8 @@ fn autoenable_created_entities_false_dp() {
 
     let topic = participant
         .create_topic::<KeyedDataType>(
-            "test_topic",
-            "KeyedDataType",
+            KeyedDataType::get_topic_name(),
+            KeyedDataType::get_type_name(),
             TopicQos::default(),
             None,
             StatusMask::default(),

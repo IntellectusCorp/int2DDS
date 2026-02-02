@@ -10,6 +10,8 @@
 use std::{
     collections::HashMap,
     fmt::Debug,
+    net::Ipv4Addr,
+    str::FromStr,
     sync::{atomic::AtomicBool, Arc, Mutex, OnceLock},
 };
 
@@ -44,6 +46,7 @@ use crate::{
             entity_id::EntityId,
             entity_kind::EntityKind,
             guid::{Guid, GuidPrefix},
+            locator::Locator,
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
             sequence::SequenceNumber,
             time::RtpsTime,
@@ -60,8 +63,11 @@ use crate::{
             wlp_logic::WlpLogic,
         },
         task::sending_handler::{MessageType, SendingHandler},
-        transport::TransportSender,
+        transport::{
+            get_transport_type, port_manager::PortManager, TransportSender, TransportType,
+        },
     },
+    utils::timer::timer_handler::TimerHandler,
 };
 
 #[derive(Clone)]
@@ -98,7 +104,7 @@ pub struct Participant {
     remote_subscriptions: Arc<DashMap<String, HashMap<Guid, SubscriptionBuiltinTopicData>>>,
 
     liveliness_monitor: Arc<Mutex<Option<LivelinessMonitor>>>,
-    working_ip: String,
+    working_ips: Vec<String>,
     terminated: Arc<AtomicBool>,
 }
 impl Debug for Participant {
@@ -131,14 +137,24 @@ impl Participant {
     pub(crate) fn new(
         domain_id: DomainId,
         participant_id: ParticipantId,
-        working_ip: String,
+        working_ips: Vec<String>,
     ) -> Self {
         let guid = Guid::new(Guid::generate_unique_guid_prefix(), EntityId::PARTICIPANT);
-        let local_participant_proxy_data = Arc::new(SPDPDiscoveredParticipantData::new(
+
+        let mut local_participant_proxy_data = SPDPDiscoveredParticipantData::new(
             domain_id,
             guid.prefix(),
             Participant::init_builtin_endpoints(),
-        ));
+        );
+
+        Self::init_locators(
+            &working_ips,
+            &mut local_participant_proxy_data,
+            domain_id,
+            participant_id,
+        );
+
+        let local_participant_proxy_data = Arc::new(local_participant_proxy_data);
         let builtin_endpoints = Arc::new(BuiltinEndpoints::new(guid));
 
         Self {
@@ -158,7 +174,7 @@ impl Participant {
             current_entity_id: Arc::new(Mutex::new([0, 0, 0])),
             remote_publications: Arc::new(DashMap::new()),
             remote_subscriptions: Arc::new(DashMap::new()),
-            working_ip,
+            working_ips,
             terminated: Arc::new(AtomicBool::new(false)),
             liveliness_monitor: Arc::new(Mutex::new(None)),
         }
@@ -180,6 +196,67 @@ impl Participant {
         endpointset.add(BuiltinEndpointFlag::DISC_BUILTIN_ENDPOINT_TOPICS_ANNOUNCER);
         endpointset.add(BuiltinEndpointFlag::DISC_BUILTIN_ENDPOINT_TOPICS_DETECTOR);
         endpointset
+    }
+
+    /// Initialize locators for participant proxy data based on transport type.
+    /// Registers locators for all available NIC IPs.
+    fn init_locators(
+        working_ips: &Vec<String>,
+        local_participant_proxy_data: &mut SPDPDiscoveredParticipantData,
+        domain_id: DomainId,
+        participant_id: ParticipantId,
+    ) {
+        let transport_type = get_transport_type();
+        let metatraffic_port =
+            PortManager::get_discovery_traffic_unicast_port(domain_id, participant_id) as u32;
+        let user_port =
+            PortManager::get_user_traffic_unicast_port(domain_id, participant_id) as u32;
+
+        for working_ip in working_ips {
+            let Ok(ip) = Ipv4Addr::from_str(working_ip) else {
+                continue;
+            };
+
+            match transport_type {
+                TransportType::UDP => {
+                    local_participant_proxy_data.add_metatraffic_unicast_locator(
+                        Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port),
+                    );
+                    local_participant_proxy_data.add_default_unicast_locator(
+                        Locator::from_ip_v4_addr_and_port(&ip, user_port),
+                    );
+                }
+                TransportType::TCP => {
+                    local_participant_proxy_data.add_metatraffic_unicast_locator(
+                        Locator::from_tcp_v4(ip, metatraffic_port),
+                    );
+                    local_participant_proxy_data
+                        .add_default_unicast_locator(Locator::from_tcp_v4(ip, user_port));
+                }
+                TransportType::Hybrid => {
+                    // Add both UDP and TCP locators
+                    local_participant_proxy_data.add_metatraffic_unicast_locator(
+                        Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port),
+                    );
+                    local_participant_proxy_data.add_default_unicast_locator(
+                        Locator::from_ip_v4_addr_and_port(&ip, user_port),
+                    );
+                    local_participant_proxy_data.add_metatraffic_unicast_locator(
+                        Locator::from_tcp_v4(ip, metatraffic_port),
+                    );
+                    local_participant_proxy_data
+                        .add_default_unicast_locator(Locator::from_tcp_v4(ip, user_port));
+                }
+                TransportType::SHM => {
+                    // metatraffic uses UDP, default uses SHM
+                    local_participant_proxy_data.add_metatraffic_unicast_locator(
+                        Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port),
+                    );
+                    local_participant_proxy_data
+                        .add_default_unicast_locator(Locator::from_shm(&ip, user_port));
+                }
+            }
+        }
     }
 
     pub(crate) fn builtin_endpoints(&self) -> Arc<BuiltinEndpoints> {
@@ -208,8 +285,8 @@ impl Participant {
         self.remote_subscriptions.clone()
     }
 
-    pub(crate) fn working_ip(&self) -> String {
-        self.working_ip.clone()
+    pub(crate) fn working_ips(&self) -> Vec<String> {
+        self.working_ips.clone()
     }
 
     pub(crate) fn participant_id(&self) -> ParticipantId {
@@ -465,6 +542,11 @@ impl Participant {
             let writer_info = if let Some(stateful_writer) =
                 writer.as_any().downcast_ref::<StatefulWriter>()
             {
+                // Remove heartbeat timer
+                if let Ok(handler) = TimerHandler::get_instance(self.guid().prefix()).lock() {
+                    handler.remove_timer(stateful_writer.periodic_heartbeat_timer_id());
+                }
+                stateful_writer.compare_and_set_heartbeat_timer_running(true, false)?;
                 Some((stateful_writer.guid(), stateful_writer.publication_builtin_topic_data()?))
             } else {
                 writer.as_any().downcast_ref::<StatelessWriter>().and_then(|stateless_writer| {
@@ -721,12 +803,20 @@ impl Participant {
                             len_before_unmatch
                         );
 
+                        let matching_count = reader_locator
+                            .iter()
+                            .filter(|locator| {
+                                locator.guid_prefix() == reader_guid.prefix()
+                                    && locator.remote_entity_id() == reader_guid.entity_id()
+                            })
+                            .count();
+
                         reader_locator.retain(|locator| {
                             locator.guid_prefix() != reader_guid.prefix()
                                 || locator.remote_entity_id() != reader_guid.entity_id()
                         });
 
-                        if len_before_unmatch == reader_locator.len() + 1 {
+                        if matching_count > 0 {
                             stateless_writer.update_publication_matched_status(
                                 -1,
                                 InstanceHandle::from_guid(&reader_guid),
@@ -738,8 +828,6 @@ impl Participant {
                                 "No matching reader found to unmatch for GUID: {:?}",
                                 reader_guid
                             );
-                        } else {
-                            log::error!("This is abnormal behavior, this writer had {:?} reader locator of same guid", len_before_unmatch - reader_locator.len());
                         }
                     }
                 }
@@ -1051,17 +1139,26 @@ impl Participant {
                             "Before unmatching with reader, this writer had {:?} matched readers",
                             reader_locator.len()
                         );
-                        for locator in reader_locator.iter() {
-                            if locator.guid_prefix() == terminated_participant_guid_prefix {
-                                stateless_writer.update_publication_matched_status(
-                                    -1,
-                                    InstanceHandle::from_guid(&Guid::new(
-                                        locator.guid_prefix(),
-                                        locator.remote_entity_id(),
-                                    )),
-                                );
-                            }
+
+                        // Collect unique entity IDs to avoid duplicate callbacks
+                        let unique_entity_ids: std::collections::HashSet<_> = reader_locator
+                            .iter()
+                            .filter(|locator| {
+                                locator.guid_prefix() == terminated_participant_guid_prefix
+                            })
+                            .map(|locator| locator.remote_entity_id())
+                            .collect();
+
+                        for entity_id in unique_entity_ids {
+                            stateless_writer.update_publication_matched_status(
+                                -1,
+                                InstanceHandle::from_guid(&Guid::new(
+                                    terminated_participant_guid_prefix,
+                                    entity_id,
+                                )),
+                            );
                         }
+
                         reader_locator.retain(|locator| {
                             locator.guid_prefix() != terminated_participant_guid_prefix
                         });

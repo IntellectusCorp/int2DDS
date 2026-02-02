@@ -944,6 +944,7 @@ impl Publisher {
         datawriter_qos.transport_priority = topic_qos.transport_priority;
         datawriter_qos.lifespan = topic_qos.lifespan;
         datawriter_qos.ownership = topic_qos.ownership;
+        datawriter_qos.data_representation = topic_qos.data_representation.clone();
         Ok(datawriter_qos)
     }
 

@@ -1132,21 +1132,23 @@ impl DynamicTypeSupport {
             }
             FieldTypeInfo::Bytes { max_length } => {
                 // Bytes are serialized as octet sequence
+                // max_length = 0 means unbounded sequence
                 let header = PlainCollectionHeader {
                     equiv_kind: XtypesEquivalenceKind::Minimal,
                     element_flags: CollectionElementFlag(0),
                 };
-                if *max_length <= 255 {
+                if *max_length > 0 && *max_length <= 255 {
                     TypeIdentifier::PlainSequenceSmall {
                         header,
                         bound: *max_length as u8,
-                        element_identifier: Box::new(TypeIdentifier::Uint8),
+                        element_identifier: Box::new(TypeIdentifier::Byte),
                     }
                 } else {
+                    // max_length == 0 (unbounded) or max_length > 255
                     TypeIdentifier::PlainSequenceLarge {
                         header,
                         bound: *max_length,
-                        element_identifier: Box::new(TypeIdentifier::Uint8),
+                        element_identifier: Box::new(TypeIdentifier::Byte),
                     }
                 }
             }
@@ -1156,7 +1158,7 @@ impl DynamicTypeSupport {
                     element_flags: CollectionElementFlag(0),
                 };
                 let element_id = Self::field_type_to_type_identifier(element_type);
-                if *max_length <= 255 {
+                if *max_length > 0 && *max_length <= 255 {
                     TypeIdentifier::PlainSequenceSmall {
                         header,
                         bound: *max_length as u8,
