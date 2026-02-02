@@ -780,7 +780,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             // qos lock is automatically released here (end of scope)
         };
 
-        let serialized_data = self.type_support.serialize_with_format(data as &dyn Any, &format)?;
+        let serialized_data = self.type_support.serialize(data as &dyn Any, Some(&format))?;
         let mut instance_handle = InstanceHandle::NIL;
         let mut is_new_instance = false;
 
