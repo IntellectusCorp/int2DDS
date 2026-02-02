@@ -15,6 +15,8 @@
 //! - **History**: Number of samples to keep
 //! - **Deadline**: Maximum time between received samples
 //! - **Liveliness**: Writer activity monitoring
+//! - **TypeConsistencyEnforcement**: Type consistency enforcement for DDS-XTypes
+//! - **ReaderReliabilityExtension**: int2DDS extension for reader reliability options (heartbeat response, preemptive ACKNACK)
 //! - And many more...
 //!
 //! Default QoS can be accessed via `SUBSCRIBER_QOS_DEFAULT` and `DATAREADER_QOS_DEFAULT`.
@@ -29,9 +31,10 @@ use crate::{
         DataRepresentationQosPolicy, DeadlineQosPolicy, DestinationOrderQosPolicy,
         DurabilityQosPolicy, EntityFactoryQosPolicy, GroupDataQosPolicy, HistoryQosPolicy,
         LatencyBudgetQosPolicy, LivelinessQosPolicy, OwnershipQosPolicy, PartitionQosPolicy,
-        PresentationQosPolicy, Qos, ReaderDataLifecycleQosPolicy, ReliabilityQosPolicy,
-        ReliabilityQosPolicyKind, ResourceLimitsQosPolicy, TimeBasedFilterQosPolicy,
-        TypeConsistencyEnforcementQosPolicy, UserDataQosPolicy,
+        PresentationQosPolicy, Qos, ReaderDataLifecycleQosPolicy,
+        ReaderReliabilityExtensionQosPolicy, ReliabilityQosPolicy, ReliabilityQosPolicyKind,
+        ResourceLimitsQosPolicy, TimeBasedFilterQosPolicy, TypeConsistencyEnforcementQosPolicy,
+        UserDataQosPolicy,
     },
 };
 use const_default::ConstDefault;
@@ -56,6 +59,7 @@ pub struct DataReaderQos {
     pub reader_data_lifecycle: ReaderDataLifecycleQosPolicy,
     pub data_representation: DataRepresentationQosPolicy,
     pub type_consistency_enforcement: TypeConsistencyEnforcementQosPolicy,
+    pub reader_reliability_extension: ReaderReliabilityExtensionQosPolicy,
 }
 
 impl Default for DataReaderQos {
@@ -78,6 +82,7 @@ impl Default for DataReaderQos {
             reader_data_lifecycle: ReaderDataLifecycleQosPolicy::default(),
             data_representation: DataRepresentationQosPolicy::default(),
             type_consistency_enforcement: TypeConsistencyEnforcementQosPolicy::default(),
+            reader_reliability_extension: ReaderReliabilityExtensionQosPolicy::default(),
         }
     }
 }
@@ -101,6 +106,7 @@ impl ConstDefault for DataReaderQos {
         reader_data_lifecycle: ReaderDataLifecycleQosPolicy::DEFAULT,
         data_representation: DataRepresentationQosPolicy::DEFAULT,
         type_consistency_enforcement: TypeConsistencyEnforcementQosPolicy::DEFAULT,
+        reader_reliability_extension: ReaderReliabilityExtensionQosPolicy::DEFAULT,
     };
 }
 
@@ -118,6 +124,14 @@ impl Qos for DataReaderQos {
             return Err(DdsError::Unsupported);
         }
 
+        // ReaderReliabilityExtensionQosPolicy unsupported fields check
+        let ext_default = ReaderReliabilityExtensionQosPolicy::DEFAULT;
+        if self.reader_reliability_extension.heartbeat_suppression_duration
+            != ext_default.heartbeat_suppression_duration
+        {
+            return Err(DdsError::Unsupported);
+        }
+
         Ok(())
     }
 
@@ -130,6 +144,7 @@ impl Qos for DataReaderQos {
             || self.resource_limits != new_qos.resource_limits
             || self.destination_order != new_qos.destination_order
             || self.data_representation != new_qos.data_representation
+            || self.reader_reliability_extension != new_qos.reader_reliability_extension
         {
             return Err(DdsError::ImmutablePolicy);
         }

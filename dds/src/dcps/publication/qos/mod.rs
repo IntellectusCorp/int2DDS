@@ -16,6 +16,7 @@
 //! - **Deadline**: Maximum allowed time between data writes
 //! - **Liveliness**: Mechanism for asserting the writer's activity
 //! - **Ownership**: Shared or exclusive ownership of instances
+//! - **WriterReliabilityExtension**: int2DDS extension for writer reliability options (heartbeat, NACK response)
 //! - And many more...
 //!
 //! Default QoS can be accessed via `PUBLISHER_QOS_DEFAULT` and `DATAWRITER_QOS_DEFAULT`.
@@ -33,7 +34,7 @@ use crate::{
         LivelinessQosPolicy, OwnershipQosPolicy, OwnershipStrengthQosPolicy, PartitionQosPolicy,
         PresentationQosPolicy, Qos, ReliabilityQosPolicy, ReliabilityQosPolicyKind,
         ResourceLimitsQosPolicy, TransportPriorityQosPolicy, UserDataQosPolicy,
-        WriterDataLifecycleQosPolicy,
+        WriterDataLifecycleQosPolicy, WriterReliabilityExtensionQosPolicy,
     },
 };
 use const_default::ConstDefault;
@@ -60,6 +61,7 @@ pub struct DataWriterQos {
     pub ownership_strength: OwnershipStrengthQosPolicy,
     pub writer_data_lifecycle: WriterDataLifecycleQosPolicy,
     pub data_representation: DataRepresentationQosPolicy,
+    pub writer_reliability_extension: WriterReliabilityExtensionQosPolicy,
 }
 
 impl Default for DataWriterQos {
@@ -84,6 +86,7 @@ impl Default for DataWriterQos {
             ownership_strength: OwnershipStrengthQosPolicy::default(),
             writer_data_lifecycle: WriterDataLifecycleQosPolicy::default(),
             data_representation: DataRepresentationQosPolicy::default(),
+            writer_reliability_extension: WriterReliabilityExtensionQosPolicy::default(),
         }
     }
 }
@@ -109,6 +112,7 @@ impl ConstDefault for DataWriterQos {
         ownership_strength: OwnershipStrengthQosPolicy::DEFAULT,
         writer_data_lifecycle: WriterDataLifecycleQosPolicy::DEFAULT,
         data_representation: DataRepresentationQosPolicy::DEFAULT,
+        writer_reliability_extension: WriterReliabilityExtensionQosPolicy::DEFAULT,
     };
 }
 
@@ -129,6 +133,15 @@ impl Qos for DataWriterQos {
             return Err(DdsError::Unsupported);
         }
 
+        // WriterReliabilityExtensionQosPolicy unsupported fields check
+        let ext_default = WriterReliabilityExtensionQosPolicy::DEFAULT;
+        if self.writer_reliability_extension.push_mode != ext_default.push_mode
+            || self.writer_reliability_extension.nack_suppression_duration
+                != ext_default.nack_suppression_duration
+        {
+            return Err(DdsError::Unsupported);
+        }
+
         Ok(())
     }
 
@@ -136,6 +149,7 @@ impl Qos for DataWriterQos {
         if self.durability != new_qos.durability
             || self.ownership != new_qos.ownership
             || self.reliability != new_qos.reliability
+            || self.writer_reliability_extension != new_qos.writer_reliability_extension
             || self.liveliness != new_qos.liveliness
             || self.history != new_qos.history
             || self.resource_limits != new_qos.resource_limits

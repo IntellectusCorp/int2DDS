@@ -22,8 +22,10 @@ pub(crate) struct ReaderProxy {
     expects_inline_qos: bool, // false
     is_active: bool,
     last_acknack_count: i32,
+    last_nackfrag_count: i32,
     content_filter_signatures: Option<Vec<FilterSignature>>, // Content filter signatures for this reader
     subscription_builtin_topic_data: SubscriptionBuiltinTopicData,
+    last_irrelevant_sn: SequenceNumber, // Sequence numbers <= this value are irrelevant for this reader and should be responded with GAP.
 }
 
 use std::hash::{Hash, Hasher};
@@ -54,6 +56,7 @@ impl ReaderProxy {
         expects_inline_qos: bool,
         is_active: bool,
         subscription_builtin_topic_data: SubscriptionBuiltinTopicData,
+        last_irrelevant_sn: SequenceNumber,
     ) -> Self {
         Self {
             remote_reader_guid,
@@ -66,8 +69,10 @@ impl ReaderProxy {
             expects_inline_qos,
             is_active,
             last_acknack_count: 0,
+            last_nackfrag_count: 0,
             content_filter_signatures: None,
             subscription_builtin_topic_data,
+            last_irrelevant_sn,
         }
     }
 
@@ -117,7 +122,10 @@ impl ReaderProxy {
         history_cache
             .get_changes()
             .iter()
-            .filter(|change| change.sequence_number() > self.highest_sent_change_sn)
+            .filter(|change| {
+                change.sequence_number() > self.highest_sent_change_sn
+                    && change.sequence_number() > self.last_irrelevant_sn
+            })
             .map(|change| change.sequence_number())
             .min()
             .unwrap_or(SequenceNumber::UNKNOWN)
@@ -190,6 +198,14 @@ impl ReaderProxy {
         self.last_acknack_count = last_acknack_count;
     }
 
+    pub(crate) fn last_nackfrag_count(&self) -> i32 {
+        self.last_nackfrag_count
+    }
+
+    pub(crate) fn set_last_nackfrag_count(&mut self, last_nackfrag_count: i32) {
+        self.last_nackfrag_count = last_nackfrag_count;
+    }
+
     pub(crate) fn content_filter_signatures(&self) -> Option<&Vec<FilterSignature>> {
         self.content_filter_signatures.as_ref()
     }
@@ -199,6 +215,10 @@ impl ReaderProxy {
         signatures: Option<Vec<FilterSignature>>,
     ) {
         self.content_filter_signatures = signatures;
+    }
+
+    pub(crate) fn last_irrelevant_sn(&self) -> SequenceNumber {
+        self.last_irrelevant_sn
     }
 
     /// Generate ContentFilterInfo for this ReaderProxy

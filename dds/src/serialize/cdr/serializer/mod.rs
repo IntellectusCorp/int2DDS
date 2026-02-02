@@ -5,7 +5,7 @@ pub mod string;
 
 use speedy::Endianness;
 
-use crate::serialize::align_buffer;
+use crate::serialize::{align_buffer, align_buffer_with_header_offset};
 
 /// Common trait for CDR serializers (CdrSerializer and Xcdr2Serializer)
 /// This trait abstracts the differences between CDR v1 and XCDR v2 serialization,
@@ -47,7 +47,14 @@ impl CdrSerializerCommon for CdrSerializer {
 
     #[inline]
     fn align(&mut self, alignment: usize) {
-        align_buffer(&mut self.buffer, alignment);
+        // CDR standard requires alignment to be calculated relative to data stream start
+        // (after encapsulation header), not from buffer start
+        if self.header_size > 0 {
+            align_buffer_with_header_offset(&mut self.buffer, alignment, self.header_size);
+        } else {
+            // No header written yet, use simple alignment
+            align_buffer(&mut self.buffer, alignment);
+        }
     }
 }
 

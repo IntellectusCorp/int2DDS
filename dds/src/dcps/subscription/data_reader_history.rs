@@ -37,7 +37,7 @@ use crate::{
     },
     rtps::{
         common::{guid::Guid, sequence::SequenceNumber, time::RtpsTime, types::ChangeKind},
-        entities::{history::cache_change::CacheChange, participant::Participant},
+        entities::history::cache_change::CacheChange,
     },
     subscription::{data_reader::DataReader, sample_info::InstanceStateKind},
 };
@@ -85,35 +85,45 @@ pub(crate) struct DataReaderHistoryCache<Foo> {
 impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> {
     type CacheChangeInputType = Arc<Mutex<CacheChange>>;
 
+    // Returns a reference to the list of CacheChanges.
     fn get_changes(&self) -> &Vec<Arc<CacheChange>> {
         &self.changes
     }
 
+    // Returns a mutable reference to the list of CacheChanges.
     fn get_changes_mut(&mut self) -> &mut Vec<Arc<CacheChange>> {
         &mut self.changes
     }
 
+    // Returns the instance map that tracks CacheChanges per instance.
     fn get_instance_map(
         &self,
     ) -> Arc<Mutex<HashMap<InstanceHandle, Vec<std::sync::Weak<CacheChange>>>>> {
         self.instance_map.clone()
     }
 
-    fn lifespan_timers(&self) -> Arc<Mutex<HashMap<Guid, String>>> {
+    // Returns the maximum number of samples allowed.
+    fn get_max_samples(&self) -> i32 {
+        self.max_samples
+    }
+
+    // Returns the maximum number of instances allowed.
+    fn get_max_instances(&self) -> i32 {
+        self.max_instances
+    }
+
+    // Returns the maximum number of samples per instance allowed.
+    fn get_max_samples_per_instance(&self) -> i32 {
+        self.max_samples_per_instance
+    }
+
+    // Returns the map of lifespan timers keyed by writer GUID.
+    fn get_lifespan_timers(&self) -> Arc<Mutex<HashMap<Guid, String>>> {
         self.lifespan_timers.clone()
     }
 
-    fn get_rtps_participant(&self) -> DdsResult<Arc<Participant>> {
-        let data_reader = self
-            .data_reader
-            .upgrade()
-            .ok_or_else(|| DdsError::Error("DataReader has been dropped".to_string()))?;
-        let participant = data_reader.get_subscriber()?.get_participant()?;
-        let rtps_participant = participant.get_rtps_participant()?;
-        Ok(Arc::new(rtps_participant))
-    }
-
-    fn lifespan_timer(
+    // Registers a periodic timer that removes expired samples based on Lifespan QoS.
+    fn register_lifespan_timer(
         &self,
         writer_guid: Guid,
         lifespan_duration: Duration,
@@ -134,9 +144,10 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
             if let Some(data_reader) = data_reader_weak.upgrade() {
                 if let Ok(cache_arc) = data_reader.get_datareader_cache() {
                     if let Ok(mut cache_guard) = cache_arc.lock() {
-                        if let Err(e) =
-                            cache_guard.lifespan_expired(writer_guid_clone, lifespan_duration_clone)
-                        {
+                        if let Err(e) = cache_guard.remove_lifespan_expired_changes(
+                            writer_guid_clone,
+                            lifespan_duration_clone,
+                        ) {
                             debug!(
                                 "[DataReaderHistoryCache] Failed to check lifespan samples: {:?}",
                                 e
@@ -147,23 +158,16 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
             }
         });
 
-        self.lifespan_timer_with_callback(writer_guid, lifespan_duration, timer_id_prefix, callback)
+        self.register_lifespan_timer_with_callback(
+            writer_guid,
+            lifespan_duration,
+            timer_id_prefix,
+            callback,
+        )
     }
 
-    fn get_max_samples(&self) -> i32 {
-        self.max_samples
-    }
-
-    fn get_max_instances(&self) -> i32 {
-        self.max_instances
-    }
-
-    fn get_max_samples_per_instance(&self) -> i32 {
-        self.max_samples_per_instance
-    }
-
-    /// Adds the given CacheChange to the history vector and map,
-    /// and returns any CacheChange that was removed during space allocation before adding.
+    // Adds the given CacheChange to the history vector and map,
+    // and returns any CacheChange that was removed during space allocation before adding.
     fn add_change_with_cleanup(
         &mut self,
         a_change: Arc<Mutex<CacheChange>>,
@@ -202,22 +206,22 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
         drop(cache_change_guard);
 
         // Check ownership
-        if immutable_change.instance_handle().is_nil() {
-            if !self.is_writer_owner_of_instance(
-                immutable_change.writer_guid(),
-                immutable_change.instance_handle(),
-            )? {
-                debug!(
-                    "Rejecting change, writer {:?} is not owner of instance (which is the whole non keyed topic)",
-                    immutable_change.writer_guid()
-                );
-                return Err(DdsError::IllegalOperation);
-            }
-        }
+        // if immutable_change.instance_handle().is_nil() {
+        //     if !self.is_writer_owner_of_instance(
+        //         immutable_change.writer_guid(),
+        //         immutable_change.instance_handle(),
+        //     )? {
+        //         debug!(
+        //             "Rejecting change, writer {:?} is not owner of instance (which is the whole non keyed topic)",
+        //             immutable_change.writer_guid()
+        //         );
+        //         return Err(DdsError::IllegalOperation);
+        //     }
+        // }
         // Check ownership & update instance state
-        else {
-            self.update_instance_state(&immutable_change)?;
-        }
+        // else {
+        self.update_instance_state(&immutable_change)?;
+        // }
 
         // Check lifespan qos
         let lifespan_duration =
@@ -231,13 +235,14 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
 
         // Create timer only if it does not exist
         if let Some(duration) = lifespan_duration {
-            let timers = self.lifespan_timers();
+            let timers = self.get_lifespan_timers();
             let timers_guard = timers.lock().map_err(|e| DdsError::Error(e.to_string()))?;
             let timer_exists = timers_guard.contains_key(&writer_guid);
             drop(timers_guard);
 
             if !timer_exists {
-                if let Err(e) = self.lifespan_timer(writer_guid, duration, "lifespan_timer_reader")
+                if let Err(e) =
+                    self.register_lifespan_timer(writer_guid, duration, "lifespan_timer_reader")
                 {
                     debug!("[DataReaderHistoryCache] Failed to ensure lifespan timer: {:?}", e);
                 }
@@ -258,7 +263,7 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
         Ok(removed_change)
     }
 
-    /// Removes the given CacheChange from the history vector and map.
+    // Removes the given CacheChange from the history vector and map.
     fn remove_change(&mut self, a_change: Arc<CacheChange>) -> DdsResult<()> {
         self.changes.retain(|c| {
             !(c.sequence_number() == a_change.sequence_number()
@@ -268,9 +273,9 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
         Ok(())
     }
 
-    /// Ensures capacity before adding a new CacheChange to the history.
-    /// Returns Ok(None) if space is already available, or Ok(Some(CacheChange)) if space was secured after removing an existing CacheChange.
-    /// Returns Err(DdsError::OutOfResources) if space cannot be secured, in which case the Sample is rejected.
+    // Ensures capacity before adding a new CacheChange to the history.
+    // Returns Ok(None) if space is already available, or Ok(Some(CacheChange)) if space was secured after removing an existing CacheChange.
+    // Returns Err(DdsError::OutOfResources) if space cannot be secured, in which case the Sample is rejected.
     fn ensure_capacity(
         &mut self,
         instance_handle: InstanceHandle,
@@ -333,7 +338,7 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
         Ok(None)
     }
 
-    /// Removes the oldest change from all instances.
+    // Removes the oldest change from all instances.
     fn try_remove_oldest_change_of_all(&mut self) -> DdsResult<Arc<CacheChange>> {
         let oldest = self.changes.iter().min_by_key(|c| c.source_timestamp()).map(Arc::clone);
 
@@ -348,7 +353,7 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
         }
     }
 
-    /// Removes the oldest change from the specified instance.
+    // Removes the oldest change from the specified instance.
     fn try_remove_oldest_change_of_instance(
         &mut self,
         instance_handle: InstanceHandle,
@@ -434,20 +439,21 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
         }
     }
 
-    /// Must be called immediately after DataReaderHistoryCache creation.
+    // Must be called immediately after DataReaderHistoryCache creation.
     pub(crate) fn set_datareader(&mut self, data_reader: Weak<DataReader<Foo>>) {
         self.data_reader = data_reader;
     }
 
-    /// Returns the owner Guid of the instance corresponding to the instance handle.
+    // Returns the owner Guid of the instance corresponding to the instance handle.
     fn get_owner_of_instance(&self, instance_handle: InstanceHandle) -> Option<Guid> {
         self.owner_candidates.get(&instance_handle)?.first().map(|owner_info| owner_info.owner_guid)
     }
 
+    // Updates the instance state based on the CacheChange kind.
     fn update_instance_state(&self, cache_change: &CacheChange) -> DdsResult<()> {
-        if cache_change.instance_handle().is_nil() {
-            return Ok(());
-        }
+        // if cache_change.instance_handle().is_nil() {
+        //     return Ok(());
+        // }
 
         let data_reader = self
             .data_reader
@@ -499,7 +505,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
         Ok(())
     }
 
-    /// Removes Ownership information, ownership changes as a result.
+    // Removes Ownership information, ownership changes as a result.
     pub(crate) fn remove_writer_from_owner_candidates(
         &self,
         remote_writer_guid: Guid,
@@ -528,7 +534,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
         Ok(())
     }
 
-    /// Revoke the current owner of the instance.
+    // Revoke the current owner of the instance.
     pub(crate) fn revoke_current_owner_from_instance(
         &self,
         instance_handle: InstanceHandle,
@@ -545,7 +551,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
         Ok(())
     }
 
-    /// Checks if the Writer that sent the CacheChange is the owner of the instance.
+    // Checks if the Writer that sent the CacheChange is the owner of the instance.
     pub(crate) fn is_writer_owner_of_instance(
         &self,
         writer_guid: Guid,
@@ -564,7 +570,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
         }
     }
 
-    /// Adds a new owner candidate to the owner candidate list for the specified instance.
+    // Adds a new owner candidate to the owner candidate list for the specified instance.
     pub(crate) fn add_to_owner_candidate_if_new(
         &self,
         instance_handle: InstanceHandle,
@@ -582,7 +588,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
         Ok(())
     }
 
-    /// Removes unused instances from the instance map.
+    // Removes unused instances from the instance map.
     fn remove_unused_instance(&mut self) -> DdsResult<bool> {
         let mut key_to_remove: Option<InstanceHandle> = None;
         let mut instance_map =
@@ -608,7 +614,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
         Ok(self.get_owner_of_instance(instance_handle).is_none())
     }
 
-    /// Adds CacheChange to the instance map.
+    // Adds CacheChange to the instance map.
     fn add_change_to_instance_map(&self, a_change: Arc<CacheChange>) -> DdsResult<()> {
         let mut instance_map =
             self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
@@ -619,7 +625,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
         Ok(())
     }
 
-    /// Removes CacheChange from the instance map.
+    // Removes CacheChange from the instance map.
     fn remove_change_from_instance_map(&self, a_change: &Arc<CacheChange>) -> DdsResult<()> {
         let mut instance_map =
             self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
@@ -635,7 +641,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
         Ok(())
     }
 
-    /// Removes all samples of the specified instance.
+    // Removes all samples of the specified instance.
     pub(crate) fn remove_all_changes_of_instance(
         &mut self,
         instance_handle: InstanceHandle,
@@ -652,7 +658,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
         Ok(())
     }
 
-    /// Retrieves CacheChange using the SequenceNumber and the Guid of the Writer that sent it.
+    // Retrieves CacheChange using the SequenceNumber and the Guid of the Writer that sent it.
     pub(crate) fn get_change(
         &self,
         seq_num: SequenceNumber,
@@ -664,7 +670,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
         change.cloned()
     }
 
-    /// Retrieves all change identifiers (writer GUID and sequence number) of the specified instance.
+    // Retrieves all change identifiers (writer GUID and sequence number) of the specified instance.
     pub(crate) fn get_change_id_set_of_instance(
         &self,
         instance_handle: InstanceHandle,
@@ -683,6 +689,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
         Ok(changes)
     }
 
+    // Sets the callback function for status updates.
     #[allow(clippy::type_complexity)]
     pub(crate) fn set_update_status(
         &self,
@@ -698,6 +705,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
         }
     }
 
+    // Invokes the status callback when a sample is rejected.
     fn on_sample_rejected(&self, info: SampleRejectedStatus) {
         match self.status_callback.lock() {
             Ok(callback) => {
@@ -747,7 +755,7 @@ mod tests {
         additional_payload_size: Vec<u8>,
     }
 
-    /// Helper function to create a test CacheChange
+    // Helper function to create a test CacheChange
     fn create_change_with_key(seq: i64, handle: InstanceHandle) -> Arc<Mutex<CacheChange>> {
         Arc::new(Mutex::new(CacheChange::new(
             ChangeKind::Alive,
@@ -762,7 +770,7 @@ mod tests {
         )))
     }
 
-    /// Helper function to create a test CacheChange
+    // Helper function to create a test CacheChange
     fn create_change_no_key(seq: i64, handle: InstanceHandle) -> Arc<Mutex<CacheChange>> {
         Arc::new(Mutex::new(CacheChange::new(
             ChangeKind::Alive,
@@ -1546,7 +1554,11 @@ mod tests {
                 writer_a.clone(), // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![1, 2, 3, 4]),
+                Arc::from(vec![
+                    0, 1, 0, 0, 0, 0, 0, 0, 52, 0, 0, 0, 72, 101, 108, 108, 111, 87, 111, 114, 108,
+                    100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                ]),
                 Some(RtpsTime::now()),
             );
 
@@ -1555,7 +1567,11 @@ mod tests {
                 writer_b.clone(), // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![1, 2, 3, 4]),
+                Arc::from(vec![
+                    0, 1, 0, 0, 0, 0, 0, 0, 52, 0, 0, 0, 72, 101, 108, 108, 111, 87, 111, 114, 108,
+                    100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                ]),
                 Some(RtpsTime::now()),
             );
 

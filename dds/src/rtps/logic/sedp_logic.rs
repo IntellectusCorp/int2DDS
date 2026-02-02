@@ -94,7 +94,7 @@ use crate::{
     },
     serialize::pl_cdr::InlineQosParameters,
     utils::timer::timer_handler::TimerHandler,
-    xtypes::TypeIdentifier,
+    xtypes::{check_structural_compatibility, TypeIdentifier, TypeObject},
 };
 
 enum MatchType {
@@ -149,6 +149,8 @@ fn validate_endpoint_compatibility<L>(
     if !check_type_compatibility(
         offered.type_identifier(),
         requested.type_identifier(),
+        offered.type_object(),
+        requested.type_object(),
         requested.type_consistency_enforcement(),
     ) {
         debug!(
@@ -202,6 +204,8 @@ fn is_partition_compatible(requested: &[String], offered: &[String]) -> bool {
 /// # Arguments
 /// * `writer_type_id` - TypeIdentifier from the writer (offered)
 /// * `reader_type_id` - TypeIdentifier from the reader (requested)
+/// * `writer_type_obj` - Optional TypeObject from the writer (for structural check)
+/// * `reader_type_obj` - Optional TypeObject from the reader (for structural check)
 /// * `type_consistency` - TypeConsistencyEnforcementQosPolicy from the reader
 ///
 /// # Returns
@@ -210,6 +214,8 @@ fn is_partition_compatible(requested: &[String], offered: &[String]) -> bool {
 fn check_type_compatibility(
     writer_type_id: Option<&TypeIdentifier>,
     reader_type_id: Option<&TypeIdentifier>,
+    writer_type_obj: Option<&TypeObject>,
+    reader_type_obj: Option<&TypeObject>,
     type_consistency: &TypeConsistencyEnforcementQosPolicy,
 ) -> bool {
     match (writer_type_id, reader_type_id) {
@@ -230,24 +236,36 @@ fn check_type_compatibility(
                 }
                 TypeConsistencyKind::AllowTypeCoercion => {
                     // Permissive mode: allow compatible type coercion
-                    // For now, we allow matching if:
-                    // 1. Types are identical
-                    // 2. Both are complex types (struct compatibility will be checked at runtime)
-                    // 3. Primitive types can be coerced (e.g., int8 -> int32)
-
+                    // 1. Types are identical - fast path
                     if writer_id == reader_id {
                         return true;
                     }
 
-                    // Allow complex type matching (actual compatibility checked at deserialization)
+                    // 2. Complex types: check hash first, then structural if needed
                     if writer_id.is_complex() && reader_id.is_complex() {
-                        // When AllowTypeCoercion is set, we trust that the types
-                        // are compatible enough for communication. The actual
-                        // structural compatibility will be enforced during deserialization.
+                        // Fast path: same hash means compatible
+                        if writer_id.equivalence_hash() == reader_id.equivalence_hash() {
+                            return true;
+                        }
+
+                        // Hash differs - use structural check if TypeObjects available
+                        // This enforces TCE flags (ignore_sequence_bounds, prevent_type_widening, etc.)
+                        if writer_type_obj.is_some() || reader_type_obj.is_some() {
+                            return check_structural_compatibility(
+                                writer_type_id,
+                                reader_type_id,
+                                writer_type_obj,
+                                reader_type_obj,
+                                type_consistency,
+                            )
+                            .is_ok();
+                        }
+
+                        // No TypeObjects available - trust type_name matching (backward compatible)
                         return true;
                     }
 
-                    // For primitive types, check if coercion is possible
+                    // 3. Primitive types: check if coercion is possible
                     is_primitive_coercion_allowed(writer_id, reader_id)
                 }
             }
@@ -455,6 +473,7 @@ impl SedpLogic {
                         debug!("match_endpoint failed: {:?}", e);
                     }
 
+                    // Match for local endpoints only if not skipped
                     if !skip_cross_match {
                         self.check_if_local_and_cross_match(
                             publication_data.endpoint_guid(),
@@ -476,6 +495,7 @@ impl SedpLogic {
                         debug!("match_endpoint failed: {:?}", e);
                     }
 
+                    // Match for local endpoints only if not skipped
                     if !skip_cross_match {
                         self.check_if_local_and_cross_match(
                             publication_data.endpoint_guid(),
@@ -508,6 +528,7 @@ impl SedpLogic {
                         debug!("match_endpoint failed: {:?}", e);
                     }
 
+                    // Match for local endpoints only if not skipped
                     if !skip_cross_match {
                         self.check_if_local_and_cross_match(
                             subscription_data.endpoint_guid(),
@@ -526,6 +547,7 @@ impl SedpLogic {
                         debug!("match_endpoint failed: {:?}", e);
                     }
 
+                    // Match for local endpoints only if not skipped
                     if !skip_cross_match {
                         self.check_if_local_and_cross_match(
                             subscription_data.endpoint_guid(),
@@ -618,10 +640,9 @@ impl SedpLogic {
 
         let participant = self.get_upgraded_participant()?;
 
+        // If STATUS_INFO indicates disposed or unregistered, remove remote reader and return early
         if let Some(inline_qos_params) = inline_qos_params {
             if let Some(status_info) = inline_qos_params.get_status_info() {
-                // According to RTPS spec, entity termination requires both
-                // DISPOSED and UNREGISTERED status flags to be set
                 if status_info.disposed() || status_info.unregistered() {
                     debug!("Received Data(r[UD])");
 
@@ -732,7 +753,8 @@ impl SedpLogic {
                 return Err(e);
             }
 
-            // Still compatible - just update builtin_topic_data
+            // Still compatible - update builtin_topic_data just in case QoS has changed
+            // it is idempotent behavior
             if writer
                 .matched_reader_lookup(endpoint_guid)
                 .ok_or(RtpsError::new(
@@ -743,7 +765,7 @@ impl SedpLogic {
                 .changeable_qos_equals(&subscription_builtin_topic_data)
             {
                 debug!(
-                    "QoS changed for remote reader {:?}, still compatible - updating builtin_topic_data",
+                    "Syncing subscription_builtin_topic_data for compatible remote reader {:?}",
                     endpoint_guid
                 );
                 writer
@@ -773,15 +795,24 @@ impl SedpLogic {
             "writer->reader",
         )?;
 
-        let mut highest_sent_change_sn = SequenceNumber::UNKNOWN;
-        let mut max_acked_sn = SequenceNumber::new(0, 0);
+        let is_volatile =
+            subscription_builtin_topic_data.durability().kind == DurabilityQosPolicyKind::Volatile;
+        let is_best_effort = subscription_builtin_topic_data.reliability().kind
+            == ReliabilityQosPolicyKind::BestEffort;
 
-        // For Volatile, assume CacheChanges before matching were already sent and ACKed, so don't resend
-        if subscription_builtin_topic_data.durability().kind == DurabilityQosPolicyKind::Volatile {
-            let last_sn = writer.last_change_sequence_number();
-            highest_sent_change_sn = last_sn;
-            max_acked_sn = last_sn;
-        }
+        // For reliable volatile readers, last irrelevant SN is last change SN to avoid resending old changes
+        let last_irrelevant_sn = if is_volatile {
+            writer.last_change_sequence_number()
+        } else {
+            SequenceNumber::new(0, 0)
+        };
+
+        // For best-effort volatile readers, simply use hightest sent change SN to avoid resending old changes
+        let highest_sent_change_sn = if is_volatile && is_best_effort {
+            writer.last_change_sequence_number()
+        } else {
+            SequenceNumber::UNKNOWN
+        };
 
         let reader_proxy = ReaderProxy::new(
             subscription_builtin_topic_data.endpoint_guid(),
@@ -789,10 +820,11 @@ impl SedpLogic {
             subscription_builtin_topic_data.unicast_locator_list(),
             subscription_builtin_topic_data.multicast_locator_list(),
             highest_sent_change_sn,
-            max_acked_sn,
+            SequenceNumber::UNKNOWN,
             false,
             true,
             subscription_builtin_topic_data.clone(),
+            last_irrelevant_sn,
         );
 
         writer.matched_reader_add(reader_proxy);
@@ -863,7 +895,8 @@ impl SedpLogic {
                 return Err(e);
             }
 
-            // Still compatible - just update builtin_topic_data
+            // Still compatible - update builtin_topic_data just in case QoS has changed
+            // it is idempotent behavior
             if writer
                 .matched_reader_lookup(endpoint_guid)
                 .ok_or(RtpsError::new(
@@ -874,7 +907,7 @@ impl SedpLogic {
                 .changeable_qos_equals(&subscription_builtin_topic_data)
             {
                 debug!(
-                    "QoS changed for remote reader {:?}, still compatible - updating builtin_topic_data",
+                    "Syncing subscription_builtin_topic_data for compatible remote reader {:?}",
                     endpoint_guid
                 );
                 writer
@@ -1116,7 +1149,7 @@ impl SedpLogic {
             {
                 // Still compatible - just update builtin_topic_data
                 debug!(
-                    "QoS changed for remote writer {:?}, still compatible - updating builtin_topic_data",
+                    "Syncing publication_builtin_topic_data for compatible remote writer {:?}",
                     endpoint_guid
                 );
                 reader
@@ -1230,7 +1263,7 @@ impl SedpLogic {
                 .changeable_qos_equals(&publication_builtin_topic_data)
             {
                 debug!(
-                    "QoS changed for remote writer {:?}, still compatible - updating builtin_topic_data",
+                    "Syncing publication_builtin_topic_data for compatible remote writer {:?}",
                     endpoint_guid
                 );
 
@@ -1367,7 +1400,8 @@ impl SedpLogic {
         Ok(())
     }
 
-    // SEDP HEARTBEAT message connection and unsent / reader proxy check unsent
+    /// Sends periodic SEDP HEARTBEAT messages to reader proxies
+    /// and checks for unsent changes in the writer cache.
     #[allow(unused_variables)]
     pub(crate) fn send_sedp_periodic_heartbeat_message(
         &self,
@@ -1432,8 +1466,8 @@ impl SedpLogic {
                         continue;
                     }
                     let buffer = MessageCreator::create_heartbeat_message(
-                        participant_guid,
-                        Guid::new(reader_proxy.remote_reader_guid().prefix(), EntityId::UNKNOWN),
+                        participant_guid.prefix(),
+                        reader_proxy.remote_reader_guid().prefix(),
                         heartbeat_count,
                         reader_entity_id,
                         writer_entity_id,
@@ -1827,7 +1861,7 @@ impl SedpLogic {
                 }
             }
             _ => {
-                warn!(
+                debug!(
                     "[{}] SEDP Logic: Unsupported locator kind: {}",
                     message_type,
                     locator.kind()
@@ -1859,9 +1893,11 @@ impl SedpLogic {
             if let Some(sending_handler) =
                 SendingHandler::get_instance_by_participant_guid(participant.guid())
             {
-                sending_handler.push_message_and_wake(MessageType::UserPreemptiveAcknack(
+                sending_handler.push_message_and_wake(MessageType::UserAcknack(
                     stateful_reader_id,
                     remote_writer_guid,
+                    false, // final_flag
+                    true,  // is_preemptive
                 ));
             }
         };
@@ -1907,7 +1943,7 @@ impl SedpLogic {
         if let Ok(timer_handler) = self.timer_handler.lock() {
             timer_handler.add_timer(
                 timer_id,
-                stateful_writer.preemptive_heartbeat_delay().to_std_duration(),
+                stateful_writer.initial_heartbeat_delay().to_std_duration(),
                 false,
                 callback,
             );
@@ -2210,6 +2246,17 @@ impl UnicastMessageProcessor for SedpLogic {
             .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::RtpsEntityNotFound, None))?;
 
+        // Check for duplicate Heartbeat
+        if heartbeat.count <= writer_proxy.last_heartbeat_count() {
+            debug!(
+                "[SEDP] [Heartbeat] Ignoring old Heartbeat: count={} <= last_count={}",
+                heartbeat.count,
+                writer_proxy.last_heartbeat_count()
+            );
+            return Ok(());
+        }
+        writer_proxy.set_last_heartbeat_count(heartbeat.count);
+
         let missing_changes = writer_proxy.process_heartbeat(heartbeat.first_sn, heartbeat.last_sn);
         let bitmap_base = writer_proxy.expected_sn();
 
@@ -2280,6 +2327,30 @@ impl UnicastMessageProcessor for SedpLogic {
                 "Failed to find matched SEDP reader for AckNack",
             ));
         }
+
+        // Check for duplicate AckNack
+        let stateful_writer =
+            local_writer.as_any().downcast_ref::<StatefulWriter>().ok_or_else(|| {
+                RtpsError::new(RtpsErrorCode::DowncastError, "Failed to downcast to StatefulWriter")
+            })?;
+        let reader_proxies = stateful_writer.reader_proxies();
+        let mut reader_proxies_guard =
+            reader_proxies.lock().map_err(|_| RtpsError::new(RtpsErrorCode::LockError, None))?;
+        let reader_proxy = reader_proxies_guard
+            .iter_mut()
+            .find(|rp| rp.remote_reader_guid() == remote_reader_guid)
+            .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
+
+        if acknack.count <= reader_proxy.last_acknack_count() {
+            debug!(
+                "[SEDP] [AckNack] Ignoring old AckNack: count={} <= last_count={}",
+                acknack.count,
+                reader_proxy.last_acknack_count()
+            );
+            return Ok(());
+        }
+        reader_proxy.set_last_acknack_count(acknack.count);
+        drop(reader_proxies_guard);
 
         let missing_sequence_numbers = acknack.reader_sn_state.extract_numbers();
 
@@ -2414,7 +2485,7 @@ mod tests {
         let mut socket = Socket::new(domain_id); //domain_id 0
         socket.create_socket();
         let participant =
-            Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ip()));
+            Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ips()));
 
         // Socket reset required??
         // socket.close();
@@ -2466,7 +2537,7 @@ mod tests {
         let mut socket = Socket::new(domain_id); //domain_id 0
         socket.create_socket();
         let participant =
-            Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ip()));
+            Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ips()));
 
         let _ = SendingHandler::get_instance(participant.clone(), Some(socket.sender()), None);
 

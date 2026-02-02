@@ -82,8 +82,6 @@ pub trait StringSerialize: CdrSerializerCommon + PrimitiveSerialize {
         self.buffer_mut().extend_from_slice(bytes);
         self.buffer_mut().push(0); // null terminator
 
-        self.align(4);
-
         Ok(())
     }
 }

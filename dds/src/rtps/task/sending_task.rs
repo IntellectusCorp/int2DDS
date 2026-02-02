@@ -176,7 +176,7 @@ impl SendingTask {
             }
 
             MessageType::UserHeartbeatToAll(entity_id) => {
-                user_logic.send_heartbeat_message_to_all_reader_proxies(entity_id)?;
+                user_logic.send_heartbeat_to_all_reader_proxies(entity_id)?;
                 Ok(())
             }
 
@@ -203,8 +203,12 @@ impl SendingTask {
                 Ok(())
             }
 
-            MessageType::UserPreemptiveAcknack(reader_id, remote_writer_guid) => {
-                user_logic.send_preemptive_acknack(reader_id, remote_writer_guid)?;
+            MessageType::UserAcknack(reader_id, remote_writer_guid, final_flag, is_preemptive) => {
+                if is_preemptive {
+                    user_logic.send_preemptive_acknack(reader_id, remote_writer_guid)?;
+                } else {
+                    user_logic.send_acknack(reader_id, remote_writer_guid, final_flag)?;
+                }
                 Ok(())
             }
 

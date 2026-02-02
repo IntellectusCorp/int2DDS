@@ -24,6 +24,16 @@
 //! | [`EntityFactoryQosPolicy`] | Manual entity enabling | DomainParticipantFactory, DomainParticipant, Publisher, Subscriber |
 //! | [`LifespanQosPolicy`] | Sample expiration duration | DataWriter, Topic |
 //! | [`DataRepresentationQosPolicy`] | Data encoding (XCDR1, XCDR2) | DataWriter, DataReader, Topic |
+//! | [`TypeConsistencyEnforcementQosPolicy`] | Type consistency enforcement for DDS-XTypes | DataReader |
+//! | [`WriterDataLifecycleQosPolicy`] | Auto-disposal of unregistered instances | DataWriter |
+//! | [`ReaderDataLifecycleQosPolicy`] | Auto-purge of disposed samples | DataReader |
+//!
+//! ## int2DDS Extension QoS Policies
+//!
+//! | Policy | Description | Applicable to |
+//! |--------|-------------|---------------|
+//! | [`WriterReliabilityExtensionQosPolicy`] | Writer reliability options | DataWriter |
+//! | [`ReaderReliabilityExtensionQosPolicy`] | Reader reliability options | DataReader |
 //!
 //! # Unsupported QoS Policies
 //!
@@ -36,8 +46,6 @@
 //! | [`LatencyBudgetQosPolicy`] | Acceptable delivery delay hint | DataWriter, DataReader, Topic |
 //! | [`TransportPriorityQosPolicy`] | Transport priority for delivery | DataWriter, Topic |
 //! | [`TimeBasedFilterQosPolicy`] | Minimum separation between samples | DataReader |
-//! | [`WriterDataLifecycleQosPolicy`] | Auto-disposal of unregistered instances | DataWriter |
-//! | [`ReaderDataLifecycleQosPolicy`] | Auto-purge of disposed samples | DataReader |
 //! | [`TopicDataQosPolicy`] | Arbitrary data attached to Topic | Topic |
 //! | [`GroupDataQosPolicy`] | Arbitrary data attached to Publisher/Subscriber | Publisher, Subscriber |
 //! | [`DurabilityServiceQosPolicy`] | Transient/Persistent service config | DataWriter, Topic |
@@ -101,6 +109,8 @@ const LIFESPAN_QOS_POLICY_NAME: &str = "Lifespan";
 const DURABILITYSERVICE_QOS_POLICY_NAME: &str = "DurabilityService";
 const DATAREPRESENTATION_QOS_POLICY_NAME: &str = "DataRepresentation";
 const TYPECONSISTENCYENFORCEMENT_QOS_POLICY_NAME: &str = "TypeConsistencyEnforcement";
+const WRITER_RELIABILITY_EXTENSION_QOS_POLICY_NAME: &str = "WriterReliabilityExtension";
+const READER_RELIABILITY_EXTENSION_QOS_POLICY_NAME: &str = "ReaderReliabilityExtension";
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash, Readable, Writable)]
 pub enum QosPolicyId {
@@ -235,6 +245,35 @@ impl HistoryQosPolicyKind {
 ///
 /// This policy controls the behavior of the middleware when the value of an instance
 /// changes before it is finally communicated to some of its existing DataReaders.
+///
+/// # Values
+/// - `KeepLast(depth)`: Keep only the last `depth` samples per instance (default: depth=1)
+/// - `KeepAll`: Keep all samples until resource limits are reached
+///
+/// # DataWriter Behavior
+///
+/// ## KeepLast(depth)
+/// - The `depth` parameter directly determines `max_samples_per_instance`.
+/// - `ResourceLimitsQosPolicy.max_samples_per_instance` is **ignored**.
+/// - When limit exceeded: oldest sample is automatically removed.
+/// - **Reliable mode**: Removes unacknowledged samples forcefully (triggers `unacked_sample_removed` callback).
+/// - **Best-Effort mode**: Simply removes the oldest sample.
+///
+/// ## KeepAll
+/// - Uses `ResourceLimitsQosPolicy.max_samples_per_instance` as the actual limit.
+/// - **Reliable mode**: Blocks waiting for ACKs up to `max_blocking_time`, returns `OutOfResources` on timeout.
+/// - **Best-Effort mode**: Removes oldest sample when limit exceeded.
+///
+/// # DataReader Behavior
+///
+/// ## KeepLast(depth)
+/// - The `depth` parameter directly determines `max_samples_per_instance`.
+/// - Automatic removal enabled: oldest sample is removed when limit exceeded.
+///
+/// ## KeepAll
+/// - Uses `ResourceLimitsQosPolicy.max_samples_per_instance` as the actual limit.
+/// - **Reliable mode**: New sample is **rejected** with `SampleRejectedStatus` (no auto-removal).
+/// - **Best-Effort mode**: Oldest sample is automatically removed.
 ///
 /// # Default
 /// `KeepLast(1)` - Only the most recent sample per instance is kept.
@@ -417,8 +456,9 @@ impl OwnershipQosPolicyKind {
 ///
 /// This QoS policy is RxO (requested/offered) and immutable after entity creation.
 ///
-/// # Default
-/// `Shared` - Multiple writers can update the same instance.
+/// # Values
+/// - `Shared`: Multiple DataWriters can update the same instance simultaneously (default)
+/// - `Exclusive`: Only the DataWriter with highest `OwnershipStrengthQosPolicy` value owns the instance
 ///
 /// # Example
 /// ```no_run
@@ -511,10 +551,26 @@ impl QosPolicy for OwnershipStrengthQosPolicy {
 
 /// Controls automatic disposal of instances when unregistered by DataWriter.
 ///
-/// **Note**: This QoS policy is currently unsupported.
+/// This policy determines what happens to an instance when `unregister_instance()` is called.
 ///
-/// # Default
-/// `autodispose_unregistered_instances: true`
+/// # Values
+/// - `autodispose_unregistered_instances: true` (default): Instance is automatically disposed when unregistered.
+///   DataReader sees `NOT_ALIVE_DISPOSED_INSTANCE_STATE`.
+/// - `autodispose_unregistered_instances: false`: Instance is NOT disposed when unregistered.
+///   DataReader sees `NOT_ALIVE_NO_WRITERS_INSTANCE_STATE`.
+///
+/// # Behavior
+///
+/// When `autodispose_unregistered_instances = true`:
+/// - Calling `unregister_instance()` implicitly calls `dispose()` on the instance
+/// - The instance transitions to DISPOSED state
+/// - Matched DataReaders receive a dispose notification
+///
+/// When `autodispose_unregistered_instances = false`:
+/// - Calling `unregister_instance()` only removes the writer's claim on the instance
+/// - The instance transitions to NO_WRITERS state (if no other writers exist)
+/// - The instance data remains available to DataReaders
+/// - Useful when multiple DataWriters share ownership of instances
 #[derive(DdsType, Copy, Eq, Deserialize, Serialize)]
 #[dds_type(crate_path = "crate", no_default)]
 pub struct WriterDataLifecycleQosPolicy {
@@ -541,17 +597,30 @@ impl QosPolicy for WriterDataLifecycleQosPolicy {
 
 /// Controls automatic purging of samples from disposed or no-writer instances.
 ///
-/// **Note**: This QoS policy is currently unsupported.
+/// This policy determines when the DataReader automatically removes samples from instances
+/// that are no longer actively maintained by any DataWriter.
+/// Useful for memory management when instances frequently come and go.
 ///
-/// # Default
-/// Both delays are `Duration::INFINITE` - samples are never automatically purged.
+/// # Fields
+///
+/// ## autopurge_nowriter_samples_delay
+/// Delay before purging samples when an instance has no more writers (`NOT_ALIVE_NO_WRITERS` state).
+/// - This occurs when all DataWriters unregister the instance (with `autodispose_unregistered_instances = false`)
+/// - After the delay, all samples for that instance are removed from the DataReader's cache
+/// - Default: `Duration::INFINITE` (never purge)
+///
+/// ## autopurge_disposed_samples_delay
+/// Delay before purging samples when an instance is disposed (`NOT_ALIVE_DISPOSED` state).
+/// - This occurs when a DataWriter calls `dispose()` or unregisters with `autodispose_unregistered_instances = true`
+/// - After the delay, all samples for that instance are removed from the DataReader's cache
+/// - Default: `Duration::INFINITE` (never purge)
 #[derive(DdsType, Copy, Eq, Deserialize, Serialize)]
 #[dds_type(crate_path = "crate", no_default)]
 pub struct ReaderDataLifecycleQosPolicy {
-    /// Delay before purging samples from instances with no writers.
+    /// Delay before purging samples from instances with no writers (`NOT_ALIVE_NO_WRITERS` state).
     #[serde(default)]
     pub autopurge_nowriter_samples_delay: Duration,
-    /// Delay before purging samples from disposed instances.
+    /// Delay before purging samples from disposed instances (`NOT_ALIVE_DISPOSED` state).
     #[serde(default)]
     pub autopurge_disposed_samples_delay: Duration,
 }
@@ -626,10 +695,10 @@ impl PresentationQosAccessScopeKind {
 ///
 /// **Note**: This QoS policy is currently unsupported.
 ///
-/// # Default
-/// - `access_scope`: Instance
-/// - `coherent_access`: false
-/// - `ordered_access`: false
+/// # Values (access_scope)
+/// - `Instance`: Changes are coherent/ordered at instance level (default)
+/// - `Topic`: Changes are coherent/ordered at topic level
+/// - `Group`: Changes are coherent/ordered at group (Publisher/Subscriber) level
 #[derive(DdsType, ConstDefault, Copy, Eq)]
 #[dds_type(crate_path = "crate")]
 pub struct PresentationQosPolicy {
@@ -1056,9 +1125,9 @@ impl ReliabilityQosPolicyKind {
 /// - DataWriter with BestEffort can only communicate with BestEffort DataReaders
 /// - DataWriter with Reliable can communicate with both Reliable and BestEffort DataReaders
 ///
-/// # Default
-/// For DataWriter: `BestEffort` with 100ms max_blocking_time
-/// For DataReader: `BestEffort`
+/// # Values
+/// - `BestEffort`: No delivery guarantee, lower latency, suitable for periodic data (DataReader default)
+/// - `Reliable`: Guaranteed delivery with acknowledgments and retransmission (DataWriter default)
 ///
 /// # Example
 /// ```no_run
@@ -1152,9 +1221,10 @@ impl LivelinessQosPolicyKind {
 /// DataReaders will be notified via `on_liveliness_changed` callback, and the
 /// DataWriter will receive `on_liveliness_lost` callback.
 ///
-/// # Default
-/// - `kind`: Automatic
-/// - `lease_duration`: Duration::INFINITE
+/// # Values
+/// - `Automatic`: Liveliness is asserted automatically by any DDS activity (default)
+/// - `ManualByParticipant`: Must call `assert_liveliness()` on DomainParticipant
+/// - `ManualByTopic`: Must call `assert_liveliness()` on DataWriter
 ///
 /// # Example
 /// ```no_run
@@ -1289,8 +1359,11 @@ impl DurabilityQosPolicyKind {
 ///
 /// This QoS policy is RxO (requested/offered) and immutable after entity creation.
 ///
-/// # Default
-/// `Volatile` - No historical data sent to late joiners.
+/// # Values
+/// - `Volatile`: Historical data is NOT sent to late-joining DataReaders (default)
+/// - `TransientLocal`: Historical data is sent to late-joining DataReaders
+/// - `Transient`: Historical data managed by external durability service (Unsupported)
+/// - `Persistent`: Historical data persisted to non-volatile storage (Unsupported)
 ///
 /// # Example
 /// ```no_run
@@ -1362,6 +1435,39 @@ impl QosPolicy for DurabilityQosPolicy {
 ///
 /// This QoS policy is immutable after entity creation.
 /// Use `LENGTH_UNLIMITED` (-1) for unlimited resources.
+///
+/// # DataWriter Enforcement Order
+///
+/// When writing a new sample, limits are checked in the following order:
+///
+/// 1. **max_instances**: If adding to a NEW instance exceeds limit → `OutOfResources` immediately (no removal attempt).
+///    User must unregister an existing instance before writing to a new one.
+///
+/// 2. **max_samples_per_instance**: If exceeded → removes oldest sample of that instance.
+///
+/// 3. **max_samples**: If exceeded → removes oldest sample from ANY instance.
+///
+/// # DataReader Enforcement Order
+///
+/// When receiving a new sample, limits are checked in the following order:
+///
+/// 1. **max_samples_per_instance**: Per-instance limit check first.
+///    - If auto-removal allowed (`KeepLast` or `KeepAll + BestEffort`): Remove oldest sample of that instance.
+///    - If auto-removal not allowed (`KeepAll + Reliable`): Reject with `SampleRejectedStatus`.
+///
+/// 2. **max_instances**: New instance limit check.
+///    - First tries to remove unused instances (empty instances with no writers).
+///    - If no unused instance can be removed: Reject with `SampleRejectedStatus` (regardless of History/Reliability).
+///
+/// 3. **max_samples**: Global sample count check.
+///    - If auto-removal allowed: Remove oldest sample from any instance.
+///    - If auto-removal not allowed: Reject with `SampleRejectedStatus`.
+///
+/// # Interaction with HistoryQosPolicy
+///
+/// - With `KeepLast(depth)`: The `depth` value overrides `max_samples_per_instance`.
+/// - With `KeepAll`: The `max_samples_per_instance` value is used as the actual limit.
+/// - `max_samples` is capped at `max_instances × max_samples_per_instance`.
 ///
 /// # Default
 /// All limits are `LENGTH_UNLIMITED`.
@@ -1555,8 +1661,9 @@ impl DestinationOrderQosPolicyKind {
 ///
 /// This QoS policy is RxO (requested/offered) and immutable after entity creation.
 ///
-/// # Default
-/// `ByReceptionTimestamp`
+/// # Values
+/// - `ByReceptionTimestamp`: Samples ordered by the time they were received (default)
+/// - `BySourceTimestamp`: Samples ordered by the source timestamp set by DataWriter
 ///
 /// # Example
 /// ```no_run
@@ -1647,8 +1754,10 @@ impl DataRepresentationId {
 /// This QoS policy defines which data representations are supported by the entity.
 /// DataWriters and DataReaders must have at least one common representation to match.
 ///
-/// # Default
-/// Empty vector (uses XCDR1 by default).
+/// # Values
+/// - `XcdrDataRepresentation`: XCDR1 encoding, legacy format (default)
+/// - `Xcdr2DataRepresentation`: XCDR2 encoding, recommended for new applications
+/// - `XmlDataRepresentation`: XML encoding (Unsupported)
 ///
 /// # Example
 /// ```no_run
@@ -1704,11 +1813,23 @@ impl DataRepresentationId {
 ///     .create_datareader::<HelloWorldType>(&topic, reader_qos, None, StatusMask::default())
 ///     .unwrap();
 /// ```
-#[derive(DdsType, Eq, ConstDefault)]
-#[dds_type(crate_path = "crate")]
+#[derive(DdsType, Eq)]
+#[dds_type(crate_path = "crate", no_default)]
 pub struct DataRepresentationQosPolicy {
     /// List of supported data representations.
     pub value: Vec<DataRepresentationId>,
+}
+
+impl Default for DataRepresentationQosPolicy {
+    fn default() -> Self {
+        Self { value: vec![DataRepresentationId::XcdrDataRepresentation] }
+    }
+}
+
+impl ConstDefault for DataRepresentationQosPolicy {
+    // Note: Rust const context doesn't support heap allocation,
+    // so DEFAULT is empty. Compatibility check treats empty as XCDR1.
+    const DEFAULT: Self = Self { value: Vec::new() };
 }
 
 impl QosPolicy for DataRepresentationQosPolicy {
@@ -1753,11 +1874,9 @@ impl TypeConsistencyKind {
 /// **Note**: This QoS policy is defined for compatibility with DDS-XTypes specification.
 /// The compatibility checking logic may be extended in future versions.
 ///
-/// # Default
-/// - `kind`: DisallowTypeCoercion
-/// - All ignore flags: false
-/// - `prevent_type_widening`: false
-/// - `force_type_validation`: false
+/// # Values
+/// - `DisallowTypeCoercion`: Strict type matching required (default)
+/// - `AllowTypeCoercion`: Allow compatible type coercion (e.g., adding optional fields)
 ///
 /// # Example
 /// ```no_run
@@ -1845,5 +1964,111 @@ impl ConstDefault for TypeConsistencyEnforcementQosPolicy {
 impl QosPolicy for TypeConsistencyEnforcementQosPolicy {
     fn name(&self) -> &str {
         TYPECONSISTENCYENFORCEMENT_QOS_POLICY_NAME
+    }
+}
+
+/// Extension to ReliabilityQosPolicy for int2DDS-specific writer reliability options.
+/// This policy provides additional control over reliable communication behavior.
+///
+/// # Default
+/// - `disable_piggyback_heartbeat: false` - Piggybacked heartbeats are enabled by default.
+/// - `heartbeat_period: 2 seconds` - Period for sending periodic heartbeat messages.
+/// - `initial_heartbeat_delay: 10ms` - Delay before sending initial heartbeat after reader discovery.
+/// - `push_mode: true` - (Unsupported) Writer pushes data to readers.
+/// - `nack_suppression_duration: 0` - (Unsupported) Duration to suppress NACKs.
+/// - `nack_response_delay: 10ms` - Delay before responding to a NACK.
+#[derive(DdsType, Copy, Eq)]
+#[dds_type(crate_path = "crate", no_default)]
+pub struct WriterReliabilityExtensionQosPolicy {
+    /// When `true`, heartbeat messages will not be piggybacked with DATA messages.
+    /// Instead, heartbeats will only be sent via the periodic heartbeat timer.
+    /// This can reduce network congestion but may increase latency for acknowledgments.
+    pub disable_piggyback_heartbeat: bool,
+
+    /// Period for sending periodic heartbeat messages.
+    /// Default: 2 seconds
+    pub heartbeat_period: Duration,
+
+    /// Delay before sending initial heartbeat after reader discovery.
+    /// Default: 10ms
+    pub initial_heartbeat_delay: Duration,
+
+    /// (Unsupported) When `true`, writer pushes data to readers.
+    /// When `false`, reader pulls data (not implemented).
+    /// Default: true
+    pub push_mode: bool,
+
+    /// (Unsupported) Duration to suppress NACKs from the same reader.
+    /// Default: 0 (no suppression)
+    pub nack_suppression_duration: Duration,
+
+    /// Delay before responding to a NACK.
+    /// Default: 10ms
+    pub nack_response_delay: Duration,
+}
+
+impl Default for WriterReliabilityExtensionQosPolicy {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl ConstDefault for WriterReliabilityExtensionQosPolicy {
+    const DEFAULT: Self = Self {
+        disable_piggyback_heartbeat: false,
+        heartbeat_period: Duration { sec: 2, nanosec: 0 },
+        initial_heartbeat_delay: Duration { sec: 0, nanosec: 10_000_000 },
+        push_mode: true,
+        nack_suppression_duration: Duration { sec: 0, nanosec: 0 },
+        nack_response_delay: Duration { sec: 0, nanosec: 10_000_000 },
+    };
+}
+
+impl QosPolicy for WriterReliabilityExtensionQosPolicy {
+    fn name(&self) -> &str {
+        WRITER_RELIABILITY_EXTENSION_QOS_POLICY_NAME
+    }
+}
+
+/// Extension to ReliabilityQosPolicy for int2DDS-specific reader reliability options.
+/// This policy provides additional control over reliable communication behavior.
+///
+/// # Default
+/// - `heartbeat_response_delay: 10ms` - Delay before responding to a heartbeat.
+/// - `heartbeat_suppression_duration: 0` - (Unsupported) Duration to suppress heartbeats.
+/// - `preemptive_acknack_delay: 80ms` - Delay before sending preemptive ACKNACK.
+#[derive(DdsType, Copy, Eq)]
+#[dds_type(crate_path = "crate", no_default)]
+pub struct ReaderReliabilityExtensionQosPolicy {
+    /// Delay before responding to a heartbeat.
+    /// Default: 10ms
+    pub heartbeat_response_delay: Duration,
+
+    /// (Unsupported) Duration to suppress heartbeats from the same writer.
+    /// Default: 0 (no suppression)
+    pub heartbeat_suppression_duration: Duration,
+
+    /// Delay before sending preemptive ACKNACK after writer discovery.
+    /// Default: 80ms
+    pub preemptive_acknack_delay: Duration,
+}
+
+impl Default for ReaderReliabilityExtensionQosPolicy {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl ConstDefault for ReaderReliabilityExtensionQosPolicy {
+    const DEFAULT: Self = Self {
+        heartbeat_response_delay: Duration { sec: 0, nanosec: 10_000_000 },
+        heartbeat_suppression_duration: Duration { sec: 0, nanosec: 0 },
+        preemptive_acknack_delay: Duration { sec: 0, nanosec: 80_000_000 },
+    };
+}
+
+impl QosPolicy for ReaderReliabilityExtensionQosPolicy {
+    fn name(&self) -> &str {
+        READER_RELIABILITY_EXTENSION_QOS_POLICY_NAME
     }
 }

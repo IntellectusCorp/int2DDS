@@ -1511,9 +1511,9 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         cache_change: Option<&CacheChange>,
     ) -> DdsResult<()> {
         // Non-keyed topic doesn't have instance state
-        if instance_handle.is_nil() {
-            return Err(DdsError::BadParameter);
-        }
+        // if instance_handle.is_nil() {
+        //     return Err(DdsError::BadParameter);
+        // }
 
         let mut instance_infos =
             self.instance_infos.lock().map_err(|e| DdsError::Error(e.to_string()))?;
@@ -1558,7 +1558,9 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
                 info.instance_state = InstanceStateKind::ALIVE_INSTANCE_STATE;
 
-                if info.key.is_empty() && cache_change.is_some() {
+                if info.key.is_empty() && instance_handle.is_nil() {
+                    info.key = Arc::from(instance_handle.value().as_slice());
+                } else if info.key.is_empty() && cache_change.is_some() {
                     log::debug!("Extracting and serializing key from data");
                     let data = self.type_support.deserialize(
                         cache_change
@@ -2398,34 +2400,12 @@ impl<Foo: DdsType> DataReader<Foo> {
         log::debug!("Processing instance registration for change");
         let instance_handle = change.instance_handle();
 
-        let has_key = self.type_support.is_compute_key_provided() && !instance_handle.is_nil();
-        log::debug!(
-            "Type has key: {}, handle is valid: {}",
-            self.type_support.is_compute_key_provided(),
-            !instance_handle.is_nil()
-        );
-
-        let info = if has_key {
-            // With key: store in instance_info
-            log::debug!("Processing keyed type instance");
-            let mut instance_infos =
+        let info = {
+            let instance_infos =
                 self.instance_infos.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-
-            let info = instance_infos.get_mut(&instance_handle).ok_or_else(|| {
+            instance_infos.get(&instance_handle).ok_or_else(|| {
                 DdsError::Error("InstanceInfo should have been updated already when added to data reader history cache".to_string())
-            })?;
-
-            info.clone() // Clone and use after releasing lock
-        } else {
-            // NoKey type
-            log::debug!("Processing keyless type instance with temporary InstanceInfo");
-            InstanceInfo {
-                key: Arc::new([]),
-                view_state: ViewStateKind::NEW_VIEW_STATE,
-                instance_state: InstanceStateKind::ALIVE_INSTANCE_STATE,
-                disposed_generation_count: 0,
-                no_writers_generation_count: 0,
-            }
+            })?.clone()
         };
 
         if let Ok(readconditions) = self.get_readconditions() {
@@ -2533,20 +2513,10 @@ impl<Foo: DdsType> DataReader<Foo> {
             }
         };
 
-        let info = if !instance_handle.is_nil() {
-            instance_infos
-                .get(&instance_handle)
-                .ok_or(DdsError::Error("Instance not found".to_string()))?
-                .clone()
-        } else {
-            InstanceInfo {
-                key: change.data_value_arc(),
-                instance_state: InstanceStateKind::ALIVE_INSTANCE_STATE,
-                view_state: ViewStateKind::NEW_VIEW_STATE,
-                disposed_generation_count: 0,
-                no_writers_generation_count: 0,
-            }
-        };
+        let info = instance_infos
+            .get(&instance_handle)
+            .ok_or(DdsError::Error("Instance not found".to_string()))?
+            .clone();
 
         let sample_info = SampleInfo {
             sample_state,
@@ -2699,9 +2669,7 @@ impl<Foo: DdsType> DataReader<Foo> {
 
         // Collect instance handles from changes
         for change in changes {
-            if !change.instance_handle().is_nil() {
-                handles.insert(change.instance_handle());
-            }
+            handles.insert(change.instance_handle());
         }
 
         Ok(handles.into_iter().collect())

@@ -1626,6 +1626,9 @@ Int2DdsRet int2dds_type_descriptor_add_struct(struct Int2DdsTypeDescriptor *desc
  * avoiding the overhead of individual FieldValue::UInt8 allocations.
  * Ideal for payloads 1KB-1MB where performance is critical.
  *
+ * # Parameters
+ * - `max_length`: DDS type bound (0 = unbounded sequence)
+ *
  * # Safety
  * - `desc` must be a valid type descriptor
  * - `name` must be a valid null-terminated C string
