@@ -1061,6 +1061,17 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         Ok(())
     }
 
+    fn register_instance_to_datawriter_cache(
+        &self,
+        instance_handle: InstanceHandle,
+    ) -> DdsResult<()> {
+        let mut datawriter_cache =
+            self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        datawriter_cache.register_instance(instance_handle)?;
+
+        Ok(())
+    }
+
     pub(crate) fn get_rtps_writer(&self) -> DdsResult<Arc<dyn RtpsWriter + Send + Sync>> {
         let rtps_writer = self
             .rtps_writer
@@ -1463,46 +1474,13 @@ where
         if timestamp.is_infinite() || timestamp.sec < 0 || !timestamp.is_valid() {
             return Err(DdsError::BadParameter);
         }
-        // TODO: Check and allocate resource space when Reliable
-        // let qos = self.get_qos().unwrap();
-        // let reliability = qos.reliability;
-        // if reliability.kind == ReliabilityQosPolicyKind::Reliable {
-        //     while !registry.has_free_space() {
-        //         if start_time.elapsed().unwrap() > reliability.max_blocking_time {
-        //             return Err(DdsError::Timeout);
-        //         }
-        //         if registry.resource_expected_to_become_available() {
-        //             return Err(DdsError::OutOfResources);
-        //         }
-        //         std::thread::sleep(Duration::from_millis(10));
-        //     }
-        //     // Example has_free_space implementation
-        //     fn has_space(&self) -> bool {
-        //         let max_samples = self.qos.resource_limits.max_samples;
-        //         let max_instances = self.qos.resource_limits.max_instances;
-        //         let history_depth = self.qos.history.depth;
-        //         let instance_count = self.get_instance_count();
-        //         // Condition 2: instance count > sample count → blocking
-        //         if max_samples < max_instances {
-        //             if instance_count >= max_samples {
-        //                 return false;
-        //             }
-        //         }
-        //         // Condition 1: overall sample count limit
-        //         let theoretical_max = instance_count * history_depth;
-        //         if max_samples < theoretical_max {
-        //             // there's potential to discard some samples
-        //             self.evict_oldest_sample_if_needed();
-        //             if self.total_sample_count() >= max_samples {
-        //                 return false; // still no space available → blocking candidate
-        //             }
-        //         }
-        //         true
-        //     }
-        // }
+
         let serialized_key = self.type_support.serialize_key(instance as &dyn Any)?;
         // 3. Deserialize key
         let handle = self.type_support.compute_key(instance as &dyn Any);
+
+        // Register instance in DataWriterCache and check if there is enough space
+        self.register_instance_to_datawriter_cache(handle)?;
 
         {
             let mut instances =
