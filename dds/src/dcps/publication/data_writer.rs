@@ -450,7 +450,10 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             *self_ref = Some(writer_arc);
         }
         let period = writer.get_qos()?.deadline.period;
-        if !period.is_infinite() && guid.entity_kind() == EntityKind::USER_DEFINED_WRITER_WITH_KEY {
+        if !period.is_infinite()
+            && (guid.entity_kind() == EntityKind::USER_DEFINED_WRITER_WITH_KEY
+                || guid.entity_kind() == EntityKind::USER_DEFINED_WRITER_NO_KEY)
+        {
             let status_callback = writer.create_status_callback()?;
             let mut deadline_monitor =
                 writer.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
@@ -547,6 +550,12 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
     ) -> DdsResult<()> {
         // let start_time = Time::now();
         self.is_enabled()?;
+
+        if !self.type_support.is_compute_key_provided() {
+            log::warn!("dispose on no-key topic has no effect");
+            return Ok(());
+        }
+
         if timestamp.is_infinite() || timestamp.sec < 0 || !timestamp.is_valid() {
             return Err(DdsError::BadParameter);
         }
@@ -820,13 +829,12 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         // Single deadline_monitor lock for both track and reschedule
         let monitor_guard =
             self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-        if !instance_handle.is_nil() {
-            if let Some(monitor) = monitor_guard.as_ref() {
-                if is_new_instance {
-                    monitor.track_instance(&instance_handle);
-                }
-                monitor.reschedule_instance(&instance_handle);
+
+        if let Some(monitor) = monitor_guard.as_ref() {
+            if is_new_instance {
+                monitor.track_instance(&instance_handle);
             }
+            monitor.reschedule_instance(&instance_handle);
         }
 
         self.add_change(
@@ -1446,6 +1454,12 @@ where
         */
         // let start_time = Time::now();
         self.is_enabled()?;
+
+        if !self.type_support.is_compute_key_provided() {
+            log::warn!("register_instance on no-key topic has no effect");
+            return Ok(InstanceHandle::NIL);
+        }
+
         if timestamp.is_infinite() || timestamp.sec < 0 || !timestamp.is_valid() {
             return Err(DdsError::BadParameter);
         }
@@ -1515,10 +1529,9 @@ where
 
             let monitor_guard =
                 self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-            if !handle.is_nil() {
-                if let Some(monitor) = monitor_guard.as_ref() {
-                    monitor.track_instance(&handle);
-                }
+
+            if let Some(monitor) = monitor_guard.as_ref() {
+                monitor.track_instance(&handle);
             }
 
             log::debug!("Registering Instance - handle: {:?}", handle);
@@ -1584,6 +1597,10 @@ where
         */
         // let start_time = Time::now();
         self.is_enabled()?;
+        if !self.type_support.is_compute_key_provided() {
+            log::warn!("unregister on no-key topic has no effect");
+            return Ok(());
+        }
         if timestamp.is_infinite() || timestamp.sec < 0 || !timestamp.is_valid() {
             return Err(DdsError::BadParameter);
         }

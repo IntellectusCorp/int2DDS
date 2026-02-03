@@ -453,19 +453,9 @@ impl UserLogic {
                 let mut current_sn = reader_locator.highest_sent_change_sn();
 
                 // Collect cache changes not yet sent to the Remote Reader (Arc clone occurs)
-                while let Some(next_sn) = cache_guard
-                    .get_changes()
-                    .iter()
-                    .filter(|c| c.sequence_number() > current_sn)
-                    .map(|c| c.sequence_number())
-                    .min()
-                {
-                    if let Some(change) = cache_guard.get_change(next_sn) {
-                        changes_to_send.push(change);
-                        current_sn = next_sn;
-                    } else {
-                        break;
-                    }
+                while let Some(change) = cache_guard.next_change_after(current_sn) {
+                    current_sn = change.sequence_number();
+                    changes_to_send.push(change);
                 }
 
                 if !changes_to_send.is_empty() {

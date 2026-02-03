@@ -1472,11 +1472,8 @@ impl UnicastMessageProcessor for WlpLogic {
             };
 
             let mut missing_changes = Vec::new();
-            let all_changes = writer_cache_guard.get_changes();
             for seq_num in missing_sequence_numbers {
-                if let Some(change) =
-                    all_changes.iter().find(|c| c.sequence_number() == seq_num).cloned()
-                {
+                if let Some(change) = writer_cache_guard.get_change(seq_num) {
                     missing_changes.push(change);
                 }
             }
