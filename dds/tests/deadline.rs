@@ -36,7 +36,22 @@ impl DataReaderListener for ReaderDeadlineListener {
         _status: &RequestedDeadlineMissedStatus,
     ) {
         self.miss_count.fetch_add(1, Ordering::SeqCst);
-        // println!("Reader deadline missed detected!");
+    }
+}
+
+struct ReaderDeadlineListenerNoKey {
+    miss_count: Arc<AtomicUsize>,
+}
+
+impl DataReaderListener for ReaderDeadlineListenerNoKey {
+    type Foo = NoKeyDataType;
+
+    fn on_requested_deadline_missed(
+        &self,
+        _reader: &DataReader<Self::Foo>,
+        _status: &RequestedDeadlineMissedStatus,
+    ) {
+        self.miss_count.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -57,8 +72,8 @@ fn test_reader_deadline_qos_basic() {
 
     let topic = participant
         .create_topic::<KeyedDataType>(
-            "test_topic",
-            "KeyedDataType",
+            KeyedDataType::get_topic_name(),
+            KeyedDataType::get_type_name(),
             TopicQos::default(),
             None,
             StatusMask::default(),
@@ -136,8 +151,8 @@ fn test_reader_deadline_qos_on_dispose() {
 
     let topic = participant
         .create_topic::<KeyedDataType>(
-            "test_topic",
-            "KeyedDataType",
+            KeyedDataType::get_topic_name(),
+            KeyedDataType::get_type_name(),
             TopicQos::default(),
             None,
             StatusMask::default(),
@@ -221,8 +236,8 @@ fn test_reader_deadline_qos_multiple_instances() {
 
     let topic = participant
         .create_topic::<KeyedDataType>(
-            "test_topic",
-            "KeyedDataType",
+            KeyedDataType::get_topic_name(),
+            KeyedDataType::get_type_name(),
             TopicQos::default(),
             None,
             StatusMask::default(),
@@ -284,4 +299,83 @@ fn test_reader_deadline_qos_multiple_instances() {
         "At least 3 deadline misses expected (one per instance), got {}",
         miss_count
     );
+}
+
+#[test]
+fn test_reader_deadline_qos_basic_no_key() {
+    let domain_id = next_domain_id();
+    let factory = DomainParticipantFactory::get_instance();
+    let participant = factory
+        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+
+    let mut writer_qos = DataWriterQos::default();
+    writer_qos.deadline.period = Duration::from_millis(200);
+    let mut reader_qos = DataReaderQos::default();
+    reader_qos.deadline.period = Duration::from_millis(200);
+
+    let data_writer = create_nokey_datawriter(&participant, PublisherQos::default(), writer_qos);
+
+    let topic = participant
+        .create_topic::<NoKeyDataType>(
+            NoKeyDataType::get_topic_name(),
+            NoKeyDataType::get_type_name(),
+            TopicQos::default(),
+            None,
+            StatusMask::default(),
+        )
+        .unwrap();
+
+    // Subscriber & Reader
+    let subscriber = participant
+        .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+        .unwrap();
+
+    let deadline_miss_count = Arc::new(AtomicUsize::new(0));
+    let listener =
+        Arc::new(ReaderDeadlineListenerNoKey { miss_count: Arc::clone(&deadline_miss_count) });
+
+    let data_reader = subscriber
+        .create_datareader::<NoKeyDataType>(
+            &topic,
+            reader_qos,
+            Some(listener),
+            StatusMask::REQUESTED_DEADLINE_MISSED,
+        )
+        .unwrap();
+
+    wait_for_reader_status(
+        &data_reader,
+        StatusMask::SUBSCRIPTION_MATCHED,
+        Duration::from_seconds(1),
+    )
+    .unwrap();
+    wait_for_writer_status(
+        &data_writer,
+        StatusMask::PUBLICATION_MATCHED,
+        Duration::from_seconds(1),
+    )
+    .unwrap();
+
+    // Send first data
+    data_writer.write(&NoKeyDataType::default(), InstanceHandle::NIL).unwrap();
+    thread::sleep(std::time::Duration::from_millis(50));
+
+    // Send again before deadline
+    data_writer.write(&NoKeyDataType::default(), InstanceHandle::NIL).unwrap();
+    thread::sleep(std::time::Duration::from_millis(50));
+
+    // Should not have deadline miss yet
+    assert_eq!(
+        deadline_miss_count.load(Ordering::SeqCst),
+        0,
+        "No deadline miss should occur when receiving data within deadline"
+    );
+
+    // Wait to exceed deadline
+    thread::sleep(std::time::Duration::from_millis(500));
+
+    // Deadline miss occurs
+    let miss_count = deadline_miss_count.load(Ordering::SeqCst);
+    assert!(miss_count >= 1, "At least one deadline miss should be detected, got {}", miss_count);
 }

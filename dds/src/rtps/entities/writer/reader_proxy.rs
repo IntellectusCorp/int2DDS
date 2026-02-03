@@ -119,15 +119,10 @@ impl ReaderProxy {
     }
 
     pub(crate) fn next_unsent_change(&self, history_cache: &WriterHistoryCache) -> SequenceNumber {
+        let start_sn = std::cmp::max(self.highest_sent_change_sn, self.last_irrelevant_sn);
         history_cache
-            .get_changes()
-            .iter()
-            .filter(|change| {
-                change.sequence_number() > self.highest_sent_change_sn
-                    && change.sequence_number() > self.last_irrelevant_sn
-            })
+            .next_change_after(start_sn)
             .map(|change| change.sequence_number())
-            .min()
             .unwrap_or(SequenceNumber::UNKNOWN)
     }
 
@@ -155,13 +150,7 @@ impl ReaderProxy {
     }
 
     pub(crate) fn unacked_changes(&self, history_cache: &WriterHistoryCache) -> bool {
-        let highest_available_seq_num = history_cache
-            .get_changes()
-            .iter()
-            .map(|change| change.sequence_number())
-            .max()
-            .unwrap_or(SequenceNumber::new(0, 0));
-        highest_available_seq_num > self.max_acked_sn
+        history_cache.get_seq_num_max() > self.max_acked_sn
     }
 
     pub(crate) fn unicast_locator_list(&self) -> Vec<Locator> {

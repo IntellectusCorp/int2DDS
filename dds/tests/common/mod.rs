@@ -19,10 +19,34 @@ use int2dds::dcps::{
 
 #[derive(DdsType)]
 #[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+pub struct NoKeyDataType {
+    pub value: i16,
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
 pub struct KeyedDataType {
     #[dds(key)]
     pub key: i16,
     pub value: i16,
+}
+
+impl NoKeyDataType {
+    pub fn new(value: i16) -> Self {
+        Self { value }
+    }
+
+    pub fn default() -> Self {
+        Self { value: 0 }
+    }
+
+    pub fn get_topic_name() -> &'static str {
+        "test_topic_no_key"
+    }
+
+    pub fn get_type_name() -> &'static str {
+        "NoKeyDataType"
+    }
 }
 
 impl KeyedDataType {
@@ -32,6 +56,14 @@ impl KeyedDataType {
 
     pub fn default() -> Self {
         Self { key: 0, value: 0 }
+    }
+
+    pub fn get_topic_name() -> &'static str {
+        "test_topic"
+    }
+
+    pub fn get_type_name() -> &'static str {
+        "KeyedDataType"
     }
 }
 
@@ -48,8 +80,8 @@ pub fn create_datareader(
 ) -> DataReader<KeyedDataType> {
     let topic = domain_participant
         .create_topic::<KeyedDataType>(
-            "test_topic",
-            "KeyedDataType",
+            KeyedDataType::get_topic_name(),
+            KeyedDataType::get_type_name(),
             TopicQos::default(),
             None,
             StatusMask::default(),
@@ -73,8 +105,8 @@ pub fn create_datawriter(
 ) -> DataWriter<KeyedDataType> {
     let topic = domain_participant
         .create_topic::<KeyedDataType>(
-            "test_topic",
-            "KeyedDataType",
+            KeyedDataType::get_topic_name(),
+            KeyedDataType::get_type_name(),
             TopicQos::default(),
             None,
             StatusMask::default(),
@@ -86,6 +118,56 @@ pub fn create_datawriter(
 
     let writer = publisher
         .create_datawriter::<KeyedDataType>(&topic, datawriter_qos, None, StatusMask::default())
+        .unwrap();
+
+    writer
+}
+
+pub fn create_nokey_datareader(
+    domain_participant: &DomainParticipant,
+    subscriber_qos: SubscriberQos,
+    data_reader_qos: DataReaderQos,
+) -> DataReader<NoKeyDataType> {
+    let topic = domain_participant
+        .create_topic::<NoKeyDataType>(
+            NoKeyDataType::get_topic_name(),
+            NoKeyDataType::get_type_name(),
+            TopicQos::default(),
+            None,
+            StatusMask::default(),
+        )
+        .unwrap();
+
+    let subscriber =
+        domain_participant.create_subscriber(subscriber_qos, None, StatusMask::default()).unwrap();
+
+    let reader = subscriber
+        .create_datareader::<NoKeyDataType>(&topic, data_reader_qos, None, StatusMask::default())
+        .unwrap();
+
+    reader
+}
+
+pub fn create_nokey_datawriter(
+    domain_participant: &DomainParticipant,
+    publisher_qos: PublisherQos,
+    datawriter_qos: DataWriterQos,
+) -> DataWriter<NoKeyDataType> {
+    let topic = domain_participant
+        .create_topic::<NoKeyDataType>(
+            NoKeyDataType::get_topic_name(),
+            NoKeyDataType::get_type_name(),
+            TopicQos::default(),
+            None,
+            StatusMask::default(),
+        )
+        .unwrap();
+
+    let publisher =
+        domain_participant.create_publisher(publisher_qos, None, StatusMask::default()).unwrap();
+
+    let writer = publisher
+        .create_datawriter::<NoKeyDataType>(&topic, datawriter_qos, None, StatusMask::default())
         .unwrap();
 
     writer
