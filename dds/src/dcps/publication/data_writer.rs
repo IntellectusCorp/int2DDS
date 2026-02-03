@@ -730,44 +730,6 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             return Err(DdsError::BadParameter);
         }
 
-        // TODO: Check and allocate resource space when Reliable
-        // let qos = self.get_qos().unwrap();
-        // let reliability = qos.reliability;
-        // if reliability.kind == ReliabilityQosPolicyKind::Reliable {
-        //     while !registry.has_free_space() {
-        //         if start_time.elapsed().unwrap() > reliability.max_blocking_time {
-        //             return Err(DdsError::Timeout);
-        //         }
-        //         if registry.resource_expected_to_become_available() {
-        //             return Err(DdsError::OutOfResources);
-        //         }
-        //         std::thread::sleep(Duration::from_millis(10));
-        //     }
-        //     // Example has_free_space implementation
-        //     fn has_space(&self) -> bool {
-        //         let max_samples = self.qos.resource_limits.max_samples;
-        //         let max_instances = self.qos.resource_limits.max_instances;
-        //         let history_depth = self.qos.history.depth;
-        //         let instance_count = self.get_instance_count();
-        //         // Condition 2: instance count > sample count → blocking
-        //         if max_samples < max_instances {
-        //             if instance_count >= max_samples {
-        //                 return false;
-        //             }
-        //         }
-        //         // Condition 1: overall sample count limit
-        //         let theoretical_max = instance_count * history_depth;
-        //         if max_samples < theoretical_max {
-        //             // there's potential to discard some samples
-        //             self.evict_oldest_sample_if_needed();
-        //             if self.total_sample_count() >= max_samples {
-        //                 return false; // still no space available → blocking candidate
-        //             }
-        //         }
-        //         true
-        //     }
-        // }
-
         // DDS-XTypes spec 7.6.3.4.1:
         // Select the correct serialization format by combining DataRepresentation QoS and type's extensibility
         let format = {
@@ -1513,15 +1475,6 @@ where
             }
 
             log::debug!("Registering Instance - handle: {:?}", handle);
-
-            // self.add_change(
-            //     ChangeKind::Alive,
-            //     // serialized_key,
-            //     self.type_support.serialize(instance as &dyn Any)?,
-            //     // ParameterList::default(),
-            //     handle,
-            //     Some(timestamp.into()),
-            // )?;
         }
         Ok(handle)
     }
