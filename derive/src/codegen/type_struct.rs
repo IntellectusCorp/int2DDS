@@ -11,6 +11,7 @@ use crate::codegen::{
     MultiKeyFieldInfo,
 };
 use crate::codegen::{quote_extensibility_tokens, DdsTypeConfig, ExtensibilityKind};
+use crate::codegen::utils::{get_serialization_method, SerializationMethod};
 
 /// Generate DdsType implementation for struct types
 pub fn derive_struct_impl(
@@ -652,6 +653,48 @@ fn generate_cdr_deserialize_impl(
     }
 }
 
+/// Map primitive Vec SerializationMethod to the specialized serializer method name.
+/// Returns None for non-primitive types (they use the blanket XcdrSerialize impl with DHEADER).
+fn primitive_vec_serialize_method(method: SerializationMethod) -> Option<&'static str> {
+    match method {
+        SerializationMethod::VecU8 => Some("serialize_byte_sequence"),
+        SerializationMethod::VecU16 => Some("serialize_u16_sequence"),
+        SerializationMethod::VecU32 => Some("serialize_u32_sequence"),
+        SerializationMethod::VecU64 => Some("serialize_u64_sequence"),
+        SerializationMethod::VecI8 => Some("serialize_i8_sequence"),
+        SerializationMethod::VecI16 => Some("serialize_i16_sequence"),
+        SerializationMethod::VecI32 => Some("serialize_i32_sequence"),
+        SerializationMethod::VecI64 => Some("serialize_i64_sequence"),
+        SerializationMethod::VecF32 => Some("serialize_f32_sequence"),
+        SerializationMethod::VecF64 => Some("serialize_f64_sequence"),
+        SerializationMethod::VecBool => Some("serialize_bool_sequence"),
+        SerializationMethod::VecChar => Some("serialize_char_sequence"),
+        SerializationMethod::VecString => Some("serialize_string_sequence"),
+        _ => None,
+    }
+}
+
+/// Map primitive Vec SerializationMethod to the specialized deserializer method name.
+/// Returns None for non-primitive types (they use the blanket XcdrDeserialize impl with DHEADER).
+fn primitive_vec_deserialize_method(method: SerializationMethod) -> Option<&'static str> {
+    match method {
+        SerializationMethod::VecU8 => Some("deserialize_byte_sequence"),
+        SerializationMethod::VecU16 => Some("deserialize_u16_sequence"),
+        SerializationMethod::VecU32 => Some("deserialize_u32_sequence"),
+        SerializationMethod::VecU64 => Some("deserialize_u64_sequence"),
+        SerializationMethod::VecI8 => Some("deserialize_i8_sequence"),
+        SerializationMethod::VecI16 => Some("deserialize_i16_sequence"),
+        SerializationMethod::VecI32 => Some("deserialize_i32_sequence"),
+        SerializationMethod::VecI64 => Some("deserialize_i64_sequence"),
+        SerializationMethod::VecF32 => Some("deserialize_f32_sequence"),
+        SerializationMethod::VecF64 => Some("deserialize_f64_sequence"),
+        SerializationMethod::VecBool => Some("deserialize_bool_sequence"),
+        SerializationMethod::VecChar => Some("deserialize_char_sequence"),
+        SerializationMethod::VecString => Some("deserialize_string_sequence"),
+        _ => None,
+    }
+}
+
 /// Generate XcdrSerialize trait implementation
 fn generate_xcdr_serialize_impl(
     name: &syn::Ident,
@@ -688,6 +731,8 @@ fn generate_xcdr_serialize_impl(
     }
 
     // Generate field serialization calls
+    // For primitive Vec types, use specialized serializer methods (no DHEADER).
+    // For non-primitive types (String, struct, etc.), use XcdrSerialize trait (blanket impl adds DHEADER).
     let field_calls: Vec<_> = fields
         .iter()
         .enumerate()
@@ -696,6 +741,19 @@ fn generate_xcdr_serialize_impl(
             let field_config = parse_field_attributes(field);
             let member_id = field_config.id.unwrap_or(index as u32);
             let is_optional = field_config.optional;
+
+            // Check if this field is a primitive Vec type that needs specialized serialization
+            let method = get_serialization_method(&field.ty);
+            let field_serialize = if let Some(ser_method) = primitive_vec_serialize_method(method) {
+                let method_ident = syn::Ident::new(ser_method, field_name.span());
+                quote! {
+                    serializer.#method_ident(&self.#field_name)?;
+                }
+            } else {
+                quote! {
+                    #crate_path::serialize::xcdr::XcdrSerialize::serialize_xcdr(&self.#field_name, serializer)?;
+                }
+            };
 
             if is_mutable {
                 // For Mutable types: write EMHEADER before each field
@@ -726,7 +784,7 @@ fn generate_xcdr_serialize_impl(
                             let field_start = serializer.position();
 
                             // Serialize the field
-                            #crate_path::serialize::xcdr::XcdrSerialize::serialize_xcdr(&self.#field_name, serializer)?;
+                            #field_serialize
 
                             // Calculate field length and backpatch EMHEADER
                             // member_id must be masked to 12 bits (0x0FFF) per DDS-XTYPES spec
@@ -748,9 +806,7 @@ fn generate_xcdr_serialize_impl(
                         }
                     }
                 } else {
-                    quote! {
-                        #crate_path::serialize::xcdr::XcdrSerialize::serialize_xcdr(&self.#field_name, serializer)?;
-                    }
+                    field_serialize
                 }
             }
         })
@@ -853,8 +909,17 @@ fn generate_final_deserialize_impl(
                     };
                 }
             } else {
-                quote! {
-                    let #field_name = <#field_type as #crate_path::serialize::xcdr::XcdrDeserialize>::deserialize_xcdr(deserializer)?;
+                // For primitive Vec types, use specialized deserializer methods (no DHEADER)
+                let method = get_serialization_method(&field.ty);
+                if let Some(deser_method) = primitive_vec_deserialize_method(method) {
+                    let method_ident = syn::Ident::new(deser_method, field_name.span());
+                    quote! {
+                        let #field_name = deserializer.#method_ident()?;
+                    }
+                } else {
+                    quote! {
+                        let #field_name = <#field_type as #crate_path::serialize::xcdr::XcdrDeserialize>::deserialize_xcdr(deserializer)?;
+                    }
                 }
             }
         })
@@ -900,8 +965,17 @@ fn generate_appendable_deserialize_impl(
                     };
                 }
             } else {
-                quote! {
-                    let #field_name = <#field_type as #crate_path::serialize::xcdr::XcdrDeserialize>::deserialize_xcdr(deserializer)?;
+                // For primitive Vec types, use specialized deserializer methods (no DHEADER)
+                let method = get_serialization_method(&field.ty);
+                if let Some(deser_method) = primitive_vec_deserialize_method(method) {
+                    let method_ident = syn::Ident::new(deser_method, field_name.span());
+                    quote! {
+                        let #field_name = deserializer.#method_ident()?;
+                    }
+                } else {
+                    quote! {
+                        let #field_name = <#field_type as #crate_path::serialize::xcdr::XcdrDeserialize>::deserialize_xcdr(deserializer)?;
+                    }
                 }
             }
         })
@@ -972,9 +1046,20 @@ fn generate_mutable_deserialize_impl(
                     }
                 }
             } else {
-                quote! {
-                    #member_id => {
-                        #field_name = Some(<#field_type as #crate_path::serialize::xcdr::XcdrDeserialize>::deserialize_xcdr(deserializer)?);
+                // For primitive Vec types, use specialized deserializer methods
+                let method = get_serialization_method(&field.ty);
+                if let Some(deser_method) = primitive_vec_deserialize_method(method) {
+                    let method_ident = syn::Ident::new(deser_method, field_name.span());
+                    quote! {
+                        #member_id => {
+                            #field_name = Some(deserializer.#method_ident()?);
+                        }
+                    }
+                } else {
+                    quote! {
+                        #member_id => {
+                            #field_name = Some(<#field_type as #crate_path::serialize::xcdr::XcdrDeserialize>::deserialize_xcdr(deserializer)?);
+                        }
                     }
                 }
             }
@@ -1560,10 +1645,19 @@ fn generate_tuple_xcdr_serialize_impl(
     let field_calls: Vec<_> = fields
         .iter()
         .enumerate()
-        .map(|(idx, _field)| {
+        .map(|(idx, field)| {
             let idx = syn::Index::from(idx);
-            quote! {
-                #crate_path::serialize::xcdr::XcdrSerialize::serialize_xcdr(&self.#idx, serializer)?;
+            // For primitive Vec types, use specialized serializer methods (no DHEADER)
+            let method = get_serialization_method(&field.ty);
+            if let Some(ser_method) = primitive_vec_serialize_method(method) {
+                let method_ident = syn::Ident::new(ser_method, proc_macro2::Span::call_site());
+                quote! {
+                    serializer.#method_ident(&self.#idx)?;
+                }
+            } else {
+                quote! {
+                    #crate_path::serialize::xcdr::XcdrSerialize::serialize_xcdr(&self.#idx, serializer)?;
+                }
             }
         })
         .collect();
@@ -1634,8 +1728,17 @@ fn generate_tuple_xcdr_deserialize_impl(
         .map(|(idx, field)| {
             let field_var = quote::format_ident!("field_{}", idx);
             let field_type = &field.ty;
-            quote! {
-                let #field_var = <#field_type as #crate_path::serialize::xcdr::XcdrDeserialize>::deserialize_xcdr(deserializer)?;
+            // For primitive Vec types, use specialized deserializer methods (no DHEADER)
+            let method = get_serialization_method(&field.ty);
+            if let Some(deser_method) = primitive_vec_deserialize_method(method) {
+                let method_ident = syn::Ident::new(deser_method, proc_macro2::Span::call_site());
+                quote! {
+                    let #field_var = deserializer.#method_ident()?;
+                }
+            } else {
+                quote! {
+                    let #field_var = <#field_type as #crate_path::serialize::xcdr::XcdrDeserialize>::deserialize_xcdr(deserializer)?;
+                }
             }
         })
         .collect();
