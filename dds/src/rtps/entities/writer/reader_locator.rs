@@ -10,7 +10,7 @@ use crate::{
             locator::Locator,
             sequence::SequenceNumber,
         },
-        entities::history::{history_cache::HistoryCache, writer_history::WriterHistoryCache},
+        entities::history::writer_history::WriterHistoryCache,
     },
 };
 
@@ -92,11 +92,8 @@ impl ReaderLocator {
 
     pub(crate) fn next_unsent_change(&self, history_cache: &WriterHistoryCache) -> SequenceNumber {
         history_cache
-            .get_changes()
-            .iter()
-            .filter(|change| change.sequence_number() > self.highest_sent_change_sn)
+            .next_change_after(self.highest_sent_change_sn)
             .map(|change| change.sequence_number())
-            .min()
             .unwrap_or(SequenceNumber::UNKNOWN)
     }
 

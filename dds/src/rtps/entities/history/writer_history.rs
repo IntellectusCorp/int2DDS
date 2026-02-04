@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+use std::ops::Bound;
 use std::sync::Arc;
 
 use crate::{
@@ -16,12 +18,12 @@ use crate::{
 pub struct WriterHistoryCache {
     participant_guid: Guid,
     owner_id: EntityId,
-    changes: Vec<Arc<CacheChange>>,
+    changes: BTreeMap<SequenceNumber, Arc<CacheChange>>,
 }
 
 impl HistoryCache for WriterHistoryCache {
     fn remove_change(&mut self, a_change: Arc<CacheChange>) -> RtpsResult<()> {
-        self.changes.retain(|change| change.sequence_number() != a_change.sequence_number());
+        self.changes.remove(&a_change.sequence_number());
 
         if let Some(handler) =
             SendingHandler::get_instance_by_participant_guid(self.participant_guid)
@@ -41,7 +43,7 @@ impl HistoryCache for WriterHistoryCache {
     }
 
     fn get_changes(&self) -> Vec<Arc<CacheChange>> {
-        self.changes.clone()
+        self.changes.values().cloned().collect()
     }
 
     fn get_change_from_instance_handle(
@@ -49,25 +51,35 @@ impl HistoryCache for WriterHistoryCache {
         instance_handle: InstanceHandle,
     ) -> Vec<Arc<CacheChange>> {
         self.changes
-            .iter()
+            .values()
             .filter(|change| change.instance_handle() == instance_handle)
             .cloned()
             .collect()
+    }
+
+    fn get_seq_num_min(&self) -> SequenceNumber {
+        self.changes.keys().next().copied().unwrap_or(SequenceNumber::new(0, 1))
+    }
+
+    fn get_seq_num_max(&self) -> SequenceNumber {
+        self.changes.keys().next_back().copied().unwrap_or(SequenceNumber::new(0, 0))
     }
 }
 
 impl WriterHistoryCache {
     pub(crate) fn new(participant_guid: Guid, owner_id: EntityId) -> Self {
-        Self { participant_guid, owner_id, changes: Vec::new() }
+        Self { participant_guid, owner_id, changes: BTreeMap::new() }
     }
 
     pub(crate) fn get_change(&self, seq_num: SequenceNumber) -> Option<Arc<CacheChange>> {
-        self.changes.iter().find(|change| change.sequence_number() == seq_num).cloned()
+        self.changes.get(&seq_num).cloned()
     }
 
     pub(crate) fn add_change(&mut self, a_change: Arc<CacheChange>) -> RtpsResult<()> {
+        let sn = a_change.sequence_number();
+
         if !self.is_builtin() {
-            self.changes.push(a_change.clone());
+            self.changes.insert(sn, a_change.clone());
 
             // Let RTPS writer know that there is a CacheChange that has not been sent
             if let Some(handler) =
@@ -80,10 +92,10 @@ impl WriterHistoryCache {
             // Built-in endpoint not connected to DDS entity, Resource limits & History QoS not applied
             // Therefore arbitrarily limit size
             if self.changes.len() >= BUILTIN_ENDPOINT_HISTORYCACHE_CAPACITY {
-                self.changes.remove(0);
+                self.changes.pop_first();
             }
 
-            self.changes.push(a_change.clone());
+            self.changes.insert(sn, a_change.clone());
         }
 
         Ok(())
@@ -91,5 +103,14 @@ impl WriterHistoryCache {
 
     pub(crate) fn is_empty(&self) -> bool {
         self.changes.is_empty()
+    }
+
+    /// Returns the next change with a sequence number strictly greater than `sn`.
+    /// Uses BTreeMap range query for O(log N) lookup.
+    pub(crate) fn next_change_after(&self, sn: SequenceNumber) -> Option<Arc<CacheChange>> {
+        self.changes
+            .range((Bound::Excluded(sn), Bound::Unbounded))
+            .next()
+            .map(|(_, change)| change.clone())
     }
 }
