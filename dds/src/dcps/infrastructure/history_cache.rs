@@ -60,10 +60,6 @@ pub(crate) trait HistoryCache {
     ) -> DdsResult<Arc<CacheChange>>;
 
     fn is_max_instances_exceeded(&self, instance_handle: InstanceHandle) -> DdsResult<bool> {
-        if instance_handle.is_nil() {
-            return Ok(false);
-        }
-
         let instance_map = self.get_instance_map();
         let instance_map_guard = instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
