@@ -543,8 +543,8 @@ fn test_tuple_struct_type_support() {
     let type_support = TupleStruct::get_type_support();
 
     // Serialize and deserialize
-    let serialized = type_support.serialize(&value).unwrap();
-    let deserialized = type_support.deserialize(&serialized).unwrap();
+    let serialized = type_support.serialize(&value, None).unwrap();
+    let deserialized = type_support.deserialize(&serialized, None).unwrap();
     let result = deserialized.downcast_ref::<TupleStruct>().unwrap();
     assert_eq!(result.0, value.0);
 
