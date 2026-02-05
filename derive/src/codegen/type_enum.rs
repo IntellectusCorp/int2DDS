@@ -113,15 +113,9 @@ pub fn generate_enum_type_support_impl(
                 #crate_path::serialize::xcdr::ExtensibilityKind::Final
             }
 
-            fn serialize(&self, data: &dyn std::any::Any) -> #crate_path::dcps::core::error::DdsResult<#crate_path::rtps::common::types::SerializedData> {
-                self.serialize_with_format(data, &#crate_path::dcps::topic::type_support::SerializationFormat::Cdr)
-            }
-
-            fn deserialize(&self, data: &[u8]) -> #crate_path::dcps::core::error::DdsResult<Box<dyn std::any::Any>> {
-                self.deserialize_with_format(data, &#crate_path::dcps::topic::type_support::SerializationFormat::Cdr)
-            }
-
-            fn serialize_with_format(&self, data: &dyn std::any::Any, format: &#crate_path::dcps::topic::type_support::SerializationFormat) -> #crate_path::dcps::core::error::DdsResult<#crate_path::rtps::common::types::SerializedData> {
+            fn serialize(&self, data: &dyn std::any::Any, format: Option<&#crate_path::dcps::topic::type_support::SerializationFormat>) -> #crate_path::dcps::core::error::DdsResult<#crate_path::rtps::common::types::SerializedData> {
+                let default_format = #crate_path::dcps::topic::type_support::SerializationFormat::Cdr;
+                let format = format.unwrap_or(&default_format);
                 if let Some(typed_data) = data.downcast_ref::<#name>() {
                     match format {
                         #crate_path::dcps::topic::type_support::SerializationFormat::Cdr => {
@@ -158,7 +152,9 @@ pub fn generate_enum_type_support_impl(
                 }
             }
 
-            fn deserialize_with_format(&self, data: &[u8], format: &#crate_path::dcps::topic::type_support::SerializationFormat) -> #crate_path::dcps::core::error::DdsResult<Box<dyn std::any::Any>> {
+            fn deserialize(&self, data: &[u8], format: Option<&#crate_path::dcps::topic::type_support::SerializationFormat>) -> #crate_path::dcps::core::error::DdsResult<Box<dyn std::any::Any>> {
+                let default_format = #crate_path::dcps::topic::type_support::SerializationFormat::Cdr;
+                let format = format.unwrap_or(&default_format);
                 match format {
                     #crate_path::dcps::topic::type_support::SerializationFormat::Cdr => {
                         use #crate_path::serialize::cdr::CdrDeserializer;
@@ -200,7 +196,7 @@ pub fn generate_enum_type_support_impl(
             }
 
             fn serialize_key_and_non_key(&self, data: &dyn std::any::Any) -> #crate_path::dcps::core::error::DdsResult<(#crate_path::rtps::common::types::SerializedData, #crate_path::rtps::common::types::SerializedData)> {
-                let full_data = self.serialize(data)?;
+                let full_data = self.serialize(data, None)?;
                 Ok((full_data.clone(), full_data))
             }
 
