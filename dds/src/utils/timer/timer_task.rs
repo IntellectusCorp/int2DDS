@@ -44,8 +44,8 @@ impl Timer {
         }
     }
 
-    pub(crate) fn is_ready(&self) -> bool {
-        !self.paused && Instant::now() >= self.next_trigger
+    pub(crate) fn is_ready(&self, now: Instant) -> bool {
+        !self.paused && now >= self.next_trigger
     }
 
     pub(crate) fn trigger(&mut self) {
@@ -94,14 +94,13 @@ impl Timer {
         }
     }
 
-    pub(crate) fn time_until_trigger(&self) -> Option<Duration> {
+    pub(crate) fn time_until_trigger(&self, now: Instant) -> Option<Duration> {
         if self.paused {
             return None;
         }
 
-        let now = Instant::now();
         if now >= self.next_trigger {
-            Some(Duration::from_millis(0))
+            Some(Duration::ZERO)
         } else {
             Some(self.next_trigger - now)
         }
@@ -136,7 +135,8 @@ impl TimerTask {
         let mut events = Events::with_capacity(128);
 
         while self.running {
-            let timeout = self.calculate_next_timeout();
+            let now = Instant::now();
+            let timeout = self.calculate_next_timeout(now); // Return None to wait indefinitely if no timers are present
 
             match self.poll.poll(&mut events, timeout) {
                 Ok(()) => {
@@ -151,7 +151,8 @@ impl TimerTask {
                         }
                     }
 
-                    self.process_expired_timers();
+                    let now = Instant::now();
+                    self.process_expired_timers(now);
                 }
                 Err(e) => {
                     error!("Poll error in timer task: {}", e);
@@ -163,16 +164,13 @@ impl TimerTask {
         Ok(())
     }
 
-    fn calculate_next_timeout(&self) -> Option<Duration> {
-        let min_timeout = self.timers.values().filter_map(|timer| timer.time_until_trigger()).min();
-
-        match min_timeout {
-            Some(timeout) => {
-                // Cap timeout to improve precision, minimum 1ms for responsiveness
-                Some(timeout.min(Duration::from_millis(100)).max(Duration::from_millis(1)))
-            }
-            None => Some(Duration::from_millis(100)), // Reduced default timeout from 1000ms to 100ms
+    fn calculate_next_timeout(&self, now: Instant) -> Option<Duration> {
+        // Return None to make event loop wait indefinitely if no timers are present
+        if self.timers.is_empty() {
+            return None;
         }
+
+        self.timers.values().filter_map(|timer| timer.time_until_trigger(now)).min()
     }
 
     fn process_messages(&mut self, message_queue: &TimerMessageQueue) {
@@ -214,23 +212,15 @@ impl TimerTask {
         }
     }
 
-    fn process_expired_timers(&mut self) {
-        let expired_timer_ids: Vec<String> = self
-            .timers
-            .values()
-            .filter(|timer| timer.is_ready())
-            .map(|timer| timer.id.clone())
-            .collect();
-
-        for timer_id in expired_timer_ids {
-            if let Some(timer) = self.timers.get_mut(&timer_id) {
+    fn process_expired_timers(&mut self, now: Instant) {
+        self.timers.retain(|_, timer| {
+            if timer.is_ready(now) {
                 timer.trigger();
-
-                if !timer.repeating {
-                    self.timers.remove(&timer_id);
-                }
+                timer.repeating
+            } else {
+                true
             }
-        }
+        });
     }
 
     fn add_timer(
