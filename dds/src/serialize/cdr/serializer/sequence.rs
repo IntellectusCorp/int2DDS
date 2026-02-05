@@ -165,7 +165,25 @@ pub trait SequenceSerialize: CdrSerializerCommon + PrimitiveSerialize + StringSe
 
 // Implement SequenceSerialize for both serializer types
 impl SequenceSerialize for CdrSerializer {}
-impl SequenceSerialize for Xcdr2Serializer {}
+impl SequenceSerialize for Xcdr2Serializer {
+    /// XCDR2: String is non-primitive, so sequence<string> needs DHEADER per DDS-XTypes v1.3
+    fn serialize_string_sequence(&mut self, data: &[String]) -> Result<(), CdrError> {
+        // Write DHEADER placeholder
+        let dheader_pos = self.reserve_dheader();
+        let content_start = self.position();
+
+        let length = checked_length(data.len())?;
+        self.serialize_u32(length)?;
+        for value in data {
+            self.serialize_string(value)?;
+        }
+
+        // Backpatch DHEADER with content byte size
+        let content_size = (self.position() - content_start) as u32;
+        self.write_dheader_at(dheader_pos, content_size);
+        Ok(())
+    }
+}
 
 // Generic serialize_sequence and serialize_optional methods need to stay as inherent impl
 // because they use generic parameters with Self type bounds
@@ -208,7 +226,7 @@ impl CdrSerializer {
 }
 
 impl Xcdr2Serializer {
-    /// Serialize sequence of values with length prefix
+    /// Serialize sequence of non-primitive values with DHEADER + length prefix (XCDR2)
     pub fn serialize_sequence<T, F>(
         &mut self,
         values: &[T],
@@ -217,11 +235,19 @@ impl Xcdr2Serializer {
     where
         F: FnMut(&mut Self, &T) -> Result<(), CdrError>,
     {
+        // XCDR2: Write DHEADER for non-primitive sequences
+        let dheader_pos = self.reserve_dheader();
+        let content_start = self.position();
+
         let length = checked_length(values.len())?;
         self.serialize_u32(length)?;
         for value in values {
             serialize_fn(self, value)?;
         }
+
+        // Backpatch DHEADER with content byte size
+        let content_size = (self.position() - content_start) as u32;
+        self.write_dheader_at(dheader_pos, content_size);
         Ok(())
     }
 

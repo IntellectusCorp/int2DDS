@@ -1315,15 +1315,25 @@ impl TypeSupport for DynamicTypeSupport {
         self.descriptor.get_field(field_path).is_some()
     }
 
-    fn serialize(&self, data: &dyn Any) -> DdsResult<SerializedData> {
+    fn serialize(
+        &self,
+        data: &dyn Any,
+        format: Option<&SerializationFormat>,
+    ) -> DdsResult<SerializedData> {
         let dynamic_data = data
             .downcast_ref::<Int2DdsData>()
             .ok_or_else(|| DdsError::Error("Expected Int2DdsData".to_string()))?;
 
-        // Use XCDR version specified in the type descriptor
-        let bytes_result = match self.descriptor.xcdr_version {
-            Int2DdsXcdrVersion::Xcdr1 => self.serialize_cdr(dynamic_data)?,
-            Int2DdsXcdrVersion::Xcdr2 => self.serialize_xcdr2(dynamic_data)?,
+        let bytes_result = match format {
+            Some(SerializationFormat::Cdr) => self.serialize_cdr(dynamic_data)?,
+            Some(SerializationFormat::Xcdr { .. }) => self.serialize_xcdr2(dynamic_data)?,
+            None => {
+                // Use XCDR version specified in the type descriptor
+                match self.descriptor.xcdr_version {
+                    Int2DdsXcdrVersion::Xcdr1 => self.serialize_cdr(dynamic_data)?,
+                    Int2DdsXcdrVersion::Xcdr2 => self.serialize_xcdr2(dynamic_data)?,
+                }
+            }
         };
         if bytes_result.len() < 2 {
             eprintln!(
@@ -1335,44 +1345,15 @@ impl TypeSupport for DynamicTypeSupport {
         Ok(bytes_result.into())
     }
 
-    fn deserialize(&self, data: &[u8]) -> DdsResult<Box<dyn Any>> {
-        let result = self.auto_deserialize(data)?;
-        Ok(Box::new(result))
-    }
-
-    fn serialize_with_format(
-        &self,
-        data: &dyn Any,
-        format: &SerializationFormat,
-    ) -> DdsResult<SerializedData> {
-        let dynamic_data = data
-            .downcast_ref::<Int2DdsData>()
-            .ok_or_else(|| DdsError::Error("Expected Int2DdsData".to_string()))?;
-
-        let bytes_result = match format {
-            SerializationFormat::Cdr => self.serialize_cdr(dynamic_data)?,
-            SerializationFormat::Xcdr { .. } => self.serialize_xcdr2(dynamic_data)?,
-        };
-        if bytes_result.len() < 2 {
-            eprintln!(
-                "DynamicTypeSupport::serialize_with_format: serialized data too short (len={}, fields={}, values={})",
-                bytes_result.len(),
-                self.descriptor.fields.len(),
-                dynamic_data.values.len()
-            );
-            return Err(DdsError::Error("Serialized data too short".to_string()));
-        }
-        Ok(bytes_result.into())
-    }
-
-    fn deserialize_with_format(
+    fn deserialize(
         &self,
         data: &[u8],
-        format: &SerializationFormat,
+        format: Option<&SerializationFormat>,
     ) -> DdsResult<Box<dyn Any>> {
         let result = match format {
-            SerializationFormat::Cdr => self.deserialize_cdr(data)?,
-            SerializationFormat::Xcdr { .. } => self.deserialize_xcdr2(data)?,
+            Some(SerializationFormat::Cdr) => self.deserialize_cdr(data)?,
+            Some(SerializationFormat::Xcdr { .. }) => self.deserialize_xcdr2(data)?,
+            None => self.auto_deserialize(data)?,
         };
         Ok(Box::new(result))
     }

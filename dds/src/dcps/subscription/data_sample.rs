@@ -50,7 +50,7 @@ where
         match (self.data.as_ref(), self.type_support.as_ref()) {
             (Some(data), Some(ts)) => {
                 // Use the registered TypeSupport for deserialization
-                let any_box = ts.deserialize(data.as_ref())?;
+                let any_box = ts.deserialize(data.as_ref(), None)?;
                 any_box
                     .downcast::<Foo>()
                     .map(|boxed| *boxed)

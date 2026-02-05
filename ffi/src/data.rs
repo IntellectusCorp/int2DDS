@@ -185,32 +185,20 @@ impl TypeSupport for DynamicTypeSupportDefault {
         false
     }
 
-    fn serialize(&self, _data: &dyn Any) -> DdsResult<SerializedData> {
-        Err(DdsError::Error(
-            "DynamicTypeSupportDefault: Use registered TypeSupport for serialization".to_string(),
-        ))
-    }
-
-    fn deserialize(&self, _data: &[u8]) -> DdsResult<Box<dyn Any>> {
-        Err(DdsError::Error(
-            "DynamicTypeSupportDefault: Use registered TypeSupport for deserialization".to_string(),
-        ))
-    }
-
-    fn serialize_with_format(
+    fn serialize(
         &self,
         _data: &dyn Any,
-        _format: &SerializationFormat,
+        _format: Option<&SerializationFormat>,
     ) -> DdsResult<SerializedData> {
         Err(DdsError::Error(
             "DynamicTypeSupportDefault: Use registered TypeSupport for serialization".to_string(),
         ))
     }
 
-    fn deserialize_with_format(
+    fn deserialize(
         &self,
         _data: &[u8],
-        _format: &SerializationFormat,
+        _format: Option<&SerializationFormat>,
     ) -> DdsResult<Box<dyn Any>> {
         Err(DdsError::Error(
             "DynamicTypeSupportDefault: Use registered TypeSupport for deserialization".to_string(),
