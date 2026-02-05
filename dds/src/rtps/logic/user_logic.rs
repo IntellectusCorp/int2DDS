@@ -1529,8 +1529,9 @@ impl UnicastMessageProcessor for UserLogic {
                         let participant_guid = participant.guid();
 
                         let timer_id = format!(
-                            "hb_response_{:?}_{:?}_{:?}",
-                            reader_entity_id, remote_writer_guid, heartbeat.count
+                            "hb_{:x}_{:x}",
+                            u32::from_be_bytes(reader_entity_id.to_bytes()),
+                            u128::from_be_bytes(remote_writer_guid.to_bytes()),
                         );
 
                         if let Ok(locked_timer_handler) =
@@ -1575,7 +1576,11 @@ impl UnicastMessageProcessor for UserLogic {
 
                         writer_proxy.increase_nackfrag_count();
 
-                        let timer_id = format!("nackfrag_{:?}_{:?}", remote_writer_guid, last_sn);
+                        let timer_id = format!(
+                            "nackfrag_{:x}_{}",
+                            u128::from_be_bytes(remote_writer_guid.to_bytes()),
+                            last_sn.to_i64()
+                        );
                         if let Ok(locked_timer_handler) =
                             TimerHandler::get_instance(participant.guid().prefix()).lock()
                         {
@@ -1740,8 +1745,9 @@ impl UnicastMessageProcessor for UserLogic {
                 let participant_guid = participant.guid();
 
                 let timer_id = format!(
-                    "nack_response_{:?}_{:?}_{:?}",
-                    writer_entity_id, remote_reader_guid, acknack.count
+                    "nack_{:x}_{:x}",
+                    u32::from_be_bytes(writer_entity_id.to_bytes()),
+                    u128::from_be_bytes(remote_reader_guid.to_bytes()),
                 );
 
                 if let Ok(locked_timer_handler) =
