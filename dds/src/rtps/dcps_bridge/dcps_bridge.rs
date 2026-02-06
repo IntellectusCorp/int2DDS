@@ -292,11 +292,9 @@ impl DcpsBridge {
 
         match writer {
             Some(writer) => {
-                let _ = self.participant.add_writer(
-                    publication_builtin_topic_data.topic_name(),
-                    datawriter_guid.entity_id(),
-                    writer.clone(),
-                );
+                let _ = self
+                    .participant
+                    .add_writer(&publication_builtin_topic_data.topic_name(), writer.clone());
                 Ok(writer)
             }
             None => {
@@ -447,11 +445,8 @@ impl DcpsBridge {
 
         match reader {
             Some(reader) => {
-                self.participant.add_reader(
-                    subscription_builtin_topic_data.topic_name(),
-                    datareader_guid.entity_id(),
-                    reader.clone(),
-                );
+                self.participant
+                    .add_reader(&subscription_builtin_topic_data.topic_name(), reader.clone());
                 Ok(reader)
             }
             None => {
