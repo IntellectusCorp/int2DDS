@@ -138,7 +138,12 @@ impl TypeSupport for RawDataTypeSupport {
         false
     }
 
-    fn serialize(&self, data: &dyn Any) -> DdsResult<SerializedData> {
+    fn serialize(
+        &self,
+        data: &dyn Any,
+        _format: Option<&SerializationFormat>,
+    ) -> DdsResult<SerializedData> {
+        // Ignore format - data is already serialized
         let raw_data = data
             .downcast_ref::<RawData>()
             .ok_or_else(|| DdsError::Error("Expected RawData type".to_string()))?;
@@ -147,27 +152,13 @@ impl TypeSupport for RawDataTypeSupport {
         Ok(raw_data.data.clone())
     }
 
-    fn deserialize(&self, data: &[u8]) -> DdsResult<Box<dyn Any>> {
-        // Wrap received bytes in RawData
-        Ok(Box::new(RawData::new(data.to_vec())))
-    }
-
-    fn serialize_with_format(
-        &self,
-        data: &dyn Any,
-        _format: &SerializationFormat,
-    ) -> DdsResult<SerializedData> {
-        // Ignore format - data is already serialized
-        self.serialize(data)
-    }
-
-    fn deserialize_with_format(
+    fn deserialize(
         &self,
         data: &[u8],
-        _format: &SerializationFormat,
+        _format: Option<&SerializationFormat>,
     ) -> DdsResult<Box<dyn Any>> {
         // Ignore format - pass raw bytes
-        self.deserialize(data)
+        Ok(Box::new(RawData::new(data.to_vec())))
     }
 
     fn serialize_key(&self, data: &dyn Any) -> DdsResult<SerializedData> {
@@ -248,7 +239,7 @@ mod tests {
         let data = vec![1, 2, 3, 4];
         let raw = RawData::new(data.clone());
 
-        let serialized = ts.serialize(&raw as &dyn Any).unwrap();
+        let serialized = ts.serialize(&raw as &dyn Any, None).unwrap();
         assert_eq!(serialized.as_ref(), &data);
     }
 
@@ -257,7 +248,7 @@ mod tests {
         let ts = RawDataTypeSupport::default();
         let data = vec![1, 2, 3, 4];
 
-        let deserialized = ts.deserialize(&data).unwrap();
+        let deserialized = ts.deserialize(&data, None).unwrap();
         let raw = deserialized.downcast_ref::<RawData>().unwrap();
         assert_eq!(raw.as_bytes(), &data);
     }
