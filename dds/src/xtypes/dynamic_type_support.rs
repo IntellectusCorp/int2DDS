@@ -166,30 +166,24 @@ impl TypeSupport for DynamicTypeSupport {
         }
     }
 
-    fn serialize(&self, data: &dyn Any) -> DdsResult<SerializedData> {
-        self.serialize_with_format(data, &SerializationFormat::Cdr)
-    }
-
-    fn deserialize(&self, data: &[u8]) -> DdsResult<Box<dyn Any>> {
-        self.deserialize_with_format(data, &SerializationFormat::Cdr)
-    }
-
-    fn serialize_with_format(
+    fn serialize(
         &self,
         data: &dyn Any,
-        format: &SerializationFormat,
+        format: Option<&SerializationFormat>,
     ) -> DdsResult<SerializedData> {
         let dynamic_data = data
             .downcast_ref::<DynamicData>()
             .ok_or_else(|| DdsError::Error("Expected DynamicData type".to_string()))?;
 
+        let default_format = SerializationFormat::Cdr;
+        let format = format.unwrap_or(&default_format);
         serialize_dynamic_data(dynamic_data, format)
     }
 
-    fn deserialize_with_format(
+    fn deserialize(
         &self,
         data: &[u8],
-        _format: &SerializationFormat,
+        _format: Option<&SerializationFormat>,
     ) -> DdsResult<Box<dyn Any>> {
         let dynamic_data = deserialize_dynamic_data(data, &self.dynamic_type)?;
         Ok(Box::new(dynamic_data))
@@ -385,10 +379,10 @@ mod tests {
         data.set("message", "Hello!").unwrap();
 
         // Serialize
-        let serialized = type_support.serialize(&data as &dyn Any).unwrap();
+        let serialized = type_support.serialize(&data as &dyn Any, None).unwrap();
 
         // Deserialize
-        let deserialized_any = type_support.deserialize(&serialized).unwrap();
+        let deserialized_any = type_support.deserialize(&serialized, None).unwrap();
         let deserialized = deserialized_any.downcast_ref::<DynamicData>().unwrap();
 
         assert_eq!(deserialized.get::<i32>("id").unwrap(), 42);

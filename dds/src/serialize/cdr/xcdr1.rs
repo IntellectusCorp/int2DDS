@@ -108,8 +108,7 @@ impl<'a> CdrDeserializer<'a> {
     }
 
     /// Align position to boundary
-    /// In CDR (XCDR1), alignment is calculated from the start of the serialized data
-    /// (after the encapsulation header), so header_offset should be 0
+    /// CDR alignment is relative to data start (after encapsulation header)
     pub(super) fn align(&mut self, alignment: usize) {
         align_position_with_header_offset(&mut self.position, alignment, 0);
     }
