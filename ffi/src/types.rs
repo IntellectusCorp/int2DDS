@@ -24,10 +24,7 @@ use int2dds::{
 };
 
 use crate::data::Int2DdsData;
-
-use crate::dynamic_type_support::DynamicTypeSupport;
 use crate::listener::{FfiDataReaderListener, FfiDataWriterListener};
-use crate::type_descriptor::Int2DdsTypeDescriptor;
 
 /// Opaque handle to a DomainParticipantFactory
 pub struct Int2DdsParticipantFactory {
@@ -53,24 +50,19 @@ pub struct Int2DdsSubscriber {
 /// Opaque handle to a DataWriter
 pub struct Int2DdsDataWriter {
     pub(crate) inner: DataWriter<Int2DdsData>,
-    // Note: type_support and type_descriptor are no longer needed here
-    // The DDS core handles TypeSupport internally via register_type_support
     pub(crate) listener: Option<Arc<FfiDataWriterListener>>,
 }
 
 /// Opaque handle to a DataReader
 pub struct Int2DdsDataReader {
     pub(crate) inner: DataReader<Int2DdsData>,
-    // Note: type_support and type_descriptor are no longer needed here
-    // The DDS core handles TypeSupport internally via register_type_support
     pub(crate) listener: Option<Arc<FfiDataReaderListener>>,
 }
 
 /// Opaque handle to a Topic
 pub struct Int2DdsTopic {
     pub(crate) inner: Arc<Topic>,
-    pub(crate) type_support: Arc<DynamicTypeSupport>,
-    pub(crate) type_descriptor: Arc<Int2DdsTypeDescriptor>,
+    pub(crate) type_name: String,
 }
 
 /// Opaque handle to a WaitSet

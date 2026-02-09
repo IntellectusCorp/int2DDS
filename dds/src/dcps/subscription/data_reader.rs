@@ -2157,6 +2157,165 @@ impl<Foo: DdsType> DataReader<Foo> {
         )
     }
 
+    // ========================================================================
+    // Raw Serialized Data Access (bypasses TypeSupport deserialization)
+    // ========================================================================
+
+    /// Take pre-serialized data directly from the cache, bypassing TypeSupport deserialization.
+    ///
+    /// Returns raw CDR bytes and SampleInfo for each matching sample.
+    /// The samples are removed from the cache (take semantics).
+    ///
+    /// Note: QueryCondition and ContentFilteredTopic filters are NOT applied,
+    /// as they require deserialized data.
+    pub fn take_serialized(
+        &self,
+        max_samples: i32,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+    ) -> DdsResult<Vec<(Arc<[u8]>, SampleInfo)>> {
+        self.read_or_take_serialized(max_samples, sample_states, view_states, instance_states, true)
+    }
+
+    /// Read pre-serialized data directly from the cache, bypassing TypeSupport deserialization.
+    ///
+    /// Returns raw CDR bytes and SampleInfo for each matching sample.
+    /// The samples remain in the cache and are marked as read.
+    ///
+    /// Note: QueryCondition and ContentFilteredTopic filters are NOT applied,
+    /// as they require deserialized data.
+    pub fn read_serialized(
+        &self,
+        max_samples: i32,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+    ) -> DdsResult<Vec<(Arc<[u8]>, SampleInfo)>> {
+        self.read_or_take_serialized(
+            max_samples,
+            sample_states,
+            view_states,
+            instance_states,
+            false,
+        )
+    }
+
+    /// Take a single pre-serialized sample from the cache.
+    pub fn take_next_serialized(&self) -> DdsResult<(Arc<[u8]>, SampleInfo)> {
+        let results = self.read_or_take_serialized(
+            1,
+            &[SampleStateKind::NOT_READ_SAMPLE_STATE],
+            &[ViewStateKind::ANY_VIEW_STATE],
+            &[InstanceStateKind::ANY_INSTANCE_STATE],
+            true,
+        )?;
+        results.into_iter().next().ok_or(DdsError::NoData)
+    }
+
+    fn read_or_take_serialized(
+        &self,
+        max_samples: i32,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+        take: bool,
+    ) -> DdsResult<Vec<(Arc<[u8]>, SampleInfo)>> {
+        self.is_enabled()?;
+
+        if max_samples == 0 {
+            return Err(DdsError::BadParameter);
+        }
+
+        self.set_read_communication_status(false)?;
+        let mut result: Vec<(Arc<[u8]>, SampleInfo)> = Vec::new();
+        let mut remaining = if max_samples == -1 { i32::MAX } else { max_samples };
+
+        let mut changes = self.get_available_changes()?;
+
+        if changes.is_empty() {
+            return Err(DdsError::NoData);
+        }
+
+        self.sort_changes_by_timestamp(&mut changes)?;
+
+        let instance_infos = self.get_instance_infos()?;
+
+        for change in changes.iter() {
+            if remaining <= 0 {
+                break;
+            }
+
+            let sample_state =
+                self.get_sample_state(&change.writer_guid(), &change.sequence_number())?;
+            let info = match instance_infos.get(&change.instance_handle()) {
+                Some(info) => info,
+                None => &InstanceInfo {
+                    key: Arc::new([]),
+                    view_state: ViewStateKind::NEW_VIEW_STATE,
+                    instance_state: InstanceStateKind::ALIVE_INSTANCE_STATE,
+                    disposed_generation_count: 0,
+                    no_writers_generation_count: 0,
+                },
+            };
+
+            if !sample_states.matches(sample_state)
+                || !view_states.matches(info.view_state)
+                || !instance_states.matches(info.instance_state)
+            {
+                continue;
+            }
+
+            let has_valid_data = match change.kind() {
+                ChangeKind::Alive | ChangeKind::AliveFiltered => true,
+                ChangeKind::NotAliveDisposed
+                | ChangeKind::NotAliveUnregistered
+                | ChangeKind::NotAliveDisposedUnregistered => false,
+            };
+
+            let serialized_data = change.data_value_arc();
+
+            let sample_info = SampleInfo {
+                sample_state,
+                view_state: info.view_state,
+                instance_state: info.instance_state,
+                disposed_generation_count: info.disposed_generation_count,
+                no_writers_generation_count: info.no_writers_generation_count,
+                sample_rank: 0,
+                generation_rank: 0,
+                absolute_generation_rank: 0,
+                source_timestamp: (*change.source_timestamp().as_ref().ok_or(DdsError::Error(
+                    "CacheChange's source timestamp is not properly initialized".to_string(),
+                ))?)
+                .into(),
+                instance_handle: change.instance_handle(),
+                publication_handle: InstanceHandle::from_guid(&change.writer_guid()),
+                valid_data: has_valid_data,
+            };
+
+            if take {
+                self.remove_change(change.clone())?;
+            } else {
+                self.mark_sample_as_read(&change.writer_guid(), change.sequence_number())?;
+            }
+
+            result.push((serialized_data, sample_info));
+            remaining -= 1;
+        }
+
+        for (_, sample_info) in &result {
+            self.mark_instance_as_viewed(sample_info.instance_handle);
+        }
+
+        self.reevaluate_all_conditions()?;
+
+        if result.is_empty() {
+            Err(DdsError::NoData)
+        } else {
+            Ok(result)
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn read_or_take(
         &self,

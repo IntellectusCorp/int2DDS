@@ -1,0 +1,15 @@
+enum SensorKind {
+    TEMPERATURE,
+    HUMIDITY,
+    PRESSURE
+};
+
+@extensibility(APPENDABLE)
+struct SensorData {
+    @key
+    long sensor_id;
+    SensorKind kind;
+    double value;
+    string<64> unit;
+    sequence<float> history;
+};
