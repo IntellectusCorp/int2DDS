@@ -5,7 +5,7 @@ pub mod string;
 
 use speedy::Endianness;
 
-use crate::serialize::{align_buffer, align_buffer_with_header_offset};
+use crate::serialize::align_buffer;
 
 /// Common trait for CDR serializers (CdrSerializer and Xcdr2Serializer)
 /// This trait abstracts the differences between CDR v1 and XCDR v2 serialization,
