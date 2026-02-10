@@ -56,11 +56,19 @@ impl TypeSupport for Int2DdsDataTypeSupport {
         false
     }
 
-    fn serialize(&self, _data: &dyn Any) -> DdsResult<SerializedData> {
+    fn serialize(
+        &self,
+        _data: &dyn Any,
+        _format: Option<&SerializationFormat>,
+    ) -> DdsResult<SerializedData> {
         Err(DdsError::Error("Int2DdsDataTypeSupport: Use registered TypeSupport".to_string()))
     }
 
-    fn deserialize(&self, _data: &[u8]) -> DdsResult<Box<dyn Any>> {
+    fn deserialize(
+        &self,
+        _data: &[u8],
+        _format: Option<&SerializationFormat>,
+    ) -> DdsResult<Box<dyn Any>> {
         Err(DdsError::Error("Int2DdsDataTypeSupport: Use registered TypeSupport".to_string()))
     }
 
