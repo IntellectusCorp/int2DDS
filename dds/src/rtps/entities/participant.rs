@@ -55,8 +55,8 @@ use crate::{
         entities::{
             entity::Entity,
             history::history_cache::HistoryCache,
-            reader::{Reader, StatefulReader, StatelessReader},
-            writer::{StatefulWriter, StatelessWriter, Writer},
+            reader::{Reader, ReaderStore, StatefulReader, StatelessReader},
+            writer::{StatefulWriter, StatelessWriter, Writer, WriterStore},
         },
         logic::{
             sedp_logic::SedpLogic, spdp_logic::SpdpLogic, user_logic::UserLogic,
@@ -86,11 +86,8 @@ pub struct Participant {
         Arc<ArcSwap<Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>>>,
 
     // RTPS data reader/writer matched with DCPS r/w
-    // Key is domain id + topic name
-    #[allow(clippy::type_complexity)]
-    rtps_reader_map: Arc<DashMap<String, HashMap<EntityId, Arc<dyn Reader + Send + Sync>>>>,
-    #[allow(clippy::type_complexity)]
-    rtps_writer_map: Arc<DashMap<String, HashMap<EntityId, Arc<dyn Writer + Send + Sync>>>>,
+    rtps_reader_store: Arc<ReaderStore>,
+    rtps_writer_store: Arc<WriterStore>,
 
     spdp_logic: OnceLock<Arc<Option<SpdpLogic>>>,
     sedp_logic: OnceLock<Arc<Option<SedpLogic>>>,
@@ -165,8 +162,8 @@ impl Participant {
             local_participant_proxy_data,
             remote_participant_proxy_datas: Arc::new(Mutex::new(vec![])),
             callback: Arc::new(ArcSwap::new(Arc::new(None))),
-            rtps_reader_map: Arc::new(DashMap::new()),
-            rtps_writer_map: Arc::new(DashMap::new()),
+            rtps_reader_store: Arc::new(ReaderStore::new()),
+            rtps_writer_store: Arc::new(WriterStore::new()),
             spdp_logic: OnceLock::new(),
             sedp_logic: OnceLock::new(),
             user_logic: OnceLock::new(),
@@ -415,11 +412,10 @@ impl Participant {
 
     pub(crate) fn add_writer(
         &self,
-        topic_name: String,
-        entity_id: EntityId,
+        topic_name: &str,
         writer: Arc<dyn Writer + Send + Sync>,
     ) -> RtpsResult<()> {
-        self.rtps_writer_map.entry(topic_name).or_default().insert(entity_id, writer.clone());
+        self.rtps_writer_store.add(topic_name, writer.clone());
         let liveliness = writer.liveliness()?;
 
         if writer.guid().entity_id().entity_kind().is_user_defined() {
@@ -430,39 +426,25 @@ impl Participant {
         Ok(())
     }
 
-    pub(crate) fn find_writer_from_entry(
-        &self,
-        topic_name: &str,
-        entity_id: EntityId,
-    ) -> Option<Arc<dyn Writer + Send + Sync>> {
-        self.rtps_writer_map.get(topic_name)?.get(&entity_id).cloned()
-    }
-
     pub(crate) fn find_writers_from_topic_name(
         &self,
         topic_name: &str,
     ) -> Vec<Arc<dyn Writer + Send + Sync>> {
-        match self.rtps_writer_map.get(topic_name) {
-            Some(map) => map.values().cloned().collect(),
-            None => Vec::new(),
-        }
+        self.rtps_writer_store.get_by_topic(topic_name)
     }
 
     pub(crate) fn find_writer_from_entity_id(
         &self,
         entity_id: EntityId,
     ) -> Option<Arc<dyn Writer + Send + Sync>> {
-        self.rtps_writer_map.iter().find_map(|entry| entry.value().get(&entity_id).cloned())
+        self.rtps_writer_store.get(entity_id)
     }
 
     pub(crate) fn find_readers_from_topic_name(
         &self,
         topic_name: &str,
     ) -> Vec<Arc<dyn Reader + Send + Sync>> {
-        match self.rtps_reader_map.get(topic_name) {
-            Some(map) => map.values().cloned().collect(),
-            None => Vec::new(),
-        }
+        self.rtps_reader_store.get_by_topic(topic_name)
     }
 
     // pub(crate) fn find_history_cache(
@@ -476,28 +458,15 @@ impl Participant {
     //         .map(|writer| writer.writer_cache())
     // }
 
-    pub(crate) fn add_reader(
-        &self,
-        topic_name: String,
-        entity_id: EntityId,
-        reader: Arc<dyn Reader + Send + Sync>,
-    ) {
-        self.rtps_reader_map.entry(topic_name.to_string()).or_default().insert(entity_id, reader);
-    }
-
-    pub(crate) fn find_reader_from_entry(
-        &self,
-        topic_name: &str,
-        entity_id: EntityId,
-    ) -> Option<Arc<dyn Reader + Send + Sync>> {
-        self.rtps_reader_map.get(topic_name).and_then(|map| map.get(&entity_id).cloned())
+    pub(crate) fn add_reader(&self, topic_name: &str, reader: Arc<dyn Reader + Send + Sync>) {
+        self.rtps_reader_store.add(topic_name, reader);
     }
 
     pub(crate) fn find_reader_from_entity_id(
         &self,
         entity_id: EntityId,
     ) -> Option<Arc<dyn Reader + Send + Sync>> {
-        self.rtps_reader_map.iter().find_map(|map| map.get(&entity_id).cloned())
+        self.rtps_reader_store.get(entity_id)
     }
 
     /// Function to increment entity_key by 1
@@ -529,8 +498,7 @@ impl Participant {
     /// Method to remove RTPS Writer
     pub(crate) fn remove_writer(&self, topic_name: String, entity_id: EntityId) -> RtpsResult<()> {
         // Send Data[w(UD)]
-        let writer_arc =
-            self.rtps_writer_map.get(&topic_name).and_then(|map| map.get(&entity_id).cloned());
+        let writer_arc = self.rtps_writer_store.get(entity_id);
 
         if let Some(writer) = writer_arc {
             if writer.guid().entity_id().entity_kind().is_user_defined() {
@@ -600,8 +568,8 @@ impl Participant {
             }
         }
 
-        // Remove from map in participant
-        self.rtps_writer_map.get_mut(&topic_name).and_then(|mut map| map.remove(&entity_id));
+        // Remove from store
+        self.rtps_writer_store.remove(&topic_name, entity_id);
         if let Some(mut entry) = self.remote_publications().get_mut(&topic_name) {
             entry.value_mut().remove(&Guid::new(self.guid().prefix(), entity_id));
 
@@ -617,8 +585,7 @@ impl Participant {
     /// Method to remove RTPS Reader
     pub(crate) fn remove_reader(&self, topic_name: String, entity_id: EntityId) -> RtpsResult<()> {
         // Send Data[r(UD)]
-        let reader_arc =
-            self.rtps_reader_map.get(&topic_name).and_then(|map| map.get(&entity_id).cloned());
+        let reader_arc = self.rtps_reader_store.get(entity_id);
 
         if let Some(reader) = reader_arc {
             let reader_info = if let Some(stateful_reader) =
@@ -675,8 +642,8 @@ impl Participant {
             }
         }
 
-        // Remove from map in participant
-        self.rtps_reader_map.get_mut(&topic_name).and_then(|mut map| map.remove(&entity_id));
+        // Remove from store
+        self.rtps_reader_store.remove(&topic_name, entity_id);
         if let Some(mut entry) = self.remote_subscriptions().get_mut(&topic_name) {
             entry.value_mut().remove(&Guid::new(self.guid().prefix(), entity_id));
 
@@ -691,70 +658,59 @@ impl Participant {
 
     /// Iterate through all Readers in the Participant to find Readers matched with the Writer, then remove Writer Proxy
     pub(crate) fn remove_unmatched_writer_from_reader(&self, writer_guid: Guid) {
-        for topic_entry in self.rtps_reader_map.iter() {
-            for reader in topic_entry.value().values() {
-                if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
-                    if let Ok(mut writer_proxies) = stateful_reader.writer_proxies().lock() {
-                        let len_before_unmatch = writer_proxies.len();
-                        debug!(
-                            "Before unmatching with writer, this reader had {:?} matched writer",
-                            len_before_unmatch
+        for reader in self.rtps_reader_store.iter_all() {
+            if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
+                if let Ok(mut writer_proxies) = stateful_reader.writer_proxies().lock() {
+                    let len_before_unmatch = writer_proxies.len();
+                    debug!(
+                        "Before unmatching with writer, this reader had {:?} matched writer",
+                        len_before_unmatch
+                    );
+
+                    writer_proxies
+                        .retain(|writer_proxy| writer_proxy.remote_writer_guid() != writer_guid);
+
+                    if len_before_unmatch == writer_proxies.len() + 1 {
+                        stateful_reader.update_subscription_matched_status(
+                            -1,
+                            InstanceHandle::from_guid(&writer_guid),
                         );
-
-                        writer_proxies.retain(|writer_proxy| {
-                            writer_proxy.remote_writer_guid() != writer_guid
-                        });
-
-                        if len_before_unmatch == writer_proxies.len() + 1 {
-                            stateful_reader.update_subscription_matched_status(
-                                -1,
-                                InstanceHandle::from_guid(&writer_guid),
-                            );
-                            info!("Unmatched with remote writer {:?}", writer_guid);
-                            debug!("Current number of matched writer: {:?}", writer_proxies.len());
-                        } else if len_before_unmatch == writer_proxies.len() {
-                            debug!(
-                                "No matching writer found to unmatch for GUID: {:?}",
-                                writer_guid
-                            );
-                        } else {
-                            log::error!("This is abnormal behavior, this reader had {:?} writer proxy of same guid", len_before_unmatch - writer_proxies.len());
-                        }
+                        info!("Unmatched with remote writer {:?}", writer_guid);
+                        debug!("Current number of matched writer: {:?}", writer_proxies.len());
+                    } else if len_before_unmatch == writer_proxies.len() {
+                        debug!("No matching writer found to unmatch for GUID: {:?}", writer_guid);
+                    } else {
+                        log::error!(
+                            "This is abnormal behavior, this reader had {:?} writer proxy of same guid",
+                            len_before_unmatch - writer_proxies.len()
+                        );
                     }
-                } else if let Some(stateless_reader) =
-                    reader.as_any().downcast_ref::<StatelessReader>()
-                {
-                    if let Ok(mut remote_writer_info) =
-                        stateless_reader.remote_writer_infos().lock()
-                    {
-                        let len_before_unmatch = remote_writer_info.len();
-                        debug!(
-                            "Before unmatching with writer, this reader had {:?} matched writer",
-                            len_before_unmatch
+                }
+            } else if let Some(stateless_reader) = reader.as_any().downcast_ref::<StatelessReader>()
+            {
+                if let Ok(mut remote_writer_info) = stateless_reader.remote_writer_infos().lock() {
+                    let len_before_unmatch = remote_writer_info.len();
+                    debug!(
+                        "Before unmatching with writer, this reader had {:?} matched writer",
+                        len_before_unmatch
+                    );
+
+                    remote_writer_info.retain(|info| info.remote_writer_guid() != writer_guid);
+
+                    if len_before_unmatch == remote_writer_info.len() + 1 {
+                        stateless_reader.update_subscription_matched_status(
+                            -1,
+                            InstanceHandle::from_guid(&writer_guid),
                         );
-
-                        remote_writer_info.retain(|remote_writer_info| {
-                            remote_writer_info.remote_writer_guid() != writer_guid
-                        });
-
-                        if len_before_unmatch == remote_writer_info.len() + 1 {
-                            stateless_reader.update_subscription_matched_status(
-                                -1,
-                                InstanceHandle::from_guid(&writer_guid),
-                            );
-                            info!("Unmatched with remote writer {:?}", writer_guid);
-                            debug!(
-                                "Current number of matched writer: {:?}",
-                                remote_writer_info.len()
-                            );
-                        } else if len_before_unmatch == remote_writer_info.len() {
-                            debug!(
-                                "No matching writer found to unmatch for GUID: {:?}",
-                                writer_guid
-                            );
-                        } else {
-                            log::error!("This is abnormal behavior, this reader had {:?} writer locator of same guid", len_before_unmatch - remote_writer_info.len());
-                        }
+                        info!("Unmatched with remote writer {:?}", writer_guid);
+                        debug!("Current number of matched writer: {:?}", remote_writer_info.len());
+                    } else if len_before_unmatch == remote_writer_info.len() {
+                        debug!("No matching writer found to unmatch for GUID: {:?}", writer_guid);
+                    } else {
+                        log::error!(
+                            "This is abnormal behavior, this reader had {:?} writer locator of same guid",
+                            len_before_unmatch - remote_writer_info.len()
+                        );
                     }
                 }
             }
@@ -763,72 +719,65 @@ impl Participant {
 
     /// Iterate through all Writers in the Participant to find Writers matched with the Reader, then remove Reader Locator or Reader Proxy
     pub(crate) fn remove_unmatched_reader_from_writer(&self, reader_guid: Guid) {
-        for topic_entry in self.rtps_writer_map.iter() {
-            for writer in topic_entry.value().values() {
-                if let Some(stateful_writer) = writer.as_any().downcast_ref::<StatefulWriter>() {
-                    if let Ok(mut reader_proxies) = stateful_writer.reader_proxies().lock() {
-                        let len_before_unmatch = reader_proxies.len();
-                        debug!(
-                            "Before unmatching with reader, this writer had {:?} matched readers",
-                            len_before_unmatch
+        for writer in self.rtps_writer_store.iter_all() {
+            if let Some(stateful_writer) = writer.as_any().downcast_ref::<StatefulWriter>() {
+                if let Ok(mut reader_proxies) = stateful_writer.reader_proxies().lock() {
+                    let len_before_unmatch = reader_proxies.len();
+                    debug!(
+                        "Before unmatching with reader, this writer had {:?} matched readers",
+                        len_before_unmatch
+                    );
+
+                    reader_proxies
+                        .retain(|reader_proxy| reader_proxy.remote_reader_guid() != reader_guid);
+
+                    if len_before_unmatch == reader_proxies.len() + 1 {
+                        stateful_writer.update_publication_matched_status(
+                            -1,
+                            InstanceHandle::from_guid(&reader_guid),
                         );
-
-                        reader_proxies.retain(|reader_proxy| {
-                            reader_proxy.remote_reader_guid() != reader_guid
-                        });
-
-                        if len_before_unmatch == reader_proxies.len() + 1 {
-                            stateful_writer.update_publication_matched_status(
-                                -1,
-                                InstanceHandle::from_guid(&reader_guid),
-                            );
-                            info!("Unmatched with remote reader {:?}", reader_guid);
-                            debug!("Current number of matched reader: {:?}", reader_proxies.len());
-                        } else if len_before_unmatch == reader_proxies.len() {
-                            debug!(
-                                "No matching reader found to unmatch for GUID: {:?}",
-                                reader_guid
-                            );
-                        } else {
-                            log::error!("This is abnormal behavior, this writer had {:?} reader proxy of same guid", len_before_unmatch - reader_proxies.len());
-                        }
+                        info!("Unmatched with remote reader {:?}", reader_guid);
+                        debug!("Current number of matched reader: {:?}", reader_proxies.len());
+                    } else if len_before_unmatch == reader_proxies.len() {
+                        debug!("No matching reader found to unmatch for GUID: {:?}", reader_guid);
+                    } else {
+                        log::error!(
+                            "This is abnormal behavior, this writer had {:?} reader proxy of same guid",
+                            len_before_unmatch - reader_proxies.len()
+                        );
                     }
-                } else if let Some(stateless_writer) =
-                    writer.as_any().downcast_ref::<StatelessWriter>()
-                {
-                    if let Ok(mut reader_locator) = stateless_writer.reader_locator().lock() {
-                        let len_before_unmatch = reader_locator.len();
-                        debug!(
-                            "Before unmatching with reader, this writer had {:?} matched readers",
-                            len_before_unmatch
+                }
+            } else if let Some(stateless_writer) = writer.as_any().downcast_ref::<StatelessWriter>()
+            {
+                if let Ok(mut reader_locator) = stateless_writer.reader_locator().lock() {
+                    let len_before_unmatch = reader_locator.len();
+                    debug!(
+                        "Before unmatching with reader, this writer had {:?} matched readers",
+                        len_before_unmatch
+                    );
+
+                    let matching_count = reader_locator
+                        .iter()
+                        .filter(|locator| {
+                            locator.guid_prefix() == reader_guid.prefix()
+                                && locator.remote_entity_id() == reader_guid.entity_id()
+                        })
+                        .count();
+
+                    reader_locator.retain(|locator| {
+                        locator.guid_prefix() != reader_guid.prefix()
+                            || locator.remote_entity_id() != reader_guid.entity_id()
+                    });
+
+                    if matching_count > 0 {
+                        stateless_writer.update_publication_matched_status(
+                            -1,
+                            InstanceHandle::from_guid(&reader_guid),
                         );
-
-                        let matching_count = reader_locator
-                            .iter()
-                            .filter(|locator| {
-                                locator.guid_prefix() == reader_guid.prefix()
-                                    && locator.remote_entity_id() == reader_guid.entity_id()
-                            })
-                            .count();
-
-                        reader_locator.retain(|locator| {
-                            locator.guid_prefix() != reader_guid.prefix()
-                                || locator.remote_entity_id() != reader_guid.entity_id()
-                        });
-
-                        if matching_count > 0 {
-                            stateless_writer.update_publication_matched_status(
-                                -1,
-                                InstanceHandle::from_guid(&reader_guid),
-                            );
-                            info!("Unmatched with remote reader {:?}", reader_guid);
-                            debug!("Current number of matched reader: {:?}", reader_locator.len());
-                        } else if len_before_unmatch == reader_locator.len() {
-                            debug!(
-                                "No matching reader found to unmatch for GUID: {:?}",
-                                reader_guid
-                            );
-                        }
+                        info!("Unmatched with remote reader {:?}", reader_guid);
+                        debug!("Current number of matched reader: {:?}", reader_locator.len());
+                    } else if len_before_unmatch == reader_locator.len() {
+                        debug!("No matching reader found to unmatch for GUID: {:?}", reader_guid);
                     }
                 }
             }
@@ -863,34 +812,28 @@ impl Participant {
     ) -> RtpsResult<Vec<Arc<dyn Reader + Send + Sync>>> {
         let mut matched_readers: Vec<Arc<dyn Reader + Send + Sync>> = Vec::new();
 
-        for topic_entry in self.rtps_reader_map.iter() {
-            for reader in topic_entry.value().values() {
-                if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
-                    let writer_proxies_arc = stateful_reader.writer_proxies();
-                    let writer_proxies = writer_proxies_arc.lock().map_err(|_e| {
-                        RtpsError::new(
-                            RtpsErrorCode::LockError,
-                            "Failed to acquire writer proxy lock",
-                        )
-                    })?;
+        for reader in self.rtps_reader_store.iter_all() {
+            if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
+                let writer_proxies_arc = stateful_reader.writer_proxies();
+                let writer_proxies = writer_proxies_arc.lock().map_err(|_e| {
+                    RtpsError::new(RtpsErrorCode::LockError, "Failed to acquire writer proxy lock")
+                })?;
 
-                    if writer_proxies.iter().any(|wp| wp.remote_writer_guid() == writer_guid) {
-                        matched_readers.push(reader.clone());
-                    }
-                } else if let Some(stateless_reader) =
-                    reader.as_any().downcast_ref::<StatelessReader>()
-                {
-                    let remote_writer_infos_arc = stateless_reader.remote_writer_infos();
-                    let remote_writer_infos = remote_writer_infos_arc.lock().map_err(|e| {
-                        RtpsError::new(
-                            RtpsErrorCode::LockError,
-                            format!("Failed to acquire writer locator lock: {:?}", e),
-                        )
-                    })?;
+                if writer_proxies.iter().any(|wp| wp.remote_writer_guid() == writer_guid) {
+                    matched_readers.push(reader.clone());
+                }
+            } else if let Some(stateless_reader) = reader.as_any().downcast_ref::<StatelessReader>()
+            {
+                let remote_writer_infos_arc = stateless_reader.remote_writer_infos();
+                let remote_writer_infos = remote_writer_infos_arc.lock().map_err(|e| {
+                    RtpsError::new(
+                        RtpsErrorCode::LockError,
+                        format!("Failed to acquire writer locator lock: {:?}", e),
+                    )
+                })?;
 
-                    if remote_writer_infos.iter().any(|w| w.remote_writer_guid() == writer_guid) {
-                        matched_readers.push(reader.clone());
-                    }
+                if remote_writer_infos.iter().any(|w| w.remote_writer_guid() == writer_guid) {
+                    matched_readers.push(reader.clone());
                 }
             }
         }
@@ -902,11 +845,9 @@ impl Participant {
     /// Later changed to send Data(p[UD]) only once
     pub(crate) fn send_termination_message_on_shutdown(&self) -> RtpsResult<()> {
         // Send Data(r[UD]) messages
-        for topic_entry in self.rtps_reader_map.iter() {
-            for reader in topic_entry.value().values() {
-                let subscription_builtin_topic_data = if let Some(stateful_reader) =
-                    reader.as_any().downcast_ref::<StatefulReader>()
-                {
+        for reader in self.rtps_reader_store.iter_all() {
+            let subscription_builtin_topic_data =
+                if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
                     Some(stateful_reader.subscription_builtin_topic_data()?)
                 } else {
                     reader.as_any().downcast_ref::<StatelessReader>().and_then(|stateless_reader| {
@@ -914,41 +855,38 @@ impl Participant {
                     })
                 };
 
-                let payload = subscription_builtin_topic_data.unwrap().to_serialized_data();
-                let a_cache_change = self.sedp_builtin_subscriptions_writer().new_change(
-                    ChangeKind::NotAliveDisposedUnregistered,
-                    payload,
-                    InstanceHandle::from_guid(&reader.guid()),
-                    Some(RtpsTime::now()),
-                );
+            let payload = subscription_builtin_topic_data.unwrap().to_serialized_data();
+            let a_cache_change = self.sedp_builtin_subscriptions_writer().new_change(
+                ChangeKind::NotAliveDisposedUnregistered,
+                payload,
+                InstanceHandle::from_guid(&reader.guid()),
+                Some(RtpsTime::now()),
+            );
 
-                let handler = SendingHandler::get_instance(Arc::new(self.clone()), None, None);
-                if let Some(sending_task) = handler.get_sending_task() {
-                    // Send messages synchronously without using event loop
-                    if let Ok(sending_task_guard) = sending_task.lock() {
-                        // let join_handle = sending_task_guard.create_worker_thread(MessageType::SedpTerminateEndpoint(
-                        //     self.sedp_builtin_subscriptions_writer().guid(),
-                        //     Arc::new(a_cache_change),
-                        // ));
+            let handler = SendingHandler::get_instance(Arc::new(self.clone()), None, None);
+            if let Some(sending_task) = handler.get_sending_task() {
+                // Send messages synchronously without using event loop
+                if let Ok(sending_task_guard) = sending_task.lock() {
+                    // let join_handle = sending_task_guard.create_worker_thread(MessageType::SedpTerminateEndpoint(
+                    //     self.sedp_builtin_subscriptions_writer().guid(),
+                    //     Arc::new(a_cache_change),
+                    // ));
 
-                        // if let Err(e) = join_handle.join() {
-                        //     log::error!("Failed to join sending task thread for SEDP Terminate endpoint task: {:?}", e);
-                        // }
-                        sending_task_guard.sync_sedp_terminate_endpoint_task(
-                            self.sedp_builtin_subscriptions_writer().guid(),
-                            Arc::new(a_cache_change),
-                        );
-                    }
+                    // if let Err(e) = join_handle.join() {
+                    //     log::error!("Failed to join sending task thread for SEDP Terminate endpoint task: {:?}", e);
+                    // }
+                    sending_task_guard.sync_sedp_terminate_endpoint_task(
+                        self.sedp_builtin_subscriptions_writer().guid(),
+                        Arc::new(a_cache_change),
+                    );
                 }
             }
         }
 
         // Send Data(w[UD]) messages
-        for topic_entry in self.rtps_writer_map.iter() {
-            for writer in topic_entry.value().values() {
-                let publication_builtin_topic_data = if let Some(stateful_writer) =
-                    writer.as_any().downcast_ref::<StatefulWriter>()
-                {
+        for writer in self.rtps_writer_store.iter_all() {
+            let publication_builtin_topic_data =
+                if let Some(stateful_writer) = writer.as_any().downcast_ref::<StatefulWriter>() {
                     Some(stateful_writer.publication_builtin_topic_data()?)
                 } else {
                     writer.as_any().downcast_ref::<StatelessWriter>().and_then(|stateless_writer| {
@@ -956,34 +894,33 @@ impl Participant {
                     })
                 };
 
-                let payload = publication_builtin_topic_data.unwrap().to_serialized_data();
-                let a_cache_change = self.sedp_builtin_publications_writer().new_change(
-                    ChangeKind::NotAliveDisposedUnregistered,
-                    payload,
-                    InstanceHandle::from_guid(&writer.guid()),
-                    Some(RtpsTime::now()),
-                );
+            let payload = publication_builtin_topic_data.unwrap().to_serialized_data();
+            let a_cache_change = self.sedp_builtin_publications_writer().new_change(
+                ChangeKind::NotAliveDisposedUnregistered,
+                payload,
+                InstanceHandle::from_guid(&writer.guid()),
+                Some(RtpsTime::now()),
+            );
 
-                let handler = SendingHandler::get_instance(Arc::new(self.clone()), None, None);
-                if let Some(sending_task) = handler.get_sending_task() {
-                    // Send messages synchronously without using event loop
-                    if let Ok(sending_task_guard) = sending_task.lock() {
-                        // let join_handle = sending_task_guard.create_worker_thread(
-                        //     MessageType::SedpTerminateEndpoint(
-                        //         self.sedp_builtin_publications_writer().guid(),
-                        //         Arc::new(a_cache_change),
-                        //     ),
-                        // );
+            let handler = SendingHandler::get_instance(Arc::new(self.clone()), None, None);
+            if let Some(sending_task) = handler.get_sending_task() {
+                // Send messages synchronously without using event loop
+                if let Ok(sending_task_guard) = sending_task.lock() {
+                    // let join_handle = sending_task_guard.create_worker_thread(
+                    //     MessageType::SedpTerminateEndpoint(
+                    //         self.sedp_builtin_publications_writer().guid(),
+                    //         Arc::new(a_cache_change),
+                    //     ),
+                    // );
 
-                        // if let Err(e) = join_handle.join() {
-                        //     log::error!("Failed to join sending task thread for SEDP Terminate endpoint task: {:?}", e);
-                        // }
+                    // if let Err(e) = join_handle.join() {
+                    //     log::error!("Failed to join sending task thread for SEDP Terminate endpoint task: {:?}", e);
+                    // }
 
-                        sending_task_guard.sync_sedp_terminate_endpoint_task(
-                            self.sedp_builtin_publications_writer().guid(),
-                            Arc::new(a_cache_change),
-                        );
-                    }
+                    sending_task_guard.sync_sedp_terminate_endpoint_task(
+                        self.sedp_builtin_publications_writer().guid(),
+                        Arc::new(a_cache_change),
+                    );
                 }
             }
         }
@@ -1031,143 +968,129 @@ impl Participant {
         &self,
         terminated_participant_guid_prefix: GuidPrefix,
     ) {
-        for topic_entry in self.rtps_reader_map.iter() {
-            for reader in topic_entry.value().values() {
-                if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
-                    if let Ok(mut writer_proxies) = stateful_reader.writer_proxies().lock() {
-                        debug!(
-                            "Before unmatching with writer, this reader had {:?} matched writer",
-                            writer_proxies.len()
-                        );
-                        for writer_proxy in writer_proxies.iter() {
-                            if writer_proxy.remote_writer_guid().prefix()
-                                == terminated_participant_guid_prefix
-                            {
-                                stateful_reader.update_subscription_matched_status(
-                                    -1,
-                                    InstanceHandle::from_guid(&writer_proxy.remote_writer_guid()),
-                                );
-                            }
-                        }
-                        writer_proxies.retain(|writer_proxy| {
-                            writer_proxy.remote_writer_guid().prefix()
-                                != terminated_participant_guid_prefix
-                        });
-
-                        debug!(
-                            "Removed all unmatched remote writers from participant: {:?}",
-                            terminated_participant_guid_prefix
-                        );
-                        debug!("Current number of matched writer: {:?}", writer_proxies.len());
-                    } else if let Some(stateless_reader) =
-                        reader.as_any().downcast_ref::<StatelessReader>()
-                    {
-                        if let Ok(mut remote_writer_info) =
-                            stateless_reader.remote_writer_infos().lock()
+        for reader in self.rtps_reader_store.iter_all() {
+            if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
+                if let Ok(mut writer_proxies) = stateful_reader.writer_proxies().lock() {
+                    debug!(
+                        "Before unmatching with writer, this reader had {:?} matched writer",
+                        writer_proxies.len()
+                    );
+                    for writer_proxy in writer_proxies.iter() {
+                        if writer_proxy.remote_writer_guid().prefix()
+                            == terminated_participant_guid_prefix
                         {
-                            debug!(
-                            "Before unmatching with writer, this reader had {:?} matched writer",
-                            remote_writer_info.len()
-                        );
-                            for remote_writer_info in remote_writer_info.iter() {
-                                if remote_writer_info.remote_writer_guid().prefix()
-                                    == terminated_participant_guid_prefix
-                                {
-                                    stateless_reader.update_subscription_matched_status(
-                                        -1,
-                                        InstanceHandle::from_guid(
-                                            &remote_writer_info.remote_writer_guid(),
-                                        ),
-                                    );
-                                }
-                            }
-                            remote_writer_info.retain(|remote_writer_info| {
-                                remote_writer_info.remote_writer_guid().prefix()
-                                    != terminated_participant_guid_prefix
-                            });
-
-                            debug!(
-                                "Removed all unmatched remote writers from participant: {:?}",
-                                terminated_participant_guid_prefix
-                            );
-                            debug!(
-                                "Current number of matched writer: {:?}",
-                                remote_writer_info.len()
+                            stateful_reader.update_subscription_matched_status(
+                                -1,
+                                InstanceHandle::from_guid(&writer_proxy.remote_writer_guid()),
                             );
                         }
-
-                        stateless_reader
-                            .update_subscription_matched_status(-1, InstanceHandle::NIL);
                     }
+                    writer_proxies.retain(|writer_proxy| {
+                        writer_proxy.remote_writer_guid().prefix()
+                            != terminated_participant_guid_prefix
+                    });
+
+                    debug!(
+                        "Removed all unmatched remote writers from participant: {:?}",
+                        terminated_participant_guid_prefix
+                    );
+                    debug!("Current number of matched writer: {:?}", writer_proxies.len());
                 }
+            } else if let Some(stateless_reader) = reader.as_any().downcast_ref::<StatelessReader>()
+            {
+                if let Ok(mut remote_writer_info) = stateless_reader.remote_writer_infos().lock() {
+                    debug!(
+                        "Before unmatching with writer, this reader had {:?} matched writer",
+                        remote_writer_info.len()
+                    );
+                    for remote_writer_info in remote_writer_info.iter() {
+                        if remote_writer_info.remote_writer_guid().prefix()
+                            == terminated_participant_guid_prefix
+                        {
+                            stateless_reader.update_subscription_matched_status(
+                                -1,
+                                InstanceHandle::from_guid(&remote_writer_info.remote_writer_guid()),
+                            );
+                        }
+                    }
+                    remote_writer_info.retain(|remote_writer_info| {
+                        remote_writer_info.remote_writer_guid().prefix()
+                            != terminated_participant_guid_prefix
+                    });
+
+                    debug!(
+                        "Removed all unmatched remote writers from participant: {:?}",
+                        terminated_participant_guid_prefix
+                    );
+                    debug!("Current number of matched writer: {:?}", remote_writer_info.len());
+                }
+
+                stateless_reader.update_subscription_matched_status(-1, InstanceHandle::NIL);
             }
         }
 
-        for topic_entry in self.rtps_writer_map.iter() {
-            for writer in topic_entry.value().values() {
-                if let Some(stateful_writer) = writer.as_any().downcast_ref::<StatefulWriter>() {
-                    if let Ok(mut reader_proxies) = stateful_writer.reader_proxies().lock() {
-                        debug!(
-                            "Before unmatching with reader, this writer had {:?} matched readers",
-                            reader_proxies.len()
-                        );
-                        for reader_proxy in reader_proxies.iter() {
-                            if reader_proxy.remote_reader_guid().prefix()
-                                == terminated_participant_guid_prefix
-                            {
-                                stateful_writer.update_publication_matched_status(
-                                    -1,
-                                    InstanceHandle::from_guid(&reader_proxy.remote_reader_guid()),
-                                );
-                            }
-                        }
-                        reader_proxies.retain(|reader_proxy| {
-                            reader_proxy.remote_reader_guid().prefix()
-                                != terminated_participant_guid_prefix
-                        });
-                        debug!(
-                            "Removed all unmatched reader proxies from unmatched participant: {:?}",
-                            terminated_participant_guid_prefix
-                        );
-                        debug!("Current number of matched reader: {:?}", reader_proxies.len());
-                    }
-                } else if let Some(stateless_writer) =
-                    writer.as_any().downcast_ref::<StatelessWriter>()
-                {
-                    if let Ok(mut reader_locator) = stateless_writer.reader_locator().lock() {
-                        debug!(
-                            "Before unmatching with reader, this writer had {:?} matched readers",
-                            reader_locator.len()
-                        );
-
-                        // Collect unique entity IDs to avoid duplicate callbacks
-                        let unique_entity_ids: std::collections::HashSet<_> = reader_locator
-                            .iter()
-                            .filter(|locator| {
-                                locator.guid_prefix() == terminated_participant_guid_prefix
-                            })
-                            .map(|locator| locator.remote_entity_id())
-                            .collect();
-
-                        for entity_id in unique_entity_ids {
-                            stateless_writer.update_publication_matched_status(
+        for writer in self.rtps_writer_store.iter_all() {
+            if let Some(stateful_writer) = writer.as_any().downcast_ref::<StatefulWriter>() {
+                if let Ok(mut reader_proxies) = stateful_writer.reader_proxies().lock() {
+                    debug!(
+                        "Before unmatching with reader, this writer had {:?} matched readers",
+                        reader_proxies.len()
+                    );
+                    for reader_proxy in reader_proxies.iter() {
+                        if reader_proxy.remote_reader_guid().prefix()
+                            == terminated_participant_guid_prefix
+                        {
+                            stateful_writer.update_publication_matched_status(
                                 -1,
-                                InstanceHandle::from_guid(&Guid::new(
-                                    terminated_participant_guid_prefix,
-                                    entity_id,
-                                )),
+                                InstanceHandle::from_guid(&reader_proxy.remote_reader_guid()),
                             );
                         }
-
-                        reader_locator.retain(|locator| {
-                            locator.guid_prefix() != terminated_participant_guid_prefix
-                        });
-                        debug!(
-                            "Removed all unmatched reader locators from participant: {:?}",
-                            terminated_participant_guid_prefix
-                        );
-                        debug!("Current number of matched reader: {:?}", reader_locator.len());
                     }
+                    reader_proxies.retain(|reader_proxy| {
+                        reader_proxy.remote_reader_guid().prefix()
+                            != terminated_participant_guid_prefix
+                    });
+                    debug!(
+                        "Removed all unmatched reader proxies from unmatched participant: {:?}",
+                        terminated_participant_guid_prefix
+                    );
+                    debug!("Current number of matched reader: {:?}", reader_proxies.len());
+                }
+            } else if let Some(stateless_writer) = writer.as_any().downcast_ref::<StatelessWriter>()
+            {
+                if let Ok(mut reader_locator) = stateless_writer.reader_locator().lock() {
+                    debug!(
+                        "Before unmatching with reader, this writer had {:?} matched readers",
+                        reader_locator.len()
+                    );
+
+                    // Collect unique entity IDs to avoid duplicate callbacks
+                    let unique_entity_ids: std::collections::HashSet<_> = reader_locator
+                        .iter()
+                        .filter(|locator| {
+                            locator.guid_prefix() == terminated_participant_guid_prefix
+                        })
+                        .map(|locator| locator.remote_entity_id())
+                        .collect();
+
+                    for entity_id in unique_entity_ids {
+                        stateless_writer.update_publication_matched_status(
+                            -1,
+                            InstanceHandle::from_guid(&Guid::new(
+                                terminated_participant_guid_prefix,
+                                entity_id,
+                            )),
+                        );
+                    }
+
+                    reader_locator.retain(|locator| {
+                        locator.guid_prefix() != terminated_participant_guid_prefix
+                    });
+                    debug!(
+                        "Removed all unmatched reader locators from participant: {:?}",
+                        terminated_participant_guid_prefix
+                    );
+                    debug!("Current number of matched reader: {:?}", reader_locator.len());
                 }
             }
         }
@@ -1178,22 +1101,20 @@ impl Participant {
         entity_id: EntityId,
         sequence_number: SequenceNumber,
     ) {
-        for topic_entry in self.rtps_reader_map.iter() {
-            for reader in topic_entry.value().values() {
-                if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
-                    match stateful_reader.writer_proxies().lock() {
-                        Ok(mut writer_proxies) => {
-                            for writer_proxy in writer_proxies.iter_mut() {
-                                if writer_proxy.remote_writer_guid().entity_id() == entity_id {
-                                    writer_proxy.remove_change_from_writer_by_sn(sequence_number);
-                                }
+        for reader in self.rtps_reader_store.iter_all() {
+            if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
+                match stateful_reader.writer_proxies().lock() {
+                    Ok(mut writer_proxies) => {
+                        for writer_proxy in writer_proxies.iter_mut() {
+                            if writer_proxy.remote_writer_guid().entity_id() == entity_id {
+                                writer_proxy.remove_change_from_writer_by_sn(sequence_number);
                             }
                         }
-                        Err(e) => {
-                            log::error!("Failed to acquire writer_proxies lock: {}", e);
-                        }
-                    };
-                }
+                    }
+                    Err(e) => {
+                        log::error!("Failed to acquire writer_proxies lock: {}", e);
+                    }
+                };
             }
         }
     }
