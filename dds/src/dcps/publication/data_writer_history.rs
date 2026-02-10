@@ -311,6 +311,18 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
         self.rtps_writer = rtps_writer;
     }
 
+    pub(crate) fn register_instance(&mut self, instance_handle: InstanceHandle) -> DdsResult<()> {
+        if self.is_max_instances_exceeded(instance_handle)? {
+            return Err(DdsError::OutOfResources);
+        }
+
+        let mut instance_map =
+            self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        instance_map.entry(instance_handle).or_insert_with(Vec::new);
+
+        Ok(())
+    }
+
     // Removes the oldest change from all instances in reliable mode.
     fn remove_oldest_change_of_all_reliable(&mut self) -> DdsResult<Arc<CacheChange>> {
         // Get removable changes based on instance conditions

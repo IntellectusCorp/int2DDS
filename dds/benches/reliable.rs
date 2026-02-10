@@ -1,3 +1,5 @@
+use std::hint::black_box;
+
 use criterion::{criterion_group, criterion_main, Criterion};
 use int2dds::{
     common::instance_handle::InstanceHandle,
@@ -121,22 +123,16 @@ fn reliable_pubsub_roundtrip(c: &mut Criterion) {
             // write
             data_writer.write(&data, InstanceHandle::NIL).unwrap();
 
-            // wait for data
-            let mut reader_condition = data_reader.get_statuscondition().unwrap().clone();
-            reader_condition.set_enabled_statuses(StatusMask::DATA_AVAILABLE).unwrap();
-            let wait_set = WaitSet::new();
-            wait_set.attach_condition(reader_condition).unwrap();
-            wait_set.wait(Duration::infinite()).unwrap();
-
-            // take the data
-            if let Ok(samples) = data_reader.take(
-                1,
-                &[SampleStateKind::ANY_SAMPLE_STATE],
-                &[ViewStateKind::ANY_VIEW_STATE],
-                &[InstanceStateKind::ANY_INSTANCE_STATE],
-            ) {
-                for sample in samples.iter() {
-                    sample.data().unwrap();
+            loop {
+                if let Ok(samples) = data_reader.take(
+                    1,
+                    &[SampleStateKind::ANY_SAMPLE_STATE],
+                    &[ViewStateKind::ANY_VIEW_STATE],
+                    &[InstanceStateKind::ANY_INSTANCE_STATE],
+                ) {
+                    if let Some(sample) = samples.first() {
+                        return black_box(sample.data().unwrap());
+                    }
                 }
             }
         });
