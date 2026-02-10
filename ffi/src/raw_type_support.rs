@@ -15,7 +15,7 @@ use int2dds::{
     rtps::common::types::SerializedData,
     serialize::cdr::ExtensibilityKind,
     topic::sql::ast::Parameter,
-    topic::type_support::TypeSupport,
+    topic::type_support::{SerializationFormat, TypeSupport},
 };
 
 /// Lightweight TypeSupport for raw bytes FFI path.
@@ -52,26 +52,18 @@ impl TypeSupport for RawTypeSupport {
         false
     }
 
-    fn serialize(&self, _data: &dyn Any) -> DdsResult<SerializedData> {
-        Err(DdsError::Error("RawTypeSupport: use write_serialized() instead".to_string()))
-    }
-
-    fn deserialize(&self, _data: &[u8]) -> DdsResult<Box<dyn Any>> {
-        Err(DdsError::Error("RawTypeSupport: use take_serialized() instead".to_string()))
-    }
-
-    fn serialize_with_format(
+    fn serialize(
         &self,
         _data: &dyn Any,
-        _format: &int2dds::topic::type_support::SerializationFormat,
+        _format: Option<&SerializationFormat>,
     ) -> DdsResult<SerializedData> {
         Err(DdsError::Error("RawTypeSupport: use write_serialized() instead".to_string()))
     }
 
-    fn deserialize_with_format(
+    fn deserialize(
         &self,
         _data: &[u8],
-        _format: &int2dds::topic::type_support::SerializationFormat,
+        _format: Option<&SerializationFormat>,
     ) -> DdsResult<Box<dyn Any>> {
         Err(DdsError::Error("RawTypeSupport: use take_serialized() instead".to_string()))
     }
