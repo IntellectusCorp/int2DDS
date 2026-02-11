@@ -52,29 +52,31 @@ static uint64_t get_monotonic_ns(void) {
 
 /* ====== CDR Layout Offsets (FINAL, XCDR2 LE) ======
  *
- * PerformanceTestData:
+ * PerformanceTestData (APPENDABLE):
  *   [0..3]   encapsulation header
- *   [4..11]  seq_num (u64)
- *   [12..19] timestamp (u64)
- *   [20..23] data.length (u32)
- *   [24..]   data bytes
+ *   [4..7]   DHEADER (struct size)
+ *   [8..15]  seq_num (u64)
+ *   [16..23] timestamp (u64)
+ *   [24..27] data.length (u32)
+ *   [28..]   data bytes
  *
- * LatencyTestData:
+ * LatencyTestData (APPENDABLE):
  *   [0..3]   encapsulation header
- *   [4..11]  seq_num (u64)
- *   [12..19] send_timestamp (u64)
- *   [20..27] echo_timestamp (u64)
- *   [28..31] data.length (u32)
- *   [32..]   data bytes
+ *   [4..7]   DHEADER (struct size)
+ *   [8..15]  seq_num (u64)
+ *   [16..23] send_timestamp (u64)
+ *   [24..31] echo_timestamp (u64)
+ *   [32..35] data.length (u32)
+ *   [36..]   data bytes
  */
-#define PERFDATA_CDR_SEQNUM_OFFSET     4
-#define PERFDATA_CDR_TIMESTAMP_OFFSET  12
-#define PERFDATA_CDR_DATALEN_OFFSET    20
+#define PERFDATA_CDR_SEQNUM_OFFSET     8
+#define PERFDATA_CDR_TIMESTAMP_OFFSET  16
+#define PERFDATA_CDR_DATALEN_OFFSET    24
 
-#define LATDATA_CDR_SEQNUM_OFFSET      4
-#define LATDATA_CDR_SEND_TS_OFFSET     12
-#define LATDATA_CDR_ECHO_TS_OFFSET     20
-#define LATDATA_CDR_DATALEN_OFFSET     28
+#define LATDATA_CDR_SEQNUM_OFFSET      8
+#define LATDATA_CDR_SEND_TS_OFFSET     16
+#define LATDATA_CDR_ECHO_TS_OFFSET     24
+#define LATDATA_CDR_DATALEN_OFFSET     32
 
 /* ====== Timing ====== */
 
@@ -628,15 +630,15 @@ static void run_throughput_subscriber(const subscriber_args_t *args) {
     ret = int2dds_create_subscriber(participant, &subscriber);
     if (ret != INT2DDS_RET_OK) { fprintf(stderr, "Failed to create subscriber: %d\n", ret); goto cleanup; }
 
-    ret = int2dds_create_topic(participant, "throughput_test_topic", "PerformanceTestData",
-                                0 /* FINAL */, NULL, &topic);
+    ret = int2dds_create_topic(participant, "throughput_test_topic", "ThroughputTestData",
+                                1 /* APPENDABLE */, NULL, &topic);
     if (ret != INT2DDS_RET_OK) { fprintf(stderr, "Failed to create topic: %d\n", ret); goto cleanup; }
 
     ret = int2dds_datareader_qos_create_default(&qos);
     if (ret != INT2DDS_RET_OK) goto cleanup;
     int2dds_datareader_qos_set_reliability(qos,
         is_reliable(args->reliability) ? INT2DDS_QOS_RELIABILITY_RELIABLE : INT2DDS_QOS_RELIABILITY_BEST_EFFORT);
-    int2dds_datareader_qos_set_history(qos, INT2DDS_QOS_HISTORY_KEEP_LAST, 100);
+    int2dds_datareader_qos_set_history(qos, INT2DDS_QOS_HISTORY_KEEP_LAST, 1000);
 
     Int2DdsDataReaderListener rd_listener = {
         .on_data_available = on_throughput_data_available,
@@ -833,11 +835,11 @@ static void run_latency_subscriber(const subscriber_args_t *args) {
     if (ret != INT2DDS_RET_OK) { fprintf(stderr, "Failed to create publisher: %d\n", ret); goto cleanup; }
 
     ret = int2dds_create_topic(participant, "latency_test_topic", "LatencyTestData",
-                                0 /* FINAL */, NULL, &topic);
+                                1 /* APPENDABLE */, NULL, &topic);
     if (ret != INT2DDS_RET_OK) { fprintf(stderr, "Failed to create topic: %d\n", ret); goto cleanup; }
 
     ret = int2dds_create_topic(participant, "latency_test_topic_echo", "LatencyTestData",
-                                0 /* FINAL */, NULL, &echo_topic);
+                                1 /* APPENDABLE */, NULL, &echo_topic);
     if (ret != INT2DDS_RET_OK) { fprintf(stderr, "Failed to create echo topic: %d\n", ret); goto cleanup; }
 
     /* Reader QoS */
@@ -852,7 +854,7 @@ static void run_latency_subscriber(const subscriber_args_t *args) {
     int2dds_datawriter_qos_set_reliability(writer_qos,
         is_reliable(args->reliability) ? INT2DDS_QOS_RELIABILITY_RELIABLE : INT2DDS_QOS_RELIABILITY_BEST_EFFORT,
         100000000);
-    int2dds_datawriter_qos_set_history(writer_qos, INT2DDS_QOS_HISTORY_KEEP_LAST, 100);
+    int2dds_datawriter_qos_set_history(writer_qos, INT2DDS_QOS_HISTORY_KEEP_LAST, 1000);
 
     /* Create echo writer first (needed by listener callback) */
     ret = int2dds_create_datawriter(publisher, echo_topic, writer_qos, &echo_writer);
@@ -961,15 +963,15 @@ static void run_local_latency_subscriber(const subscriber_args_t *args) {
     ret = int2dds_create_subscriber(participant, &subscriber);
     if (ret != INT2DDS_RET_OK) { fprintf(stderr, "Failed to create subscriber: %d\n", ret); goto cleanup; }
 
-    ret = int2dds_create_topic(participant, "local_latency_test_topic", "PerformanceTestData",
-                                0 /* FINAL */, NULL, &topic);
+    ret = int2dds_create_topic(participant, "local_latency_test_topic", "ThroughputTestData",
+                                1 /* APPENDABLE */, NULL, &topic);
     if (ret != INT2DDS_RET_OK) { fprintf(stderr, "Failed to create topic: %d\n", ret); goto cleanup; }
 
     ret = int2dds_datareader_qos_create_default(&qos);
     if (ret != INT2DDS_RET_OK) goto cleanup;
     int2dds_datareader_qos_set_reliability(qos,
         is_reliable(args->reliability) ? INT2DDS_QOS_RELIABILITY_RELIABLE : INT2DDS_QOS_RELIABILITY_BEST_EFFORT);
-    int2dds_datareader_qos_set_history(qos, INT2DDS_QOS_HISTORY_KEEP_LAST, 100);
+    int2dds_datareader_qos_set_history(qos, INT2DDS_QOS_HISTORY_KEEP_LAST, 1000);
 
     Int2DdsDataReaderListener rd_listener = {
         .on_data_available = on_local_latency_data_available,
