@@ -13,7 +13,7 @@
 
 /* ========================================================================
  * Type: PerformanceTestData
- * Extensibility: FINAL
+ * Extensibility: APPENDABLE
  * ======================================================================== */
 
 typedef struct PerformanceTestData {
@@ -29,13 +29,16 @@ static inline size_t PerformanceTestData_serialize_cdr(
 {
     Int2DdsCdrWriter w;
     int2dds_cdr_writer_init(&w, buf, capacity, true, true);
-    int2dds_cdr_write_encapsulation(&w, INT2DDS_CDR_FINAL);
+    int2dds_cdr_write_encapsulation(&w, INT2DDS_CDR_APPENDABLE);
+    size_t dh_token;
+    int2dds_cdr_write_dheader_begin(&w, &dh_token);
     int2dds_cdr_write_u64(&w, val->seq_num);
     int2dds_cdr_write_u64(&w, val->timestamp);
     int2dds_cdr_write_seq_header(&w, val->data.length);
     for (uint32_t _i = 0; _i < val->data.length; _i++) {
         int2dds_cdr_write_u8(&w, val->data.data[_i]);
     }
+    int2dds_cdr_write_dheader_finalize(&w, dh_token);
     return w.error == INT2DDS_CDR_OK ? int2dds_cdr_writer_size(&w) : 0;
 }
 
@@ -47,6 +50,8 @@ static inline bool PerformanceTestData_deserialize_cdr(
     Int2DdsCdrReader r;
     if (int2dds_cdr_reader_init(&r, buf, len) != INT2DDS_CDR_OK)
         return false;
+    uint32_t dh_size; size_t dh_start;
+    int2dds_cdr_read_dheader(&r, &dh_size, &dh_start);
     int2dds_cdr_read_u64(&r, &val_out->seq_num);
     int2dds_cdr_read_u64(&r, &val_out->timestamp);
     int2dds_cdr_read_seq_header(&r, &val_out->data.length);
