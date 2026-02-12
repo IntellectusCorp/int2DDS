@@ -68,11 +68,11 @@ pub trait DdsType: 'static + Send + Sync + Clone + Debug {
 
     // Convenient type-safe methods
     fn serialize(&self) -> DdsResult<SerializedData> {
-        Self::TypeSupport::default().serialize(self as &dyn Any)
+        Self::TypeSupport::default().serialize(self as &dyn Any, None)
     }
 
     fn deserialize(data: &[u8]) -> DdsResult<Self> {
-        let any_box = Self::TypeSupport::default().deserialize(data)?;
+        let any_box = Self::TypeSupport::default().deserialize(data, None)?;
         any_box
             .downcast::<Self>()
             .map(|boxed| *boxed)
@@ -94,20 +94,17 @@ pub trait TypeSupport: Send + Sync + 'static {
     fn get_field_value(&self, data: &dyn Any, field_path: &str) -> DdsResult<Parameter>;
     fn has_field(&self, field_path: &str) -> bool;
 
-    // Default serialization (CDR format)
-    fn serialize(&self, data: &dyn Any) -> DdsResult<SerializedData>;
-    fn deserialize(&self, data: &[u8]) -> DdsResult<Box<dyn Any>>;
-
-    // Format-specific serialization (CDR or XCDR)
-    fn serialize_with_format(
+    // Serialization with optional format override.
+    // When format is None, the implementation uses its own default behavior.
+    fn serialize(
         &self,
         data: &dyn Any,
-        format: &SerializationFormat,
+        format: Option<&SerializationFormat>,
     ) -> DdsResult<SerializedData>;
-    fn deserialize_with_format(
+    fn deserialize(
         &self,
         data: &[u8],
-        format: &SerializationFormat,
+        format: Option<&SerializationFormat>,
     ) -> DdsResult<Box<dyn Any>>;
 
     // Key handling
@@ -122,7 +119,7 @@ pub trait TypeSupport: Send + Sync + 'static {
         data: &dyn Any,
     ) -> DdsResult<(SerializedData, SerializedData)> {
         let key_data = self.serialize_key(data)?;
-        let full_data = self.serialize(data)?;
+        let full_data = self.serialize(data, None)?;
         Ok((key_data, full_data))
     }
 

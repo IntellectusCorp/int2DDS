@@ -10,7 +10,6 @@ use std::collections::HashMap;
 use std::ops::Add;
 use std::time::Duration;
 
-use crate::common::builtin::topic::publication_builtin_topic_data::PublicationBuiltinTopicData;
 use crate::common::instance_handle::InstanceHandle;
 use crate::rtps::common::entity_id::EntityId;
 use crate::rtps::common::guid::{Guid, GuidPrefix};
@@ -453,19 +452,9 @@ impl UserLogic {
                 let mut current_sn = reader_locator.highest_sent_change_sn();
 
                 // Collect cache changes not yet sent to the Remote Reader (Arc clone occurs)
-                while let Some(next_sn) = cache_guard
-                    .get_changes()
-                    .iter()
-                    .filter(|c| c.sequence_number() > current_sn)
-                    .map(|c| c.sequence_number())
-                    .min()
-                {
-                    if let Some(change) = cache_guard.get_change(next_sn) {
-                        changes_to_send.push(change);
-                        current_sn = next_sn;
-                    } else {
-                        break;
-                    }
+                while let Some(change) = cache_guard.next_change_after(current_sn) {
+                    current_sn = change.sequence_number();
+                    changes_to_send.push(change);
                 }
 
                 if !changes_to_send.is_empty() {
@@ -1305,34 +1294,47 @@ impl UserLogic {
         Ok(writer)
     }
 
-    fn get_remote_writer_attributes(
-        &self,
-        reader: &dyn Reader,
-        remote_writer_guid: Guid,
-    ) -> Option<PublicationBuiltinTopicData> {
-        if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
-            stateful_reader
-                .matched_writer_lookup(remote_writer_guid)
-                .map(|w| w.publication_builtin_topic_data())
-        } else if let Some(stateless_reader) = reader.as_any().downcast_ref::<StatelessReader>() {
-            stateless_reader
-                .matched_writer_lookup(remote_writer_guid)
-                .map(|w| w.publication_builtin_topic_data())
-        } else {
-            None
-        }
-    }
-
     fn apply_writer_attributes_to_change(
         &self,
         reader: Arc<dyn Reader + Send + Sync>,
         remote_writer_guid: Guid,
         cache_change: &mut CacheChange,
     ) -> RtpsResult<()> {
-        if let Some(data) = self.get_remote_writer_attributes(reader.as_ref(), remote_writer_guid) {
-            cache_change.set_ownership_strength(Some(data.ownership_strength().value));
-            cache_change.set_lifespan_duration(Some(data.lifespan().duration));
+        let ownership_strength;
+        let lifespan_duration;
+
+        if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
+            let writer_proxies = stateful_reader.writer_proxies();
+            let matched_writers = writer_proxies
+                .lock()
+                .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+            let writer_proxy = matched_writers
+                .iter()
+                .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
+                .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
+
+            // Get attributes from WriterProxy
+            ownership_strength = writer_proxy.get_ownership_strength();
+            lifespan_duration = writer_proxy.get_lifespan_duration();
+        } else if let Some(stateless_reader) = reader.as_any().downcast_ref::<StatelessReader>() {
+            let remote_writer_infos = stateless_reader.remote_writer_infos();
+            let matched_writers = remote_writer_infos
+                .lock()
+                .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+            let remote_writer_info = matched_writers
+                .iter()
+                .find(|info| info.remote_writer_guid() == remote_writer_guid)
+                .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
+
+            // Get attributes from RemoteWriterInfo
+            ownership_strength = remote_writer_info.get_ownership_strength();
+            lifespan_duration = remote_writer_info.get_lifespan_duration();
+        } else {
+            return Err(RtpsError::new(RtpsErrorCode::DowncastError, None));
         }
+
+        cache_change.set_ownership_strength(Some(ownership_strength));
+        cache_change.set_lifespan_duration(Some(lifespan_duration));
 
         // According to lifespan qos, reception timestamp is checked when source timestamp has abnormal value
         // Need to verify if it's really necessary and whether checking timestamp for each message affects performance
@@ -1539,8 +1541,9 @@ impl UnicastMessageProcessor for UserLogic {
                         let participant_guid = participant.guid();
 
                         let timer_id = format!(
-                            "hb_response_{:?}_{:?}_{:?}",
-                            reader_entity_id, remote_writer_guid, heartbeat.count
+                            "hb_{:x}_{:x}",
+                            u32::from_be_bytes(reader_entity_id.to_bytes()),
+                            u128::from_be_bytes(remote_writer_guid.to_bytes()),
                         );
 
                         if let Ok(locked_timer_handler) =
@@ -1585,7 +1588,11 @@ impl UnicastMessageProcessor for UserLogic {
 
                         writer_proxy.increase_nackfrag_count();
 
-                        let timer_id = format!("nackfrag_{:?}_{:?}", remote_writer_guid, last_sn);
+                        let timer_id = format!(
+                            "nackfrag_{:x}_{}",
+                            u128::from_be_bytes(remote_writer_guid.to_bytes()),
+                            last_sn.to_i64()
+                        );
                         if let Ok(locked_timer_handler) =
                             TimerHandler::get_instance(participant.guid().prefix()).lock()
                         {
@@ -1750,8 +1757,9 @@ impl UnicastMessageProcessor for UserLogic {
                 let participant_guid = participant.guid();
 
                 let timer_id = format!(
-                    "nack_response_{:?}_{:?}_{:?}",
-                    writer_entity_id, remote_reader_guid, acknack.count
+                    "nack_{:x}_{:x}",
+                    u32::from_be_bytes(writer_entity_id.to_bytes()),
+                    u128::from_be_bytes(remote_reader_guid.to_bytes()),
                 );
 
                 if let Ok(locked_timer_handler) =
@@ -1839,6 +1847,9 @@ impl UnicastMessageProcessor for UserLogic {
             }
         } // buffer RefMut is automatically dropped here
           // For StatefulReader case, update WriterProxy's ChangeFromWriter state
+
+        let mut ownership_strength = None;
+
         if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
             // Query buffer information from DashMap again
             if let Some(buffer_ref) = self.fragment_buffers.get(&key) {
@@ -1860,6 +1871,8 @@ impl UnicastMessageProcessor for UserLogic {
                         buffer_ref.total_fragments,
                         buffer_ref.received_fragments.clone(),
                     );
+
+                    ownership_strength = Some(writer_proxy.get_ownership_strength());
                 }
             }
         }
@@ -1878,10 +1891,6 @@ impl UnicastMessageProcessor for UserLogic {
                 let (_, mut buffer) = self.fragment_buffers.remove(&key).unwrap();
                 let assembled_payload = std::mem::take(&mut buffer.payload);
                 let serialized_data: SerializedData = Arc::<[u8]>::from(assembled_payload);
-
-                let ownership_strength = self
-                    .get_remote_writer_attributes(reader.as_ref(), remote_writer_guid)
-                    .map(|data| data.ownership_strength().value);
 
                 let mut assembled_change = CacheChange::new(
                     ChangeKind::Alive,
