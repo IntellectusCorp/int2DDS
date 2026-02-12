@@ -2,15 +2,16 @@
 #![allow(unused_variables)]
 
 use std::{
-    collections::BTreeSet,
+    cmp::max,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
-    {cmp::max, collections::BTreeMap},
 };
 
 use log::debug;
 
 use crate::{
     common::builtin::topic::publication_builtin_topic_data::PublicationBuiltinTopicData,
+    core::time::Duration,
     infrastructure::status::{StatusInfo, StatusKind},
     rtps::{
         common::{
@@ -136,6 +137,14 @@ impl WriterProxy {
 
     pub(crate) fn set_publication_builtin_topic_data(&mut self, data: PublicationBuiltinTopicData) {
         self.publication_builtin_topic_data = data;
+    }
+
+    pub(crate) fn get_ownership_strength(&self) -> i32 {
+        self.publication_builtin_topic_data.ownership_strength().value
+    }
+
+    pub(crate) fn get_lifespan_duration(&self) -> Duration {
+        self.publication_builtin_topic_data.lifespan().duration
     }
 
     pub(crate) fn has_fragmented_changes(

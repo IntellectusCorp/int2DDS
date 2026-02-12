@@ -1494,7 +1494,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         // Fallback: If InlineQos has no key_hash, compute from SerializedData (RTPS 9.6.4.8)
         if instance_handle.is_nil() && self.type_support.is_compute_key_provided() {
             log::info!("Instance handle is NIL, computing from serialized data (fallback)");
-            let data = self.type_support.deserialize(change.data_value())?;
+            let data = self.type_support.deserialize(change.data_value(), None)?;
             let computed_handle = self.type_support.compute_key(&*data);
             // log::info!("Computed instance handle from data: {:?}", computed_handle);
             Ok(computed_handle)
@@ -1569,6 +1569,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                                 "CacheChange is not properly initialized".to_string(),
                             ))?
                             .data_value(),
+                        None,
                     )?;
                     #[allow(clippy::disallowed_names)]
                     let foo = data

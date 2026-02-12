@@ -3,6 +3,7 @@
 
 use crate::{
     common::builtin::topic::publication_builtin_topic_data::PublicationBuiltinTopicData,
+    core::time::Duration,
     rtps::common::{guid::Guid, sequence::SequenceNumber},
 };
 
@@ -47,6 +48,14 @@ impl RemoteWriterInfo {
 
     pub(crate) fn set_publication_builtin_topic_data(&mut self, data: PublicationBuiltinTopicData) {
         self.publication_builtin_topic_data = data;
+    }
+
+    pub(crate) fn get_ownership_strength(&self) -> i32 {
+        self.publication_builtin_topic_data.ownership_strength().value
+    }
+
+    pub(crate) fn get_lifespan_duration(&self) -> Duration {
+        self.publication_builtin_topic_data.lifespan().duration
     }
 
     pub(crate) fn expected_sn(&self) -> SequenceNumber {
