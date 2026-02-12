@@ -334,6 +334,148 @@ ffi.cdef("""
         bool *triggered_out
     );
     Int2DdsRet int2dds_condition_delete(Int2DdsCondition *condition);
+
+    /* Listener Status Structures */
+    typedef struct Int2DdsPublicationMatchedStatus {
+        int32_t total_count;
+        int32_t total_count_change;
+        int32_t current_count;
+        int32_t current_count_change;
+        uint8_t last_subscription_handle[16];
+    } Int2DdsPublicationMatchedStatus;
+
+    typedef struct Int2DdsSubscriptionMatchedStatus {
+        int32_t total_count;
+        int32_t total_count_change;
+        int32_t current_count;
+        int32_t current_count_change;
+        uint8_t last_publication_handle[16];
+    } Int2DdsSubscriptionMatchedStatus;
+
+    typedef struct Int2DdsOfferedDeadlineMissedStatus {
+        int32_t total_count;
+        int32_t total_count_change;
+        uint8_t last_instance_handle[16];
+    } Int2DdsOfferedDeadlineMissedStatus;
+
+    typedef struct Int2DdsRequestedDeadlineMissedStatus {
+        int32_t total_count;
+        int32_t total_count_change;
+        uint8_t last_instance_handle[16];
+    } Int2DdsRequestedDeadlineMissedStatus;
+
+    typedef struct Int2DdsLivelinessLostStatus {
+        int32_t total_count;
+        int32_t total_count_change;
+    } Int2DdsLivelinessLostStatus;
+
+    typedef struct Int2DdsLivelinessChangedStatus {
+        int32_t alive_count;
+        int32_t not_alive_count;
+        int32_t alive_count_change;
+        int32_t not_alive_count_change;
+        uint8_t last_publication_handle[16];
+    } Int2DdsLivelinessChangedStatus;
+
+    typedef struct Int2DdsSampleLostStatus {
+        int32_t total_count;
+        int32_t total_count_change;
+    } Int2DdsSampleLostStatus;
+
+    /* User context for callbacks */
+    typedef void *Int2DdsUserContext;
+
+    /* Callback function pointer types */
+    typedef void (*Int2DdsOnPublicationMatchedCallback)(
+        Int2DdsDataWriter *writer,
+        const Int2DdsPublicationMatchedStatus *status,
+        Int2DdsUserContext user_context
+    );
+    typedef void (*Int2DdsOnOfferedDeadlineMissedCallback)(
+        Int2DdsDataWriter *writer,
+        const Int2DdsOfferedDeadlineMissedStatus *status,
+        Int2DdsUserContext user_context
+    );
+    typedef void (*Int2DdsOnLivelinessLostCallback)(
+        Int2DdsDataWriter *writer,
+        const Int2DdsLivelinessLostStatus *status,
+        Int2DdsUserContext user_context
+    );
+    typedef void (*Int2DdsOnDataAvailableCallback)(
+        Int2DdsDataReader *reader,
+        Int2DdsUserContext user_context
+    );
+    typedef void (*Int2DdsOnSubscriptionMatchedCallback)(
+        Int2DdsDataReader *reader,
+        const Int2DdsSubscriptionMatchedStatus *status,
+        Int2DdsUserContext user_context
+    );
+    typedef void (*Int2DdsOnRequestedDeadlineMissedCallback)(
+        Int2DdsDataReader *reader,
+        const Int2DdsRequestedDeadlineMissedStatus *status,
+        Int2DdsUserContext user_context
+    );
+    typedef void (*Int2DdsOnLivelinessChangedCallback)(
+        Int2DdsDataReader *reader,
+        const Int2DdsLivelinessChangedStatus *status,
+        Int2DdsUserContext user_context
+    );
+    typedef void (*Int2DdsOnSampleLostCallback)(
+        Int2DdsDataReader *reader,
+        const Int2DdsSampleLostStatus *status,
+        Int2DdsUserContext user_context
+    );
+
+    /* DataWriter Listener */
+    typedef struct Int2DdsDataWriterListener {
+        Int2DdsOnPublicationMatchedCallback on_publication_matched;
+        Int2DdsOnOfferedDeadlineMissedCallback on_offered_deadline_missed;
+        void *on_offered_incompatible_qos;  /* Not fully exposed */
+        Int2DdsOnLivelinessLostCallback on_liveliness_lost;
+        Int2DdsUserContext user_context;
+    } Int2DdsDataWriterListener;
+
+    /* DataReader Listener */
+    typedef struct Int2DdsDataReaderListener {
+        Int2DdsOnDataAvailableCallback on_data_available;
+        Int2DdsOnSubscriptionMatchedCallback on_subscription_matched;
+        void *on_sample_rejected;  /* Not fully exposed */
+        Int2DdsOnLivelinessChangedCallback on_liveliness_changed;
+        Int2DdsOnRequestedDeadlineMissedCallback on_requested_deadline_missed;
+        void *on_requested_incompatible_qos;  /* Not fully exposed */
+        Int2DdsOnSampleLostCallback on_sample_lost;
+        Int2DdsUserContext user_context;
+    } Int2DdsDataReaderListener;
+
+    /* DataWriter with Listener */
+    Int2DdsRet int2dds_create_datawriter_with_listener(
+        const Int2DdsPublisher *publisher,
+        const Int2DdsTopic *topic,
+        const Int2DdsDataWriterQos *qos,
+        const Int2DdsDataWriterListener *listener,
+        uint32_t mask,
+        Int2DdsDataWriter **writer_out
+    );
+    Int2DdsRet int2dds_datawriter_set_listener(
+        Int2DdsDataWriter *writer,
+        const Int2DdsDataWriterListener *listener,
+        uint32_t mask
+    );
+
+    /* DataReader with Listener */
+    Int2DdsRet int2dds_create_datareader_with_listener(
+        const Int2DdsSubscriber *subscriber,
+        const Int2DdsTopic *topic,
+        const Int2DdsDataReaderQos *qos,
+        const Int2DdsDataReaderListener *listener,
+        uint32_t mask,
+        Int2DdsDataReader **reader_out
+    );
+    Int2DdsRet int2dds_datareader_set_listener(
+        Int2DdsDataReader *reader,
+        const Int2DdsDataReaderListener *listener,
+        uint32_t mask
+    );
 """)
 
 
