@@ -346,6 +346,19 @@ impl UserLogic {
 
                 // Send DATA message or GAP message depending on filter result
                 if let Some(a_change) = history_cache.get_change(a_change_seq_num) {
+                    let first_sn = history_cache.get_seq_num_min().ok_or_else(|| {
+                        RtpsError::new(
+                            RtpsErrorCode::DataNotSet,
+                            "Writer cache should not be empty while sending DATA",
+                        )
+                    })?;
+                    let last_sn = history_cache.get_seq_num_max().ok_or_else(|| {
+                        RtpsError::new(
+                            RtpsErrorCode::DataNotSet,
+                            "Writer cache should not be empty while sending DATA",
+                        )
+                    })?;
+
                     if a_change.is_fragmented() {
                         let timestamp = Utc::now();
                         for fragment_num in 1..=a_change.total_fragments() {
@@ -354,8 +367,8 @@ impl UserLogic {
                             if reader_proxy.is_reliable() && !writer.disable_piggyback_heartbeat() {
                                 heartbeat_info = Some((
                                     writer.heartbeat_count(),
-                                    history_cache.get_seq_num_min(),
-                                    history_cache.get_seq_num_max(),
+                                    first_sn,
+                                    last_sn,
                                     false,
                                     false,
                                 ));
@@ -379,8 +392,8 @@ impl UserLogic {
                         if reader_proxy.is_reliable() && !writer.disable_piggyback_heartbeat() {
                             heartbeat_info = Some((
                                 writer.heartbeat_count(),
-                                history_cache.get_seq_num_min(),
-                                history_cache.get_seq_num_max(),
+                                first_sn,
+                                last_sn,
                                 false,
                                 false,
                             ));
@@ -643,14 +656,15 @@ impl UserLogic {
 
         // Send heartbeat once per participant
         for (target_participant_prefix, locators) in participant_locators.iter() {
+            let last_change_sn = writer.last_change_sequence_number();
             let buffer = MessageCreator::create_heartbeat_message(
                 writer.guid().prefix(),
                 *target_participant_prefix,
                 writer.heartbeat_count(),
                 EntityId::UNKNOWN, // This ensures all readers in the participant receive the heartbeat
                 writer.endpoint_id(),
-                history_cache.get_seq_num_min(),
-                history_cache.get_seq_num_max(),
+                history_cache.get_seq_num_min().unwrap_or(last_change_sn + 1),
+                history_cache.get_seq_num_max().unwrap_or(last_change_sn),
                 false,
                 false,
             );
@@ -730,14 +744,15 @@ impl UserLogic {
             }
         };
 
+        let last_change_sn = writer.last_change_sequence_number();
         let buffer = MessageCreator::create_heartbeat_message(
             writer.guid().prefix(),
             reader_proxy.remote_reader_guid().prefix(),
             writer.heartbeat_count(),
             reader_proxy.remote_group_entity_id(),
             writer.endpoint_id(),
-            history_cache.get_seq_num_min(),
-            history_cache.get_seq_num_max(),
+            history_cache.get_seq_num_min().unwrap_or(last_change_sn + 1),
+            history_cache.get_seq_num_max().unwrap_or(last_change_sn),
             false,
             false,
         );
@@ -755,15 +770,17 @@ impl UserLogic {
         if should_send_gap {
             // For volatile readers, send GAP for irrelevant sequence numbers
             let last_irrelevant = reader_proxy.last_irrelevant_sn();
-            let cache_min = history_cache.get_seq_num_min();
-            if last_irrelevant > SequenceNumber::new(0, 0) && cache_min <= last_irrelevant {
+            if last_irrelevant > SequenceNumber::new(0, 0)
+                && reader_proxy.highest_sent_change_sn() < last_irrelevant
+            {
                 self.send_gap_for_range(
                     writer.guid(),
                     reader_proxy,
                     writer.endpoint_id(),
-                    cache_min,
+                    SequenceNumber::new(0, 1),
                     last_irrelevant,
                 )?;
+                reader_proxy.set_highest_sent_change_sn(last_irrelevant);
             }
         }
 
@@ -1973,8 +1990,13 @@ impl UnicastMessageProcessor for UserLogic {
         let total_frags = change.total_fragments();
         let requested_fragments = frag_state.extract_numbers();
         let heartbeat_count = stateful_writer.heartbeat_count();
-        let heartbeat_info =
-            Some((heartbeat_count, writer_sn, history_cache_guard.get_seq_num_max(), false, false));
+        let last_sn = history_cache_guard.get_seq_num_max().ok_or_else(|| {
+            RtpsError::new(
+                RtpsErrorCode::DataNotSet,
+                "Writer cache should not be empty while sending DATA_FRAG",
+            )
+        })?;
+        let heartbeat_info = Some((heartbeat_count, writer_sn, last_sn, false, false));
 
         let timestamp = Utc::now();
         for fragment_num in requested_fragments {
@@ -2021,7 +2043,9 @@ impl UnicastMessageProcessor for UserLogic {
                     .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
 
                 // Collect irrelevant changes from GAP message
-                let mut irrelevant_changes = Vec::new();
+                let capacity =
+                    (gap.gap_list.bitmap_base().to_i64() - gap.gap_start.to_i64()).max(0) as usize;
+                let mut irrelevant_changes = Vec::with_capacity(capacity);
 
                 for sn in gap.gap_start.to_i64()..gap.gap_list.bitmap_base().to_i64() {
                     irrelevant_changes.push(SequenceNumber::from_i64(sn));
