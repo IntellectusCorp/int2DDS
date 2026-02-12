@@ -383,6 +383,9 @@ impl UserLogic {
                                 timestamp,
                             ) {
                                 writer.increase_heartbeat_count();
+                                if !reader_proxy.is_first_hb_sent() {
+                                    reader_proxy.set_first_hb_sent();
+                                }
                             }
                         }
                     } else {
@@ -390,13 +393,8 @@ impl UserLogic {
                         let mut heartbeat_info = None;
 
                         if reader_proxy.is_reliable() && !writer.disable_piggyback_heartbeat() {
-                            heartbeat_info = Some((
-                                writer.heartbeat_count(),
-                                first_sn,
-                                last_sn,
-                                false,
-                                false,
-                            ));
+                            heartbeat_info =
+                                Some((writer.heartbeat_count(), first_sn, last_sn, false, false));
                         }
 
                         let buffer = MessageCreator::create_data_msg(
@@ -418,6 +416,9 @@ impl UserLogic {
                             .is_ok()
                         {
                             writer.increase_heartbeat_count();
+                            if !reader_proxy.is_first_hb_sent() {
+                                reader_proxy.set_first_hb_sent();
+                            }
                         }
                     }
                 } else {
@@ -601,7 +602,7 @@ impl UserLogic {
     }
 
     // Sending heartbeat message to all matched reader proxies of the given writer
-    pub(crate) fn send_heartbeat_to_all_reader_proxies(
+    pub(crate) fn send_heartbeat_to_anonymous_matched_readers(
         &self,
         entity_id: EntityId,
     ) -> RtpsResult<()> {
@@ -708,10 +709,7 @@ impl UserLogic {
             return Ok(());
         }
 
-        if is_preemptive
-            && reader_proxy.last_acknack_count() > 0
-            && stateful_writer.heartbeat_count() > 0
-        {
+        if is_preemptive && reader_proxy.is_first_hb_sent() {
             trace!("Remote reader should already know about my writer's status by now, skipping preemptive heartbeat.");
             return Ok(());
         }
@@ -760,6 +758,9 @@ impl UserLogic {
         if let Ok(buf) = buffer {
             self.send_rtps_message_to_locators(reader_proxy.unicast_locator_list(), &buf)?;
             writer.increase_heartbeat_count();
+            if !reader_proxy.is_first_hb_sent() {
+                reader_proxy.set_first_hb_sent();
+            }
         } else {
             return Err(RtpsError::new(
                 RtpsErrorCode::Io,

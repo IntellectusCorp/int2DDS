@@ -26,6 +26,7 @@ pub(crate) struct ReaderProxy {
     content_filter_signatures: Option<Vec<FilterSignature>>, // Content filter signatures for this reader
     subscription_builtin_topic_data: SubscriptionBuiltinTopicData,
     last_irrelevant_sn: SequenceNumber, // Sequence numbers <= this value are irrelevant for this reader and should be responded with GAP.
+    is_first_hb_sent: bool,             // has stateful writer sent first heartbeat to this reader
 }
 
 use std::hash::{Hash, Hasher};
@@ -73,6 +74,7 @@ impl ReaderProxy {
             content_filter_signatures: None,
             subscription_builtin_topic_data,
             last_irrelevant_sn,
+            is_first_hb_sent: false,
         }
     }
 
@@ -171,6 +173,14 @@ impl ReaderProxy {
 
     pub(crate) fn is_active(&self) -> bool {
         self.is_active
+    }
+
+    pub(crate) fn is_first_hb_sent(&self) -> bool {
+        self.is_first_hb_sent
+    }
+
+    pub(crate) fn set_first_hb_sent(&mut self) {
+        self.is_first_hb_sent = true;
     }
 
     pub(crate) fn set_highest_sent_change_sn(&mut self, highest_sent_change_sn: SequenceNumber) {
