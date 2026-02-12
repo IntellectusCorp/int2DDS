@@ -464,10 +464,13 @@ impl WlpLogic {
         liveliness_flag: bool,
         final_flag: bool,
     ) -> RtpsResult<()> {
+        let last_change_sn = writer.last_change_sequence_number();
         let (first_sn, last_sn, heartbeat_count) = match writer.writer_cache().lock() {
-            Ok(cache) => {
-                (cache.get_seq_num_min(), cache.get_seq_num_max(), writer.heartbeat_count())
-            }
+            Ok(cache) => (
+                cache.get_seq_num_min().unwrap_or(last_change_sn + 1),
+                cache.get_seq_num_max().unwrap_or(last_change_sn),
+                writer.heartbeat_count(),
+            ),
             Err(_) => (SequenceNumber::UNKNOWN, SequenceNumber::UNKNOWN, writer.heartbeat_count()),
         };
 
@@ -602,18 +605,21 @@ impl WlpLogic {
                         continue; // Skip this reader proxy
                     }
                 };
+                let wlp_last_change_sn = writer.last_change_sequence_number();
+                let first_sn = cache_guard.get_seq_num_min().unwrap_or(wlp_last_change_sn + 1);
+                let last_sn = cache_guard.get_seq_num_max().unwrap_or(wlp_last_change_sn);
                 let info = Some((
                     writer.heartbeat_count(),
-                    cache_guard.get_seq_num_min(),
-                    cache_guard.get_seq_num_max(),
+                    first_sn,
+                    last_sn,
                     false,
                     false,
                 ));
                 debug!(
                     "[WLP] heartbeat_info: count={}, first={:?}, last={:?}",
                     writer.heartbeat_count(),
-                    cache_guard.get_seq_num_min(),
-                    cache_guard.get_seq_num_max()
+                    first_sn,
+                    last_sn
                 );
                 info
             };
@@ -1515,10 +1521,11 @@ impl UnicastMessageProcessor for WlpLogic {
                     }
                 };
 
+                let wlp_last_change_sn = writer.last_change_sequence_number();
                 Some((
                     writer.heartbeat_count(),
-                    cache_guard.get_seq_num_min(),
-                    cache_guard.get_seq_num_max(),
+                    cache_guard.get_seq_num_min().unwrap_or(wlp_last_change_sn + 1),
+                    cache_guard.get_seq_num_max().unwrap_or(wlp_last_change_sn),
                     false,
                     false,
                 ))

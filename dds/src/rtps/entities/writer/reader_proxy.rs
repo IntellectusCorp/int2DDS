@@ -150,7 +150,7 @@ impl ReaderProxy {
     }
 
     pub(crate) fn unacked_changes(&self, history_cache: &WriterHistoryCache) -> bool {
-        history_cache.get_seq_num_max() > self.max_acked_sn
+        history_cache.get_seq_num_max().map_or(false, |max_sn| max_sn > self.max_acked_sn)
     }
 
     pub(crate) fn unicast_locator_list(&self) -> Vec<Locator> {
