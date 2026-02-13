@@ -385,8 +385,8 @@ fn run_subscriber(args: &Args) {
     let deadline_str = if qos.deadline == Duration::infinite() { "INFINITE".to_string() } else { format!("{:?}", qos.deadline) };
     println!(
         "********* [subscriber qos info] reliability: {:?}, durability: {:?}, \
-         history: {:?}, deadline: {}, partition: {:?}",
-        qos.reliability, qos.durability, qos.history, deadline_str, qos.partition.name,
+         history: {:?}, ownership_kind: {:?}, deadline: {}, partition: {:?}",
+        qos.reliability, qos.durability, qos.history, qos.ownership_kind, deadline_str, qos.partition.name,
     );
 
     loop {
