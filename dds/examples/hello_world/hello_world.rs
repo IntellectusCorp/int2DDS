@@ -308,7 +308,7 @@ fn run_publisher(args: &Args) {
         ReliabilityQosPolicyKind::Reliable => "reliable",
     };
 
-    let mut i = 0;
+    let mut i = 1;
     loop {
         let data = HelloWorldType {
             index: i,
