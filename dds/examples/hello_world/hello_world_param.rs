@@ -3,7 +3,7 @@ use std::sync::{
     Arc,
 };
 
-use clap::{Parser, ValueEnum};
+use clap::Parser;
 use int2dds::{
     common::{
         env::{set_console_log_level, set_log_type},
@@ -13,7 +13,12 @@ use int2dds::{
     core::time::Duration,
     domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
     infrastructure::{
-        qos_policy::{ReliabilityQosPolicy, ReliabilityQosPolicyKind},
+        qos_policy::{
+            DeadlineQosPolicy, DurabilityQosPolicy, DurabilityQosPolicyKind, HistoryQosPolicy,
+            HistoryQosPolicyKind, OwnershipQosPolicy, OwnershipQosPolicyKind,
+            OwnershipStrengthQosPolicy, PartitionQosPolicy, ReliabilityQosPolicy,
+            ReliabilityQosPolicyKind,
+        },
         status::StatusMask,
         wait_set::WaitSet,
     },
@@ -30,32 +35,52 @@ use int2dds::{
 };
 use log::info;
 
-#[derive(Clone, ValueEnum, Debug)]
-enum Role {
-    Pub,
-    Sub,
-}
-
-#[derive(Clone, ValueEnum, Debug)]
-enum Reliability {
-    BestEffort,
-    Reliable,
-}
-
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Hello World DDS Example", long_about = None)]
+#[command(about = "Hello World DDS Example", disable_help_flag = true)]
 struct Args {
-    /// Role: pub or sub
-    #[arg(short, long)]
-    role: Role,
+    /// Print help
+    #[arg(long, action = clap::ArgAction::Help)]
+    help: Option<bool>,
 
-    /// Domain ID (e.g., 30, 31, 32, 33 for pub; 40, 41, 42, 43 for sub)
-    #[arg(short, long)]
+    /// Run as publisher
+    #[arg(short = 'P', long, conflicts_with = "subscriber")]
+    publisher: bool,
+
+    /// Run as subscriber
+    #[arg(short = 'S', long, conflicts_with = "publisher")]
+    subscriber: bool,
+
+    /// Domain ID
+    #[arg(short = 'd', long, default_value_t = 0)]
     domain: i32,
 
-    /// Reliability QoS: best-effort or reliable
-    #[arg(short = 'q', long, default_value = "best-effort")]
-    reliability: Reliability,
+    /// Publish interval in ms (publisher only)
+    #[arg(short = 'i', long, default_value_t = 1000)]
+    interval: u64,
+
+    /// Use transient-local durability (default: volatile)
+    #[arg(short = 't', long = "transient-local")]
+    transient_local: bool,
+
+    /// Use reliable reliability (default: best-effort)
+    #[arg(short = 'r', long)]
+    reliable: bool,
+
+    /// Deadline period in ms (default: infinite)
+    #[arg(short = 'f', long)]
+    deadline: Option<u64>,
+
+    /// Ownership exclusive with strength (publisher only, must be > 0)
+    #[arg(short = 'o', long)]
+    ownership: Option<i32>,
+
+    /// Partition name
+    #[arg(short = 'p', long)]
+    partition: Option<String>,
+
+    /// History depth: 0 = keep-all, N = keep-last N (default: 1)
+    #[arg(short = 'k', long, default_value_t = 1)]
+    keep: i32,
 }
 
 #[derive(DdsType)]
@@ -63,6 +88,65 @@ struct Args {
 struct HelloWorldType {
     index: u32,
     message: String,
+}
+
+struct QosConfig {
+    reliability: ReliabilityQosPolicyKind,
+    durability: DurabilityQosPolicyKind,
+    history: HistoryQosPolicyKind,
+    deadline: Duration,
+    ownership_kind: OwnershipQosPolicyKind,
+    ownership_strength: i32,
+    partition: PartitionQosPolicy,
+}
+
+fn ms_to_duration(ms: u64) -> Duration {
+    Duration { sec: (ms / 1000) as i32, nanosec: ((ms % 1000) * 1_000_000) as u32 }
+}
+
+fn build_qos(args: &Args) -> QosConfig {
+    let reliability = if args.reliable {
+        ReliabilityQosPolicyKind::Reliable
+    } else {
+        ReliabilityQosPolicyKind::BestEffort
+    };
+    let durability = if args.transient_local {
+        DurabilityQosPolicyKind::TransientLocal
+    } else {
+        DurabilityQosPolicyKind::Volatile
+    };
+    let history = if args.keep == 0 {
+        HistoryQosPolicyKind::KeepAll
+    } else {
+        HistoryQosPolicyKind::KeepLast(args.keep)
+    };
+    let deadline = match args.deadline {
+        Some(ms) => ms_to_duration(ms),
+        None => Duration::infinite(),
+    };
+    let (ownership_kind, ownership_strength) = match args.ownership {
+        Some(s) => {
+            if s <= 0 {
+                eprintln!("Error: ownership strength must be greater than 0");
+                std::process::exit(1);
+            }
+            (OwnershipQosPolicyKind::Exclusive, s)
+        }
+        None => (OwnershipQosPolicyKind::Shared, 0),
+    };
+    let partition = match &args.partition {
+        Some(name) => PartitionQosPolicy { name: vec![name.clone()] },
+        None => PartitionQosPolicy::default(),
+    };
+    QosConfig {
+        reliability,
+        durability,
+        history,
+        deadline,
+        ownership_kind,
+        ownership_strength,
+        partition,
+    }
 }
 
 // Publisher Listener
@@ -138,11 +222,17 @@ impl DataReaderListener for SubListener {
     }
 }
 
-fn run_publisher(domain_id: i32, reliability: Reliability) {
-    let participant_qos = DomainParticipantQos::default();
+fn run_publisher(args: &Args) {
+    let qos = build_qos(args);
+
     let factory = DomainParticipantFactory::get_instance();
     let participant = factory
-        .create_participant(domain_id, participant_qos, None, StatusMask::default())
+        .create_participant(
+            args.domain,
+            DomainParticipantQos::default(),
+            None,
+            StatusMask::default(),
+        )
         .unwrap();
 
     let topic = participant
@@ -155,19 +245,20 @@ fn run_publisher(domain_id: i32, reliability: Reliability) {
         )
         .unwrap();
 
+    let publisher_qos = PublisherQos { partition: qos.partition.clone(), ..Default::default() };
     let publisher =
-        participant.create_publisher(PublisherQos::default(), None, StatusMask::default()).unwrap();
-
-    let reliability_kind = match reliability {
-        Reliability::BestEffort => ReliabilityQosPolicyKind::BestEffort,
-        Reliability::Reliable => ReliabilityQosPolicyKind::Reliable,
-    };
+        participant.create_publisher(publisher_qos, None, StatusMask::default()).unwrap();
 
     let writer_qos = DataWriterQos {
         reliability: ReliabilityQosPolicy {
-            kind: reliability_kind,
+            kind: qos.reliability,
             max_blocking_time: Duration { sec: 0, nanosec: 100_000_000 },
         },
+        durability: DurabilityQosPolicy { kind: qos.durability },
+        history: HistoryQosPolicy { kind: qos.history },
+        deadline: DeadlineQosPolicy { period: qos.deadline },
+        ownership: OwnershipQosPolicy { kind: qos.ownership_kind },
+        ownership_strength: OwnershipStrengthQosPolicy { value: qos.ownership_strength },
         ..Default::default()
     };
 
@@ -181,11 +272,24 @@ fn run_publisher(domain_id: i32, reliability: Reliability) {
         )
         .unwrap();
 
-    info!(
-        "[publisher INFO] domain_id: {:?}, hostname: {:?}, reliability: {:?}",
-        domain_id,
+    println!(
+        "********* [publisher INFO] domain_id: {:?}, hostname: {:?}, reliability: {:?}",
+        args.domain,
         hostname::get().unwrap(),
-        reliability_kind
+        qos.reliability,
+    );
+    let deadline_str = if qos.deadline == Duration::infinite() { "INFINITE".to_string() } else { format!("{:?}", qos.deadline) };
+    println!(
+        "********* [publisher qos info] interval: {}ms, reliability: {:?}, durability: {:?}, \
+         history: {:?}, deadline: {}, ownership: {:?}(strength: {}), partition: {:?}",
+        args.interval,
+        qos.reliability,
+        qos.durability,
+        qos.history,
+        deadline_str,
+        qos.ownership_kind,
+        qos.ownership_strength,
+        qos.partition.name,
     );
 
     let mut condition = writer.get_statuscondition().unwrap().clone();
@@ -195,7 +299,7 @@ fn run_publisher(domain_id: i32, reliability: Reliability) {
     wait_set.wait(Duration::infinite()).unwrap();
     writer.get_publication_matched_status().unwrap();
 
-    let reliability_str = match reliability_kind {
+    let reliability_str = match qos.reliability {
         ReliabilityQosPolicyKind::BestEffort => "best_effort",
         ReliabilityQosPolicyKind::Reliable => "reliable",
     };
@@ -208,21 +312,27 @@ fn run_publisher(domain_id: i32, reliability: Reliability) {
                 "[{:?}]HelloWorld_{}_d{}",
                 hostname::get().unwrap(),
                 reliability_str,
-                domain_id
+                args.domain,
             ),
         };
         writer.write(&data, InstanceHandle::NIL).unwrap();
         info!("Published {:?}", data);
-        std::thread::sleep(std::time::Duration::from_millis(1000));
+        std::thread::sleep(std::time::Duration::from_millis(args.interval));
         i += 1;
     }
 }
 
-fn run_subscriber(domain_id: i32, reliability: Reliability) {
-    let participant_qos = DomainParticipantQos::default();
+fn run_subscriber(args: &Args) {
+    let qos = build_qos(args);
+
     let factory = DomainParticipantFactory::get_instance();
     let participant = factory
-        .create_participant(domain_id, participant_qos, None, StatusMask::default())
+        .create_participant(
+            args.domain,
+            DomainParticipantQos::default(),
+            None,
+            StatusMask::default(),
+        )
         .unwrap();
 
     let topic = participant
@@ -235,20 +345,19 @@ fn run_subscriber(domain_id: i32, reliability: Reliability) {
         )
         .unwrap();
 
-    let subscriber = participant
-        .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
-        .unwrap();
-
-    let reliability_kind = match reliability {
-        Reliability::BestEffort => ReliabilityQosPolicyKind::BestEffort,
-        Reliability::Reliable => ReliabilityQosPolicyKind::Reliable,
-    };
+    let subscriber_qos = SubscriberQos { partition: qos.partition.clone(), ..Default::default() };
+    let subscriber =
+        participant.create_subscriber(subscriber_qos, None, StatusMask::default()).unwrap();
 
     let reader_qos = DataReaderQos {
         reliability: ReliabilityQosPolicy {
-            kind: reliability_kind,
+            kind: qos.reliability,
             max_blocking_time: Duration { sec: 0, nanosec: 100_000_000 },
         },
+        durability: DurabilityQosPolicy { kind: qos.durability },
+        history: HistoryQosPolicy { kind: qos.history },
+        deadline: DeadlineQosPolicy { period: qos.deadline },
+        ownership: OwnershipQosPolicy { kind: qos.ownership_kind },
         ..Default::default()
     };
 
@@ -257,17 +366,23 @@ fn run_subscriber(domain_id: i32, reliability: Reliability) {
     let _reader = subscriber
         .create_datareader::<HelloWorldType>(
             &topic,
-            reader_qos,
+            reader_qos.clone(),
             Some(Arc::new(read_listener)),
             StatusMask::default(),
         )
         .unwrap();
 
     println!(
-        "[subscriber INFO] domain_id: {:?}, hostname: {:?}, reliability: {:?}",
-        domain_id,
+        "********* [subscriber INFO] domain_id: {:?}, hostname: {:?}, reliability: {:?} ",
+        args.domain,
         hostname::get().unwrap(),
-        reliability_kind
+        qos.reliability,
+    );
+    let deadline_str = if qos.deadline == Duration::infinite() { "INFINITE".to_string() } else { format!("{:?}", qos.deadline) };
+    println!(
+        "********* [subscriber qos info] reliability: {:?}, durability: {:?}, \
+         history: {:?}, deadline: {}, partition: {:?}",
+        qos.reliability, qos.durability, qos.history, deadline_str, qos.partition.name,
     );
 
     loop {
@@ -281,8 +396,19 @@ fn main() {
 
     let args = Args::parse();
 
-    match args.role {
-        Role::Pub => run_publisher(args.domain, args.reliability),
-        Role::Sub => run_subscriber(args.domain, args.reliability),
+    if !args.publisher && !args.subscriber {
+        eprintln!("Error: either -P (--publisher) or -S (--subscriber) is required");
+        std::process::exit(1);
+    }
+
+    if args.publisher == args.subscriber {
+        eprintln!("Error: specify exactly one of -P (--publisher) or -S (--subscriber)");
+        std::process::exit(1);
+    }
+
+    if args.publisher {
+        run_publisher(&args);
+    } else {
+        run_subscriber(&args);
     }
 }
