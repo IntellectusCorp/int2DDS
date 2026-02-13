@@ -942,36 +942,40 @@ impl UserLogic {
         final_flag: bool,
         is_preemptive: bool,
     ) -> RtpsResult<()> {
-        if !missing_changes.is_empty() || !final_flag || is_preemptive {
-            writer_proxy.increase_acknack_count();
+        if missing_changes.is_empty() && final_flag && !is_preemptive {
+            debug!("Skip ACKNACK because no missing changes, final flag set, not preemptive");
+            return Ok(());
+        }
 
-            let participant = self.get_upgraded_participant()?;
+        writer_proxy.increase_acknack_count();
 
-            let buffer = MessageCreator::create_acknack_message(
-                participant.guid(),
-                writer_proxy.remote_writer_guid(),
-                stateful_reader.guid().entity_id(),
-                writer_proxy.remote_writer_guid().entity_id(),
-                missing_changes,
-                writer_proxy.acknack_count(),
-                bitmap_base,
-                is_preemptive,
+        let participant = self.get_upgraded_participant()?;
+
+        let buffer = MessageCreator::create_acknack_message(
+            participant.guid(),
+            writer_proxy.remote_writer_guid(),
+            stateful_reader.guid().entity_id(),
+            writer_proxy.remote_writer_guid().entity_id(),
+            missing_changes,
+            writer_proxy.acknack_count(),
+            bitmap_base,
+            is_preemptive,
+        )
+        .map_err(|e| {
+            RtpsError::new(
+                RtpsErrorCode::SerializationError,
+                format!("Failed to create ACKNACK message: {}", e),
             )
+        })?;
+
+        self.send_rtps_message_to_locators(writer_proxy.unicast_locator_list(), &buffer)
             .map_err(|e| {
                 RtpsError::new(
                     RtpsErrorCode::SerializationError,
-                    format!("Failed to create ACKNACK message: {}", e),
+                    format!("Failed to send ACKNACK message: {}", e),
                 )
             })?;
 
-            self.send_rtps_message_to_locators(writer_proxy.unicast_locator_list(), &buffer)
-                .map_err(|e| {
-                    RtpsError::new(
-                        RtpsErrorCode::SerializationError,
-                        format!("Failed to send ACKNACK message: {}", e),
-                    )
-                })?
-        }
         Ok(())
     }
 }
