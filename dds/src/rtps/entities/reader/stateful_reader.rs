@@ -31,7 +31,6 @@ use crate::{
             guid::Guid,
             locator::Locator,
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
-            sequence::SequenceNumber,
             time::RtpsDuration,
             types::TopicKind,
         },
@@ -395,17 +394,6 @@ impl Reader for StatefulReader {
         };
 
         debug!("StatefulReader on_change completed.");
-    }
-
-    fn get_next_sequence_number(&self) -> SequenceNumber {
-        let cache_guard = match self.reader_cache.lock() {
-            Ok(guard) => guard,
-            Err(e) => {
-                error!("Failed to acquire reader cache lock: {}", e);
-                return SequenceNumber::new(0, 0);
-            }
-        };
-        cache_guard.get_seq_num_max().next()
     }
 
     fn as_any(&self) -> &dyn Any {

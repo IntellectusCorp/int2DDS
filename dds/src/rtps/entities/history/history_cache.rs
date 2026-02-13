@@ -17,21 +17,6 @@ pub(crate) trait HistoryCache {
         instance_handle: InstanceHandle,
     ) -> Vec<Arc<CacheChange>>;
 
-    fn get_seq_num_min(&self) -> SequenceNumber {
-        let changes = self.get_changes();
-        let min_change = changes.iter().min_by_key(|change| change.sequence_number());
-        match min_change {
-            Some(change) => change.sequence_number(),
-            None => SequenceNumber::new(0, 1),
-        }
-    }
-
-    fn get_seq_num_max(&self) -> SequenceNumber {
-        let changes = self.get_changes();
-        let max_change = changes.iter().max_by_key(|change| change.sequence_number());
-        match max_change {
-            Some(change) => change.sequence_number(),
-            None => SequenceNumber::new(0, 0),
-        }
-    }
+    fn get_seq_num_min(&self) -> Option<SequenceNumber>;
+    fn get_seq_num_max(&self) -> Option<SequenceNumber>;
 }

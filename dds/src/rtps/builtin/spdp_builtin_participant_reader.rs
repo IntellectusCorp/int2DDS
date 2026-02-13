@@ -6,8 +6,6 @@
 
 #![allow(dead_code)]
 
-use log::error;
-
 use crate::{
     common::builtin::topic::{
         publication_builtin_topic_data::PublicationBuiltinTopicData,
@@ -24,7 +22,6 @@ use crate::{
             guid::Guid,
             locator::Locator,
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
-            sequence::SequenceNumber,
             time::RtpsDuration,
             types::TopicKind,
         },
@@ -32,7 +29,7 @@ use crate::{
             endpoint::Endpoint,
             entity::Entity,
             history::{
-                cache_change::CacheChange, history_cache::HistoryCache,
+                cache_change::CacheChange,
                 reader_history::ReaderHistoryCache,
             },
             reader::Reader,
@@ -155,16 +152,6 @@ impl Reader for SPDPBuiltinParticipantReader {
     }
     fn on_change(&self, _change: Arc<CacheChange>) {
         // SPDP builtin reader handles changes through internal discovery logic, not user callbacks
-    }
-    fn get_next_sequence_number(&self) -> SequenceNumber {
-        let cache_guard = match self.reader_cache.lock() {
-            Ok(guard) => guard,
-            Err(e) => {
-                error!("Failed to acquire reader cache lock: {}", e);
-                return SequenceNumber::new(0, 0);
-            }
-        };
-        cache_guard.get_seq_num_max().next()
     }
 
     fn as_any(&self) -> &dyn Any {

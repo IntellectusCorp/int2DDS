@@ -176,7 +176,7 @@ impl SendingTask {
             }
 
             MessageType::UserHeartbeatToAll(entity_id) => {
-                user_logic.send_heartbeat_to_all_reader_proxies(entity_id)?;
+                user_logic.send_heartbeat_to_anonymous_matched_readers(entity_id)?;
                 Ok(())
             }
 
