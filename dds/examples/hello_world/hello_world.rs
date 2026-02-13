@@ -41,14 +41,18 @@ struct Args {
     /// Print help
     #[arg(long, action = clap::ArgAction::Help)]
     help: Option<bool>,
-
+    
     /// Run as publisher
     #[arg(short = 'P', long, conflicts_with = "subscriber")]
     publisher: bool,
-
+    
     /// Run as subscriber
     #[arg(short = 'S', long, conflicts_with = "publisher")]
     subscriber: bool,
+    
+    /// Topic name
+    #[arg(short = 'T', long, default_value = "hello_world_topic")]
+    topic: String,
 
     /// Domain ID
     #[arg(short = 'd', long, default_value_t = 0)]
@@ -237,7 +241,7 @@ fn run_publisher(args: &Args) {
 
     let topic = participant
         .create_topic::<HelloWorldType>(
-            "hello_world_topic",
+            &args.topic,
             "HelloWorld",
             TopicQos::default(),
             None,
@@ -337,7 +341,7 @@ fn run_subscriber(args: &Args) {
 
     let topic = participant
         .create_topic::<HelloWorldType>(
-            "hello_world_topic",
+            &args.topic,
             "HelloWorld",
             TopicQos::default(),
             None,
@@ -398,11 +402,6 @@ fn main() {
 
     if !args.publisher && !args.subscriber {
         eprintln!("Error: either -P (--publisher) or -S (--subscriber) is required");
-        std::process::exit(1);
-    }
-
-    if args.publisher == args.subscriber {
-        eprintln!("Error: specify exactly one of -P (--publisher) or -S (--subscriber)");
         std::process::exit(1);
     }
 
