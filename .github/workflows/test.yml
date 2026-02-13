@@ -9,7 +9,7 @@ on:
 
 jobs:
   cargo-test:
-    runs-on: ubuntu-24.04-20260126.10.1
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
