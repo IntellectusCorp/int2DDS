@@ -768,20 +768,21 @@ impl UserLogic {
             ));
         }
 
-        if should_send_gap {
+        if should_send_gap && !history_cache.is_empty() {
+            let min_sn: SequenceNumber = history_cache
+                .get_seq_num_min()
+                .ok_or_else(|| RtpsError::new(RtpsErrorCode::DataNotSet, None))?;
+
             // For volatile readers, send GAP for irrelevant sequence numbers
             let last_irrelevant = reader_proxy.last_irrelevant_sn();
-            if last_irrelevant > SequenceNumber::new(0, 0)
-                && reader_proxy.highest_sent_change_sn() < last_irrelevant
-            {
+            if min_sn <= last_irrelevant {
                 self.send_gap_for_range(
                     writer.guid(),
                     reader_proxy,
                     writer.endpoint_id(),
-                    SequenceNumber::new(0, 1),
+                    min_sn,
                     last_irrelevant,
                 )?;
-                reader_proxy.set_highest_sent_change_sn(last_irrelevant);
             }
         }
 

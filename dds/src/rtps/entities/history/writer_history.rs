@@ -101,7 +101,7 @@ impl WriterHistoryCache {
         Ok(())
     }
 
-    pub(crate) fn _is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.changes.is_empty()
     }
 
