@@ -58,31 +58,31 @@ struct Args {
     #[arg(short = 'd', long, default_value_t = 0)]
     domain: i32,
 
-    /// Publish interval in ms (publisher only)
+    /// Publish interval in ms [publisher only]
     #[arg(short = 'i', long, default_value_t = 1000)]
     interval: u64,
 
-    /// Use transient-local durability (default: volatile)
+    /// Use transient-local durability [default: volatile]
     #[arg(short = 't', long = "transient-local")]
     transient_local: bool,
 
-    /// Use reliable reliability (default: best-effort)
+    /// Use reliable reliability [default: best-effort]
     #[arg(short = 'r', long)]
     reliable: bool,
 
-    /// Deadline period in ms (default: infinite)
+    /// Deadline period in ms [default: infinite]
     #[arg(short = 'f', long)]
     deadline: Option<u64>,
 
-    /// Ownership exclusive with strength (publisher only, must be > 0)
-    #[arg(short = 'o', long)]
+    /// Ownership exclusive [subscriber: -o, publisher: -o <strength>]
+    #[arg(short = 'o', long, num_args = 0..=1, default_missing_value = "0")]
     ownership: Option<i32>,
 
     /// Partition name
     #[arg(short = 'p', long)]
     partition: Option<String>,
 
-    /// History depth: 0 = keep-all, N = keep-last N (default: 1)
+    /// History depth: 0 = keep-all, N = keep-last N
     #[arg(short = 'k', long, default_value_t = 1)]
     keep: i32,
 }
@@ -108,7 +108,7 @@ fn ms_to_duration(ms: u64) -> Duration {
     Duration { sec: (ms / 1000) as i32, nanosec: ((ms % 1000) * 1_000_000) as u32 }
 }
 
-fn build_qos(args: &Args) -> QosConfig {
+fn build_qos(args: &Args, is_publisher: bool) -> QosConfig {
     let reliability = if args.reliable {
         ReliabilityQosPolicyKind::Reliable
     } else {
@@ -130,8 +130,8 @@ fn build_qos(args: &Args) -> QosConfig {
     };
     let (ownership_kind, ownership_strength) = match args.ownership {
         Some(s) => {
-            if s <= 0 {
-                eprintln!("Error: ownership strength must be greater than 0");
+            if is_publisher && s <= 0 {
+                eprintln!("Error: publisher ownership strength must be greater than 0 (use -o <strength>)");
                 std::process::exit(1);
             }
             (OwnershipQosPolicyKind::Exclusive, s)
@@ -227,7 +227,7 @@ impl DataReaderListener for SubListener {
 }
 
 fn run_publisher(args: &Args) {
-    let qos = build_qos(args);
+    let qos = build_qos(args, true);
 
     let factory = DomainParticipantFactory::get_instance();
     let participant = factory
@@ -277,10 +277,11 @@ fn run_publisher(args: &Args) {
         .unwrap();
 
     println!(
-        "********* [publisher INFO] domain_id: {:?}, hostname: {:?}, reliability: {:?}",
+        "********* [publisher INFO] domain_id: {:?}, hostname: {:?}, reliability: {:?}, topic: {}",
         args.domain,
         hostname::get().unwrap(),
         qos.reliability,
+        args.topic,
     );
     let deadline_str = if qos.deadline == Duration::infinite() { "INFINITE".to_string() } else { format!("{:?}", qos.deadline) };
     println!(
@@ -327,7 +328,7 @@ fn run_publisher(args: &Args) {
 }
 
 fn run_subscriber(args: &Args) {
-    let qos = build_qos(args);
+    let qos = build_qos(args, false);
 
     let factory = DomainParticipantFactory::get_instance();
     let participant = factory
@@ -377,10 +378,11 @@ fn run_subscriber(args: &Args) {
         .unwrap();
 
     println!(
-        "********* [subscriber INFO] domain_id: {:?}, hostname: {:?}, reliability: {:?} ",
+        "********* [subscriber INFO] domain_id: {:?}, hostname: {:?}, reliability: {:?}, topic: {}",
         args.domain,
         hostname::get().unwrap(),
         qos.reliability,
+        args.topic,
     );
     let deadline_str = if qos.deadline == Duration::infinite() { "INFINITE".to_string() } else { format!("{:?}", qos.deadline) };
     println!(
