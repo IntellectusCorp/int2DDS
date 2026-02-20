@@ -83,6 +83,15 @@ target_link_libraries(listener_publisher ${INT2DDS_FFI_LIB})
 add_executable(listener_subscriber listener/listener_subscriber.c)
 target_link_libraries(listener_subscriber ${INT2DDS_FFI_LIB})
 
+# Primitives Type Test Examples (FastDDS Interop)
+add_executable(primitives_publisher Primitives/primitives_publisher.c)
+target_include_directories(primitives_publisher PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Primitives)
+target_link_libraries(primitives_publisher ${INT2DDS_FFI_LIB})
+
+add_executable(primitives_subscriber Primitives/primitives_subscriber.c)
+target_include_directories(primitives_subscriber PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Primitives)
+target_link_libraries(primitives_subscriber ${INT2DDS_FFI_LIB})
+
 # Copy DLL to output directory on Windows
 if(WIN32 AND EXISTS ${INT2DDS_FFI_DLL})
     add_custom_command(TARGET hello_world_publisher POST_BUILD
@@ -145,6 +154,14 @@ if(WIN32 AND EXISTS ${INT2DDS_FFI_DLL})
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${INT2DDS_FFI_DLL}
         $<TARGET_FILE_DIR:perftest_cdr_subscriber>)
+    add_custom_command(TARGET primitives_publisher POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${INT2DDS_FFI_DLL}
+        $<TARGET_FILE_DIR:primitives_publisher>)
+    add_custom_command(TARGET primitives_subscriber POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${INT2DDS_FFI_DLL}
+        $<TARGET_FILE_DIR:primitives_subscriber>)
 endif()
 
 # Instructions
@@ -186,4 +203,9 @@ message(STATUS "  Latency:        ./perftest_cdr_publisher --test-mode latency -
 message(STATUS "                  ./perftest_cdr_subscriber --test-mode latency")
 message(STATUS "  Local latency:  ./perftest_cdr_publisher --test-mode local_latency --data-len 1024")
 message(STATUS "                  ./perftest_cdr_subscriber --test-mode local_latency")
+message(STATUS "")
+message(STATUS "Primitives type interop test:")
+message(STATUS "  ./primitives_publisher --domain-id 0")
+message(STATUS "  ./primitives_subscriber --domain-id 0")
+message(STATUS "  Options: --domain-id <id> --count <n> --reliability <best_effort|reliable>")
 message(STATUS "")

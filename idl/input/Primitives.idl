@@ -1,0 +1,7 @@
+@extensibility(APPENDABLE)
+struct PrimitivesType {
+    @key long id;
+    boolean bool_val;
+    octet byte_val;
+    char char_val;
+};
