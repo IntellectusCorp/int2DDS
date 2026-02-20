@@ -14,7 +14,10 @@
 
 use std::sync::Arc;
 
-use int2dds::{infrastructure::status::StatusMask, subscription::qos::SubscriberQos};
+use int2dds::{
+    infrastructure::status::StatusMask, subscription::data_reader_listener::DataReaderListener,
+    subscription::qos::SubscriberQos,
+};
 
 use crate::data::Int2DdsData;
 
@@ -202,7 +205,18 @@ pub unsafe extern "C" fn int2dds_create_datareader_with_listener(
             .inner
             .set_listener(Some(listener_clone), StatusMask::from_bits_truncate(mask)));
 
-        reader_handle.listener = Some(listener_arc);
+        reader_handle.listener = Some(listener_arc.clone());
+
+        // Check if matching already occurred before the listener was set.
+        // This handles the race condition where SEDP matching completes between
+        // create_datareader() and set_listener().
+        if mask & crate::status_condition::INT2DDS_STATUS_SUBSCRIPTION_MATCHED != 0 {
+            if let Ok(status) = reader_handle.inner.get_subscription_matched_status() {
+                if status.current_count() > 0 {
+                    listener_arc.on_subscription_matched(&reader_handle.inner, &status);
+                }
+            }
+        }
     }
 
     *reader_out = Box::into_raw(reader_handle);

@@ -14,7 +14,10 @@
 
 use std::sync::Arc;
 
-use int2dds::{infrastructure::status::StatusMask, publication::qos::PublisherQos};
+use int2dds::{
+    infrastructure::status::StatusMask, publication::data_writer_listener::DataWriterListener,
+    publication::qos::PublisherQos,
+};
 
 use crate::data::Int2DdsData;
 
@@ -200,7 +203,18 @@ pub unsafe extern "C" fn int2dds_create_datawriter_with_listener(
             .inner
             .set_listener(Some(listener_clone), StatusMask::from_bits_truncate(mask)));
 
-        writer_handle.listener = Some(listener_arc);
+        writer_handle.listener = Some(listener_arc.clone());
+
+        // Check if matching already occurred before the listener was set.
+        // This handles the race condition where SEDP matching completes between
+        // create_datawriter() and set_listener().
+        if mask & crate::status_condition::INT2DDS_STATUS_PUBLICATION_MATCHED != 0 {
+            if let Ok(status) = writer_handle.inner.get_publication_matched_status() {
+                if status.current_count() > 0 {
+                    listener_arc.on_publication_matched(&writer_handle.inner, &status);
+                }
+            }
+        }
     }
 
     *writer_out = Box::into_raw(writer_handle);
