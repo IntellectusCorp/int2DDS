@@ -5,7 +5,6 @@
 /// - Auto-assigns enum discriminant values
 /// - Extracts annotations into structured fields (is_key, member_id, etc.)
 /// - Topologically sorts structs so nested types come first
-
 use std::collections::{HashMap, HashSet};
 
 use crate::parser::ast::*;
@@ -30,7 +29,7 @@ pub fn resolve(definitions: Vec<Definition>) -> Result<IdlModel, ResolveError> {
 
 struct Resolver {
     typedefs: HashMap<String, TypeSpec>,
-    struct_defs: Vec<(String, StructDef)>,  // (qualified_name, def)
+    struct_defs: Vec<(String, StructDef)>, // (qualified_name, def)
     enum_defs: Vec<(String, EnumDef)>,
     known_types: HashSet<String>,
 }
@@ -127,17 +126,10 @@ impl Resolver {
                 next_value += 1;
                 val
             };
-            variants.push(ResolvedEnumVariant {
-                name: v.name.clone(),
-                value,
-            });
+            variants.push(ResolvedEnumVariant { name: v.name.clone(), value });
         }
 
-        Ok(ResolvedEnum {
-            name: edef.name.clone(),
-            qualified_name: qname.to_string(),
-            variants,
-        })
+        Ok(ResolvedEnum { name: edef.name.clone(), qualified_name: qname.to_string(), variants })
     }
 
     fn resolve_struct(
@@ -210,6 +202,18 @@ impl Resolver {
                 size: *size,
             }),
             TypeSpec::Named(name) => {
+                // OMG IDL 4.2 integer type aliases
+                match name.as_str() {
+                    "int8" => return Ok(ResolvedType::I8),
+                    "uint8" => return Ok(ResolvedType::U8),
+                    "int16" => return Ok(ResolvedType::I16),
+                    "uint16" => return Ok(ResolvedType::U16),
+                    "int32" => return Ok(ResolvedType::I32),
+                    "uint32" => return Ok(ResolvedType::U32),
+                    "int64" => return Ok(ResolvedType::I64),
+                    "uint64" => return Ok(ResolvedType::U64),
+                    _ => {}
+                }
                 // Check typedef first
                 if let Some(target) = self.typedefs.get(name) {
                     return self.resolve_type_spec(target);
@@ -217,15 +221,17 @@ impl Resolver {
                 // Check known struct/enum
                 if self.known_types.contains(name) {
                     // Determine if it's an enum or struct
-                    if self.enum_defs.iter().any(|(q, _)| q == name || q.ends_with(&format!("::{}", name))) {
+                    if self
+                        .enum_defs
+                        .iter()
+                        .any(|(q, _)| q == name || q.ends_with(&format!("::{}", name)))
+                    {
                         Ok(ResolvedType::Enum(name.clone()))
                     } else {
                         Ok(ResolvedType::Struct(name.clone()))
                     }
                 } else {
-                    Err(ResolveError {
-                        message: format!("unresolved type: '{}'", name),
-                    })
+                    Err(ResolveError { message: format!("unresolved type: '{}'", name) })
                 }
             }
         }
@@ -366,10 +372,7 @@ mod tests {
         assert_eq!(s.extensibility, ExtensibilityKind::Appendable);
         assert_eq!(s.members.len(), 2);
         assert!(matches!(s.members[0].resolved_type, ResolvedType::U32));
-        assert!(matches!(
-            s.members[1].resolved_type,
-            ResolvedType::String { bound: None }
-        ));
+        assert!(matches!(s.members[1].resolved_type, ResolvedType::String { bound: None }));
     }
 
     #[test]
