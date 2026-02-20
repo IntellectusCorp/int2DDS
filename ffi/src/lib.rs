@@ -60,5 +60,6 @@ pub mod status;
 pub mod status_condition;
 pub mod subscriber;
 pub mod topic;
+pub mod type_info;
 pub mod types;
 pub mod waitset;

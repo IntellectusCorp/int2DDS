@@ -24,6 +24,10 @@
 
 #define INT2DDS_QOS_HISTORY_KEEP_ALL 1
 
+#define INT2DDS_QOS_DATA_REPR_XCDR1 0
+
+#define INT2DDS_QOS_DATA_REPR_XCDR2 2
+
 #define INT2DDS_STATUS_DATA_ON_READERS (1 << 0)
 
 #define INT2DDS_STATUS_DATA_AVAILABLE (1 << 1)
@@ -47,6 +51,39 @@
 #define INT2DDS_STATUS_LIVELINESS_LOST (1 << 10)
 
 #define INT2DDS_STATUS_PUBLICATION_MATCHED (1 << 11)
+
+/**
+ * Field type constants for C FFI.
+ */
+#define INT2DDS_FIELD_BOOL 0
+
+#define INT2DDS_FIELD_BYTE 1
+
+#define INT2DDS_FIELD_CHAR8 2
+
+#define INT2DDS_FIELD_INT8 3
+
+#define INT2DDS_FIELD_INT16 4
+
+#define INT2DDS_FIELD_INT32 5
+
+#define INT2DDS_FIELD_INT64 6
+
+#define INT2DDS_FIELD_UINT8 7
+
+#define INT2DDS_FIELD_UINT16 8
+
+#define INT2DDS_FIELD_UINT32 9
+
+#define INT2DDS_FIELD_UINT64 10
+
+#define INT2DDS_FIELD_FLOAT32 11
+
+#define INT2DDS_FIELD_FLOAT64 12
+
+#define INT2DDS_FIELD_STRING 13
+
+#define INT2DDS_FIELD_ENUM 14
 
 /**
  * C-compatible QoS policy ID enum
@@ -159,6 +196,14 @@ typedef struct Int2DdsTopic Int2DdsTopic;
  * Opaque QoS handle for Topic
  */
 typedef struct Int2DdsTopicQos Int2DdsTopicQos;
+
+/**
+ * Opaque type info builder for the FFI layer.
+ *
+ * Collects field descriptions and builds TypeIdentifier/TypeObject
+ * for DDS-XTypes discovery.
+ */
+typedef struct Int2DdsTypeInfo Int2DdsTypeInfo;
 
 /**
  * Opaque handle to a WaitSet
@@ -775,6 +820,20 @@ Int2DdsRet int2dds_datawriter_qos_set_history(struct Int2DdsDataWriterQos *qos,
                                               int32_t depth);
 
 /**
+ * Set data representation QoS for DataWriter
+ *
+ * Controls which encoding is advertised in DDS discovery.
+ * - `INT2DDS_QOS_DATA_REPR_XCDR1` (0): XCDR1 — for FINAL extensibility
+ * - `INT2DDS_QOS_DATA_REPR_XCDR2` (2): XCDR2 — for APPENDABLE/MUTABLE extensibility
+ *
+ * # Safety
+ * - `qos` must be a valid QoS handle
+ * - `kind` must be a valid data representation kind
+ */
+Int2DdsRet int2dds_datawriter_qos_set_data_representation(struct Int2DdsDataWriterQos *qos,
+                                                          int32_t kind);
+
+/**
  * Destroy DataWriter QoS
  *
  * # Safety
@@ -821,6 +880,20 @@ Int2DdsRet int2dds_datareader_qos_set_durability(struct Int2DdsDataReaderQos *qo
 Int2DdsRet int2dds_datareader_qos_set_history(struct Int2DdsDataReaderQos *qos,
                                               int32_t kind,
                                               int32_t depth);
+
+/**
+ * Set data representation QoS for DataReader
+ *
+ * Controls which encoding is advertised in DDS discovery.
+ * - `INT2DDS_QOS_DATA_REPR_XCDR1` (0): XCDR1 — for FINAL extensibility
+ * - `INT2DDS_QOS_DATA_REPR_XCDR2` (2): XCDR2 — for APPENDABLE/MUTABLE extensibility
+ *
+ * # Safety
+ * - `qos` must be a valid QoS handle
+ * - `kind` must be a valid data representation kind
+ */
+Int2DdsRet int2dds_datareader_qos_set_data_representation(struct Int2DdsDataReaderQos *qos,
+                                                          int32_t kind);
 
 /**
  * Destroy DataReader QoS
@@ -1097,6 +1170,28 @@ Int2DdsRet int2dds_create_topic(const struct Int2DdsParticipant *participant,
                                 struct Int2DdsTopic **topic_out);
 
 /**
+ * Create a Topic with type information for DDS-XTypes discovery
+ *
+ * Creates a topic using a pre-built `Int2DdsTypeInfo` which provides
+ * TypeIdentifier and TypeObject for DDS discovery parameters (0x0069, 0x0072).
+ * This enables interoperability with implementations that require type information
+ * (e.g., Fast-DDS).
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `topic_name` must be a valid null-terminated C string
+ * - `type_info` must be a valid `Int2DdsTypeInfo` created by `int2dds_type_info_create`
+ * - `qos` can be null for default QoS
+ * - `topic_out` must be a valid pointer to a null pointer
+ * - The returned topic must be freed with `int2dds_delete_topic`
+ */
+Int2DdsRet int2dds_create_topic_with_type_info(const struct Int2DdsParticipant *participant,
+                                               const char *topic_name,
+                                               const struct Int2DdsTypeInfo *type_info,
+                                               const struct Int2DdsTopicQos *qos,
+                                               struct Int2DdsTopic **topic_out);
+
+/**
  * Delete a Topic
  *
  * # Safety
@@ -1129,6 +1224,42 @@ Int2DdsRet int2dds_topic_get_name(const struct Int2DdsTopic *topic,
 Int2DdsRet int2dds_topic_get_type_name(const struct Int2DdsTopic *topic,
                                        char *type_name_out,
                                        uintptr_t type_name_size);
+
+/**
+ * Create a new type info builder.
+ *
+ * # Safety
+ * - `type_name` must be a valid null-terminated C string
+ * - `extensibility`: 0 = Final, 1 = Appendable, 2 = Mutable
+ * - `out` must be a valid pointer to a null pointer
+ * - The returned type info must be freed with `int2dds_type_info_destroy`
+ */
+Int2DdsRet int2dds_type_info_create(const char *type_name,
+                                    int32_t extensibility,
+                                    struct Int2DdsTypeInfo **out);
+
+/**
+ * Add a field to the type info builder.
+ *
+ * # Safety
+ * - `type_info` must be a valid type info created by `int2dds_type_info_create`
+ * - `field_name` must be a valid null-terminated C string
+ * - `field_type`: one of the INT2DDS_FIELD_* constants
+ * - `is_key`: non-zero if this field is a key field
+ */
+Int2DdsRet int2dds_type_info_add_field(struct Int2DdsTypeInfo *type_info,
+                                       const char *field_name,
+                                       int32_t field_type,
+                                       int32_t is_key);
+
+/**
+ * Destroy a type info builder.
+ *
+ * # Safety
+ * - `type_info` must be a valid type info, or null (no-op)
+ * - Must not be used after this call
+ */
+void int2dds_type_info_destroy(struct Int2DdsTypeInfo *type_info);
 
 /**
  * Create a new WaitSet

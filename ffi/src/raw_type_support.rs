@@ -16,6 +16,7 @@ use int2dds::{
     serialize::cdr::ExtensibilityKind,
     topic::sql::ast::Parameter,
     topic::type_support::{SerializationFormat, TypeSupport},
+    xtypes::{TypeIdentifier, TypeObject},
 };
 
 /// Lightweight TypeSupport for raw bytes FFI path.
@@ -25,11 +26,34 @@ use int2dds::{
 pub struct RawTypeSupport {
     type_name: String,
     extensibility: ExtensibilityKind,
+    has_key: bool,
+    type_identifier: Option<TypeIdentifier>,
+    type_object: Option<TypeObject>,
 }
 
 impl RawTypeSupport {
     pub fn new(type_name: String, extensibility: ExtensibilityKind) -> Self {
-        Self { type_name, extensibility }
+        Self { type_name, extensibility, has_key: false, type_identifier: None, type_object: None }
+    }
+
+    /// Create a RawTypeSupport with pre-built TypeIdentifier and TypeObject.
+    ///
+    /// This enables DDS-XTypes discovery parameters (0x0069, 0x0072) to be sent
+    /// during endpoint matching.
+    pub fn with_type_info(
+        type_name: String,
+        extensibility: ExtensibilityKind,
+        has_key: bool,
+        type_identifier: TypeIdentifier,
+        type_object: TypeObject,
+    ) -> Self {
+        Self {
+            type_name,
+            extensibility,
+            has_key,
+            type_identifier: Some(type_identifier),
+            type_object: Some(type_object),
+        }
     }
 }
 
@@ -65,7 +89,10 @@ impl TypeSupport for RawTypeSupport {
         _data: &[u8],
         _format: Option<&SerializationFormat>,
     ) -> DdsResult<Box<dyn Any>> {
-        Err(DdsError::Error("RawTypeSupport: use take_serialized() instead".to_string()))
+        // Return a dummy Int2DdsData so that the DDS internal key extraction
+        // (update_instance_state) succeeds and data is stored in the cache.
+        // Actual deserialization is done by C users via take_serialized().
+        Ok(Box::new(crate::data::Int2DdsData))
     }
 
     fn serialize_key(&self, _data: &dyn Any) -> DdsResult<SerializedData> {
@@ -81,10 +108,18 @@ impl TypeSupport for RawTypeSupport {
     }
 
     fn is_compute_key_provided(&self) -> bool {
-        false
+        self.has_key
     }
 
     fn get_extensibility_kind(&self) -> ExtensibilityKind {
         self.extensibility
+    }
+
+    fn get_type_identifier(&self) -> Option<TypeIdentifier> {
+        self.type_identifier.clone()
+    }
+
+    fn get_type_object(&self) -> Option<TypeObject> {
+        self.type_object.clone()
     }
 }
