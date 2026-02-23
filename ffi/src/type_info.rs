@@ -18,7 +18,8 @@ use int2dds::{
     serialize::cdr::ExtensibilityKind,
     xtypes::{
         CommonStructMember, CompleteMemberDetail, CompleteStructMember, CompleteStructType,
-        CompleteTypeObject, MemberFlag, TryConstructKind, TypeFlag, TypeIdentifier, TypeObject,
+        CompleteTypeObject, EquivalenceHash, MemberFlag, PlainCollectionHeader, TryConstructKind,
+        TypeFlag, TypeIdentifier, TypeObject,
     },
 };
 
@@ -210,6 +211,140 @@ pub unsafe extern "C" fn int2dds_type_info_add_field(
     INT2DDS_RET_OK
 }
 
+/// Add a sequence field to the type info builder.
+///
+/// Creates a `PlainSequenceLarge` TypeIdentifier wrapping the element type,
+/// matching how int2DDS-Rust represents `Vec<T>` in DDS-XTypes.
+///
+/// # Safety
+/// - `type_info` must be a valid type info created by `int2dds_type_info_create`
+/// - `field_name` must be a valid null-terminated C string
+/// - `element_type`: one of the INT2DDS_FIELD_* constants for the sequence element
+/// - `bound`: maximum sequence length (0 = unbounded)
+/// - `is_key`: non-zero if this field is a key field
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_type_info_add_sequence_field(
+    type_info: *mut Int2DdsTypeInfo,
+    field_name: *const std::os::raw::c_char,
+    element_type: i32,
+    bound: u32,
+    is_key: i32,
+) -> Int2DdsRet {
+    check_null!(type_info);
+    check_null!(field_name);
+
+    let ti = &mut *type_info;
+
+    let name_str = match CStr::from_ptr(field_name).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    let element_id = match field_type_to_type_identifier(element_type) {
+        Some(id) => id,
+        None => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    let type_id = TypeIdentifier::PlainSequenceLarge {
+        header: PlainCollectionHeader::default(),
+        bound,
+        element_identifier: Box::new(element_id),
+    };
+
+    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, is_key: is_key != 0 });
+
+    INT2DDS_RET_OK
+}
+
+/// Add an array field to the type info builder.
+///
+/// Creates a `PlainArrayLarge` TypeIdentifier wrapping the element type,
+/// matching how int2DDS-Rust represents `[T; N]` in DDS-XTypes.
+///
+/// # Safety
+/// - `type_info` must be a valid type info created by `int2dds_type_info_create`
+/// - `field_name` must be a valid null-terminated C string
+/// - `element_type`: one of the INT2DDS_FIELD_* constants for the array element
+/// - `array_size`: fixed size of the array
+/// - `is_key`: non-zero if this field is a key field
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_type_info_add_array_field(
+    type_info: *mut Int2DdsTypeInfo,
+    field_name: *const std::os::raw::c_char,
+    element_type: i32,
+    array_size: u32,
+    is_key: i32,
+) -> Int2DdsRet {
+    check_null!(type_info);
+    check_null!(field_name);
+
+    let ti = &mut *type_info;
+
+    let name_str = match CStr::from_ptr(field_name).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    let element_id = match field_type_to_type_identifier(element_type) {
+        Some(id) => id,
+        None => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    let type_id = TypeIdentifier::PlainArrayLarge {
+        header: PlainCollectionHeader::default(),
+        array_bound_seq: vec![array_size],
+        element_identifier: Box::new(element_id),
+    };
+
+    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, is_key: is_key != 0 });
+
+    INT2DDS_RET_OK
+}
+
+/// Add a named (complex) type field to the type info builder.
+///
+/// Creates a `MinimalTypeId(EquivalenceHash::compute(type_hash_name))` TypeIdentifier,
+/// matching how int2DDS-Rust represents struct fields via the derive macro's
+/// `Fallback` path in `type_to_identifier`.
+///
+/// For direct struct fields: pass the struct name (e.g., "InnerStruct").
+/// For `Vec<Struct>` fields: pass "Vec < StructName >" (matching Rust `quote!` formatting).
+///
+/// # Safety
+/// - `type_info` must be a valid type info created by `int2dds_type_info_create`
+/// - `field_name` must be a valid null-terminated C string
+/// - `type_hash_name` must be a valid null-terminated C string (the type name to hash)
+/// - `is_key`: non-zero if this field is a key field
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_type_info_add_named_type_field(
+    type_info: *mut Int2DdsTypeInfo,
+    field_name: *const std::os::raw::c_char,
+    type_hash_name: *const std::os::raw::c_char,
+    is_key: i32,
+) -> Int2DdsRet {
+    check_null!(type_info);
+    check_null!(field_name);
+    check_null!(type_hash_name);
+
+    let ti = &mut *type_info;
+
+    let name_str = match CStr::from_ptr(field_name).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    let hash_name = match CStr::from_ptr(type_hash_name).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    let type_id = TypeIdentifier::MinimalTypeId(EquivalenceHash::compute(hash_name.as_bytes()));
+
+    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, is_key: is_key != 0 });
+
+    INT2DDS_RET_OK
+}
+
 /// Destroy a type info builder.
 ///
 /// # Safety
@@ -226,8 +361,8 @@ pub unsafe extern "C" fn int2dds_type_info_destroy(type_info: *mut Int2DdsTypeIn
 mod tests {
     use super::*;
     use int2dds::xtypes::{
-        CommonStructMember, CompleteMemberDetail, CompleteStructMember, CompleteStructType,
-        CompleteTypeObject, MemberFlag, TryConstructKind, TypeFlag, TypeIdentifier, TypeObject,
+        CompleteStructMember, CompleteStructType, CompleteTypeObject, MemberFlag, TryConstructKind,
+        TypeFlag, TypeIdentifier, TypeObject,
     };
 
     /// Test that the FFI type_info builder produces the same hash as the derive macro path.
@@ -332,6 +467,111 @@ mod tests {
         assert_eq!(
             ffi_type_id, derive_type_id,
             "TypeIdentifier hashes differ between FFI and derive paths"
+        );
+    }
+
+    /// Test that sequence fields produce the same hash as the derive macro path.
+    ///
+    /// Simulates a struct with sequence and array fields to verify that
+    /// `int2dds_type_info_add_sequence_field` and `int2dds_type_info_add_array_field`
+    /// produce correct PlainSequenceLarge/PlainArrayLarge TypeIdentifiers.
+    #[test]
+    fn test_sequence_type_hash_matches_derive_macro() {
+        // === Path 1: FFI type_info builder ===
+        let mut ti = Int2DdsTypeInfo {
+            type_name: "TestSeqType".to_string(),
+            extensibility: ExtensibilityKind::Appendable,
+            fields: Vec::new(),
+        };
+        // Primitive field
+        ti.fields.push(FieldInfo {
+            name: "id".to_string(),
+            type_id: TypeIdentifier::Int32,
+            is_key: true,
+        });
+        // Unbounded sequence<bool>
+        ti.fields.push(FieldInfo {
+            name: "bool_seq".to_string(),
+            type_id: TypeIdentifier::PlainSequenceLarge {
+                header: PlainCollectionHeader::default(),
+                bound: 0,
+                element_identifier: Box::new(TypeIdentifier::Boolean),
+            },
+            is_key: false,
+        });
+        // Bounded sequence<int32, 10>
+        ti.fields.push(FieldInfo {
+            name: "bounded_seq".to_string(),
+            type_id: TypeIdentifier::PlainSequenceLarge {
+                header: PlainCollectionHeader::default(),
+                bound: 10,
+                element_identifier: Box::new(TypeIdentifier::Int32),
+            },
+            is_key: false,
+        });
+        // Array bool[4]
+        ti.fields.push(FieldInfo {
+            name: "bool_array".to_string(),
+            type_id: TypeIdentifier::PlainArrayLarge {
+                header: PlainCollectionHeader::default(),
+                array_bound_seq: vec![4],
+                element_identifier: Box::new(TypeIdentifier::Boolean),
+            },
+            is_key: false,
+        });
+
+        let ffi_type_id = ti.build_type_identifier();
+
+        // === Path 2: Derive macro simulation ===
+        let ext_kind = int2dds::xtypes::ExtensibilityKind::Appendable;
+        let type_flags = TypeFlag::new(ext_kind, false, false);
+        let mut struct_type = CompleteStructType::new(type_flags, "TestSeqType".to_string(), None);
+
+        struct_type.add_member(CompleteStructMember::new(
+            0,
+            MemberFlag::new(TryConstructKind::Discard, false, false, false, true, false),
+            TypeIdentifier::Int32,
+            "id".to_string(),
+        ));
+        struct_type.add_member(CompleteStructMember::new(
+            1,
+            MemberFlag::new(TryConstructKind::Discard, false, false, false, false, false),
+            TypeIdentifier::PlainSequenceLarge {
+                header: PlainCollectionHeader::default(),
+                bound: 0,
+                element_identifier: Box::new(TypeIdentifier::Boolean),
+            },
+            "bool_seq".to_string(),
+        ));
+        struct_type.add_member(CompleteStructMember::new(
+            2,
+            MemberFlag::new(TryConstructKind::Discard, false, false, false, false, false),
+            TypeIdentifier::PlainSequenceLarge {
+                header: PlainCollectionHeader::default(),
+                bound: 10,
+                element_identifier: Box::new(TypeIdentifier::Int32),
+            },
+            "bounded_seq".to_string(),
+        ));
+        struct_type.add_member(CompleteStructMember::new(
+            3,
+            MemberFlag::new(TryConstructKind::Discard, false, false, false, false, false),
+            TypeIdentifier::PlainArrayLarge {
+                header: PlainCollectionHeader::default(),
+                array_bound_seq: vec![4],
+                element_identifier: Box::new(TypeIdentifier::Boolean),
+            },
+            "bool_array".to_string(),
+        ));
+
+        let derive_complete = CompleteTypeObject::Struct(struct_type);
+        let derive_type_obj = TypeObject::Complete(derive_complete);
+        let derive_hash = derive_type_obj.compute_hash();
+        let derive_type_id = TypeIdentifier::CompleteTypeId(derive_hash);
+
+        assert_eq!(
+            ffi_type_id, derive_type_id,
+            "TypeIdentifier hashes differ for sequence/array fields"
         );
     }
 }

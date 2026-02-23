@@ -170,6 +170,19 @@ impl<'a> CGen<'a> {
                 StringMode::Pointer => format!("char* {}", name),
             },
             ResolvedType::Sequence { element, bound } => {
+                // Special handling for sequence<string> in FixedArray mode:
+                // each element is char[size], so we need char data[N][size] (bounded)
+                // or char (*data)[size] (unbounded pointer-to-array).
+                if let ResolvedType::String { bound: str_bound } = element.as_ref() {
+                    if self.opts.string_mode == StringMode::FixedArray {
+                        let str_size = str_bound.unwrap_or(self.opts.default_string_bound) + 1;
+                        return if let Some(max) = bound {
+                            format!("struct {{ char data[{}][{}]; uint32_t length; }} {}", max, str_size, name)
+                        } else {
+                            format!("struct {{ char (*data)[{}]; uint32_t length; }} {}", str_size, name)
+                        };
+                    }
+                }
                 let elem_c = self.type_to_c_base(element);
                 if let Some(max) = bound {
                     // Bounded: inline array + length
@@ -206,8 +219,8 @@ impl<'a> CGen<'a> {
             ResolvedType::Char => "char".to_string(),
             ResolvedType::String { .. } => match self.opts.string_mode {
                 StringMode::FixedArray => {
-                    // For sequence<string> in FixedArray mode, use char* as base
-                    // (the array dimension is handled separately)
+                    // Base type for string in FixedArray mode.
+                    // Note: sequence<string> is handled specially in type_to_c_declaration.
                     "char".to_string()
                 }
                 StringMode::Pointer => "char*".to_string(),
@@ -304,16 +317,12 @@ impl<'a> CGen<'a> {
         };
 
         self.raw(&format!(
-            "static inline size_t {}_serialize_cdr(\n    const {} *val,\n    uint8_t *buf,\n    size_t capacity)\n{{\n",
+            "static inline size_t {}_serialize_cdr(\n    const {} *val,\n    uint8_t *buf,\n    size_t capacity,\n    bool xcdr2)\n{{\n",
             s.name, s.name
         ));
-        let xcdr2 = match s.extensibility {
-            ExtensibilityKind::Final => "false",
-            ExtensibilityKind::Appendable | ExtensibilityKind::Mutable => "true",
-        };
 
         self.raw("    Int2DdsCdrWriter w;\n");
-        self.raw(&format!("    int2dds_cdr_writer_init(&w, buf, capacity, true, {});\n", xcdr2));
+        self.raw("    int2dds_cdr_writer_init(&w, buf, capacity, true, xcdr2);\n");
         self.raw(&format!("    int2dds_cdr_write_encapsulation(&w, {});\n", ext_int));
 
         match s.extensibility {
@@ -321,12 +330,17 @@ impl<'a> CGen<'a> {
                 self.emit_serialize_fields(s, "val");
             }
             ExtensibilityKind::Appendable => {
-                self.raw("    size_t dh;\n");
-                self.raw("    int2dds_cdr_write_dheader_begin(&w, &dh);\n");
+                self.raw("    size_t dh = 0;\n");
+                self.raw("    if (xcdr2) {\n");
+                self.raw("        int2dds_cdr_write_dheader_begin(&w, &dh);\n");
+                self.raw("    }\n");
                 self.emit_serialize_fields(s, "val");
-                self.raw("    int2dds_cdr_write_dheader_finalize(&w, dh);\n");
+                self.raw("    if (xcdr2) {\n");
+                self.raw("        int2dds_cdr_write_dheader_finalize(&w, dh);\n");
+                self.raw("    }\n");
             }
             ExtensibilityKind::Mutable => {
+                // Mutable always requires XCDR2 (DHEADER + EMHEADER)
                 self.raw("    size_t dh;\n");
                 self.raw("    int2dds_cdr_write_dheader_begin(&w, &dh);\n");
                 self.emit_serialize_fields_mutable(s, "val");
@@ -413,6 +427,15 @@ impl<'a> CGen<'a> {
                 ));
             }
             ResolvedType::Sequence { element, .. } => {
+                let needs_dh = Self::sequence_element_needs_dheader(element);
+                if needs_dh {
+                    // XCDR2: non-primitive sequences need DHEADER
+                    self.raw(&format!("{}{{ size_t _seq_dh = 0;\n", indent));
+                    self.raw(&format!(
+                        "{}if (w.xcdr2) {{ int2dds_cdr_write_dheader_begin(&w, &_seq_dh); }}\n",
+                        indent
+                    ));
+                }
                 self.raw(&format!(
                     "{}int2dds_cdr_write_seq_header(&w, {}.length);\n",
                     indent, accessor
@@ -424,6 +447,13 @@ impl<'a> CGen<'a> {
                 let elem_accessor = format!("{}.data[_i]", accessor);
                 self.emit_write_field_indented(element, &elem_accessor, &format!("{}    ", indent));
                 self.raw(&format!("{}}}\n", indent));
+                if needs_dh {
+                    self.raw(&format!(
+                        "{}if (w.xcdr2) {{ int2dds_cdr_write_dheader_finalize(&w, _seq_dh); }}\n",
+                        indent
+                    ));
+                    self.raw(&format!("{}}}\n", indent));
+                }
             }
             ResolvedType::Array { element, size } => {
                 self.raw(&format!("{}for (uint32_t _i = 0; _i < {}; _i++) {{\n", indent, size));
@@ -433,7 +463,22 @@ impl<'a> CGen<'a> {
             }
             ResolvedType::Struct(type_name) => {
                 let simple = type_name.rsplit("::").next().unwrap_or(type_name);
+                let needs_dh = self.struct_needs_member_dheader(type_name);
+                if needs_dh {
+                    self.raw(&format!("{}{{ size_t _mbr_dh = 0;\n", indent));
+                    self.raw(&format!(
+                        "{}if (w.xcdr2) {{ int2dds_cdr_write_dheader_begin(&w, &_mbr_dh); }}\n",
+                        indent
+                    ));
+                }
                 self.raw(&format!("{}{}_serialize_fields(&w, &{});\n", indent, simple, accessor));
+                if needs_dh {
+                    self.raw(&format!(
+                        "{}if (w.xcdr2) {{ int2dds_cdr_write_dheader_finalize(&w, _mbr_dh); }}\n",
+                        indent
+                    ));
+                    self.raw(&format!("{}}}\n", indent));
+                }
             }
         }
     }
@@ -580,6 +625,15 @@ impl<'a> CGen<'a> {
                 ));
             }
             ResolvedType::Sequence { element, bound } => {
+                let needs_dh = Self::sequence_element_needs_dheader(element);
+                if needs_dh {
+                    // XCDR2: non-primitive sequences need DHEADER
+                    self.raw(&format!("{}{{ uint32_t _seq_sz = 0; size_t _seq_sp = 0;\n", indent));
+                    self.raw(&format!(
+                        "{}if (r.xcdr2) {{ int2dds_cdr_read_dheader(&r, &_seq_sz, &_seq_sp); }}\n",
+                        indent
+                    ));
+                }
                 self.raw(&format!(
                     "{}int2dds_cdr_read_seq_header(&r, &{}.length);\n",
                     indent, accessor
@@ -621,6 +675,13 @@ impl<'a> CGen<'a> {
                     );
                     self.raw(&format!("{}}}\n", indent));
                 }
+                if needs_dh {
+                    self.raw(&format!(
+                        "{}if (r.xcdr2) {{ int2dds_cdr_read_dheader_end(&r, _seq_sz, _seq_sp); }}\n",
+                        indent
+                    ));
+                    self.raw(&format!("{}}}\n", indent));
+                }
             }
             ResolvedType::Array { element, size } => {
                 self.raw(&format!("{}for (uint32_t _i = 0; _i < {}; _i++) {{\n", indent, size));
@@ -630,7 +691,22 @@ impl<'a> CGen<'a> {
             }
             ResolvedType::Struct(type_name) => {
                 let simple = type_name.rsplit("::").next().unwrap_or(type_name);
+                let needs_dh = self.struct_needs_member_dheader(type_name);
+                if needs_dh {
+                    self.raw(&format!("{}{{ uint32_t _mbr_sz = 0; size_t _mbr_sp = 0;\n", indent));
+                    self.raw(&format!(
+                        "{}if (r.xcdr2) {{ int2dds_cdr_read_dheader(&r, &_mbr_sz, &_mbr_sp); }}\n",
+                        indent
+                    ));
+                }
                 self.raw(&format!("{}{}_deserialize_fields(&r, &{});\n", indent, simple, accessor));
+                if needs_dh {
+                    self.raw(&format!(
+                        "{}if (r.xcdr2) {{ int2dds_cdr_read_dheader_end(&r, _mbr_sz, _mbr_sp); }}\n",
+                        indent
+                    ));
+                    self.raw(&format!("{}}}\n", indent));
+                }
             }
         }
     }
@@ -670,9 +746,49 @@ impl<'a> CGen<'a> {
 
     // ---- Type Info (DDS-XTypes discovery) ----
 
+    /// Check if a sequence needs an outer DHEADER in XCDR2.
+    /// String and nested sequence elements need an outer DHEADER because they don't
+    /// have their own type-level DHEADER. Struct elements do NOT need an outer sequence
+    /// DHEADER because each struct element gets its own member-level DHEADER (for
+    /// variable-length FINAL structs) or type-level DHEADER (for APPENDABLE/MUTABLE).
+    fn sequence_element_needs_dheader(element: &ResolvedType) -> bool {
+        matches!(
+            element,
+            ResolvedType::String { .. } | ResolvedType::Sequence { .. }
+        )
+    }
+
+    /// Check if a type has variable-length serialized representation.
+    fn type_is_variable_length(&self, ty: &ResolvedType) -> bool {
+        match ty {
+            ResolvedType::String { .. } | ResolvedType::Sequence { .. } => true,
+            ResolvedType::Array { element, .. } => self.type_is_variable_length(element),
+            ResolvedType::Struct(name) => {
+                if let Some(s) = self.model.structs.iter().find(|s| s.name == *name || s.qualified_name == *name) {
+                    s.members.iter().any(|m| self.type_is_variable_length(&m.resolved_type))
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Check if a struct type needs a member-level DHEADER in XCDR2.
+    /// Only FINAL structs with variable-length content need this, because
+    /// APPENDABLE/MUTABLE `_serialize_fields` already emit their own DHEADER.
+    fn struct_needs_member_dheader(&self, type_name: &str) -> bool {
+        if let Some(s) = self.model.structs.iter().find(|s| s.name == type_name || s.qualified_name == type_name) {
+            s.extensibility == ExtensibilityKind::Final
+                && s.members.iter().any(|m| self.type_is_variable_length(&m.resolved_type))
+        } else {
+            false
+        }
+    }
+
     /// Map a ResolvedType to an INT2DDS_FIELD_* constant name for the type info builder.
-    /// Returns None for complex types (sequences, arrays, nested structs) that are
-    /// not yet supported by the lightweight type info API.
+    /// Maps a primitive/enum ResolvedType to an INT2DDS_FIELD_* constant name.
+    /// Returns None for complex types (nested structs) not yet supported.
     fn resolved_type_to_field_constant(ty: &ResolvedType) -> Option<&'static str> {
         match ty {
             ResolvedType::Bool => Some("INT2DDS_FIELD_BOOL"),
@@ -689,7 +805,57 @@ impl<'a> CGen<'a> {
             ResolvedType::F64 => Some("INT2DDS_FIELD_FLOAT64"),
             ResolvedType::String { .. } => Some("INT2DDS_FIELD_STRING"),
             ResolvedType::Enum(_) => Some("INT2DDS_FIELD_ENUM"),
-            _ => None, // Sequence, Array, Struct not yet supported
+            _ => None,
+        }
+    }
+
+    /// Emit a single type_info field registration call for a member.
+    fn emit_type_info_field(&mut self, name: &str, ty: &ResolvedType, is_key: i32) {
+        match ty {
+            ResolvedType::Sequence { element, .. } => {
+                match element.as_ref() {
+                    ResolvedType::Struct(struct_name) => {
+                        // Vec<Struct> in Rust: Fallback path hashes "Vec < StructName >"
+                        self.raw(&format!(
+                            "    int2dds_type_info_add_named_type_field(ti, \"{}\", \"Vec < {} >\", {});\n",
+                            name, struct_name, is_key
+                        ));
+                    }
+                    _ => {
+                        if let Some(elem_const) = Self::resolved_type_to_field_constant(element) {
+                            // Always use bound=0 to match Rust derive macro behavior
+                            // (Rust Vec<T> always generates PlainSequenceLarge { bound: 0 })
+                            self.raw(&format!(
+                                "    int2dds_type_info_add_sequence_field(ti, \"{}\", {}, 0, {});\n",
+                                name, elem_const, is_key
+                            ));
+                        }
+                    }
+                }
+            }
+            ResolvedType::Array { element, size } => {
+                if let Some(elem_const) = Self::resolved_type_to_field_constant(element) {
+                    self.raw(&format!(
+                        "    int2dds_type_info_add_array_field(ti, \"{}\", {}, {}, {});\n",
+                        name, elem_const, size, is_key
+                    ));
+                }
+            }
+            ResolvedType::Struct(struct_name) => {
+                // Direct struct field: hash the struct name
+                self.raw(&format!(
+                    "    int2dds_type_info_add_named_type_field(ti, \"{}\", \"{}\", {});\n",
+                    name, struct_name, is_key
+                ));
+            }
+            _ => {
+                if let Some(field_const) = Self::resolved_type_to_field_constant(ty) {
+                    self.raw(&format!(
+                        "    int2dds_type_info_add_field(ti, \"{}\", {}, {});\n",
+                        name, field_const, is_key
+                    ));
+                }
+            }
         }
     }
 
@@ -705,13 +871,8 @@ impl<'a> CGen<'a> {
         self.raw(&format!("    int2dds_type_info_create(\"{}\", {}, &ti);\n", s.name, ext_int));
 
         for m in &s.members {
-            if let Some(field_const) = Self::resolved_type_to_field_constant(&m.resolved_type) {
-                let is_key = if m.is_key { 1 } else { 0 };
-                self.raw(&format!(
-                    "    int2dds_type_info_add_field(ti, \"{}\", {}, {});\n",
-                    m.name, field_const, is_key
-                ));
-            }
+            let is_key = if m.is_key { 1 } else { 0 };
+            self.emit_type_info_field(&m.name, &m.resolved_type, is_key);
         }
 
         self.raw("    return ti;\n}\n");
@@ -840,7 +1001,8 @@ mod tests {
         assert!(code.contains("char message[257];")); // 256 + 1
         assert!(code.contains("HelloWorld_serialize_cdr("));
         assert!(code.contains("int2dds_cdr_write_encapsulation(&w, INT2DDS_CDR_APPENDABLE)"));
-        // APPENDABLE: serialize_cdr uses XCDR2 with DHEADER, fields functions have conditional dheader
+        // APPENDABLE: serialize_cdr and fields functions both have conditional DHEADER
+        assert!(code.contains("if (xcdr2)"));
         assert!(code.contains("int2dds_cdr_write_dheader_begin(&w, &dh)"));
         assert!(code.contains("int2dds_cdr_write_dheader_finalize(&w, dh)"));
         assert!(code.contains("if (w.xcdr2)"));
@@ -1079,6 +1241,28 @@ mod tests {
         assert!(code.contains("Messages_cleanup"));
         assert!(code.contains("if (val->items.data[_i]) { free(val->items.data[_i]);"));
         assert!(code.contains("if (val->items.data) { free(val->items.data);"));
+    }
+
+    #[test]
+    fn test_sequence_of_strings_fixedarray_mode() {
+        let defs = parse_idl(
+            r#"
+            struct Messages {
+                sequence<string> items;
+                sequence<string, 5> bounded_items;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let opts = COptions { string_mode: StringMode::FixedArray, ..Default::default() };
+        let code = generate(&model, "Messages.idl", &opts);
+
+        // Unbounded sequence<string>: char (*data)[257] (pointer to array of 257-char buffers)
+        assert!(code.contains("char (*data)[257];"));
+
+        // Bounded sequence<string, 5>: char data[5][257] (inline array of 5 strings)
+        assert!(code.contains("char data[5][257];"));
     }
 
     #[test]
