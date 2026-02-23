@@ -83,7 +83,7 @@ target_link_libraries(listener_publisher ${INT2DDS_FFI_LIB})
 add_executable(listener_subscriber listener/listener_subscriber.c)
 target_link_libraries(listener_subscriber ${INT2DDS_FFI_LIB})
 
-# Primitives Type Test Examples (FastDDS Interop)
+# Primitives Type Test Examples
 add_executable(primitives_publisher Primitives/primitives_publisher.c)
 target_include_directories(primitives_publisher PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Primitives)
 target_link_libraries(primitives_publisher ${INT2DDS_FFI_LIB})
@@ -91,6 +91,78 @@ target_link_libraries(primitives_publisher ${INT2DDS_FFI_LIB})
 add_executable(primitives_subscriber Primitives/primitives_subscriber.c)
 target_include_directories(primitives_subscriber PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Primitives)
 target_link_libraries(primitives_subscriber ${INT2DDS_FFI_LIB})
+
+# Integers Type Test Examples
+add_executable(integers_publisher Integers/integers_publisher.c)
+target_include_directories(integers_publisher PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Integers)
+target_link_libraries(integers_publisher ${INT2DDS_FFI_LIB})
+
+add_executable(integers_subscriber Integers/integers_subscriber.c)
+target_include_directories(integers_subscriber PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Integers)
+target_link_libraries(integers_subscriber ${INT2DDS_FFI_LIB})
+
+# Floats Type Test Examples
+add_executable(floats_publisher Floats/floats_publisher.c)
+target_include_directories(floats_publisher PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Floats)
+target_link_libraries(floats_publisher ${INT2DDS_FFI_LIB})
+
+add_executable(floats_subscriber Floats/floats_subscriber.c)
+target_include_directories(floats_subscriber PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Floats)
+target_link_libraries(floats_subscriber ${INT2DDS_FFI_LIB})
+
+# Strings Type Test Examples
+add_executable(strings_publisher Strings/strings_publisher.c)
+target_include_directories(strings_publisher PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Strings)
+target_link_libraries(strings_publisher ${INT2DDS_FFI_LIB})
+
+add_executable(strings_subscriber Strings/strings_subscriber.c)
+target_include_directories(strings_subscriber PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Strings)
+target_link_libraries(strings_subscriber ${INT2DDS_FFI_LIB})
+
+# Enum Type Test Examples
+add_executable(enum_publisher Enum/enum_publisher.c)
+target_include_directories(enum_publisher PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Enum)
+target_link_libraries(enum_publisher ${INT2DDS_FFI_LIB})
+
+add_executable(enum_subscriber Enum/enum_subscriber.c)
+target_include_directories(enum_subscriber PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Enum)
+target_link_libraries(enum_subscriber ${INT2DDS_FFI_LIB})
+
+# Arrays Type Test Examples
+add_executable(arrays_publisher Arrays/arrays_publisher.c)
+target_include_directories(arrays_publisher PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Arrays)
+target_link_libraries(arrays_publisher ${INT2DDS_FFI_LIB})
+
+add_executable(arrays_subscriber Arrays/arrays_subscriber.c)
+target_include_directories(arrays_subscriber PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Arrays)
+target_link_libraries(arrays_subscriber ${INT2DDS_FFI_LIB})
+
+# Sequences Type Test Examples
+add_executable(sequences_publisher Sequences/sequences_publisher.c)
+target_include_directories(sequences_publisher PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Sequences)
+target_link_libraries(sequences_publisher ${INT2DDS_FFI_LIB})
+
+add_executable(sequences_subscriber Sequences/sequences_subscriber.c)
+target_include_directories(sequences_subscriber PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Sequences)
+target_link_libraries(sequences_subscriber ${INT2DDS_FFI_LIB})
+
+# Sequence_Enum Type Test Examples
+add_executable(sequence_enum_publisher Sequence_Enum/sequence_enum_publisher.c)
+target_include_directories(sequence_enum_publisher PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Sequence_Enum)
+target_link_libraries(sequence_enum_publisher ${INT2DDS_FFI_LIB})
+
+add_executable(sequence_enum_subscriber Sequence_Enum/sequence_enum_subscriber.c)
+target_include_directories(sequence_enum_subscriber PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Sequence_Enum)
+target_link_libraries(sequence_enum_subscriber ${INT2DDS_FFI_LIB})
+
+# Nested_Structs Type Test Examples
+add_executable(nested_structs_publisher Nested_Structs/nested_structs_publisher.c)
+target_include_directories(nested_structs_publisher PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Nested_Structs)
+target_link_libraries(nested_structs_publisher ${INT2DDS_FFI_LIB})
+
+add_executable(nested_structs_subscriber Nested_Structs/nested_structs_subscriber.c)
+target_include_directories(nested_structs_subscriber PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Nested_Structs)
+target_link_libraries(nested_structs_subscriber ${INT2DDS_FFI_LIB})
 
 # Copy DLL to output directory on Windows
 if(WIN32 AND EXISTS ${INT2DDS_FFI_DLL})
@@ -162,6 +234,70 @@ if(WIN32 AND EXISTS ${INT2DDS_FFI_DLL})
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${INT2DDS_FFI_DLL}
         $<TARGET_FILE_DIR:primitives_subscriber>)
+    add_custom_command(TARGET integers_publisher POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${INT2DDS_FFI_DLL}
+        $<TARGET_FILE_DIR:integers_publisher>)
+    add_custom_command(TARGET integers_subscriber POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${INT2DDS_FFI_DLL}
+        $<TARGET_FILE_DIR:integers_subscriber>)
+    add_custom_command(TARGET floats_publisher POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${INT2DDS_FFI_DLL}
+        $<TARGET_FILE_DIR:floats_publisher>)
+    add_custom_command(TARGET floats_subscriber POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${INT2DDS_FFI_DLL}
+        $<TARGET_FILE_DIR:floats_subscriber>)
+    add_custom_command(TARGET strings_publisher POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${INT2DDS_FFI_DLL}
+        $<TARGET_FILE_DIR:strings_publisher>)
+    add_custom_command(TARGET strings_subscriber POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${INT2DDS_FFI_DLL}
+        $<TARGET_FILE_DIR:strings_subscriber>)
+    add_custom_command(TARGET enum_publisher POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${INT2DDS_FFI_DLL}
+        $<TARGET_FILE_DIR:enum_publisher>)
+    add_custom_command(TARGET enum_subscriber POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${INT2DDS_FFI_DLL}
+        $<TARGET_FILE_DIR:enum_subscriber>)
+    add_custom_command(TARGET arrays_publisher POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${INT2DDS_FFI_DLL}
+        $<TARGET_FILE_DIR:arrays_publisher>)
+    add_custom_command(TARGET arrays_subscriber POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${INT2DDS_FFI_DLL}
+        $<TARGET_FILE_DIR:arrays_subscriber>)
+    add_custom_command(TARGET sequences_publisher POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${INT2DDS_FFI_DLL}
+        $<TARGET_FILE_DIR:sequences_publisher>)
+    add_custom_command(TARGET sequences_subscriber POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${INT2DDS_FFI_DLL}
+        $<TARGET_FILE_DIR:sequences_subscriber>)
+    add_custom_command(TARGET sequence_enum_publisher POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${INT2DDS_FFI_DLL}
+        $<TARGET_FILE_DIR:sequence_enum_publisher>)
+    add_custom_command(TARGET sequence_enum_subscriber POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${INT2DDS_FFI_DLL}
+        $<TARGET_FILE_DIR:sequence_enum_subscriber>)
+    add_custom_command(TARGET nested_structs_publisher POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${INT2DDS_FFI_DLL}
+        $<TARGET_FILE_DIR:nested_structs_publisher>)
+    add_custom_command(TARGET nested_structs_subscriber POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${INT2DDS_FFI_DLL}
+        $<TARGET_FILE_DIR:nested_structs_subscriber>)
 endif()
 
 # Instructions
@@ -204,8 +340,15 @@ message(STATUS "                  ./perftest_cdr_subscriber --test-mode latency"
 message(STATUS "  Local latency:  ./perftest_cdr_publisher --test-mode local_latency --data-len 1024")
 message(STATUS "                  ./perftest_cdr_subscriber --test-mode local_latency")
 message(STATUS "")
-message(STATUS "Primitives type interop test:")
-message(STATUS "  ./primitives_publisher --domain-id 0")
-message(STATUS "  ./primitives_subscriber --domain-id 0")
-message(STATUS "  Options: --domain-id <id> --count <n> --reliability <best_effort|reliable>")
+message(STATUS "CDR type interop tests:")
+message(STATUS "  Options: --domain-id <id> --count <n> --reliability <best_effort|reliable> --encoding <xcdr1|xcdr2>")
+message(STATUS "  Primitives:     ./primitives_publisher      ./primitives_subscriber")
+message(STATUS "  Integers:       ./integers_publisher         ./integers_subscriber")
+message(STATUS "  Floats:         ./floats_publisher           ./floats_subscriber")
+message(STATUS "  Strings:        ./strings_publisher          ./strings_subscriber")
+message(STATUS "  Enum:           ./enum_publisher             ./enum_subscriber")
+message(STATUS "  Arrays:         ./arrays_publisher           ./arrays_subscriber")
+message(STATUS "  Sequences:      ./sequences_publisher        ./sequences_subscriber")
+message(STATUS "  Sequence_Enum:  ./sequence_enum_publisher    ./sequence_enum_subscriber")
+message(STATUS "  Nested_Structs: ./nested_structs_publisher   ./nested_structs_subscriber")
 message(STATUS "")
