@@ -1,8 +1,8 @@
 /**
- * int2dds FFI Primitives Type Publisher
+ * int2dds FFI Sequence_Enum Type Publisher
  *
- * Topic: PrimitivesTestTopic
- * Type:  PrimitivesType
+ * Topic: SequenceEnumTestTopic
+ * Type:  SequenceEnumType
  */
 
 #include <stdio.h>
@@ -22,11 +22,7 @@
 
 #define INT2DDS_CDR_STATIC
 #include "int2dds-ffi.h"
-#include "Primitives.h"
-
-/* ========================================================================
- * Signal handling for clean shutdown
- * ======================================================================== */
+#include "Sequence_Enum.h"
 
 static volatile sig_atomic_t g_running = 1;
 
@@ -35,9 +31,16 @@ static void signal_handler(int sig) {
     g_running = 0;
 }
 
-/* ========================================================================
- * Listener callback
- * ======================================================================== */
+static const char* color_to_string(Color c) {
+    switch (c) {
+        case COLOR_RED:    return "RED";
+        case COLOR_GREEN:  return "GREEN";
+        case COLOR_BLUE:   return "BLUE";
+        case COLOR_YELLOW: return "YELLOW";
+        case COLOR_PURPLE: return "PURPLE";
+        default:           return "UNKNOWN";
+    }
+}
 
 static void on_publication_matched(
     Int2DdsDataWriter *writer,
@@ -46,7 +49,6 @@ static void on_publication_matched(
 {
     (void)writer;
     (void)user_ctx;
-
     if (status->current_count_change > 0) {
         printf("[Matched] Subscriber connected (current: %d, total: %d)\n",
                status->current_count, status->total_count);
@@ -55,10 +57,6 @@ static void on_publication_matched(
                status->current_count, status->total_count);
     }
 }
-
-/* ========================================================================
- * Usage
- * ======================================================================== */
 
 static void print_usage(const char *prog) {
     printf("Usage: %s [options]\n", prog);
@@ -70,10 +68,6 @@ static void print_usage(const char *prog) {
     printf("  --help             Show this help\n");
 }
 
-/* ========================================================================
- * Main
- * ======================================================================== */
-
 int main(int argc, char *argv[]) {
     Int2DdsRet ret;
     Int2DdsParticipantFactory *factory = NULL;
@@ -84,11 +78,10 @@ int main(int argc, char *argv[]) {
     Int2DdsDataWriterQos *qos = NULL;
 
     int32_t domain_id = 0;
-    int32_t count = 0;  /* 0 = infinite */
+    int32_t count = 0;
     int use_reliable = 0;
     int use_xcdr2 = 0;
 
-    /* Parse arguments */
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--domain-id") == 0 && i + 1 < argc) {
             domain_id = atoi(argv[++i]);
@@ -96,112 +89,77 @@ int main(int argc, char *argv[]) {
             count = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--reliability") == 0 && i + 1 < argc) {
             i++;
-            if (strcmp(argv[i], "reliable") == 0) {
-                use_reliable = 1;
-            }
+            if (strcmp(argv[i], "reliable") == 0) use_reliable = 1;
         } else if (strcmp(argv[i], "--encoding") == 0 && i + 1 < argc) {
             i++;
-            if (strcmp(argv[i], "xcdr2") == 0) {
-                use_xcdr2 = 1;
-            }
+            if (strcmp(argv[i], "xcdr2") == 0) use_xcdr2 = 1;
         } else if (strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
             return 0;
         }
     }
 
-    /* Install signal handler */
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
-    printf("=== int2dds Primitives Publisher ===\n");
-    printf("Topic: PrimitivesTestTopic\n");
-    printf("Type:  PrimitivesType (APPENDABLE)\n");
+    printf("=== int2dds Sequence_Enum Publisher ===\n");
+    printf("Topic: SequenceEnumTestTopic\n");
+    printf("Type:  SequenceEnumType (APPENDABLE)\n");
     printf("Domain: %d, QoS: %s\n", domain_id,
            use_reliable ? "RELIABLE" : "BEST_EFFORT");
     printf("Encoding: %s\n", use_xcdr2 ? "XCDR2" : "XCDR1");
     printf("Count: %s\n", count > 0 ? "" : "infinite");
     if (count > 0) printf("  %d samples\n", count);
-    printf("====================================\n\n");
+    printf("========================================\n\n");
 
-    /* Initialize factory */
     ret = int2dds_domain_participant_factory_get_instance(&factory);
-    if (ret != INT2DDS_RET_OK) {
-        fprintf(stderr, "Failed to get participant factory: %d\n", ret);
-        return 1;
-    }
+    if (ret != INT2DDS_RET_OK) { fprintf(stderr, "Failed to get participant factory: %d\n", ret); return 1; }
 
-    /* Create participant */
-    ret = int2dds_create_participant(factory, "primitives_publisher", domain_id, &participant);
-    if (ret != INT2DDS_RET_OK) {
-        fprintf(stderr, "Failed to create participant: %d\n", ret);
-        goto cleanup;
-    }
+    ret = int2dds_create_participant(factory, "sequence_enum_publisher", domain_id, &participant);
+    if (ret != INT2DDS_RET_OK) { fprintf(stderr, "Failed to create participant: %d\n", ret); goto cleanup; }
 
-    /* Create publisher */
     ret = int2dds_create_publisher(participant, &publisher);
-    if (ret != INT2DDS_RET_OK) {
-        fprintf(stderr, "Failed to create publisher: %d\n", ret);
-        goto cleanup;
-    }
+    if (ret != INT2DDS_RET_OK) { fprintf(stderr, "Failed to create publisher: %d\n", ret); goto cleanup; }
 
-    /* Create topic with type info for DDS-XTypes discovery */
     {
-        Int2DdsTypeInfo *type_info = PrimitivesType_type_info();
-        ret = int2dds_create_topic_with_type_info(participant, "PrimitivesTestTopic",
+        Int2DdsTypeInfo *type_info = SequenceEnumType_type_info();
+        ret = int2dds_create_topic_with_type_info(participant, "SequenceEnumTestTopic",
                                                    type_info, NULL, &topic);
         int2dds_type_info_destroy(type_info);
     }
-    if (ret != INT2DDS_RET_OK) {
-        fprintf(stderr, "Failed to create topic: %d\n", ret);
-        goto cleanup;
-    }
+    if (ret != INT2DDS_RET_OK) { fprintf(stderr, "Failed to create topic: %d\n", ret); goto cleanup; }
 
-    /* Create DataWriter QoS */
     ret = int2dds_datawriter_qos_create_default(&qos);
-    if (ret != INT2DDS_RET_OK) {
-        fprintf(stderr, "Failed to create QoS: %d\n", ret);
-        goto cleanup;
-    }
+    if (ret != INT2DDS_RET_OK) { fprintf(stderr, "Failed to create QoS: %d\n", ret); goto cleanup; }
 
     if (use_reliable) {
         ret = int2dds_datawriter_qos_set_reliability(qos, INT2DDS_QOS_RELIABILITY_RELIABLE, 100000000);
     } else {
         ret = int2dds_datawriter_qos_set_reliability(qos, INT2DDS_QOS_RELIABILITY_BEST_EFFORT, 100000000);
     }
-    if (ret != INT2DDS_RET_OK) {
-        fprintf(stderr, "Failed to set reliability: %d\n", ret);
-        goto cleanup;
-    }
+    if (ret != INT2DDS_RET_OK) { fprintf(stderr, "Failed to set reliability: %d\n", ret); goto cleanup; }
 
     if (use_xcdr2) {
         ret = int2dds_datawriter_qos_set_data_representation(qos, INT2DDS_QOS_DATA_REPR_XCDR2);
-        if (ret != INT2DDS_RET_OK) {
-            fprintf(stderr, "Failed to set data representation: %d\n", ret);
-            goto cleanup;
-        }
+        if (ret != INT2DDS_RET_OK) { fprintf(stderr, "Failed to set data representation: %d\n", ret); goto cleanup; }
     }
 
-    /* Configure listener */
     Int2DdsDataWriterListener listener = {0};
     listener.on_publication_matched = on_publication_matched;
 
-    /* Create DataWriter with listener */
     ret = int2dds_create_datawriter_with_listener(
         publisher, topic, qos, &listener,
-        INT2DDS_STATUS_PUBLICATION_MATCHED,
-        &writer);
-    if (ret != INT2DDS_RET_OK) {
-        fprintf(stderr, "Failed to create datawriter: %d\n", ret);
-        goto cleanup;
-    }
+        INT2DDS_STATUS_PUBLICATION_MATCHED, &writer);
+    if (ret != INT2DDS_RET_OK) { fprintf(stderr, "Failed to create datawriter: %d\n", ret); goto cleanup; }
 
     printf("Publisher ready. Waiting for subscriber...\n");
     printf("Press Ctrl+C to stop.\n\n");
 
-    /* Publish data */
-    PrimitivesType data;
-    uint8_t buf[256];
+    static const Color all_colors[] = {COLOR_RED, COLOR_GREEN, COLOR_BLUE, COLOR_YELLOW, COLOR_PURPLE};
+    Color color_buf[10];
+
+    SequenceEnumType data;
+    uint8_t buf[512];
     uint8_t key_buf[16];
     uint32_t sample_index = 0;
 
@@ -209,28 +167,30 @@ int main(int argc, char *argv[]) {
         if (count > 0 && (int32_t)sample_index >= count) break;
 
         data.id = 1;
-        data.bool_val = (sample_index % 2 == 0);
-        data.byte_val = (uint8_t)(sample_index % 256);
-        data.char_val = (char)('A' + (sample_index % 26));
 
-        /* Serialize */
-        size_t serialized_len = PrimitivesType_serialize_cdr(&data, buf, sizeof(buf), use_xcdr2);
-        if (serialized_len == 0) {
-            fprintf(stderr, "Serialization failed\n");
-            sample_index++;
-            continue;
+        /* Growing cycle of Color values */
+        uint32_t color_len = (sample_index % 5) + 1;
+        for (uint32_t j = 0; j < color_len; j++) {
+            color_buf[j] = all_colors[(sample_index + j) % 5];
         }
+        data.color_seq.data = color_buf;
+        data.color_seq.length = color_len;
 
-        /* Serialize key */
-        size_t key_len = PrimitivesType_serialize_key(&data, key_buf, sizeof(key_buf));
+        size_t serialized_len = SequenceEnumType_serialize_cdr(&data, buf, sizeof(buf), use_xcdr2);
+        if (serialized_len == 0) { fprintf(stderr, "Serialization failed\n"); sample_index++; continue; }
 
-        /* Write */
+        size_t key_len = SequenceEnumType_serialize_key(&data, key_buf, sizeof(key_buf));
+
         ret = int2dds_write_serialized(writer, buf, serialized_len, key_buf, key_len);
         if (ret != INT2DDS_RET_OK) {
             fprintf(stderr, "Write failed: %d\n", ret);
         } else {
-            printf("[%u] Sent PrimitivesType (id=%d, bool=%d, byte=%u, char=%c)\n",
-                   sample_index, data.id, data.bool_val, data.byte_val, data.char_val);
+            printf("[%u] Sent SequenceEnumType (color_seq.len=%u: [", sample_index, color_len);
+            for (uint32_t j = 0; j < color_len; j++) {
+                if (j > 0) printf(", ");
+                printf("%s", color_to_string(color_buf[j]));
+            }
+            printf("])\n");
         }
 
         sample_index++;

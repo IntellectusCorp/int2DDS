@@ -1,8 +1,8 @@
 /**
- * int2dds FFI Primitives Type Subscriber
+ * int2dds FFI Sequences Type Subscriber
  *
- * Topic: PrimitivesTestTopic
- * Type:  PrimitivesType
+ * Topic: SequencesTestTopic
+ * Type:  SequencesType
  */
 
 #include <stdio.h>
@@ -22,11 +22,7 @@
 
 #define INT2DDS_CDR_STATIC
 #include "int2dds-ffi.h"
-#include "Primitives.h"
-
-/* ========================================================================
- * Signal handling for clean shutdown
- * ======================================================================== */
+#include "Sequences.h"
 
 static volatile sig_atomic_t g_running = 1;
 
@@ -35,36 +31,68 @@ static void signal_handler(int sig) {
     g_running = 0;
 }
 
-/* ========================================================================
- * Application context for listener callbacks
- * ======================================================================== */
-
 typedef struct {
     Int2DdsDataReader *reader;
     int32_t received_count;
-    int32_t max_count;  /* 0 = infinite */
+    int32_t max_count;
 } AppContext;
-
-/* ========================================================================
- * Listener callbacks
- * ======================================================================== */
 
 static void on_data_available(Int2DdsDataReader *reader, void *user_ctx) {
     AppContext *ctx = (AppContext *)user_ctx;
-    uint8_t recv_buf[256];
+    uint8_t recv_buf[2048];
     uintptr_t actual_size;
     bool valid_data;
-    PrimitivesType data;
     Int2DdsRet ret;
 
-    /* Take all available samples */
+    /* Pre-allocate buffers for sequence fields.
+     * Static to avoid large stack allocations in callback thread.
+     * Sizes must be >= the max element count the publisher can send. */
+    static bool bool_buf[256];
+    static uint8_t byte_buf[256];
+    static int32_t i32_buf[256];
+    static float f32_buf[256];
+    static double f64_buf[256];
+    static char string_buf[64][257];
+
     while ((ret = int2dds_take_serialized(reader, recv_buf, sizeof(recv_buf),
                                           &actual_size, &valid_data)) == INT2DDS_RET_OK) {
         if (!valid_data) continue;
 
-        if (PrimitivesType_deserialize_cdr(recv_buf, actual_size, &data)) {
-            printf("Received PrimitivesType (id=%d, bool=%d, byte=%u, char=%c)\n",
-                   data.id, data.bool_val, data.byte_val, data.char_val);
+        SequencesType data;
+        data.bool_seq.data = bool_buf;
+        data.byte_seq.data = byte_buf;
+        data.i32_seq.data = i32_buf;
+        data.f32_seq.data = f32_buf;
+        data.f64_seq.data = f64_buf;
+        data.string_seq.data = string_buf;
+
+        if (SequencesType_deserialize_cdr(recv_buf, actual_size, &data)) {
+            printf("Received SequencesType (bool_seq.len=%u, byte_seq.len=%u, "
+                   "i32_seq.len=%u, f32_seq.len=%u, f64_seq.len=%u, "
+                   "string_seq.len=%u, bounded_seq.len=%u)\n",
+                   data.bool_seq.length, data.byte_seq.length,
+                   data.i32_seq.length, data.f32_seq.length,
+                   data.f64_seq.length, data.string_seq.length,
+                   data.bounded_seq.length);
+
+            if (data.i32_seq.length > 0) {
+                printf("  i32_seq: [");
+                for (uint32_t j = 0; j < data.i32_seq.length; j++) {
+                    if (j > 0) printf(", ");
+                    printf("%d", data.i32_seq.data[j]);
+                }
+                printf("]\n");
+            }
+
+            if (data.string_seq.length > 0) {
+                printf("  string_seq: [");
+                for (uint32_t j = 0; j < data.string_seq.length; j++) {
+                    if (j > 0) printf(", ");
+                    printf("\"%s\"", data.string_seq.data[j]);
+                }
+                printf("]\n");
+            }
+
             ctx->received_count++;
 
             if (ctx->max_count > 0 && ctx->received_count >= ctx->max_count) {
@@ -85,7 +113,6 @@ static void on_subscription_matched(
 {
     (void)reader;
     (void)user_ctx;
-
     if (status->current_count_change > 0) {
         printf("[Matched] Publisher connected (current: %d, total: %d)\n",
                status->current_count, status->total_count);
@@ -94,10 +121,6 @@ static void on_subscription_matched(
                status->current_count, status->total_count);
     }
 }
-
-/* ========================================================================
- * Usage
- * ======================================================================== */
 
 static void print_usage(const char *prog) {
     printf("Usage: %s [options]\n", prog);
@@ -109,10 +132,6 @@ static void print_usage(const char *prog) {
     printf("  --help             Show this help\n");
 }
 
-/* ========================================================================
- * Main
- * ======================================================================== */
-
 int main(int argc, char *argv[]) {
     Int2DdsRet ret;
     Int2DdsParticipantFactory *factory = NULL;
@@ -123,11 +142,10 @@ int main(int argc, char *argv[]) {
     Int2DdsDataReaderQos *qos = NULL;
 
     int32_t domain_id = 0;
-    int32_t count = 0;  /* 0 = infinite */
+    int32_t count = 0;
     int use_reliable = 0;
     int use_xcdr2 = 0;
 
-    /* Parse arguments */
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--domain-id") == 0 && i + 1 < argc) {
             domain_id = atoi(argv[++i]);
@@ -135,117 +153,78 @@ int main(int argc, char *argv[]) {
             count = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--reliability") == 0 && i + 1 < argc) {
             i++;
-            if (strcmp(argv[i], "reliable") == 0) {
-                use_reliable = 1;
-            }
+            if (strcmp(argv[i], "reliable") == 0) use_reliable = 1;
         } else if (strcmp(argv[i], "--encoding") == 0 && i + 1 < argc) {
             i++;
-            if (strcmp(argv[i], "xcdr2") == 0) {
-                use_xcdr2 = 1;
-            }
+            if (strcmp(argv[i], "xcdr2") == 0) use_xcdr2 = 1;
         } else if (strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
             return 0;
         }
     }
 
-    /* Install signal handler */
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
-    printf("=== int2dds Primitives Subscriber ===\n");
-    printf("Topic: PrimitivesTestTopic\n");
-    printf("Type:  PrimitivesType (APPENDABLE)\n");
+    printf("=== int2dds Sequences Subscriber ===\n");
+    printf("Topic: SequencesTestTopic\n");
+    printf("Type:  SequencesType (APPENDABLE)\n");
     printf("Domain: %d, QoS: %s\n", domain_id,
            use_reliable ? "RELIABLE" : "BEST_EFFORT");
     printf("Encoding: %s\n", use_xcdr2 ? "XCDR2" : "XCDR1");
     printf("Count: %s\n", count > 0 ? "" : "infinite");
     if (count > 0) printf("  %d samples\n", count);
-    printf("=====================================\n\n");
+    printf("====================================\n\n");
 
-    /* Application context */
     AppContext app_ctx = {0};
     app_ctx.max_count = count;
 
-    /* Initialize factory */
     ret = int2dds_domain_participant_factory_get_instance(&factory);
-    if (ret != INT2DDS_RET_OK) {
-        fprintf(stderr, "Failed to get participant factory: %d\n", ret);
-        return 1;
-    }
+    if (ret != INT2DDS_RET_OK) { fprintf(stderr, "Failed to get participant factory: %d\n", ret); return 1; }
 
-    /* Create participant */
-    ret = int2dds_create_participant(factory, "primitives_subscriber", domain_id, &participant);
-    if (ret != INT2DDS_RET_OK) {
-        fprintf(stderr, "Failed to create participant: %d\n", ret);
-        goto cleanup;
-    }
+    ret = int2dds_create_participant(factory, "sequences_subscriber", domain_id, &participant);
+    if (ret != INT2DDS_RET_OK) { fprintf(stderr, "Failed to create participant: %d\n", ret); goto cleanup; }
 
-    /* Create subscriber */
     ret = int2dds_create_subscriber(participant, &subscriber);
-    if (ret != INT2DDS_RET_OK) {
-        fprintf(stderr, "Failed to create subscriber: %d\n", ret);
-        goto cleanup;
-    }
+    if (ret != INT2DDS_RET_OK) { fprintf(stderr, "Failed to create subscriber: %d\n", ret); goto cleanup; }
 
-    /* Create topic with type info for DDS-XTypes discovery */
     {
-        Int2DdsTypeInfo *type_info = PrimitivesType_type_info();
-        ret = int2dds_create_topic_with_type_info(participant, "PrimitivesTestTopic",
+        Int2DdsTypeInfo *type_info = SequencesType_type_info();
+        ret = int2dds_create_topic_with_type_info(participant, "SequencesTestTopic",
                                                    type_info, NULL, &topic);
         int2dds_type_info_destroy(type_info);
     }
-    if (ret != INT2DDS_RET_OK) {
-        fprintf(stderr, "Failed to create topic: %d\n", ret);
-        goto cleanup;
-    }
+    if (ret != INT2DDS_RET_OK) { fprintf(stderr, "Failed to create topic: %d\n", ret); goto cleanup; }
 
-    /* Create DataReader QoS */
     ret = int2dds_datareader_qos_create_default(&qos);
-    if (ret != INT2DDS_RET_OK) {
-        fprintf(stderr, "Failed to create QoS: %d\n", ret);
-        goto cleanup;
-    }
+    if (ret != INT2DDS_RET_OK) { fprintf(stderr, "Failed to create QoS: %d\n", ret); goto cleanup; }
 
     if (use_reliable) {
         ret = int2dds_datareader_qos_set_reliability(qos, INT2DDS_QOS_RELIABILITY_RELIABLE);
     } else {
         ret = int2dds_datareader_qos_set_reliability(qos, INT2DDS_QOS_RELIABILITY_BEST_EFFORT);
     }
-    if (ret != INT2DDS_RET_OK) {
-        fprintf(stderr, "Failed to set reliability: %d\n", ret);
-        goto cleanup;
-    }
+    if (ret != INT2DDS_RET_OK) { fprintf(stderr, "Failed to set reliability: %d\n", ret); goto cleanup; }
 
     if (use_xcdr2) {
         ret = int2dds_datareader_qos_set_data_representation(qos, INT2DDS_QOS_DATA_REPR_XCDR2);
-        if (ret != INT2DDS_RET_OK) {
-            fprintf(stderr, "Failed to set data representation: %d\n", ret);
-            goto cleanup;
-        }
+        if (ret != INT2DDS_RET_OK) { fprintf(stderr, "Failed to set data representation: %d\n", ret); goto cleanup; }
     }
 
-    /* Configure listener */
     Int2DdsDataReaderListener listener = {0};
     listener.on_data_available = on_data_available;
     listener.on_subscription_matched = on_subscription_matched;
     listener.user_context = &app_ctx;
 
-    /* Create DataReader with listener */
     ret = int2dds_create_datareader_with_listener(
         subscriber, topic, qos, &listener,
-        INT2DDS_STATUS_DATA_AVAILABLE | INT2DDS_STATUS_SUBSCRIPTION_MATCHED,
-        &reader);
-    if (ret != INT2DDS_RET_OK) {
-        fprintf(stderr, "Failed to create datareader: %d\n", ret);
-        goto cleanup;
-    }
+        INT2DDS_STATUS_DATA_AVAILABLE | INT2DDS_STATUS_SUBSCRIPTION_MATCHED, &reader);
+    if (ret != INT2DDS_RET_OK) { fprintf(stderr, "Failed to create datareader: %d\n", ret); goto cleanup; }
     app_ctx.reader = reader;
 
     printf("Subscriber ready. Waiting for publisher...\n");
     printf("Press Ctrl+C to stop.\n\n");
 
-    /* Main loop - callbacks handle data reception */
     while (g_running) {
         sleep_ms(100);
     }

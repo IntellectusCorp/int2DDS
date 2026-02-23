@@ -1,8 +1,8 @@
 /**
- * int2dds FFI Primitives Type Publisher
+ * int2dds FFI Integers Type Publisher
  *
- * Topic: PrimitivesTestTopic
- * Type:  PrimitivesType
+ * Topic: IntegersTestTopic
+ * Type:  IntegersType
  */
 
 #include <stdio.h>
@@ -22,11 +22,7 @@
 
 #define INT2DDS_CDR_STATIC
 #include "int2dds-ffi.h"
-#include "Primitives.h"
-
-/* ========================================================================
- * Signal handling for clean shutdown
- * ======================================================================== */
+#include "Integers.h"
 
 static volatile sig_atomic_t g_running = 1;
 
@@ -34,10 +30,6 @@ static void signal_handler(int sig) {
     (void)sig;
     g_running = 0;
 }
-
-/* ========================================================================
- * Listener callback
- * ======================================================================== */
 
 static void on_publication_matched(
     Int2DdsDataWriter *writer,
@@ -56,10 +48,6 @@ static void on_publication_matched(
     }
 }
 
-/* ========================================================================
- * Usage
- * ======================================================================== */
-
 static void print_usage(const char *prog) {
     printf("Usage: %s [options]\n", prog);
     printf("Options:\n");
@@ -69,10 +57,6 @@ static void print_usage(const char *prog) {
     printf("  --encoding <e>     xcdr1 or xcdr2 (default: xcdr1)\n");
     printf("  --help             Show this help\n");
 }
-
-/* ========================================================================
- * Main
- * ======================================================================== */
 
 int main(int argc, char *argv[]) {
     Int2DdsRet ret;
@@ -84,11 +68,10 @@ int main(int argc, char *argv[]) {
     Int2DdsDataWriterQos *qos = NULL;
 
     int32_t domain_id = 0;
-    int32_t count = 0;  /* 0 = infinite */
+    int32_t count = 0;
     int use_reliable = 0;
     int use_xcdr2 = 0;
 
-    /* Parse arguments */
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--domain-id") == 0 && i + 1 < argc) {
             domain_id = atoi(argv[++i]);
@@ -96,59 +79,50 @@ int main(int argc, char *argv[]) {
             count = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--reliability") == 0 && i + 1 < argc) {
             i++;
-            if (strcmp(argv[i], "reliable") == 0) {
-                use_reliable = 1;
-            }
+            if (strcmp(argv[i], "reliable") == 0) use_reliable = 1;
         } else if (strcmp(argv[i], "--encoding") == 0 && i + 1 < argc) {
             i++;
-            if (strcmp(argv[i], "xcdr2") == 0) {
-                use_xcdr2 = 1;
-            }
+            if (strcmp(argv[i], "xcdr2") == 0) use_xcdr2 = 1;
         } else if (strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
             return 0;
         }
     }
 
-    /* Install signal handler */
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
-    printf("=== int2dds Primitives Publisher ===\n");
-    printf("Topic: PrimitivesTestTopic\n");
-    printf("Type:  PrimitivesType (APPENDABLE)\n");
+    printf("=== int2dds Integers Publisher ===\n");
+    printf("Topic: IntegersTestTopic\n");
+    printf("Type:  IntegersType (APPENDABLE)\n");
     printf("Domain: %d, QoS: %s\n", domain_id,
            use_reliable ? "RELIABLE" : "BEST_EFFORT");
     printf("Encoding: %s\n", use_xcdr2 ? "XCDR2" : "XCDR1");
     printf("Count: %s\n", count > 0 ? "" : "infinite");
     if (count > 0) printf("  %d samples\n", count);
-    printf("====================================\n\n");
+    printf("==================================\n\n");
 
-    /* Initialize factory */
     ret = int2dds_domain_participant_factory_get_instance(&factory);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to get participant factory: %d\n", ret);
         return 1;
     }
 
-    /* Create participant */
-    ret = int2dds_create_participant(factory, "primitives_publisher", domain_id, &participant);
+    ret = int2dds_create_participant(factory, "integers_publisher", domain_id, &participant);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create participant: %d\n", ret);
         goto cleanup;
     }
 
-    /* Create publisher */
     ret = int2dds_create_publisher(participant, &publisher);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create publisher: %d\n", ret);
         goto cleanup;
     }
 
-    /* Create topic with type info for DDS-XTypes discovery */
     {
-        Int2DdsTypeInfo *type_info = PrimitivesType_type_info();
-        ret = int2dds_create_topic_with_type_info(participant, "PrimitivesTestTopic",
+        Int2DdsTypeInfo *type_info = IntegersType_type_info();
+        ret = int2dds_create_topic_with_type_info(participant, "IntegersTestTopic",
                                                    type_info, NULL, &topic);
         int2dds_type_info_destroy(type_info);
     }
@@ -157,7 +131,6 @@ int main(int argc, char *argv[]) {
         goto cleanup;
     }
 
-    /* Create DataWriter QoS */
     ret = int2dds_datawriter_qos_create_default(&qos);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create QoS: %d\n", ret);
@@ -182,11 +155,9 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    /* Configure listener */
     Int2DdsDataWriterListener listener = {0};
     listener.on_publication_matched = on_publication_matched;
 
-    /* Create DataWriter with listener */
     ret = int2dds_create_datawriter_with_listener(
         publisher, topic, qos, &listener,
         INT2DDS_STATUS_PUBLICATION_MATCHED,
@@ -199,8 +170,7 @@ int main(int argc, char *argv[]) {
     printf("Publisher ready. Waiting for subscriber...\n");
     printf("Press Ctrl+C to stop.\n\n");
 
-    /* Publish data */
-    PrimitivesType data;
+    IntegersType data;
     uint8_t buf[256];
     uint8_t key_buf[16];
     uint32_t sample_index = 0;
@@ -209,28 +179,32 @@ int main(int argc, char *argv[]) {
         if (count > 0 && (int32_t)sample_index >= count) break;
 
         data.id = 1;
-        data.bool_val = (sample_index % 2 == 0);
-        data.byte_val = (uint8_t)(sample_index % 256);
-        data.char_val = (char)('A' + (sample_index % 26));
+        data.i8_val = (int8_t)(sample_index % 128);
+        data.i16_val = (int16_t)(sample_index * 10);
+        data.i32_val = (int32_t)(sample_index * 100);
+        data.i64_val = (int64_t)(sample_index * 1000);
+        data.u8_val = (uint8_t)(sample_index % 256);
+        data.u16_val = (uint16_t)(sample_index * 10);
+        data.u32_val = (uint32_t)(sample_index * 100);
+        data.u64_val = (uint64_t)(sample_index * 1000);
 
-        /* Serialize */
-        size_t serialized_len = PrimitivesType_serialize_cdr(&data, buf, sizeof(buf), use_xcdr2);
+        size_t serialized_len = IntegersType_serialize_cdr(&data, buf, sizeof(buf), use_xcdr2);
         if (serialized_len == 0) {
             fprintf(stderr, "Serialization failed\n");
             sample_index++;
             continue;
         }
 
-        /* Serialize key */
-        size_t key_len = PrimitivesType_serialize_key(&data, key_buf, sizeof(key_buf));
+        size_t key_len = IntegersType_serialize_key(&data, key_buf, sizeof(key_buf));
 
-        /* Write */
         ret = int2dds_write_serialized(writer, buf, serialized_len, key_buf, key_len);
         if (ret != INT2DDS_RET_OK) {
             fprintf(stderr, "Write failed: %d\n", ret);
         } else {
-            printf("[%u] Sent PrimitivesType (id=%d, bool=%d, byte=%u, char=%c)\n",
-                   sample_index, data.id, data.bool_val, data.byte_val, data.char_val);
+            printf("[%u] Sent IntegersType (i8=%d, i16=%d, i32=%d, i64=%lld, u8=%u, u16=%u, u32=%u, u64=%llu)\n",
+                   sample_index, data.i8_val, data.i16_val, data.i32_val,
+                   (long long)data.i64_val, data.u8_val, data.u16_val,
+                   data.u32_val, (unsigned long long)data.u64_val);
         }
 
         sample_index++;
