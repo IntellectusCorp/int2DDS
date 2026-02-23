@@ -1252,6 +1252,65 @@ Int2DdsRet int2dds_type_info_add_field(struct Int2DdsTypeInfo *type_info,
                                        int32_t is_key);
 
 /**
+ * Add a sequence field to the type info builder.
+ *
+ * Creates a `PlainSequenceLarge` TypeIdentifier wrapping the element type,
+ * matching how int2DDS-Rust represents `Vec<T>` in DDS-XTypes.
+ *
+ * # Safety
+ * - `type_info` must be a valid type info created by `int2dds_type_info_create`
+ * - `field_name` must be a valid null-terminated C string
+ * - `element_type`: one of the INT2DDS_FIELD_* constants for the sequence element
+ * - `bound`: maximum sequence length (0 = unbounded)
+ * - `is_key`: non-zero if this field is a key field
+ */
+Int2DdsRet int2dds_type_info_add_sequence_field(struct Int2DdsTypeInfo *type_info,
+                                                const char *field_name,
+                                                int32_t element_type,
+                                                uint32_t bound,
+                                                int32_t is_key);
+
+/**
+ * Add an array field to the type info builder.
+ *
+ * Creates a `PlainArrayLarge` TypeIdentifier wrapping the element type,
+ * matching how int2DDS-Rust represents `[T; N]` in DDS-XTypes.
+ *
+ * # Safety
+ * - `type_info` must be a valid type info created by `int2dds_type_info_create`
+ * - `field_name` must be a valid null-terminated C string
+ * - `element_type`: one of the INT2DDS_FIELD_* constants for the array element
+ * - `array_size`: fixed size of the array
+ * - `is_key`: non-zero if this field is a key field
+ */
+Int2DdsRet int2dds_type_info_add_array_field(struct Int2DdsTypeInfo *type_info,
+                                             const char *field_name,
+                                             int32_t element_type,
+                                             uint32_t array_size,
+                                             int32_t is_key);
+
+/**
+ * Add a named (complex) type field to the type info builder.
+ *
+ * Creates a `MinimalTypeId(EquivalenceHash::compute(type_hash_name))` TypeIdentifier,
+ * matching how int2DDS-Rust represents struct fields via the derive macro's
+ * `Fallback` path in `type_to_identifier`.
+ *
+ * For direct struct fields: pass the struct name (e.g., "InnerStruct").
+ * For `Vec<Struct>` fields: pass "Vec < StructName >" (matching Rust `quote!` formatting).
+ *
+ * # Safety
+ * - `type_info` must be a valid type info created by `int2dds_type_info_create`
+ * - `field_name` must be a valid null-terminated C string
+ * - `type_hash_name` must be a valid null-terminated C string (the type name to hash)
+ * - `is_key`: non-zero if this field is a key field
+ */
+Int2DdsRet int2dds_type_info_add_named_type_field(struct Int2DdsTypeInfo *type_info,
+                                                  const char *field_name,
+                                                  const char *type_hash_name,
+                                                  int32_t is_key);
+
+/**
  * Destroy a type info builder.
  *
  * # Safety
