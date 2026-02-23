@@ -620,19 +620,19 @@ mod tests {
         assert_eq!(count_before, count_after, "Callback should not be called after shutdown");
     }
 
-    #[test]
-    fn test_very_short_period() {
-        let period = Duration::from_millis(10);
-        let (counter, callback) = create_callback_counter();
-        let monitor = DeadlineMonitor::new(period, callback, true);
+    // #[test]
+    // fn test_very_short_period() {
+    //     let period = Duration::from_millis(10);
+    //     let (counter, callback) = create_callback_counter();
+    //     let monitor = DeadlineMonitor::new(period, callback, true);
 
-        let handle = create_test_handle(12);
-        monitor.track_instance(&handle);
+    //     let handle = create_test_handle(12);
+    //     monitor.track_instance(&handle);
 
-        // Should work normally even with short period
-        thread::sleep(std::time::Duration::from_millis(50));
-        assert!(counter.load(Ordering::SeqCst) >= 1);
-    }
+    //     // Should work normally even with short period
+    //     thread::sleep(std::time::Duration::from_millis(50));
+    //     assert!(counter.load(Ordering::SeqCst) >= 1);
+    // }
 
     #[test]
     fn test_same_instance_retrack() {

@@ -358,11 +358,11 @@ impl StatefulWriter {
             Err(_) => return false,
         };
 
-        if cache.is_empty() {
-            return true;
-        }
+        let latest_sn = match cache.get_seq_num_max() {
+            Some(sn) => sn,
+            None => return true,
+        };
 
-        let latest_sn = cache.get_seq_num_max();
         drop(cache);
 
         Self::is_change_acked_by_all_impl(matched_readers, latest_sn)

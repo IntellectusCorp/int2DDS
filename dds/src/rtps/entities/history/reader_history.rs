@@ -62,6 +62,22 @@ impl HistoryCache for ReaderHistoryCache {
             .cloned()
             .collect()
     }
+
+    fn get_seq_num_min(&self) -> Option<SequenceNumber> {
+        let min_change = self.changes.iter().min_by_key(|change| change.sequence_number());
+        match min_change {
+            Some(change) => Some(change.sequence_number()),
+            None => None,
+        }
+    }
+
+    fn get_seq_num_max(&self) -> Option<SequenceNumber> {
+        let max_change = self.changes.iter().max_by_key(|change| change.sequence_number());
+        match max_change {
+            Some(change) => Some(change.sequence_number()),
+            None => None,
+        }
+    }
 }
 
 #[allow(dead_code)]
