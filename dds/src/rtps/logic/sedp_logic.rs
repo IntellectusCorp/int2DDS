@@ -1433,10 +1433,11 @@ impl SedpLogic {
         let writer_entity_id = writer.guid().entity_id();
 
         let (first_sn, last_sn, heartbeat_count) = {
+            let last_change_sn = writer.last_change_sequence_number();
             match writer.writer_cache().lock() {
                 Ok(writer_cache) => (
-                    writer_cache.get_seq_num_min(),
-                    writer_cache.get_seq_num_max(),
+                    writer_cache.get_seq_num_min().unwrap_or(last_change_sn + 1),
+                    writer_cache.get_seq_num_max().unwrap_or(last_change_sn),
                     writer.heartbeat_count(),
                 ),
                 Err(e) => {
@@ -2423,7 +2424,8 @@ impl UnicastMessageProcessor for SedpLogic {
             .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
 
-        let mut irrelevant_changes = Vec::new();
+        let capacity = (gap.gap_list.bitmap_base().to_i64() - gap.gap_start.to_i64()).max(0) as usize;
+        let mut irrelevant_changes = Vec::with_capacity(capacity);
 
         for sn in gap.gap_start.to_i64()..gap.gap_list.bitmap_base().to_i64() {
             irrelevant_changes.push(SequenceNumber::from_i64(sn));

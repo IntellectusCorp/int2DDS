@@ -346,6 +346,19 @@ impl UserLogic {
 
                 // Send DATA message or GAP message depending on filter result
                 if let Some(a_change) = history_cache.get_change(a_change_seq_num) {
+                    let first_sn = history_cache.get_seq_num_min().ok_or_else(|| {
+                        RtpsError::new(
+                            RtpsErrorCode::DataNotSet,
+                            "Writer cache should not be empty while sending DATA",
+                        )
+                    })?;
+                    let last_sn = history_cache.get_seq_num_max().ok_or_else(|| {
+                        RtpsError::new(
+                            RtpsErrorCode::DataNotSet,
+                            "Writer cache should not be empty while sending DATA",
+                        )
+                    })?;
+
                     if a_change.is_fragmented() {
                         let timestamp = Utc::now();
                         for fragment_num in 1..=a_change.total_fragments() {
@@ -354,8 +367,8 @@ impl UserLogic {
                             if reader_proxy.is_reliable() && !writer.disable_piggyback_heartbeat() {
                                 heartbeat_info = Some((
                                     writer.heartbeat_count(),
-                                    history_cache.get_seq_num_min(),
-                                    history_cache.get_seq_num_max(),
+                                    first_sn,
+                                    last_sn,
                                     false,
                                     false,
                                 ));
@@ -370,6 +383,9 @@ impl UserLogic {
                                 timestamp,
                             ) {
                                 writer.increase_heartbeat_count();
+                                if !reader_proxy.is_first_hb_sent() {
+                                    reader_proxy.set_first_hb_sent();
+                                }
                             }
                         }
                     } else {
@@ -377,13 +393,8 @@ impl UserLogic {
                         let mut heartbeat_info = None;
 
                         if reader_proxy.is_reliable() && !writer.disable_piggyback_heartbeat() {
-                            heartbeat_info = Some((
-                                writer.heartbeat_count(),
-                                history_cache.get_seq_num_min(),
-                                history_cache.get_seq_num_max(),
-                                false,
-                                false,
-                            ));
+                            heartbeat_info =
+                                Some((writer.heartbeat_count(), first_sn, last_sn, false, false));
                         }
 
                         let buffer = MessageCreator::create_data_msg(
@@ -405,6 +416,9 @@ impl UserLogic {
                             .is_ok()
                         {
                             writer.increase_heartbeat_count();
+                            if !reader_proxy.is_first_hb_sent() {
+                                reader_proxy.set_first_hb_sent();
+                            }
                         }
                     }
                 } else {
@@ -588,7 +602,7 @@ impl UserLogic {
     }
 
     // Sending heartbeat message to all matched reader proxies of the given writer
-    pub(crate) fn send_heartbeat_to_all_reader_proxies(
+    pub(crate) fn send_heartbeat_to_anonymous_matched_readers(
         &self,
         entity_id: EntityId,
     ) -> RtpsResult<()> {
@@ -643,14 +657,15 @@ impl UserLogic {
 
         // Send heartbeat once per participant
         for (target_participant_prefix, locators) in participant_locators.iter() {
+            let last_change_sn = writer.last_change_sequence_number();
             let buffer = MessageCreator::create_heartbeat_message(
                 writer.guid().prefix(),
                 *target_participant_prefix,
                 writer.heartbeat_count(),
                 EntityId::UNKNOWN, // This ensures all readers in the participant receive the heartbeat
                 writer.endpoint_id(),
-                history_cache.get_seq_num_min(),
-                history_cache.get_seq_num_max(),
+                history_cache.get_seq_num_min().unwrap_or(last_change_sn + 1),
+                history_cache.get_seq_num_max().unwrap_or(last_change_sn),
                 false,
                 false,
             );
@@ -694,10 +709,7 @@ impl UserLogic {
             return Ok(());
         }
 
-        if is_preemptive
-            && reader_proxy.last_acknack_count() > 0
-            && stateful_writer.heartbeat_count() > 0
-        {
+        if is_preemptive && reader_proxy.is_first_hb_sent() {
             trace!("Remote reader should already know about my writer's status by now, skipping preemptive heartbeat.");
             return Ok(());
         }
@@ -730,14 +742,15 @@ impl UserLogic {
             }
         };
 
+        let last_change_sn = writer.last_change_sequence_number();
         let buffer = MessageCreator::create_heartbeat_message(
             writer.guid().prefix(),
             reader_proxy.remote_reader_guid().prefix(),
             writer.heartbeat_count(),
             reader_proxy.remote_group_entity_id(),
             writer.endpoint_id(),
-            history_cache.get_seq_num_min(),
-            history_cache.get_seq_num_max(),
+            history_cache.get_seq_num_min().unwrap_or(last_change_sn + 1),
+            history_cache.get_seq_num_max().unwrap_or(last_change_sn),
             false,
             false,
         );
@@ -745,6 +758,9 @@ impl UserLogic {
         if let Ok(buf) = buffer {
             self.send_rtps_message_to_locators(reader_proxy.unicast_locator_list(), &buf)?;
             writer.increase_heartbeat_count();
+            if !reader_proxy.is_first_hb_sent() {
+                reader_proxy.set_first_hb_sent();
+            }
         } else {
             return Err(RtpsError::new(
                 RtpsErrorCode::Io,
@@ -752,16 +768,19 @@ impl UserLogic {
             ));
         }
 
-        if should_send_gap {
+        if should_send_gap && !history_cache.is_empty() {
+            let min_sn: SequenceNumber = history_cache
+                .get_seq_num_min()
+                .ok_or_else(|| RtpsError::new(RtpsErrorCode::DataNotSet, None))?;
+
             // For volatile readers, send GAP for irrelevant sequence numbers
             let last_irrelevant = reader_proxy.last_irrelevant_sn();
-            let cache_min = history_cache.get_seq_num_min();
-            if last_irrelevant > SequenceNumber::new(0, 0) && cache_min <= last_irrelevant {
+            if min_sn <= last_irrelevant {
                 self.send_gap_for_range(
                     writer.guid(),
                     reader_proxy,
                     writer.endpoint_id(),
-                    cache_min,
+                    min_sn,
                     last_irrelevant,
                 )?;
             }
@@ -923,36 +942,40 @@ impl UserLogic {
         final_flag: bool,
         is_preemptive: bool,
     ) -> RtpsResult<()> {
-        if !missing_changes.is_empty() || !final_flag || is_preemptive {
-            writer_proxy.increase_acknack_count();
+        if missing_changes.is_empty() && final_flag && !is_preemptive {
+            debug!("Skip ACKNACK because no missing changes, final flag set, not preemptive");
+            return Ok(());
+        }
 
-            let participant = self.get_upgraded_participant()?;
+        writer_proxy.increase_acknack_count();
 
-            let buffer = MessageCreator::create_acknack_message(
-                participant.guid(),
-                writer_proxy.remote_writer_guid(),
-                stateful_reader.guid().entity_id(),
-                writer_proxy.remote_writer_guid().entity_id(),
-                missing_changes,
-                writer_proxy.acknack_count(),
-                bitmap_base,
-                is_preemptive,
+        let participant = self.get_upgraded_participant()?;
+
+        let buffer = MessageCreator::create_acknack_message(
+            participant.guid(),
+            writer_proxy.remote_writer_guid(),
+            stateful_reader.guid().entity_id(),
+            writer_proxy.remote_writer_guid().entity_id(),
+            missing_changes,
+            writer_proxy.acknack_count(),
+            bitmap_base,
+            is_preemptive,
+        )
+        .map_err(|e| {
+            RtpsError::new(
+                RtpsErrorCode::SerializationError,
+                format!("Failed to create ACKNACK message: {}", e),
             )
+        })?;
+
+        self.send_rtps_message_to_locators(writer_proxy.unicast_locator_list(), &buffer)
             .map_err(|e| {
                 RtpsError::new(
                     RtpsErrorCode::SerializationError,
-                    format!("Failed to create ACKNACK message: {}", e),
+                    format!("Failed to send ACKNACK message: {}", e),
                 )
             })?;
 
-            self.send_rtps_message_to_locators(writer_proxy.unicast_locator_list(), &buffer)
-                .map_err(|e| {
-                    RtpsError::new(
-                        RtpsErrorCode::SerializationError,
-                        format!("Failed to send ACKNACK message: {}", e),
-                    )
-                })?
-        }
         Ok(())
     }
 }
@@ -1973,8 +1996,13 @@ impl UnicastMessageProcessor for UserLogic {
         let total_frags = change.total_fragments();
         let requested_fragments = frag_state.extract_numbers();
         let heartbeat_count = stateful_writer.heartbeat_count();
-        let heartbeat_info =
-            Some((heartbeat_count, writer_sn, history_cache_guard.get_seq_num_max(), false, false));
+        let last_sn = history_cache_guard.get_seq_num_max().ok_or_else(|| {
+            RtpsError::new(
+                RtpsErrorCode::DataNotSet,
+                "Writer cache should not be empty while sending DATA_FRAG",
+            )
+        })?;
+        let heartbeat_info = Some((heartbeat_count, writer_sn, last_sn, false, false));
 
         let timestamp = Utc::now();
         for fragment_num in requested_fragments {
@@ -2021,7 +2049,9 @@ impl UnicastMessageProcessor for UserLogic {
                     .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
 
                 // Collect irrelevant changes from GAP message
-                let mut irrelevant_changes = Vec::new();
+                let capacity =
+                    (gap.gap_list.bitmap_base().to_i64() - gap.gap_start.to_i64()).max(0) as usize;
+                let mut irrelevant_changes = Vec::with_capacity(capacity);
 
                 for sn in gap.gap_start.to_i64()..gap.gap_list.bitmap_base().to_i64() {
                     irrelevant_changes.push(SequenceNumber::from_i64(sn));
