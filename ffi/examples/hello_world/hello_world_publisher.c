@@ -1,8 +1,8 @@
 /**
  * int2dds FFI Hello World Publisher Example
  *
- * This example demonstrates how to use the int2dds FFI to publish messages
- * using the TypeDescriptor API for automatic CDR serialization.
+ * This example demonstrates how to use the int2dds FFI with IDL-generated
+ * code for CDR serialization.
  */
 
 #include <stdio.h>
@@ -18,7 +18,9 @@
 #define sleep_ms(ms) usleep((ms) * 1000)
 #endif
 
+#define INT2DDS_CDR_STATIC
 #include "int2dds-ffi.h"
+#include "hello_world.h"
 
 int main(int argc, char* argv[]) {
     Int2DdsRet ret;
@@ -28,8 +30,7 @@ int main(int argc, char* argv[]) {
     Int2DdsTopic* topic = NULL;
     Int2DdsDataWriter* writer = NULL;
     Int2DdsDataWriterQos* qos = NULL;
-    Int2DdsTypeDescriptor* type_desc = NULL;
-    Int2DdsData* data = NULL;
+    Int2DdsWaitSet* waitset = NULL;
 
     int32_t domain_id = 0;
     int use_reliable = 0;  /* 0 = best effort, 1 = reliable */
@@ -43,7 +44,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    printf("int2dds FFI Hello World Publisher\n");
+    printf("int2dds IDL Hello World Publisher\n");
     printf("Domain: %d, QoS: %s\n", domain_id, use_reliable ? "RELIABLE" : "BEST_EFFORT");
     printf("-----------------------------------\n");
 
@@ -54,7 +55,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    /* Create participant (DomainParticipant) */
+    /* Create participant */
     ret = int2dds_create_participant(factory, "hello_world_publisher", domain_id, &participant);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create participant: %d\n", ret);
@@ -68,34 +69,10 @@ int main(int argc, char* argv[]) {
         goto cleanup;
     }
 
-    /* Create type descriptor for HelloWorld
-     * The type_name here ("HelloWorldType") is used for XTypes TypeObject hash calculation
-     * to match with Rust struct name
-     */
-    ret = int2dds_type_descriptor_create("HelloWorldType", &type_desc);
-    if (ret != INT2DDS_RET_OK) {
-        fprintf(stderr, "Failed to create type descriptor: %d\n", ret);
-        goto cleanup;
-    }
-
-    /* Add fields to type descriptor (must be done BEFORE creating topic) */
-    ret = int2dds_type_descriptor_add_u32(type_desc, "index", false);
-    if (ret != INT2DDS_RET_OK) {
-        fprintf(stderr, "Failed to add index field: %d\n", ret);
-        goto cleanup;
-    }
-
-    ret = int2dds_type_descriptor_add_string(type_desc, "message", 0, false);
-    if (ret != INT2DDS_RET_OK) {
-        fprintf(stderr, "Failed to add message field: %d\n", ret);
-        goto cleanup;
-    }
-
-    /* Create topic with type descriptor (after all fields are added)
-     * - type_desc->type_name ("HelloWorldType"): Used for XTypes TypeObject hash
-     * - dds_type_name ("HelloWorld"): Used for DDS type registration/matching
-     */
-    ret = int2dds_create_topic(participant, "hello_world_topic", "HelloWorld", type_desc, NULL, &topic);
+    /* Create topic with extensibility (1 = APPENDABLE) */
+    ret = int2dds_create_topic(participant, "hello_world_topic", "HelloWorld",
+                               1,  /* APPENDABLE */
+                               NULL, &topic);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create topic: %d\n", ret);
         goto cleanup;
@@ -110,7 +87,7 @@ int main(int argc, char* argv[]) {
 
     /* Set reliability */
     if (use_reliable) {
-        ret = int2dds_datawriter_qos_set_reliability(qos, INT2DDS_QOS_RELIABILITY_RELIABLE, 100000000);  /* 100ms */
+        ret = int2dds_datawriter_qos_set_reliability(qos, INT2DDS_QOS_RELIABILITY_RELIABLE, 100000000);
     } else {
         ret = int2dds_datawriter_qos_set_reliability(qos, INT2DDS_QOS_RELIABILITY_BEST_EFFORT, 0);
     }
@@ -129,7 +106,6 @@ int main(int argc, char* argv[]) {
     printf("Publisher ready. Waiting for subscriber...\n");
 
     /* Create WaitSet and attach writer */
-    Int2DdsWaitSet* waitset = NULL;
     ret = int2dds_waitset_new(&waitset);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create waitset: %d\n", ret);
@@ -142,14 +118,14 @@ int main(int argc, char* argv[]) {
         goto cleanup;
     }
 
-    /* Wait for subscriber to match using WaitSet */
-    ret = int2dds_waitset_wait(waitset, -1);  /* -1 for infinite wait */
+    /* Wait for subscriber to match */
+    ret = int2dds_waitset_wait(waitset, -1);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "WaitSet wait failed: %d\n", ret);
         goto cleanup;
     }
 
-    /* Get matched status to confirm */
+    /* Get matched status */
     int32_t total_count = 0;
     int32_t current_count = 0;
     ret = int2dds_get_publication_matched_status(writer, &total_count, &current_count);
@@ -160,52 +136,40 @@ int main(int argc, char* argv[]) {
     printf("Subscriber matched! (total: %d, current: %d)\n", total_count, current_count);
     printf("Starting to send messages...\n\n");
 
-    /* Create data container */
-    ret = int2dds_data_create(type_desc, &data);
-    if (ret != INT2DDS_RET_OK) {
-        fprintf(stderr, "Failed to create data: %d\n", ret);
-        goto cleanup;
-    }
-
-    /* Publish messages */
-    char message[256];
+    /* Publish messages using IDL-generated serialization */
+    HelloWorld hw;
+    uint8_t buf[4096];
     uint32_t i = 0;
+
     while (1) {
         i++;
-        /* Set field values */
-        ret = int2dds_data_set_u32(data, "index", i);
-        if (ret != INT2DDS_RET_OK) {
-            fprintf(stderr, "Failed to set index: %d\n", ret);
+
+        /* Fill struct directly */
+        hw.index = i;
+        snprintf(hw.message, sizeof(hw.message), "Hello World from C! [%u]", i);
+
+        /* Serialize to CDR bytes */
+        size_t serialized_len = HelloWorld_serialize_cdr(&hw, buf, sizeof(buf));
+        if (serialized_len == 0) {
+            fprintf(stderr, "Serialization failed\n");
             continue;
         }
 
-        snprintf(message, sizeof(message), "Hello World from C! [%u]", i);
-        ret = int2dds_data_set_string(data, "message", message);
-        if (ret != INT2DDS_RET_OK) {
-            fprintf(stderr, "Failed to set message: %d\n", ret);
-            continue;
-        }
-
-        /* Write data (automatic CDR serialization) */
-        ret = int2dds_write(writer, data);
+        /* Write serialized bytes (no key for HelloWorld) */
+        ret = int2dds_write_serialized(writer, buf, serialized_len, NULL, 0);
         if (ret != INT2DDS_RET_OK) {
             fprintf(stderr, "Failed to write: %d\n", ret);
         } else {
-            printf("[%u] Sent: %s\n", i, message);
+            printf("[%u] Sent: %s\n", i, hw.message);
         }
 
-        sleep_ms(1000);  /* 1 second delay */
-    }
-
-    if (waitset) {
-        int2dds_waitset_detach_datawriter(waitset, writer);
-        int2dds_waitset_delete(waitset);
+        sleep_ms(1000);
     }
 
 cleanup:
-    /* Cleanup in reverse order */
-    if (data) {
-        int2dds_data_delete(data);
+    if (waitset) {
+        int2dds_waitset_detach_datawriter(waitset, writer);
+        int2dds_waitset_delete(waitset);
     }
     if (writer) {
         int2dds_delete_datawriter(writer);
@@ -215,9 +179,6 @@ cleanup:
     }
     if (topic) {
         int2dds_delete_topic(topic);
-    }
-    if (type_desc) {
-        int2dds_type_descriptor_delete(type_desc);
     }
     if (publisher) {
         int2dds_delete_publisher(publisher);

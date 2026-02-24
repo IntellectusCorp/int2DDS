@@ -1,0 +1,6 @@
+@extensibility(APPENDABLE)
+struct FloatsType {
+    @key long id;
+    float f32_val;
+    double f64_val;
+};
