@@ -814,6 +814,118 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         Ok(())
     }
 
+    /// Write pre-serialized data directly, bypassing TypeSupport serialization.
+    ///
+    /// This is the primary write path for FFI/C users who serialize data in C
+    /// using CDR utilities. The `serialized_data` must be a valid CDR-encoded
+    /// byte sequence including the 4-byte encapsulation header.
+    ///
+    /// # Arguments
+    /// * `serialized_data` - CDR-encoded bytes (with encapsulation header)
+    /// * `serialized_key` - CDR-encoded key bytes for instance identification.
+    ///   If `None`, `InstanceHandle::NIL` is used (unkeyed topic).
+    pub fn write_serialized(
+        &self,
+        serialized_data: &[u8],
+        serialized_key: Option<&[u8]>,
+    ) -> DdsResult<()> {
+        let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
+        self.write_serialized_w_timestamp(serialized_data, serialized_key, timestamp)
+    }
+
+    /// Write pre-serialized data with an explicit timestamp.
+    pub fn write_serialized_w_timestamp(
+        &self,
+        serialized_data: &[u8],
+        serialized_key: Option<&[u8]>,
+        timestamp: Time,
+    ) -> DdsResult<()> {
+        self.is_enabled()?;
+        if timestamp.is_infinite() || timestamp.sec < 0 || !timestamp.is_valid() {
+            return Err(DdsError::BadParameter);
+        }
+
+        let data: SerializedData = Arc::from(serialized_data);
+        let mut instance_handle = InstanceHandle::NIL;
+        let mut is_new_instance = false;
+
+        if let Some(key_bytes) = serialized_key {
+            if !key_bytes.is_empty() {
+                let key_data: SerializedData = Arc::from(key_bytes);
+
+                // Compute InstanceHandle from key bytes:
+                // If key fits in 16 bytes, use directly; otherwise MD5 hash
+                let computed_handle = Self::compute_instance_handle_from_key(key_bytes);
+
+                // Fast path: check existing instances
+                let existing_handle = {
+                    let key_instances =
+                        self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+                    key_instances.get(&key_data).copied()
+                };
+
+                instance_handle = if let Some(handle) = existing_handle {
+                    handle
+                } else {
+                    // Slow path: register new instance
+                    {
+                        let mut instances =
+                            self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+                        instances.insert(
+                            computed_handle,
+                            (key_data.clone(), timestamp, InstanceState::Registered),
+                        );
+                    }
+
+                    {
+                        let mut key_instances = self
+                            .key_instances
+                            .lock()
+                            .map_err(|e| DdsError::Error(e.to_string()))?;
+                        key_instances.insert(key_data, computed_handle);
+                    }
+
+                    is_new_instance = true;
+                    computed_handle
+                };
+            }
+        }
+
+        // Deadline monitor
+        let monitor_guard =
+            self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+
+        if let Some(monitor) = monitor_guard.as_ref() {
+            if is_new_instance {
+                monitor.track_instance(&instance_handle);
+            }
+            monitor.reschedule_instance(&instance_handle);
+        }
+
+        self.add_change(ChangeKind::Alive, data, instance_handle, Some(timestamp.into()))?;
+
+        self.update_liveliness()?;
+
+        Ok(())
+    }
+
+    /// Compute an InstanceHandle from raw key bytes.
+    /// If key_bytes fits in 16 bytes, it is used directly as the KeyHash.
+    /// Otherwise, MD5 hash is computed.
+    fn compute_instance_handle_from_key(key_bytes: &[u8]) -> InstanceHandle {
+        if key_bytes.is_empty() {
+            return InstanceHandle::NIL;
+        }
+        let mut hash = [0u8; 16];
+        if key_bytes.len() <= 16 {
+            hash[..key_bytes.len()].copy_from_slice(key_bytes);
+        } else {
+            let digest = md5::compute(key_bytes);
+            hash.copy_from_slice(&digest.0);
+        }
+        InstanceHandle::new(hash)
+    }
+
     pub fn get_key_value(&self, key_holder: &mut Foo, handle: InstanceHandle) -> DdsResult<()> {
         // in: key_holder: <Foo>, handle: InstanceHandle
         // out: DdsError_t, key_holder: <Foo>
