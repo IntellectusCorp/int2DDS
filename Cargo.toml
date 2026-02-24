@@ -1,7 +1,6 @@
 [workspace]
 members = ["dds", "derive", "ffi"]
 default-members = ["dds", "derive", "ffi"]
-exclude = ["idl"]
 resolver = "2"
 
 [workspace.package]
