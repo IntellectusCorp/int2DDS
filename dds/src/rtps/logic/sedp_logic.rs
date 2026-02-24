@@ -2424,7 +2424,8 @@ impl UnicastMessageProcessor for SedpLogic {
             .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
 
-        let capacity = (gap.gap_list.bitmap_base().to_i64() - gap.gap_start.to_i64()).max(0) as usize;
+        let capacity =
+            (gap.gap_list.bitmap_base().to_i64() - gap.gap_start.to_i64()).max(0) as usize;
         let mut irrelevant_changes = Vec::with_capacity(capacity);
 
         for sn in gap.gap_start.to_i64()..gap.gap_list.bitmap_base().to_i64() {

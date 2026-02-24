@@ -968,13 +968,14 @@ impl UserLogic {
             )
         })?;
 
-        self.send_rtps_message_to_locators(writer_proxy.unicast_locator_list(), &buffer)
-            .map_err(|e| {
+        self.send_rtps_message_to_locators(writer_proxy.unicast_locator_list(), &buffer).map_err(
+            |e| {
                 RtpsError::new(
                     RtpsErrorCode::SerializationError,
                     format!("Failed to send ACKNACK message: {}", e),
                 )
-            })?;
+            },
+        )?;
 
         Ok(())
     }
