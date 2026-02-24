@@ -835,6 +835,17 @@ mod tests {
         TypeConsistencyEnforcementQosPolicy::default()
     }
 
+    fn disallow_coercion_policy() -> TypeConsistencyEnforcementQosPolicy {
+        TypeConsistencyEnforcementQosPolicy {
+            kind: TypeConsistencyKind::DisallowTypeCoercion,
+            ignore_sequence_bounds: false,
+            ignore_string_bounds: false,
+            ignore_member_names: false,
+            prevent_type_widening: false,
+            force_type_validation: false,
+        }
+    }
+
     fn allow_coercion_policy() -> TypeConsistencyEnforcementQosPolicy {
         TypeConsistencyEnforcementQosPolicy {
             kind: TypeConsistencyKind::AllowTypeCoercion,
@@ -863,7 +874,7 @@ mod tests {
     fn test_hash_mismatch_disallow_coercion() {
         let writer_id = TypeIdentifier::MinimalTypeId(EquivalenceHash::compute(b"type1"));
         let reader_id = TypeIdentifier::MinimalTypeId(EquivalenceHash::compute(b"type2"));
-        let policy = default_tce_policy();
+        let policy = disallow_coercion_policy();
 
         let result =
             check_structural_compatibility(Some(&writer_id), Some(&reader_id), None, None, &policy);
@@ -891,7 +902,7 @@ mod tests {
     fn test_primitive_widening_not_allowed_in_strict_mode() {
         let writer_id = TypeIdentifier::Int16;
         let reader_id = TypeIdentifier::Int32;
-        let policy = default_tce_policy(); // DisallowTypeCoercion
+        let policy = disallow_coercion_policy();
 
         assert!(check_structural_compatibility(
             Some(&writer_id),
