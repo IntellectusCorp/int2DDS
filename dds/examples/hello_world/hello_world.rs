@@ -41,15 +41,15 @@ struct Args {
     /// Print help
     #[arg(long, action = clap::ArgAction::Help)]
     help: Option<bool>,
-    
+
     /// Run as publisher
     #[arg(short = 'P', long, conflicts_with = "subscriber")]
     publisher: bool,
-    
+
     /// Run as subscriber
     #[arg(short = 'S', long, conflicts_with = "publisher")]
     subscriber: bool,
-    
+
     /// Topic name
     #[arg(short = 'T', long, default_value = "hello_world_topic")]
     topic: String,
@@ -283,7 +283,11 @@ fn run_publisher(args: &Args) {
         qos.reliability,
         args.topic,
     );
-    let deadline_str = if qos.deadline == Duration::infinite() { "INFINITE".to_string() } else { format!("{:?}", qos.deadline) };
+    let deadline_str = if qos.deadline == Duration::infinite() {
+        "INFINITE".to_string()
+    } else {
+        format!("{:?}", qos.deadline)
+    };
     println!(
         "********* [publisher qos info] interval: {}ms, reliability: {:?}, durability: {:?}, \
          history: {:?}, deadline: {}, ownership: {:?}(strength: {}), partition: {:?}",
@@ -384,11 +388,20 @@ fn run_subscriber(args: &Args) {
         qos.reliability,
         args.topic,
     );
-    let deadline_str = if qos.deadline == Duration::infinite() { "INFINITE".to_string() } else { format!("{:?}", qos.deadline) };
+    let deadline_str = if qos.deadline == Duration::infinite() {
+        "INFINITE".to_string()
+    } else {
+        format!("{:?}", qos.deadline)
+    };
     println!(
         "********* [subscriber qos info] reliability: {:?}, durability: {:?}, \
          history: {:?}, ownership_kind: {:?}, deadline: {}, partition: {:?}",
-        qos.reliability, qos.durability, qos.history, qos.ownership_kind, deadline_str, qos.partition.name,
+        qos.reliability,
+        qos.durability,
+        qos.history,
+        qos.ownership_kind,
+        deadline_str,
+        qos.partition.name,
     );
 
     loop {
