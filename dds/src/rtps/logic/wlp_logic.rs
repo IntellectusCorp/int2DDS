@@ -608,13 +608,7 @@ impl WlpLogic {
                 let wlp_last_change_sn = writer.last_change_sequence_number();
                 let first_sn = cache_guard.get_seq_num_min().unwrap_or(wlp_last_change_sn + 1);
                 let last_sn = cache_guard.get_seq_num_max().unwrap_or(wlp_last_change_sn);
-                let info = Some((
-                    writer.heartbeat_count(),
-                    first_sn,
-                    last_sn,
-                    false,
-                    false,
-                ));
+                let info = Some((writer.heartbeat_count(), first_sn, last_sn, false, false));
                 debug!(
                     "[WLP] heartbeat_info: count={}, first={:?}, last={:?}",
                     writer.heartbeat_count(),

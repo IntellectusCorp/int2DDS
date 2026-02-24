@@ -28,10 +28,7 @@ use crate::{
         entities::{
             endpoint::Endpoint,
             entity::Entity,
-            history::{
-                cache_change::CacheChange,
-                reader_history::ReaderHistoryCache,
-            },
+            history::{cache_change::CacheChange, reader_history::ReaderHistoryCache},
             reader::Reader,
         },
         messages::spdp_message::SpdpMessage,
