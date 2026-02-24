@@ -20,9 +20,7 @@ use crate::{
     },
     infrastructure::history_cache::HistoryCache,
     rtps::{
-        common::{
-            guid::Guid, rtps_error_code::RtpsResult, time::RtpsDuration,
-        },
+        common::{guid::Guid, rtps_error_code::RtpsResult, time::RtpsDuration},
         entities::{
             endpoint::Endpoint,
             entity::Entity,
