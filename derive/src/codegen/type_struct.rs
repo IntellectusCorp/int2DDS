@@ -706,10 +706,7 @@ fn generate_xcdr_serialize_impl(
 
     // Handle empty struct case
     if fields.is_empty() {
-        let serialization_body = if matches!(
-            extensibility,
-            Some(ExtensibilityKind::Appendable) | Some(ExtensibilityKind::Mutable)
-        ) {
+        let serialization_body = if !matches!(extensibility, Some(ExtensibilityKind::Final)) {
             quote! {
                 let size_pos = serializer.begin_struct()?;
                 serializer.end_struct(size_pos)?;
@@ -812,10 +809,7 @@ fn generate_xcdr_serialize_impl(
         })
         .collect();
 
-    let serialization_body = if matches!(
-        extensibility,
-        Some(ExtensibilityKind::Appendable) | Some(ExtensibilityKind::Mutable)
-    ) {
+    let serialization_body = if !matches!(extensibility, Some(ExtensibilityKind::Final)) {
         quote! {
             use #crate_path::serialize::cdr::{PrimitiveSerialize, StringSerialize, ArraySerialize, SequenceSerialize};
             let size_pos = serializer.begin_struct()?;
@@ -849,10 +843,7 @@ fn generate_xcdr_deserialize_impl(
 ) -> proc_macro2::TokenStream {
     // Handle empty struct case
     if fields.is_empty() {
-        let deserialization_body = if matches!(
-            extensibility,
-            Some(ExtensibilityKind::Appendable) | Some(ExtensibilityKind::Mutable)
-        ) {
+        let deserialization_body = if !matches!(extensibility, Some(ExtensibilityKind::Final)) {
             quote! {
                 let (object_size, start_position) = deserializer.begin_struct()?;
                 deserializer.end_struct(object_size, start_position)?;
@@ -877,10 +868,10 @@ fn generate_xcdr_deserialize_impl(
 
     if is_mutable {
         generate_mutable_deserialize_impl(name, fields, crate_path)
-    } else if matches!(extensibility, Some(ExtensibilityKind::Appendable)) {
-        generate_appendable_deserialize_impl(name, fields, crate_path)
-    } else {
+    } else if matches!(extensibility, Some(ExtensibilityKind::Final)) {
         generate_final_deserialize_impl(name, fields, crate_path)
+    } else {
+        generate_appendable_deserialize_impl(name, fields, crate_path)
     }
 }
 
