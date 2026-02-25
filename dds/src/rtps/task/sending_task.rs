@@ -257,10 +257,14 @@ impl SendingTask {
         })?;
 
         loop {
-            if let Err(e) =
-                self.poll.poll(&mut self.events, Some(core::time::Duration::from_secs(1)))
-            {
-                return Err(RtpsError::new(RtpsErrorCode::Io, format!("poll error: {}", e)));
+            match self.poll.poll(&mut self.events, Some(core::time::Duration::from_secs(1))) {
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                    log::warn!("Poll interrupted in sending task, continuing: {}", e);
+                }
+                Err(e) => {
+                    return Err(RtpsError::new(RtpsErrorCode::Io, format!("poll error: {}", e)));
+                }
+                Ok(()) => {}
             }
 
             if participant.is_terminated() {

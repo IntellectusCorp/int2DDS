@@ -48,7 +48,17 @@ impl UserMulticastListeningTask {
         poll.registry().register(listener.socket(), user_multicast_token, Interest::READABLE)?;
 
         loop {
-            poll.poll(&mut events, Some(Duration::from_secs(1)))?;
+            match poll.poll(&mut events, Some(Duration::from_secs(1))) {
+                Ok(()) => {}
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                    log::warn!(
+                        "Poll interrupted in user multicast listening task, continuing: {}",
+                        e
+                    );
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
             for event in events.iter() {
                 if event.token() == user_multicast_token && event.is_readable() {
                     while let Some((buffer, from_addr)) = listener.get_message() {
