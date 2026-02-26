@@ -40,6 +40,18 @@ pub(crate) enum TimerId {
         remote_writer_guid: Guid,
         sequence_number: SequenceNumber,
     },
+
+    // Writer: one-shot preemptive HEARTBEAT on new reader match
+    PreemptiveHeartbeat {
+        entity_id: EntityId,
+        remote_reader_guid: Guid,
+    },
+
+    // Reader: one-shot preemptive ACKNACK on new writer match
+    PreemptiveAcknack {
+        entity_id: EntityId,
+        remote_writer_guid: Guid,
+    },
 }
 
 impl fmt::Display for TimerId {
@@ -82,6 +94,24 @@ impl fmt::Display for TimerId {
                     SubmessageId::NACK_FRAG.as_u8(),
                     Self::guid_u128(remote_writer_guid),
                     sequence_number.to_i64()
+                )
+            }
+            TimerId::PreemptiveHeartbeat { entity_id, remote_reader_guid } => {
+                write!(
+                    f,
+                    "{}_{:02x}_pre_{:x}",
+                    Self::id_hex(entity_id),
+                    SubmessageId::HEARTBEAT.as_u8(),
+                    Self::guid_u128(remote_reader_guid)
+                )
+            }
+            TimerId::PreemptiveAcknack { entity_id, remote_writer_guid } => {
+                write!(
+                    f,
+                    "{}_{:02x}_pre_{:x}",
+                    Self::id_hex(entity_id),
+                    SubmessageId::ACKNACK.as_u8(),
+                    Self::guid_u128(remote_writer_guid)
                 )
             }
         }
