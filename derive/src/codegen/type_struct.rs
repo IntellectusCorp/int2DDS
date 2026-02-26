@@ -1,6 +1,7 @@
 use quote::quote;
 use syn::DeriveInput;
 
+use crate::codegen::utils::{get_serialization_method, SerializationMethod};
 use crate::codegen::{
     generate_additional_derives, generate_field_deserialization,
     generate_field_deserialization_xcdr, generate_field_deserialization_xcdr_per_field_dheader,
@@ -11,7 +12,6 @@ use crate::codegen::{
     MultiKeyFieldInfo,
 };
 use crate::codegen::{quote_extensibility_tokens, DdsTypeConfig, ExtensibilityKind};
-use crate::codegen::utils::{get_serialization_method, SerializationMethod};
 
 /// Generate DdsType implementation for struct types
 pub fn derive_struct_impl(

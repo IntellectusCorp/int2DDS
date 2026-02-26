@@ -1,6 +1,6 @@
 //! # Subscriber and DataReader
 //!
-//! Functions for creating Subscribers and reading data.
+//! Functions for creating Subscribers and reading serialized data.
 //!
 //! ## Overview
 //!
@@ -9,18 +9,15 @@
 //!
 //! ## Reading Data
 //!
-//! Two methods are available:
-//! - `int2dds_take` - Returns and removes the next sample from the cache
-//! - `int2dds_read` - Returns the next sample without removing it
-//!
-//! ## Data Format
-//!
-//! The FFI uses Int2DdsData with DynamicTypeSupport for CDR deserialization.
-//! The DDS core handles all deserialization automatically using the registered TypeSupport.
+//! C users receive raw CDR bytes via `int2dds_take_serialized` / `int2dds_read_serialized`
+//! and deserialize them with IDL-generated code.
 
 use std::sync::Arc;
 
-use int2dds::{infrastructure::status::StatusMask, subscription::qos::SubscriberQos};
+use int2dds::{
+    infrastructure::status::StatusMask, subscription::data_reader_listener::DataReaderListener,
+    subscription::qos::SubscriberQos,
+};
 
 use crate::data::Int2DdsData;
 
@@ -208,7 +205,18 @@ pub unsafe extern "C" fn int2dds_create_datareader_with_listener(
             .inner
             .set_listener(Some(listener_clone), StatusMask::from_bits_truncate(mask)));
 
-        reader_handle.listener = Some(listener_arc);
+        reader_handle.listener = Some(listener_arc.clone());
+
+        // Check if matching already occurred before the listener was set.
+        // This handles the race condition where SEDP matching completes between
+        // create_datareader() and set_listener().
+        if mask & crate::status_condition::INT2DDS_STATUS_SUBSCRIPTION_MATCHED != 0 {
+            if let Ok(status) = reader_handle.inner.get_subscription_matched_status() {
+                if status.current_count() > 0 {
+                    listener_arc.on_subscription_matched(&reader_handle.inner, &status);
+                }
+            }
+        }
     }
 
     *reader_out = Box::into_raw(reader_handle);
@@ -290,119 +298,6 @@ pub unsafe extern "C" fn int2dds_datareader_get_listener(
     }
 }
 
-/// Take data from a DataReader (removes from cache)
-///
-/// Returns the next sample, removing it from the cache.
-/// The data is automatically deserialized from CDR format using the registered TypeSupport.
-///
-/// # Safety
-/// - `reader` must be a valid datareader
-/// - `data_out` must be a valid Int2DdsData created from a compatible TypeDescriptor
-/// - `valid_data_out` will be set to true if valid data was read
-///
-/// # Returns
-/// - INT2DDS_RET_OK if data was successfully read
-/// - INT2DDS_RET_NO_DATA if no data is available
-/// - INT2DDS_RET_ERROR if deserialization failed
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_take(
-    reader: *const Int2DdsDataReader,
-    data_out: *mut Int2DdsData,
-    valid_data_out: *mut bool,
-) -> Int2DdsRet {
-    check_null!(reader);
-    check_null!(data_out);
-    check_null!(valid_data_out);
-
-    let reader_ref = &*reader;
-
-    // Take next sample
-    let sample = match reader_ref.inner.take_next_sample() {
-        Ok(result) => result,
-        Err(int2dds::dcps::core::error::DdsError::NoData) => {
-            *valid_data_out = false;
-            return INT2DDS_RET_NO_DATA;
-        }
-        Err(e) => return dds_error_to_code(&e),
-    };
-
-    let info = sample.sample_info();
-    *valid_data_out = info.valid_data;
-
-    if !info.valid_data {
-        return INT2DDS_RET_OK;
-    }
-
-    // Use sample.data() - DDS core automatically deserializes using registered TypeSupport
-    let mut received_data = match sample.data() {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("int2dds_take: sample.data() failed: {:?}", e);
-            return INT2DDS_RET_ERROR;
-        }
-    };
-
-    // Move values from received data to output - avoids clone
-    let data_out_ref = &mut *data_out;
-    data_out_ref.values = std::mem::take(&mut received_data.values);
-
-    INT2DDS_RET_OK
-}
-
-/// Read data from a DataReader (keeps in cache)
-///
-/// Returns the next sample without removing it from the cache.
-/// The data is automatically deserialized from CDR format using the registered TypeSupport.
-///
-/// # Safety
-/// - `reader` must be a valid datareader
-/// - `data_out` must be a valid Int2DdsData created from a compatible TypeDescriptor
-/// - `valid_data_out` will be set to true if valid data was read
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_read(
-    reader: *const Int2DdsDataReader,
-    data_out: *mut Int2DdsData,
-    valid_data_out: *mut bool,
-) -> Int2DdsRet {
-    check_null!(reader);
-    check_null!(data_out);
-    check_null!(valid_data_out);
-
-    let reader_ref = &*reader;
-
-    // Read next sample (without removing)
-    let sample = match reader_ref.inner.read_next_sample() {
-        Ok(result) => result,
-        Err(int2dds::dcps::core::error::DdsError::NoData) => {
-            *valid_data_out = false;
-            return INT2DDS_RET_NO_DATA;
-        }
-        Err(e) => return dds_error_to_code(&e),
-    };
-
-    let info = sample.sample_info();
-    *valid_data_out = info.valid_data;
-
-    if !info.valid_data {
-        return INT2DDS_RET_OK;
-    }
-
-    // Use sample.data() - DDS core automatically deserializes using registered TypeSupport
-    let mut received_data = match sample.data() {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("int2dds_read: sample.data() failed: {:?}", e);
-            return INT2DDS_RET_ERROR;
-        }
-    };
-
-    // Move values from received data to output
-    let data_out_ref = &mut *data_out;
-    data_out_ref.values = std::mem::take(&mut received_data.values);
-
-    INT2DDS_RET_OK
-}
-
 /// Delete a DataReader
 ///
 /// # Safety
@@ -478,6 +373,134 @@ pub unsafe extern "C" fn int2dds_subscriber_delete_contained_entities(
         Ok(()) => INT2DDS_RET_OK,
         Err(e) => dds_error_to_code(&e),
     }
+}
+
+// ============================================================================
+// Raw Serialized Data Read/Take Functions
+// ============================================================================
+
+/// Take pre-serialized data from a DataReader, bypassing TypeSupport deserialization.
+///
+/// Copies the raw CDR bytes (including encapsulation header) into the caller's buffer.
+/// The sample is removed from the cache.
+///
+/// # Parameters
+/// - `reader`: A valid datareader
+/// - `buffer`: Pointer to the caller's byte buffer for receiving serialized data
+/// - `buffer_capacity`: Size of the buffer in bytes
+/// - `actual_size_out`: Receives the actual number of bytes written
+/// - `valid_data_out`: Set to true if this is a valid data sample (not dispose/unregister)
+///
+/// # Returns
+/// - INT2DDS_RET_OK on success
+/// - INT2DDS_RET_NO_DATA if no samples available
+/// - INT2DDS_RET_ERROR if buffer is too small (actual_size_out will contain the required size)
+///
+/// # Safety
+/// - `reader` must be a valid datareader
+/// - `buffer` must point to at least `buffer_capacity` writable bytes
+/// - `actual_size_out` and `valid_data_out` must be valid pointers
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_take_serialized(
+    reader: *const Int2DdsDataReader,
+    buffer: *mut u8,
+    buffer_capacity: usize,
+    actual_size_out: *mut usize,
+    valid_data_out: *mut bool,
+) -> Int2DdsRet {
+    check_null!(reader);
+    check_null!(buffer);
+    check_null!(actual_size_out);
+    check_null!(valid_data_out);
+
+    let reader_ref = &*reader;
+
+    let (serialized_data, sample_info) = match reader_ref.inner.take_next_serialized() {
+        Ok(result) => result,
+        Err(int2dds::dcps::core::error::DdsError::NoData) => {
+            *valid_data_out = false;
+            *actual_size_out = 0;
+            return INT2DDS_RET_NO_DATA;
+        }
+        Err(e) => return dds_error_to_code(&e),
+    };
+
+    *valid_data_out = sample_info.valid_data;
+    *actual_size_out = serialized_data.len();
+
+    if !sample_info.valid_data {
+        return INT2DDS_RET_OK;
+    }
+
+    if serialized_data.len() > buffer_capacity {
+        return INT2DDS_RET_ERROR;
+    }
+
+    std::ptr::copy_nonoverlapping(serialized_data.as_ptr(), buffer, serialized_data.len());
+
+    INT2DDS_RET_OK
+}
+
+/// Read pre-serialized data from a DataReader without removing from cache.
+///
+/// Same as `int2dds_take_serialized` but the sample remains in the cache.
+///
+/// # Safety
+/// - Same as `int2dds_take_serialized`
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_read_serialized(
+    reader: *const Int2DdsDataReader,
+    buffer: *mut u8,
+    buffer_capacity: usize,
+    actual_size_out: *mut usize,
+    valid_data_out: *mut bool,
+) -> Int2DdsRet {
+    check_null!(reader);
+    check_null!(buffer);
+    check_null!(actual_size_out);
+    check_null!(valid_data_out);
+
+    let reader_ref = &*reader;
+
+    // Use read_serialized with NOT_READ state for "next" semantics
+    let results = match reader_ref.inner.read_serialized(
+        1,
+        &[int2dds::subscription::sample_info::SampleStateKind::NOT_READ_SAMPLE_STATE],
+        &[int2dds::subscription::sample_info::ViewStateKind::ANY_VIEW_STATE],
+        &[int2dds::subscription::sample_info::InstanceStateKind::ANY_INSTANCE_STATE],
+    ) {
+        Ok(r) => r,
+        Err(int2dds::dcps::core::error::DdsError::NoData) => {
+            *valid_data_out = false;
+            *actual_size_out = 0;
+            return INT2DDS_RET_NO_DATA;
+        }
+        Err(e) => return dds_error_to_code(&e),
+    };
+
+    let (serialized_data, sample_info) = match results.into_iter().next() {
+        Some(item) => item,
+        None => {
+            *valid_data_out = false;
+            *actual_size_out = 0;
+            return INT2DDS_RET_NO_DATA;
+        }
+    };
+
+    *valid_data_out = sample_info.valid_data;
+    *actual_size_out = serialized_data.len();
+
+    if !sample_info.valid_data {
+        return INT2DDS_RET_OK;
+    }
+
+    if serialized_data.len() > buffer_capacity {
+        return INT2DDS_RET_ERROR;
+    }
+
+    std::ptr::copy_nonoverlapping(serialized_data.as_ptr(), buffer, serialized_data.len());
+
+    INT2DDS_RET_OK
 }
 
 #[cfg(test)]

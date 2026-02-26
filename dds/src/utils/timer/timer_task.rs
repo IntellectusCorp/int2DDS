@@ -150,15 +150,19 @@ impl TimerTask {
                             }
                         }
                     }
-
-                    let now = Instant::now();
-                    self.process_expired_timers(now);
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                    warn!("Poll interrupted in timer task, continuing: {}", e);
+                    self.process_messages(&message_queue);
                 }
                 Err(e) => {
                     error!("Poll error in timer task: {}", e);
                     break;
                 }
             }
+
+            let now = Instant::now();
+            self.process_expired_timers(now);
         }
 
         Ok(())
