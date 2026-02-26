@@ -9,7 +9,7 @@ use crate::rtps::messages::message_receiver::MessageReceiver;
 use crate::rtps::transport::socket::MAX_EVENTS;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 use crate::serialize::pl_cdr::InlineQosParameters;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use mio::{Events, Interest, Poll, Token};
 use std::sync::Arc;
 use std::time::Duration;
@@ -52,7 +52,17 @@ impl DiscoveryMulticastListeningTask {
         )?;
 
         loop {
-            poll.poll(&mut events, Some(Duration::from_millis(100)))?;
+            match poll.poll(&mut events, Some(Duration::from_millis(100))) {
+                Ok(()) => {}
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                    warn!(
+                        "Poll interrupted in discovery multicast listening task, continuing: {}",
+                        e
+                    );
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
 
             // Check for participant termination before processing events
             let spdp_logic =
