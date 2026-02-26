@@ -326,11 +326,13 @@ mod tests {
             EntityId { entity_key: [0x00, 0x00, 0x01], entity_kind: EntityKind(0x07) },
         );
 
-        // Register 7 timers: 3 writer + 2 reader_a + 2 reader_b
+        // Register 10 timers: 4 writer + 3 reader_a + 3 reader_b
         let ids = [
             TimerId::PeriodicHeartbeat { entity_id: writer_id }.to_string(),
             TimerId::PeriodicHeartbeatDelay { entity_id: writer_id }.to_string(),
             TimerId::NackResponse { writer_entity_id: writer_id, remote_reader_guid: remote_guid }
+                .to_string(),
+            TimerId::PreemptiveHeartbeat { entity_id: writer_id, remote_reader_guid: remote_guid }
                 .to_string(),
             TimerId::Acknack { reader_entity_id: reader_a, remote_writer_guid: remote_guid }
                 .to_string(),
@@ -340,6 +342,8 @@ mod tests {
                 sequence_number: SequenceNumber::new(0, 1),
             }
             .to_string(),
+            TimerId::PreemptiveAcknack { entity_id: reader_a, remote_writer_guid: remote_guid }
+                .to_string(),
             TimerId::Acknack { reader_entity_id: reader_b, remote_writer_guid: remote_guid }
                 .to_string(),
             TimerId::NackFrag {
@@ -348,22 +352,24 @@ mod tests {
                 sequence_number: SequenceNumber::new(0, 1),
             }
             .to_string(),
+            TimerId::PreemptiveAcknack { entity_id: reader_b, remote_writer_guid: remote_guid }
+                .to_string(),
         ];
 
         for id in &ids {
             task.add_timer(id.clone(), Duration::from_secs(60), false, noop_callback());
         }
-        assert_eq!(task.list_timers().len(), 7);
+        assert_eq!(task.list_timers().len(), 10);
 
-        // Remove writer timers (3)
+        // Remove writer timers (4)
         task.remove_timers_with_prefix(&TimerId::entity_prefix(writer_id));
-        assert_eq!(task.list_timers().len(), 4);
+        assert_eq!(task.list_timers().len(), 6);
 
-        // Remove reader_a timers (2)
+        // Remove reader_a timers (3)
         task.remove_timers_with_prefix(&TimerId::entity_prefix(reader_a));
-        assert_eq!(task.list_timers().len(), 2);
+        assert_eq!(task.list_timers().len(), 3);
 
-        // Remove reader_b timers (2)
+        // Remove reader_b timers (3)
         task.remove_timers_with_prefix(&TimerId::entity_prefix(reader_b));
         assert_eq!(task.list_timers().len(), 0);
     }
