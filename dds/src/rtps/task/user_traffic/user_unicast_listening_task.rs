@@ -103,7 +103,14 @@ impl UserUnicastListeningTask {
             .ok_or_else(|| std::io::Error::other("Participant already dropped"))?;
 
         loop {
-            poll.poll(&mut events, Some(poll_timeout))?;
+            match poll.poll(&mut events, Some(poll_timeout)) {
+                Ok(()) => {}
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                    warn!("Poll interrupted in user unicast listening task, continuing: {}", e);
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
 
             if participant.is_terminated() {
                 debug!("Detected global termination flag, user traffic unicast listening loop is terminating...");

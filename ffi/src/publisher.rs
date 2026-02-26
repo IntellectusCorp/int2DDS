@@ -1,6 +1,6 @@
 //! # Publisher and DataWriter
 //!
-//! Functions for creating Publishers and writing data.
+//! Functions for creating Publishers and writing serialized data.
 //!
 //! ## Overview
 //!
@@ -9,20 +9,13 @@
 //!
 //! ## Data Format
 //!
-//! The FFI uses Int2DdsData with DynamicTypeSupport for CDR serialization.
-//! The DDS core handles all serialization automatically using the registered TypeSupport.
-//!
-//! ## Instance Management
-//!
-//! For keyed topics, the FFI provides:
-//! - `int2dds_register_instance` - Pre-register an instance for better performance
-//! - `int2dds_unregister_instance` - Unregister when done with an instance
-//! - `int2dds_dispose` - Indicate instance is no longer valid
+//! C users serialize data with IDL-generated code and pass CDR bytes
+//! directly via `int2dds_write_serialized`.
 
 use std::sync::Arc;
 
 use int2dds::{
-    common::instance_handle::InstanceHandle, infrastructure::status::StatusMask,
+    infrastructure::status::StatusMask, publication::data_writer_listener::DataWriterListener,
     publication::qos::PublisherQos,
 };
 
@@ -210,7 +203,18 @@ pub unsafe extern "C" fn int2dds_create_datawriter_with_listener(
             .inner
             .set_listener(Some(listener_clone), StatusMask::from_bits_truncate(mask)));
 
-        writer_handle.listener = Some(listener_arc);
+        writer_handle.listener = Some(listener_arc.clone());
+
+        // Check if matching already occurred before the listener was set.
+        // This handles the race condition where SEDP matching completes between
+        // create_datawriter() and set_listener().
+        if mask & crate::status_condition::INT2DDS_STATUS_PUBLICATION_MATCHED != 0 {
+            if let Ok(status) = writer_handle.inner.get_publication_matched_status() {
+                if status.current_count() > 0 {
+                    listener_arc.on_publication_matched(&writer_handle.inner, &status);
+                }
+            }
+        }
     }
 
     *writer_out = Box::into_raw(writer_handle);
@@ -292,31 +296,6 @@ pub unsafe extern "C" fn int2dds_datawriter_get_listener(
     }
 }
 
-/// Write data to a DataWriter
-///
-/// # Safety
-/// - `writer` must be a valid datawriter
-/// - `data` must be a valid Int2DdsData created from a compatible TypeDescriptor
-///
-/// The data is automatically serialized using CDR format by the DDS core.
-/// The registered DynamicTypeSupport handles all serialization.
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_write(
-    writer: *const Int2DdsDataWriter,
-    data: *const Int2DdsData,
-) -> Int2DdsRet {
-    check_null!(writer);
-    check_null!(data);
-
-    let writer_ref = &*writer;
-    let data_ref = &*data;
-
-    // Write directly without cloning - DDS core uses registered TypeSupport for serialization
-    ffi_try!(writer_ref.inner.write(data_ref, InstanceHandle::NIL));
-
-    INT2DDS_RET_OK
-}
-
 /// Delete a DataWriter
 ///
 /// # Safety
@@ -373,103 +352,6 @@ pub unsafe extern "C" fn int2dds_get_publication_matched_status(
     }
 }
 
-/// Register an instance for subsequent write operations
-///
-/// This operation informs the service that the application intends to modify
-/// a particular instance, allowing pre-configuration for improved performance.
-///
-/// # Safety
-/// - `writer` must be a valid datawriter
-/// - `data` must be a valid Int2DdsData with key fields set
-/// - `handle_out` must be a valid pointer to 16-byte array for the instance handle
-///
-/// # Returns
-/// Returns the instance handle (16 bytes) that can be used in subsequent write/dispose operations
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_register_instance(
-    writer: *const Int2DdsDataWriter,
-    data: *const Int2DdsData,
-    handle_out: *mut [u8; 16],
-) -> Int2DdsRet {
-    check_null!(writer);
-    check_null!(data);
-    check_null!(handle_out);
-
-    let writer_ref = &*writer;
-    let data_ref = &*data;
-
-    // Register directly without cloning - DDS core uses registered TypeSupport for key handling
-    match writer_ref.inner.register_instance(data_ref) {
-        Ok(handle) => {
-            *handle_out = *handle.value();
-            INT2DDS_RET_OK
-        }
-        Err(e) => dds_error_to_code(&e),
-    }
-}
-
-/// Unregister a previously registered instance
-///
-/// This operation reverses register_instance, indicating the application
-/// no longer intends to modify the instance.
-///
-/// # Safety
-/// - `writer` must be a valid datawriter
-/// - `data` must be a valid Int2DdsData with key fields set
-/// - `handle` is a pointer to 16-byte instance handle (use all zeros for NIL)
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_unregister_instance(
-    writer: *const Int2DdsDataWriter,
-    data: *const Int2DdsData,
-    handle: *const [u8; 16],
-) -> Int2DdsRet {
-    check_null!(writer);
-    check_null!(data);
-
-    let writer_ref = &*writer;
-    let data_ref = &*data;
-
-    // Unregister directly without cloning
-    let instance_handle =
-        if handle.is_null() { InstanceHandle::NIL } else { InstanceHandle::new(*handle) };
-
-    match writer_ref.inner.unregister_instance(data_ref, instance_handle) {
-        Ok(()) => INT2DDS_RET_OK,
-        Err(e) => dds_error_to_code(&e),
-    }
-}
-
-/// Dispose an instance, indicating it is no longer valid
-///
-/// This operation requests the middleware to delete the data instance.
-/// DataReaders will be notified of the disposal through instance state changes.
-///
-/// # Safety
-/// - `writer` must be a valid datawriter
-/// - `data` must be a valid Int2DdsData with key fields set
-/// - `handle` is a pointer to 16-byte instance handle (use all zeros for NIL)
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_dispose(
-    writer: *const Int2DdsDataWriter,
-    data: *const Int2DdsData,
-    handle: *const [u8; 16],
-) -> Int2DdsRet {
-    check_null!(writer);
-    check_null!(data);
-
-    let writer_ref = &*writer;
-    let data_ref = &*data;
-
-    // Dispose directly without cloning
-    let instance_handle =
-        if handle.is_null() { InstanceHandle::NIL } else { InstanceHandle::new(*handle) };
-
-    match writer_ref.inner.dispose(data_ref, instance_handle) {
-        Ok(()) => INT2DDS_RET_OK,
-        Err(e) => dds_error_to_code(&e),
-    }
-}
-
 /// Delete all entities contained by a publisher
 ///
 /// This operation deletes all DataWriter objects contained by this Publisher.
@@ -485,6 +367,52 @@ pub unsafe extern "C" fn int2dds_publisher_delete_contained_entities(
     let publisher_ref = &*publisher;
 
     match publisher_ref.inner.delete_contained_entities() {
+        Ok(()) => INT2DDS_RET_OK,
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
+// ============================================================================
+// Raw Serialized Data Write Functions
+// ============================================================================
+
+/// Write pre-serialized data to a DataWriter, bypassing TypeSupport serialization.
+///
+/// The caller is responsible for CDR-serializing the data (including the
+/// encapsulation header) before calling this function.
+///
+/// # Parameters
+/// - `writer`: A valid datawriter
+/// - `data`: Pointer to the CDR-serialized byte buffer
+/// - `data_len`: Length of the serialized data in bytes
+/// - `key`: Pointer to the serialized key bytes (can be null if no key)
+/// - `key_len`: Length of the key bytes
+///
+/// # Safety
+/// - `writer` must be a valid datawriter
+/// - `data` must point to at least `data_len` readable bytes
+/// - If `key` is not null, it must point to at least `key_len` readable bytes
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_write_serialized(
+    writer: *const Int2DdsDataWriter,
+    data: *const u8,
+    data_len: usize,
+    key: *const u8,
+    key_len: usize,
+) -> Int2DdsRet {
+    check_null!(writer);
+    check_null!(data);
+
+    let writer_ref = &*writer;
+    let serialized_data = std::slice::from_raw_parts(data, data_len);
+
+    let serialized_key = if key.is_null() || key_len == 0 {
+        None
+    } else {
+        Some(std::slice::from_raw_parts(key, key_len))
+    };
+
+    match writer_ref.inner.write_serialized(serialized_data, serialized_key) {
         Ok(()) => INT2DDS_RET_OK,
         Err(e) => dds_error_to_code(&e),
     }

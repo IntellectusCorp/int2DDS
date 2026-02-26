@@ -83,7 +83,17 @@ impl DiscoveryUnicastListeningTask {
             .ok_or_else(|| std::io::Error::other("Participant already dropped"))?;
 
         loop {
-            poll.poll(&mut events, Some(Duration::from_millis(100)))?;
+            match poll.poll(&mut events, Some(Duration::from_millis(100))) {
+                Ok(()) => {}
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                    warn!(
+                        "Poll interrupted in discovery unicast listening task, continuing: {}",
+                        e
+                    );
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
 
             if participant.is_terminated() {
                 debug!("Detected global termination flag, discovery unicast listening loop is terminating...");

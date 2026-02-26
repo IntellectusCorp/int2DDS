@@ -22,7 +22,8 @@
 use int2dds::{
     core::time::Duration,
     infrastructure::qos_policy::{
-        DurabilityQosPolicyKind, HistoryQosPolicyKind, ReliabilityQosPolicyKind,
+        DataRepresentationId, DataRepresentationQosPolicy, DurabilityQosPolicyKind,
+        HistoryQosPolicyKind, ReliabilityQosPolicyKind,
     },
     publication::qos::DataWriterQos,
     subscription::qos::DataReaderQos,
@@ -42,6 +43,9 @@ pub const INT2DDS_QOS_DURABILITY_PERSISTENT: i32 = 3;
 
 pub const INT2DDS_QOS_HISTORY_KEEP_LAST: i32 = 0;
 pub const INT2DDS_QOS_HISTORY_KEEP_ALL: i32 = 1;
+
+pub const INT2DDS_QOS_DATA_REPR_XCDR1: i32 = 0;
+pub const INT2DDS_QOS_DATA_REPR_XCDR2: i32 = 2;
 
 /// Opaque QoS handle for DataWriter
 pub struct Int2DdsDataWriterQos {
@@ -160,6 +164,35 @@ pub unsafe extern "C" fn int2dds_datawriter_qos_set_history(
     INT2DDS_RET_OK
 }
 
+/// Set data representation QoS for DataWriter
+///
+/// Controls which encoding is advertised in DDS discovery.
+/// - `INT2DDS_QOS_DATA_REPR_XCDR1` (0): XCDR1 — for FINAL extensibility
+/// - `INT2DDS_QOS_DATA_REPR_XCDR2` (2): XCDR2 — for APPENDABLE/MUTABLE extensibility
+///
+/// # Safety
+/// - `qos` must be a valid QoS handle
+/// - `kind` must be a valid data representation kind
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_qos_set_data_representation(
+    qos: *mut Int2DdsDataWriterQos,
+    kind: i32,
+) -> Int2DdsRet {
+    check_null!(qos);
+
+    let qos_ref = &mut *qos;
+
+    let repr_id = match kind {
+        INT2DDS_QOS_DATA_REPR_XCDR1 => DataRepresentationId::XcdrDataRepresentation,
+        INT2DDS_QOS_DATA_REPR_XCDR2 => DataRepresentationId::Xcdr2DataRepresentation,
+        _ => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    qos_ref.inner.data_representation = DataRepresentationQosPolicy { value: vec![repr_id] };
+
+    INT2DDS_RET_OK
+}
+
 /// Destroy DataWriter QoS
 ///
 /// # Safety
@@ -271,6 +304,35 @@ pub unsafe extern "C" fn int2dds_datareader_qos_set_history(
     };
 
     qos_ref.inner.history.kind = history_kind;
+
+    INT2DDS_RET_OK
+}
+
+/// Set data representation QoS for DataReader
+///
+/// Controls which encoding is advertised in DDS discovery.
+/// - `INT2DDS_QOS_DATA_REPR_XCDR1` (0): XCDR1 — for FINAL extensibility
+/// - `INT2DDS_QOS_DATA_REPR_XCDR2` (2): XCDR2 — for APPENDABLE/MUTABLE extensibility
+///
+/// # Safety
+/// - `qos` must be a valid QoS handle
+/// - `kind` must be a valid data representation kind
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_qos_set_data_representation(
+    qos: *mut Int2DdsDataReaderQos,
+    kind: i32,
+) -> Int2DdsRet {
+    check_null!(qos);
+
+    let qos_ref = &mut *qos;
+
+    let repr_id = match kind {
+        INT2DDS_QOS_DATA_REPR_XCDR1 => DataRepresentationId::XcdrDataRepresentation,
+        INT2DDS_QOS_DATA_REPR_XCDR2 => DataRepresentationId::Xcdr2DataRepresentation,
+        _ => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    qos_ref.inner.data_representation = DataRepresentationQosPolicy { value: vec![repr_id] };
 
     INT2DDS_RET_OK
 }
