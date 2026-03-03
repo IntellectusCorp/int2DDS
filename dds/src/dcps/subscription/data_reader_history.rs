@@ -40,6 +40,7 @@ use crate::{
         entities::history::cache_change::CacheChange,
     },
     subscription::{data_reader::DataReader, sample_info::InstanceStateKind},
+    utils::timer::timer_id::TimerId,
 };
 
 pub(crate) type ReaderChangeId = (Guid, SequenceNumber);
@@ -76,7 +77,7 @@ pub(crate) struct DataReaderHistoryCache<Foo> {
     can_auto_remove: bool, // auto remove oldest changes when full
     ownership_kind: OwnershipQosPolicyKind,
     owner_candidates: Arc<DashMap<InstanceHandle, BTreeSet<OwnershipInfo>>>, // Track valid writers per instance (includes writers that missed deadline or unregistered, not just strictly alive ones by Liveliness QoS)
-    lifespan_timers: Arc<Mutex<HashMap<Guid, String>>>, // writer_guid -> timer_id
+    lifespan_timers: Arc<Mutex<HashMap<Guid, TimerId>>>, // writer_guid -> timer_id
     #[allow(clippy::type_complexity)]
     status_callback:
         Arc<Mutex<Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>>>,
@@ -118,7 +119,7 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
     }
 
     // Returns the map of lifespan timers keyed by writer GUID.
-    fn get_lifespan_timers(&self) -> Arc<Mutex<HashMap<Guid, String>>> {
+    fn get_lifespan_timers(&self) -> Arc<Mutex<HashMap<Guid, TimerId>>> {
         self.lifespan_timers.clone()
     }
 
@@ -127,7 +128,7 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
         &self,
         writer_guid: Guid,
         lifespan_duration: Duration,
-        timer_id_prefix: &str,
+        timer_id: TimerId,
     ) -> DdsResult<()> {
         use log::debug;
 
@@ -161,7 +162,7 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
         self.register_lifespan_timer_with_callback(
             writer_guid,
             lifespan_duration,
-            timer_id_prefix,
+            timer_id,
             callback,
         )
     }
@@ -241,9 +242,11 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
             drop(timers_guard);
 
             if !timer_exists {
-                if let Err(e) =
-                    self.register_lifespan_timer(writer_guid, duration, "lifespan_timer_reader")
-                {
+                if let Err(e) = self.register_lifespan_timer(
+                    writer_guid,
+                    duration,
+                    TimerId::LifespanReader { writer_guid },
+                ) {
                     debug!("[DataReaderHistoryCache] Failed to ensure lifespan timer: {:?}", e);
                 }
             }

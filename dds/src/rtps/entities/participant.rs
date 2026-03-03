@@ -67,7 +67,7 @@ use crate::{
             get_transport_type, port_manager::PortManager, TransportSender, TransportType,
         },
     },
-    utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
+    utils::timer::timer_handler::TimerHandler,
 };
 
 #[derive(Clone)]
@@ -512,7 +512,7 @@ impl Participant {
             {
                 // Remove all timers for this writer (heartbeat, heartbeat delay, nack response)
                 if let Ok(handler) = TimerHandler::get_instance(self.guid().prefix()).lock() {
-                    handler.remove_timers_with_prefix(TimerId::entity_prefix(entity_id));
+                    handler.remove_timers_by_entity(entity_id);
                 }
                 stateful_writer.compare_and_set_heartbeat_timer_running(true, false)?;
                 Some((stateful_writer.guid(), stateful_writer.publication_builtin_topic_data()?))
@@ -590,7 +590,7 @@ impl Participant {
         if let Some(reader) = reader_arc {
             // Remove all timers for this reader (acknack, nackfrag)
             if let Ok(handler) = TimerHandler::get_instance(self.guid().prefix()).lock() {
-                handler.remove_timers_with_prefix(TimerId::entity_prefix(entity_id));
+                handler.remove_timers_by_entity(entity_id);
             }
 
             let reader_info = if let Some(stateful_reader) =

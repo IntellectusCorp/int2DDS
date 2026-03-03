@@ -15,20 +15,22 @@ use std::time::Duration;
 use log::{debug, error};
 use mio::Waker;
 
+use crate::rtps::common::entity_id::EntityId;
 use crate::rtps::common::guid::{Guid, GuidPrefix};
 use crate::rtps::common::rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult};
+use crate::utils::timer::timer_id::TimerId;
 use crate::utils::timer::timer_task::TimerTask;
 
 pub type TimerCallback = Arc<dyn Fn() + Send + Sync>;
 
 #[derive(Clone)]
 pub(crate) enum TimerMessage {
-    AddTimer(String, Duration, bool, TimerCallback), // timer_id, duration, repeating, callback
-    RemoveTimer(String),                             // timer_id
-    RemoveTimersWithPrefix(String),                  // prefix
-    PauseTimer(String),                              // timer_id
-    ResumeTimer(String),                             // timer_id
-    ModifyTimer(String, Duration),                   // timer_id, new_duration
+    AddTimer(TimerId, Duration, bool, TimerCallback),
+    RemoveTimer(TimerId),
+    RemoveTimersByEntity(EntityId),
+    PauseTimer(TimerId),
+    ResumeTimer(TimerId),
+    ModifyTimer(TimerId, Duration),
     Terminate,
 }
 
@@ -145,7 +147,7 @@ impl TimerHandler {
 
     pub(crate) fn add_timer<F>(
         &self,
-        timer_id: String,
+        timer_id: TimerId,
         duration: Duration,
         repeating: bool,
         callback: F,
@@ -161,23 +163,23 @@ impl TimerHandler {
         ));
     }
 
-    pub(crate) fn remove_timer(&self, timer_id: String) {
+    pub(crate) fn remove_timer(&self, timer_id: TimerId) {
         self.push_message_and_wake(TimerMessage::RemoveTimer(timer_id));
     }
 
-    pub(crate) fn remove_timers_with_prefix(&self, prefix: String) {
-        self.push_message_and_wake(TimerMessage::RemoveTimersWithPrefix(prefix));
+    pub(crate) fn remove_timers_by_entity(&self, entity_id: EntityId) {
+        self.push_message_and_wake(TimerMessage::RemoveTimersByEntity(entity_id));
     }
 
-    pub(crate) fn pause_timer(&self, timer_id: String) {
+    pub(crate) fn pause_timer(&self, timer_id: TimerId) {
         self.push_message_and_wake(TimerMessage::PauseTimer(timer_id));
     }
 
-    pub(crate) fn resume_timer(&self, timer_id: String) {
+    pub(crate) fn resume_timer(&self, timer_id: TimerId) {
         self.push_message_and_wake(TimerMessage::ResumeTimer(timer_id));
     }
 
-    pub(crate) fn modify_timer(&self, timer_id: String, new_duration: Duration) {
+    pub(crate) fn modify_timer(&self, timer_id: TimerId, new_duration: Duration) {
         self.push_message_and_wake(TimerMessage::ModifyTimer(timer_id, new_duration));
     }
 
@@ -237,11 +239,14 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
+    use crate::rtps::common::entity_id::EntityId;
+    use crate::rtps::common::entity_kind::EntityKind;
     use crate::rtps::common::guid::Guid;
     use crate::rtps::common::types::{DomainId, ParticipantId};
     use crate::rtps::entities::entity::Entity;
     use crate::rtps::entities::participant::Participant;
     use crate::utils::timer::timer_handler::TimerHandler;
+    use crate::utils::timer::timer_id::TimerId;
 
     // Helper to create mock participant for tests
     fn create_mock_participant(
@@ -253,6 +258,18 @@ mod tests {
         // Create actual Participant - this may need adjustment to match your codebase's Participant creation method
         // For now, create a simple structure
         Arc::new(Participant::new(domain_id, participant_id, vec!["127.0.0.1".to_string()]))
+    }
+
+    // Helper: generate unique TimerIds for tests using PeriodicHeartbeat with fabricated EntityIds.
+    // The number n is encoded into the entity_key bytes for uniqueness.
+    fn test_id(n: u32) -> TimerId {
+        let bytes = n.to_le_bytes();
+        TimerId::PeriodicHeartbeat {
+            entity_id: EntityId {
+                entity_key: [bytes[0], bytes[1], bytes[2]],
+                entity_kind: EntityKind(0x02),
+            },
+        }
     }
 
     #[test]
@@ -267,7 +284,7 @@ mod tests {
         {
             let handler = timer_handler.lock().unwrap();
             handler.add_timer(
-                "test_timer".to_string(),
+                test_id(1),
                 Duration::from_millis(100),
                 false, // one-shot
                 move || {
@@ -301,36 +318,21 @@ mod tests {
 
             // 10 second timer (actually 300ms for test)
             let order_clone = execution_order.clone();
-            handler.add_timer(
-                "timer_10".to_string(),
-                Duration::from_millis(300),
-                false,
-                move || {
-                    order_clone.lock().unwrap().push(10);
-                },
-            );
+            handler.add_timer(test_id(10), Duration::from_millis(300), false, move || {
+                order_clone.lock().unwrap().push(10);
+            });
 
             // 5 second timer (actually 200ms for test)
             let order_clone = execution_order.clone();
-            handler.add_timer(
-                "timer_5".to_string(),
-                Duration::from_millis(200),
-                false,
-                move || {
-                    order_clone.lock().unwrap().push(5);
-                },
-            );
+            handler.add_timer(test_id(5), Duration::from_millis(200), false, move || {
+                order_clone.lock().unwrap().push(5);
+            });
 
             // 2 second timer (actually 100ms for test)
             let order_clone = execution_order.clone();
-            handler.add_timer(
-                "timer_2".to_string(),
-                Duration::from_millis(100),
-                false,
-                move || {
-                    order_clone.lock().unwrap().push(2);
-                },
-            );
+            handler.add_timer(test_id(2), Duration::from_millis(100), false, move || {
+                order_clone.lock().unwrap().push(2);
+            });
         }
 
         // Wait for all timers to execute
@@ -354,22 +356,18 @@ mod tests {
 
         let executed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let executed_clone = executed.clone();
+        let timer_id = test_id(99);
 
         {
             let handler = timer_handler.lock().unwrap();
 
             // Add timer
-            handler.add_timer(
-                "remove_me".to_string(),
-                Duration::from_millis(200),
-                false,
-                move || {
-                    executed_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-                },
-            );
+            handler.add_timer(timer_id, Duration::from_millis(200), false, move || {
+                executed_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
 
             // Remove it immediately
-            handler.remove_timer("remove_me".to_string());
+            handler.remove_timer(timer_id);
         }
 
         // Wait longer than the timer would have executed
@@ -392,11 +390,12 @@ mod tests {
 
         let count = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let count_clone = count.clone();
+        let timer_id = test_id(50);
 
         {
             let handler = timer_handler.lock().unwrap();
             handler.add_timer(
-                "repeating_timer".to_string(),
+                timer_id,
                 Duration::from_millis(50),
                 true, // repeating
                 move || {
@@ -417,7 +416,7 @@ mod tests {
         // Cleanup
         {
             let handler = timer_handler.lock().unwrap();
-            handler.remove_timer("repeating_timer".to_string());
+            handler.remove_timer(timer_id);
             handler.terminate();
         }
     }
@@ -429,20 +428,16 @@ mod tests {
 
         let executed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let executed_clone = executed.clone();
+        let timer_id = test_id(77);
 
         {
             let handler = timer_handler.lock().unwrap();
-            handler.add_timer(
-                "pause_test".to_string(),
-                Duration::from_millis(100),
-                false,
-                move || {
-                    executed_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-                },
-            );
+            handler.add_timer(timer_id, Duration::from_millis(100), false, move || {
+                executed_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
 
             // Pause immediately
-            handler.pause_timer("pause_test".to_string());
+            handler.pause_timer(timer_id);
         }
 
         // Wait longer than original execution time
@@ -454,7 +449,7 @@ mod tests {
         // Resume
         {
             let handler = timer_handler.lock().unwrap();
-            handler.resume_timer("pause_test".to_string());
+            handler.resume_timer(timer_id);
         }
 
         // Wait for it to execute after resume
@@ -487,14 +482,14 @@ mod tests {
         // Add timers to each participant
         {
             let h1 = handler1.lock().unwrap();
-            h1.add_timer("p1_timer".to_string(), Duration::from_millis(50), true, move || {
+            h1.add_timer(test_id(1), Duration::from_millis(50), true, move || {
                 count1_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             });
         }
 
         {
             let h2 = handler2.lock().unwrap();
-            h2.add_timer("p2_timer".to_string(), Duration::from_millis(75), true, move || {
+            h2.add_timer(test_id(2), Duration::from_millis(75), true, move || {
                 count2_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             });
         }
@@ -514,13 +509,13 @@ mod tests {
         // Cleanup
         {
             let h1 = handler1.lock().unwrap();
-            h1.remove_timer("p1_timer".to_string());
+            h1.remove_timer(test_id(1));
             h1.terminate();
         }
 
         {
             let h2 = handler2.lock().unwrap();
-            h2.remove_timer("p2_timer".to_string());
+            h2.remove_timer(test_id(2));
             h2.terminate();
         }
     }
@@ -533,11 +528,12 @@ mod tests {
         let start_time = Instant::now();
         let execution_time = Arc::new(std::sync::Mutex::new(None));
         let execution_time_clone = execution_time.clone();
+        let timer_id = test_id(88);
 
         {
             let handler = timer_handler.lock().unwrap();
             handler.add_timer(
-                "modify_test".to_string(),
+                timer_id,
                 Duration::from_millis(200), // Originally 200ms
                 false,
                 move || {
@@ -547,7 +543,7 @@ mod tests {
             );
 
             // Immediately modify to 100ms
-            handler.modify_timer("modify_test".to_string(), Duration::from_millis(100));
+            handler.modify_timer(timer_id, Duration::from_millis(100));
         }
 
         // Wait 150ms (longer than modified 100ms, shorter than original 200ms)
@@ -574,33 +570,25 @@ mod tests {
         let timer_handler = TimerHandler::get_instance(participant.guid().prefix());
 
         let execution_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let oneshot_id = test_id(101);
+        let heartbeat_id = test_id(102);
 
         {
             let handler = timer_handler.lock().unwrap();
             let count_clone = execution_count.clone();
 
             // Originally 2-second timer, reduced to 100ms for test
-            handler.add_timer(
-                "oneshot_timer".to_string(),
-                Duration::from_millis(100),
-                false,
-                move || {
-                    count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    println!("One-shot timer executed!");
-                },
-            );
+            handler.add_timer(oneshot_id, Duration::from_millis(100), false, move || {
+                count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                println!("One-shot timer executed!");
+            });
 
             let count_clone2 = execution_count.clone();
             // Originally 5-second repeating timer, reduced to 50ms for test
-            handler.add_timer(
-                "heartbeat_timer".to_string(),
-                Duration::from_millis(50),
-                true,
-                move || {
-                    count_clone2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    println!("Heartbeat timer executed!");
-                },
-            );
+            handler.add_timer(heartbeat_id, Duration::from_millis(50), true, move || {
+                count_clone2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                println!("Heartbeat timer executed!");
+            });
         }
 
         // Wait 300ms (heartbeat executes multiple times, oneshot executes once)
@@ -613,7 +601,7 @@ mod tests {
         // Cleanup
         {
             let handler = timer_handler.lock().unwrap();
-            handler.remove_timer("heartbeat_timer".to_string());
+            handler.remove_timer(heartbeat_id);
             handler.terminate();
         }
     }
@@ -634,11 +622,11 @@ mod tests {
             let timer_handler = TimerHandler::get_instance(participant.guid().prefix());
 
             if let Ok(handler) = timer_handler.lock() {
-                let timer_id = format!("participant_{}_timer", i);
+                let timer_id = test_id(200 + i as u32);
                 let interval = Duration::from_millis(100 * (i as u64 + 1));
                 let counts_clone = execution_counts.clone();
 
-                handler.add_timer(timer_id.clone(), interval, true, move || {
+                handler.add_timer(timer_id, interval, true, move || {
                     let mut counts = counts_clone.lock().unwrap();
                     counts[i] += 1;
                     let _now =
@@ -665,7 +653,7 @@ mod tests {
         // Cleanup
         for (i, handler) in timer_handlers.iter().enumerate() {
             if let Ok(h) = handler.lock() {
-                h.remove_timer(format!("participant_{}_timer", i));
+                h.remove_timer(test_id(200 + i as u32));
                 h.terminate();
             }
         }
@@ -677,48 +665,36 @@ mod tests {
         let timer_handler = TimerHandler::get_instance(participant.guid().prefix());
 
         let execution_counts = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let spdp_id = test_id(301);
+        let hb_id = test_id(302);
+        let stats_id = test_id(303);
 
         {
             let handler = timer_handler.lock().unwrap();
 
             // SPDP timer (originally 30 seconds -> 150ms for test)
             let counts_clone = execution_counts.clone();
-            handler.add_timer(
-                "spdp_announcement".to_string(),
-                Duration::from_millis(150),
-                true,
-                move || {
-                    let mut counts = counts_clone.lock().unwrap();
-                    *counts.entry("spdp".to_string()).or_insert(0) += 1;
-                    println!("SPDP announcement timer executed");
-                },
-            );
+            handler.add_timer(spdp_id, Duration::from_millis(150), true, move || {
+                let mut counts = counts_clone.lock().unwrap();
+                *counts.entry("spdp".to_string()).or_insert(0) += 1;
+                println!("SPDP announcement timer executed");
+            });
 
             // Heartbeat timer (originally 200ms -> 30ms for test)
             let counts_clone = execution_counts.clone();
-            handler.add_timer(
-                "heartbeat_sender".to_string(),
-                Duration::from_millis(30),
-                true,
-                move || {
-                    let mut counts = counts_clone.lock().unwrap();
-                    *counts.entry("heartbeat".to_string()).or_insert(0) += 1;
-                    println!("Heartbeat timer executed");
-                },
-            );
+            handler.add_timer(hb_id, Duration::from_millis(30), true, move || {
+                let mut counts = counts_clone.lock().unwrap();
+                *counts.entry("heartbeat".to_string()).or_insert(0) += 1;
+                println!("Heartbeat timer executed");
+            });
 
             // Statistics collection timer (originally 5 seconds -> 50ms, one-shot)
             let counts_clone = execution_counts.clone();
-            handler.add_timer(
-                "stats_collection".to_string(),
-                Duration::from_millis(50),
-                false,
-                move || {
-                    let mut counts = counts_clone.lock().unwrap();
-                    *counts.entry("stats".to_string()).or_insert(0) += 1;
-                    println!("Statistics collection timer executed");
-                },
-            );
+            handler.add_timer(stats_id, Duration::from_millis(50), false, move || {
+                let mut counts = counts_clone.lock().unwrap();
+                *counts.entry("stats".to_string()).or_insert(0) += 1;
+                println!("Statistics collection timer executed");
+            });
         }
 
         // Wait 200ms
@@ -733,8 +709,8 @@ mod tests {
         // Cleanup
         {
             let handler = timer_handler.lock().unwrap();
-            handler.remove_timer("spdp_announcement".to_string());
-            handler.remove_timer("heartbeat_sender".to_string());
+            handler.remove_timer(spdp_id);
+            handler.remove_timer(hb_id);
             handler.terminate();
         }
     }
@@ -754,41 +730,26 @@ mod tests {
             // 50ms timer (originally 10 seconds)
             let order_clone = execution_order.clone();
             let start = start_time;
-            handler.add_timer(
-                "timer_50ms".to_string(),
-                Duration::from_millis(50),
-                false,
-                move || {
-                    let elapsed = start.elapsed();
-                    order_clone.lock().unwrap().push((50, elapsed.as_millis()));
-                },
-            );
+            handler.add_timer(test_id(50), Duration::from_millis(50), false, move || {
+                let elapsed = start.elapsed();
+                order_clone.lock().unwrap().push((50, elapsed.as_millis()));
+            });
 
             // 30ms timer (originally 5 seconds)
             let order_clone = execution_order.clone();
             let start = start_time;
-            handler.add_timer(
-                "timer_30ms".to_string(),
-                Duration::from_millis(30),
-                false,
-                move || {
-                    let elapsed = start.elapsed();
-                    order_clone.lock().unwrap().push((30, elapsed.as_millis()));
-                },
-            );
+            handler.add_timer(test_id(30), Duration::from_millis(30), false, move || {
+                let elapsed = start.elapsed();
+                order_clone.lock().unwrap().push((30, elapsed.as_millis()));
+            });
 
             // 10ms timer (originally 2 seconds)
             let order_clone = execution_order.clone();
             let start = start_time;
-            handler.add_timer(
-                "timer_10ms".to_string(),
-                Duration::from_millis(10),
-                false,
-                move || {
-                    let elapsed = start.elapsed();
-                    order_clone.lock().unwrap().push((10, elapsed.as_millis()));
-                },
-            );
+            handler.add_timer(test_id(10), Duration::from_millis(10), false, move || {
+                let elapsed = start.elapsed();
+                order_clone.lock().unwrap().push((10, elapsed.as_millis()));
+            });
         }
 
         // Wait for all timers to execute
@@ -816,24 +777,21 @@ mod tests {
         let timer_handler = TimerHandler::get_instance(participant.guid().prefix());
 
         let execution_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let keep_id = test_id(501);
+        let delete_id = test_id(502);
 
         {
             let handler = timer_handler.lock().unwrap();
 
             // Setup repeating timer
             let count_clone = execution_count.clone();
-            handler.add_timer(
-                "keep_timer".to_string(),
-                Duration::from_millis(100),
-                true,
-                move || {
-                    count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                },
-            );
+            handler.add_timer(keep_id, Duration::from_millis(100), true, move || {
+                count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            });
 
             let count_clone = execution_count.clone();
             handler.add_timer(
-                "delete_timer".to_string(),
+                delete_id,
                 Duration::from_millis(500), // This timer will be deleted before execution
                 true,
                 move || {
@@ -848,7 +806,7 @@ mod tests {
 
         {
             let handler = timer_handler.lock().unwrap();
-            handler.remove_timer("delete_timer".to_string());
+            handler.remove_timer(delete_id);
         }
 
         // Wait an additional 400ms
@@ -865,7 +823,7 @@ mod tests {
         // Cleanup
         {
             let handler = timer_handler.lock().unwrap();
-            handler.remove_timer("keep_timer".to_string());
+            handler.remove_timer(keep_id);
             handler.terminate();
         }
     }
@@ -883,13 +841,13 @@ mod tests {
 
             // Add timers with large intervals for CI stability
             // Timers: 300ms, 600ms, 900ms, 1200ms, 1500ms
-            for i in 1..=5 {
-                let timer_id = format!("fast_timer_{}", i);
+            for i in 1u32..=5 {
+                let timer_id = test_id(600 + i);
                 let delay_ms = i * 300; // 300ms, 600ms, 900ms, 1200ms, 1500ms
                 let results_clone = execution_results.clone();
 
                 handler.add_timer(
-                    timer_id.clone(),
+                    timer_id,
                     Duration::from_millis(delay_ms as u64),
                     false,
                     move || {
@@ -904,8 +862,8 @@ mod tests {
 
         {
             let handler = timer_handler.lock().unwrap();
-            handler.remove_timer("fast_timer_4".to_string()); // Delete 1200ms timer
-            handler.remove_timer("fast_timer_5".to_string()); // Delete 1500ms timer
+            handler.remove_timer(test_id(604)); // Delete 1200ms timer
+            handler.remove_timer(test_id(605)); // Delete 1500ms timer
         }
 
         // Wait an additional 600ms
@@ -936,43 +894,31 @@ mod tests {
         let timer_handler = TimerHandler::get_instance(participant.guid().prefix());
 
         let execution_log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let id_a = test_id(701);
+        let id_b = test_id(702);
+        let id_c = test_id(703);
 
         {
             let handler = timer_handler.lock().unwrap();
 
             // Setup initial timers
             let log_clone = execution_log.clone();
-            handler.add_timer(
-                "timer_a".to_string(),
-                Duration::from_millis(100),
-                false,
-                move || {
-                    log_clone.lock().unwrap().push("A".to_string());
-                },
-            );
+            handler.add_timer(id_a, Duration::from_millis(100), false, move || {
+                log_clone.lock().unwrap().push("A".to_string());
+            });
 
             let log_clone = execution_log.clone();
-            handler.add_timer(
-                "timer_b".to_string(),
-                Duration::from_millis(200),
-                false,
-                move || {
-                    log_clone.lock().unwrap().push("B".to_string());
-                },
-            );
+            handler.add_timer(id_b, Duration::from_millis(200), false, move || {
+                log_clone.lock().unwrap().push("B".to_string());
+            });
 
             // Modify timer_b to 50ms (will be faster than A)
-            handler.modify_timer("timer_b".to_string(), Duration::from_millis(50));
+            handler.modify_timer(id_b, Duration::from_millis(50));
 
             let log_clone = execution_log.clone();
-            handler.add_timer(
-                "timer_c".to_string(),
-                Duration::from_millis(150),
-                false,
-                move || {
-                    log_clone.lock().unwrap().push("C".to_string());
-                },
-            );
+            handler.add_timer(id_c, Duration::from_millis(150), false, move || {
+                log_clone.lock().unwrap().push("C".to_string());
+            });
         }
 
         // Wait for all timers to execute

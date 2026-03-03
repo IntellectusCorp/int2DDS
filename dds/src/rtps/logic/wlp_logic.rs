@@ -45,7 +45,7 @@ use crate::{
         task::sending_handler::{MessageType, SendingHandler},
         transport::{Transport, TransportSender},
     },
-    utils::timer::timer_handler::TimerHandler,
+    utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
 };
 use std::{
     collections::HashMap,
@@ -762,11 +762,7 @@ impl WlpLogic {
         let participant = self.get_upgraded_participant()?;
         let participant_weak = self.participant.clone();
 
-        let timer_id = format!(
-            "wlp_p2p_{:?}_{}",
-            participant.guid().prefix(),
-            logic_start_time.elapsed().as_nanos(),
-        );
+        let timer_id = TimerId::WlpP2p { guid_prefix: participant.guid().prefix() };
 
         let message = Arc::new(message);
         if let Ok(handler) = self.timer_handler.lock() {

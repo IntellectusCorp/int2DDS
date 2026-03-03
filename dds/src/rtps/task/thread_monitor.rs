@@ -20,7 +20,7 @@ use log::{debug, error};
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::entities::entity::Entity;
 use crate::rtps::entities::participant::Participant;
-use crate::utils::timer::timer_handler::TimerHandler;
+use crate::utils::timer::{timer_handler::TimerHandler, timer_id::TimerId};
 
 // Global thread registry: Guid -> (TID -> thread name)
 static THREAD_REGISTRY: OnceLock<Mutex<HashMap<GuidPrefix, HashMap<u32, String>>>> =
@@ -60,7 +60,7 @@ impl ThreadMonitor {
         match timer_handler.lock() {
             Ok(handler) => {
                 handler.add_timer(
-                    "thread_monitoring_timer".to_string(),
+                    TimerId::ThreadMonitoring,
                     Duration::from_secs(10),
                     true, // repeating
                     move || {
@@ -87,7 +87,7 @@ impl ThreadMonitor {
 
         match timer_handler.lock() {
             Ok(handler) => {
-                handler.remove_timer("thread_monitoring_timer".to_string());
+                handler.remove_timer(TimerId::ThreadMonitoring);
                 debug!("Thread monitoring timer removed successfully");
             }
             Err(e) => {
