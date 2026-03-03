@@ -51,7 +51,7 @@ use crate::{
         },
         task::sending_handler::{MessageType, SendingHandler},
     },
-    utils::timer::timer_handler::TimerHandler,
+    utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
 };
 
 use super::{reader_proxy::ReaderProxy, Writer};
@@ -106,10 +106,8 @@ impl StatefulWriter {
             topic_kind,
             endpoint_id,
             last_change_sequence_number: Arc::new(Mutex::new(SequenceNumber::new(0, 0))),
-            periodic_heartbeat_timer_id: format!(
-                "periodic_heartbeat_writer_{:?}",
-                guid.entity_id().entity_key
-            ),
+            periodic_heartbeat_timer_id: TimerId::PeriodicHeartbeat { entity_id: guid.entity_id() }
+                .to_string(),
             data_max_size_serialized,
             matched_readers: Arc::new(Mutex::new(Vec::new())),
             writer_cache: Arc::new(Mutex::new(WriterHistoryCache::new(
@@ -201,7 +199,8 @@ impl StatefulWriter {
         let heartbeat_period = self.heartbeat_period().to_std_duration();
         let timer_id = self.periodic_heartbeat_timer_id();
         let heartbeat_timer_running = Arc::clone(&self.heartbeat_timer_running);
-        let delay_timer_id = format!("{}_delay", timer_id);
+        let delay_timer_id =
+            TimerId::PeriodicHeartbeatDelay { entity_id: self.guid.entity_id() }.to_string();
 
         // Clone Arcs for the callback to check is_acked_by_all
         let matched_readers = Arc::clone(&self.matched_readers);
