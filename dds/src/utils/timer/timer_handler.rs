@@ -25,6 +25,7 @@ pub type TimerCallback = Arc<dyn Fn() + Send + Sync>;
 pub(crate) enum TimerMessage {
     AddTimer(String, Duration, bool, TimerCallback), // timer_id, duration, repeating, callback
     RemoveTimer(String),                             // timer_id
+    RemoveTimersWithPrefix(String),                  // prefix
     PauseTimer(String),                              // timer_id
     ResumeTimer(String),                             // timer_id
     ModifyTimer(String, Duration),                   // timer_id, new_duration
@@ -162,6 +163,10 @@ impl TimerHandler {
 
     pub(crate) fn remove_timer(&self, timer_id: String) {
         self.push_message_and_wake(TimerMessage::RemoveTimer(timer_id));
+    }
+
+    pub(crate) fn remove_timers_with_prefix(&self, prefix: String) {
+        self.push_message_and_wake(TimerMessage::RemoveTimersWithPrefix(prefix));
     }
 
     pub(crate) fn pause_timer(&self, timer_id: String) {

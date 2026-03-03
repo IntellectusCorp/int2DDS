@@ -93,7 +93,7 @@ use crate::{
         },
     },
     serialize::pl_cdr::InlineQosParameters,
-    utils::timer::timer_handler::TimerHandler,
+    utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
     xtypes::{check_structural_compatibility, TypeIdentifier, TypeObject},
 };
 
@@ -1882,11 +1882,9 @@ impl SedpLogic {
         remote_writer_guid: Guid,
     ) -> RtpsResult<()> {
         let stateful_reader_id = stateful_reader.guid().entity_id();
-        let timer_id = format!(
-            "preemptive_acknack_{:?}_{:?}",
-            stateful_reader_id,
-            chrono::Local::now().to_rfc3339()
-        );
+        let timer_id =
+            TimerId::PreemptiveAcknack { entity_id: stateful_reader_id, remote_writer_guid }
+                .to_string();
 
         let participant = self.get_upgraded_participant()?;
 
@@ -1921,11 +1919,9 @@ impl SedpLogic {
         remote_reader_guid: Guid,
     ) -> RtpsResult<()> {
         let stateful_writer_id = stateful_writer.guid().entity_id();
-        let timer_id = format!(
-            "preemptive_heartbeat_{:?}_{:?}",
-            stateful_writer_id,
-            chrono::Local::now().to_rfc3339()
-        );
+        let timer_id =
+            TimerId::PreemptiveHeartbeat { entity_id: stateful_writer_id, remote_reader_guid }
+                .to_string();
 
         let participant = self.get_upgraded_participant()?;
 

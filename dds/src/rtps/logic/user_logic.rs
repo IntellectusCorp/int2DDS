@@ -53,7 +53,7 @@ use crate::rtps::{
     entities::participant::Participant, messages::message_receiver::MessageReceiver,
 };
 use crate::serialize::pl_cdr::InlineQosParameters;
-use crate::utils::timer::timer_handler::TimerHandler;
+use crate::utils::timer::{timer_handler::TimerHandler, timer_id::TimerId};
 use dashmap::DashMap;
 
 use std::net::{SocketAddr, SocketAddrV4};
@@ -1564,11 +1564,8 @@ impl UnicastMessageProcessor for UserLogic {
                         let reader_entity_id = stateful_reader.guid().entity_id();
                         let participant_guid = participant.guid();
 
-                        let timer_id = format!(
-                            "hb_{:x}_{:x}",
-                            u32::from_be_bytes(reader_entity_id.to_bytes()),
-                            u128::from_be_bytes(remote_writer_guid.to_bytes()),
-                        );
+                        let timer_id =
+                            TimerId::Acknack { reader_entity_id, remote_writer_guid }.to_string();
 
                         if let Ok(locked_timer_handler) =
                             TimerHandler::get_instance(participant.guid().prefix()).lock()
@@ -1612,11 +1609,12 @@ impl UnicastMessageProcessor for UserLogic {
 
                         writer_proxy.increase_nackfrag_count();
 
-                        let timer_id = format!(
-                            "nackfrag_{:x}_{}",
-                            u128::from_be_bytes(remote_writer_guid.to_bytes()),
-                            last_sn.to_i64()
-                        );
+                        let timer_id = TimerId::NackFrag {
+                            reader_entity_id: stateful_reader.guid().entity_id(),
+                            remote_writer_guid,
+                            sequence_number: last_sn,
+                        }
+                        .to_string();
                         if let Ok(locked_timer_handler) =
                             TimerHandler::get_instance(participant.guid().prefix()).lock()
                         {
@@ -1780,11 +1778,8 @@ impl UnicastMessageProcessor for UserLogic {
                 let writer_entity_id = acknack.writer_id;
                 let participant_guid = participant.guid();
 
-                let timer_id = format!(
-                    "nack_{:x}_{:x}",
-                    u32::from_be_bytes(writer_entity_id.to_bytes()),
-                    u128::from_be_bytes(remote_reader_guid.to_bytes()),
-                );
+                let timer_id =
+                    TimerId::NackResponse { writer_entity_id, remote_reader_guid }.to_string();
 
                 if let Ok(locked_timer_handler) =
                     TimerHandler::get_instance(participant.guid().prefix()).lock()
