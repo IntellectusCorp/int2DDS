@@ -99,7 +99,9 @@ impl Xcdr2Serializer {
     }
 
     /// Reserve space for DHEADER and return position
+    /// DHEADER is always 4-byte aligned per XCDR2 spec
     pub fn reserve_dheader(&mut self) -> usize {
+        self.align(4);
         let pos = self.buffer.len();
         self.buffer.extend_from_slice(&[0u8; 4]); // Reserve 4 bytes for DHEADER
         pos
@@ -123,16 +125,14 @@ impl Xcdr2Serializer {
     pub fn begin_struct(&mut self) -> Result<usize, CdrError> {
         match self.extensibility_kind {
             ExtensibilityKind::Final => Ok(0), // No header needed
-            ExtensibilityKind::Appendable => {
-                // Write placeholder for DHEADER
+            ExtensibilityKind::Appendable | ExtensibilityKind::Mutable => {
+                // Align BEFORE recording size_pos so that backpatching in
+                // end_struct writes to the actual DHEADER position, not into
+                // alignment padding bytes.
+                self.align(4);
                 let size_pos = self.buffer.len();
-                self.write_u32(0)?; // Will be backpatched
-                Ok(size_pos)
-            }
-            ExtensibilityKind::Mutable => {
-                // Write placeholder for DHEADER
-                let size_pos = self.buffer.len();
-                self.write_u32(0)?; // Will be backpatched
+                let bytes = to_bytes_u32(0, self.endianness);
+                self.buffer.extend_from_slice(&bytes); // placeholder
                 Ok(size_pos)
             }
         }
@@ -275,6 +275,7 @@ impl<'a> Xcdr2Deserializer<'a> {
     pub fn read_member_header(&mut self) -> Result<(u32, u32), CdrError> {
         use super::MemberHeader;
 
+        self.align(4); // EMHEADER is u32, needs 4-byte alignment
         let (header, bytes_consumed) =
             MemberHeader::read(self.data, self.position, self.endianness)?;
 
@@ -288,6 +289,7 @@ impl<'a> Xcdr2Deserializer<'a> {
     pub fn read_member_header_full(&mut self) -> Result<(u32, u32, bool), CdrError> {
         use super::MemberHeader;
 
+        self.align(4); // EMHEADER is u32, needs 4-byte alignment
         let (header, bytes_consumed) =
             MemberHeader::read(self.data, self.position, self.endianness)?;
 
