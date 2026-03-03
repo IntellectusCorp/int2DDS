@@ -199,6 +199,9 @@ impl TimerTask {
                 TimerMessage::RemoveTimer(timer_id) => {
                     self.remove_timer(&timer_id);
                 }
+                TimerMessage::RemoveTimersWithPrefix(prefix) => {
+                    self.remove_timers_with_prefix(&prefix);
+                }
                 TimerMessage::PauseTimer(timer_id) => {
                     self.pause_timer(&timer_id);
                 }
@@ -252,6 +255,15 @@ impl TimerTask {
         }
     }
 
+    fn remove_timers_with_prefix(&mut self, prefix: &str) {
+        let before = self.timers.len();
+        self.timers.retain(|id, _| !id.starts_with(prefix));
+        let removed = before - self.timers.len();
+        if removed > 0 {
+            debug!("Removed {} timer(s) with prefix '{}'", removed, prefix);
+        }
+    }
+
     fn pause_timer(&mut self, timer_id: &str) {
         if let Some(timer) = self.timers.get_mut(timer_id) {
             timer.pause();
@@ -285,5 +297,80 @@ impl TimerTask {
 
     pub(crate) fn list_timers(&self) -> Vec<String> {
         self.timers.keys().cloned().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rtps::common::entity_id::EntityId;
+    use crate::rtps::common::entity_kind::EntityKind;
+    use crate::rtps::common::guid::Guid;
+    use crate::rtps::common::sequence::SequenceNumber;
+    use crate::utils::timer::timer_id::TimerId;
+    use std::sync::Arc;
+
+    fn noop_callback() -> TimerCallback {
+        Arc::new(|| {})
+    }
+
+    #[test]
+    fn test_remove_timers_with_prefix() {
+        let mut task = TimerTask::new();
+
+        let writer_id = EntityId { entity_key: [0x00, 0x00, 0x03], entity_kind: EntityKind(0x02) };
+        let reader_a = EntityId { entity_key: [0x00, 0x00, 0x07], entity_kind: EntityKind(0x07) };
+        let reader_b = EntityId { entity_key: [0x00, 0x00, 0x08], entity_kind: EntityKind(0x07) };
+        let remote_guid = Guid::new(
+            [0x01; 12],
+            EntityId { entity_key: [0x00, 0x00, 0x01], entity_kind: EntityKind(0x07) },
+        );
+
+        // Register 10 timers: 4 writer + 3 reader_a + 3 reader_b
+        let ids = [
+            TimerId::PeriodicHeartbeat { entity_id: writer_id }.to_string(),
+            TimerId::PeriodicHeartbeatDelay { entity_id: writer_id }.to_string(),
+            TimerId::NackResponse { writer_entity_id: writer_id, remote_reader_guid: remote_guid }
+                .to_string(),
+            TimerId::PreemptiveHeartbeat { entity_id: writer_id, remote_reader_guid: remote_guid }
+                .to_string(),
+            TimerId::Acknack { reader_entity_id: reader_a, remote_writer_guid: remote_guid }
+                .to_string(),
+            TimerId::NackFrag {
+                reader_entity_id: reader_a,
+                remote_writer_guid: remote_guid,
+                sequence_number: SequenceNumber::new(0, 1),
+            }
+            .to_string(),
+            TimerId::PreemptiveAcknack { entity_id: reader_a, remote_writer_guid: remote_guid }
+                .to_string(),
+            TimerId::Acknack { reader_entity_id: reader_b, remote_writer_guid: remote_guid }
+                .to_string(),
+            TimerId::NackFrag {
+                reader_entity_id: reader_b,
+                remote_writer_guid: remote_guid,
+                sequence_number: SequenceNumber::new(0, 1),
+            }
+            .to_string(),
+            TimerId::PreemptiveAcknack { entity_id: reader_b, remote_writer_guid: remote_guid }
+                .to_string(),
+        ];
+
+        for id in &ids {
+            task.add_timer(id.clone(), Duration::from_secs(60), false, noop_callback());
+        }
+        assert_eq!(task.list_timers().len(), 10);
+
+        // Remove writer timers (4)
+        task.remove_timers_with_prefix(&TimerId::entity_prefix(writer_id));
+        assert_eq!(task.list_timers().len(), 6);
+
+        // Remove reader_a timers (3)
+        task.remove_timers_with_prefix(&TimerId::entity_prefix(reader_a));
+        assert_eq!(task.list_timers().len(), 3);
+
+        // Remove reader_b timers (3)
+        task.remove_timers_with_prefix(&TimerId::entity_prefix(reader_b));
+        assert_eq!(task.list_timers().len(), 0);
     }
 }
