@@ -367,33 +367,22 @@ impl XcdrDeserialize for String {
 
 impl<T: XcdrSerialize> XcdrSerialize for Vec<T> {
     fn serialize_xcdr(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()> {
-        // XCDR2: Write DHEADER for non-primitive sequences per DDS-XTypes v1.3
-        // Note: For primitive Vec types (Vec<i32>, etc.), the derive macro generates
-        // specialized method calls that bypass this blanket impl.
-        let dheader_pos = serializer.reserve_dheader();
-        let content_start = serializer.position();
-
-        // Write sequence length
+        // XCDR2: Sequence itself has no DHEADER per DDS-XTypes v1.3.
+        // Only APPENDABLE/MUTABLE struct elements carry their own DHEADERs.
+        // Encoding: uint32(count) + element[0] + element[1] + ...
         serializer.serialize_u32(self.len() as u32)?;
-
-        // Write sequence elements
         for item in self {
             item.serialize_xcdr(serializer)?;
         }
-
-        // Backpatch DHEADER with content byte size
-        let content_size = (serializer.position() - content_start) as u32;
-        serializer.write_dheader_at(dheader_pos, content_size);
         Ok(())
     }
 }
 
 impl<T: XcdrDeserialize> XcdrDeserialize for Vec<T> {
     fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
-        // XCDR2: Read DHEADER for non-primitive sequences per DDS-XTypes v1.3
-        // Note: For primitive Vec types, the derive macro generates specialized
-        // method calls that bypass this blanket impl.
-        let _dheader = deserializer.read_dheader()?;
+        // XCDR2: Sequence itself has no DHEADER per DDS-XTypes v1.3.
+        // Only APPENDABLE/MUTABLE struct elements carry their own DHEADERs.
+        // Encoding: uint32(count) + element[0] + element[1] + ...
         let length = deserializer.deserialize_u32()? as usize;
         let mut result = Vec::with_capacity(length);
         for _ in 0..length {
