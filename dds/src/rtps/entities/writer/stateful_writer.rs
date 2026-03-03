@@ -65,7 +65,7 @@ pub(crate) struct StatefulWriter {
     multicast_locator_list: Vec<Locator>,
     endpoint_id: EntityId,
     last_change_sequence_number: Arc<Mutex<SequenceNumber>>,
-    periodic_heartbeat_timer_id: String,
+    periodic_heartbeat_timer_id: TimerId,
     data_max_size_serialized: i32,
     matched_readers: Arc<Mutex<Vec<ReaderProxy>>>,
     writer_cache: Arc<Mutex<WriterHistoryCache>>,
@@ -106,8 +106,7 @@ impl StatefulWriter {
             topic_kind,
             endpoint_id,
             last_change_sequence_number: Arc::new(Mutex::new(SequenceNumber::new(0, 0))),
-            periodic_heartbeat_timer_id: TimerId::PeriodicHeartbeat { entity_id: guid.entity_id() }
-                .to_string(),
+            periodic_heartbeat_timer_id: TimerId::PeriodicHeartbeat { entity_id: guid.entity_id() },
             data_max_size_serialized,
             matched_readers: Arc::new(Mutex::new(Vec::new())),
             writer_cache: Arc::new(Mutex::new(WriterHistoryCache::new(
@@ -134,8 +133,8 @@ impl StatefulWriter {
         RtpsDuration::from(self.writer_reliability_extension.initial_heartbeat_delay)
     }
 
-    pub(crate) fn periodic_heartbeat_timer_id(&self) -> String {
-        self.periodic_heartbeat_timer_id.clone()
+    pub(crate) fn periodic_heartbeat_timer_id(&self) -> TimerId {
+        self.periodic_heartbeat_timer_id
     }
 
     pub(crate) fn heartbeat_timer_running(&self) -> bool {
@@ -199,8 +198,7 @@ impl StatefulWriter {
         let heartbeat_period = self.heartbeat_period().to_std_duration();
         let timer_id = self.periodic_heartbeat_timer_id();
         let heartbeat_timer_running = Arc::clone(&self.heartbeat_timer_running);
-        let delay_timer_id =
-            TimerId::PeriodicHeartbeatDelay { entity_id: self.guid.entity_id() }.to_string();
+        let delay_timer_id = TimerId::PeriodicHeartbeatDelay { entity_id: self.guid.entity_id() };
 
         // Clone Arcs for the callback to check is_acked_by_all
         let matched_readers = Arc::clone(&self.matched_readers);
@@ -222,7 +220,7 @@ impl StatefulWriter {
                         guid_prefix,
                         guid,
                         heartbeat_period,
-                        timer_id.clone(),
+                        timer_id,
                         heartbeat_timer_running.clone(),
                     );
                 },
@@ -250,7 +248,7 @@ impl StatefulWriter {
         guid_prefix: GuidPrefix,
         guid: Guid,
         heartbeat_period: std::time::Duration,
-        timer_id: String,
+        timer_id: TimerId,
         heartbeat_timer_running: Arc<AtomicBool>,
     ) {
         // CAS check - if already running, skip

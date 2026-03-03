@@ -26,7 +26,7 @@ use crate::{
         },
         entities::history::cache_change::CacheChange,
     },
-    utils::timer::timer_handler::TimerHandler,
+    utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
 };
 
 pub(crate) trait HistoryCache {
@@ -40,7 +40,7 @@ pub(crate) trait HistoryCache {
     fn get_max_samples(&self) -> i32;
     fn get_max_instances(&self) -> i32;
     fn get_max_samples_per_instance(&self) -> i32;
-    fn get_lifespan_timers(&self) -> Arc<Mutex<HashMap<Guid, String>>>;
+    fn get_lifespan_timers(&self) -> Arc<Mutex<HashMap<Guid, TimerId>>>;
     fn get_timer_handler(&self, guid_prefix: GuidPrefix) -> DdsResult<Arc<Mutex<TimerHandler>>> {
         Ok(TimerHandler::get_instance(guid_prefix))
     }
@@ -110,14 +110,14 @@ pub(crate) trait HistoryCache {
         &self,
         writer_guid: Guid,
         lifespan_duration: Duration,
-        timer_id_prefix: &str,
+        timer_id: TimerId,
     ) -> DdsResult<()>;
 
     fn register_lifespan_timer_with_callback(
         &self,
         writer_guid: Guid,
         lifespan_duration: Duration,
-        timer_id_prefix: &str,
+        timer_id: TimerId,
         callback: Arc<dyn Fn() + Send + Sync>,
     ) -> DdsResult<()> {
         let lifespan_timers = self.get_lifespan_timers();
@@ -134,7 +134,6 @@ pub(crate) trait HistoryCache {
         let std_duration = std::time::Duration::try_from(lifespan_duration)
             .map_err(|e| DdsError::Error(format!("Failed to convert Duration: {:?}", e)))?;
 
-        let timer_id = format!("{}_{:?}", timer_id_prefix, writer_guid);
         let timer_handler = self.get_timer_handler(writer_guid.prefix())?;
 
         {
@@ -142,7 +141,7 @@ pub(crate) trait HistoryCache {
                 .lock()
                 .map_err(|e| DdsError::Error(format!("Failed to lock timer handler: {}", e)))?;
 
-            handler.add_timer(timer_id.clone(), std_duration, true, move || {
+            handler.add_timer(timer_id, std_duration, true, move || {
                 callback();
             });
         }
@@ -162,7 +161,7 @@ pub(crate) trait HistoryCache {
             let timers_guard = lifespan_timers
                 .lock()
                 .map_err(|e| DdsError::Error(format!("Failed to lock lifespan_timers: {}", e)))?;
-            timers_guard.get(&writer_guid).cloned()
+            timers_guard.get(&writer_guid).copied()
         };
 
         if let Some(timer_id) = timer_id {

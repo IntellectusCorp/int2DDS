@@ -12,7 +12,6 @@ use std::{
 };
 
 use log::{debug, error, warn};
-use rand::random_range;
 use speedy::{Endianness, Writable};
 
 use crate::{
@@ -1581,13 +1580,10 @@ impl SedpLogic {
         let participant = self.get_upgraded_participant()?;
         let participant_weak = self.participant.clone();
 
-        // Generate unique timer ID using participant GUID, timestamp and random number
-        let timer_id = format!(
-            "sedp_send_{:?}_{}_{:?}",
-            participant.guid().prefix(),
-            logic_start_time.elapsed().as_nanos(),
-            random_range(0..10000)
-        );
+        let timer_id = TimerId::SedpScheduledMessage {
+            guid_prefix: participant.guid().prefix(),
+            elapsed_nano: logic_start_time.elapsed().as_nanos() as u64,
+        };
 
         let message = Arc::new(message);
         if let Ok(timer_handler) = self.timer_handler.lock() {
@@ -1883,8 +1879,7 @@ impl SedpLogic {
     ) -> RtpsResult<()> {
         let stateful_reader_id = stateful_reader.guid().entity_id();
         let timer_id =
-            TimerId::PreemptiveAcknack { entity_id: stateful_reader_id, remote_writer_guid }
-                .to_string();
+            TimerId::PreemptiveAcknack { entity_id: stateful_reader_id, remote_writer_guid };
 
         let participant = self.get_upgraded_participant()?;
 
@@ -1920,8 +1915,7 @@ impl SedpLogic {
     ) -> RtpsResult<()> {
         let stateful_writer_id = stateful_writer.guid().entity_id();
         let timer_id =
-            TimerId::PreemptiveHeartbeat { entity_id: stateful_writer_id, remote_reader_guid }
-                .to_string();
+            TimerId::PreemptiveHeartbeat { entity_id: stateful_writer_id, remote_reader_guid };
 
         let participant = self.get_upgraded_participant()?;
 

@@ -8,13 +8,15 @@ use std::time::{Duration, Instant};
 use log::{debug, error, warn};
 use mio::{Events, Poll, Token, Waker};
 
+use crate::rtps::common::entity_id::EntityId;
 use crate::utils::timer::timer_handler::{TimerCallback, TimerMessage, TimerMessageQueue};
+use crate::utils::timer::timer_id::TimerId;
 
 const WAKER_TOKEN: Token = Token(0);
 
 #[derive(Clone)]
 pub(crate) struct Timer {
-    id: String,
+    id: TimerId,
     duration: Duration,
     next_trigger: Instant,
     start_time: Instant,
@@ -26,7 +28,7 @@ pub(crate) struct Timer {
 
 impl Timer {
     pub(crate) fn new(
-        id: String,
+        id: TimerId,
         duration: Duration,
         repeating: bool,
         callback: TimerCallback,
@@ -110,7 +112,7 @@ impl Timer {
 pub struct TimerTask {
     poll: Poll,
     waker: Arc<Waker>,
-    timers: HashMap<String, Timer>,
+    timers: HashMap<TimerId, Timer>,
     running: bool,
 }
 
@@ -199,8 +201,8 @@ impl TimerTask {
                 TimerMessage::RemoveTimer(timer_id) => {
                     self.remove_timer(&timer_id);
                 }
-                TimerMessage::RemoveTimersWithPrefix(prefix) => {
-                    self.remove_timers_with_prefix(&prefix);
+                TimerMessage::RemoveTimersByEntity(entity_id) => {
+                    self.remove_timers_by_entity(&entity_id);
                 }
                 TimerMessage::PauseTimer(timer_id) => {
                     self.pause_timer(&timer_id);
@@ -232,7 +234,7 @@ impl TimerTask {
 
     fn add_timer(
         &mut self,
-        timer_id: String,
+        timer_id: TimerId,
         duration: Duration,
         repeating: bool,
         callback: TimerCallback,
@@ -242,12 +244,12 @@ impl TimerTask {
             return;
         }
 
-        let timer = Timer::new(timer_id.clone(), duration, repeating, callback);
-        self.timers.insert(timer_id.clone(), timer);
+        let timer = Timer::new(timer_id, duration, repeating, callback);
+        self.timers.insert(timer_id, timer);
         debug!("Added timer '{}' with duration {:?}, repeating: {}", timer_id, duration, repeating);
     }
 
-    fn remove_timer(&mut self, timer_id: &str) {
+    fn remove_timer(&mut self, timer_id: &TimerId) {
         if self.timers.remove(timer_id).is_some() {
             debug!("Removed timer '{}'", timer_id);
         } else {
@@ -255,16 +257,16 @@ impl TimerTask {
         }
     }
 
-    fn remove_timers_with_prefix(&mut self, prefix: &str) {
+    fn remove_timers_by_entity(&mut self, entity_id: &EntityId) {
         let before = self.timers.len();
-        self.timers.retain(|id, _| !id.starts_with(prefix));
+        self.timers.retain(|id, _| !id.belongs_to_entity(entity_id));
         let removed = before - self.timers.len();
         if removed > 0 {
-            debug!("Removed {} timer(s) with prefix '{}'", removed, prefix);
+            debug!("Removed {} timer(s) for entity {:?}", removed, entity_id);
         }
     }
 
-    fn pause_timer(&mut self, timer_id: &str) {
+    fn pause_timer(&mut self, timer_id: &TimerId) {
         if let Some(timer) = self.timers.get_mut(timer_id) {
             timer.pause();
             debug!("Paused timer '{}'", timer_id);
@@ -273,7 +275,7 @@ impl TimerTask {
         }
     }
 
-    fn resume_timer(&mut self, timer_id: &str) {
+    fn resume_timer(&mut self, timer_id: &TimerId) {
         if let Some(timer) = self.timers.get_mut(timer_id) {
             timer.resume();
             debug!("Resumed timer '{}'", timer_id);
@@ -282,7 +284,7 @@ impl TimerTask {
         }
     }
 
-    fn modify_timer(&mut self, timer_id: &str, new_duration: Duration) {
+    fn modify_timer(&mut self, timer_id: &TimerId, new_duration: Duration) {
         if let Some(timer) = self.timers.get_mut(timer_id) {
             timer.modify_duration(new_duration);
             debug!("Modified timer '{}' duration to {:?}", timer_id, new_duration);
@@ -291,12 +293,12 @@ impl TimerTask {
         }
     }
 
-    pub(crate) fn get_timer_info(&self, timer_id: &str) -> Option<(Duration, bool, bool)> {
+    pub(crate) fn get_timer_info(&self, timer_id: &TimerId) -> Option<(Duration, bool, bool)> {
         self.timers.get(timer_id).map(|timer| (timer.duration, timer.repeating, timer.paused))
     }
 
-    pub(crate) fn list_timers(&self) -> Vec<String> {
-        self.timers.keys().cloned().collect()
+    pub(crate) fn list_timers(&self) -> Vec<TimerId> {
+        self.timers.keys().copied().collect()
     }
 }
 
@@ -307,7 +309,6 @@ mod tests {
     use crate::rtps::common::entity_kind::EntityKind;
     use crate::rtps::common::guid::Guid;
     use crate::rtps::common::sequence::SequenceNumber;
-    use crate::utils::timer::timer_id::TimerId;
     use std::sync::Arc;
 
     fn noop_callback() -> TimerCallback {
@@ -315,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_timers_with_prefix() {
+    fn test_remove_timers_by_entity() {
         let mut task = TimerTask::new();
 
         let writer_id = EntityId { entity_key: [0x00, 0x00, 0x03], entity_kind: EntityKind(0x02) };
@@ -328,49 +329,41 @@ mod tests {
 
         // Register 10 timers: 4 writer + 3 reader_a + 3 reader_b
         let ids = [
-            TimerId::PeriodicHeartbeat { entity_id: writer_id }.to_string(),
-            TimerId::PeriodicHeartbeatDelay { entity_id: writer_id }.to_string(),
-            TimerId::NackResponse { writer_entity_id: writer_id, remote_reader_guid: remote_guid }
-                .to_string(),
-            TimerId::PreemptiveHeartbeat { entity_id: writer_id, remote_reader_guid: remote_guid }
-                .to_string(),
-            TimerId::Acknack { reader_entity_id: reader_a, remote_writer_guid: remote_guid }
-                .to_string(),
+            TimerId::PeriodicHeartbeat { entity_id: writer_id },
+            TimerId::PeriodicHeartbeatDelay { entity_id: writer_id },
+            TimerId::NackResponse { writer_entity_id: writer_id, remote_reader_guid: remote_guid },
+            TimerId::PreemptiveHeartbeat { entity_id: writer_id, remote_reader_guid: remote_guid },
+            TimerId::Acknack { reader_entity_id: reader_a, remote_writer_guid: remote_guid },
             TimerId::NackFrag {
                 reader_entity_id: reader_a,
                 remote_writer_guid: remote_guid,
                 sequence_number: SequenceNumber::new(0, 1),
-            }
-            .to_string(),
-            TimerId::PreemptiveAcknack { entity_id: reader_a, remote_writer_guid: remote_guid }
-                .to_string(),
-            TimerId::Acknack { reader_entity_id: reader_b, remote_writer_guid: remote_guid }
-                .to_string(),
+            },
+            TimerId::PreemptiveAcknack { entity_id: reader_a, remote_writer_guid: remote_guid },
+            TimerId::Acknack { reader_entity_id: reader_b, remote_writer_guid: remote_guid },
             TimerId::NackFrag {
                 reader_entity_id: reader_b,
                 remote_writer_guid: remote_guid,
                 sequence_number: SequenceNumber::new(0, 1),
-            }
-            .to_string(),
-            TimerId::PreemptiveAcknack { entity_id: reader_b, remote_writer_guid: remote_guid }
-                .to_string(),
+            },
+            TimerId::PreemptiveAcknack { entity_id: reader_b, remote_writer_guid: remote_guid },
         ];
 
         for id in &ids {
-            task.add_timer(id.clone(), Duration::from_secs(60), false, noop_callback());
+            task.add_timer(*id, Duration::from_secs(60), false, noop_callback());
         }
         assert_eq!(task.list_timers().len(), 10);
 
         // Remove writer timers (4)
-        task.remove_timers_with_prefix(&TimerId::entity_prefix(writer_id));
+        task.remove_timers_by_entity(&writer_id);
         assert_eq!(task.list_timers().len(), 6);
 
         // Remove reader_a timers (3)
-        task.remove_timers_with_prefix(&TimerId::entity_prefix(reader_a));
+        task.remove_timers_by_entity(&reader_a);
         assert_eq!(task.list_timers().len(), 3);
 
         // Remove reader_b timers (3)
-        task.remove_timers_with_prefix(&TimerId::entity_prefix(reader_b));
+        task.remove_timers_by_entity(&reader_b);
         assert_eq!(task.list_timers().len(), 0);
     }
 }
