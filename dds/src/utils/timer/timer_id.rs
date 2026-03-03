@@ -1,16 +1,14 @@
 use std::fmt;
 
 use crate::rtps::common::entity_id::EntityId;
-use crate::rtps::common::guid::Guid;
+use crate::rtps::common::guid::{Guid, GuidPrefix};
 use crate::rtps::common::sequence::SequenceNumber;
+use crate::rtps::common::types::DomainId;
 use crate::rtps::messages::submessage_id::SubmessageId;
 
-// Structured timer identifier for entity-related timers.
-//
-// Format: `{entity_id_hex}_{submessage_id_hex}[_{remote_guid_hex}][_{extra}]`
-//
-// The entity_id prefix (8 hex chars + underscore) enables bulk removal
-// of all timers belonging to a specific writer or reader via `entity_prefix()`.
+// Structured timer identifier used as the HashMap key for all timers.
+// Every timer in the system must use a `TimerId` variant, enforcing type safety.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum TimerId {
     // Writer: periodic HEARTBEAT sender
     PeriodicHeartbeat {
@@ -52,6 +50,45 @@ pub(crate) enum TimerId {
         entity_id: EntityId,
         remote_writer_guid: Guid,
     },
+
+    // Lifespan expiry timer for writer-side history cache
+    LifespanWriter {
+        writer_guid: Guid,
+    },
+
+    // Lifespan expiry timer for reader-side history cache
+    LifespanReader {
+        writer_guid: Guid,
+    },
+
+    // Autopurge disposed samples delay
+    AutopurgeDisposed {
+        reader_guid: Guid,
+    },
+
+    // Autopurge no-writer samples delay
+    AutopurgeNowriter {
+        reader_guid: Guid,
+    },
+
+    // SPDP periodic multicast announcement
+    SpdpMulticast {
+        domain_id: DomainId,
+    },
+
+    // WLP participant-to-participant liveliness
+    WlpP2p {
+        guid_prefix: GuidPrefix,
+    },
+
+    // SEDP delayed message send (one-shot, unique per invocation)
+    SedpScheduledMessage {
+        guid_prefix: GuidPrefix,
+        elapsed_nano: u64,
+    },
+
+    // Thread monitoring periodic timer
+    ThreadMonitoring,
 }
 
 impl fmt::Display for TimerId {
@@ -114,6 +151,30 @@ impl fmt::Display for TimerId {
                     Self::guid_u128(remote_writer_guid)
                 )
             }
+            TimerId::SpdpMulticast { domain_id } => {
+                write!(f, "spdp_multicast_{}", domain_id)
+            }
+            TimerId::WlpP2p { guid_prefix } => {
+                write!(f, "wlp_p2p_{:02x?}", guid_prefix)
+            }
+            TimerId::LifespanWriter { writer_guid } => {
+                write!(f, "lifespan_writer_{:x}", Self::guid_u128(writer_guid))
+            }
+            TimerId::LifespanReader { writer_guid } => {
+                write!(f, "lifespan_reader_{:x}", Self::guid_u128(writer_guid))
+            }
+            TimerId::AutopurgeDisposed { reader_guid } => {
+                write!(f, "autopurge_disposed_{:x}", Self::guid_u128(reader_guid))
+            }
+            TimerId::AutopurgeNowriter { reader_guid } => {
+                write!(f, "autopurge_nowriter_{:x}", Self::guid_u128(reader_guid))
+            }
+            TimerId::SedpScheduledMessage { guid_prefix, elapsed_nano } => {
+                write!(f, "sedp_scheduled_{:02x?}_{}", guid_prefix, elapsed_nano)
+            }
+            TimerId::ThreadMonitoring => {
+                write!(f, "thread_monitoring_timer")
+            }
         }
     }
 }
@@ -128,11 +189,19 @@ impl TimerId {
         u128::from_be_bytes(guid.to_bytes())
     }
 
-    // Returns the entity_id prefix string for bulk timer removal.
-    // All timers belonging to the given entity start with this prefix.
-    pub(crate) fn entity_prefix(entity_id: EntityId) -> String {
-        let b = entity_id.to_bytes();
-        format!("{:02x}{:02x}{:02x}{:02x}_", b[0], b[1], b[2], b[3])
+    /// Returns true if this timer belongs to the given RTPS entity.
+    /// Used for bulk removal when an entity (writer/reader) is deleted.
+    pub(crate) fn belongs_to_entity(&self, entity_id: &EntityId) -> bool {
+        match self {
+            TimerId::PeriodicHeartbeat { entity_id: eid } => eid == entity_id,
+            TimerId::PeriodicHeartbeatDelay { entity_id: eid } => eid == entity_id,
+            TimerId::NackResponse { writer_entity_id, .. } => writer_entity_id == entity_id,
+            TimerId::Acknack { reader_entity_id, .. } => reader_entity_id == entity_id,
+            TimerId::NackFrag { reader_entity_id, .. } => reader_entity_id == entity_id,
+            TimerId::PreemptiveHeartbeat { entity_id: eid, .. } => eid == entity_id,
+            TimerId::PreemptiveAcknack { entity_id: eid, .. } => eid == entity_id,
+            _ => false,
+        }
     }
 }
 
@@ -156,34 +225,59 @@ mod tests {
     }
 
     #[test]
-    fn test_entity_prefix() {
-        let entity_id = EntityId { entity_key: [0x00, 0x00, 0x03], entity_kind: EntityKind(0x02) };
-        assert_eq!(TimerId::entity_prefix(entity_id), "00000302_");
+    fn test_belongs_to_entity() {
+        let writer_id = EntityId { entity_key: [0x00, 0x00, 0x03], entity_kind: EntityKind(0x02) };
+        let reader_id = EntityId { entity_key: [0x00, 0x00, 0x07], entity_kind: EntityKind(0x07) };
+        let remote_guid = Guid::new(
+            [0x01; 12],
+            EntityId { entity_key: [0x00, 0x00, 0x01], entity_kind: EntityKind(0x07) },
+        );
+
+        let hb = TimerId::PeriodicHeartbeat { entity_id: writer_id };
+        let hb_delay = TimerId::PeriodicHeartbeatDelay { entity_id: writer_id };
+        let nack =
+            TimerId::NackResponse { writer_entity_id: writer_id, remote_reader_guid: remote_guid };
+        let pre_hb =
+            TimerId::PreemptiveHeartbeat { entity_id: writer_id, remote_reader_guid: remote_guid };
+
+        // Writer timers belong to writer_id
+        assert!(hb.belongs_to_entity(&writer_id));
+        assert!(hb_delay.belongs_to_entity(&writer_id));
+        assert!(nack.belongs_to_entity(&writer_id));
+        assert!(pre_hb.belongs_to_entity(&writer_id));
+
+        // Writer timers do NOT belong to reader_id
+        assert!(!hb.belongs_to_entity(&reader_id));
+        assert!(!hb_delay.belongs_to_entity(&reader_id));
+        assert!(!nack.belongs_to_entity(&reader_id));
+
+        // Reader timers
+        let acknack =
+            TimerId::Acknack { reader_entity_id: reader_id, remote_writer_guid: remote_guid };
+        let nackfrag = TimerId::NackFrag {
+            reader_entity_id: reader_id,
+            remote_writer_guid: remote_guid,
+            sequence_number: SequenceNumber::new(0, 1),
+        };
+        let pre_ack =
+            TimerId::PreemptiveAcknack { entity_id: reader_id, remote_writer_guid: remote_guid };
+
+        assert!(acknack.belongs_to_entity(&reader_id));
+        assert!(nackfrag.belongs_to_entity(&reader_id));
+        assert!(pre_ack.belongs_to_entity(&reader_id));
+        assert!(!acknack.belongs_to_entity(&writer_id));
+
+        // Non-entity timers never belong to any entity
+        assert!(!TimerId::SpdpMulticast { domain_id: 0 }.belongs_to_entity(&writer_id));
+        assert!(!TimerId::ThreadMonitoring.belongs_to_entity(&writer_id));
     }
 
     #[test]
-    fn test_prefix_matches_timer_ids() {
-        let writer_id = EntityId { entity_key: [0x00, 0x00, 0x03], entity_kind: EntityKind(0x02) };
-        let remote_guid = Guid::new(
-            [0x01; 12],
-            EntityId { entity_key: [0x00, 0x00, 0x07], entity_kind: EntityKind(0x07) },
-        );
+    fn test_different_variants_same_entity_are_distinct() {
+        let entity_id = EntityId { entity_key: [0x00, 0x00, 0x03], entity_kind: EntityKind(0x02) };
+        let hb = TimerId::PeriodicHeartbeat { entity_id };
+        let hb_delay = TimerId::PeriodicHeartbeatDelay { entity_id };
 
-        let prefix = TimerId::entity_prefix(writer_id);
-
-        let hb = TimerId::PeriodicHeartbeat { entity_id: writer_id }.to_string();
-        let hb_delay = TimerId::PeriodicHeartbeatDelay { entity_id: writer_id }.to_string();
-        let nack =
-            TimerId::NackResponse { writer_entity_id: writer_id, remote_reader_guid: remote_guid }
-                .to_string();
-
-        assert!(hb.starts_with(&prefix));
-        assert!(hb_delay.starts_with(&prefix));
-        assert!(nack.starts_with(&prefix));
-
-        // Reader timer with different entity_id should NOT match
-        let reader_id = EntityId { entity_key: [0x00, 0x00, 0x07], entity_kind: EntityKind(0x07) };
-        let reader_prefix = TimerId::entity_prefix(reader_id);
-        assert!(!hb.starts_with(&reader_prefix));
+        assert_ne!(hb, hb_delay);
     }
 }

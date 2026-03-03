@@ -9,7 +9,6 @@ use std::{
     time::{Duration as StdDuration, Instant},
 };
 
-use rand;
 use speedy::{Endianness, Writable};
 
 use crate::rtps::{
@@ -26,7 +25,7 @@ use crate::rtps::{
     task::sending_handler::{MessageType, SendingHandler},
     transport::{Transport, TransportSender, TransportType},
 };
-use crate::utils::timer::timer_handler::TimerHandler;
+use crate::utils::timer::{timer_handler::TimerHandler, timer_id::TimerId};
 
 #[derive(Clone)]
 pub(crate) struct SpdpLogic {
@@ -129,13 +128,7 @@ impl SpdpLogic {
             None => duration.checked_sub(elapsed).unwrap_or(StdDuration::from_millis(0)),
         };
 
-        // Generate unique timer ID
-        let timer_id = format!(
-            "spdp_multicast_{}_{}_{}",
-            domain_id,
-            start.elapsed().as_nanos(),
-            rand::random::<u32>()
-        );
+        let timer_id = TimerId::SpdpMulticast { domain_id };
 
         let data_arc = Arc::new(data);
         if let Ok(timer_handler) = self.timer_handler.lock() {

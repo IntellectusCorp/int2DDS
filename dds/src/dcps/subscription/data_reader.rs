@@ -93,7 +93,7 @@ use crate::{
         topic_description::TopicDescription,
         type_support::{DdsType, TypeSupport},
     },
-    utils::timer::timer_handler::TimerHandler,
+    utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
 };
 
 // Pub/Sub must contain multiple types of DataWriter/Reader<Foo>,
@@ -1614,7 +1614,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                         );
                         self.add_autopurge_timer(
                             std_duration,
-                            format!("autopurge_disposed_samples_{:?}", self.guid),
+                            TimerId::AutopurgeDisposed { reader_guid: self.guid },
                             instance_handle,
                         )?;
                     }
@@ -1652,7 +1652,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                         );
                         self.add_autopurge_timer(
                             std_duration,
-                            format!("autopurge_nowriter_samples_{:?}", self.guid),
+                            TimerId::AutopurgeNowriter { reader_guid: self.guid },
                             instance_handle,
                         )?;
                     }
@@ -1674,7 +1674,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     fn add_autopurge_timer(
         &self,
         std_duration: std::time::Duration,
-        timer_id: String,
+        timer_id: TimerId,
         instance_handle: InstanceHandle,
     ) -> DdsResult<()> {
         // Get weak reference to self (DataReader)
