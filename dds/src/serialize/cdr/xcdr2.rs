@@ -114,7 +114,7 @@ impl Xcdr2Serializer {
     }
 
     /// Helper method for writing u32 (used by begin_struct)
-    fn write_u32(&mut self, value: u32) -> Result<(), CdrError> {
+    fn _write_u32(&mut self, value: u32) -> Result<(), CdrError> {
         self.align(4);
         let bytes = to_bytes_u32(value, self.endianness);
         self.buffer.extend_from_slice(&bytes);
