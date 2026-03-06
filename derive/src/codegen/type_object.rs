@@ -6,7 +6,7 @@ use quote::quote;
 
 use crate::codegen::type_config::DdsTypeConfig;
 use crate::codegen::utils::{
-    get_serialization_method, parse_field_attributes, SerializationMethod,
+    get_serialization_method, parse_field_attributes, resolve_member_id, SerializationMethod,
 };
 
 /// Generate TypeIdentifier expression for a Rust type.
@@ -30,6 +30,7 @@ fn type_to_identifier(
         SerializationMethod::F64 => quote! { #crate_path::xtypes::TypeIdentifier::Float64 },
         SerializationMethod::Char => quote! { #crate_path::xtypes::TypeIdentifier::Char8 },
         SerializationMethod::String => quote! { #crate_path::xtypes::TypeIdentifier::String8 },
+        SerializationMethod::WString => quote! { #crate_path::xtypes::TypeIdentifier::String16 },
         SerializationMethod::VecU8
         | SerializationMethod::VecU16
         | SerializationMethod::VecU32
@@ -114,6 +115,24 @@ pub fn generate_has_type_object_impl(
 ) -> proc_macro2::TokenStream {
     let crate_path = &type_config.crate_path;
     let type_name_str = name.to_string();
+    let autoid = type_config.autoid;
+
+    // Find parent field (struct inheritance) for base_type reference
+    let parent_field = fields.iter().find(|f| {
+        let fc = parse_field_attributes(f);
+        fc.parent
+    });
+    let base_type_expr = if let Some(pf) = parent_field {
+        let parent_type = &pf.ty;
+        let parent_type_str = quote!(#parent_type).to_string();
+        quote! {
+            Some(#crate_path::xtypes::TypeIdentifier::MinimalTypeId(
+                #crate_path::xtypes::EquivalenceHash::compute(#parent_type_str.as_bytes())
+            ))
+        }
+    } else {
+        quote! { None }
+    };
 
     // Generate member definitions for MinimalStructType
     let minimal_members: Vec<_> = fields
@@ -123,19 +142,20 @@ pub fn generate_has_type_object_impl(
             let field_name = field.ident.as_ref().unwrap();
             let field_name_str = field_name.to_string();
             let field_config = parse_field_attributes(field);
-            let member_id = field_config.id.unwrap_or(index as u32);
+            let member_id = resolve_member_id(&field_config, &field_name_str, index, autoid);
             let type_id = type_to_identifier(&field.ty, crate_path);
 
             let is_key = field_config.key;
             let is_optional = field_config.optional;
             let is_must_understand = field_config.must_understand;
+            let is_external = field_config.external;
 
             quote! {
                 #crate_path::xtypes::MinimalStructMember::new(
                     #member_id,
                     #crate_path::xtypes::MemberFlag::new(
                         #crate_path::xtypes::TryConstructKind::Discard,
-                        false, // is_external
+                        #is_external,
                         #is_optional,
                         #is_must_understand,
                         #is_key,
@@ -156,19 +176,20 @@ pub fn generate_has_type_object_impl(
             let field_name = field.ident.as_ref().unwrap();
             let field_name_str = field_name.to_string();
             let field_config = parse_field_attributes(field);
-            let member_id = field_config.id.unwrap_or(index as u32);
+            let member_id = resolve_member_id(&field_config, &field_name_str, index, autoid);
             let type_id = type_to_identifier(&field.ty, crate_path);
 
             let is_key = field_config.key;
             let is_optional = field_config.optional;
             let is_must_understand = field_config.must_understand;
+            let is_external = field_config.external;
 
             quote! {
                 #crate_path::xtypes::CompleteStructMember::new(
                     #member_id,
                     #crate_path::xtypes::MemberFlag::new(
                         #crate_path::xtypes::TryConstructKind::Discard,
-                        false, // is_external
+                        #is_external,
                         #is_optional,
                         #is_must_understand,
                         #is_key,
@@ -212,7 +233,7 @@ pub fn generate_has_type_object_impl(
             fn minimal_type_object() -> #crate_path::xtypes::MinimalTypeObject {
                 let mut struct_type = #crate_path::xtypes::MinimalStructType::new(
                     #crate_path::xtypes::TypeFlag::new(#ext_kind, false, false),
-                    None, // no base type
+                    #base_type_expr
                 );
                 #(struct_type.add_member(#minimal_members);)*
                 #crate_path::xtypes::MinimalTypeObject::Struct(struct_type)
@@ -222,7 +243,7 @@ pub fn generate_has_type_object_impl(
                 let mut struct_type = #crate_path::xtypes::CompleteStructType::new(
                     #crate_path::xtypes::TypeFlag::new(#ext_kind, false, false),
                     #type_name_str.to_string(),
-                    None, // no base type
+                    #base_type_expr
                 );
                 #(struct_type.add_member(#complete_members);)*
                 #crate_path::xtypes::CompleteTypeObject::Struct(struct_type)
