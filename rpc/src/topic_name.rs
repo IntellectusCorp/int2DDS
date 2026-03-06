@@ -1,10 +1,10 @@
-//! Topic name synthesis rules (Spec 7.4.1, 7.4.2)
+//! Topic name synthesis rules (7.4.1, 7.4.2)
 //!
 //! BNF: <topic_name> ::= <interface_name> "_" <service_name> "_" [ "Request" | "Reply" ]
 //!                      | <user_def_alpha_num>
 //!
-//! For request-reply style, interface_name is NOT automatically included (Spec 7.4.1).
-//! Priority: runtime params > annotation > default (Spec 7.4.2.3)
+//! For request-reply style, interface_name is NOT automatically included (7.4.1).
+//! Priority: runtime params > annotation > default (7.4.2.3)
 
 const DEFAULT_SERVICE_NAME: &str = "Service";
 

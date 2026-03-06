@@ -1,4 +1,4 @@
-//! DDS-RPC error types (Spec 7.11.1.3)
+//! DDS-RPC error types (7.11.1.3)
 
 use std::fmt;
 
