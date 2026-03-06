@@ -11,4 +11,4 @@ description = "DDS-RPC (Remote Procedure Call over DDS) implementation for int2D
 
 [dependencies]
 int2dds = { path = "../dds" }
-md5 = "0.7"
+md5 = "0.8.0"
