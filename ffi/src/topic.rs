@@ -13,6 +13,7 @@
 //! and pass CDR bytes directly via `int2dds_write_serialized` / `int2dds_take_serialized`.
 
 use std::ffi::{CStr, CString};
+use std::os::raw::c_char;
 use std::sync::Arc;
 
 use int2dds::{
@@ -234,7 +235,7 @@ pub unsafe extern "C" fn int2dds_topic_get_name(
         return INT2DDS_RET_ERROR;
     }
 
-    std::ptr::copy_nonoverlapping(name_bytes.as_ptr() as *const i8, name_out, name_bytes.len());
+    std::ptr::copy_nonoverlapping(name_bytes.as_ptr() as *const c_char, name_out, name_bytes.len());
 
     INT2DDS_RET_OK
 }
@@ -269,7 +270,7 @@ pub unsafe extern "C" fn int2dds_topic_get_type_name(
     }
 
     std::ptr::copy_nonoverlapping(
-        type_name_bytes.as_ptr() as *const i8,
+        type_name_bytes.as_ptr() as *const c_char,
         type_name_out,
         type_name_bytes.len(),
     );
