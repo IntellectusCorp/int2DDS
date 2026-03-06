@@ -66,6 +66,7 @@ use crate::{
         common::{
             entity_kind::EntityKind,
             guid::Guid,
+            sequence::SequenceNumber,
             time::RtpsTime,
             types::{ChangeKind, SerializedData},
         },
@@ -710,36 +711,42 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         handle: InstanceHandle,
         timestamp: Time,
     ) -> DdsResult<()> {
-        // in: data: <Foo>, handle: InstanceHandle, timestamp: Time
-        // out: DdsError_t
-        /*
-            This operation performs the same function as write, but additionally allows specifying a source_timestamp value.
-            This timestamp is used by DataReader objects through the source_timestamp attribute in SampleInfo.
-            For more details on data timestamps on the receiving side, refer to 2.2.2.5, Subscription Module, and for information on the DESTINATION_ORDER QoS policy, see 2.2.3.17.
-            Constraints on the handle parameter value and related error behavior are defined the same as for the write operation (see 2.2.2.4.2.11).
-            This operation can block under the same conditions as the write operation and may return TIMEOUT.
-            Additionally, this operation can return errors in the following situations:
-            - OUT_OF_RESOURCES
-            - PRECONDITION_NOT_MET
-            - BAD_PARAMETER
-            This operation, like write, should also be provided in the specialized class generated for the specific data type used by the application.
-        */
-        // let start_time = Time::now();
+        self.write_w_timestamp_inner(data, handle, timestamp)?;
+        Ok(())
+    }
+
+    /// Write data and return the SampleIdentity (writer GUID + sequence number).
+    /// Used by DDS-RPC for request-reply correlation.
+    pub fn write_and_obtain_sample_identity(
+        &self,
+        data: &Foo,
+        handle: InstanceHandle,
+    ) -> DdsResult<(Guid, SequenceNumber)> {
+        let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
+        let seq = self.write_w_timestamp_inner(data, handle, timestamp)?;
+        Ok((self.guid, seq))
+    }
+
+    // pub: needed by DDS-RPC for SampleIdentity construction
+    pub fn guid(&self) -> Guid {
+        self.guid
+    }
+
+    fn write_w_timestamp_inner(
+        &self,
+        data: &Foo,
+        handle: InstanceHandle,
+        timestamp: Time,
+    ) -> DdsResult<SequenceNumber> {
         self.is_enabled()?;
         if timestamp.is_infinite() || timestamp.sec < 0 || !timestamp.is_valid() {
             return Err(DdsError::BadParameter);
         }
 
-        // DDS-XTypes spec 7.6.3.4.1:
-        // Select the correct serialization format by combining DataRepresentation QoS and type's extensibility
         let format = {
             let qos = self.qos.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-
             let extensibility = self.type_support.get_extensibility_kind();
-
             Self::resolve_serialization_format(&qos.data_representation.value, extensibility)?
-
-            // qos lock is automatically released here (end of scope)
         };
 
         let serialized_data = self.type_support.serialize(data as &dyn Any, Some(&format))?;
@@ -749,7 +756,6 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         if self.type_support.is_compute_key_provided() {
             let serialized_key = self.type_support.serialize_key(data as &dyn Any)?;
 
-            // Fast path: quick lookup with minimal lock holding
             let existing_handle = {
                 let key_instances =
                     self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
@@ -759,10 +765,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             instance_handle = if let Some(handle) = existing_handle {
                 handle
             } else {
-                // Slow path: compute key first (outside all locks)
                 let computed_handle = self.type_support.compute_key(data as &dyn Any);
-
-                // Insert into instances (separate lock, not nested)
                 {
                     let mut instances =
                         self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
@@ -771,14 +774,11 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                         (serialized_key.clone(), timestamp, InstanceState::Registered),
                     );
                 }
-
-                // Insert into key_instances (separate lock, not nested)
                 {
                     let mut key_instances =
                         self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
                     key_instances.insert(serialized_key, computed_handle);
                 }
-
                 is_new_instance = true;
                 computed_handle
             };
@@ -788,10 +788,8 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             return Err(DdsError::PreconditionNotMet);
         }
 
-        // Single deadline_monitor lock for both track and reschedule
         let monitor_guard =
             self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-
         if let Some(monitor) = monitor_guard.as_ref() {
             if is_new_instance {
                 monitor.track_instance(&instance_handle);
@@ -799,10 +797,9 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             monitor.reschedule_instance(&instance_handle);
         }
 
-        self.add_change(
+        let seq_num = self.add_change(
             ChangeKind::Alive,
             serialized_data,
-            // ParameterList::default(),
             instance_handle,
             Some(timestamp.into()),
         )?;
@@ -811,7 +808,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         self.update_liveliness()?;
         debug!("update_liveliness completed in datawriter");
 
-        Ok(())
+        Ok(seq_num)
     }
 
     /// Write pre-serialized data directly, bypassing TypeSupport serialization.
@@ -1118,7 +1115,8 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         // inline_qos: ParameterList,
         handle: InstanceHandle,
         source_timestamp: Option<RtpsTime>,
-    ) -> DdsResult<()> {
+    ) -> DdsResult<SequenceNumber> {
+        let seq_num;
         {
             let rtps_writer = self.get_rtps_writer()?;
             let change = rtps_writer.new_change(
@@ -1128,11 +1126,12 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                 handle,
                 source_timestamp,
             );
+            seq_num = change.sequence_number();
             let mut datawriter_cache =
                 self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
             datawriter_cache.add_change_with_cleanup(Arc::new(change))?;
         }
-        Ok(())
+        Ok(seq_num)
     }
 
     fn register_instance_to_datawriter_cache(
