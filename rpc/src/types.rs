@@ -1,4 +1,4 @@
-//! DDS-RPC common types (Spec 7.5.1.1.1)
+//! DDS-RPC common types (7.5.1.1.1)
 
 use int2dds::rtps::common::guid::Guid;
 use int2dds::rtps::common::sequence::SequenceNumber;
@@ -34,7 +34,7 @@ pub enum RemoteExceptionCode {
     UnknownException = 5,
 }
 
-/// Default case in Call/Return unions for unrecognized operations (Spec 7.5.1.1.6, 7.5.1.1.7)
+/// Default case in Call/Return unions for unrecognized operations (7.5.1.1.6, 7.5.1.1.7)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnknownOperation;
 
@@ -42,9 +42,9 @@ pub struct UnknownOperation;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnknownException;
 
-/// Dummy member for In/Out structs with no parameters (Spec 7.5.1.1.4)
+/// Dummy member for In/Out structs with no parameters (7.5.1.1.4)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnusedMember;
 
-/// Re-export from DDS layer (Spec 7.5.1.1.5 Rule 3)
+/// Re-export from DDS layer (7.5.1.1.5 Rule 3)
 pub use int2dds::dcps::core::error::RETCODE_OK;

@@ -1,4 +1,4 @@
-//! HASH function implementation (Spec 7.5.1.1.2)
+//! HASH function implementation (7.5.1.1.2)
 //!
 //! Converts the first 4 bytes of an MD5 hash into a little-endian 32-bit integer.
 //! Used to generate hash identifiers for operation names, exception type names, etc.
