@@ -1,6 +1,8 @@
 use quote::quote;
 use syn::DeriveInput;
 
+use crate::codegen::utils::AutoIdKind;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ExtensibilityKind {
     #[default]
@@ -15,6 +17,10 @@ pub struct DdsTypeConfig {
     pub extensibility: Option<ExtensibilityKind>,
     pub no_default: bool,
     pub no_partialeq: bool,
+    pub autoid: Option<AutoIdKind>,
+    pub bitmask: bool,
+    pub bit_bound: Option<u8>,
+    pub bitset: bool,
 }
 
 pub fn parse_dds_type_attributes(input: &DeriveInput) -> DdsTypeConfig {
@@ -22,6 +28,10 @@ pub fn parse_dds_type_attributes(input: &DeriveInput) -> DdsTypeConfig {
     let mut extensibility: Option<ExtensibilityKind> = None;
     let mut no_default = false;
     let mut no_partialeq = false;
+    let mut autoid: Option<AutoIdKind> = None;
+    let mut bitmask = false;
+    let mut bit_bound: Option<u8> = None;
+    let mut bitset = false;
 
     // Parse #[dds_type(...)] attributes
     for attr in &input.attrs {
@@ -55,6 +65,27 @@ pub fn parse_dds_type_attributes(input: &DeriveInput) -> DdsTypeConfig {
                     no_default = true;
                 } else if meta.path.is_ident("no_partialeq") {
                     no_partialeq = true;
+                } else if meta.path.is_ident("autoid") {
+                    let value = meta.value()?;
+                    let lit: syn::LitStr = value.parse()?;
+                    autoid = Some(match lit.value().to_lowercase().as_str() {
+                        "sequential" => AutoIdKind::Sequential,
+                        "hash" => AutoIdKind::Hash,
+                        _ => {
+                            return Err(meta.error(format!(
+                                "Unknown autoid kind: '{}'. Valid values are: 'Sequential', 'Hash'",
+                                lit.value()
+                            )));
+                        }
+                    });
+                } else if meta.path.is_ident("bitmask") {
+                    bitmask = true;
+                } else if meta.path.is_ident("bit_bound") {
+                    let value = meta.value()?;
+                    let lit: syn::LitInt = value.parse()?;
+                    bit_bound = Some(lit.base10_parse::<u8>()?);
+                } else if meta.path.is_ident("bitset") {
+                    bitset = true;
                 }
                 Ok(())
             });
@@ -73,7 +104,16 @@ pub fn parse_dds_type_attributes(input: &DeriveInput) -> DdsTypeConfig {
         quote! { int2dds }
     };
 
-    DdsTypeConfig { crate_path: crate_path_tokens, extensibility, no_default, no_partialeq }
+    DdsTypeConfig {
+        crate_path: crate_path_tokens,
+        extensibility,
+        no_default,
+        no_partialeq,
+        autoid,
+        bitmask,
+        bit_bound,
+        bitset,
+    }
 }
 
 /// Generate extensibility kind tokens from ExtensibilityKind enum

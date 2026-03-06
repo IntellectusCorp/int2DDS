@@ -2,6 +2,8 @@ pub mod derives;
 pub mod enum_ops;
 pub mod field_ops;
 pub mod key_methods;
+pub mod type_bitmask;
+pub mod type_bitset;
 pub mod type_config;
 pub mod type_enum;
 pub mod type_object;
