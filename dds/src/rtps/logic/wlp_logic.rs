@@ -938,7 +938,7 @@ impl WlpLogic {
                     let acknack_count = writer_proxy.acknack_count();
                     self.send_liveliness_acknack_message(
                         remote_guid,
-                        heartbeat.reader_id,
+                        local_reader.guid().entity_id(),
                         heartbeat.writer_id,
                         missing_changes,
                         acknack_count,
