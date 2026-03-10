@@ -9,7 +9,7 @@ use std::sync::Arc;
 use crate::{
     common::instance_handle::InstanceHandle,
     dcps::core::error::{DdsError, DdsResult},
-    dcps::topic::type_support::{DdsType, SerializationFormat, TypeSupport},
+    dcps::topic::type_support::{DdsType, FieldAccessor, SerializationFormat, TypeSupport},
     rtps::common::types::SerializedData,
     serialize::xcdr::ExtensibilityKind,
     topic::sql::ast::Parameter,
@@ -128,15 +128,7 @@ impl Default for DynamicTypeSupport {
     }
 }
 
-impl TypeSupport for DynamicTypeSupport {
-    fn type_id(&self) -> TypeId {
-        TypeId::of::<DynamicData>()
-    }
-
-    fn get_type_name(&self) -> &str {
-        &self.type_name
-    }
-
+impl FieldAccessor for DynamicTypeSupport {
     fn get_field_value(&self, data: &dyn Any, field_path: &str) -> DdsResult<Parameter> {
         let dynamic_data = data
             .downcast_ref::<DynamicData>()
@@ -146,24 +138,29 @@ impl TypeSupport for DynamicTypeSupport {
             .get_value(field_path)
             .ok_or_else(|| DdsError::Error(format!("Field not found: {}", field_path)))?;
 
-        // Convert DynamicValue to Parameter
         dynamic_value_to_parameter(value)
     }
 
     fn has_field(&self, field_path: &str) -> bool {
-        // Check if the field exists in the type
         if let Some(struct_desc) = self.dynamic_type.as_struct() {
-            // Handle nested paths
             let parts: Vec<&str> = field_path.split('.').collect();
             if parts.is_empty() {
                 return false;
             }
-
-            // For simple paths, just check if member exists
             struct_desc.get_member(parts[0]).is_some()
         } else {
             false
         }
+    }
+}
+
+impl TypeSupport for DynamicTypeSupport {
+    fn type_id(&self) -> TypeId {
+        TypeId::of::<DynamicData>()
+    }
+
+    fn get_type_name(&self) -> &str {
+        &self.type_name
     }
 
     fn serialize(
@@ -278,6 +275,7 @@ impl TypeSupport for DynamicTypeSupport {
 /// Implement DdsType for DynamicData
 impl DdsType for DynamicData {
     type TypeSupport = DynamicTypeSupport;
+    type FieldAccessor = DynamicTypeSupport;
 
     fn get_type_name() -> String {
         "DynamicData".to_string()
