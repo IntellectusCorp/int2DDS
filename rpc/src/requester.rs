@@ -24,7 +24,7 @@ use crate::error::{DdsRpcError, DdsRpcResult};
 use crate::params::RequesterParams;
 use crate::sample::Sample;
 use crate::topic_name::TopicNameConfig;
-use crate::types::{InstanceName, SampleIdentity};
+use crate::types::{InstanceName, RpcRequest, SampleIdentity};
 
 pub struct Requester<TReq, TRep> {
     request_writer: Option<DataWriter<TReq>>,
@@ -33,7 +33,7 @@ pub struct Requester<TReq, TRep> {
     closed: bool,
 }
 
-impl<TReq: DdsType + Clone, TRep: DdsType> Requester<TReq, TRep> {
+impl<TReq: DdsType + Clone + RpcRequest, TRep: DdsType> Requester<TReq, TRep> {
     pub fn new(params: RequesterParams) -> DdsRpcResult<Self> {
         let topic_config = TopicNameConfig {
             interface_name: None, // request-reply style: no interface name (7.4.1)
@@ -111,10 +111,18 @@ impl<TReq: DdsType + Clone, TRep: DdsType> Requester<TReq, TRep> {
         self.reply_reader.as_ref().ok_or(DdsError::AlreadyDeleted.into())
     }
 
-    pub fn send_request(&self, data: &TReq) -> DdsRpcResult<SampleIdentity> {
-        let (guid, seq) =
-            self.writer()?.write_and_obtain_sample_identity(data, InstanceHandle::NIL)?;
-        Ok(SampleIdentity { writer_guid: guid, sequence_number: seq })
+    /// Send a request. The middleware fills in `RequestHeader.requestId`
+    /// before writing, and returns it for reply correlation. (7.8.1)
+    pub fn send_request(&self, data: &mut TReq) -> DdsRpcResult<SampleIdentity> {
+        // Bind instance name if bound
+        if let Some(name) = &self.bound_instance {
+            data.header_mut().instance_name = name.clone();
+        }
+        let writer = self.writer()?;
+        let (guid, seq) = writer.write_and_obtain_sample_identity(data, InstanceHandle::NIL)?;
+        let identity = SampleIdentity { writer_guid: guid, sequence_number: seq };
+        data.header_mut().request_id = identity;
+        Ok(identity)
     }
 
     pub fn receive_reply(&self, timeout: Duration) -> DdsRpcResult<Sample<TRep>> {
@@ -192,7 +200,7 @@ impl<TReq: DdsType + Clone, TRep: DdsType> Requester<TReq, TRep> {
     }
 }
 
-impl<TReq: DdsType + Clone, TRep: DdsType> RpcEntity for Requester<TReq, TRep> {
+impl<TReq: DdsType + Clone + RpcRequest, TRep: DdsType> RpcEntity for Requester<TReq, TRep> {
     fn close(&mut self) -> DdsRpcResult<()> {
         if let Some(writer) = self.request_writer.take() {
             let publisher = writer.get_publisher()?;
@@ -211,7 +219,7 @@ impl<TReq: DdsType + Clone, TRep: DdsType> RpcEntity for Requester<TReq, TRep> {
     }
 }
 
-impl<TReq: DdsType + Clone, TRep: DdsType> ServiceProxy for Requester<TReq, TRep> {
+impl<TReq: DdsType + Clone + RpcRequest, TRep: DdsType> ServiceProxy for Requester<TReq, TRep> {
     fn bind_instance(&mut self, instance_name: InstanceName) -> DdsRpcResult<()> {
         self.bound_instance = Some(instance_name);
         Ok(())

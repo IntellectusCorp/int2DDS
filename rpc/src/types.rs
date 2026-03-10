@@ -122,6 +122,20 @@ pub enum RemoteExceptionCode {
     UnknownException = 5,
 }
 
+/// Trait for types that carry a RequestHeader (Basic Service Mapping).
+/// User-defined request types must implement this.
+pub trait RpcRequest {
+    fn header(&self) -> &RequestHeader;
+    fn header_mut(&mut self) -> &mut RequestHeader;
+}
+
+/// Trait for types that carry a ReplyHeader (Basic Service Mapping).
+/// User-defined reply types must implement this.
+pub trait RpcReply {
+    fn header(&self) -> &ReplyHeader;
+    fn header_mut(&mut self) -> &mut ReplyHeader;
+}
+
 /// Default case in Call/Return unions for unrecognized operations (7.5.1.1.6, 7.5.1.1.7)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnknownOperation;
