@@ -13,7 +13,6 @@ use int2dds::dcps::infrastructure::wait_set::WaitSet;
 use int2dds::dcps::publication::data_writer::DataWriter;
 use int2dds::dcps::publication::qos::{DataWriterQos, DATAWRITER_QOS_DEFAULT};
 use int2dds::dcps::subscription::data_reader::DataReader;
-use int2dds::dcps::subscription::data_sample::DataSample;
 use int2dds::dcps::subscription::qos::{DataReaderQos, DATAREADER_QOS_DEFAULT};
 use int2dds::dcps::subscription::query_condition::QueryCondition;
 use int2dds::dcps::subscription::sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind};
@@ -23,10 +22,9 @@ use int2dds::dcps::topic::type_support::DdsType;
 use crate::entity::{RpcEntity, ServiceProxy};
 use crate::error::{DdsRpcError, DdsRpcResult};
 use crate::params::RequesterParams;
+use crate::sample::Sample;
 use crate::topic_name::TopicNameConfig;
 use crate::types::{InstanceName, SampleIdentity};
-
-pub type Sample<T> = DataSample<T>;
 
 pub struct Requester<TReq, TRep> {
     request_writer: Option<DataWriter<TReq>>,
