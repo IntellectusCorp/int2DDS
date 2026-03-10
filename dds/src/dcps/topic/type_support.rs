@@ -153,3 +153,39 @@ pub trait TypeSupport: Send + Sync + 'static {
         participant.register_type(type_support, type_name)
     }
 }
+
+/// Autoref specialization helper for dot-notation nested field access.
+///
+/// Allows derive macro generated code to delegate field access into nested struct
+/// fields without knowing at macro expansion time whether a field type implements
+/// `DdsType`. Uses the autoref specialization pattern:
+/// - If `T: DdsType`, inherent methods on `NestedAccessor<T>` are resolved first.
+/// - Otherwise, auto-ref finds the fallback trait impl on `&NestedAccessor<T>`.
+pub mod nested_access {
+    use super::*;
+
+    pub struct NestedAccessor<T>(pub core::marker::PhantomData<T>);
+
+    /// Fallback for types that do NOT implement DdsType.
+    pub trait NestedAccessFallback {
+        fn nested_has_field(&self, _rest: &str) -> bool {
+            false
+        }
+        fn nested_get_field_value(&self, _data: &dyn Any, rest: &str) -> DdsResult<Parameter> {
+            Err(DdsError::Error(format!("Type has no nested field '{}'", rest)))
+        }
+    }
+
+    impl<T> NestedAccessFallback for NestedAccessor<T> {}
+
+    /// Preferred path for types that DO implement DdsType.
+    impl<T: DdsType> NestedAccessor<T> {
+        pub fn nested_has_field(&self, rest: &str) -> bool {
+            T::TypeSupport::default().has_field(rest)
+        }
+
+        pub fn nested_get_field_value(&self, data: &dyn Any, rest: &str) -> DdsResult<Parameter> {
+            T::TypeSupport::default().get_field_value(data, rest)
+        }
+    }
+}
