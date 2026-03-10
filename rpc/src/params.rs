@@ -90,6 +90,7 @@ pub struct ReplierParams {
     pub(crate) publisher: Option<Publisher>,
     pub(crate) subscriber: Option<Subscriber>,
     pub(crate) service_name: Option<String>,
+    pub(crate) instance_name: Option<String>,
     pub(crate) request_topic_name: Option<String>,
     pub(crate) reply_topic_name: Option<String>,
     pub(crate) datawriter_qos: Option<DataWriterQos>,
@@ -105,6 +106,7 @@ impl ReplierParams {
             publisher: None,
             subscriber: None,
             service_name: None,
+            instance_name: None,
             request_topic_name: None,
             reply_topic_name: None,
             datawriter_qos: None,
@@ -116,6 +118,11 @@ impl ReplierParams {
 
     pub fn service_name(mut self, name: impl Into<String>) -> Self {
         self.service_name = Some(name.into());
+        self
+    }
+
+    pub fn instance_name(mut self, name: impl Into<String>) -> Self {
+        self.instance_name = Some(name.into());
         self
     }
 
@@ -230,6 +237,7 @@ mod tests {
         let p = test_participant();
         let params = ReplierParams::new(p);
         assert!(params.service_name.is_none());
+        assert!(params.instance_name.is_none());
         assert!(params.request_topic_name.is_none());
         assert!(params.reply_topic_name.is_none());
         assert!(params.datawriter_qos.is_none());
@@ -245,9 +253,11 @@ mod tests {
         let p = test_participant();
         let params = ReplierParams::new(p)
             .service_name("MySvc")
+            .instance_name("Instance1")
             .request_topic_name("ReqTopic")
             .reply_topic_name("RepTopic");
         assert_eq!(params.service_name.as_deref(), Some("MySvc"));
+        assert_eq!(params.instance_name.as_deref(), Some("Instance1"));
         assert_eq!(params.request_topic_name.as_deref(), Some("ReqTopic"));
         assert_eq!(params.reply_topic_name.as_deref(), Some("RepTopic"));
     }
