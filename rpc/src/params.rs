@@ -159,3 +159,113 @@ impl ReplierParams {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use int2dds::dcps::domain::domain_participant_factory::DomainParticipantFactory;
+    use int2dds::dcps::domain::qos::DomainParticipantQos;
+    use int2dds::dcps::infrastructure::status::StatusMask;
+
+    fn test_participant() -> DomainParticipant {
+        use std::sync::atomic::{AtomicI32, Ordering};
+        static DOMAIN_ID: AtomicI32 = AtomicI32::new(300);
+        let factory = DomainParticipantFactory::get_instance();
+        factory
+            .create_participant(
+                DOMAIN_ID.fetch_add(1, Ordering::SeqCst),
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn requester_params_defaults() {
+        let p = test_participant();
+        let params = RequesterParams::new(p);
+        assert!(params.service_name.is_none());
+        assert!(params.request_topic_name.is_none());
+        assert!(params.reply_topic_name.is_none());
+        assert!(params.datawriter_qos.is_none());
+        assert!(params.datareader_qos.is_none());
+        assert!(params.publisher.is_none());
+        assert!(params.subscriber.is_none());
+        assert!(params.publisher_qos.is_none());
+        assert!(params.subscriber_qos.is_none());
+    }
+
+    #[test]
+    fn requester_params_builder_sets_fields() {
+        let p = test_participant();
+        let params = RequesterParams::new(p)
+            .service_name("MySvc")
+            .request_topic_name("ReqTopic")
+            .reply_topic_name("RepTopic");
+        assert_eq!(params.service_name.as_deref(), Some("MySvc"));
+        assert_eq!(params.request_topic_name.as_deref(), Some("ReqTopic"));
+        assert_eq!(params.reply_topic_name.as_deref(), Some("RepTopic"));
+    }
+
+    #[test]
+    fn requester_params_qos_setters() {
+        use int2dds::dcps::publication::qos::DATAWRITER_QOS_DEFAULT;
+        use int2dds::dcps::subscription::qos::DATAREADER_QOS_DEFAULT;
+
+        let p = test_participant();
+        let params = RequesterParams::new(p)
+            .datawriter_qos(DATAWRITER_QOS_DEFAULT)
+            .datareader_qos(DATAREADER_QOS_DEFAULT)
+            .publisher_qos(Default::default())
+            .subscriber_qos(Default::default());
+        assert!(params.datawriter_qos.is_some());
+        assert!(params.datareader_qos.is_some());
+        assert!(params.publisher_qos.is_some());
+        assert!(params.subscriber_qos.is_some());
+    }
+
+    #[test]
+    fn replier_params_defaults() {
+        let p = test_participant();
+        let params = ReplierParams::new(p);
+        assert!(params.service_name.is_none());
+        assert!(params.request_topic_name.is_none());
+        assert!(params.reply_topic_name.is_none());
+        assert!(params.datawriter_qos.is_none());
+        assert!(params.datareader_qos.is_none());
+        assert!(params.publisher.is_none());
+        assert!(params.subscriber.is_none());
+        assert!(params.publisher_qos.is_none());
+        assert!(params.subscriber_qos.is_none());
+    }
+
+    #[test]
+    fn replier_params_builder_sets_fields() {
+        let p = test_participant();
+        let params = ReplierParams::new(p)
+            .service_name("MySvc")
+            .request_topic_name("ReqTopic")
+            .reply_topic_name("RepTopic");
+        assert_eq!(params.service_name.as_deref(), Some("MySvc"));
+        assert_eq!(params.request_topic_name.as_deref(), Some("ReqTopic"));
+        assert_eq!(params.reply_topic_name.as_deref(), Some("RepTopic"));
+    }
+
+    #[test]
+    fn replier_params_qos_setters() {
+        use int2dds::dcps::publication::qos::DATAWRITER_QOS_DEFAULT;
+        use int2dds::dcps::subscription::qos::DATAREADER_QOS_DEFAULT;
+
+        let p = test_participant();
+        let params = ReplierParams::new(p)
+            .datawriter_qos(DATAWRITER_QOS_DEFAULT)
+            .datareader_qos(DATAREADER_QOS_DEFAULT)
+            .publisher_qos(Default::default())
+            .subscriber_qos(Default::default());
+        assert!(params.datawriter_qos.is_some());
+        assert!(params.datareader_qos.is_some());
+        assert!(params.publisher_qos.is_some());
+        assert!(params.subscriber_qos.is_some());
+    }
+}

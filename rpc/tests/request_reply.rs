@@ -144,7 +144,190 @@ fn take_reply_by_request_id() {
 }
 
 #[test]
-fn requester_close() {
+fn take_request_non_blocking() {
+    let domain_id = next_domain_id();
+    let factory = DomainParticipantFactory::get_instance();
+    let participant = factory
+        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+
+    let service_name = "TakeRequestService";
+
+    let requester = Requester::<AddRequest, AddReply>::new(
+        RequesterParams::new(participant.clone()).service_name(service_name),
+    )
+    .unwrap();
+
+    let replier = Replier::<AddRequest, AddReply>::new(
+        ReplierParams::new(participant.clone()).service_name(service_name),
+    )
+    .unwrap();
+
+    requester.wait_for_service_timeout(Duration::from_secs(3)).unwrap();
+
+    // No request yet — take_request returns None
+    let empty = replier.take_request();
+    assert!(empty.is_err() || empty.unwrap().is_none());
+
+    // Send a request, then take it
+    let mut req = AddRequest { a: 5, b: 6, ..Default::default() };
+    requester.send_request(&mut req).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+
+    let sample = replier.take_request().unwrap().expect("should have a request");
+    let data = sample.data().unwrap();
+    assert_eq!(data.a, 5);
+    assert_eq!(data.b, 6);
+}
+
+#[test]
+fn take_requests_batch() {
+    let domain_id = next_domain_id();
+    let factory = DomainParticipantFactory::get_instance();
+    let participant = factory
+        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+
+    let service_name = "TakeRequestsBatchService";
+
+    let requester = Requester::<AddRequest, AddReply>::new(
+        RequesterParams::new(participant.clone()).service_name(service_name),
+    )
+    .unwrap();
+
+    let replier = Replier::<AddRequest, AddReply>::new(
+        ReplierParams::new(participant.clone()).service_name(service_name),
+    )
+    .unwrap();
+
+    requester.wait_for_service_timeout(Duration::from_secs(3)).unwrap();
+
+    // Send 3 requests
+    for i in 0..3 {
+        let mut req = AddRequest { a: i, b: i * 10, ..Default::default() };
+        requester.send_request(&mut req).unwrap();
+    }
+    std::thread::sleep(Duration::from_millis(100));
+
+    let samples = replier.take_requests(10).unwrap();
+    assert_eq!(samples.len(), 3);
+}
+
+#[test]
+fn take_replies_batch() {
+    let domain_id = next_domain_id();
+    let factory = DomainParticipantFactory::get_instance();
+    let participant = factory
+        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+
+    let service_name = "TakeRepliesBatchService";
+
+    let requester = Requester::<AddRequest, AddReply>::new(
+        RequesterParams::new(participant.clone()).service_name(service_name),
+    )
+    .unwrap();
+
+    let replier = Replier::<AddRequest, AddReply>::new(
+        ReplierParams::new(participant.clone()).service_name(service_name),
+    )
+    .unwrap();
+
+    requester.wait_for_service_timeout(Duration::from_secs(3)).unwrap();
+
+    // Send 2 requests and reply to both
+    for i in 0..2 {
+        let mut req = AddRequest { a: i, b: i + 1, ..Default::default() };
+        requester.send_request(&mut req).unwrap();
+    }
+
+    for _ in 0..2 {
+        let sample = replier.receive_request(Duration::from_secs(3)).unwrap();
+        let r = sample.data().unwrap();
+        let mut reply = AddReply { result: r.a + r.b, ..Default::default() };
+        replier.send_reply(&mut reply, &r.header.request_id).unwrap();
+    }
+
+    std::thread::sleep(Duration::from_millis(100));
+    let replies = requester.take_replies(10).unwrap();
+    assert_eq!(replies.len(), 2);
+}
+
+#[test]
+fn take_replies_for_request() {
+    let domain_id = next_domain_id();
+    let factory = DomainParticipantFactory::get_instance();
+    let participant = factory
+        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+
+    let service_name = "MultiReplierService";
+
+    let requester = Requester::<AddRequest, AddReply>::new(
+        RequesterParams::new(participant.clone()).service_name(service_name),
+    )
+    .unwrap();
+
+    let replier1 = Replier::<AddRequest, AddReply>::new(
+        ReplierParams::new(participant.clone()).service_name(service_name),
+    )
+    .unwrap();
+
+    let replier2 = Replier::<AddRequest, AddReply>::new(
+        ReplierParams::new(participant.clone()).service_name(service_name),
+    )
+    .unwrap();
+
+    requester.wait_for_service_timeout(Duration::from_secs(3)).unwrap();
+
+    // Send a single request
+    let mut req = AddRequest { a: 5, b: 3, ..Default::default() };
+    let req_id = requester.send_request(&mut req).unwrap();
+
+    // Both repliers receive and reply to the same request
+    for replier in [&replier1, &replier2] {
+        let sample = replier.receive_request(Duration::from_secs(3)).unwrap();
+        let r = sample.data().unwrap();
+        let mut reply = AddReply { result: r.a + r.b, ..Default::default() };
+        replier.send_reply(&mut reply, &r.header.request_id).unwrap();
+    }
+
+    std::thread::sleep(Duration::from_millis(100));
+
+    // Requester should receive 2 replies for the same request
+    let replies = requester.take_replies_for_request(10, &req_id).unwrap();
+    assert_eq!(replies.len(), 2);
+    for reply in &replies {
+        let data = reply.data().unwrap();
+        assert_eq!(data.result, 8);
+        assert_eq!(data.header.related_request_id, req_id);
+    }
+}
+
+#[test]
+fn bind_and_unbind_instance() {
+    let domain_id = next_domain_id();
+    let factory = DomainParticipantFactory::get_instance();
+    let participant = factory
+        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+
+    let mut requester = Requester::<AddRequest, AddReply>::new(
+        RequesterParams::new(participant.clone()).service_name("BindService"),
+    )
+    .unwrap();
+
+    assert!(requester.get_bound_instance_name().is_none());
+
+    requester.bind_instance("robot1".to_string()).unwrap();
+    assert_eq!(requester.get_bound_instance_name(), Some("robot1"));
+
+    requester.unbind().unwrap();
+    assert!(requester.get_bound_instance_name().is_none());
+}
+
+#[test]
+fn close_requester_and_replier() {
     let domain_id = next_domain_id();
     let factory = DomainParticipantFactory::get_instance();
     let participant = factory
@@ -157,6 +340,26 @@ fn requester_close() {
     .unwrap();
 
     assert!(!requester.is_closed());
+    assert!(requester.get_request_datawriter().is_ok());
+    assert!(requester.get_reply_datareader().is_ok());
+
+    let mut replier = Replier::<AddRequest, AddReply>::new(
+        ReplierParams::new(participant.clone()).service_name("ReplierCloseService"),
+    )
+    .unwrap();
+
+    assert!(!replier.is_closed());
+    assert!(replier.get_request_datareader().is_ok());
+    assert!(replier.get_reply_datawriter().is_ok());
+
+    // Now close both
     requester.close().unwrap();
     assert!(requester.is_closed());
+    assert!(requester.get_request_datawriter().is_err());
+    assert!(requester.get_reply_datareader().is_err());
+
+    replier.close().unwrap();
+    assert!(replier.is_closed());
+    assert!(replier.get_request_datareader().is_err());
+    assert!(replier.get_reply_datawriter().is_err());
 }
