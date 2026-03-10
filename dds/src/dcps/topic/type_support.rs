@@ -57,6 +57,7 @@ pub enum SerializationFormat {
 
 pub trait DdsType: 'static + Send + Sync + Clone + Debug {
     type TypeSupport: TypeSupport + Default;
+    type FieldAccessor: FieldAccessor + Default;
 
     fn get_type_support() -> Arc<Self::TypeSupport> {
         Arc::new(Self::TypeSupport::default())
@@ -80,19 +81,22 @@ pub trait DdsType: 'static + Send + Sync + Clone + Debug {
     }
 
     fn get_field_value(&self, field_path: &str) -> DdsResult<Parameter> {
-        Self::TypeSupport::default().get_field_value(self as &dyn Any, field_path)
+        Self::FieldAccessor::default().get_field_value(self as &dyn Any, field_path)
     }
 
     fn has_field(&self, field_path: &str) -> DdsResult<bool> {
-        Ok(Self::TypeSupport::default().has_field(field_path))
+        Ok(Self::FieldAccessor::default().has_field(field_path))
     }
+}
+
+pub trait FieldAccessor: Send + Sync + 'static {
+    fn get_field_value(&self, data: &dyn Any, field_path: &str) -> DdsResult<Parameter>;
+    fn has_field(&self, field_path: &str) -> bool;
 }
 
 pub trait TypeSupport: Send + Sync + 'static {
     fn type_id(&self) -> TypeId;
     fn get_type_name(&self) -> &str;
-    fn get_field_value(&self, data: &dyn Any, field_path: &str) -> DdsResult<Parameter>;
-    fn has_field(&self, field_path: &str) -> bool;
 
     // Serialization with optional format override.
     // When format is None, the implementation uses its own default behavior.
@@ -181,11 +185,11 @@ pub mod nested_access {
     /// Preferred path for types that DO implement DdsType.
     impl<T: DdsType> NestedAccessor<T> {
         pub fn nested_has_field(&self, rest: &str) -> bool {
-            T::TypeSupport::default().has_field(rest)
+            T::FieldAccessor::default().has_field(rest)
         }
 
         pub fn nested_get_field_value(&self, data: &dyn Any, rest: &str) -> DdsResult<Parameter> {
-            T::TypeSupport::default().get_field_value(data, rest)
+            T::FieldAccessor::default().get_field_value(data, rest)
         }
     }
 }

@@ -39,6 +39,7 @@ pub fn derive_enum_impl(
     let dds_type_impl = quote! {
         impl #crate_path::dcps::topic::type_support::DdsType for #name {
             type TypeSupport = #type_support_name;
+            type FieldAccessor = #type_support_name;
         }
     };
 
@@ -200,6 +201,11 @@ pub fn generate_enum_type_support_impl(
                 Ok((full_data.clone(), full_data))
             }
 
+            // Enums (including unions) use default get_type_identifier/get_type_object (None)
+            // Only C-style enums have HasTypeObject, but TypeSupport is shared
+        }
+
+        impl #crate_path::dcps::topic::type_support::FieldAccessor for #type_support_name {
             fn get_field_value(&self, _data: &dyn std::any::Any, _field_path: &str) -> #crate_path::dcps::core::error::DdsResult<#crate_path::topic::sql::ast::Parameter> {
                 Err(#crate_path::dcps::core::error::DdsError::Error("Enum/Union types do not support field access".to_string()))
             }
@@ -207,9 +213,6 @@ pub fn generate_enum_type_support_impl(
             fn has_field(&self, _field_path: &str) -> bool {
                 false
             }
-
-            // Enums (including unions) use default get_type_identifier/get_type_object (None)
-            // Only C-style enums have HasTypeObject, but TypeSupport is shared
         }
     }
 }
