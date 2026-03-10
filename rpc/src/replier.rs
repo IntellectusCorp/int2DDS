@@ -22,7 +22,7 @@ use crate::error::{DdsRpcError, DdsRpcResult};
 use crate::params::ReplierParams;
 use crate::sample::Sample;
 use crate::topic_name::TopicNameConfig;
-use crate::types::SampleIdentity;
+use crate::types::{RemoteExceptionCode, RpcReply, SampleIdentity};
 
 pub struct Replier<TReq, TRep> {
     request_reader: Option<DataReader<TReq>>,
@@ -30,7 +30,7 @@ pub struct Replier<TReq, TRep> {
     closed: bool,
 }
 
-impl<TReq: DdsType, TRep: DdsType + Clone> Replier<TReq, TRep> {
+impl<TReq: DdsType, TRep: DdsType + Clone + RpcReply> Replier<TReq, TRep> {
     pub fn new(params: ReplierParams) -> DdsRpcResult<Self> {
         let topic_config = TopicNameConfig {
             interface_name: None,
@@ -107,9 +107,14 @@ impl<TReq: DdsType, TRep: DdsType + Clone> Replier<TReq, TRep> {
         self.reply_writer.as_ref().ok_or(DdsError::AlreadyDeleted.into())
     }
 
-    /// Send a reply correlated with the given request identity.
-    pub fn send_reply(&self, data: &TRep, related_request_id: &SampleIdentity) -> DdsRpcResult<()> {
-        let _ = related_request_id; // TODO: Basic Correlation (7.8.1)
+    /// Send a reply correlated with the given request identity. (7.8.1)
+    pub fn send_reply(
+        &self,
+        data: &mut TRep,
+        related_request_id: &SampleIdentity,
+    ) -> DdsRpcResult<()> {
+        data.header_mut().related_request_id = *related_request_id;
+        data.header_mut().remote_ex = RemoteExceptionCode::Ok;
         self.writer()?.write(data, InstanceHandle::NIL)?;
         Ok(())
     }
@@ -166,7 +171,7 @@ impl<TReq: DdsType, TRep: DdsType + Clone> Replier<TReq, TRep> {
     }
 }
 
-impl<TReq: DdsType, TRep: DdsType + Clone> RpcEntity for Replier<TReq, TRep> {
+impl<TReq: DdsType, TRep: DdsType + Clone + RpcReply> RpcEntity for Replier<TReq, TRep> {
     fn close(&mut self) -> DdsRpcResult<()> {
         if let Some(reader) = self.request_reader.take() {
             let subscriber = reader.get_subscriber()?;
