@@ -9,6 +9,7 @@ use int2dds::dcps::infrastructure::qos_policy::{
     ReliabilityQosPolicy, ReliabilityQosPolicyKind,
 };
 use int2dds::dcps::infrastructure::status::StatusMask;
+use int2dds::dcps::infrastructure::wait_set::WaitSet;
 use int2dds::dcps::publication::data_writer::DataWriter;
 use int2dds::dcps::publication::qos::{DataWriterQos, DATAWRITER_QOS_DEFAULT};
 use int2dds::dcps::subscription::data_reader::DataReader;
@@ -214,12 +215,22 @@ impl<TReq: DdsType + Clone, TRep: DdsType> ServiceProxy for Requester<TReq, TRep
     }
 
     fn wait_for_service(&self) -> DdsRpcResult<()> {
-        // TODO: implement discovery-based service waiting
+        // Basic discovery: wait until request_writer has at least one matched subscription
+        let mut condition = self.request_writer.get_statuscondition()?;
+        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED)?;
+        let wait_set = WaitSet::new();
+        wait_set.attach_condition(condition)?;
+        wait_set.wait(int2dds::dcps::core::time::Duration::infinite())?;
         Ok(())
     }
 
-    fn wait_for_service_timeout(&self, _timeout: Duration) -> DdsRpcResult<()> {
-        // TODO: implement discovery-based service waiting with timeout
+    fn wait_for_service_timeout(&self, timeout: Duration) -> DdsRpcResult<()> {
+        let mut condition = self.request_writer.get_statuscondition()?;
+        condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED)?;
+        let wait_set = WaitSet::new();
+        wait_set.attach_condition(condition)?;
+        let dds_timeout = int2dds::dcps::core::time::Duration::try_from(timeout)?;
+        wait_set.wait(dds_timeout)?;
         Ok(())
     }
 }
