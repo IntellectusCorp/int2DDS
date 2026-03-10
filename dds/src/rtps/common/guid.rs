@@ -99,6 +99,10 @@ impl Guid {
     pub fn guid_prefix_to_string(prefix: &GuidPrefix) -> String {
         prefix.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(":")
     }
+
+    pub fn to_hex_string(&self) -> String {
+        self.to_bytes().iter().map(|b| format!("{:02x}", b)).collect()
+    }
 }
 
 pub type EntityName = String;

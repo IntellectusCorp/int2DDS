@@ -14,6 +14,7 @@ use int2dds::dcps::publication::qos::{DataWriterQos, DATAWRITER_QOS_DEFAULT};
 use int2dds::dcps::subscription::data_reader::DataReader;
 use int2dds::dcps::subscription::data_sample::DataSample;
 use int2dds::dcps::subscription::qos::{DataReaderQos, DATAREADER_QOS_DEFAULT};
+use int2dds::dcps::subscription::query_condition::QueryCondition;
 use int2dds::dcps::subscription::sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind};
 use int2dds::dcps::topic::qos::TopicQos;
 use int2dds::dcps::topic::type_support::DdsType;
@@ -131,14 +132,9 @@ impl<TReq: DdsType + Clone, TRep: DdsType> Requester<TReq, TRep> {
         }
     }
 
-    pub fn take_reply(&self, _related_id: &SampleIdentity) -> DdsRpcResult<Option<Sample<TRep>>> {
-        // TODO: filter by related_request_id once correlation is implemented
-        let samples = self.reply_reader.take(
-            1,
-            &[SampleStateKind::NOT_READ_SAMPLE_STATE],
-            &[ViewStateKind::ANY_VIEW_STATE],
-            &[InstanceStateKind::ALIVE_INSTANCE_STATE],
-        )?;
+    pub fn take_reply(&self, related_id: &SampleIdentity) -> DdsRpcResult<Option<Sample<TRep>>> {
+        let qc = self.create_correlation_condition(related_id)?;
+        let samples = self.reply_reader.take_w_condition(1, qc)?;
         Ok(samples.into_iter().next())
     }
 
@@ -150,6 +146,36 @@ impl<TReq: DdsType + Clone, TRep: DdsType> Requester<TReq, TRep> {
             &[InstanceStateKind::ALIVE_INSTANCE_STATE],
         )?;
         Ok(samples)
+    }
+
+    pub fn take_replies_for_request(
+        &self,
+        max_count: i32,
+        related_id: &SampleIdentity,
+    ) -> DdsRpcResult<Vec<Sample<TRep>>> {
+        let qc = self.create_correlation_condition(related_id)?;
+        let samples = self.reply_reader.take_w_condition(max_count, qc)?;
+        Ok(samples)
+    }
+
+    fn create_correlation_condition(
+        &self,
+        related_id: &SampleIdentity,
+    ) -> DdsRpcResult<QueryCondition> {
+        let qc = self.reply_reader.create_querycondition(
+            &[SampleStateKind::NOT_READ_SAMPLE_STATE],
+            &[ViewStateKind::ANY_VIEW_STATE],
+            &[InstanceStateKind::ALIVE_INSTANCE_STATE],
+            "header.related_request_id.writer_guid = %0 \
+             AND header.related_request_id.sequence_number.high = %1 \
+             AND header.related_request_id.sequence_number.low = %2",
+            vec![
+                related_id.writer_guid.to_hex_string(),
+                related_id.sequence_number.high.to_string(),
+                (related_id.sequence_number.low as i32).to_string(),
+            ],
+        )?;
+        Ok(qc)
     }
 
     pub fn get_request_datawriter(&self) -> &DataWriter<TReq> {
