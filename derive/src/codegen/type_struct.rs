@@ -95,14 +95,20 @@ pub fn derive_struct_impl(
         &serialize_key_impl,
         &deserialize_key_impl,
         &compute_key_impl,
-        &field_access_impl,
         crate_path,
         type_config.extensibility,
     );
 
+    let field_accessor_impl = quote! {
+        impl #crate_path::dcps::topic::type_support::FieldAccessor for #type_support_name {
+            #field_access_impl
+        }
+    };
+
     let dds_type_impl = quote! {
         impl #crate_path::dcps::topic::type_support::DdsType for #name {
             type TypeSupport = #type_support_name;
+            type FieldAccessor = #type_support_name;
         }
     };
 
@@ -127,6 +133,7 @@ pub fn derive_struct_impl(
     quote! {
         #type_support_struct
         #type_support_impl
+        #field_accessor_impl
         #dds_type_impl
         #cdr_serialize_impl
         #cdr_deserialize_impl
@@ -382,7 +389,6 @@ fn generate_unified_type_support_impl(
     serialize_key_impl: &proc_macro2::TokenStream,
     deserialize_key_impl: &proc_macro2::TokenStream,
     compute_key_impl: &proc_macro2::TokenStream,
-    field_access_impl: &proc_macro2::TokenStream,
     crate_path: &proc_macro2::TokenStream,
     extensibility: Option<ExtensibilityKind>,
 ) -> proc_macro2::TokenStream {
@@ -450,8 +456,6 @@ fn generate_unified_type_support_impl(
                     <#name as #crate_path::xtypes::HasTypeObject>::complete_type_object()
                 ))
             }
-
-            #field_access_impl
         }
     }
 }
@@ -1252,14 +1256,20 @@ pub fn derive_tuple_struct_impl(
         &serialize_key_impl,
         &deserialize_key_impl,
         &compute_key_impl,
-        &field_access_impl,
         crate_path,
         type_config.extensibility,
     );
 
+    let field_accessor_impl = quote! {
+        impl #crate_path::dcps::topic::type_support::FieldAccessor for #type_support_name {
+            #field_access_impl
+        }
+    };
+
     let dds_type_impl = quote! {
         impl #crate_path::dcps::topic::type_support::DdsType for #name {
             type TypeSupport = #type_support_name;
+            type FieldAccessor = #type_support_name;
         }
     };
 
@@ -1278,6 +1288,7 @@ pub fn derive_tuple_struct_impl(
     quote! {
         #type_support_struct
         #type_support_impl
+        #field_accessor_impl
         #dds_type_impl
         #cdr_serialize_impl
         #cdr_deserialize_impl
@@ -1509,7 +1520,6 @@ fn generate_tuple_type_support_impl(
     serialize_key_impl: &proc_macro2::TokenStream,
     deserialize_key_impl: &proc_macro2::TokenStream,
     compute_key_impl: &proc_macro2::TokenStream,
-    field_access_impl: &proc_macro2::TokenStream,
     crate_path: &proc_macro2::TokenStream,
     extensibility: Option<ExtensibilityKind>,
 ) -> proc_macro2::TokenStream {
@@ -1569,8 +1579,6 @@ fn generate_tuple_type_support_impl(
             }
 
             // Tuple structs don't have HasTypeObject, use default (None)
-
-            #field_access_impl
         }
     }
 }
