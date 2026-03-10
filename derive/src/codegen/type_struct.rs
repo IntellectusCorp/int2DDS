@@ -551,8 +551,7 @@ fn generate_field_access_methods(
         })
         .collect();
 
-    // Nested field access (dot notation) — delegate to nested type's TypeSupport
-    // using autoref specialization (Annex B).
+    // Nested field access (dot notation) — delegate to nested type's TypeSupport using autoref specialization.
     // If the field type implements DdsType, the inherent method on NestedAccessor<T>
     // is resolved. Otherwise, the fallback trait on &NestedAccessor<T> returns false/error.
     let nested_get_matches: Vec<_> = fields
