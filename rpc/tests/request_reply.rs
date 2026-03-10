@@ -12,41 +12,19 @@ use int2dds_rpc::entity::{RpcEntity, ServiceProxy};
 use int2dds_rpc::params::{ReplierParams, RequesterParams};
 use int2dds_rpc::replier::Replier;
 use int2dds_rpc::requester::Requester;
-use int2dds_rpc::types::{RemoteExceptionCode, ReplyHeader, RequestHeader, RpcReply, RpcRequest};
-
-// -- Test types --
+use int2dds_rpc::types::RemoteExceptionCode;
 
 #[derive(DdsType, Debug, Clone, Default)]
 #[dds_type(crate_path = "int2dds", no_additional_derives)]
 struct AddRequest {
-    header: RequestHeader,
     a: i32,
     b: i32,
 }
 
-impl RpcRequest for AddRequest {
-    fn header(&self) -> &RequestHeader {
-        &self.header
-    }
-    fn header_mut(&mut self) -> &mut RequestHeader {
-        &mut self.header
-    }
-}
-
 #[derive(DdsType, Debug, Clone, Default)]
 #[dds_type(crate_path = "int2dds", no_additional_derives)]
-struct AddReply {
-    header: ReplyHeader,
+struct AddResponse {
     result: i32,
-}
-
-impl RpcReply for AddReply {
-    fn header(&self) -> &ReplyHeader {
-        &self.header
-    }
-    fn header_mut(&mut self) -> &mut ReplyHeader {
-        &mut self.header
-    }
 }
 
 static DOMAIN_ID: AtomicI32 = AtomicI32::new(200);
@@ -65,12 +43,12 @@ fn send_request_and_receive_reply() {
 
     let service_name = "AddService";
 
-    let requester = Requester::<AddRequest, AddReply>::new(
+    let requester = Requester::<AddRequest, AddResponse>::new(
         RequesterParams::new(participant.clone()).service_name(service_name),
     )
     .unwrap();
 
-    let replier = Replier::<AddRequest, AddReply>::new(
+    let replier = Replier::<AddRequest, AddResponse>::new(
         ReplierParams::new(participant.clone()).service_name(service_name),
     )
     .unwrap();
@@ -79,24 +57,24 @@ fn send_request_and_receive_reply() {
     requester.wait_for_service_timeout(Duration::from_secs(3)).unwrap();
 
     // Send request
-    let mut req = AddRequest { a: 3, b: 4, ..Default::default() };
-    let req_id = requester.send_request(&mut req).unwrap();
+    let call = AddRequest { a: 3, b: 4 };
+    let req_id = requester.send_request(&call).unwrap();
 
     // Replier receives request
     let sample = replier.receive_request(Duration::from_secs(3)).unwrap();
-    let received_req = sample.data().unwrap();
-    assert_eq!(received_req.a, 3);
-    assert_eq!(received_req.b, 4);
+    let received = sample.data().unwrap();
+    assert_eq!(received.data.a, 3);
+    assert_eq!(received.data.b, 4);
 
     // Replier sends reply
-    let related_id = received_req.header.request_id;
-    let mut reply = AddReply { result: received_req.a + received_req.b, ..Default::default() };
-    replier.send_reply(&mut reply, &related_id).unwrap();
+    let related_id = received.header.request_id;
+    let ret = AddResponse { result: received.data.a + received.data.b };
+    replier.send_reply(&ret, &related_id).unwrap();
 
     // Requester receives reply
     let reply_sample = requester.receive_reply(Duration::from_secs(3)).unwrap();
     let received_reply = reply_sample.data().unwrap();
-    assert_eq!(received_reply.result, 7);
+    assert_eq!(received_reply.data.result, 7);
     assert_eq!(received_reply.header.related_request_id, req_id);
     assert_eq!(received_reply.header.remote_ex, RemoteExceptionCode::Ok);
 }
@@ -109,12 +87,12 @@ fn take_reply_by_request_id() {
         .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
         .unwrap();
 
-    let requester = Requester::<AddRequest, AddReply>::new(
+    let requester = Requester::<AddRequest, AddResponse>::new(
         RequesterParams::new(participant.clone()).service_name("TakeReplyService"),
     )
     .unwrap();
 
-    let replier = Replier::<AddRequest, AddReply>::new(
+    let replier = Replier::<AddRequest, AddResponse>::new(
         ReplierParams::new(participant.clone()).service_name("TakeReplyService"),
     )
     .unwrap();
@@ -122,25 +100,25 @@ fn take_reply_by_request_id() {
     requester.wait_for_service_timeout(Duration::from_secs(3)).unwrap();
 
     // Send two requests
-    let mut req1 = AddRequest { a: 1, b: 2, ..Default::default() };
-    let id1 = requester.send_request(&mut req1).unwrap();
+    let call1 = AddRequest { a: 1, b: 2 };
+    let id1 = requester.send_request(&call1).unwrap();
 
-    let mut req2 = AddRequest { a: 10, b: 20, ..Default::default() };
-    let _id2 = requester.send_request(&mut req2).unwrap();
+    let call2 = AddRequest { a: 10, b: 20 };
+    let _id2 = requester.send_request(&call2).unwrap();
 
     // Replier handles both
     for _ in 0..2 {
         let sample = replier.receive_request(Duration::from_secs(3)).unwrap();
         let r = sample.data().unwrap();
-        let mut reply = AddReply { result: r.a + r.b, ..Default::default() };
-        replier.send_reply(&mut reply, &r.header.request_id).unwrap();
+        let ret = AddResponse { result: r.data.a + r.data.b };
+        replier.send_reply(&ret, &r.header.request_id).unwrap();
     }
 
     // Requester takes reply for first request specifically
     std::thread::sleep(Duration::from_millis(100));
     let reply = requester.take_reply(&id1).unwrap().expect("reply for id1");
     let data = reply.data().unwrap();
-    assert_eq!(data.result, 3);
+    assert_eq!(data.data.result, 3);
 }
 
 #[test]
@@ -153,12 +131,12 @@ fn take_request_non_blocking() {
 
     let service_name = "TakeRequestService";
 
-    let requester = Requester::<AddRequest, AddReply>::new(
+    let requester = Requester::<AddRequest, AddResponse>::new(
         RequesterParams::new(participant.clone()).service_name(service_name),
     )
     .unwrap();
 
-    let replier = Replier::<AddRequest, AddReply>::new(
+    let replier = Replier::<AddRequest, AddResponse>::new(
         ReplierParams::new(participant.clone()).service_name(service_name),
     )
     .unwrap();
@@ -170,14 +148,14 @@ fn take_request_non_blocking() {
     assert!(empty.is_err() || empty.unwrap().is_none());
 
     // Send a request, then take it
-    let mut req = AddRequest { a: 5, b: 6, ..Default::default() };
-    requester.send_request(&mut req).unwrap();
+    let call = AddRequest { a: 5, b: 6 };
+    requester.send_request(&call).unwrap();
     std::thread::sleep(Duration::from_millis(100));
 
     let sample = replier.take_request().unwrap().expect("should have a request");
     let data = sample.data().unwrap();
-    assert_eq!(data.a, 5);
-    assert_eq!(data.b, 6);
+    assert_eq!(data.data.a, 5);
+    assert_eq!(data.data.b, 6);
 }
 
 #[test]
@@ -190,12 +168,12 @@ fn take_requests_batch() {
 
     let service_name = "TakeRequestsBatchService";
 
-    let requester = Requester::<AddRequest, AddReply>::new(
+    let requester = Requester::<AddRequest, AddResponse>::new(
         RequesterParams::new(participant.clone()).service_name(service_name),
     )
     .unwrap();
 
-    let replier = Replier::<AddRequest, AddReply>::new(
+    let replier = Replier::<AddRequest, AddResponse>::new(
         ReplierParams::new(participant.clone()).service_name(service_name),
     )
     .unwrap();
@@ -204,8 +182,8 @@ fn take_requests_batch() {
 
     // Send 3 requests
     for i in 0..3 {
-        let mut req = AddRequest { a: i, b: i * 10, ..Default::default() };
-        requester.send_request(&mut req).unwrap();
+        let call = AddRequest { a: i, b: i * 10 };
+        requester.send_request(&call).unwrap();
     }
     std::thread::sleep(Duration::from_millis(100));
 
@@ -223,12 +201,12 @@ fn take_replies_batch() {
 
     let service_name = "TakeRepliesBatchService";
 
-    let requester = Requester::<AddRequest, AddReply>::new(
+    let requester = Requester::<AddRequest, AddResponse>::new(
         RequesterParams::new(participant.clone()).service_name(service_name),
     )
     .unwrap();
 
-    let replier = Replier::<AddRequest, AddReply>::new(
+    let replier = Replier::<AddRequest, AddResponse>::new(
         ReplierParams::new(participant.clone()).service_name(service_name),
     )
     .unwrap();
@@ -237,15 +215,15 @@ fn take_replies_batch() {
 
     // Send 2 requests and reply to both
     for i in 0..2 {
-        let mut req = AddRequest { a: i, b: i + 1, ..Default::default() };
-        requester.send_request(&mut req).unwrap();
+        let call = AddRequest { a: i, b: i + 1 };
+        requester.send_request(&call).unwrap();
     }
 
     for _ in 0..2 {
         let sample = replier.receive_request(Duration::from_secs(3)).unwrap();
         let r = sample.data().unwrap();
-        let mut reply = AddReply { result: r.a + r.b, ..Default::default() };
-        replier.send_reply(&mut reply, &r.header.request_id).unwrap();
+        let ret = AddResponse { result: r.data.a + r.data.b };
+        replier.send_reply(&ret, &r.header.request_id).unwrap();
     }
 
     std::thread::sleep(Duration::from_millis(100));
@@ -263,17 +241,17 @@ fn take_replies_for_request() {
 
     let service_name = "MultiReplierService";
 
-    let requester = Requester::<AddRequest, AddReply>::new(
+    let requester = Requester::<AddRequest, AddResponse>::new(
         RequesterParams::new(participant.clone()).service_name(service_name),
     )
     .unwrap();
 
-    let replier1 = Replier::<AddRequest, AddReply>::new(
+    let replier1 = Replier::<AddRequest, AddResponse>::new(
         ReplierParams::new(participant.clone()).service_name(service_name),
     )
     .unwrap();
 
-    let replier2 = Replier::<AddRequest, AddReply>::new(
+    let replier2 = Replier::<AddRequest, AddResponse>::new(
         ReplierParams::new(participant.clone()).service_name(service_name),
     )
     .unwrap();
@@ -281,15 +259,15 @@ fn take_replies_for_request() {
     requester.wait_for_service_timeout(Duration::from_secs(3)).unwrap();
 
     // Send a single request
-    let mut req = AddRequest { a: 5, b: 3, ..Default::default() };
-    let req_id = requester.send_request(&mut req).unwrap();
+    let call = AddRequest { a: 5, b: 3 };
+    let req_id = requester.send_request(&call).unwrap();
 
     // Both repliers receive and reply to the same request
     for replier in [&replier1, &replier2] {
         let sample = replier.receive_request(Duration::from_secs(3)).unwrap();
         let r = sample.data().unwrap();
-        let mut reply = AddReply { result: r.a + r.b, ..Default::default() };
-        replier.send_reply(&mut reply, &r.header.request_id).unwrap();
+        let ret = AddResponse { result: r.data.a + r.data.b };
+        replier.send_reply(&ret, &r.header.request_id).unwrap();
     }
 
     std::thread::sleep(Duration::from_millis(100));
@@ -299,7 +277,7 @@ fn take_replies_for_request() {
     assert_eq!(replies.len(), 2);
     for reply in &replies {
         let data = reply.data().unwrap();
-        assert_eq!(data.result, 8);
+        assert_eq!(data.data.result, 8);
         assert_eq!(data.header.related_request_id, req_id);
     }
 }
@@ -312,7 +290,7 @@ fn bind_and_unbind_instance() {
         .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
         .unwrap();
 
-    let mut requester = Requester::<AddRequest, AddReply>::new(
+    let mut requester = Requester::<AddRequest, AddResponse>::new(
         RequesterParams::new(participant.clone()).service_name("BindService"),
     )
     .unwrap();
@@ -334,7 +312,7 @@ fn close_requester_and_replier() {
         .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
         .unwrap();
 
-    let mut requester = Requester::<AddRequest, AddReply>::new(
+    let mut requester = Requester::<AddRequest, AddResponse>::new(
         RequesterParams::new(participant.clone()).service_name("CloseService"),
     )
     .unwrap();
@@ -343,7 +321,7 @@ fn close_requester_and_replier() {
     assert!(requester.get_request_datawriter().is_ok());
     assert!(requester.get_reply_datareader().is_ok());
 
-    let mut replier = Replier::<AddRequest, AddReply>::new(
+    let mut replier = Replier::<AddRequest, AddResponse>::new(
         ReplierParams::new(participant.clone()).service_name("ReplierCloseService"),
     )
     .unwrap();

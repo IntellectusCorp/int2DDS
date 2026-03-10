@@ -6,13 +6,27 @@ use int2dds::dcps::core::error::{DdsError, DdsResult};
 use int2dds::dcps::topic::type_support::{DdsType, FieldAccessor};
 use int2dds::topic::sql::ast::Parameter;
 
-// Re-export DDS layer types used for constructing SampleIdentity
+pub use int2dds::dcps::core::error::RETCODE_OK;
 pub use int2dds::rtps::common::guid::Guid;
 pub use int2dds::rtps::common::sequence::SequenceNumber;
 
+pub type InstanceName = String; // max 255 chars
+
+#[derive(int2dds_derive::DdsType, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[dds_type(crate_path = "int2dds", no_additional_derives)]
+#[repr(i32)]
+pub enum RemoteExceptionCode {
+    #[default]
+    Ok = 0,
+    Unsupported = 1,
+    InvalidArgument = 2,
+    OutOfResources = 3,
+    UnknownOperation = 4,
+    UnknownException = 5,
+}
+
 // Local SequenceNumber with DdsType derive for SampleIdentity field access.
-// The original SequenceNumber in dds crate cannot have DdsType derived
-// due to trait conflicts.
+// This is to avoid conflict with the original SequenceNumber for DdsType derive.
 #[derive(int2dds_derive::DdsType, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[dds_type(crate_path = "int2dds", no_additional_derives)]
 pub struct RpcSequenceNumber {
@@ -84,8 +98,6 @@ impl DdsType for SampleIdentity {
     type FieldAccessor = SampleIdentityFieldAccessor;
 }
 
-pub type InstanceName = String; // max 255 chars
-
 #[derive(int2dds_derive::DdsType, Debug, Clone, Default)]
 #[dds_type(crate_path = "int2dds", no_additional_derives)]
 pub struct RequestHeader {
@@ -100,31 +112,22 @@ pub struct ReplyHeader {
     pub remote_ex: RemoteExceptionCode,
 }
 
-#[derive(int2dds_derive::DdsType, Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// Generic request wrapper.
+/// Users define only the call/payload type `T`; the middleware handles the header.
+#[derive(int2dds_derive::DdsType, Debug, Clone, Default)]
 #[dds_type(crate_path = "int2dds", no_additional_derives)]
-#[repr(i32)]
-pub enum RemoteExceptionCode {
-    #[default]
-    Ok = 0,
-    Unsupported = 1,
-    InvalidArgument = 2,
-    OutOfResources = 3,
-    UnknownOperation = 4,
-    UnknownException = 5,
+pub struct Request<T> {
+    pub header: RequestHeader,
+    pub data: T,
 }
 
-/// Trait for types that carry a RequestHeader (Basic Service Mapping).
-/// User-defined request types must implement this.
-pub trait RpcRequest {
-    fn header(&self) -> &RequestHeader;
-    fn header_mut(&mut self) -> &mut RequestHeader;
-}
-
-/// Trait for types that carry a ReplyHeader (Basic Service Mapping).
-/// User-defined reply types must implement this.
-pub trait RpcReply {
-    fn header(&self) -> &ReplyHeader;
-    fn header_mut(&mut self) -> &mut ReplyHeader;
+/// Generic reply wrapper.
+/// Users define only the return/payload type `T`; the middleware handles the header.
+#[derive(int2dds_derive::DdsType, Debug, Clone, Default)]
+#[dds_type(crate_path = "int2dds", no_additional_derives)]
+pub struct Reply<T> {
+    pub header: ReplyHeader,
+    pub data: T,
 }
 
 /// Default case in Call/Return unions for unrecognized operations (7.5.1.1.6, 7.5.1.1.7)
@@ -138,9 +141,6 @@ pub struct UnknownException;
 /// Dummy member for In/Out structs with no parameters (7.5.1.1.4)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnusedMember;
-
-/// Re-export from DDS layer (7.5.1.1.5 Rule 3)
-pub use int2dds::dcps::core::error::RETCODE_OK;
 
 #[cfg(test)]
 mod tests {
