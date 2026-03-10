@@ -552,6 +552,48 @@ impl Writer for StatefulWriter {
         }
     }
 
+    fn new_change_with_rpc_callback(
+        &self,
+        kind: ChangeKind,
+        handle: InstanceHandle,
+        source_timestamp: Option<RtpsTime>,
+        data_fn: Box<dyn FnOnce(Guid, SequenceNumber) -> SerializedData + '_>,
+    ) -> CacheChange {
+        let last_change_sequence_number = match self.last_change_sequence_number.lock() {
+            Ok(mut last_change_sequence_number) => {
+                *last_change_sequence_number += 1;
+                *last_change_sequence_number
+            }
+            Err(e) => {
+                error!("Failed to acquire last_change_sequence_number lock: {}", e);
+                SequenceNumber::UNKNOWN
+            }
+        };
+
+        let data = data_fn(self.guid, last_change_sequence_number);
+
+        if data.len() > self.data_max_size_serialized as usize {
+            CacheChange::create_fragmented(
+                kind,
+                self.guid,
+                handle,
+                last_change_sequence_number,
+                &data,
+                source_timestamp,
+                self.data_max_size_serialized as usize,
+            )
+        } else {
+            CacheChange::new(
+                kind,
+                self.guid,
+                handle,
+                last_change_sequence_number,
+                data,
+                source_timestamp,
+            )
+        }
+    }
+
     fn data_max_size_serialized(&self) -> i32 {
         self.data_max_size_serialized
     }

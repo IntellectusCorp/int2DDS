@@ -146,14 +146,19 @@ impl<TReq: DdsType, TRep: DdsType + Clone + RpcReply> Replier<TReq, TRep> {
         let reader = self.reader()?;
         let start = std::time::Instant::now();
         loop {
-            let samples = reader.take(
+            match reader.take(
                 1,
                 &[SampleStateKind::NOT_READ_SAMPLE_STATE],
                 &[ViewStateKind::ANY_VIEW_STATE],
                 &[InstanceStateKind::ALIVE_INSTANCE_STATE],
-            )?;
-            if let Some(sample) = samples.into_iter().next() {
-                return Ok(sample);
+            ) {
+                Ok(samples) => {
+                    if let Some(sample) = samples.into_iter().next() {
+                        return Ok(sample);
+                    }
+                }
+                Err(DdsError::NoData) => {}
+                Err(e) => return Err(e.into()),
             }
             if start.elapsed() >= timeout {
                 return Err(DdsRpcError::Timeout);
