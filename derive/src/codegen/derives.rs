@@ -325,6 +325,10 @@ fn generate_enum_additional_derives(
     name: &syn::Ident,
     config: &DdsTypeConfig,
 ) -> proc_macro2::TokenStream {
+    if config.no_additional_derives {
+        return quote! {};
+    }
+
     if let Data::Enum(data) = &input.data {
         let variants = &data.variants;
 
