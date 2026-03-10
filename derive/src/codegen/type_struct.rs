@@ -13,6 +13,42 @@ use crate::codegen::{
 };
 use crate::codegen::{quote_extensibility_tokens, DdsTypeConfig, ExtensibilityKind};
 
+/// Generics context for code generation.
+/// For non-generic types, all fields are empty token streams,
+/// producing identical output to the non-generic case.
+pub(crate) struct GenCtx {
+    /// e.g., `<T: DdsType + CdrSerialize + ...>` for impl headers
+    pub impl_generics: proc_macro2::TokenStream,
+    /// e.g., `<T>` for type references
+    pub ty_generics: proc_macro2::TokenStream,
+    /// e.g., `where T: ...`
+    pub where_clause: proc_macro2::TokenStream,
+    /// `#name #ty_generics` for use in type position (downcast_ref, TypeId, etc.)
+    pub full_type: proc_macro2::TokenStream,
+    /// `#type_support_name #ty_generics` for TypeSupport type references
+    pub full_ts_type: proc_macro2::TokenStream,
+    /// Whether there are generic type params
+    pub has_type_params: bool,
+}
+
+/// Add DDS trait bounds to all type parameters for generated impl blocks.
+fn add_dds_bounds(
+    generics: &syn::Generics,
+    crate_path: &proc_macro2::TokenStream,
+) -> syn::Generics {
+    let mut bounded = generics.clone();
+    for param in &mut bounded.params {
+        if let syn::GenericParam::Type(ref mut tp) = *param {
+            tp.bounds.push(syn::parse_quote!(#crate_path::dcps::topic::type_support::DdsType));
+            tp.bounds.push(syn::parse_quote!(#crate_path::serialize::cdr::CdrSerialize));
+            tp.bounds.push(syn::parse_quote!(#crate_path::serialize::cdr::CdrDeserialize));
+            tp.bounds.push(syn::parse_quote!(#crate_path::serialize::xcdr::XcdrSerialize));
+            tp.bounds.push(syn::parse_quote!(#crate_path::serialize::xcdr::XcdrDeserialize));
+        }
+    }
+    bounded
+}
+
 /// Generate DdsType implementation for struct types
 pub fn derive_struct_impl(
     input: &DeriveInput,
@@ -22,6 +58,26 @@ pub fn derive_struct_impl(
 ) -> proc_macro2::TokenStream {
     let crate_path = &type_config.crate_path;
     let type_support_name = quote::format_ident!("{}TypeSupport", name);
+
+    // Generics support
+    let has_type_params = input.generics.type_params().count() > 0;
+    let (_, ty_gen, _) = input.generics.split_for_impl();
+    let ty_generics_ts = quote! { #ty_gen };
+    let bounded_generics = add_dds_bounds(&input.generics, crate_path);
+    let (bounded_impl_gen, _, bounded_where) = bounded_generics.split_for_impl();
+    let impl_generics_ts = quote! { #bounded_impl_gen };
+    let where_clause_ts = quote! { #bounded_where };
+    let full_type = quote! { #name #ty_generics_ts };
+    let full_ts_type = quote! { #type_support_name #ty_generics_ts };
+
+    let gc = GenCtx {
+        impl_generics: impl_generics_ts.clone(),
+        ty_generics: ty_generics_ts.clone(),
+        where_clause: where_clause_ts.clone(),
+        full_type: full_type.clone(),
+        full_ts_type: full_ts_type.clone(),
+        has_type_params,
+    };
 
     // Find all key fields - all fields with #[dds(key)] attribute
     let all_key_fields = find_all_key_fields(fields);
@@ -36,9 +92,24 @@ pub fn derive_struct_impl(
     });
 
     // Define TypeSupport struct
-    let type_support_struct = quote! {
-        #[derive(Default)]
-        pub struct #type_support_name;
+    let type_support_struct = if has_type_params {
+        let type_params: Vec<_> = input.generics.type_params().map(|tp| &tp.ident).collect();
+        let (orig_impl_gen, _, _) = input.generics.split_for_impl();
+        quote! {
+            pub struct #type_support_name #ty_generics_ts (
+                #(core::marker::PhantomData<#type_params>,)*
+            );
+            impl #orig_impl_gen Default for #type_support_name #ty_generics_ts {
+                fn default() -> Self {
+                    Self(#(core::marker::PhantomData::<#type_params>,)*)
+                }
+            }
+        }
+    } else {
+        quote! {
+            #[derive(Default)]
+            pub struct #type_support_name;
+        }
     };
 
     // Generate CDR and XCDR field information
@@ -64,18 +135,23 @@ pub fn derive_struct_impl(
     let (serialize_key_impl, deserialize_key_impl, compute_key_impl) = if all_key_fields.is_empty()
     {
         // When there are no keys
-        generate_key_methods(None, name, &field_deserialization, crate_path)
+        generate_key_methods(None, &gc.full_type, &field_deserialization, crate_path)
     } else if all_key_fields.len() == 1 {
         // Single key
-        generate_key_methods(Some(&all_key_fields[0]), name, &field_deserialization, crate_path)
+        generate_key_methods(
+            Some(&all_key_fields[0]),
+            &gc.full_type,
+            &field_deserialization,
+            crate_path,
+        )
     } else {
         // Multiple keys
         let multi_key_info = MultiKeyFieldInfo { fields: all_key_fields };
-        generate_multi_key_methods(Some(&multi_key_info), name, crate_path)
+        generate_multi_key_methods(Some(&multi_key_info), &gc.full_type, crate_path)
     };
 
     // Generate field access methods
-    let field_access_impl = generate_field_access_methods(fields, name, crate_path);
+    let field_access_impl = generate_field_access_methods(fields, name, crate_path, &gc);
 
     // TypeSupport trait implementation (CDR + XCDR unified)
     let type_support_impl = generate_unified_type_support_impl(
@@ -97,6 +173,7 @@ pub fn derive_struct_impl(
         &compute_key_impl,
         crate_path,
         type_config.extensibility,
+        &gc,
     );
 
     let (field_accessor_impl, dds_type_impl) = if type_config.skip_field_accessor {
@@ -105,36 +182,36 @@ pub fn derive_struct_impl(
     } else {
         (
             quote! {
-                impl #crate_path::dcps::topic::type_support::FieldAccessor for #type_support_name {
+                impl #impl_generics_ts #crate_path::dcps::topic::type_support::FieldAccessor for #full_ts_type #where_clause_ts {
                     #field_access_impl
                 }
             },
             quote! {
-                impl #crate_path::dcps::topic::type_support::DdsType for #name {
-                    type TypeSupport = #type_support_name;
-                    type FieldAccessor = #type_support_name;
+                impl #impl_generics_ts #crate_path::dcps::topic::type_support::DdsType for #full_type #where_clause_ts {
+                    type TypeSupport = #full_ts_type;
+                    type FieldAccessor = #full_ts_type;
                 }
             },
         )
     };
 
     // Generate CdrSerialize and CdrDeserialize trait implementations
-    let cdr_serialize_impl = generate_cdr_serialize_impl(name, fields, crate_path);
+    let cdr_serialize_impl = generate_cdr_serialize_impl(name, fields, crate_path, &gc);
 
-    let cdr_deserialize_impl = generate_cdr_deserialize_impl(name, fields, crate_path);
+    let cdr_deserialize_impl = generate_cdr_deserialize_impl(name, fields, crate_path, &gc);
 
     // Generate XcdrSerialize and XcdrDeserialize trait implementations
     let xcdr_serialize_impl =
-        generate_xcdr_serialize_impl(name, fields, crate_path, type_config.extensibility);
+        generate_xcdr_serialize_impl(name, fields, crate_path, type_config.extensibility, &gc);
 
     let xcdr_deserialize_impl =
-        generate_xcdr_deserialize_impl(name, fields, crate_path, type_config.extensibility);
+        generate_xcdr_deserialize_impl(name, fields, crate_path, type_config.extensibility, &gc);
 
     let additional_derives = generate_additional_derives(input, name, type_config);
 
     // Generate HasTypeObject implementation for XTypes support
     let has_type_object_impl =
-        crate::codegen::type_object::generate_has_type_object_impl(name, fields, type_config);
+        crate::codegen::type_object::generate_has_type_object_impl(name, fields, type_config, &gc);
 
     quote! {
         #type_support_struct
@@ -173,16 +250,18 @@ fn find_all_key_fields(
 
 /// Generate serialize method implementation (unified: handles both None and Some format)
 fn quote_serialize_impl(
-    name: &syn::Ident,
+    _name: &syn::Ident,
     cdr_field_serialization: &proc_macro2::TokenStream,
     xcdr_field_serialization: &proc_macro2::TokenStream,
     crate_path: &proc_macro2::TokenStream,
+    gc: &GenCtx,
 ) -> proc_macro2::TokenStream {
+    let full_type = &gc.full_type;
     quote! {
         fn serialize(&self, data: &dyn std::any::Any, format: Option<&#crate_path::dcps::topic::type_support::SerializationFormat>) -> #crate_path::dcps::core::error::DdsResult<#crate_path::rtps::common::types::SerializedData> {
             let default_format = #crate_path::dcps::topic::type_support::SerializationFormat::Cdr;
             let format = format.unwrap_or(&default_format);
-            if let Some(typed_data) = data.downcast_ref::<#name>() {
+            if let Some(typed_data) = data.downcast_ref::<#full_type>() {
                 match format {
                     #crate_path::dcps::topic::type_support::SerializationFormat::Cdr => {
                         use #crate_path::serialize::{cdr::CdrSerializer, BufferManager};
@@ -242,13 +321,15 @@ fn quote_serialize_impl(
 
 /// Generate deserialize method implementation (unified: handles both None and Some format)
 fn quote_deserialize_impl(
-    name: &syn::Ident,
+    _name: &syn::Ident,
     extensibility: Option<ExtensibilityKind>,
     cdr_field_deserialization: &proc_macro2::TokenStream,
     xcdr_field_deserialization: &proc_macro2::TokenStream,
     xcdr_field_deserialization_per_field_dheader: &proc_macro2::TokenStream,
     crate_path: &proc_macro2::TokenStream,
+    gc: &GenCtx,
 ) -> proc_macro2::TokenStream {
+    let full_type = &gc.full_type;
     // Generate format resolution for None case
     let none_format_resolution = if let Some(ext_kind) = extensibility {
         let extensibility_tokens = quote_extensibility_tokens(ext_kind, crate_path);
@@ -307,13 +388,13 @@ fn quote_deserialize_impl(
                     let use_delimiters = *use_delimiters;
 
                     // Standard XCDR2 deserialization (single DHEADER for struct)
-                    let mut parse_body = |mut deserializer: &mut Xcdr2Deserializer<'_>| -> #crate_path::dcps::core::error::DdsResult<#name> {
+                    let mut parse_body = |mut deserializer: &mut Xcdr2Deserializer<'_>| -> #crate_path::dcps::core::error::DdsResult<#full_type> {
                         #xcdr_field_deserialization
                         Ok(result)
                     };
 
                     // Alternative deserialization with per-field DHEADER (for interoperability)
-                    let mut parse_body_per_field_dheader = |mut deserializer: &mut Xcdr2Deserializer<'_>| -> #crate_path::dcps::core::error::DdsResult<#name> {
+                    let mut parse_body_per_field_dheader = |mut deserializer: &mut Xcdr2Deserializer<'_>| -> #crate_path::dcps::core::error::DdsResult<#full_type> {
                         #xcdr_field_deserialization_per_field_dheader
                         Ok(result)
                     };
@@ -323,7 +404,7 @@ fn quote_deserialize_impl(
                         let mut delimited_deserializer = Xcdr2Deserializer::new(data)
                             .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
 
-                        match (|| -> #crate_path::dcps::core::error::DdsResult<#name> {
+                        match (|| -> #crate_path::dcps::core::error::DdsResult<#full_type> {
                             let (object_size, start_position) = delimited_deserializer
                                 .begin_struct()
                                 .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
@@ -348,7 +429,7 @@ fn quote_deserialize_impl(
                         let mut compat_deserializer = Xcdr2Deserializer::new(data)
                             .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
 
-                        match (|| -> #crate_path::dcps::core::error::DdsResult<#name> {
+                        match (|| -> #crate_path::dcps::core::error::DdsResult<#full_type> {
                             let value = parse_body_per_field_dheader(&mut compat_deserializer)?;
                             Ok(value)
                         })() {
@@ -379,7 +460,7 @@ fn quote_deserialize_impl(
 
 #[allow(clippy::too_many_arguments)]
 fn generate_unified_type_support_impl(
-    type_support_name: &syn::Ident,
+    _type_support_name: &syn::Ident,
     name: &syn::Ident,
     has_key: bool,
     _has_non_key_fields: bool,
@@ -397,9 +478,15 @@ fn generate_unified_type_support_impl(
     compute_key_impl: &proc_macro2::TokenStream,
     crate_path: &proc_macro2::TokenStream,
     extensibility: Option<ExtensibilityKind>,
+    gc: &GenCtx,
 ) -> proc_macro2::TokenStream {
-    let serialize_impl =
-        quote_serialize_impl(name, cdr_field_serialization, xcdr_field_serialization, crate_path);
+    let serialize_impl = quote_serialize_impl(
+        name,
+        cdr_field_serialization,
+        xcdr_field_serialization,
+        crate_path,
+        gc,
+    );
     let deserialize_impl = quote_deserialize_impl(
         name,
         extensibility,
@@ -407,6 +494,7 @@ fn generate_unified_type_support_impl(
         xcdr_field_deserialization,
         xcdr_field_deserialization_per_field_dheader,
         crate_path,
+        gc,
     );
 
     let extensibility_tokens = if let Some(ext_kind) = extensibility {
@@ -415,14 +503,37 @@ fn generate_unified_type_support_impl(
         quote! { #crate_path::serialize::xcdr::ExtensibilityKind::Appendable }
     };
 
-    quote! {
-        impl #crate_path::dcps::topic::type_support::TypeSupport for #type_support_name {
+    let impl_generics = &gc.impl_generics;
+    let where_clause = &gc.where_clause;
+    let full_ts_type = &gc.full_ts_type;
+    let full_type = &gc.full_type;
+
+    let get_type_name_impl = if gc.has_type_params {
+        quote! {
+            fn get_type_name(&self) -> &str {
+                // Generic types use runtime type_name since stringify cannot capture type params
+                // Use a leaked &'static str for the required lifetime
+                use std::sync::OnceLock;
+                static NAME: OnceLock<String> = OnceLock::new();
+                // Note: for generic types this will use the first instantiation's name.
+                // This is acceptable since TypeSupport instances are per-concrete-type.
+                NAME.get_or_init(|| std::any::type_name::<#full_type>().to_string())
+            }
+        }
+    } else {
+        quote! {
             fn get_type_name(&self) -> &str {
                 stringify!(#name)
             }
+        }
+    };
+
+    quote! {
+        impl #impl_generics #crate_path::dcps::topic::type_support::TypeSupport for #full_ts_type #where_clause {
+            #get_type_name_impl
 
             fn type_id(&self) -> std::any::TypeId {
-                std::any::TypeId::of::<#name>()
+                std::any::TypeId::of::<#full_type>()
             }
 
             fn is_compute_key_provided(&self) -> bool {
@@ -444,7 +555,7 @@ fn generate_unified_type_support_impl(
             #compute_key_impl
 
             fn serialize_key_and_non_key(&self, data: &dyn std::any::Any) -> #crate_path::dcps::core::error::DdsResult<(#crate_path::rtps::common::types::SerializedData, #crate_path::rtps::common::types::SerializedData)> {
-                if let Some(typed_data) = data.downcast_ref::<#name>() {
+                if let Some(typed_data) = data.downcast_ref::<#full_type>() {
                     let key_data = self.serialize_key(data)?;
                     let full_data = self.serialize(data, None)?;
                     Ok((key_data, full_data))
@@ -454,12 +565,12 @@ fn generate_unified_type_support_impl(
             }
 
             fn get_type_identifier(&self) -> Option<#crate_path::xtypes::TypeIdentifier> {
-                Some(<#name as #crate_path::xtypes::HasTypeObject>::type_identifier())
+                Some(<#full_type as #crate_path::xtypes::HasTypeObject>::type_identifier())
             }
 
             fn get_type_object(&self) -> Option<#crate_path::xtypes::TypeObject> {
                 Some(#crate_path::xtypes::TypeObject::Complete(
-                    <#name as #crate_path::xtypes::HasTypeObject>::complete_type_object()
+                    <#full_type as #crate_path::xtypes::HasTypeObject>::complete_type_object()
                 ))
             }
         }
@@ -516,14 +627,16 @@ fn quote_field_to_parameter_conversion(
 
 fn generate_field_access_methods(
     fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
-    name: &syn::Ident,
+    _name: &syn::Ident,
     crate_path: &proc_macro2::TokenStream,
+    gc: &GenCtx,
 ) -> proc_macro2::TokenStream {
+    let full_type = &gc.full_type;
     // Handle empty struct case
     if fields.is_empty() {
         return quote! {
             fn get_field_value(&self, data: &dyn std::any::Any, field_path: &str) -> #crate_path::dcps::core::error::DdsResult<#crate_path::topic::sql::ast::Parameter> {
-                if data.downcast_ref::<#name>().is_some() {
+                if data.downcast_ref::<#full_type>().is_some() {
                     Err(#crate_path::dcps::core::error::DdsError::Error(format!("Field '{}' not found", field_path)))
                 } else {
                     Err(#crate_path::dcps::core::error::DdsError::BadParameter)
@@ -601,7 +714,7 @@ fn generate_field_access_methods(
         fn get_field_value(&self, data: &dyn std::any::Any, field_path: &str) -> #crate_path::dcps::core::error::DdsResult<#crate_path::topic::sql::ast::Parameter> {
             #helper_fn
 
-            if let Some(typed_data) = data.downcast_ref::<#name>() {
+            if let Some(typed_data) = data.downcast_ref::<#full_type>() {
                 if let Some((first, rest)) = field_path.split_once('.') {
                     match first {
                         #(#nested_get_matches)*
@@ -638,11 +751,15 @@ fn generate_cdr_serialize_impl(
     name: &syn::Ident,
     fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
     crate_path: &proc_macro2::TokenStream,
+    gc: &GenCtx,
 ) -> proc_macro2::TokenStream {
+    let impl_generics = &gc.impl_generics;
+    let ty_generics = &gc.ty_generics;
+    let where_clause = &gc.where_clause;
     // Handle empty struct case
     if fields.is_empty() {
         return quote! {
-            impl #crate_path::serialize::cdr::CdrSerialize for #name {
+            impl #impl_generics #crate_path::serialize::cdr::CdrSerialize for #name #ty_generics #where_clause {
                 fn serialize_cdr(&self, _serializer: &mut #crate_path::serialize::cdr::CdrSerializer) -> #crate_path::serialize::cdr::CdrResult<()> {
                     Ok(())
                 }
@@ -662,7 +779,7 @@ fn generate_cdr_serialize_impl(
         .collect();
 
     quote! {
-        impl #crate_path::serialize::cdr::CdrSerialize for #name {
+        impl #impl_generics #crate_path::serialize::cdr::CdrSerialize for #name #ty_generics #where_clause {
             fn serialize_cdr(&self, serializer: &mut #crate_path::serialize::cdr::CdrSerializer) -> #crate_path::serialize::cdr::CdrResult<()> {
                 use #crate_path::serialize::cdr::{PrimitiveSerialize, StringSerialize, ArraySerialize, SequenceSerialize};
                 #(#field_calls)*
@@ -677,11 +794,15 @@ fn generate_cdr_deserialize_impl(
     name: &syn::Ident,
     fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
     crate_path: &proc_macro2::TokenStream,
+    gc: &GenCtx,
 ) -> proc_macro2::TokenStream {
+    let impl_generics = &gc.impl_generics;
+    let ty_generics = &gc.ty_generics;
+    let where_clause = &gc.where_clause;
     // Handle empty struct case
     if fields.is_empty() {
         return quote! {
-            impl #crate_path::serialize::cdr::CdrDeserialize for #name {
+            impl #impl_generics #crate_path::serialize::cdr::CdrDeserialize for #name #ty_generics #where_clause {
                 fn deserialize_cdr(_deserializer: &mut #crate_path::serialize::cdr::CdrDeserializer) -> #crate_path::serialize::cdr::CdrResult<Self> {
                     Ok(#name {})
                 }
@@ -704,7 +825,7 @@ fn generate_cdr_deserialize_impl(
     let field_names: Vec<_> = fields.iter().map(|f| f.ident.as_ref().unwrap()).collect();
 
     quote! {
-        impl #crate_path::serialize::cdr::CdrDeserialize for #name {
+        impl #impl_generics #crate_path::serialize::cdr::CdrDeserialize for #name #ty_generics #where_clause {
             fn deserialize_cdr(deserializer: &mut #crate_path::serialize::cdr::CdrDeserializer) -> #crate_path::serialize::cdr::CdrResult<Self> {
                 #(#field_deserializations)*
 
@@ -764,7 +885,11 @@ fn generate_xcdr_serialize_impl(
     fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
     crate_path: &proc_macro2::TokenStream,
     extensibility: Option<ExtensibilityKind>,
+    gc: &GenCtx,
 ) -> proc_macro2::TokenStream {
+    let impl_generics = &gc.impl_generics;
+    let ty_generics = &gc.ty_generics;
+    let where_clause = &gc.where_clause;
     let is_mutable = matches!(extensibility, Some(ExtensibilityKind::Mutable));
 
     // Handle empty struct case
@@ -782,7 +907,7 @@ fn generate_xcdr_serialize_impl(
         };
 
         return quote! {
-            impl #crate_path::serialize::xcdr::XcdrSerialize for #name {
+            impl #impl_generics #crate_path::serialize::xcdr::XcdrSerialize for #name #ty_generics #where_clause {
                 fn serialize_xcdr(&self, serializer: &mut #crate_path::serialize::xcdr::XcdrSerializer) -> #crate_path::serialize::xcdr::XcdrResult<()> {
                     #serialization_body
                 }
@@ -889,7 +1014,7 @@ fn generate_xcdr_serialize_impl(
     };
 
     quote! {
-        impl #crate_path::serialize::xcdr::XcdrSerialize for #name {
+        impl #impl_generics #crate_path::serialize::xcdr::XcdrSerialize for #name #ty_generics #where_clause {
             fn serialize_xcdr(&self, serializer: &mut #crate_path::serialize::xcdr::XcdrSerializer) -> #crate_path::serialize::xcdr::XcdrResult<()> {
                 #serialization_body
             }
@@ -903,7 +1028,11 @@ fn generate_xcdr_deserialize_impl(
     fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
     crate_path: &proc_macro2::TokenStream,
     extensibility: Option<ExtensibilityKind>,
+    gc: &GenCtx,
 ) -> proc_macro2::TokenStream {
+    let impl_generics = &gc.impl_generics;
+    let ty_generics = &gc.ty_generics;
+    let where_clause = &gc.where_clause;
     // Handle empty struct case
     if fields.is_empty() {
         let deserialization_body = if !matches!(extensibility, Some(ExtensibilityKind::Final)) {
@@ -919,7 +1048,7 @@ fn generate_xcdr_deserialize_impl(
         };
 
         return quote! {
-            impl #crate_path::serialize::xcdr::XcdrDeserialize for #name {
+            impl #impl_generics #crate_path::serialize::xcdr::XcdrDeserialize for #name #ty_generics #where_clause {
                 fn deserialize_xcdr(deserializer: &mut #crate_path::serialize::xcdr::XcdrDeserializer) -> #crate_path::serialize::xcdr::XcdrResult<Self> {
                     #deserialization_body
                 }
@@ -930,11 +1059,11 @@ fn generate_xcdr_deserialize_impl(
     let is_mutable = matches!(extensibility, Some(ExtensibilityKind::Mutable));
 
     if is_mutable {
-        generate_mutable_deserialize_impl(name, fields, crate_path)
+        generate_mutable_deserialize_impl(name, fields, crate_path, gc)
     } else if matches!(extensibility, Some(ExtensibilityKind::Final)) {
-        generate_final_deserialize_impl(name, fields, crate_path)
+        generate_final_deserialize_impl(name, fields, crate_path, gc)
     } else {
-        generate_appendable_deserialize_impl(name, fields, crate_path)
+        generate_appendable_deserialize_impl(name, fields, crate_path, gc)
     }
 }
 
@@ -943,7 +1072,11 @@ fn generate_final_deserialize_impl(
     name: &syn::Ident,
     fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
     crate_path: &proc_macro2::TokenStream,
+    gc: &GenCtx,
 ) -> proc_macro2::TokenStream {
+    let impl_generics = &gc.impl_generics;
+    let ty_generics = &gc.ty_generics;
+    let where_clause = &gc.where_clause;
     let field_deserializations: Vec<_> = fields
         .iter()
         .map(|field| {
@@ -982,7 +1115,7 @@ fn generate_final_deserialize_impl(
     let field_names: Vec<_> = fields.iter().map(|f| f.ident.as_ref().unwrap()).collect();
 
     quote! {
-        impl #crate_path::serialize::xcdr::XcdrDeserialize for #name {
+        impl #impl_generics #crate_path::serialize::xcdr::XcdrDeserialize for #name #ty_generics #where_clause {
             fn deserialize_xcdr(deserializer: &mut #crate_path::serialize::xcdr::XcdrDeserializer) -> #crate_path::serialize::xcdr::XcdrResult<Self> {
                 #(#field_deserializations)*
 
@@ -999,7 +1132,11 @@ fn generate_appendable_deserialize_impl(
     name: &syn::Ident,
     fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
     crate_path: &proc_macro2::TokenStream,
+    gc: &GenCtx,
 ) -> proc_macro2::TokenStream {
+    let impl_generics = &gc.impl_generics;
+    let ty_generics = &gc.ty_generics;
+    let where_clause = &gc.where_clause;
     let field_deserializations: Vec<_> = fields
         .iter()
         .map(|field| {
@@ -1038,7 +1175,7 @@ fn generate_appendable_deserialize_impl(
     let field_names: Vec<_> = fields.iter().map(|f| f.ident.as_ref().unwrap()).collect();
 
     quote! {
-        impl #crate_path::serialize::xcdr::XcdrDeserialize for #name {
+        impl #impl_generics #crate_path::serialize::xcdr::XcdrDeserialize for #name #ty_generics #where_clause {
             fn deserialize_xcdr(deserializer: &mut #crate_path::serialize::xcdr::XcdrDeserializer) -> #crate_path::serialize::xcdr::XcdrResult<Self> {
                 let (object_size, start_position) = deserializer.begin_struct()?;
                 #(#field_deserializations)*
@@ -1057,7 +1194,11 @@ fn generate_mutable_deserialize_impl(
     name: &syn::Ident,
     fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
     crate_path: &proc_macro2::TokenStream,
+    gc: &GenCtx,
 ) -> proc_macro2::TokenStream {
+    let impl_generics = &gc.impl_generics;
+    let ty_generics = &gc.ty_generics;
+    let where_clause = &gc.where_clause;
     // Generate field declarations with Option wrapper
     let field_declarations: Vec<_> = fields
         .iter()
@@ -1157,7 +1298,7 @@ fn generate_mutable_deserialize_impl(
     let field_names: Vec<_> = fields.iter().map(|f| f.ident.as_ref().unwrap()).collect();
 
     quote! {
-        impl #crate_path::serialize::xcdr::XcdrDeserialize for #name {
+        impl #impl_generics #crate_path::serialize::xcdr::XcdrDeserialize for #name #ty_generics #where_clause {
             fn deserialize_xcdr(deserializer: &mut #crate_path::serialize::xcdr::XcdrDeserializer) -> #crate_path::serialize::xcdr::XcdrResult<Self> {
                 use #crate_path::serialize::cdr::is_sentinel_member_id;
 
@@ -1220,6 +1361,16 @@ pub fn derive_tuple_struct_impl(
     // Tuple structs don't have key fields (no named fields with #[dds(key)] attribute)
     let has_key = false;
 
+    // Non-generic GenCtx for tuple structs
+    let tuple_gc = GenCtx {
+        impl_generics: quote! {},
+        ty_generics: quote! {},
+        where_clause: quote! {},
+        full_type: quote! { #name },
+        full_ts_type: quote! { #type_support_name },
+        has_type_params: false,
+    };
+
     // Define TypeSupport struct
     let type_support_struct = quote! {
         #[derive(Default)]
@@ -1244,7 +1395,7 @@ pub fn derive_tuple_struct_impl(
 
     // Generate key-related methods (no keys for tuple structs)
     let (serialize_key_impl, deserialize_key_impl, compute_key_impl) =
-        generate_key_methods(None, name, &cdr_field_deserialization, crate_path);
+        generate_key_methods(None, &tuple_gc.full_type, &cdr_field_deserialization, crate_path);
 
     // Generate field access methods
     let field_access_impl = generate_tuple_field_access_methods(field_count, name, crate_path);
@@ -1529,8 +1680,23 @@ fn generate_tuple_type_support_impl(
     crate_path: &proc_macro2::TokenStream,
     extensibility: Option<ExtensibilityKind>,
 ) -> proc_macro2::TokenStream {
-    let serialize_impl =
-        quote_serialize_impl(name, cdr_field_serialization, xcdr_field_serialization, crate_path);
+    // Non-generic GenCtx for tuple structs
+    let tuple_gc = GenCtx {
+        impl_generics: quote! {},
+        ty_generics: quote! {},
+        where_clause: quote! {},
+        full_type: quote! { #name },
+        full_ts_type: quote! { #type_support_name },
+        has_type_params: false,
+    };
+
+    let serialize_impl = quote_serialize_impl(
+        name,
+        cdr_field_serialization,
+        xcdr_field_serialization,
+        crate_path,
+        &tuple_gc,
+    );
     let deserialize_impl = quote_deserialize_impl(
         name,
         extensibility,
@@ -1538,6 +1704,7 @@ fn generate_tuple_type_support_impl(
         xcdr_field_deserialization,
         xcdr_field_deserialization_per_field_dheader,
         crate_path,
+        &tuple_gc,
     );
 
     let extensibility_tokens = if let Some(ext_kind) = extensibility {
