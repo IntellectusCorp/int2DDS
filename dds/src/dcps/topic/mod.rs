@@ -48,4 +48,4 @@ pub use raw_data::{RawData, RawDataTypeSupport};
 #[doc(hidden)]
 pub use topic::*;
 #[doc(hidden)]
-pub use type_support::{DdsType, TypeSupport};
+pub use type_support::{DdsType, FieldAccessor, TypeSupport};

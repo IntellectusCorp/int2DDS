@@ -15,7 +15,7 @@ use int2dds::{
     rtps::common::types::SerializedData,
     serialize::cdr::ExtensibilityKind,
     topic::sql::ast::Parameter,
-    topic::type_support::{SerializationFormat, TypeSupport},
+    topic::type_support::{FieldAccessor, SerializationFormat, TypeSupport},
     xtypes::{TypeIdentifier, TypeObject},
 };
 
@@ -57,15 +57,7 @@ impl RawTypeSupport {
     }
 }
 
-impl TypeSupport for RawTypeSupport {
-    fn type_id(&self) -> TypeId {
-        TypeId::of::<crate::data::Int2DdsData>()
-    }
-
-    fn get_type_name(&self) -> &str {
-        &self.type_name
-    }
-
+impl FieldAccessor for RawTypeSupport {
     fn get_field_value(&self, _data: &dyn Any, _field_path: &str) -> DdsResult<Parameter> {
         Err(DdsError::Error(
             "RawTypeSupport: field access not supported in raw bytes mode".to_string(),
@@ -74,6 +66,16 @@ impl TypeSupport for RawTypeSupport {
 
     fn has_field(&self, _field_path: &str) -> bool {
         false
+    }
+}
+
+impl TypeSupport for RawTypeSupport {
+    fn type_id(&self) -> TypeId {
+        TypeId::of::<crate::data::Int2DdsData>()
+    }
+
+    fn get_type_name(&self) -> &str {
+        &self.type_name
     }
 
     fn serialize(

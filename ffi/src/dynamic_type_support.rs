@@ -27,7 +27,7 @@ use int2dds::{
     },
     topic::{
         sql::ast::Parameter,
-        type_support::{SerializationFormat, TypeSupport},
+        type_support::{FieldAccessor, SerializationFormat, TypeSupport},
     },
     xtypes::{
         CollectionElementFlag, CommonStructMember, CompleteMemberDetail, CompleteStructMember,
@@ -1279,15 +1279,7 @@ impl DynamicTypeSupport {
     }
 }
 
-impl TypeSupport for DynamicTypeSupport {
-    fn type_id(&self) -> TypeId {
-        TypeId::of::<Int2DdsData>()
-    }
-
-    fn get_type_name(&self) -> &str {
-        &self.descriptor.type_name
-    }
-
+impl FieldAccessor for DynamicTypeSupport {
     fn get_field_value(&self, data: &dyn Any, field_path: &str) -> DdsResult<Parameter> {
         let dynamic_data = data
             .downcast_ref::<Int2DdsData>()
@@ -1313,6 +1305,16 @@ impl TypeSupport for DynamicTypeSupport {
 
     fn has_field(&self, field_path: &str) -> bool {
         self.descriptor.get_field(field_path).is_some()
+    }
+}
+
+impl TypeSupport for DynamicTypeSupport {
+    fn type_id(&self) -> TypeId {
+        TypeId::of::<Int2DdsData>()
+    }
+
+    fn get_type_name(&self) -> &str {
+        &self.descriptor.type_name
     }
 
     fn serialize(
