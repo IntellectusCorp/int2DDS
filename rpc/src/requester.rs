@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use int2dds::common::instance_handle::InstanceHandle;
-use int2dds::dcps::domain::domain_participant::DomainParticipant;
+use int2dds::dcps::core::error::DdsError;
 use int2dds::dcps::infrastructure::qos_policy::{
     DurabilityQosPolicy, DurabilityQosPolicyKind, HistoryQosPolicy, HistoryQosPolicyKind,
     ReliabilityQosPolicy, ReliabilityQosPolicyKind,
@@ -29,9 +29,8 @@ use crate::types::{InstanceName, SampleIdentity};
 pub type Sample<T> = DataSample<T>;
 
 pub struct Requester<TReq, TRep> {
-    participant: DomainParticipant,
-    request_writer: DataWriter<TReq>,
-    reply_reader: DataReader<TRep>,
+    request_writer: Option<DataWriter<TReq>>,
+    reply_reader: Option<DataReader<TRep>>,
     bound_instance: Option<InstanceName>,
     closed: bool,
 }
@@ -99,25 +98,32 @@ impl<TReq: DdsType + Clone, TRep: DdsType> Requester<TReq, TRep> {
         )?;
 
         Ok(Self {
-            participant: params.participant,
-            request_writer,
-            reply_reader,
+            request_writer: Some(request_writer),
+            reply_reader: Some(reply_reader),
             bound_instance: None,
             closed: false,
         })
     }
 
+    fn writer(&self) -> DdsRpcResult<&DataWriter<TReq>> {
+        self.request_writer.as_ref().ok_or(DdsError::AlreadyDeleted.into())
+    }
+
+    fn reader(&self) -> DdsRpcResult<&DataReader<TRep>> {
+        self.reply_reader.as_ref().ok_or(DdsError::AlreadyDeleted.into())
+    }
+
     pub fn send_request(&self, data: &TReq) -> DdsRpcResult<SampleIdentity> {
         let (guid, seq) =
-            self.request_writer.write_and_obtain_sample_identity(data, InstanceHandle::NIL)?;
+            self.writer()?.write_and_obtain_sample_identity(data, InstanceHandle::NIL)?;
         Ok(SampleIdentity { writer_guid: guid, sequence_number: seq })
     }
 
     pub fn receive_reply(&self, timeout: Duration) -> DdsRpcResult<Sample<TRep>> {
-        // Poll with sleep until timeout
+        let reader = self.reader()?;
         let start = std::time::Instant::now();
         loop {
-            let samples = self.reply_reader.take(
+            let samples = reader.take(
                 1,
                 &[SampleStateKind::NOT_READ_SAMPLE_STATE],
                 &[ViewStateKind::ANY_VIEW_STATE],
@@ -135,12 +141,12 @@ impl<TReq: DdsType + Clone, TRep: DdsType> Requester<TReq, TRep> {
 
     pub fn take_reply(&self, related_id: &SampleIdentity) -> DdsRpcResult<Option<Sample<TRep>>> {
         let qc = self.create_correlation_condition(related_id)?;
-        let samples = self.reply_reader.take_w_condition(1, qc)?;
+        let samples = self.reader()?.take_w_condition(1, qc)?;
         Ok(samples.into_iter().next())
     }
 
     pub fn take_replies(&self, max_count: i32) -> DdsRpcResult<Vec<Sample<TRep>>> {
-        let samples = self.reply_reader.take(
+        let samples = self.reader()?.take(
             max_count,
             &[SampleStateKind::NOT_READ_SAMPLE_STATE],
             &[ViewStateKind::ANY_VIEW_STATE],
@@ -155,7 +161,7 @@ impl<TReq: DdsType + Clone, TRep: DdsType> Requester<TReq, TRep> {
         related_id: &SampleIdentity,
     ) -> DdsRpcResult<Vec<Sample<TRep>>> {
         let qc = self.create_correlation_condition(related_id)?;
-        let samples = self.reply_reader.take_w_condition(max_count, qc)?;
+        let samples = self.reader()?.take_w_condition(max_count, qc)?;
         Ok(samples)
     }
 
@@ -163,7 +169,7 @@ impl<TReq: DdsType + Clone, TRep: DdsType> Requester<TReq, TRep> {
         &self,
         related_id: &SampleIdentity,
     ) -> DdsRpcResult<QueryCondition> {
-        let qc = self.reply_reader.create_querycondition(
+        let qc = self.reader()?.create_querycondition(
             &[SampleStateKind::NOT_READ_SAMPLE_STATE],
             &[ViewStateKind::ANY_VIEW_STATE],
             &[InstanceStateKind::ALIVE_INSTANCE_STATE],
@@ -179,17 +185,25 @@ impl<TReq: DdsType + Clone, TRep: DdsType> Requester<TReq, TRep> {
         Ok(qc)
     }
 
-    pub fn get_request_datawriter(&self) -> &DataWriter<TReq> {
-        &self.request_writer
+    pub fn get_request_datawriter(&self) -> DdsRpcResult<&DataWriter<TReq>> {
+        self.writer()
     }
 
-    pub fn get_reply_datareader(&self) -> &DataReader<TRep> {
-        &self.reply_reader
+    pub fn get_reply_datareader(&self) -> DdsRpcResult<&DataReader<TRep>> {
+        self.reader()
     }
 }
 
 impl<TReq: DdsType + Clone, TRep: DdsType> RpcEntity for Requester<TReq, TRep> {
     fn close(&mut self) -> DdsRpcResult<()> {
+        if let Some(writer) = self.request_writer.take() {
+            let publisher = writer.get_publisher()?;
+            publisher.delete_datawriter(writer)?;
+        }
+        if let Some(reader) = self.reply_reader.take() {
+            let subscriber = reader.get_subscriber()?;
+            subscriber.delete_datareader(reader)?;
+        }
         self.closed = true;
         Ok(())
     }
@@ -216,7 +230,7 @@ impl<TReq: DdsType + Clone, TRep: DdsType> ServiceProxy for Requester<TReq, TRep
 
     fn wait_for_service(&self) -> DdsRpcResult<()> {
         // Basic discovery: wait until request_writer has at least one matched subscription
-        let mut condition = self.request_writer.get_statuscondition()?;
+        let mut condition = self.writer()?.get_statuscondition()?;
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED)?;
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition)?;
@@ -225,7 +239,7 @@ impl<TReq: DdsType + Clone, TRep: DdsType> ServiceProxy for Requester<TReq, TRep
     }
 
     fn wait_for_service_timeout(&self, timeout: Duration) -> DdsRpcResult<()> {
-        let mut condition = self.request_writer.get_statuscondition()?;
+        let mut condition = self.writer()?.get_statuscondition()?;
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED)?;
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition)?;
