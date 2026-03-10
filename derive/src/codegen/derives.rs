@@ -119,6 +119,10 @@ pub fn generate_additional_derives(
         }
     }
 
+    if config.no_additional_derives {
+        return quote! {};
+    }
+
     let debug_fields = generate_debug_fields(input);
     let clone_fields = generate_clone_fields(input);
     let eq_fields = generate_eq_fields(input);
