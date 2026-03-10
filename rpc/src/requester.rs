@@ -114,29 +114,38 @@ impl<TReq: DdsType + Clone + RpcRequest, TRep: DdsType> Requester<TReq, TRep> {
     /// Send a request. The middleware fills in `RequestHeader.requestId`
     /// before writing, and returns it for reply correlation. (7.8.1)
     pub fn send_request(&self, data: &mut TReq) -> DdsRpcResult<SampleIdentity> {
-        // Bind instance name if bound
         if let Some(name) = &self.bound_instance {
             data.header_mut().instance_name = name.clone();
         }
         let writer = self.writer()?;
-        let (guid, seq) = writer.write_and_obtain_sample_identity(data, InstanceHandle::NIL)?;
-        let identity = SampleIdentity { writer_guid: guid, sequence_number: seq.into() };
-        data.header_mut().request_id = identity;
-        Ok(identity)
+        let (guid, seq) = writer.write_and_obtain_sample_identity(
+            data,
+            InstanceHandle::NIL,
+            |data, guid, seq| {
+                data.header_mut().request_id =
+                    SampleIdentity { writer_guid: guid, sequence_number: seq.into() };
+            },
+        )?;
+        Ok(SampleIdentity { writer_guid: guid, sequence_number: seq.into() })
     }
 
     pub fn receive_reply(&self, timeout: Duration) -> DdsRpcResult<Sample<TRep>> {
         let reader = self.reader()?;
         let start = std::time::Instant::now();
         loop {
-            let samples = reader.take(
+            match reader.take(
                 1,
                 &[SampleStateKind::NOT_READ_SAMPLE_STATE],
                 &[ViewStateKind::ANY_VIEW_STATE],
                 &[InstanceStateKind::ALIVE_INSTANCE_STATE],
-            )?;
-            if let Some(sample) = samples.into_iter().next() {
-                return Ok(sample);
+            ) {
+                Ok(samples) => {
+                    if let Some(sample) = samples.into_iter().next() {
+                        return Ok(sample);
+                    }
+                }
+                Err(DdsError::NoData) => {}
+                Err(e) => return Err(e.into()),
             }
             if start.elapsed() >= timeout {
                 return Err(DdsRpcError::Timeout);

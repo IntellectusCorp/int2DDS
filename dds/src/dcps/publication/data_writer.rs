@@ -716,15 +716,95 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
     }
 
     /// Write data and return the SampleIdentity (writer GUID + sequence number).
+    /// `on_identity_assigned` is called with the allocated identity before serialization,
+    /// allowing the caller to embed it into the data (e.g. RequestHeader.request_id). (7.8.1)
     /// Used by DDS-RPC for request-reply correlation.
     pub fn write_and_obtain_sample_identity(
         &self,
-        data: &Foo,
+        data: &mut Foo,
         handle: InstanceHandle,
+        on_identity_assigned: impl FnOnce(&mut Foo, Guid, SequenceNumber),
     ) -> DdsResult<(Guid, SequenceNumber)> {
+        self.is_enabled()?;
         let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
-        let seq = self.write_w_timestamp_inner(data, handle, timestamp)?;
-        Ok((self.guid, seq))
+        if timestamp.is_infinite() || timestamp.sec < 0 || !timestamp.is_valid() {
+            return Err(DdsError::BadParameter);
+        }
+
+        let format = {
+            let qos = self.qos.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            let extensibility = self.type_support.get_extensibility_kind();
+            Self::resolve_serialization_format(&qos.data_representation.value, extensibility)?
+        };
+
+        let mut instance_handle = InstanceHandle::NIL;
+        let mut is_new_instance = false;
+
+        if self.type_support.is_compute_key_provided() {
+            let serialized_key = self.type_support.serialize_key(data as &dyn Any)?;
+
+            let existing_handle = {
+                let key_instances =
+                    self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+                key_instances.get(&serialized_key).copied()
+            };
+
+            instance_handle = if let Some(handle) = existing_handle {
+                handle
+            } else {
+                let computed_handle = self.type_support.compute_key(data as &dyn Any);
+                {
+                    let mut instances =
+                        self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+                    instances.insert(
+                        computed_handle,
+                        (serialized_key.clone(), timestamp, InstanceState::Registered),
+                    );
+                }
+                {
+                    let mut key_instances =
+                        self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+                    key_instances.insert(serialized_key, computed_handle);
+                }
+                is_new_instance = true;
+                computed_handle
+            };
+        }
+
+        if !handle.is_nil() && handle != instance_handle {
+            return Err(DdsError::PreconditionNotMet);
+        }
+
+        let monitor_guard =
+            self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        if let Some(monitor) = monitor_guard.as_ref() {
+            if is_new_instance {
+                monitor.track_instance(&instance_handle);
+            }
+            monitor.reschedule_instance(&instance_handle);
+        }
+
+        let type_support = self.type_support.clone();
+        let seq_num;
+        {
+            let rtps_writer = self.get_rtps_writer()?;
+            let change = rtps_writer.new_change_with_rpc_callback(
+                ChangeKind::Alive,
+                instance_handle,
+                Some(timestamp.into()),
+                Box::new(move |guid, seq| {
+                    on_identity_assigned(data, guid, seq);
+                    type_support.serialize(data as &dyn Any, Some(&format)).unwrap_or_default()
+                }),
+            );
+            seq_num = change.sequence_number();
+            let mut datawriter_cache =
+                self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            datawriter_cache.add_change_with_cleanup(Arc::new(change))?;
+        }
+
+        self.update_liveliness()?;
+        Ok((self.guid, seq_num))
     }
 
     // pub: needed by DDS-RPC for SampleIdentity construction
