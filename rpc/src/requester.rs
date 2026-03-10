@@ -18,22 +18,27 @@ use int2dds::dcps::subscription::query_condition::QueryCondition;
 use int2dds::dcps::subscription::sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind};
 use int2dds::dcps::topic::qos::TopicQos;
 use int2dds::dcps::topic::type_support::DdsType;
+use int2dds::serialize::cdr::{CdrDeserialize, CdrSerialize, XcdrDeserialize, XcdrSerialize};
 
 use crate::entity::{RpcEntity, ServiceProxy};
 use crate::error::{DdsRpcError, DdsRpcResult};
 use crate::params::RequesterParams;
 use crate::sample::Sample;
 use crate::topic_name::TopicNameConfig;
-use crate::types::{InstanceName, RpcRequest, SampleIdentity};
+use crate::types::{InstanceName, Request, SampleIdentity};
 
 pub struct Requester<TReq, TRep> {
-    request_writer: Option<DataWriter<TReq>>,
-    reply_reader: Option<DataReader<TRep>>,
+    request_writer: Option<DataWriter<Request<TReq>>>,
+    reply_reader: Option<DataReader<crate::types::Reply<TRep>>>,
     bound_instance: Option<InstanceName>,
     closed: bool,
 }
 
-impl<TReq: DdsType + Clone + RpcRequest, TRep: DdsType> Requester<TReq, TRep> {
+impl<TReq, TRep> Requester<TReq, TRep>
+where
+    TReq: DdsType + Clone + CdrSerialize + CdrDeserialize + XcdrSerialize + XcdrDeserialize,
+    TRep: DdsType + CdrSerialize + CdrDeserialize + XcdrSerialize + XcdrDeserialize,
+{
     pub fn new(params: RequesterParams) -> DdsRpcResult<Self> {
         let topic_config = TopicNameConfig {
             interface_name: None, // request-reply style: no interface name (7.4.1)
@@ -45,17 +50,17 @@ impl<TReq: DdsType + Clone + RpcRequest, TRep: DdsType> Requester<TReq, TRep> {
         let request_topic_name = topic_config.request_topic();
         let reply_topic_name = topic_config.reply_topic();
 
-        let request_topic = params.participant.create_topic::<TReq>(
+        let request_topic = params.participant.create_topic::<Request<TReq>>(
             &request_topic_name,
-            &TReq::get_type_name(),
+            &Request::<TReq>::get_type_name(),
             TopicQos::default(),
             None,
             StatusMask::default(),
         )?;
 
-        let reply_topic = params.participant.create_topic::<TRep>(
+        let reply_topic = params.participant.create_topic::<crate::types::Reply<TRep>>(
             &reply_topic_name,
-            &TRep::get_type_name(),
+            &crate::types::Reply::<TRep>::get_type_name(),
             TopicQos::default(),
             None,
             StatusMask::default(),
@@ -71,7 +76,7 @@ impl<TReq: DdsType + Clone + RpcRequest, TRep: DdsType> Requester<TReq, TRep> {
         };
 
         let writer_qos = params.datawriter_qos.unwrap_or_else(rpc_datawriter_qos);
-        let request_writer = publisher.create_datawriter::<TReq>(
+        let request_writer = publisher.create_datawriter::<Request<TReq>>(
             &request_topic,
             writer_qos,
             None,
@@ -88,7 +93,7 @@ impl<TReq: DdsType + Clone + RpcRequest, TRep: DdsType> Requester<TReq, TRep> {
         };
 
         let reader_qos = params.datareader_qos.unwrap_or_else(rpc_datareader_qos);
-        let reply_reader = subscriber.create_datareader::<TRep>(
+        let reply_reader = subscriber.create_datareader::<crate::types::Reply<TRep>>(
             &reply_topic,
             reader_qos,
             None,
@@ -103,33 +108,38 @@ impl<TReq: DdsType + Clone + RpcRequest, TRep: DdsType> Requester<TReq, TRep> {
         })
     }
 
-    fn writer(&self) -> DdsRpcResult<&DataWriter<TReq>> {
+    fn writer(&self) -> DdsRpcResult<&DataWriter<Request<TReq>>> {
         self.request_writer.as_ref().ok_or(DdsError::AlreadyDeleted.into())
     }
 
-    fn reader(&self) -> DdsRpcResult<&DataReader<TRep>> {
+    fn reader(&self) -> DdsRpcResult<&DataReader<crate::types::Reply<TRep>>> {
         self.reply_reader.as_ref().ok_or(DdsError::AlreadyDeleted.into())
     }
 
     /// Send a request. The middleware fills in `RequestHeader.requestId`
     /// before writing, and returns it for reply correlation. (7.8.1)
-    pub fn send_request(&self, data: &mut TReq) -> DdsRpcResult<SampleIdentity> {
+    pub fn send_request(&self, data: &TReq) -> DdsRpcResult<SampleIdentity> {
+        let mut request =
+            Request { header: crate::types::RequestHeader::default(), data: data.clone() };
         if let Some(name) = &self.bound_instance {
-            data.header_mut().instance_name = name.clone();
+            request.header.instance_name = name.clone();
         }
         let writer = self.writer()?;
         let (guid, seq) = writer.write_and_obtain_sample_identity(
-            data,
+            &mut request,
             InstanceHandle::NIL,
-            |data, guid, seq| {
-                data.header_mut().request_id =
+            |req, guid, seq| {
+                req.header.request_id =
                     SampleIdentity { writer_guid: guid, sequence_number: seq.into() };
             },
         )?;
         Ok(SampleIdentity { writer_guid: guid, sequence_number: seq.into() })
     }
 
-    pub fn receive_reply(&self, timeout: Duration) -> DdsRpcResult<Sample<TRep>> {
+    pub fn receive_reply(
+        &self,
+        timeout: Duration,
+    ) -> DdsRpcResult<Sample<crate::types::Reply<TRep>>> {
         let reader = self.reader()?;
         let start = std::time::Instant::now();
         loop {
@@ -154,13 +164,19 @@ impl<TReq: DdsType + Clone + RpcRequest, TRep: DdsType> Requester<TReq, TRep> {
         }
     }
 
-    pub fn take_reply(&self, related_id: &SampleIdentity) -> DdsRpcResult<Option<Sample<TRep>>> {
+    pub fn take_reply(
+        &self,
+        related_id: &SampleIdentity,
+    ) -> DdsRpcResult<Option<Sample<crate::types::Reply<TRep>>>> {
         let qc = self.create_correlation_condition(related_id)?;
         let samples = self.reader()?.take_w_condition(1, qc)?;
         Ok(samples.into_iter().next())
     }
 
-    pub fn take_replies(&self, max_count: i32) -> DdsRpcResult<Vec<Sample<TRep>>> {
+    pub fn take_replies(
+        &self,
+        max_count: i32,
+    ) -> DdsRpcResult<Vec<Sample<crate::types::Reply<TRep>>>> {
         let samples = self.reader()?.take(
             max_count,
             &[SampleStateKind::NOT_READ_SAMPLE_STATE],
@@ -174,7 +190,7 @@ impl<TReq: DdsType + Clone + RpcRequest, TRep: DdsType> Requester<TReq, TRep> {
         &self,
         max_count: i32,
         related_id: &SampleIdentity,
-    ) -> DdsRpcResult<Vec<Sample<TRep>>> {
+    ) -> DdsRpcResult<Vec<Sample<crate::types::Reply<TRep>>>> {
         let qc = self.create_correlation_condition(related_id)?;
         let samples = self.reader()?.take_w_condition(max_count, qc)?;
         Ok(samples)
@@ -200,16 +216,20 @@ impl<TReq: DdsType + Clone + RpcRequest, TRep: DdsType> Requester<TReq, TRep> {
         Ok(qc)
     }
 
-    pub fn get_request_datawriter(&self) -> DdsRpcResult<&DataWriter<TReq>> {
+    pub fn get_request_datawriter(&self) -> DdsRpcResult<&DataWriter<Request<TReq>>> {
         self.writer()
     }
 
-    pub fn get_reply_datareader(&self) -> DdsRpcResult<&DataReader<TRep>> {
+    pub fn get_reply_datareader(&self) -> DdsRpcResult<&DataReader<crate::types::Reply<TRep>>> {
         self.reader()
     }
 }
 
-impl<TReq: DdsType + Clone + RpcRequest, TRep: DdsType> RpcEntity for Requester<TReq, TRep> {
+impl<TReq, TRep> RpcEntity for Requester<TReq, TRep>
+where
+    TReq: DdsType + Clone + CdrSerialize + CdrDeserialize + XcdrSerialize + XcdrDeserialize,
+    TRep: DdsType + CdrSerialize + CdrDeserialize + XcdrSerialize + XcdrDeserialize,
+{
     fn close(&mut self) -> DdsRpcResult<()> {
         if let Some(writer) = self.request_writer.take() {
             let publisher = writer.get_publisher()?;
@@ -228,7 +248,11 @@ impl<TReq: DdsType + Clone + RpcRequest, TRep: DdsType> RpcEntity for Requester<
     }
 }
 
-impl<TReq: DdsType + Clone + RpcRequest, TRep: DdsType> ServiceProxy for Requester<TReq, TRep> {
+impl<TReq, TRep> ServiceProxy for Requester<TReq, TRep>
+where
+    TReq: DdsType + Clone + CdrSerialize + CdrDeserialize + XcdrSerialize + XcdrDeserialize,
+    TRep: DdsType + CdrSerialize + CdrDeserialize + XcdrSerialize + XcdrDeserialize,
+{
     fn bind_instance(&mut self, instance_name: InstanceName) -> DdsRpcResult<()> {
         self.bound_instance = Some(instance_name);
         Ok(())
