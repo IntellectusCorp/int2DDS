@@ -154,7 +154,7 @@ pub trait TypeSupport: Send + Sync + 'static {
     }
 }
 
-/// Autoref specialization helper for dot-notation nested field access (Annex B).
+/// Autoref specialization helper for dot-notation nested field access.
 ///
 /// Allows derive macro generated code to delegate field access into nested struct
 /// fields without knowing at macro expansion time whether a field type implements
