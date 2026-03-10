@@ -120,7 +120,7 @@ impl<TReq: DdsType + Clone + RpcRequest, TRep: DdsType> Requester<TReq, TRep> {
         }
         let writer = self.writer()?;
         let (guid, seq) = writer.write_and_obtain_sample_identity(data, InstanceHandle::NIL)?;
-        let identity = SampleIdentity { writer_guid: guid, sequence_number: seq };
+        let identity = SampleIdentity { writer_guid: guid, sequence_number: seq.into() };
         data.header_mut().request_id = identity;
         Ok(identity)
     }

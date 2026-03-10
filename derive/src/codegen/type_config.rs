@@ -15,6 +15,8 @@ pub struct DdsTypeConfig {
     pub extensibility: Option<ExtensibilityKind>,
     pub no_default: bool,
     pub no_partialeq: bool,
+    pub no_additional_derives: bool,
+    pub skip_field_accessor: bool,
 }
 
 pub fn parse_dds_type_attributes(input: &DeriveInput) -> DdsTypeConfig {
@@ -22,6 +24,8 @@ pub fn parse_dds_type_attributes(input: &DeriveInput) -> DdsTypeConfig {
     let mut extensibility: Option<ExtensibilityKind> = None;
     let mut no_default = false;
     let mut no_partialeq = false;
+    let mut no_additional_derives = false;
+    let mut skip_field_accessor = false;
 
     // Parse #[dds_type(...)] attributes
     for attr in &input.attrs {
@@ -55,6 +59,10 @@ pub fn parse_dds_type_attributes(input: &DeriveInput) -> DdsTypeConfig {
                     no_default = true;
                 } else if meta.path.is_ident("no_partialeq") {
                     no_partialeq = true;
+                } else if meta.path.is_ident("no_additional_derives") {
+                    no_additional_derives = true;
+                } else if meta.path.is_ident("skip_field_accessor") {
+                    skip_field_accessor = true;
                 }
                 Ok(())
             });
@@ -73,7 +81,14 @@ pub fn parse_dds_type_attributes(input: &DeriveInput) -> DdsTypeConfig {
         quote! { int2dds }
     };
 
-    DdsTypeConfig { crate_path: crate_path_tokens, extensibility, no_default, no_partialeq }
+    DdsTypeConfig {
+        crate_path: crate_path_tokens,
+        extensibility,
+        no_default,
+        no_partialeq,
+        no_additional_derives,
+        skip_field_accessor,
+    }
 }
 
 /// Generate extensibility kind tokens from ExtensibilityKind enum

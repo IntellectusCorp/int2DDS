@@ -99,17 +99,23 @@ pub fn derive_struct_impl(
         type_config.extensibility,
     );
 
-    let field_accessor_impl = quote! {
-        impl #crate_path::dcps::topic::type_support::FieldAccessor for #type_support_name {
-            #field_access_impl
-        }
-    };
-
-    let dds_type_impl = quote! {
-        impl #crate_path::dcps::topic::type_support::DdsType for #name {
-            type TypeSupport = #type_support_name;
-            type FieldAccessor = #type_support_name;
-        }
+    let (field_accessor_impl, dds_type_impl) = if type_config.skip_field_accessor {
+        // User will manually impl DdsType with custom FieldAccessor
+        (quote! {}, quote! {})
+    } else {
+        (
+            quote! {
+                impl #crate_path::dcps::topic::type_support::FieldAccessor for #type_support_name {
+                    #field_access_impl
+                }
+            },
+            quote! {
+                impl #crate_path::dcps::topic::type_support::DdsType for #name {
+                    type TypeSupport = #type_support_name;
+                    type FieldAccessor = #type_support_name;
+                }
+            },
+        )
     };
 
     // Generate CdrSerialize and CdrDeserialize trait implementations
