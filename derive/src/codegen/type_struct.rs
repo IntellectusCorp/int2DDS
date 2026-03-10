@@ -536,6 +536,7 @@ fn generate_field_access_methods(
 
     let helper_fn = quote_field_to_parameter_conversion(crate_path);
 
+    // Direct field access (no dot) — leaf value via any_to_parameter
     let field_matches: Vec<_> = fields
         .iter()
         .map(|field| {
@@ -550,14 +551,59 @@ fn generate_field_access_methods(
         })
         .collect();
 
+    // Nested field access (dot notation) — delegate to nested type's TypeSupport using autoref specialization.
+    // If the field type implements DdsType, the inherent method on NestedAccessor<T>
+    // is resolved. Otherwise, the fallback trait on &NestedAccessor<T> returns false/error.
+    let nested_get_matches: Vec<_> = fields
+        .iter()
+        .map(|field| {
+            let field_name = field.ident.as_ref().unwrap();
+            let field_name_str = field_name.to_string();
+            let field_type = &field.ty;
+
+            quote! {
+                #field_name_str => {
+                    use #crate_path::dcps::topic::type_support::nested_access::*;
+                    let accessor = NestedAccessor::<#field_type>(core::marker::PhantomData);
+                    accessor.nested_get_field_value(&typed_data.#field_name as &dyn std::any::Any, rest)
+                },
+            }
+        })
+        .collect();
+
+    let nested_has_matches: Vec<_> = fields
+        .iter()
+        .map(|field| {
+            let field_name_str = field.ident.as_ref().unwrap().to_string();
+            let field_type = &field.ty;
+
+            quote! {
+                #field_name_str => {
+                    use #crate_path::dcps::topic::type_support::nested_access::*;
+                    let accessor = NestedAccessor::<#field_type>(core::marker::PhantomData);
+                    accessor.nested_has_field(rest)
+                },
+            }
+        })
+        .collect();
+
     quote! {
         fn get_field_value(&self, data: &dyn std::any::Any, field_path: &str) -> #crate_path::dcps::core::error::DdsResult<#crate_path::topic::sql::ast::Parameter> {
             #helper_fn
 
             if let Some(typed_data) = data.downcast_ref::<#name>() {
-                match field_path {
-                    #(#field_matches)*
-                    _ => Err(#crate_path::dcps::core::error::DdsError::Error(format!("Field '{}' not found", field_path))),
+                if let Some((first, rest)) = field_path.split_once('.') {
+                    match first {
+                        #(#nested_get_matches)*
+                        _ => Err(#crate_path::dcps::core::error::DdsError::Error(
+                            format!("Field '{}' not found or not a nested type", first)
+                        )),
+                    }
+                } else {
+                    match field_path {
+                        #(#field_matches)*
+                        _ => Err(#crate_path::dcps::core::error::DdsError::Error(format!("Field '{}' not found", field_path))),
+                    }
                 }
             } else {
                 Err(#crate_path::dcps::core::error::DdsError::BadParameter)
@@ -565,7 +611,14 @@ fn generate_field_access_methods(
         }
 
         fn has_field(&self, field_path: &str) -> bool {
-            matches!(field_path, #(#field_names)|*)
+            if let Some((first, rest)) = field_path.split_once('.') {
+                match first {
+                    #(#nested_has_matches)*
+                    _ => false,
+                }
+            } else {
+                matches!(field_path, #(#field_names)|*)
+            }
         }
     }
 }
