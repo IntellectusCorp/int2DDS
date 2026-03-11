@@ -3,7 +3,7 @@
 //! Converts the first 4 bytes of an MD5 hash into a little-endian 32-bit integer.
 //! Used to generate hash identifiers for operation names, exception type names, etc.
 
-pub(crate) fn rpc_hash(name: &str) -> i32 {
+pub(crate) fn _rpc_hash(name: &str) -> i32 {
     let digest = md5::compute(name.as_bytes());
     let bytes = digest.0;
     i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
