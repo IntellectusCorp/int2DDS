@@ -5,6 +5,37 @@
 use crate::naming;
 use crate::types::*;
 
+/// Compute member ID hash from a name string (same algorithm as derive crate).
+/// MD5(name) first 4 bytes as little-endian u32, masked to 28 bits.
+fn compute_member_id_hash(name: &str) -> u32 {
+    let digest = md5::compute(name.as_bytes());
+    let bytes: [u8; 4] = [digest[0], digest[1], digest[2], digest[3]];
+    let raw = u32::from_le_bytes(bytes);
+    raw & 0x0FFF_FFFF
+}
+
+/// Resolve member ID considering @id, @hashid, and @autoid annotations.
+fn resolve_member_id(m: &ResolvedMember, index: usize, autoid: &Option<AutoIdKind>) -> u32 {
+    // Explicit @id takes highest priority
+    if let Some(id) = m.member_id {
+        return id;
+    }
+    // @hashid takes next priority
+    if let Some(ref hashid) = m.hashid {
+        let name = match hashid {
+            Some(custom) => custom.as_str(),
+            None => &m.name,
+        };
+        return compute_member_id_hash(name);
+    }
+    // @autoid(Hash) at struct level
+    if matches!(autoid, Some(AutoIdKind::Hash)) {
+        return compute_member_id_hash(&m.name);
+    }
+    // Default: sequential index
+    index as u32
+}
+
 /// String representation mode for C code generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StringMode {
@@ -73,15 +104,79 @@ impl<'a> CGen<'a> {
             self.raw("\n");
         }
 
-        // Unions
-        for u in &self.model.unions {
-            self.emit_union_section(u);
+        // Collect union names for dependency detection
+        let union_names: std::collections::HashSet<&str> = self
+            .model
+            .unions
+            .iter()
+            .map(|u| u.name.as_str())
+            .collect();
+
+        // Forward declarations for ALL types (structs and unions)
+        if !self.model.structs.is_empty() || !self.model.unions.is_empty() {
+            for s in &self.model.structs {
+                self.raw(&format!("typedef struct {} {};\n", s.name, s.name));
+            }
+            for u in &self.model.unions {
+                self.raw(&format!("typedef struct {} {};\n", u.name, u.name));
+            }
             self.raw("\n");
         }
 
-        // Structs with their serialize/deserialize functions
+        // Phase 1: Emit struct typedefs that do NOT reference any union type
+        //          (these may be needed as value members inside unions)
         for s in &self.model.structs {
-            self.emit_struct_section(s);
+            if !self.struct_references_any(&s, &union_names) {
+                self.emit_struct_typedef_header(s);
+            }
+        }
+
+        // Phase 2: Emit all union typedefs
+        //          (union value members of struct types are now fully defined)
+        for u in &self.model.unions {
+            self.emit_union_typedef(u);
+        }
+
+        // Phase 3: Emit remaining struct typedefs (those that reference union types)
+        for s in &self.model.structs {
+            if self.struct_references_any(&s, &union_names) {
+                self.emit_struct_typedef_header(s);
+            }
+        }
+
+        // Phase 4a: Forward-declare all _serialize_fields / _deserialize_fields
+        //           to avoid implicit declaration issues with MSVC C compiler
+        if !self.model.structs.is_empty() || !self.model.unions.is_empty() {
+            for s in &self.model.structs {
+                self.raw(&format!(
+                    "static inline void {0}_serialize_fields(Int2DdsCdrWriter *_w, const {0} *val);\n",
+                    s.name
+                ));
+                self.raw(&format!(
+                    "static inline void {0}_deserialize_fields(Int2DdsCdrReader *_r, {0} *val_out);\n",
+                    s.name
+                ));
+            }
+            for u in &self.model.unions {
+                self.raw(&format!(
+                    "static inline void {0}_serialize_fields(Int2DdsCdrWriter *_w, const {0} *val);\n",
+                    u.name
+                ));
+                self.raw(&format!(
+                    "static inline void {0}_deserialize_fields(Int2DdsCdrReader *_r, {0} *val_out);\n",
+                    u.name
+                ));
+            }
+            self.raw("\n");
+        }
+
+        // Phase 4b: Emit all function bodies
+        for u in &self.model.unions {
+            self.emit_union_functions(u);
+            self.raw("\n");
+        }
+        for s in &self.model.structs {
+            self.emit_struct_functions(s);
             self.raw("\n");
         }
 
@@ -157,12 +252,118 @@ impl<'a> CGen<'a> {
             ));
             bit_offset += f.bit_width;
         }
-        self.raw("}\n");
+        self.raw("}\n\n");
+
+        // serialize_fields: pack → write wire-type integer
+        self.raw(&format!(
+            "static inline void {}_serialize_fields(\n    Int2DdsCdrWriter *_w,\n    const {} *val)\n{{\n",
+            b.name, b.name
+        ));
+        self.raw("    Int2DdsCdrWriter w = *_w;\n");
+        let write_fn = match &*wire_type {
+            "uint8_t" => "int2dds_cdr_write_u8",
+            "uint16_t" => "int2dds_cdr_write_u16",
+            "uint32_t" => "int2dds_cdr_write_u32",
+            "uint64_t" => "int2dds_cdr_write_u64",
+            _ => unreachable!(),
+        };
+        self.raw(&format!("    {}(&w, {}_pack(val));\n", write_fn, b.name));
+        self.raw("    *_w = w;\n}\n\n");
+
+        // deserialize_fields: read wire-type integer → unpack
+        self.raw(&format!(
+            "static inline void {}_deserialize_fields(\n    Int2DdsCdrReader *_r,\n    {} *val)\n{{\n",
+            b.name, b.name
+        ));
+        self.raw("    Int2DdsCdrReader r = *_r;\n");
+        self.raw(&format!("    {} packed;\n", wire_type));
+        let read_fn = match &*wire_type {
+            "uint8_t" => "int2dds_cdr_read_u8",
+            "uint16_t" => "int2dds_cdr_read_u16",
+            "uint32_t" => "int2dds_cdr_read_u32",
+            "uint64_t" => "int2dds_cdr_read_u64",
+            _ => unreachable!(),
+        };
+        self.raw(&format!("    {}(&r, &packed);\n", read_fn));
+        self.raw(&format!("    {}_unpack(packed, val);\n", b.name));
+        self.raw("    *_r = r;\n}\n");
+    }
+
+    // ---- Helpers for dependency-ordered emission ----
+
+    /// Check if a struct references any type in the given set (by name)
+    fn struct_references_any(&self, s: &ResolvedStruct, names: &std::collections::HashSet<&str>) -> bool {
+        for m in &s.members {
+            if self.type_references_any(&m.resolved_type, names) {
+                return true;
+            }
+        }
+        if let Some(base) = &s.base_type {
+            let simple = base.rsplit("::").next().unwrap_or(base);
+            if names.contains(simple) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn type_references_any(&self, ty: &ResolvedType, names: &std::collections::HashSet<&str>) -> bool {
+        match ty {
+            ResolvedType::Struct(name) => names.contains(name.as_str()),
+            ResolvedType::Sequence { element, .. } | ResolvedType::Array { element, .. } => {
+                self.type_references_any(element, names)
+            }
+            ResolvedType::Map { key, value, .. } => {
+                self.type_references_any(key, names) || self.type_references_any(value, names)
+            }
+            _ => false,
+        }
+    }
+
+    /// Emit struct typedef + comment header (no functions)
+    fn emit_struct_typedef_header(&mut self, s: &ResolvedStruct) {
+        let ext_str = match s.extensibility {
+            Some(ExtensibilityKind::Appendable) => "APPENDABLE",
+            Some(ExtensibilityKind::Mutable) => "MUTABLE",
+            Some(ExtensibilityKind::Final) | None => "FINAL",
+        };
+        self.raw(&format!(
+            "/* ========================================================================\n * Type: {}\n * Extensibility: {}\n * ======================================================================== */\n\n",
+            s.name, ext_str
+        ));
+        self.emit_struct_typedef(s);
+        self.raw("\n");
+    }
+
+    /// Emit struct functions (serialize, deserialize, type_info, etc.)
+    fn emit_struct_functions(&mut self, s: &ResolvedStruct) {
+        // Memory management functions (only for Pointer mode)
+        if self.opts.string_mode == StringMode::Pointer {
+            self.emit_struct_init(s);
+            self.raw("\n");
+            if self.struct_needs_cleanup(s) {
+                self.emit_struct_cleanup(s);
+                self.raw("\n");
+            }
+        }
+
+        self.emit_serialize_fields_fn(s);
+        self.raw("\n");
+        self.emit_deserialize_fields_fn(s);
+        self.raw("\n");
+        self.emit_serialize_cdr(s);
+        self.raw("\n");
+        self.emit_deserialize_cdr(s);
+        self.raw("\n");
+        self.emit_serialize_key(s);
+        self.raw("\n");
+        self.emit_type_info_fn(s);
     }
 
     // ---- Union ----
 
-    fn emit_union_section(&mut self, u: &ResolvedUnion) {
+    /// Emit union typedef only (no functions)
+    fn emit_union_typedef(&mut self, u: &ResolvedUnion) {
         let disc_c = self.type_to_c_base(&u.discriminant_type);
 
         self.raw(&format!("typedef struct {} {{\n", u.name));
@@ -178,7 +379,10 @@ impl<'a> CGen<'a> {
         }
         self.raw("    } _u;\n");
         self.raw(&format!("}} {};\n\n", u.name));
+    }
 
+    /// Emit union functions (serialize_cdr, deserialize_cdr, _fields variants)
+    fn emit_union_functions(&mut self, u: &ResolvedUnion) {
         // Serialize function
         self.raw(&format!(
             "static inline size_t {}_serialize_cdr(\n    const {} *val,\n    uint8_t *buf,\n    size_t capacity,\n    bool xcdr2)\n{{\n",
@@ -230,7 +434,57 @@ impl<'a> CGen<'a> {
             self.raw("        break;\n");
         }
         self.raw("    }\n");
-        self.raw("    return int2dds_cdr_reader_error(&r) == INT2DDS_CDR_OK;\n}\n");
+        self.raw("    return int2dds_cdr_reader_error(&r) == INT2DDS_CDR_OK;\n}\n\n");
+
+        // serialize_fields (for use as nested member in structs)
+        self.raw(&format!(
+            "static inline void {}_serialize_fields(\n    Int2DdsCdrWriter *_w,\n    const {} *val)\n{{\n",
+            u.name, u.name
+        ));
+        self.raw("    Int2DdsCdrWriter w = *_w;\n");
+        self.emit_write_field_indented(&u.discriminant_type, "val->_d", "    ");
+        self.raw("    switch (val->_d) {\n");
+        for case in &u.cases {
+            for label in &case.labels {
+                self.raw(&format!("    case {}:\n", self.union_label_c(label)));
+            }
+            let accessor = format!("val->_u.{}", case.member.name);
+            self.emit_write_field_indented(&case.member.resolved_type, &accessor, "        ");
+            self.raw("        break;\n");
+        }
+        if let Some(dc) = &u.default_case {
+            self.raw("    default:\n");
+            let accessor = format!("val->_u.{}", dc.name);
+            self.emit_write_field_indented(&dc.resolved_type, &accessor, "        ");
+            self.raw("        break;\n");
+        }
+        self.raw("    }\n");
+        self.raw("    *_w = w;\n}\n\n");
+
+        // deserialize_fields (for use as nested member in structs)
+        self.raw(&format!(
+            "static inline void {}_deserialize_fields(\n    Int2DdsCdrReader *_r,\n    {} *val_out)\n{{\n",
+            u.name, u.name
+        ));
+        self.raw("    Int2DdsCdrReader r = *_r;\n");
+        self.emit_read_field_indented(&u.discriminant_type, "val_out->_d", "    ");
+        self.raw("    switch (val_out->_d) {\n");
+        for case in &u.cases {
+            for label in &case.labels {
+                self.raw(&format!("    case {}:\n", self.union_label_c(label)));
+            }
+            let accessor = format!("val_out->_u.{}", case.member.name);
+            self.emit_read_field_indented(&case.member.resolved_type, &accessor, "        ");
+            self.raw("        break;\n");
+        }
+        if let Some(dc) = &u.default_case {
+            self.raw("    default:\n");
+            let accessor = format!("val_out->_u.{}", dc.name);
+            self.emit_read_field_indented(&dc.resolved_type, &accessor, "        ");
+            self.raw("        break;\n");
+        }
+        self.raw("    }\n");
+        self.raw("    *_r = r;\n}\n");
     }
 
     fn union_label_c(&self, label: &ResolvedUnionLabel) -> String {
@@ -243,55 +497,7 @@ impl<'a> CGen<'a> {
 
     // ---- Struct ----
 
-    fn emit_struct_section(&mut self, s: &ResolvedStruct) {
-        let ext_str = match s.extensibility {
-            ExtensibilityKind::Final => "FINAL",
-            ExtensibilityKind::Appendable => "APPENDABLE",
-            ExtensibilityKind::Mutable => "MUTABLE",
-        };
-        self.raw(&format!(
-            "/* ========================================================================\n * Type: {}\n * Extensibility: {}\n * ======================================================================== */\n\n",
-            s.name, ext_str
-        ));
 
-        // Struct definition
-        self.emit_struct_typedef(s);
-        self.raw("\n");
-
-        // Memory management functions (only for Pointer mode)
-        if self.opts.string_mode == StringMode::Pointer {
-            self.emit_struct_init(s);
-            self.raw("\n");
-
-            // Only emit cleanup if struct has strings
-            if self.struct_needs_cleanup(s) {
-                self.emit_struct_cleanup(s);
-                self.raw("\n");
-            }
-        }
-
-        // serialize_fields / deserialize_fields (for nested struct support)
-        self.emit_serialize_fields_fn(s);
-        self.raw("\n");
-
-        self.emit_deserialize_fields_fn(s);
-        self.raw("\n");
-
-        // serialize_cdr
-        self.emit_serialize_cdr(s);
-        self.raw("\n");
-
-        // deserialize_cdr
-        self.emit_deserialize_cdr(s);
-        self.raw("\n");
-
-        // serialize_key
-        self.emit_serialize_key(s);
-        self.raw("\n");
-
-        // type_info builder (for DDS-XTypes discovery)
-        self.emit_type_info_fn(s);
-    }
 
     fn emit_struct_typedef(&mut self, s: &ResolvedStruct) {
         self.raw(&format!("typedef struct {} {{\n", s.name));
@@ -309,11 +515,36 @@ impl<'a> CGen<'a> {
 
     fn field_declaration(&self, m: &ResolvedMember) -> String {
         if m.is_external {
-            // External fields are pointers in C
-            let base = self.type_to_c_base(&m.resolved_type);
-            format!("{}* {}", base, m.name)
+            match &m.resolved_type {
+                // External sequences need proper struct type (not void*)
+                ResolvedType::Sequence { .. } => {
+                    self.type_to_c_declaration(&m.resolved_type, &m.name)
+                }
+                // Other external fields are pointers in C
+                _ => {
+                    let base = self.type_to_c_base(&m.resolved_type);
+                    format!("{}* {}", base, m.name)
+                }
+            }
         } else {
             self.type_to_c_declaration(&m.resolved_type, &m.name)
+        }
+    }
+
+    /// Build the accessor expression for a struct member.
+    /// External pointer fields (except strings and sequences) are dereferenced
+    /// so that the generic emit_write_field / emit_read_field code produces
+    /// correct C (e.g. `(*val->ext_value)` instead of `val->ext_value`).
+    fn member_accessor(&self, m: &ResolvedMember, prefix: &str) -> String {
+        if m.is_external
+            && !matches!(
+                m.resolved_type,
+                ResolvedType::String { .. } | ResolvedType::Sequence { .. }
+            )
+        {
+            format!("(*{}->{})", prefix, m.name)
+        } else {
+            format!("{}->{}", prefix, m.name)
         }
     }
 
@@ -371,19 +602,9 @@ impl<'a> CGen<'a> {
                 format!("{} {}[{}]", elem_c, name, size)
             }
             ResolvedType::Map { key, value, bound } => {
-                let key_c = self.type_to_c_base(key);
-                let val_c = self.type_to_c_base(value);
-                if let Some(max) = bound {
-                    format!(
-                        "struct {{ {} keys[{}]; {} values[{}]; uint32_t length; }} {}",
-                        key_c, max, val_c, max, name
-                    )
-                } else {
-                    format!(
-                        "struct {{ {}* keys; {}* values; uint32_t length; }} {}",
-                        key_c, val_c, name
-                    )
-                }
+                let key_part = self.map_member_decl(key, "keys", *bound);
+                let val_part = self.map_member_decl(value, "values", *bound);
+                format!("struct {{ {} {} uint32_t length; }} {}", key_part, val_part, name)
             }
             ResolvedType::Struct(type_name) | ResolvedType::Enum(type_name) | ResolvedType::Bitmask(type_name) => {
                 let simple = type_name.rsplit("::").next().unwrap_or(type_name);
@@ -423,6 +644,28 @@ impl<'a> CGen<'a> {
         }
     }
 
+    /// Generate a map key or value member declaration.
+    /// Handles string types specially (like sequence<string>) to produce
+    /// `char keys[N][str_size]` (bounded) or `char (*keys)[str_size]` (unbounded).
+    fn map_member_decl(&self, ty: &ResolvedType, name: &str, bound: Option<u32>) -> String {
+        if let ResolvedType::String { bound: str_bound } = ty {
+            if self.opts.string_mode == StringMode::FixedArray {
+                let str_size = str_bound.unwrap_or(self.opts.default_string_bound) + 1;
+                return if let Some(max) = bound {
+                    format!("char {}[{}][{}];", name, max, str_size)
+                } else {
+                    format!("char (*{})[{}];", name, str_size)
+                };
+            }
+        }
+        let base = self.type_to_c_base(ty);
+        if let Some(max) = bound {
+            format!("{} {}[{}];", base, name, max)
+        } else {
+            format!("{}* {};", base, name)
+        }
+    }
+
     // ---- Fields serialize/deserialize (for nested struct support) ----
     //
     // These standalone functions allow a parent struct to serialize/deserialize
@@ -438,10 +681,10 @@ impl<'a> CGen<'a> {
         self.raw("    Int2DdsCdrWriter w = *_w;\n");
 
         match s.extensibility {
-            ExtensibilityKind::Final => {
+            Some(ExtensibilityKind::Final) | None => {
                 self.emit_serialize_fields(s, "val");
             }
-            ExtensibilityKind::Appendable => {
+            Some(ExtensibilityKind::Appendable) => {
                 // Conditionally write DHEADER based on writer mode (XCDR2 vs XCDR1)
                 self.raw("    size_t dh = 0;\n");
                 self.raw("    if (w.xcdr2) {\n");
@@ -452,7 +695,7 @@ impl<'a> CGen<'a> {
                 self.raw("        int2dds_cdr_write_dheader_finalize(&w, dh);\n");
                 self.raw("    }\n");
             }
-            ExtensibilityKind::Mutable => {
+            Some(ExtensibilityKind::Mutable) => {
                 self.raw("    size_t dh;\n");
                 self.raw("    int2dds_cdr_write_dheader_begin(&w, &dh);\n");
                 self.emit_serialize_fields_mutable(s, "val");
@@ -472,10 +715,10 @@ impl<'a> CGen<'a> {
         self.raw("    Int2DdsCdrReader r = *_r;\n");
 
         match s.extensibility {
-            ExtensibilityKind::Final => {
+            Some(ExtensibilityKind::Final) | None => {
                 self.emit_deserialize_fields(s, "val_out");
             }
-            ExtensibilityKind::Appendable => {
+            Some(ExtensibilityKind::Appendable) => {
                 // Conditionally read DHEADER based on reader mode (XCDR2 vs XCDR1)
                 self.raw("    uint32_t obj_size = 0;\n    size_t start_pos = 0;\n");
                 self.raw("    if (r.xcdr2) {\n");
@@ -486,7 +729,7 @@ impl<'a> CGen<'a> {
                 self.raw("        int2dds_cdr_read_dheader_end(&r, obj_size, start_pos);\n");
                 self.raw("    }\n");
             }
-            ExtensibilityKind::Mutable => {
+            Some(ExtensibilityKind::Mutable) => {
                 self.raw("    uint32_t obj_size;\n    size_t start_pos;\n");
                 self.raw("    int2dds_cdr_read_dheader(&r, &obj_size, &start_pos);\n");
                 self.raw("    memset(val_out, 0, sizeof(*val_out));\n");
@@ -502,9 +745,9 @@ impl<'a> CGen<'a> {
 
     fn emit_serialize_cdr(&mut self, s: &ResolvedStruct) {
         let ext_int = match s.extensibility {
-            ExtensibilityKind::Final => "INT2DDS_CDR_FINAL",
-            ExtensibilityKind::Appendable => "INT2DDS_CDR_APPENDABLE",
-            ExtensibilityKind::Mutable => "INT2DDS_CDR_MUTABLE",
+            Some(ExtensibilityKind::Appendable) => "INT2DDS_CDR_APPENDABLE",
+            Some(ExtensibilityKind::Mutable) => "INT2DDS_CDR_MUTABLE",
+            Some(ExtensibilityKind::Final) | None => "INT2DDS_CDR_FINAL",
         };
 
         self.raw(&format!(
@@ -517,10 +760,10 @@ impl<'a> CGen<'a> {
         self.raw(&format!("    int2dds_cdr_write_encapsulation(&w, {});\n", ext_int));
 
         match s.extensibility {
-            ExtensibilityKind::Final => {
+            Some(ExtensibilityKind::Final) | None => {
                 self.emit_serialize_fields(s, "val");
             }
-            ExtensibilityKind::Appendable => {
+            Some(ExtensibilityKind::Appendable) => {
                 self.raw("    size_t dh = 0;\n");
                 self.raw("    if (xcdr2) {\n");
                 self.raw("        int2dds_cdr_write_dheader_begin(&w, &dh);\n");
@@ -530,7 +773,7 @@ impl<'a> CGen<'a> {
                 self.raw("        int2dds_cdr_write_dheader_finalize(&w, dh);\n");
                 self.raw("    }\n");
             }
-            ExtensibilityKind::Mutable => {
+            Some(ExtensibilityKind::Mutable) => {
                 // Mutable always requires XCDR2 (DHEADER + EMHEADER)
                 self.raw("    size_t dh;\n");
                 self.raw("    int2dds_cdr_write_dheader_begin(&w, &dh);\n");
@@ -550,15 +793,15 @@ impl<'a> CGen<'a> {
             self.raw(&format!("    {}_serialize_fields(&w, (const {}*)&{}->parent);\n", simple, simple, prefix));
         }
         for m in &s.members {
-            let accessor = format!("{}->{}", prefix, m.name);
+            let accessor = self.member_accessor(m, prefix);
             self.emit_write_field(&m.resolved_type, &accessor);
         }
     }
 
     fn emit_serialize_fields_mutable(&mut self, s: &ResolvedStruct, prefix: &str) {
         for (i, m) in s.members.iter().enumerate() {
-            let id = m.member_id.unwrap_or(i as u32);
-            let accessor = format!("{}->{}", prefix, m.name);
+            let id = resolve_member_id(m, i, &s.autoid);
+            let accessor = self.member_accessor(m, prefix);
             self.raw("    {\n");
             self.raw("        size_t em;\n");
             self.raw(&format!(
@@ -625,10 +868,18 @@ impl<'a> CGen<'a> {
                 self.raw(&format!("{}for (uint32_t _wi = 0; _wi < _wlen; _wi++) int2dds_cdr_write_u16(&w, {}[_wi]);\n", indent, accessor));
                 self.raw(&format!("{}}}\n", indent));
             }
-            ResolvedType::Enum(_) | ResolvedType::Bitmask(_) => {
+            ResolvedType::Enum(_) => {
                 self.raw(&format!(
                     "{}int2dds_cdr_write_enum(&w, (int32_t){});\n",
                     indent, accessor
+                ));
+            }
+            ResolvedType::Bitmask(name) => {
+                let write_fn = self.bitmask_write_fn(name);
+                let cast = self.bitmask_cast_type(name);
+                self.raw(&format!(
+                    "{}{}(&w, ({}){});\n",
+                    indent, write_fn, cast, accessor
                 ));
             }
             ResolvedType::Sequence { element, .. } => {
@@ -716,10 +967,10 @@ impl<'a> CGen<'a> {
         );
 
         match s.extensibility {
-            ExtensibilityKind::Final => {
+            Some(ExtensibilityKind::Final) | None => {
                 self.emit_deserialize_fields(s, "val_out");
             }
-            ExtensibilityKind::Appendable => {
+            Some(ExtensibilityKind::Appendable) => {
                 // Auto-detect XCDR1 vs XCDR2 from encapsulation header (set by reader_init)
                 self.raw("    uint32_t obj_size = 0;\n    size_t start_pos = 0;\n");
                 self.raw("    if (r.xcdr2) {\n");
@@ -730,7 +981,7 @@ impl<'a> CGen<'a> {
                 self.raw("        int2dds_cdr_read_dheader_end(&r, obj_size, start_pos);\n");
                 self.raw("    }\n");
             }
-            ExtensibilityKind::Mutable => {
+            Some(ExtensibilityKind::Mutable) => {
                 self.raw("    uint32_t obj_size;\n    size_t start_pos;\n");
                 self.raw("    int2dds_cdr_read_dheader(&r, &obj_size, &start_pos);\n");
                 self.raw("    memset(val_out, 0, sizeof(*val_out));\n");
@@ -749,22 +1000,28 @@ impl<'a> CGen<'a> {
             self.raw(&format!("    {}_deserialize_fields(&r, ({}*)&{}->parent);\n", simple, simple, prefix));
         }
         for m in &s.members {
-            let accessor = format!("{}->{}", prefix, m.name);
+            let accessor = self.member_accessor(m, prefix);
             self.emit_read_field(&m.resolved_type, &accessor);
         }
     }
 
     fn emit_deserialize_fields_mutable(&mut self, s: &ResolvedStruct, prefix: &str) {
-        self.raw("    while (!int2dds_cdr_is_sentinel(&r)) {\n");
+        // Use DHEADER object_size for loop boundary (compatible with both sentinel and non-sentinel)
+        self.raw("    size_t obj_end = start_pos + obj_size;\n");
+        self.raw("    while (r.pos < obj_end) {\n");
+        self.raw("        if (int2dds_cdr_is_sentinel(&r)) {\n");
+        self.raw("            int2dds_cdr_skip_bytes(&r, 4); /* consume sentinel */\n");
+        self.raw("            break;\n");
+        self.raw("        }\n");
         self.raw("        uint32_t mid, dlen;\n        bool mu;\n");
         self.raw(
-            "        if (!int2dds_cdr_read_emheader(&r, &mid, &dlen, &mu))\n            return false;\n",
+            "        if (!int2dds_cdr_read_emheader(&r, &mid, &dlen, &mu))\n            break;\n",
         );
         self.raw("        switch (mid) {\n");
 
         for (i, m) in s.members.iter().enumerate() {
-            let id = m.member_id.unwrap_or(i as u32);
-            let accessor = format!("{}->{}", prefix, m.name);
+            let id = resolve_member_id(m, i, &s.autoid);
+            let accessor = self.member_accessor(m, prefix);
             self.raw(&format!("        case {}:\n", id));
             self.emit_read_field_indented(&m.resolved_type, &accessor, "            ");
             self.raw("            break;\n");
@@ -775,7 +1032,6 @@ impl<'a> CGen<'a> {
         self.raw("            break;\n");
         self.raw("        }\n");
         self.raw("    }\n");
-        self.raw("    int2dds_cdr_skip_bytes(&r, 4); /* sentinel */\n");
     }
 
     fn emit_read_field(&mut self, ty: &ResolvedType, accessor: &str) {
@@ -852,10 +1108,18 @@ impl<'a> CGen<'a> {
                 self.raw(&format!("{}{}[_wlen] = 0;\n", indent, accessor));
                 self.raw(&format!("{}}}\n", indent));
             }
-            ResolvedType::Enum(_) | ResolvedType::Bitmask(_) => {
+            ResolvedType::Enum(_) => {
                 self.raw(&format!(
                     "{}int2dds_cdr_read_enum(&r, (int32_t*)&{});\n",
                     indent, accessor
+                ));
+            }
+            ResolvedType::Bitmask(name) => {
+                let read_fn = self.bitmask_read_fn(name);
+                let cast = self.bitmask_cast_ptr_type(name);
+                self.raw(&format!(
+                    "{}{}(&r, ({}*)&{});\n",
+                    indent, read_fn, cast, accessor
                 ));
             }
             ResolvedType::Sequence { element, bound } => {
@@ -1021,13 +1285,10 @@ impl<'a> CGen<'a> {
     }
 
     /// Check if a struct type needs a member-level DHEADER in XCDR2.
-    fn struct_needs_member_dheader(&self, type_name: &str) -> bool {
-        if let Some(s) = self.model.structs.iter().find(|s| s.name == type_name || s.qualified_name == type_name) {
-            s.extensibility == ExtensibilityKind::Final
-                && s.members.iter().any(|m| self.type_is_variable_length(&m.resolved_type))
-        } else {
-            false
-        }
+    /// FINAL types never need a DHEADER regardless of their contents.
+    /// APPENDABLE/MUTABLE types already handle DHEADER inside their own _serialize_fields/_deserialize_fields.
+    fn struct_needs_member_dheader(&self, _type_name: &str) -> bool {
+        false
     }
 
     fn resolved_type_to_field_constant(ty: &ResolvedType) -> Option<&'static str> {
@@ -1046,7 +1307,7 @@ impl<'a> CGen<'a> {
             ResolvedType::F32 => Some("INT2DDS_FIELD_FLOAT32"),
             ResolvedType::F64 => Some("INT2DDS_FIELD_FLOAT64"),
             ResolvedType::String { .. } => Some("INT2DDS_FIELD_STRING"),
-            ResolvedType::WString { .. } => Some("INT2DDS_FIELD_WSTRING"),
+            ResolvedType::WString { .. } => Some("INT2DDS_FIELD_STRING"),
             ResolvedType::Enum(_) => Some("INT2DDS_FIELD_ENUM"),
             _ => None,
         }
@@ -1099,9 +1360,9 @@ impl<'a> CGen<'a> {
 
     fn emit_type_info_fn(&mut self, s: &ResolvedStruct) {
         let ext_int = match s.extensibility {
-            ExtensibilityKind::Final => 0,
-            ExtensibilityKind::Appendable => 1,
-            ExtensibilityKind::Mutable => 2,
+            Some(ExtensibilityKind::Appendable) => 1,
+            Some(ExtensibilityKind::Mutable) => 2,
+            Some(ExtensibilityKind::Final) | None => 0,
         };
 
         self.raw(&format!("static inline Int2DdsTypeInfo* {}_type_info(void) {{\n", s.name));
@@ -1231,6 +1492,41 @@ impl<'a> CGen<'a> {
             }
             _ => {} // Primitives don't need cleanup
         }
+    }
+
+    fn bitmask_bit_bound(&self, name: &str) -> u32 {
+        self.model
+            .bitmasks
+            .iter()
+            .find(|b| b.name == name || b.qualified_name == name)
+            .map(|b| b.bit_bound)
+            .unwrap_or(32)
+    }
+
+    fn bitmask_write_fn(&self, name: &str) -> &'static str {
+        match self.bitmask_bit_bound(name) {
+            0..=8 => "int2dds_cdr_write_u8",
+            9..=16 => "int2dds_cdr_write_u16",
+            17..=32 => "int2dds_cdr_write_u32",
+            _ => "int2dds_cdr_write_u64",
+        }
+    }
+
+    fn bitmask_read_fn(&self, name: &str) -> &'static str {
+        match self.bitmask_bit_bound(name) {
+            0..=8 => "int2dds_cdr_read_u8",
+            9..=16 => "int2dds_cdr_read_u16",
+            17..=32 => "int2dds_cdr_read_u32",
+            _ => "int2dds_cdr_read_u64",
+        }
+    }
+
+    fn bitmask_cast_type(&self, name: &str) -> &'static str {
+        bitmask_c_type(self.bitmask_bit_bound(name))
+    }
+
+    fn bitmask_cast_ptr_type(&self, name: &str) -> &'static str {
+        bitmask_c_type(self.bitmask_bit_bound(name))
     }
 
     // ---- Helpers ----
