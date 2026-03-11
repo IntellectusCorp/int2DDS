@@ -406,7 +406,7 @@ impl Resolver {
     fn extract_extensibility(
         &self,
         annotations: &[Annotation],
-    ) -> Result<ExtensibilityKind, ResolveError> {
+    ) -> Result<Option<ExtensibilityKind>, ResolveError> {
         for ann in annotations {
             if ann.name == "extensibility" {
                 if let Some(param) = ann.params.first() {
@@ -420,9 +420,9 @@ impl Resolver {
                         }
                     };
                     return match value.to_uppercase().as_str() {
-                        "FINAL" => Ok(ExtensibilityKind::Final),
-                        "APPENDABLE" => Ok(ExtensibilityKind::Appendable),
-                        "MUTABLE" => Ok(ExtensibilityKind::Mutable),
+                        "FINAL" => Ok(Some(ExtensibilityKind::Final)),
+                        "APPENDABLE" => Ok(Some(ExtensibilityKind::Appendable)),
+                        "MUTABLE" => Ok(Some(ExtensibilityKind::Mutable)),
                         _ => Err(ResolveError {
                             message: format!("unknown extensibility: '{}'", value),
                         }),
@@ -431,13 +431,13 @@ impl Resolver {
             }
             // Shorthand: @final, @appendable, @mutable
             match ann.name.to_lowercase().as_str() {
-                "final" => return Ok(ExtensibilityKind::Final),
-                "appendable" => return Ok(ExtensibilityKind::Appendable),
-                "mutable" => return Ok(ExtensibilityKind::Mutable),
+                "final" => return Ok(Some(ExtensibilityKind::Final)),
+                "appendable" => return Ok(Some(ExtensibilityKind::Appendable)),
+                "mutable" => return Ok(Some(ExtensibilityKind::Mutable)),
                 _ => {}
             }
         }
-        Ok(ExtensibilityKind::default())
+        Ok(None)
     }
 
     fn extract_autoid(&self, annotations: &[Annotation]) -> Result<Option<AutoIdKind>, ResolveError> {
@@ -628,7 +628,7 @@ mod tests {
         assert_eq!(model.structs.len(), 1);
         let s = &model.structs[0];
         assert_eq!(s.name, "HelloWorld");
-        assert_eq!(s.extensibility, ExtensibilityKind::Appendable);
+        assert_eq!(s.extensibility, Some(ExtensibilityKind::Appendable));
         assert_eq!(s.members.len(), 2);
         assert!(matches!(s.members[0].resolved_type, ResolvedType::U32));
         assert!(matches!(s.members[1].resolved_type, ResolvedType::String { bound: None }));

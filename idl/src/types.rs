@@ -46,7 +46,8 @@ pub enum AutoIdKind {
 pub struct ResolvedStruct {
     pub name: String,
     pub qualified_name: String,
-    pub extensibility: ExtensibilityKind,
+    /// None = not specified in IDL (use CLI default), Some = explicitly set via @extensibility
+    pub extensibility: Option<ExtensibilityKind>,
     pub autoid: Option<AutoIdKind>,
     pub base_type: Option<String>,
     pub members: Vec<ResolvedMember>,
@@ -65,9 +66,8 @@ pub struct ResolvedMember {
     pub hashid: Option<Option<String>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExtensibilityKind {
-    #[default]
     Final,
     Appendable,
     Mutable,
@@ -121,7 +121,8 @@ pub struct ResolvedUnion {
     pub discriminant_type: ResolvedType,
     pub cases: Vec<ResolvedUnionCase>,
     pub default_case: Option<ResolvedUnionCaseMember>,
-    pub extensibility: ExtensibilityKind,
+    /// None = not specified in IDL (use CLI default), Some = explicitly set via @extensibility
+    pub extensibility: Option<ExtensibilityKind>,
 }
 
 #[derive(Debug, Clone)]

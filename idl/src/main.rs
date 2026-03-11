@@ -4,6 +4,7 @@ use int2dds_idl::codegen;
 use int2dds_idl::naming;
 use int2dds_idl::parser;
 use int2dds_idl::resolver;
+use int2dds_idl::types::ExtensibilityKind;
 
 struct Args {
     input_file: String,
@@ -11,6 +12,7 @@ struct Args {
     c_output: Option<String>,
     output_dir: Option<String>,
     crate_path: String,
+    default_extensibility: Option<ExtensibilityKind>,
     default_string_bound: u32,
     string_pointer: bool,
 }
@@ -23,6 +25,7 @@ fn parse_args() -> Args {
     let mut c_output = None;
     let mut output_dir = None;
     let mut crate_path = "int2dds".to_string();
+    let mut default_extensibility: Option<ExtensibilityKind> = None;
     let mut default_string_bound = 256u32;
     let mut string_pointer = false;
 
@@ -44,6 +47,19 @@ fn parse_args() -> Args {
             "--crate-path" => {
                 i += 1;
                 crate_path = args.get(i).cloned().unwrap_or_default();
+            }
+            "--extensibility" => {
+                i += 1;
+                let value = args.get(i).map(|s| s.as_str()).unwrap_or("");
+                default_extensibility = match value.to_uppercase().as_str() {
+                    "FINAL" => Some(ExtensibilityKind::Final),
+                    "APPENDABLE" => Some(ExtensibilityKind::Appendable),
+                    "MUTABLE" => Some(ExtensibilityKind::Mutable),
+                    _ => {
+                        eprintln!("error: invalid extensibility '{}' (use: final, appendable, mutable)", value);
+                        process::exit(1);
+                    }
+                };
             }
             "--string-bound" => {
                 i += 1;
@@ -89,6 +105,7 @@ fn parse_args() -> Args {
         c_output,
         output_dir,
         crate_path,
+        default_extensibility,
         default_string_bound,
         string_pointer,
     }
@@ -105,6 +122,8 @@ OPTIONS:
     -c, --c-header <PATH>   Generate C header output to PATH
     -o, --output-dir <DIR>  Output directory (auto-names files)
     --crate-path <PATH>     Rust crate path (default: int2dds)
+    --extensibility <TYPE>  Default extensibility for types without @extensibility
+                            (final, appendable, mutable). IDL annotations take priority.
     --string-bound <N>      Default unbounded string size in C (default: 256)
     --string-pointer        Use char* pointers for strings (OMG standard)
     -h, --help              Print help
@@ -175,6 +194,7 @@ fn main() {
     if let Some(path) = &rust_path {
         let rust_opts = codegen::rust::RustOptions {
             crate_path: args.crate_path.clone(),
+            default_extensibility: args.default_extensibility,
         };
         let code = codegen::rust::generate(&model, idl_filename, &rust_opts);
         if let Err(e) = write_file(path, &code) {
