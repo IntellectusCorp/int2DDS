@@ -111,6 +111,7 @@ pub fn generate_has_type_object_impl(
     name: &syn::Ident,
     fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
     type_config: &DdsTypeConfig,
+    gc: &super::type_struct::GenCtx,
 ) -> proc_macro2::TokenStream {
     let crate_path = &type_config.crate_path;
     let type_name_str = name.to_string();
@@ -195,8 +196,22 @@ pub fn generate_has_type_object_impl(
         None => quote! { #crate_path::xtypes::ExtensibilityKind::Final },
     };
 
-    quote! {
-        impl #crate_path::xtypes::HasTypeObject for #name {
+    let impl_generics = &gc.impl_generics;
+    let ty_generics = &gc.ty_generics;
+    let where_clause = &gc.where_clause;
+
+    let type_identifier_impl = if gc.has_type_params {
+        // Generic types cannot use static OnceLock; compute each time
+        quote! {
+            fn type_identifier() -> #crate_path::xtypes::TypeIdentifier {
+                let complete = Self::complete_type_object();
+                let type_obj = #crate_path::xtypes::TypeObject::Complete(complete);
+                let hash = type_obj.compute_hash();
+                #crate_path::xtypes::TypeIdentifier::CompleteTypeId(hash)
+            }
+        }
+    } else {
+        quote! {
             fn type_identifier() -> #crate_path::xtypes::TypeIdentifier {
                 // For complex types, compute hash from CompleteTypeObject
                 // This ensures consistency with DynamicTypeSupport which also uses CompleteTypeObject
@@ -208,6 +223,12 @@ pub fn generate_has_type_object_impl(
                     #crate_path::xtypes::TypeIdentifier::CompleteTypeId(hash)
                 }).clone()
             }
+        }
+    };
+
+    quote! {
+        impl #impl_generics #crate_path::xtypes::HasTypeObject for #name #ty_generics #where_clause {
+            #type_identifier_impl
 
             fn minimal_type_object() -> #crate_path::xtypes::MinimalTypeObject {
                 let mut struct_type = #crate_path::xtypes::MinimalStructType::new(

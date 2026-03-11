@@ -9,12 +9,12 @@ pub struct KeyFieldInfo {
 
 pub fn generate_key_methods(
     key_field_info: Option<&KeyFieldInfo>,
-    name: &syn::Ident,
+    full_type: &proc_macro2::TokenStream,
     _field_deserialization: &proc_macro2::TokenStream,
     crate_path: &proc_macro2::TokenStream,
 ) -> (proc_macro2::TokenStream, proc_macro2::TokenStream, proc_macro2::TokenStream) {
     if let Some(key_info) = key_field_info {
-        generate_key_impls_from_fields(std::slice::from_ref(key_info), name, crate_path)
+        generate_key_impls_from_fields(std::slice::from_ref(key_info), full_type, crate_path)
     } else {
         generate_no_key_impls(crate_path)
     }
@@ -26,11 +26,11 @@ pub struct MultiKeyFieldInfo {
 
 pub fn generate_multi_key_methods(
     multi_key_info: Option<&MultiKeyFieldInfo>,
-    name: &syn::Ident,
+    full_type: &proc_macro2::TokenStream,
     crate_path: &proc_macro2::TokenStream,
 ) -> (proc_macro2::TokenStream, proc_macro2::TokenStream, proc_macro2::TokenStream) {
     if let Some(multi_key) = multi_key_info {
-        generate_key_impls_from_fields(&multi_key.fields, name, crate_path)
+        generate_key_impls_from_fields(&multi_key.fields, full_type, crate_path)
     } else {
         generate_no_key_impls(crate_path)
     }
@@ -62,7 +62,7 @@ fn generate_no_key_impls(
 
 fn generate_key_impls_from_fields(
     fields: &[KeyFieldInfo],
-    name: &syn::Ident,
+    full_type: &proc_macro2::TokenStream,
     crate_path: &proc_macro2::TokenStream,
 ) -> (proc_macro2::TokenStream, proc_macro2::TokenStream, proc_macro2::TokenStream) {
     assert!(!fields.is_empty());
@@ -100,7 +100,7 @@ fn generate_key_impls_from_fields(
             use #crate_path::serialize::xcdr::{Xcdr2Serializer, ExtensibilityKind, XcdrSerialize};
             use #crate_path::serialize::BufferManager;
 
-            if let Some(typed_data) = data.downcast_ref::<#name>() {
+            if let Some(typed_data) = data.downcast_ref::<#full_type>() {
                 let mut serializer = Xcdr2Serializer::new(false, ExtensibilityKind::Final);
                 #(
                     typed_data.#key_fields.serialize_xcdr(&mut serializer)
@@ -113,7 +113,7 @@ fn generate_key_impls_from_fields(
             } else {
                 Err(#crate_path::dcps::core::error::DdsError::Error(format!(
                     "Type mismatch: expected {}, but received incompatible type for key serialization",
-                    std::any::type_name::<#name>()
+                    std::any::type_name::<#full_type>()
                 )))
             }
         }
@@ -124,7 +124,7 @@ fn generate_key_impls_from_fields(
             use #crate_path::serialize::xcdr::{Xcdr2Deserializer, XcdrDeserialize};
 
             let mut deserializer = Xcdr2Deserializer::new_without_header(serialized_key, false);
-            let mut key_holder = <#name as Default>::default();
+            let mut key_holder = <#full_type as Default>::default();
 
             #(
                 key_holder.#key_fields = <#key_types>::deserialize_xcdr(&mut deserializer)
@@ -148,7 +148,7 @@ fn generate_key_impls_from_fields(
 
                 Err(e) => {
                     log::error!("Warning: Key serialization failed for type {}: {:?}. Using NIL instance handle.",
-                        std::any::type_name::<#name>(), e);
+                        std::any::type_name::<#full_type>(), e);
                     #crate_path::common::instance_handle::InstanceHandle::NIL
                 }
             }
@@ -170,7 +170,7 @@ fn generate_key_impls_from_fields(
                 }
                 Err(e) => {
                     log::error!("Warning: Key serialization failed for type {}: {:?}. Using NIL instance handle.",
-                        std::any::type_name::<#name>(), e);
+                        std::any::type_name::<#full_type>(), e);
                     #crate_path::common::instance_handle::InstanceHandle::NIL
                 }
             }
@@ -179,7 +179,7 @@ fn generate_key_impls_from_fields(
 
     let compute_key_impl = quote! {
         fn compute_key(&self, data: &dyn std::any::Any) -> #crate_path::common::instance_handle::InstanceHandle {
-            if data.downcast_ref::<#name>().is_some() {
+            if data.downcast_ref::<#full_type>().is_some() {
                 #compute_logic
             } else {
                 #crate_path::common::instance_handle::InstanceHandle::NIL
