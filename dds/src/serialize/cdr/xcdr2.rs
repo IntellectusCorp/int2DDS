@@ -138,6 +138,16 @@ impl Xcdr2Serializer {
         }
     }
 
+    /// Write PL_CDR2 sentinel (end-of-members marker for mutable types)
+    pub fn write_sentinel(&mut self) -> Result<(), CdrError> {
+        use super::MEMBER_ID_SENTINEL;
+        let header = (MEMBER_ID_SENTINEL as u32) << 16;
+        self.align(4);
+        let bytes = to_bytes_u32(header, self.endianness);
+        self.buffer.extend_from_slice(&bytes);
+        Ok(())
+    }
+
     /// End struct serialization (backpatch size if needed)
     pub fn end_struct(&mut self, size_pos: usize) -> Result<(), CdrError> {
         match self.extensibility_kind {
