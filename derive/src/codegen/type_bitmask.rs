@@ -95,6 +95,13 @@ pub fn derive_bitmask_impl(
         })
         .collect();
 
+    // Generate deserialization match arms for enum type
+    let variant_idents: Vec<_> = variants.iter().map(|v| &v.ident).collect();
+    let variant_positions: Vec<u8> = variants
+        .iter()
+        .map(|v| parse_variant_attributes(v).unwrap())
+        .collect();
+
     // Generate additional derives
     let additional_derives =
         crate::codegen::derives::generate_additional_derives(input, name, type_config);
@@ -166,6 +173,18 @@ pub fn derive_bitmask_impl(
             }
         }
 
+        impl<C: speedy::Context> speedy::Writable<C> for #value_name {
+            fn write_to<T: ?Sized + speedy::Writer<C>>(&self, writer: &mut T) -> Result<(), C::Error> {
+                writer.write_value(&self.0)
+            }
+        }
+
+        impl<'a, C: speedy::Context> speedy::Readable<'a, C> for #value_name {
+            fn read_from<R: speedy::Reader<'a, C>>(reader: &mut R) -> Result<Self, C::Error> {
+                Ok(Self(reader.read_value()?))
+            }
+        }
+
         impl From<#name> for #value_name {
             fn from(flag: #name) -> Self {
                 match flag {
@@ -200,6 +219,49 @@ pub fn derive_bitmask_impl(
             fn deserialize_xcdr(deserializer: &mut #crate_path::serialize::xcdr::XcdrDeserializer) -> #crate_path::serialize::xcdr::XcdrResult<Self> {
                 use #crate_path::serialize::cdr::PrimitiveSerialize;
                 Ok(Self(deserializer.#wire_deser()?))
+            }
+        }
+
+        // CdrSerialize/CdrDeserialize for enum type (delegates via From conversion)
+        impl #crate_path::serialize::cdr::CdrSerialize for #name {
+            fn serialize_cdr(&self, serializer: &mut #crate_path::serialize::cdr::CdrSerializer) -> #crate_path::serialize::cdr::CdrResult<()> {
+                let val: #value_name = self.clone().into();
+                val.serialize_cdr(serializer)
+            }
+        }
+
+        impl #crate_path::serialize::cdr::CdrDeserialize for #name {
+            fn deserialize_cdr(deserializer: &mut #crate_path::serialize::cdr::CdrDeserializer) -> #crate_path::serialize::cdr::CdrResult<Self> {
+                let val = #value_name::deserialize_cdr(deserializer)?;
+                #(
+                    if val.0 == (1 << #variant_positions) {
+                        return Ok(#name::#variant_idents);
+                    }
+                )*
+                Err(#crate_path::serialize::cdr::CdrError::DeserializationError(
+                    format!("Unknown bitmask value: {}", val.0)
+                ))
+            }
+        }
+
+        impl #crate_path::serialize::xcdr::XcdrSerialize for #name {
+            fn serialize_xcdr(&self, serializer: &mut #crate_path::serialize::xcdr::XcdrSerializer) -> #crate_path::serialize::xcdr::XcdrResult<()> {
+                let val: #value_name = self.clone().into();
+                val.serialize_xcdr(serializer)
+            }
+        }
+
+        impl #crate_path::serialize::xcdr::XcdrDeserialize for #name {
+            fn deserialize_xcdr(deserializer: &mut #crate_path::serialize::xcdr::XcdrDeserializer) -> #crate_path::serialize::xcdr::XcdrResult<Self> {
+                let val = #value_name::deserialize_xcdr(deserializer)?;
+                #(
+                    if val.0 == (1 << #variant_positions) {
+                        return Ok(#name::#variant_idents);
+                    }
+                )*
+                Err(#crate_path::serialize::cdr::CdrError::DeserializationError(
+                    format!("Unknown bitmask value: {}", val.0)
+                ))
             }
         }
 

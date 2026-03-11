@@ -500,22 +500,22 @@ INT2DDS_CDR_DEF bool int2dds_cdr_write_dheader_finalize(Int2DdsCdrWriter *w, siz
 
 INT2DDS_CDR_DEF bool int2dds_cdr_write_emheader(Int2DdsCdrWriter *w, uint32_t member_id, uint32_t data_length, bool must_understand) {
     uint32_t mu_bit = must_understand ? 0x80000000u : 0;
-    if (data_length <= 0xFFFF) {
-        /* Short encoding: LC=0 */
+    if (member_id <= 0x0FFF && data_length <= 0xFFFF) {
+        /* Short encoding: LC=0, 12-bit member_id */
         uint32_t header = mu_bit | ((member_id & 0x0FFF) << 16) | (data_length & 0xFFFF);
         return int2dds_cdr_write_u32(w, header);
     } else {
-        /* Extended encoding: LC=4 */
-        uint32_t header = mu_bit | (4u << 28) | ((member_id & 0x0FFF) << 16);
+        /* Extended encoding: LC=4, 28-bit member_id + NEXTINT */
+        uint32_t header = mu_bit | (4u << 28) | (member_id & 0x0FFFFFFFu);
         if (!int2dds_cdr_write_u32(w, header)) return false;
         return int2dds_cdr_write_u32(w, data_length);
     }
 }
 
 INT2DDS_CDR_DEF bool int2dds_cdr_write_emheader_begin(Int2DdsCdrWriter *w, uint32_t member_id, bool must_understand, size_t *token_out) {
-    /* Always use LC=4 format (8 bytes) for backpatching */
+    /* Always use LC=4 format (8 bytes) for backpatching, 28-bit member_id */
     uint32_t mu_bit = must_understand ? 0x80000000u : 0;
-    uint32_t header = mu_bit | (4u << 28) | ((member_id & 0x0FFF) << 16);
+    uint32_t header = mu_bit | (4u << 28) | (member_id & 0x0FFFFFFFu);
     if (!int2dds_cdr_write_u32(w, header)) return false;
     *token_out = w->pos;
     return int2dds_cdr_write_u32(w, 0); /* placeholder for length */
@@ -789,7 +789,14 @@ INT2DDS_CDR_DEF bool int2dds_cdr_read_emheader(Int2DdsCdrReader *r, uint32_t *me
 
     *must_understand_out = (header & 0x80000000u) != 0;
     uint8_t lc = (uint8_t)((header >> 28) & 0x07);
-    *member_id_out = (header >> 16) & 0x0FFF;
+
+    if (lc < 4) {
+        /* Compact format: 12-bit member_id, 16-bit length */
+        *member_id_out = (header >> 16) & 0x0FFF;
+    } else {
+        /* Extended format: 28-bit member_id */
+        *member_id_out = header & 0x0FFFFFFFu;
+    }
     uint32_t length_or_flags = header & 0xFFFF;
 
     switch (lc) {

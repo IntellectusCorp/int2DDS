@@ -6,7 +6,7 @@ use syn::Variant;
 
 use crate::codegen::utils::{
     get_discriminant_value, get_serialization_method, get_variant_type, variant_has_data,
-    DiscriminantType, SerializationMethod,
+    variant_is_union_default, DiscriminantType, SerializationMethod,
 };
 
 /// Generate CdrSerialize implementation for union (enum with data)
@@ -75,44 +75,72 @@ pub fn generate_union_cdr_deserialize_impl(
 ) -> TokenStream {
     let deserialize_disc_method = syn::Ident::new(disc_type.deserialize_method(), name.span());
 
-    let match_arms: Vec<_> = variants
-        .iter()
-        .enumerate()
-        .map(|(idx, variant)| {
-            let variant_name = &variant.ident;
-            let disc_value = get_discriminant_value(variant, idx);
+    let mut has_default = false;
+    let mut default_arm: Option<TokenStream> = None;
+    let mut normal_arms: Vec<TokenStream> = Vec::new();
 
+    for (idx, variant) in variants.iter().enumerate() {
+        let variant_name = &variant.ident;
+        let disc_value = get_discriminant_value(variant, idx);
+        let is_default = variant_is_union_default(variant);
+
+        if is_default {
+            has_default = true;
             if variant_has_data(variant) {
                 let value_deserialization = if let Some(field_type) = get_variant_type(variant) {
                     generate_value_deserialization(field_type, crate_path, false)
                 } else {
-                    // Multiple fields not supported - use trait fallback
                     quote! {
                         let value = #crate_path::serialize::cdr::CdrDeserialize::deserialize_cdr(deserializer)?;
                     }
                 };
-
-                quote! {
-                    #disc_value => {
+                default_arm = Some(quote! {
+                    _ => {
                         #value_deserialization
                         Ok(#name::#variant_name(value))
                     }
-                }
+                });
+            } else {
+                default_arm = Some(quote! {
+                    _ => Ok(#name::#variant_name),
+                });
+            }
+        } else if variant_has_data(variant) {
+            let value_deserialization = if let Some(field_type) = get_variant_type(variant) {
+                generate_value_deserialization(field_type, crate_path, false)
             } else {
                 quote! {
-                    #disc_value => Ok(#name::#variant_name),
+                    let value = #crate_path::serialize::cdr::CdrDeserialize::deserialize_cdr(deserializer)?;
                 }
-            }
-        })
-        .collect();
+            };
+            normal_arms.push(quote! {
+                #disc_value => {
+                    #value_deserialization
+                    Ok(#name::#variant_name(value))
+                }
+            });
+        } else {
+            normal_arms.push(quote! {
+                #disc_value => Ok(#name::#variant_name),
+            });
+        }
+    }
+
+    let fallback = if has_default {
+        default_arm.unwrap()
+    } else {
+        quote! {
+            _ => Err(#crate_path::serialize::core::SerializationError::InvalidUnionDiscriminant(discriminant as i32)),
+        }
+    };
 
     quote! {
         impl #crate_path::serialize::cdr::CdrDeserialize for #name {
             fn deserialize_cdr(deserializer: &mut #crate_path::serialize::cdr::CdrDeserializer) -> #crate_path::serialize::cdr::CdrResult<Self> {
                 let discriminant = deserializer.#deserialize_disc_method()? as i64;
                 match discriminant {
-                    #(#match_arms)*
-                    _ => Err(#crate_path::serialize::core::SerializationError::InvalidUnionDiscriminant(discriminant as i32)),
+                    #(#normal_arms)*
+                    #fallback
                 }
             }
         }
@@ -182,13 +210,17 @@ pub fn generate_union_xcdr_deserialize_impl(
 ) -> TokenStream {
     let deserialize_disc_method = syn::Ident::new(disc_type.deserialize_method(), name.span());
 
-    let match_arms: Vec<_> = variants
-        .iter()
-        .enumerate()
-        .map(|(idx, variant)| {
-            let variant_name = &variant.ident;
-            let disc_value = get_discriminant_value(variant, idx);
+    let mut has_default = false;
+    let mut default_arm: Option<TokenStream> = None;
+    let mut normal_arms: Vec<TokenStream> = Vec::new();
 
+    for (idx, variant) in variants.iter().enumerate() {
+        let variant_name = &variant.ident;
+        let disc_value = get_discriminant_value(variant, idx);
+        let is_default = variant_is_union_default(variant);
+
+        if is_default {
+            has_default = true;
             if variant_has_data(variant) {
                 let value_deserialization = if let Some(field_type) = get_variant_type(variant) {
                     generate_value_deserialization(field_type, crate_path, true)
@@ -197,28 +229,53 @@ pub fn generate_union_xcdr_deserialize_impl(
                         let value = #crate_path::serialize::cdr::XcdrDeserialize::deserialize_xcdr(deserializer)?;
                     }
                 };
-
-                quote! {
-                    #disc_value => {
+                default_arm = Some(quote! {
+                    _ => {
                         #value_deserialization
                         Ok(#name::#variant_name(value))
                     }
-                }
+                });
+            } else {
+                default_arm = Some(quote! {
+                    _ => Ok(#name::#variant_name),
+                });
+            }
+        } else if variant_has_data(variant) {
+            let value_deserialization = if let Some(field_type) = get_variant_type(variant) {
+                generate_value_deserialization(field_type, crate_path, true)
             } else {
                 quote! {
-                    #disc_value => Ok(#name::#variant_name),
+                    let value = #crate_path::serialize::cdr::XcdrDeserialize::deserialize_xcdr(deserializer)?;
                 }
-            }
-        })
-        .collect();
+            };
+            normal_arms.push(quote! {
+                #disc_value => {
+                    #value_deserialization
+                    Ok(#name::#variant_name(value))
+                }
+            });
+        } else {
+            normal_arms.push(quote! {
+                #disc_value => Ok(#name::#variant_name),
+            });
+        }
+    }
+
+    let fallback = if has_default {
+        default_arm.unwrap()
+    } else {
+        quote! {
+            _ => Err(#crate_path::serialize::core::SerializationError::InvalidUnionDiscriminant(discriminant as i32)),
+        }
+    };
 
     quote! {
         impl #crate_path::serialize::cdr::XcdrDeserialize for #name {
             fn deserialize_xcdr(deserializer: &mut #crate_path::serialize::cdr::XcdrDeserializer) -> #crate_path::serialize::cdr::XcdrResult<Self> {
                 let discriminant = deserializer.#deserialize_disc_method()? as i64;
                 match discriminant {
-                    #(#match_arms)*
-                    _ => Err(#crate_path::serialize::core::SerializationError::InvalidUnionDiscriminant(discriminant as i32)),
+                    #(#normal_arms)*
+                    #fallback
                 }
             }
         }

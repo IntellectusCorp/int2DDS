@@ -204,6 +204,15 @@ fn quote_serialize_impl(
                         serializer.write_encapsulation_header()
                             .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
 
+                        // For Mutable types, use XcdrSerialize which handles EMHEADER-based member serialization
+                        if matches!(effective_extensibility, #crate_path::serialize::xcdr::ExtensibilityKind::Mutable) {
+                            use #crate_path::serialize::xcdr::XcdrSerialize;
+                            typed_data.serialize_xcdr(&mut serializer)
+                                .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+                            let bytes = serializer.into_bytes();
+                            return Ok(std::sync::Arc::from(bytes.into_boxed_slice()));
+                        }
+
                         let size_pos = if use_delimiters {
                             Some(
                                 serializer
@@ -298,10 +307,20 @@ fn quote_deserialize_impl(
 
                     Ok(Box::new(result))
                 },
-                #crate_path::dcps::topic::type_support::SerializationFormat::Xcdr { use_delimiters, .. } => {
+                #crate_path::dcps::topic::type_support::SerializationFormat::Xcdr { use_delimiters, extensibility_kind } => {
                     use #crate_path::serialize::xcdr::Xcdr2Deserializer;
 
                     let use_delimiters = *use_delimiters;
+
+                    // For Mutable types, use XcdrDeserialize which handles EMHEADER-based member parsing
+                    if matches!(extensibility_kind, #crate_path::serialize::xcdr::ExtensibilityKind::Mutable) {
+                        use #crate_path::serialize::xcdr::XcdrDeserialize;
+                        let mut deserializer = Xcdr2Deserializer::new(data)
+                            .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+                        let result = <#name as XcdrDeserialize>::deserialize_xcdr(&mut deserializer)
+                            .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+                        return Ok(Box::new(result));
+                    }
 
                     // Standard XCDR2 deserialization (single DHEADER for struct)
                     let mut parse_body = |mut deserializer: &mut Xcdr2Deserializer<'_>| -> #crate_path::dcps::core::error::DdsResult<#name> {
@@ -840,7 +859,18 @@ fn generate_xcdr_serialize_impl(
         })
         .collect();
 
-    let serialization_body = if !matches!(extensibility, Some(ExtensibilityKind::Final)) {
+    let is_mutable = matches!(extensibility, Some(ExtensibilityKind::Mutable));
+
+    let serialization_body = if is_mutable {
+        quote! {
+            use #crate_path::serialize::cdr::{PrimitiveSerialize, StringSerialize, ArraySerialize, SequenceSerialize};
+            let size_pos = serializer.begin_struct()?;
+            #(#field_calls)*
+            serializer.write_sentinel()?;
+            serializer.end_struct(size_pos)?;
+            Ok(())
+        }
+    } else if matches!(extensibility, Some(ExtensibilityKind::Appendable)) {
         quote! {
             use #crate_path::serialize::cdr::{PrimitiveSerialize, StringSerialize, ArraySerialize, SequenceSerialize};
             let size_pos = serializer.begin_struct()?;
@@ -849,6 +879,7 @@ fn generate_xcdr_serialize_impl(
             Ok(())
         }
     } else {
+        // Final or None (default) - no DHEADER
         quote! {
             use #crate_path::serialize::cdr::{PrimitiveSerialize, StringSerialize, ArraySerialize, SequenceSerialize};
             #(#field_calls)*
@@ -875,13 +906,14 @@ fn generate_xcdr_deserialize_impl(
 ) -> proc_macro2::TokenStream {
     // Handle empty struct case
     if fields.is_empty() {
-        let deserialization_body = if !matches!(extensibility, Some(ExtensibilityKind::Final)) {
+        let deserialization_body = if matches!(extensibility, Some(ExtensibilityKind::Appendable) | Some(ExtensibilityKind::Mutable)) {
             quote! {
                 let (object_size, start_position) = deserializer.begin_struct()?;
                 deserializer.end_struct(object_size, start_position)?;
                 Ok(#name {})
             }
         } else {
+            // Final or None (default) - no DHEADER
             quote! {
                 Ok(#name {})
             }
@@ -900,10 +932,11 @@ fn generate_xcdr_deserialize_impl(
 
     if is_mutable {
         generate_mutable_deserialize_impl(name, fields, crate_path, autoid)
-    } else if matches!(extensibility, Some(ExtensibilityKind::Final)) {
-        generate_final_deserialize_impl(name, fields, crate_path)
-    } else {
+    } else if matches!(extensibility, Some(ExtensibilityKind::Appendable)) {
         generate_appendable_deserialize_impl(name, fields, crate_path)
+    } else {
+        // Final or None (default) - no DHEADER
+        generate_final_deserialize_impl(name, fields, crate_path)
     }
 }
 

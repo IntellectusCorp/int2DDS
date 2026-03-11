@@ -11,3 +11,6 @@ path = "src/main.rs"
 [lib]
 name = "int2dds_idl"
 path = "src/lib.rs"
+
+[dependencies]
+md5 = "0.8"
