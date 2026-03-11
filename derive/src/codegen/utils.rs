@@ -390,6 +390,26 @@ pub fn get_discriminant_value(variant: &syn::Variant, index: usize) -> i64 {
     index as i64 // default: use index
 }
 
+/// Check if a variant has the #[dds(union_default)] attribute
+pub fn variant_is_union_default(variant: &syn::Variant) -> bool {
+    for attr in &variant.attrs {
+        if attr.path().is_ident("dds") {
+            if let Ok(nested) = attr.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::token::Comma>::parse_terminated,
+            ) {
+                for meta in &nested {
+                    if let syn::Meta::Path(path) = meta {
+                        if path.is_ident("union_default") {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 /// AutoId kind for struct-level auto ID assignment
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutoIdKind {
