@@ -83,6 +83,26 @@ impl Parser {
         }
     }
 
+    /// Like expect_ident but also accepts keyword tokens (for annotation names like @default).
+    fn expect_annotation_name(&mut self) -> Result<String, ParseError> {
+        let name = match self.peek().clone() {
+            Token::Ident(name) => name,
+            Token::Default => "default".to_string(),
+            Token::Switch => "switch".to_string(),
+            Token::Case => "case".to_string(),
+            _ => {
+                let cur = self.current();
+                return Err(ParseError {
+                    line: cur.line,
+                    col: cur.col,
+                    message: format!("expected annotation name, found {:?}", cur.token),
+                });
+            }
+        };
+        self.advance();
+        Ok(name)
+    }
+
     fn expect_int(&mut self) -> Result<i64, ParseError> {
         if let Token::IntLiteral(val) = self.peek().clone() {
             self.advance();
@@ -134,13 +154,16 @@ impl Parser {
                 }
                 Ok(Definition::Typedef(self.parse_typedef()?))
             }
+            Token::Bitmask => Ok(Definition::Bitmask(self.parse_bitmask(annotations)?)),
+            Token::Bitset => Ok(Definition::Bitset(self.parse_bitset(annotations)?)),
+            Token::Union => Ok(Definition::Union(self.parse_union(annotations)?)),
             _ => {
                 let cur = self.current();
                 Err(ParseError {
                     line: cur.line,
                     col: cur.col,
                     message: format!(
-                        "expected struct, enum, module, or typedef, found {:?}",
+                        "expected definition keyword, found {:?}",
                         cur.token
                     ),
                 })
@@ -158,7 +181,8 @@ impl Parser {
     }
 
     fn parse_annotation(&mut self) -> Result<Annotation, ParseError> {
-        let name = self.expect_ident()?;
+        // Annotation names can be keywords like @default, @key etc.
+        let name = self.expect_annotation_name()?;
         let mut params = Vec::new();
 
         if matches!(self.peek(), Token::LeftParen) {
@@ -267,8 +291,20 @@ impl Parser {
         self.expect(&Token::Struct)?;
         let name = self.expect_ident()?;
 
-        // Optional inheritance (skip for now)
-        // struct Foo : Bar { ... }
+        // Optional inheritance: struct Derived : Base { ... }
+        let base_type = if matches!(self.peek(), Token::Colon) {
+            self.advance(); // consume ':'
+            let mut base_name = self.expect_ident()?;
+            // Handle scoped names: Foo::Bar
+            while matches!(self.peek(), Token::ColonColon) {
+                self.advance();
+                let part = self.expect_ident()?;
+                base_name = format!("{}::{}", base_name, part);
+            }
+            Some(base_name)
+        } else {
+            None
+        };
 
         self.expect(&Token::LeftBrace)?;
 
@@ -282,6 +318,7 @@ impl Parser {
 
         Ok(StructDef {
             name,
+            base_type,
             members,
             annotations,
         })
@@ -347,6 +384,112 @@ impl Parser {
         Ok(TypedefDef { name, type_spec })
     }
 
+    fn parse_bitmask(&mut self, annotations: Vec<Annotation>) -> Result<BitmaskDef, ParseError> {
+        self.expect(&Token::Bitmask)?;
+        let name = self.expect_ident()?;
+        self.expect(&Token::LeftBrace)?;
+
+        let mut flags = Vec::new();
+        if !matches!(self.peek(), Token::RightBrace) {
+            flags.push(self.parse_bitmask_flag()?);
+            while matches!(self.peek(), Token::Comma) {
+                self.advance();
+                if matches!(self.peek(), Token::RightBrace) {
+                    break;
+                }
+                flags.push(self.parse_bitmask_flag()?);
+            }
+        }
+
+        self.expect(&Token::RightBrace)?;
+        self.eat_semicolons();
+
+        Ok(BitmaskDef { name, flags, annotations })
+    }
+
+    fn parse_bitmask_flag(&mut self) -> Result<BitmaskFlag, ParseError> {
+        let annotations = self.parse_annotations()?;
+        let name = self.expect_ident()?;
+        Ok(BitmaskFlag { name, annotations })
+    }
+
+    fn parse_bitset(&mut self, annotations: Vec<Annotation>) -> Result<BitsetDef, ParseError> {
+        self.expect(&Token::Bitset)?;
+        let name = self.expect_ident()?;
+        self.expect(&Token::LeftBrace)?;
+
+        let mut fields = Vec::new();
+        while !matches!(self.peek(), Token::RightBrace) {
+            // bitfield<N> name;
+            self.expect(&Token::Bitfield)?;
+            self.expect(&Token::LeftAngle)?;
+            let bit_width = self.expect_int()? as u32;
+            self.expect(&Token::RightAngle)?;
+            let field_name = self.expect_ident()?;
+            self.expect(&Token::Semicolon)?;
+            fields.push(BitsetField { name: field_name, bit_width });
+        }
+
+        self.expect(&Token::RightBrace)?;
+        self.eat_semicolons();
+
+        Ok(BitsetDef { name, fields, annotations })
+    }
+
+    fn parse_union(&mut self, annotations: Vec<Annotation>) -> Result<UnionDef, ParseError> {
+        self.expect(&Token::Union)?;
+        let name = self.expect_ident()?;
+        self.expect(&Token::Switch)?;
+        self.expect(&Token::LeftParen)?;
+        let discriminant_type = self.parse_type_spec()?;
+        self.expect(&Token::RightParen)?;
+        self.expect(&Token::LeftBrace)?;
+
+        let mut cases = Vec::new();
+        let mut default_case = None;
+
+        while !matches!(self.peek(), Token::RightBrace) {
+            if matches!(self.peek(), Token::Default) {
+                // default: Type name;
+                self.advance();
+                self.expect(&Token::Colon)?;
+                let type_spec = self.parse_type_spec()?;
+                let member_name = self.expect_ident()?;
+                self.expect(&Token::Semicolon)?;
+                default_case = Some(UnionCaseMember { type_spec, name: member_name });
+            } else {
+                // case LABEL: [case LABEL: ...] Type name;
+                let mut labels = Vec::new();
+                while matches!(self.peek(), Token::Case) {
+                    self.advance();
+                    let label = self.parse_const_expr()?;
+                    self.expect(&Token::Colon)?;
+                    labels.push(label);
+                }
+                if labels.is_empty() {
+                    let cur = self.current();
+                    return Err(ParseError {
+                        line: cur.line,
+                        col: cur.col,
+                        message: format!("expected 'case' or 'default', found {:?}", cur.token),
+                    });
+                }
+                let type_spec = self.parse_type_spec()?;
+                let member_name = self.expect_ident()?;
+                self.expect(&Token::Semicolon)?;
+                cases.push(UnionCase {
+                    labels,
+                    member: UnionCaseMember { type_spec, name: member_name },
+                });
+            }
+        }
+
+        self.expect(&Token::RightBrace)?;
+        self.eat_semicolons();
+
+        Ok(UnionDef { name, discriminant_type, cases, default_case, annotations })
+    }
+
     /// Parse a type specifier (without the field name / array dimensions).
     fn parse_type_spec(&mut self) -> Result<TypeSpec, ParseError> {
         match self.peek().clone() {
@@ -361,6 +504,10 @@ impl Parser {
             Token::Char => {
                 self.advance();
                 Ok(TypeSpec::Char)
+            }
+            Token::WCharKw => {
+                self.advance();
+                Ok(TypeSpec::WChar)
             }
             Token::Float => {
                 self.advance();
@@ -425,6 +572,18 @@ impl Parser {
                 };
                 Ok(TypeSpec::String(bound))
             }
+            Token::WStringKw => {
+                self.advance();
+                let bound = if matches!(self.peek(), Token::LeftAngle) {
+                    self.advance();
+                    let n = self.expect_int()? as u32;
+                    self.expect(&Token::RightAngle)?;
+                    Some(n)
+                } else {
+                    None
+                };
+                Ok(TypeSpec::WString(bound))
+            }
             Token::Sequence => {
                 self.advance();
                 self.expect(&Token::LeftAngle)?;
@@ -437,6 +596,21 @@ impl Parser {
                 };
                 self.expect(&Token::RightAngle)?;
                 Ok(TypeSpec::Sequence(Box::new(element), bound))
+            }
+            Token::Map => {
+                self.advance();
+                self.expect(&Token::LeftAngle)?;
+                let key_type = self.parse_type_spec()?;
+                self.expect(&Token::Comma)?;
+                let value_type = self.parse_type_spec()?;
+                let bound = if matches!(self.peek(), Token::Comma) {
+                    self.advance();
+                    Some(self.expect_int()? as u32)
+                } else {
+                    None
+                };
+                self.expect(&Token::RightAngle)?;
+                Ok(TypeSpec::Map(Box::new(key_type), Box::new(value_type), bound))
             }
             Token::Ident(name) => {
                 self.advance();
@@ -643,6 +817,139 @@ mod tests {
             assert_eq!(s.members[2].annotations.len(), 2); // @optional, @id(2)
         } else {
             panic!("expected struct");
+        }
+    }
+
+    #[test]
+    fn test_wstring_wchar() {
+        let defs = parse_str(
+            r#"
+            struct WideData {
+                wchar wc;
+                wstring ws;
+                wstring<128> bounded_ws;
+            };
+            "#,
+        );
+        if let Definition::Struct(s) = &defs[0] {
+            assert!(matches!(s.members[0].type_spec, TypeSpec::WChar));
+            assert!(matches!(s.members[1].type_spec, TypeSpec::WString(None)));
+            assert!(matches!(s.members[2].type_spec, TypeSpec::WString(Some(128))));
+        } else {
+            panic!("expected struct");
+        }
+    }
+
+    #[test]
+    fn test_struct_inheritance() {
+        let defs = parse_str(
+            r#"
+            struct Base {
+                long x;
+            };
+            struct Derived : Base {
+                long y;
+            };
+            "#,
+        );
+        assert_eq!(defs.len(), 2);
+        if let Definition::Struct(s) = &defs[1] {
+            assert_eq!(s.name, "Derived");
+            assert_eq!(s.base_type, Some("Base".to_string()));
+            assert_eq!(s.members.len(), 1);
+        } else {
+            panic!("expected struct");
+        }
+    }
+
+    #[test]
+    fn test_map() {
+        let defs = parse_str(
+            r#"
+            struct MapData {
+                map<long, string> lookup;
+                map<string, double, 100> bounded_map;
+            };
+            "#,
+        );
+        if let Definition::Struct(s) = &defs[0] {
+            assert!(matches!(&s.members[0].type_spec, TypeSpec::Map(k, v, None)
+                if matches!(k.as_ref(), TypeSpec::Int32) && matches!(v.as_ref(), TypeSpec::String(None))));
+            assert!(matches!(&s.members[1].type_spec, TypeSpec::Map(k, v, Some(100))
+                if matches!(k.as_ref(), TypeSpec::String(None)) && matches!(v.as_ref(), TypeSpec::Float64)));
+        } else {
+            panic!("expected struct");
+        }
+    }
+
+    #[test]
+    fn test_bitmask() {
+        let defs = parse_str(
+            r#"
+            @bit_bound(8)
+            bitmask MyFlags {
+                FLAG_A,
+                @position(3) FLAG_B,
+                FLAG_C
+            };
+            "#,
+        );
+        if let Definition::Bitmask(b) = &defs[0] {
+            assert_eq!(b.name, "MyFlags");
+            assert_eq!(b.flags.len(), 3);
+            assert_eq!(b.flags[0].name, "FLAG_A");
+            assert_eq!(b.flags[1].name, "FLAG_B");
+            assert_eq!(b.flags[1].annotations.len(), 1);
+            assert_eq!(b.flags[1].annotations[0].name, "position");
+        } else {
+            panic!("expected bitmask");
+        }
+    }
+
+    #[test]
+    fn test_bitset() {
+        let defs = parse_str(
+            r#"
+            bitset MyBitset {
+                bitfield<3> field_a;
+                bitfield<5> field_b;
+            };
+            "#,
+        );
+        if let Definition::Bitset(b) = &defs[0] {
+            assert_eq!(b.name, "MyBitset");
+            assert_eq!(b.fields.len(), 2);
+            assert_eq!(b.fields[0].name, "field_a");
+            assert_eq!(b.fields[0].bit_width, 3);
+            assert_eq!(b.fields[1].name, "field_b");
+            assert_eq!(b.fields[1].bit_width, 5);
+        } else {
+            panic!("expected bitset");
+        }
+    }
+
+    #[test]
+    fn test_union() {
+        let defs = parse_str(
+            r#"
+            union MyUnion switch(long) {
+                case 0: long int_val;
+                case 1:
+                case 2: string str_val;
+                default: octet default_val;
+            };
+            "#,
+        );
+        if let Definition::Union(u) = &defs[0] {
+            assert_eq!(u.name, "MyUnion");
+            assert!(matches!(u.discriminant_type, TypeSpec::Int32));
+            assert_eq!(u.cases.len(), 2);
+            assert_eq!(u.cases[0].labels.len(), 1);
+            assert_eq!(u.cases[1].labels.len(), 2); // case 1 and case 2
+            assert!(u.default_case.is_some());
+            assert_eq!(u.default_case.as_ref().unwrap().name, "default_val");
+        } else {
+            panic!("expected union");
         }
     }
 }

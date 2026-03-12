@@ -161,6 +161,34 @@ fn gen_serialize_code(
                 }
             }
         }
+        SerializationMethod::WString => {
+            let trait_path = if xcdr {
+                quote!(#crate_path::serialize::xcdr::XcdrSerialize::serialize_xcdr)
+            } else {
+                quote!(#crate_path::serialize::cdr::CdrSerialize::serialize_cdr)
+            };
+
+            if let Some(max_len) = bound {
+                quote! {
+                    {
+                        let __utf16_len = typed_data.#field_name.as_str().encode_utf16().count();
+                        if __utf16_len > #max_len {
+                            return Err(#crate_path::dcps::core::error::DdsError::Error(
+                                format!("WString field '{}' UTF-16 length {} exceeds bound {}",
+                                    stringify!(#field_name), __utf16_len, #max_len)
+                            ));
+                        }
+                    }
+                    #trait_path(&typed_data.#field_name, &mut serializer)
+                        .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+                }
+            } else {
+                quote! {
+                    #trait_path(&typed_data.#field_name, &mut serializer)
+                        .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+                }
+            }
+        }
         SerializationMethod::U8Array => {
             gen_array_serialize("serialize_byte_array", field_name, crate_path)
         }
@@ -329,6 +357,34 @@ fn gen_deserialize_code(
                 }
             } else {
                 gen_primitive_deserialize("deserialize_string", field_name, crate_path)
+            }
+        }
+        SerializationMethod::WString => {
+            let (trait_name, method_name) = if xcdr {
+                (quote!(#crate_path::serialize::xcdr::XcdrDeserialize), quote!(deserialize_xcdr))
+            } else {
+                (quote!(#crate_path::serialize::cdr::CdrDeserialize), quote!(deserialize_cdr))
+            };
+
+            if let Some(max_len) = bound {
+                quote! {
+                    let #field_name = <#field_type as #trait_name>::#method_name(&mut deserializer)
+                        .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+                    {
+                        let __utf16_len = #field_name.as_str().encode_utf16().count();
+                        if __utf16_len > #max_len {
+                            return Err(#crate_path::dcps::core::error::DdsError::Error(
+                                format!("Deserialized WString field '{}' UTF-16 length {} exceeds bound {}",
+                                    stringify!(#field_name), __utf16_len, #max_len)
+                            ));
+                        }
+                    }
+                }
+            } else {
+                quote! {
+                    let #field_name = <#field_type as #trait_name>::#method_name(&mut deserializer)
+                        .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+                }
             }
         }
         SerializationMethod::U8Array => {
