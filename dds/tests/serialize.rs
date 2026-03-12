@@ -1,7 +1,7 @@
 mod common;
 
 use int2dds::{
-    dcps::topic::type_support::DdsType,
+    dcps::topic::type_support::{DdsType, FieldAccessor},
     serialize::{
         cdr::{
             CdrDeserialize, CdrDeserializer, CdrSerialize, CdrSerializer, ExtensibilityKind,

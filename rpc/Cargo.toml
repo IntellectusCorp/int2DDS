@@ -1,0 +1,17 @@
+[package]
+name = "int2dds-rpc"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "DDS-RPC (Remote Procedure Call over DDS) implementation for int2DDS"
+
+[dependencies]
+int2dds = { path = "../dds" }
+int2dds-derive = { path = "../derive" }
+speedy = "0.8.0"
+log = "0.4"
+md5 = "0.8.0"

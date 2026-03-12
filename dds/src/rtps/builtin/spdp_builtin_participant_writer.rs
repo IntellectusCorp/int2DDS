@@ -206,6 +206,16 @@ impl Writer for SPDPbuiltinParticipantWriter {
             source_timestamp,
         )
     }
+    fn new_change_with_rpc_callback(
+        &self,
+        _kind: ChangeKind,
+        _handle: InstanceHandle,
+        _source_timestamp: Option<RtpsTime>,
+        _data_fn: Box<dyn FnOnce(Guid, SequenceNumber) -> SerializedData + '_>,
+    ) -> CacheChange {
+        unimplemented!("SPDP writer does not support RPC callback")
+    }
+
     fn data_max_size_serialized(&self) -> i32 {
         self.data_max_size_serialized
     }

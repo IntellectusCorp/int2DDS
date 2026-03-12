@@ -1,6 +1,6 @@
 [workspace]
-members = ["dds", "derive", "ffi"]
-default-members = ["dds", "derive", "ffi"]
+members = ["dds", "derive", "ffi", "rpc"]
+default-members = ["dds", "derive", "ffi", "rpc"]
 exclude = ["idl"]
 resolver = "2"
 
