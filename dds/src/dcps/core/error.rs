@@ -44,6 +44,8 @@ impl fmt::Display for DdsError {
         }
     }
 }
+impl std::error::Error for DdsError {}
+
 /// Return code representing the different errors
 pub type ReturnCode = i32;
 
