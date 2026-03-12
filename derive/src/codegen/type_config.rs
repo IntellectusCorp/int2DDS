@@ -21,6 +21,8 @@ pub struct DdsTypeConfig {
     pub bitmask: bool,
     pub bit_bound: Option<u8>,
     pub bitset: bool,
+    pub no_additional_derives: bool,
+    pub skip_field_accessor: bool,
 }
 
 pub fn parse_dds_type_attributes(input: &DeriveInput) -> DdsTypeConfig {
@@ -32,6 +34,8 @@ pub fn parse_dds_type_attributes(input: &DeriveInput) -> DdsTypeConfig {
     let mut bitmask = false;
     let mut bit_bound: Option<u8> = None;
     let mut bitset = false;
+    let mut no_additional_derives = false;
+    let mut skip_field_accessor = false;
 
     // Parse #[dds_type(...)] attributes
     for attr in &input.attrs {
@@ -86,6 +90,10 @@ pub fn parse_dds_type_attributes(input: &DeriveInput) -> DdsTypeConfig {
                     bit_bound = Some(lit.base10_parse::<u8>()?);
                 } else if meta.path.is_ident("bitset") {
                     bitset = true;
+                } else if meta.path.is_ident("no_additional_derives") {
+                    no_additional_derives = true;
+                } else if meta.path.is_ident("skip_field_accessor") {
+                    skip_field_accessor = true;
                 }
                 Ok(())
             });
@@ -113,6 +121,8 @@ pub fn parse_dds_type_attributes(input: &DeriveInput) -> DdsTypeConfig {
         bitmask,
         bit_bound,
         bitset,
+        no_additional_derives,
+        skip_field_accessor,
     }
 }
 
