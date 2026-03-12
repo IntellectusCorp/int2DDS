@@ -79,8 +79,7 @@ impl UdpListener {
         interface_address_list.clone().map(|a| Locator::from_ip_and_port(&a, port as u32)).collect()
     }
 
-    pub(crate) fn new_multicast(port: u16, working_ip: String) -> std::io::Result<Self> {
-        // socket2 bind
+    pub(crate) fn new_multicast(port: u16, working_ips: &[String]) -> std::io::Result<Self> {
         let socket = Socket2::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
         socket.set_reuse_address(true)?;
         socket.set_broadcast(true)?;
@@ -94,12 +93,15 @@ impl UdpListener {
             let _ = socket.set_recv_buffer_size(new_size);
         }
 
-        // println!("[socket] new_multicast recv_buffer_size: {:?}", socket.recv_buffer_size());
+        // Join multicast group on each working interface individually,
+        // so multicast works regardless of OS default route availability.
+        for ip in working_ips {
+            let addr: std::net::Ipv4Addr = ip.parse().unwrap();
+            socket.join_multicast_v4(&MULTICAST_IP, &addr).unwrap_or_else(|e| {
+                error!("Fail - join_multicast_v4 : {:?} {:?}", e, addr);
+            });
+        }
 
-        let addr = working_ip.parse().unwrap();
-        socket.join_multicast_v4(&MULTICAST_IP, &addr).unwrap_or_else(|e| {
-            error!("Fail - join_multicast_v4 : {:?} {:?}", e, addr);
-        });
         let addr: SocketAddr = format!("0.0.0.0:{}", port).parse().unwrap();
         let sock_addr = SockAddr::from(addr);
         socket.bind(&sock_addr)?;
