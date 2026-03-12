@@ -52,6 +52,16 @@ pub(crate) trait Writer: Entity + Endpoint + Debug + Any {
         source_timestamp: Option<RtpsTime>,
     ) -> CacheChange;
 
+    /// Call `data_fn` to produce serialized data under the lock, then create the CacheChange.
+    /// Designed for RPC DataWriters to generate request/reply samples with correct SampleIdentity in a single step.
+    fn new_change_with_rpc_callback(
+        &self,
+        kind: ChangeKind,
+        handle: InstanceHandle,
+        source_timestamp: Option<RtpsTime>,
+        data_fn: Box<dyn FnOnce(Guid, SequenceNumber) -> SerializedData + '_>,
+    ) -> CacheChange;
+
     fn push_mode(&self) -> bool;
     fn heartbeat_period(&self) -> RtpsDuration;
     fn nack_response_delay(&self) -> RtpsDuration;

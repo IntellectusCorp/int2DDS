@@ -31,6 +31,7 @@ pub fn generate_enum_cdr_serialize_impl(
     quote! {
         impl #crate_path::serialize::cdr::CdrSerialize for #name {
             fn serialize_cdr(&self, serializer: &mut #crate_path::serialize::cdr::CdrSerializer) -> #crate_path::serialize::cdr::CdrResult<()> {
+                use #crate_path::serialize::cdr::PrimitiveSerialize;
                 let discriminant: #disc_rust_type = match self {
                     #(#match_arms)*
                 };
@@ -99,6 +100,7 @@ pub fn generate_enum_xcdr_serialize_impl(
     quote! {
         impl #crate_path::serialize::cdr::XcdrSerialize for #name {
             fn serialize_xcdr(&self, serializer: &mut #crate_path::serialize::cdr::XcdrSerializer) -> #crate_path::serialize::cdr::XcdrResult<()> {
+                use #crate_path::serialize::cdr::PrimitiveSerialize;
                 let discriminant: #disc_rust_type = match self {
                     #(#match_arms)*
                 };
