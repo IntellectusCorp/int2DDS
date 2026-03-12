@@ -98,7 +98,10 @@ impl Socket {
 
         match transport_type {
             TransportType::UDP => {
-                self.sender = match UdpSender::new(self.get_ip_to_bind()) {
+                self.sender = match UdpSender::new(
+                    self.get_sender_bind_addr(),
+                    self.get_sender_multicast_if_addr(),
+                ) {
                     Ok(udp_sender) => {
                         let transport_sender = TransportSender::Udp(udp_sender);
                         Some(Arc::new(transport_sender))
@@ -110,7 +113,7 @@ impl Socket {
                 };
             }
             TransportType::TCP => {
-                let tcp_sender_arc = match TcpSender::new(self.get_ip_to_bind()) {
+                let tcp_sender_arc = match TcpSender::new(self.get_sender_bind_addr()) {
                     Ok(tcp_sender) => {
                         let transport_sender = TransportSender::Tcp(tcp_sender);
                         log::info!("[socket] TCP sender created");
@@ -128,7 +131,10 @@ impl Socket {
             }
             TransportType::Hybrid => {
                 // Create UDP sender as primary
-                self.sender = match UdpSender::new(self.get_ip_to_bind()) {
+                self.sender = match UdpSender::new(
+                    self.get_sender_bind_addr(),
+                    self.get_sender_multicast_if_addr(),
+                ) {
                     Ok(udp_sender) => {
                         let transport_sender = TransportSender::Udp(udp_sender);
                         log::info!("[socket] Hybrid mode: UDP sender created");
@@ -141,7 +147,7 @@ impl Socket {
                 };
 
                 // Create TCP sender as secondary
-                self.tcp_sender = match TcpSender::new(self.get_ip_to_bind()) {
+                self.tcp_sender = match TcpSender::new(self.get_sender_bind_addr()) {
                     Ok(tcp_sender) => {
                         log::info!("[socket] Hybrid mode: TCP sender created");
                         Some(Arc::new(TransportSender::Tcp(tcp_sender)))
@@ -154,7 +160,10 @@ impl Socket {
             }
             TransportType::SHM => {
                 // SHM mode uses UDP for discovery (SPDP, SEDP)
-                self.sender = match UdpSender::new(self.get_ip_to_bind()) {
+                self.sender = match UdpSender::new(
+                    self.get_sender_bind_addr(),
+                    self.get_sender_multicast_if_addr(),
+                ) {
                     Ok(udp_sender) => {
                         let transport_sender = TransportSender::Udp(udp_sender);
                         log::info!("[socket] SHM mode: UDP sender created for discovery");
@@ -243,13 +252,40 @@ impl Socket {
         self.create_user_traffic_multicast_listener(self.domain_id);
     }
 
-    fn get_ip_to_bind(&self) -> String {
+    // Sender bind address: loopback-only -> 127.0.0.1, otherwise -> 0.0.0.0
+    fn get_sender_bind_addr(&self) -> String {
         let only_loopback = self.working_ips.len() == 1 && self.working_ips[0] == "127.0.0.1";
         if only_loopback {
+            // No physical NIC available, 0.0.0.0 has no interface to route through
             "127.0.0.1".to_string()
         } else {
+            // 0.0.0.0 allows unicast to reach any subnet via OS routing table
             "0.0.0.0".to_string()
         }
+    }
+
+    // TODO: Ideally, create one multicast sender per NIC with set_multicast_if_v4(ip) + bind(ip:0)
+    // to send multicast out of all NICs simultaneously.
+    // 0.0.0.0 relies on default route, which doesn't exist in gateway-less environments,
+    // and multicast addresses (e.g. 239.x) don't match any subnet route.
+    fn get_sender_multicast_if_addr(&self) -> String {
+        // Check if OS can resolve a default route (gateway exists)
+        let has_default_route = std::net::UdpSocket::bind("0.0.0.0:0")
+            .and_then(|s| s.connect("8.8.8.8:80").map(|_| s))
+            .is_ok();
+
+        // If default route exists, use 0.0.0.0 to let OS choose NIC via routing table
+        if has_default_route {
+            return "0.0.0.0".to_string();
+        }
+
+        // No default route (e.g. direct Ethernet without gateway):
+        // pick the first non-loopback IP from working_ips
+        self.working_ips
+            .iter()
+            .find(|ip| ip.as_str() != "127.0.0.1")
+            .cloned()
+            .unwrap_or_else(|| "127.0.0.1".to_string()) // Fallback to loopback if no other IPs are available
     }
 
     fn create_unicast_listener(&mut self) {
@@ -263,7 +299,7 @@ impl Socket {
     fn create_discovery_multicast_listener(&mut self, domain_id: u32) {
         let udp_listener: Option<UdpListener> = UdpListener::new_multicast(
             PortManager::get_discovery_traffic_multicast_port(domain_id),
-            self.get_ip_to_bind(),
+            &self.working_ips,
         )
         .ok();
         self.discovery_traffic_multicast_listener = udp_listener;
@@ -294,7 +330,7 @@ impl Socket {
     fn create_user_traffic_multicast_listener(&mut self, domain_id: u32) {
         let udp_listener: Option<UdpListener> = UdpListener::new_multicast(
             PortManager::get_user_traffic_multicast_port(domain_id),
-            self.get_ip_to_bind(),
+            &self.working_ips,
         )
         .ok();
         self.user_traffic_multicast_listener = udp_listener;
