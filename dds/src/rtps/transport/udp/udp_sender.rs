@@ -34,13 +34,14 @@ impl UdpSender {
             .unwrap_or(0)
     }
 
-    pub(crate) fn new(working_ip: String) -> std::io::Result<Self> {
-        let addr: Ipv4Addr = working_ip.parse().unwrap();
-
+    pub(crate) fn new(bind_ip: String, multicast_if_ip: String) -> std::io::Result<Self> {
         let socket = Socket2::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-        socket.set_multicast_if_v4(&addr)?;
-        let bind_addr = SocketAddr::new(IpAddr::V4(addr), 0);
-        let sock_addr = SockAddr::from(bind_addr);
+
+        let mc_addr: Ipv4Addr = multicast_if_ip.parse().unwrap();
+        socket.set_multicast_if_v4(&mc_addr)?;
+
+        let bind_addr: Ipv4Addr = bind_ip.parse().unwrap();
+        let sock_addr = SockAddr::from(SocketAddr::new(IpAddr::V4(bind_addr), 0));
         socket.bind(&sock_addr)?;
         if let Some(size) = Self::get_socket_buffer_size() {
             socket.set_send_buffer_size(size)?;
