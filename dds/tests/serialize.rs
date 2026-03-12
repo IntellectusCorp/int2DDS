@@ -1083,79 +1083,84 @@ fn test_struct_inheritance_xcdr_appendable() {
 // Bitmask Tests
 // ============================================================================
 
-#[derive(DdsType)]
-#[dds_type(bitmask, bit_bound = 8)]
-#[repr(u8)]
-enum MyBitmask {
-    #[dds(position = 0)]
-    Flag0 = 1,
-    #[dds(position = 1)]
-    Flag1 = 2,
-    #[dds(position = 7)]
-    Flag7 = 128,
-}
+#[allow(non_upper_case_globals)]
+mod bitmask_tests {
+    use super::*;
 
-#[test]
-fn test_bitmask_cdr_roundtrip() {
-    let value = MyBitmaskValue::from(MyBitmask::Flag0);
-    let mut serializer = CdrSerializer::new(true);
-    serializer.write_encapsulation_header().unwrap();
-    value.serialize_cdr(&mut serializer).unwrap();
+    #[derive(DdsType)]
+    #[dds_type(bitmask, bit_bound = 8)]
+    #[repr(u8)]
+    enum MyBitmask {
+        #[dds(position = 0)]
+        Flag0 = 1,
+        #[dds(position = 1)]
+        Flag1 = 2,
+        #[dds(position = 7)]
+        Flag7 = 128,
+    }
 
-    let bytes = serializer.into_bytes();
-    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
-    let result = MyBitmaskValue::deserialize_cdr(&mut deserializer).unwrap();
-    assert_eq!(result, MyBitmaskValue(1));
-    assert!(result.contains(MyBitmaskValue::Flag0));
-    assert!(!result.contains(MyBitmaskValue::Flag1));
-}
+    #[test]
+    fn test_bitmask_cdr_roundtrip() {
+        let value = MyBitmaskValue::from(MyBitmask::Flag0);
+        let mut serializer = CdrSerializer::new(true);
+        serializer.write_encapsulation_header().unwrap();
+        value.serialize_cdr(&mut serializer).unwrap();
 
-#[test]
-fn test_bitmask_combined_flags() {
-    let mut value = MyBitmaskValue::empty();
-    value.set(MyBitmaskValue::Flag0);
-    value.set(MyBitmaskValue::Flag7);
-    assert!(value.contains(MyBitmaskValue::Flag0));
-    assert!(!value.contains(MyBitmaskValue::Flag1));
-    assert!(value.contains(MyBitmaskValue::Flag7));
-    assert_eq!(value.bits(), 0b1000_0001);
+        let bytes = serializer.into_bytes();
+        let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+        let result = MyBitmaskValue::deserialize_cdr(&mut deserializer).unwrap();
+        assert_eq!(result, MyBitmaskValue(1));
+        assert!(result.contains(MyBitmaskValue::Flag0));
+        assert!(!result.contains(MyBitmaskValue::Flag1));
+    }
 
-    let mut serializer = CdrSerializer::new(true);
-    serializer.write_encapsulation_header().unwrap();
-    value.serialize_cdr(&mut serializer).unwrap();
+    #[test]
+    fn test_bitmask_combined_flags() {
+        let mut value = MyBitmaskValue::empty();
+        value.set(MyBitmaskValue::Flag0);
+        value.set(MyBitmaskValue::Flag7);
+        assert!(value.contains(MyBitmaskValue::Flag0));
+        assert!(!value.contains(MyBitmaskValue::Flag1));
+        assert!(value.contains(MyBitmaskValue::Flag7));
+        assert_eq!(value.bits(), 0b1000_0001);
 
-    let bytes = serializer.into_bytes();
-    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
-    let result = MyBitmaskValue::deserialize_cdr(&mut deserializer).unwrap();
-    assert_eq!(result, value);
-}
+        let mut serializer = CdrSerializer::new(true);
+        serializer.write_encapsulation_header().unwrap();
+        value.serialize_cdr(&mut serializer).unwrap();
 
-#[test]
-fn test_bitmask_bitwise_ops() {
-    let a = MyBitmaskValue::from(MyBitmask::Flag0);
-    let b = MyBitmaskValue::from(MyBitmask::Flag1);
-    let combined = a | b;
-    assert!(combined.contains(MyBitmaskValue::Flag0));
-    assert!(combined.contains(MyBitmaskValue::Flag1));
-    assert_eq!(combined.bits(), 0b11);
+        let bytes = serializer.into_bytes();
+        let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+        let result = MyBitmaskValue::deserialize_cdr(&mut deserializer).unwrap();
+        assert_eq!(result, value);
+    }
 
-    let masked = combined & MyBitmaskValue::from(MyBitmask::Flag0);
-    assert!(masked.contains(MyBitmaskValue::Flag0));
-    assert!(!masked.contains(MyBitmaskValue::Flag1));
-}
+    #[test]
+    fn test_bitmask_bitwise_ops() {
+        let a = MyBitmaskValue::from(MyBitmask::Flag0);
+        let b = MyBitmaskValue::from(MyBitmask::Flag1);
+        let combined = a | b;
+        assert!(combined.contains(MyBitmaskValue::Flag0));
+        assert!(combined.contains(MyBitmaskValue::Flag1));
+        assert_eq!(combined.bits(), 0b11);
 
-#[test]
-fn test_bitmask_xcdr_roundtrip() {
-    let value = MyBitmaskValue::from(MyBitmask::Flag1) | MyBitmaskValue::from(MyBitmask::Flag7);
+        let masked = combined & MyBitmaskValue::from(MyBitmask::Flag0);
+        assert!(masked.contains(MyBitmaskValue::Flag0));
+        assert!(!masked.contains(MyBitmaskValue::Flag1));
+    }
 
-    let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Final);
-    serializer.write_encapsulation_header().unwrap();
-    value.serialize_xcdr(&mut serializer).unwrap();
+    #[test]
+    fn test_bitmask_xcdr_roundtrip() {
+        let value = MyBitmaskValue::from(MyBitmask::Flag1) | MyBitmaskValue::from(MyBitmask::Flag7);
 
-    let bytes = serializer.into_bytes();
-    let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
-    let result = MyBitmaskValue::deserialize_xcdr(&mut deserializer).unwrap();
-    assert_eq!(result, value);
+        let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Final);
+        serializer.write_encapsulation_header().unwrap();
+        value.serialize_xcdr(&mut serializer).unwrap();
+
+        let bytes = serializer.into_bytes();
+        let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
+        let result = MyBitmaskValue::deserialize_xcdr(&mut deserializer).unwrap();
+        assert_eq!(result, value);
+    }
 }
 
 // ============================================================================
