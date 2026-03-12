@@ -861,3 +861,394 @@ fn test_appendable_struct_dheader() {
 
     assert_eq!(result, value);
 }
+
+// ============================================================================
+// Bounded WString Tests
+// ============================================================================
+
+#[derive(DdsType)]
+struct BoundedWStringStruct {
+    #[dds(bound = 5)]
+    pub ws: WString,
+}
+
+#[test]
+fn test_bounded_wstring_within_bound() {
+    let value = BoundedWStringStruct { ws: WString::from("Hello") };
+    let mut serializer = CdrSerializer::new(true);
+    serializer.write_encapsulation_header().unwrap();
+    CdrSerialize::serialize_cdr(&value, &mut serializer).unwrap();
+
+    let bytes = serializer.into_bytes();
+    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+    let result = BoundedWStringStruct::deserialize_cdr(&mut deserializer).unwrap();
+    assert_eq!(result.ws.as_str(), "Hello");
+}
+
+// ============================================================================
+// @external (Box<T>) Tests
+// ============================================================================
+
+#[test]
+fn test_box_cdr_roundtrip() {
+    let value: Box<u32> = Box::new(42);
+    let mut serializer = CdrSerializer::new(true);
+    serializer.write_encapsulation_header().unwrap();
+    value.serialize_cdr(&mut serializer).unwrap();
+
+    let bytes = serializer.into_bytes();
+    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+    let result = Box::<u32>::deserialize_cdr(&mut deserializer).unwrap();
+    assert_eq!(*result, 42);
+}
+
+#[test]
+fn test_box_xcdr_roundtrip() {
+    let value: Box<String> = Box::new("test_external".to_string());
+    let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Final);
+    serializer.write_encapsulation_header().unwrap();
+    value.serialize_xcdr(&mut serializer).unwrap();
+
+    let bytes = serializer.into_bytes();
+    let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
+    let result = Box::<String>::deserialize_xcdr(&mut deserializer).unwrap();
+    assert_eq!(*result, "test_external");
+}
+
+#[test]
+fn test_box_nested_struct_cdr() {
+    #[derive(DdsType)]
+    struct InnerData {
+        pub x: i32,
+        pub y: f64,
+    }
+
+    let value: Box<InnerData> = Box::new(InnerData { x: 100, y: 3.14 });
+    let mut serializer = CdrSerializer::new(true);
+    serializer.write_encapsulation_header().unwrap();
+    value.serialize_cdr(&mut serializer).unwrap();
+
+    let bytes = serializer.into_bytes();
+    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+    let result = Box::<InnerData>::deserialize_cdr(&mut deserializer).unwrap();
+    assert_eq!(result.x, 100);
+    assert_eq!(result.y, 3.14);
+}
+
+// ============================================================================
+// @hashid Tests
+// ============================================================================
+
+#[derive(DdsType)]
+#[dds_type(extensibility = "Mutable")]
+struct HashIdStruct {
+    #[dds(hashid)]
+    pub name: String,
+    #[dds(hashid = "custom_field")]
+    pub value: u32,
+}
+
+#[test]
+fn test_hashid_mutable_roundtrip() {
+    let original = HashIdStruct { name: "test_name".to_string(), value: 42 };
+
+    let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Mutable);
+    serializer.write_encapsulation_header().unwrap();
+    original.serialize_xcdr(&mut serializer).unwrap();
+
+    let bytes = serializer.into_bytes();
+
+    let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
+    let result = HashIdStruct::deserialize_xcdr(&mut deserializer).unwrap();
+    assert_eq!(result.name, "test_name");
+    assert_eq!(result.value, 42);
+}
+
+// ============================================================================
+// @autoid Tests
+// ============================================================================
+
+#[derive(DdsType)]
+#[dds_type(extensibility = "Mutable", autoid = "Hash")]
+struct AutoIdHashStruct {
+    pub field_a: u32,
+    pub field_b: String,
+}
+
+#[test]
+fn test_autoid_hash_mutable_roundtrip() {
+    let original = AutoIdHashStruct { field_a: 123, field_b: "autoid_test".to_string() };
+
+    let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Mutable);
+    serializer.write_encapsulation_header().unwrap();
+    original.serialize_xcdr(&mut serializer).unwrap();
+
+    let bytes = serializer.into_bytes();
+
+    let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
+    let result = AutoIdHashStruct::deserialize_xcdr(&mut deserializer).unwrap();
+    assert_eq!(result.field_a, 123);
+    assert_eq!(result.field_b, "autoid_test");
+}
+
+#[derive(DdsType)]
+#[dds_type(extensibility = "Mutable", autoid = "Sequential")]
+struct AutoIdSeqStruct {
+    pub first: u32,
+    pub second: f64,
+}
+
+#[test]
+fn test_autoid_sequential_mutable_roundtrip() {
+    let original = AutoIdSeqStruct { first: 999, second: 1.5 };
+
+    let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Mutable);
+    serializer.write_encapsulation_header().unwrap();
+    original.serialize_xcdr(&mut serializer).unwrap();
+
+    let bytes = serializer.into_bytes();
+
+    let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
+    let result = AutoIdSeqStruct::deserialize_xcdr(&mut deserializer).unwrap();
+    assert_eq!(result.first, 999);
+    assert_eq!(result.second, 1.5);
+}
+
+// ============================================================================
+// Struct Inheritance Tests
+// ============================================================================
+
+#[derive(DdsType)]
+struct ParentStruct {
+    pub parent_id: u32,
+    pub parent_name: String,
+}
+
+#[derive(DdsType)]
+struct ChildStruct {
+    #[dds(parent)]
+    pub base: ParentStruct,
+    pub child_value: f64,
+}
+
+#[test]
+fn test_struct_inheritance_cdr() {
+    let value = ChildStruct {
+        base: ParentStruct { parent_id: 42, parent_name: "parent".to_string() },
+        child_value: 3.14,
+    };
+
+    let mut serializer = CdrSerializer::new(true);
+    serializer.write_encapsulation_header().unwrap();
+    value.serialize_cdr(&mut serializer).unwrap();
+
+    let bytes = serializer.into_bytes();
+    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+    let result = ChildStruct::deserialize_cdr(&mut deserializer).unwrap();
+    assert_eq!(result.base.parent_id, 42);
+    assert_eq!(result.base.parent_name, "parent");
+    assert_eq!(result.child_value, 3.14);
+}
+
+#[derive(DdsType)]
+#[dds_type(extensibility = "Appendable")]
+struct AppendableParent2 {
+    pub x: i32,
+}
+
+#[derive(DdsType)]
+#[dds_type(extensibility = "Appendable")]
+struct AppendableChild2 {
+    #[dds(parent)]
+    pub base: AppendableParent2,
+    pub y: f64,
+}
+
+#[test]
+fn test_struct_inheritance_xcdr_appendable() {
+    let value = AppendableChild2 { base: AppendableParent2 { x: 100 }, y: 2.71 };
+
+    let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Appendable);
+    serializer.write_encapsulation_header().unwrap();
+    value.serialize_xcdr(&mut serializer).unwrap();
+
+    let bytes = serializer.into_bytes();
+    let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
+    let result = AppendableChild2::deserialize_xcdr(&mut deserializer).unwrap();
+    assert_eq!(result.base.x, 100);
+    assert_eq!(result.y, 2.71);
+}
+
+// ============================================================================
+// Bitmask Tests
+// ============================================================================
+
+#[allow(non_upper_case_globals)]
+mod bitmask_tests {
+    use super::*;
+
+    #[derive(DdsType)]
+    #[dds_type(bitmask, bit_bound = 8)]
+    #[repr(u8)]
+    enum MyBitmask {
+        #[dds(position = 0)]
+        Flag0 = 1,
+        #[dds(position = 1)]
+        Flag1 = 2,
+        #[dds(position = 7)]
+        Flag7 = 128,
+    }
+
+    #[test]
+    fn test_bitmask_cdr_roundtrip() {
+        let value = MyBitmaskValue::from(MyBitmask::Flag0);
+        let mut serializer = CdrSerializer::new(true);
+        serializer.write_encapsulation_header().unwrap();
+        value.serialize_cdr(&mut serializer).unwrap();
+
+        let bytes = serializer.into_bytes();
+        let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+        let result = MyBitmaskValue::deserialize_cdr(&mut deserializer).unwrap();
+        assert_eq!(result, MyBitmaskValue(1));
+        assert!(result.contains(MyBitmaskValue::Flag0));
+        assert!(!result.contains(MyBitmaskValue::Flag1));
+    }
+
+    #[test]
+    fn test_bitmask_combined_flags() {
+        let mut value = MyBitmaskValue::empty();
+        value.set(MyBitmaskValue::Flag0);
+        value.set(MyBitmaskValue::Flag7);
+        assert!(value.contains(MyBitmaskValue::Flag0));
+        assert!(!value.contains(MyBitmaskValue::Flag1));
+        assert!(value.contains(MyBitmaskValue::Flag7));
+        assert_eq!(value.bits(), 0b1000_0001);
+
+        let mut serializer = CdrSerializer::new(true);
+        serializer.write_encapsulation_header().unwrap();
+        value.serialize_cdr(&mut serializer).unwrap();
+
+        let bytes = serializer.into_bytes();
+        let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+        let result = MyBitmaskValue::deserialize_cdr(&mut deserializer).unwrap();
+        assert_eq!(result, value);
+    }
+
+    #[test]
+    fn test_bitmask_bitwise_ops() {
+        let a = MyBitmaskValue::from(MyBitmask::Flag0);
+        let b = MyBitmaskValue::from(MyBitmask::Flag1);
+        let combined = a | b;
+        assert!(combined.contains(MyBitmaskValue::Flag0));
+        assert!(combined.contains(MyBitmaskValue::Flag1));
+        assert_eq!(combined.bits(), 0b11);
+
+        let masked = combined & MyBitmaskValue::from(MyBitmask::Flag0);
+        assert!(masked.contains(MyBitmaskValue::Flag0));
+        assert!(!masked.contains(MyBitmaskValue::Flag1));
+    }
+
+    #[test]
+    fn test_bitmask_xcdr_roundtrip() {
+        let value = MyBitmaskValue::from(MyBitmask::Flag1) | MyBitmaskValue::from(MyBitmask::Flag7);
+
+        let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Final);
+        serializer.write_encapsulation_header().unwrap();
+        value.serialize_xcdr(&mut serializer).unwrap();
+
+        let bytes = serializer.into_bytes();
+        let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
+        let result = MyBitmaskValue::deserialize_xcdr(&mut deserializer).unwrap();
+        assert_eq!(result, value);
+    }
+}
+
+// ============================================================================
+// Bitset Tests
+// ============================================================================
+
+#[derive(DdsType)]
+#[dds_type(bitset)]
+struct MyBitset {
+    #[dds(bitfield = 3)]
+    pub a: u8,
+    #[dds(bitfield = 10)]
+    pub b: u16,
+    #[dds(bitfield = 12)]
+    pub c: u32,
+}
+
+#[test]
+fn test_bitset_cdr_roundtrip() {
+    let value = MyBitset { a: 5, b: 1023, c: 4095 };
+
+    let mut serializer = CdrSerializer::new(true);
+    serializer.write_encapsulation_header().unwrap();
+    value.serialize_cdr(&mut serializer).unwrap();
+
+    let bytes = serializer.into_bytes();
+    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+    let result = MyBitset::deserialize_cdr(&mut deserializer).unwrap();
+    assert_eq!(result.a, 5);
+    assert_eq!(result.b, 1023);
+    assert_eq!(result.c, 4095);
+}
+
+#[test]
+fn test_bitset_zero_values() {
+    let value = MyBitset { a: 0, b: 0, c: 0 };
+
+    let mut serializer = CdrSerializer::new(true);
+    serializer.write_encapsulation_header().unwrap();
+    value.serialize_cdr(&mut serializer).unwrap();
+
+    let bytes = serializer.into_bytes();
+    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+    let result = MyBitset::deserialize_cdr(&mut deserializer).unwrap();
+    assert_eq!(result.a, 0);
+    assert_eq!(result.b, 0);
+    assert_eq!(result.c, 0);
+}
+
+#[test]
+fn test_bitset_xcdr_roundtrip() {
+    let value = MyBitset { a: 7, b: 512, c: 2048 };
+
+    let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Final);
+    serializer.write_encapsulation_header().unwrap();
+    value.serialize_xcdr(&mut serializer).unwrap();
+
+    let bytes = serializer.into_bytes();
+    let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
+    let result = MyBitset::deserialize_xcdr(&mut deserializer).unwrap();
+    assert_eq!(result.a, 7);
+    assert_eq!(result.b, 512);
+    assert_eq!(result.c, 2048);
+}
+
+#[derive(DdsType)]
+#[dds_type(bitset)]
+struct SmallBitset {
+    #[dds(bitfield = 1)]
+    pub flag: u8,
+    #[dds(bitfield = 3)]
+    pub mode: u8,
+}
+
+#[test]
+fn test_small_bitset_u8_wire_type() {
+    let value = SmallBitset { flag: 1, mode: 5 };
+
+    let mut serializer = CdrSerializer::new(true);
+    serializer.write_encapsulation_header().unwrap();
+    value.serialize_cdr(&mut serializer).unwrap();
+
+    let bytes = serializer.into_bytes();
+    // 4 bytes encap header + 1 byte u8 = 5 bytes total
+    assert_eq!(bytes.len(), 5);
+
+    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+    let result = SmallBitset::deserialize_cdr(&mut deserializer).unwrap();
+    assert_eq!(result.flag, 1);
+    assert_eq!(result.mode, 5);
+}
