@@ -97,10 +97,8 @@ pub fn derive_bitmask_impl(
 
     // Generate deserialization match arms for enum type
     let variant_idents: Vec<_> = variants.iter().map(|v| &v.ident).collect();
-    let variant_positions: Vec<u8> = variants
-        .iter()
-        .map(|v| parse_variant_attributes(v).unwrap())
-        .collect();
+    let variant_positions: Vec<u8> =
+        variants.iter().map(|v| parse_variant_attributes(v).unwrap()).collect();
 
     // Generate additional derives
     let additional_derives =
