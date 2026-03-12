@@ -1,5 +1,6 @@
 //! Requester<TReq, TRep> — sends requests and receives replies (7.11.1.4.3)
 
+use std::fmt::Debug;
 use std::time::Duration;
 
 use int2dds::common::instance_handle::InstanceHandle;
@@ -225,6 +226,21 @@ where
     }
 }
 
+impl<TReq, TRep> Requester<TReq, TRep>
+where
+    TReq: DdsType + Clone + CdrSerialize + CdrDeserialize + XcdrSerialize + XcdrDeserialize,
+    TRep: DdsType + Clone + Debug + CdrSerialize + CdrDeserialize + XcdrSerialize + XcdrDeserialize,
+{
+    /// Send a request and return a Future for the correlated reply.
+    /// No manual correlation needed — the Future handles it internally. (7.11.1.4.3)
+    pub fn send_request_async(&self, data: &TReq) -> DdsRpcResult<Future<TRep>> {
+        let identity = self.send_request(data)?;
+        let condition = self.create_correlation_condition(&identity)?;
+        let reader = self.reader()?.clone();
+        Ok(Future { reader, condition })
+    }
+}
+
 impl<TReq, TRep> RpcEntity for Requester<TReq, TRep>
 where
     TReq: DdsType + Clone + CdrSerialize + CdrDeserialize + XcdrSerialize + XcdrDeserialize,
@@ -268,7 +284,6 @@ where
     }
 
     fn wait_for_service(&self) -> DdsRpcResult<()> {
-        // Basic discovery: wait until request_writer has at least one matched subscription
         let mut condition = self.writer()?.get_statuscondition()?;
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED)?;
         let wait_set = WaitSet::new();
@@ -285,6 +300,37 @@ where
         let dds_timeout = int2dds::dcps::core::time::Duration::try_from(timeout)?;
         wait_set.wait(dds_timeout)?;
         Ok(())
+    }
+}
+
+/// Blocking future for receiving a reply to a specific request.
+/// Wraps a WaitSet + QueryCondition to wait only for the correlated reply. (7.11.1.4.3)
+pub struct Future<TRep: 'static + Clone + Debug> {
+    reader: DataReader<crate::types::Reply<TRep>>,
+    condition: QueryCondition,
+}
+
+impl<TRep> Future<TRep>
+where
+    TRep: DdsType + Clone + Debug + CdrSerialize + CdrDeserialize + XcdrSerialize + XcdrDeserialize,
+{
+    /// Block until the correlated reply arrives.
+    pub fn get(self) -> DdsRpcResult<Sample<crate::types::Reply<TRep>>> {
+        let wait_set = WaitSet::new();
+        wait_set.attach_condition(self.condition.clone())?;
+        wait_set.wait(int2dds::dcps::core::time::Duration::infinite())?;
+        let samples = self.reader.take_w_condition(1, self.condition)?;
+        samples.into_iter().next().ok_or(DdsRpcError::Timeout)
+    }
+
+    /// Block until the correlated reply arrives or timeout expires.
+    pub fn get_timeout(self, timeout: Duration) -> DdsRpcResult<Sample<crate::types::Reply<TRep>>> {
+        let wait_set = WaitSet::new();
+        wait_set.attach_condition(self.condition.clone())?;
+        let dds_timeout = int2dds::dcps::core::time::Duration::try_from(timeout)?;
+        wait_set.wait(dds_timeout)?;
+        let samples = self.reader.take_w_condition(1, self.condition)?;
+        samples.into_iter().next().ok_or(DdsRpcError::Timeout)
     }
 }
 
