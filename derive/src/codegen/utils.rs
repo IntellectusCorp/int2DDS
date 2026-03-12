@@ -8,6 +8,16 @@ pub struct FieldConfig {
     pub bound: Option<usize>,
     /// Default value for the field when not present in serialized data (DDS-XTYPES @default)
     pub default: Option<syn::Lit>,
+    /// @external: field is stored as Box<T>, wire format is inline
+    pub external: bool,
+    /// @hashid: compute member_id from hash. None=not set, Some("")=use field name, Some("name")=use custom name
+    pub hashid: Option<String>,
+    /// @parent: this field represents an inherited base type (struct inheritance)
+    pub parent: bool,
+    /// @position: bit position for bitmask variants
+    pub position: Option<u8>,
+    /// @bitfield: bit width for bitset fields
+    pub bitfield: Option<u8>,
 }
 
 /// Convert a literal to a TokenStream for code generation
@@ -64,6 +74,26 @@ pub fn parse_field_attributes(field: &syn::Field) -> FieldConfig {
                     let value = meta.value()?;
                     let lit: syn::Lit = value.parse()?;
                     config.default = Some(lit);
+                } else if meta.path.is_ident("external") {
+                    config.external = true;
+                } else if meta.path.is_ident("hashid") {
+                    // #[dds(hashid)] or #[dds(hashid = "custom_name")]
+                    if let Ok(value) = meta.value() {
+                        let lit: syn::LitStr = value.parse()?;
+                        config.hashid = Some(lit.value());
+                    } else {
+                        config.hashid = Some(String::new());
+                    }
+                } else if meta.path.is_ident("parent") {
+                    config.parent = true;
+                } else if meta.path.is_ident("position") {
+                    let value = meta.value()?;
+                    let lit: syn::LitInt = value.parse()?;
+                    config.position = Some(lit.base10_parse::<u8>()?);
+                } else if meta.path.is_ident("bitfield") {
+                    let value = meta.value()?;
+                    let lit: syn::LitInt = value.parse()?;
+                    config.bitfield = Some(lit.base10_parse::<u8>()?);
                 }
                 Ok(())
             });
@@ -86,6 +116,7 @@ pub enum SerializationMethod {
     F32,
     F64,
     String,
+    WString,
     Char,
     Bool,
     U8Array,
@@ -134,6 +165,7 @@ pub fn get_serialization_method(ty: &syn::Type) -> SerializationMethod {
                 "f32" => SerializationMethod::F32,
                 "f64" => SerializationMethod::F64,
                 "String" => SerializationMethod::String,
+                "WString" => SerializationMethod::WString,
                 "char" => SerializationMethod::Char,
                 "bool" => SerializationMethod::Bool,
                 "Vec" => {
@@ -356,4 +388,59 @@ pub fn get_discriminant_value(variant: &syn::Variant, index: usize) -> i64 {
         }
     }
     index as i64 // default: use index
+}
+
+/// AutoId kind for struct-level auto ID assignment
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoIdKind {
+    Sequential,
+    Hash,
+}
+
+/// Compute member ID hash from a name string.
+/// Algorithm: MD5(name) first 4 bytes as little-endian u32, masked to 28 bits.
+pub fn compute_member_id_hash(name: &str) -> u32 {
+    let digest = md5::compute(name.as_bytes());
+    let bytes: [u8; 4] = [digest[0], digest[1], digest[2], digest[3]];
+    let raw = u32::from_le_bytes(bytes);
+    raw & 0x0FFF_FFFF
+}
+
+/// Resolve member ID for a field based on priority:
+/// 1. Explicit @id
+/// 2. @hashid (field name or custom name)
+/// 3. @autoid(Hash) — hash of field name
+/// 4. Sequential index (default or @autoid(Sequential))
+pub fn resolve_member_id(
+    field_config: &FieldConfig,
+    field_name: &str,
+    index: usize,
+    autoid: Option<AutoIdKind>,
+) -> u32 {
+    // @id and @hashid are mutually exclusive
+    if field_config.id.is_some() && field_config.hashid.is_some() {
+        panic!(
+            "Field '{}' cannot have both #[dds(id = ...)] and #[dds(hashid)] attributes",
+            field_name
+        );
+    }
+
+    // @id takes highest priority
+    if let Some(id) = field_config.id {
+        return id;
+    }
+
+    // @hashid takes next priority
+    if let Some(ref hash_name) = field_config.hashid {
+        let name = if hash_name.is_empty() { field_name } else { hash_name };
+        return compute_member_id_hash(name);
+    }
+
+    // @autoid(Hash) at struct level
+    if matches!(autoid, Some(AutoIdKind::Hash)) {
+        return compute_member_id_hash(field_name);
+    }
+
+    // Default: sequential index
+    index as u32
 }
