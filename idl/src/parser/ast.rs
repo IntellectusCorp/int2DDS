@@ -7,6 +7,9 @@ pub enum Definition {
     Struct(StructDef),
     Enum(EnumDef),
     Typedef(TypedefDef),
+    Bitmask(BitmaskDef),
+    Bitset(BitsetDef),
+    Union(UnionDef),
 }
 
 #[derive(Debug, Clone)]
@@ -18,6 +21,7 @@ pub struct ModuleDef {
 #[derive(Debug, Clone)]
 pub struct StructDef {
     pub name: String,
+    pub base_type: Option<String>,
     pub members: Vec<StructMember>,
     pub annotations: Vec<Annotation>,
 }
@@ -48,6 +52,53 @@ pub struct TypedefDef {
     pub type_spec: TypeSpec,
 }
 
+#[derive(Debug, Clone)]
+pub struct BitmaskDef {
+    pub name: String,
+    pub flags: Vec<BitmaskFlag>,
+    pub annotations: Vec<Annotation>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BitmaskFlag {
+    pub name: String,
+    pub annotations: Vec<Annotation>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BitsetDef {
+    pub name: String,
+    pub fields: Vec<BitsetField>,
+    pub annotations: Vec<Annotation>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BitsetField {
+    pub name: String,
+    pub bit_width: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct UnionDef {
+    pub name: String,
+    pub discriminant_type: TypeSpec,
+    pub cases: Vec<UnionCase>,
+    pub default_case: Option<UnionCaseMember>,
+    pub annotations: Vec<Annotation>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UnionCase {
+    pub labels: Vec<ConstExpr>,
+    pub member: UnionCaseMember,
+}
+
+#[derive(Debug, Clone)]
+pub struct UnionCaseMember {
+    pub type_spec: TypeSpec,
+    pub name: String,
+}
+
 /// Type specifier in IDL.
 #[derive(Debug, Clone)]
 pub enum TypeSpec {
@@ -55,6 +106,7 @@ pub enum TypeSpec {
     Boolean,
     Octet,
     Char,
+    WChar,
     Int16,
     Uint16,
     Int32,
@@ -66,10 +118,12 @@ pub enum TypeSpec {
 
     // Strings
     String(Option<u32>),
+    WString(Option<u32>),
 
     // Collections
     Sequence(Box<TypeSpec>, Option<u32>),
     Array(Box<TypeSpec>, u32),
+    Map(Box<TypeSpec>, Box<TypeSpec>, Option<u32>),
 
     // Named type reference
     Named(String),
