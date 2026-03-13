@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::vec;
 
+use crate::common::env::{get_network_interface, get_network_ip};
 use crate::rtps::common::types::{DomainId, ParticipantId};
 use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::shm::shm_listener::ShmListener;
@@ -484,20 +485,41 @@ impl Socket {
     fn get_new_working_ips() -> std::io::Result<Vec<String>> {
         let mut ips: Vec<String> = Vec::new();
 
+        // Check if user specified which network to use via env variable
+        let is_network_specified = get_network_interface().is_some() || get_network_ip().is_some();
+
         if let Ok(Some(ip)) = crate::common::int2dds_feature_ffi::get_working_ip() {
-            ips.push(ip.clone());
-        } else if let Ok(ifaces) = get_if_addrs::get_if_addrs() {
-            for iface in ifaces {
-                if !iface.ip().is_loopback() {
-                    ips.push(iface.ip().to_string());
+            // int2DDS-feature enabled
+            if is_network_specified {
+                ips.push(ip);
+            } else {
+                log::warn!(
+                    "int2DDS-feature is enabled but no network interface specified. \
+                            Falling back to default (auto-detection)"
+                );
+            }
+        } else if is_network_specified {
+            // These variables can only be used with int2DDS-feature
+            log::warn!("Env variable INT2DDS_NETWORK_INTERFACE or INT2DDS_NETWORK_IP is set but int2DDS-feature is not enabled. \
+                        Ignoring the value");
+        }
+
+        // If no specific IP was selected, use all available NICs
+        if ips.is_empty() {
+            if let Ok(ifaces) = get_if_addrs::get_if_addrs() {
+                for iface in ifaces {
+                    if !iface.ip().is_loopback() {
+                        ips.push(iface.ip().to_string());
+                    }
                 }
             }
         }
 
         let use_loopback = crate::common::env::get_use_loopback_interface();
+        let should_add_loopback = !ips.contains(&"127.0.0.1".to_string()) && use_loopback;
 
-        // If no NIC available or loopback is set to use, use loopback
-        if ips.is_empty() || (!ips.contains(&"127.0.0.1".to_string()) && use_loopback) {
+        // If no NIC available or loopback is set to use, add localhost IP to the list
+        if ips.is_empty() || should_add_loopback {
             ips.push("127.0.0.1".to_string());
         }
 
