@@ -114,6 +114,48 @@ class SampleLostStatus:
     """Change in total_count since last access."""
 
 
+@dataclass
+class SampleRejectedStatus:
+    """Status when a sample is rejected by a DataReader."""
+
+    total_count: int
+    """Total cumulative count of rejected samples."""
+
+    total_count_change: int
+    """Change in total_count since last access."""
+
+    last_reason: int
+    """Reason for the last rejection (0=NotRejected, 1=ByInstancesLimit, 2=BySamplesLimit, 3=BySamplesPerInstanceLimit)."""
+
+
+@dataclass
+class RequestedIncompatibleQosStatus:
+    """Status when a DataReader detects incompatible QoS with a DataWriter."""
+
+    total_count: int
+    """Total cumulative count of incompatible QoS detected."""
+
+    total_count_change: int
+    """Change in total_count since last access."""
+
+    last_policy_id: int
+    """ID of the last QoS policy that was incompatible."""
+
+
+@dataclass
+class OfferedIncompatibleQosStatus:
+    """Status when a DataWriter detects incompatible QoS with a DataReader."""
+
+    total_count: int
+    """Total cumulative count of incompatible QoS detected."""
+
+    total_count_change: int
+    """Change in total_count since last access."""
+
+    last_policy_id: int
+    """ID of the last QoS policy that was incompatible."""
+
+
 # Status mask constants
 STATUS_MASK_NONE = 0
 STATUS_MASK_ALL = 0xFFFFFFFF
@@ -128,6 +170,7 @@ STATUS_LIVELINESS_LOST = 1 << 11
 STATUS_LIVELINESS_CHANGED = 1 << 12
 STATUS_PUBLICATION_MATCHED = 1 << 13
 STATUS_SUBSCRIPTION_MATCHED = 1 << 14
+
 
 # Listener protocols
 @runtime_checkable
@@ -150,6 +193,12 @@ class DataWriterListener(Protocol):
         self, writer: DataWriter, status: LivelinessLostStatus
     ) -> None:
         """Called when the writer loses liveliness."""
+        ...
+
+    def on_offered_incompatible_qos(
+        self, writer: DataWriter, status: OfferedIncompatibleQosStatus
+    ) -> None:
+        """Called when the writer detects incompatible QoS."""
         ...
 
 
@@ -183,6 +232,18 @@ class DataReaderListener(Protocol):
         """Called when samples are lost."""
         ...
 
+    def on_sample_rejected(
+        self, reader: DataReader, status: SampleRejectedStatus
+    ) -> None:
+        """Called when a sample is rejected."""
+        ...
+
+    def on_requested_incompatible_qos(
+        self, reader: DataReader, status: RequestedIncompatibleQosStatus
+    ) -> None:
+        """Called when incompatible QoS is detected."""
+        ...
+
 
 # Listener base classes with default implementations
 class DataWriterListenerBase:
@@ -209,6 +270,11 @@ class DataWriterListenerBase:
 
     def on_liveliness_lost(
         self, writer: DataWriter, status: LivelinessLostStatus
+    ) -> None:
+        pass
+
+    def on_offered_incompatible_qos(
+        self, writer: DataWriter, status: OfferedIncompatibleQosStatus
     ) -> None:
         pass
 
@@ -245,6 +311,16 @@ class DataReaderListenerBase:
         pass
 
     def on_sample_lost(self, reader: DataReader, status: SampleLostStatus) -> None:
+        pass
+
+    def on_sample_rejected(
+        self, reader: DataReader, status: SampleRejectedStatus
+    ) -> None:
+        pass
+
+    def on_requested_incompatible_qos(
+        self, reader: DataReader, status: RequestedIncompatibleQosStatus
+    ) -> None:
         pass
 
 
@@ -401,6 +477,60 @@ def _on_sample_lost_cb(reader_ptr, status_ptr, user_context):
         pass
 
 
+@ffi.callback("void(Int2DdsDataReader*, Int2DdsSampleRejectedStatus*, void*)")
+def _on_sample_rejected_cb(reader_ptr, status_ptr, user_context):
+    """C callback for on_sample_rejected."""
+    ctx_id = int(ffi.cast("uintptr_t", user_context))
+    if ctx_id not in _callback_handles:
+        return
+    listener, reader = _callback_handles[ctx_id][:2]
+    status = SampleRejectedStatus(
+        total_count=status_ptr.total_count,
+        total_count_change=status_ptr.total_count_change,
+        last_reason=int(status_ptr.last_reason),
+    )
+    try:
+        listener.on_sample_rejected(reader, status)
+    except Exception:
+        pass
+
+
+@ffi.callback("void(Int2DdsDataReader*, Int2DdsRequestedIncompatibleQosStatus*, void*)")
+def _on_requested_incompatible_qos_cb(reader_ptr, status_ptr, user_context):
+    """C callback for on_requested_incompatible_qos."""
+    ctx_id = int(ffi.cast("uintptr_t", user_context))
+    if ctx_id not in _callback_handles:
+        return
+    listener, reader = _callback_handles[ctx_id][:2]
+    status = RequestedIncompatibleQosStatus(
+        total_count=status_ptr.total_count,
+        total_count_change=status_ptr.total_count_change,
+        last_policy_id=int(status_ptr.last_policy_id),
+    )
+    try:
+        listener.on_requested_incompatible_qos(reader, status)
+    except Exception:
+        pass
+
+
+@ffi.callback("void(Int2DdsDataWriter*, Int2DdsOfferedIncompatibleQosStatus*, void*)")
+def _on_offered_incompatible_qos_cb(writer_ptr, status_ptr, user_context):
+    """C callback for on_offered_incompatible_qos."""
+    ctx_id = int(ffi.cast("uintptr_t", user_context))
+    if ctx_id not in _callback_handles:
+        return
+    listener, writer = _callback_handles[ctx_id][:2]
+    status = OfferedIncompatibleQosStatus(
+        total_count=status_ptr.total_count,
+        total_count_change=status_ptr.total_count_change,
+        last_policy_id=int(status_ptr.last_policy_id),
+    )
+    try:
+        listener.on_offered_incompatible_qos(writer, status)
+    except Exception:
+        pass
+
+
 def _create_writer_listener_struct(
     listener: DataWriterListener, writer: DataWriter
 ) -> tuple[ffi.CData, int]:
@@ -412,7 +542,7 @@ def _create_writer_listener_struct(
     c_listener.on_publication_matched = _on_publication_matched_cb
     c_listener.on_offered_deadline_missed = _on_offered_deadline_missed_cb
     c_listener.on_liveliness_lost = _on_liveliness_lost_cb
-    c_listener.on_offered_incompatible_qos = ffi.NULL
+    c_listener.on_offered_incompatible_qos = _on_offered_incompatible_qos_cb
     c_listener.user_context = ctx_ptr
 
     # Store reference to keep callbacks alive
@@ -434,8 +564,8 @@ def _create_reader_listener_struct(
     c_listener.on_liveliness_changed = _on_liveliness_changed_cb
     c_listener.on_requested_deadline_missed = _on_requested_deadline_missed_cb
     c_listener.on_sample_lost = _on_sample_lost_cb
-    c_listener.on_sample_rejected = ffi.NULL
-    c_listener.on_requested_incompatible_qos = ffi.NULL
+    c_listener.on_sample_rejected = _on_sample_rejected_cb
+    c_listener.on_requested_incompatible_qos = _on_requested_incompatible_qos_cb
     c_listener.user_context = ctx_ptr
 
     # Store reference to keep callbacks alive

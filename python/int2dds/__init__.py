@@ -25,9 +25,12 @@ from int2dds.core.listeners import (
     LivelinessChangedStatus,
     LivelinessLostStatus,
     OfferedDeadlineMissedStatus,
+    OfferedIncompatibleQosStatus,
     PublicationMatchedStatus,
     RequestedDeadlineMissedStatus,
+    RequestedIncompatibleQosStatus,
     SampleLostStatus,
+    SampleRejectedStatus,
     SubscriptionMatchedStatus,
 )
 from int2dds.exceptions import (
@@ -75,6 +78,10 @@ __all__ = [
     "LivelinessLostStatus",
     "LivelinessChangedStatus",
     "SampleLostStatus",
+    "SampleRejectedStatus",
+    "RequestedIncompatibleQosStatus",
+    "OfferedIncompatibleQosStatus",
+    # Exceptions
     # Exceptions
     "DdsError",
     "DdsTimeout",
