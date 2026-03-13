@@ -12,8 +12,8 @@
 //!
 //! The enabled statuses determine which status changes trigger the condition.
 //! Use the `INT2DDS_STATUS_*` constants to construct status masks.
-
 use int2dds::infrastructure::status::StatusMask;
+use std::sync::Mutex;
 
 use super::{error::*, types::*};
 
@@ -52,8 +52,10 @@ pub unsafe extern "C" fn int2dds_datareader_get_statuscondition(
         Err(e) => return dds_error_to_code(&e),
     };
 
-    let condition_handle = Box::new(Int2DdsStatusCondition { inner: status_condition.into() });
-
+    // Clone before .into() to preserve concrete type for set/get_enabled_statuses
+    let kind = StatusConditionKind::Reader(status_condition.clone());
+    let condition_handle =
+        Box::new(Int2DdsStatusCondition { inner: status_condition.into(), kind: Mutex::new(kind) });
     *condition_out = Box::into_raw(condition_handle);
 
     INT2DDS_RET_OK
@@ -80,8 +82,10 @@ pub unsafe extern "C" fn int2dds_datawriter_get_statuscondition(
         Err(e) => return dds_error_to_code(&e),
     };
 
-    let condition_handle = Box::new(Int2DdsStatusCondition { inner: status_condition.into() });
-
+    // Clone before .into() to preserve concrete type for set/get_enabled_statuses
+    let kind = StatusConditionKind::Writer(status_condition.clone());
+    let condition_handle =
+        Box::new(Int2DdsStatusCondition { inner: status_condition.into(), kind: Mutex::new(kind) });
     *condition_out = Box::into_raw(condition_handle);
 
     INT2DDS_RET_OK
@@ -102,23 +106,23 @@ pub unsafe extern "C" fn int2dds_statuscondition_set_enabled_statuses(
     check_null!(condition);
 
     let condition_ref = &*condition;
-
-    // Try to downcast to StatusCondition to set enabled statuses
-    // Since we store as Arc<dyn Condition>, we need to access the underlying status condition
-    // The status mask is set during condition creation, so we need to store it differently
-
-    // For now, we'll use a workaround by storing the mask
-    // This requires the Rust library to support this operation
     let status_mask = StatusMask::from_bits_truncate(mask);
 
-    // The inner is Arc<dyn Condition>, which may be a StatusCondition
-    // We need to check if set_enabled_statuses is available on the Condition trait
-    // For now, return OK as the status mask is typically set at creation time
-    let _ = (condition_ref, status_mask);
+    // Access the concrete StatusCondition through the kind field
+    let mut kind = match condition_ref.kind.lock() {
+        Ok(guard) => guard,
+        Err(_) => return INT2DDS_RET_ERROR,
+    };
 
-    // TODO: When the Rust library exposes set_enabled_statuses on the Condition trait,
-    // implement this properly. For now, return OK.
-    INT2DDS_RET_OK
+    let result = match &mut *kind {
+        StatusConditionKind::Reader(sc) => sc.set_enabled_statuses(status_mask),
+        StatusConditionKind::Writer(sc) => sc.set_enabled_statuses(status_mask),
+    };
+
+    match result {
+        Ok(()) => INT2DDS_RET_OK,
+        Err(e) => dds_error_to_code(&e),
+    }
 }
 
 /// Get the enabled statuses for a StatusCondition
@@ -134,13 +138,26 @@ pub unsafe extern "C" fn int2dds_statuscondition_get_enabled_statuses(
     check_null!(condition);
     check_null!(mask_out);
 
-    let _condition_ref = &*condition;
+    let condition_ref = &*condition;
 
-    // Similar to set_enabled_statuses, we need proper trait support
-    // For now, return the default mask (all statuses enabled)
-    *mask_out = 0xFFFFFFFF;
+    // Access the concrete StatusCondition through the kind field
+    let kind = match condition_ref.kind.lock() {
+        Ok(guard) => guard,
+        Err(_) => return INT2DDS_RET_ERROR,
+    };
 
-    INT2DDS_RET_OK
+    let result = match &*kind {
+        StatusConditionKind::Reader(sc) => sc.get_enabled_statuses(),
+        StatusConditionKind::Writer(sc) => sc.get_enabled_statuses(),
+    };
+
+    match result {
+        Ok(mask) => {
+            *mask_out = mask.bits();
+            INT2DDS_RET_OK
+        }
+        Err(e) => dds_error_to_code(&e),
+    }
 }
 
 /// Get the trigger value of a StatusCondition
