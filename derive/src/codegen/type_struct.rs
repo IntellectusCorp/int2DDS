@@ -1,7 +1,7 @@
 use quote::quote;
 use syn::DeriveInput;
 
-use crate::codegen::utils::{get_serialization_method, SerializationMethod};
+use crate::codegen::utils::{get_serialization_method, resolve_member_id, SerializationMethod};
 use crate::codegen::{
     generate_additional_derives, generate_field_deserialization,
     generate_field_deserialization_xcdr, generate_field_deserialization_xcdr_per_field_dheader,
@@ -201,11 +201,23 @@ pub fn derive_struct_impl(
     let cdr_deserialize_impl = generate_cdr_deserialize_impl(name, fields, crate_path, &gc);
 
     // Generate XcdrSerialize and XcdrDeserialize trait implementations
-    let xcdr_serialize_impl =
-        generate_xcdr_serialize_impl(name, fields, crate_path, type_config.extensibility, &gc);
+    let xcdr_serialize_impl = generate_xcdr_serialize_impl(
+        name,
+        fields,
+        crate_path,
+        type_config.extensibility,
+        type_config.autoid,
+        &gc,
+    );
 
-    let xcdr_deserialize_impl =
-        generate_xcdr_deserialize_impl(name, fields, crate_path, type_config.extensibility, &gc);
+    let xcdr_deserialize_impl = generate_xcdr_deserialize_impl(
+        name,
+        fields,
+        crate_path,
+        type_config.extensibility,
+        type_config.autoid,
+        &gc,
+    );
 
     let additional_derives = generate_additional_derives(input, name, type_config);
 
@@ -885,6 +897,7 @@ fn generate_xcdr_serialize_impl(
     fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
     crate_path: &proc_macro2::TokenStream,
     extensibility: Option<ExtensibilityKind>,
+    autoid: Option<crate::codegen::utils::AutoIdKind>,
     gc: &GenCtx,
 ) -> proc_macro2::TokenStream {
     let impl_generics = &gc.impl_generics;
@@ -924,7 +937,7 @@ fn generate_xcdr_serialize_impl(
         .map(|(index, field)| {
             let field_name = field.ident.as_ref().unwrap();
             let field_config = parse_field_attributes(field);
-            let member_id = field_config.id.unwrap_or(index as u32);
+            let member_id = resolve_member_id(&field_config, &field_name.to_string(), index, autoid);
             let is_optional = field_config.optional;
 
             // Check if this field is a primitive Vec type that needs specialized serialization
@@ -942,40 +955,60 @@ fn generate_xcdr_serialize_impl(
 
             if is_mutable {
                 // For Mutable types: write EMHEADER before each field
+                // Generate EMHEADER backpatch logic supporting 28-bit member_id
+                let emheader_backpatch = if member_id <= 0x0FFF {
+                    // Compact: member_id fits in 12 bits
+                    quote! {
+                        let field_len = (serializer.position() - field_start) as u32;
+                        let emheader = ((#member_id & 0x0FFFu32) << 16) | (field_len & 0xFFFF);
+                        serializer.write_dheader_at(emheader_pos, emheader);
+                    }
+                } else {
+                    // 28-bit member_id: use LC=4 format, reserve extra 4 bytes for length
+                    quote! {
+                        let field_len = (serializer.position() - field_start) as u32;
+                        let emheader = (4u32 << 28) | (#member_id & 0x0FFF_FFFFu32);
+                        serializer.write_dheader_at(emheader_pos, emheader);
+                        serializer.write_dheader_at(emheader_pos + 4, field_len);
+                    }
+                };
+
+                // For 28-bit member_id, reserve 8 bytes (EMHEADER + NEXTINT length)
+                let reserve_code = if member_id > 0x0FFF {
+                    quote! {
+                        let emheader_pos = serializer.reserve_dheader();
+                        let _ = serializer.reserve_dheader(); // reserve NEXTINT length slot
+                    }
+                } else {
+                    quote! {
+                        let emheader_pos = serializer.reserve_dheader();
+                    }
+                };
+
                 if is_optional {
                     // Optional field: only serialize if Some
                     quote! {
                         if let Some(ref opt_value) = self.#field_name {
-                            // Reserve space for EMHEADER
-                            let emheader_pos = serializer.reserve_dheader();
+                            #reserve_code
                             let field_start = serializer.position();
 
                             // Serialize the field value
                             #crate_path::serialize::xcdr::XcdrSerialize::serialize_xcdr(opt_value, serializer)?;
 
-                            // Calculate field length and backpatch EMHEADER
-                            // member_id must be masked to 12 bits (0x0FFF) per DDS-XTYPES spec
-                            let field_len = (serializer.position() - field_start) as u32;
-                            let emheader = ((#member_id & 0x0FFFu32) << 16) | (field_len & 0xFFFF);
-                            serializer.write_dheader_at(emheader_pos, emheader);
+                            #emheader_backpatch
                         }
                     }
                 } else {
                     // Required field: always serialize
                     quote! {
                         {
-                            // Reserve space for EMHEADER
-                            let emheader_pos = serializer.reserve_dheader();
+                            #reserve_code
                             let field_start = serializer.position();
 
                             // Serialize the field
                             #field_serialize
 
-                            // Calculate field length and backpatch EMHEADER
-                            // member_id must be masked to 12 bits (0x0FFF) per DDS-XTYPES spec
-                            let field_len = (serializer.position() - field_start) as u32;
-                            let emheader = ((#member_id & 0x0FFFu32) << 16) | (field_len & 0xFFFF);
-                            serializer.write_dheader_at(emheader_pos, emheader);
+                            #emheader_backpatch
                         }
                     }
                 }
@@ -1028,6 +1061,7 @@ fn generate_xcdr_deserialize_impl(
     fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
     crate_path: &proc_macro2::TokenStream,
     extensibility: Option<ExtensibilityKind>,
+    autoid: Option<crate::codegen::utils::AutoIdKind>,
     gc: &GenCtx,
 ) -> proc_macro2::TokenStream {
     let impl_generics = &gc.impl_generics;
@@ -1059,7 +1093,7 @@ fn generate_xcdr_deserialize_impl(
     let is_mutable = matches!(extensibility, Some(ExtensibilityKind::Mutable));
 
     if is_mutable {
-        generate_mutable_deserialize_impl(name, fields, crate_path, gc)
+        generate_mutable_deserialize_impl(name, fields, crate_path, autoid, gc)
     } else if matches!(extensibility, Some(ExtensibilityKind::Final)) {
         generate_final_deserialize_impl(name, fields, crate_path, gc)
     } else {
@@ -1194,6 +1228,7 @@ fn generate_mutable_deserialize_impl(
     name: &syn::Ident,
     fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
     crate_path: &proc_macro2::TokenStream,
+    autoid: Option<crate::codegen::utils::AutoIdKind>,
     gc: &GenCtx,
 ) -> proc_macro2::TokenStream {
     let impl_generics = &gc.impl_generics;
@@ -1229,7 +1264,7 @@ fn generate_mutable_deserialize_impl(
             let field_name = field.ident.as_ref().unwrap();
             let field_type = &field.ty;
             let field_config = parse_field_attributes(field);
-            let member_id = field_config.id.unwrap_or(index as u32);
+            let member_id = resolve_member_id(&field_config, &field_name.to_string(), index, autoid);
 
             if field_config.optional {
                 // For optional fields, the inner type needs to be extracted
