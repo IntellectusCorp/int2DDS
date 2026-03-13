@@ -7,6 +7,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 from int2dds._ffi import ffi, lib
+from int2dds.core.listeners import (
+    DataWriterListener,
+    _create_writer_listener_struct,
+    _remove_listener,
+    STATUS_MASK_ALL,
+)
 from int2dds.exceptions import check_ret
 
 if TYPE_CHECKING:
@@ -39,6 +45,8 @@ class Publisher:
         self,
         topic: Topic[T],
         qos: DataWriterQos | None = None,
+        listener: DataWriterListener | None = None,
+        status_mask: int | None = None,
     ) -> DataWriter[T]:
         """
         Create a DataWriter for the given topic.
@@ -46,11 +54,13 @@ class Publisher:
         Args:
             topic: The topic to write to
             qos: Optional QoS settings
+            listener: Optional listener for event callbacks
+            status_mask: Bitmask of statuses to listen for
 
         Returns:
             A new DataWriter instance
         """
-        return DataWriter(self, topic, qos)
+        return DataWriter(self, topic, qos, listener, status_mask)
 
     def delete_contained_entities(self) -> None:
         """Delete all DataWriters created by this publisher."""
@@ -96,11 +106,14 @@ class DataWriter(Generic[T]):
         publisher: Publisher,
         topic: Topic[T],
         qos: DataWriterQos | None = None,
+        listener: DataWriterListener | None = None,
+        status_mask: int | None = None,
     ) -> None:
         self._publisher = publisher
         self._topic = topic
         self._closed = False
         self._qos_handle: ffi.CData | None = None
+        self._listener_ctx_id: int | None = None
 
         # Create QoS if provided
         qos_ptr = ffi.NULL
@@ -130,9 +143,24 @@ class DataWriter(Generic[T]):
             qos_ptr = self._qos_handle
 
         writer_ptr = ffi.new("Int2DdsDataWriter **")
-        check_ret(
-            lib.int2dds_create_datawriter(publisher._handle, topic._handle, qos_ptr, writer_ptr)
-        )
+
+        if listener is not None:
+            mask = status_mask if status_mask is not None else STATUS_MASK_ALL
+            c_listener, ctx_id = _create_writer_listener_struct(listener, self)
+            check_ret(
+                lib.int2dds_create_datawriter_with_listener(
+                    publisher._handle, topic._handle, qos_ptr,
+                    c_listener, mask, writer_ptr
+                )
+            )
+            self._listener_ctx_id = ctx_id
+        else:
+            check_ret(
+                lib.int2dds_create_datawriter(
+                    publisher._handle, topic._handle, qos_ptr, writer_ptr
+                )
+            )
+
         self._handle = writer_ptr[0]
 
         # Clean up QoS handle after use

@@ -8,6 +8,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 from int2dds._ffi import ffi, lib
+from int2dds.core.conditions import StatusCondition
+from int2dds.core.listeners import (
+    DataReaderListener,
+    _create_reader_listener_struct,
+    _remove_listener,
+    STATUS_MASK_ALL,
+)
 from int2dds.exceptions import INT2DDS_RET_NO_DATA, check_ret
 
 if TYPE_CHECKING:
@@ -54,6 +61,8 @@ class Subscriber:
         self,
         topic: Topic[T],
         qos: DataReaderQos | None = None,
+        listener: DataReaderListener | None = None,
+        status_mask: int | None = None,
     ) -> DataReader[T]:
         """
         Create a DataReader for the given topic.
@@ -61,11 +70,13 @@ class Subscriber:
         Args:
             topic: The topic to read from
             qos: Optional QoS settings
+            listener: Optional listener for event callbacks
+            status_mask: Bitmask of statuses to listen for
 
         Returns:
             A new DataReader instance
         """
-        return DataReader(self, topic, qos)
+        return DataReader(self, topic, qos, listener, status_mask)
 
     def delete_contained_entities(self) -> None:
         """Delete all DataReaders created by this subscriber."""
@@ -116,11 +127,14 @@ class DataReader(Generic[T]):
         subscriber: Subscriber,
         topic: Topic[T],
         qos: DataReaderQos | None = None,
+        listener: DataReaderListener | None = None,
+        status_mask: int | None = None,
     ) -> None:
         self._subscriber = subscriber
         self._topic = topic
         self._closed = False
         self._qos_handle: ffi.CData | None = None
+        self._listener_ctx_id: int | None = None
         self._buffer_size = self.DEFAULT_BUFFER_SIZE
         self._buffer = ffi.new(f"uint8_t[{self._buffer_size}]")
 
@@ -150,10 +164,26 @@ class DataReader(Generic[T]):
             qos_ptr = self._qos_handle
 
         reader_ptr = ffi.new("Int2DdsDataReader **")
-        check_ret(
-            lib.int2dds_create_datareader(subscriber._handle, topic._handle, qos_ptr, reader_ptr)
-        )
+
+        if listener is not None:
+            mask = status_mask if status_mask is not None else STATUS_MASK_ALL
+            c_listener, ctx_id = _create_reader_listener_struct(listener, self)
+            check_ret(
+                lib.int2dds_create_datareader_with_listener(
+                    subscriber._handle, topic._handle, qos_ptr,
+                    c_listener, mask, reader_ptr
+                )
+            )
+            self._listener_ctx_id = ctx_id
+        else:
+            check_ret(
+                lib.int2dds_create_datareader(
+                    subscriber._handle, topic._handle, qos_ptr, reader_ptr
+                )
+            )
+
         self._handle = reader_ptr[0]
+
 
         # Clean up QoS handle after use
         if self._qos_handle is not None:
@@ -265,10 +295,47 @@ class DataReader(Generic[T]):
         """Get the current number of matched writers."""
         _, current = self.get_subscription_matched_status()
         return current
+    def get_statuscondition(self) -> StatusCondition:
+        """Get the StatusCondition associated with this DataReader."""
+        cond_ptr = ffi.new("Int2DdsStatusCondition **")
+        check_ret(lib.int2dds_datareader_get_statuscondition(self._handle, cond_ptr))
+        return StatusCondition(cond_ptr[0], owner=self)
 
+    def set_listener(
+        self,
+        listener: DataReaderListener | None,
+        status_mask: int | None = None,
+    ) -> None:
+        """
+        Set or replace the listener for this DataReader.
+
+        Args:
+            listener: The listener to set, or None to remove.
+            status_mask: Bitmask of statuses to listen for.
+                         Defaults to STATUS_MASK_ALL.
+        """
+        if self._listener_ctx_id is not None:
+            _remove_listener(self._listener_ctx_id)
+            self._listener_ctx_id = None
+
+        mask = status_mask if status_mask is not None else STATUS_MASK_ALL
+
+        if listener is not None:
+            c_listener, ctx_id = _create_reader_listener_struct(listener, self)
+            check_ret(
+                lib.int2dds_datareader_set_listener(self._handle, c_listener, mask)
+            )
+            self._listener_ctx_id = ctx_id
+        else:
+            check_ret(
+                lib.int2dds_datareader_set_listener(self._handle, ffi.NULL, mask)
+            )
     def close(self) -> None:
         """Delete the DataReader."""
         if not self._closed and self._handle is not None:
+            if self._listener_ctx_id is not None:
+                _remove_listener(self._listener_ctx_id)
+                self._listener_ctx_id = None        
             check_ret(lib.int2dds_delete_datareader(self._handle))
             self._handle = None
             self._closed = True
