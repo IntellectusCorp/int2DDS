@@ -145,6 +145,50 @@ class StatusCondition:
                 pass  # Suppress errors during cleanup
 
 
+class Condition:
+    """
+    A generic condition returned from WaitSet.wait_ex().
+
+    Represents a triggered condition from the WaitSet. Use trigger_value
+    to check if this condition is currently triggered.
+
+    Note: This is a read-only wrapper around Int2DdsCondition.
+    It cannot be attached to a WaitSet directly.
+
+    Example:
+        >>> triggered = waitset.wait_ex(timeout=5.0)
+        >>> for cond in triggered:
+        ...     print(f"Triggered: {cond.trigger_value}")
+    """
+
+    __slots__ = ("_handle", "_closed")
+
+    def __init__(self, handle: ffi.CData) -> None:
+        self._handle = handle
+        self._closed = False
+
+    @property
+    def trigger_value(self) -> bool:
+        """Get the current trigger value of this condition."""
+        value_out = ffi.new("bool *")
+        check_ret(lib.int2dds_condition_get_trigger_value(self._handle, value_out))
+        return value_out[0]
+
+    def close(self) -> None:
+        """Delete the Condition handle."""
+        if not self._closed and self._handle is not None:
+            check_ret(lib.int2dds_condition_delete(self._handle))
+            self._handle = None
+            self._closed = True
+
+    def __del__(self) -> None:
+        if not getattr(self, "_closed", True):
+            try:
+                self.close()
+            except Exception:
+                pass  # Suppress errors during cleanup
+
+
 class WaitSet:
     """
     WaitSet - wait for multiple conditions.
@@ -233,6 +277,57 @@ class WaitSet:
         if ret == INT2DDS_RET_TIMEOUT:
             raise DdsTimeout()
         check_ret(ret)
+    def wait_ex(self, timeout: float | None = None) -> list[Condition]:
+        """
+        Wait for conditions and return the list of triggered conditions.
+
+        Unlike wait(), this method returns which conditions were triggered,
+        useful when multiple conditions are attached to the WaitSet.
+
+        Args:
+            timeout: Maximum time to wait in seconds, None for infinite
+
+        Returns:
+            List of triggered Condition objects
+
+        Raises:
+            DdsTimeout: If the timeout expires before any condition triggers
+
+        Example:
+            >>> waitset.attach(reader1_cond)
+            >>> waitset.attach(reader2_cond)
+            >>> triggered = waitset.wait_ex(timeout=5.0)
+            >>> for cond in triggered:
+            ...     print(f"Triggered: {cond.trigger_value}")
+        """
+        timeout_ms = -1 if timeout is None else int(timeout * 1000)
+        seq_ptr = ffi.new("Int2DdsConditionSeq **")
+
+        ret = lib.int2dds_waitset_wait_ex(self._handle, timeout_ms, seq_ptr)
+
+        if ret == INT2DDS_RET_TIMEOUT:
+            raise DdsTimeout()
+        check_ret(ret)
+
+        seq = seq_ptr[0]
+        try:
+            # Get the number of triggered conditions
+            count_out = ffi.new("size_t *")
+            check_ret(lib.int2dds_condition_seq_length(seq, count_out))
+            count = count_out[0]
+
+            # Extract each condition
+            conditions: list[Condition] = []
+            for i in range(count):
+                cond_ptr = ffi.new("Int2DdsCondition **")
+                check_ret(lib.int2dds_condition_seq_get(seq, i, cond_ptr))
+                conditions.append(Condition(cond_ptr[0]))
+
+            return conditions
+        finally:
+            # Always free the sequence (individual conditions are owned by Condition objects)
+            lib.int2dds_condition_seq_delete(seq)
+
 
     def close(self) -> None:
         """Delete the WaitSet."""

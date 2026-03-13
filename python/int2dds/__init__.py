@@ -56,6 +56,7 @@ __all__ = [
     "History",
     # Conditions
     "WaitSet",
+    "Condition",
     "StatusCondition",
     "GuardCondition",
     # Async support
