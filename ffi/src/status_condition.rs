@@ -17,19 +17,20 @@ use std::sync::Mutex;
 
 use super::{error::*, types::*};
 
-// Status mask constants matching DDS standard
-pub const INT2DDS_STATUS_DATA_ON_READERS: u32 = 1 << 0;
-pub const INT2DDS_STATUS_DATA_AVAILABLE: u32 = 1 << 1;
-pub const INT2DDS_STATUS_SAMPLE_REJECTED: u32 = 1 << 2;
-pub const INT2DDS_STATUS_LIVELINESS_CHANGED: u32 = 1 << 3;
-pub const INT2DDS_STATUS_REQUESTED_DEADLINE_MISSED: u32 = 1 << 4;
-pub const INT2DDS_STATUS_REQUESTED_INCOMPATIBLE_QOS: u32 = 1 << 5;
-pub const INT2DDS_STATUS_SAMPLE_LOST: u32 = 1 << 6;
-pub const INT2DDS_STATUS_SUBSCRIPTION_MATCHED: u32 = 1 << 7;
-pub const INT2DDS_STATUS_OFFERED_DEADLINE_MISSED: u32 = 1 << 8;
-pub const INT2DDS_STATUS_OFFERED_INCOMPATIBLE_QOS: u32 = 1 << 9;
-pub const INT2DDS_STATUS_LIVELINESS_LOST: u32 = 1 << 10;
-pub const INT2DDS_STATUS_PUBLICATION_MATCHED: u32 = 1 << 11;
+// Status mask constants matching int2dds Rust library (status.rs StatusKind)
+pub const INT2DDS_STATUS_INCONSISTENT_TOPIC: u32 = 1 << 0;
+pub const INT2DDS_STATUS_OFFERED_DEADLINE_MISSED: u32 = 1 << 1;
+pub const INT2DDS_STATUS_REQUESTED_DEADLINE_MISSED: u32 = 1 << 2;
+pub const INT2DDS_STATUS_OFFERED_INCOMPATIBLE_QOS: u32 = 1 << 5;
+pub const INT2DDS_STATUS_REQUESTED_INCOMPATIBLE_QOS: u32 = 1 << 6;
+pub const INT2DDS_STATUS_SAMPLE_LOST: u32 = 1 << 7;
+pub const INT2DDS_STATUS_SAMPLE_REJECTED: u32 = 1 << 8;
+pub const INT2DDS_STATUS_DATA_ON_READERS: u32 = 1 << 9;
+pub const INT2DDS_STATUS_DATA_AVAILABLE: u32 = 1 << 10;
+pub const INT2DDS_STATUS_LIVELINESS_LOST: u32 = 1 << 11;
+pub const INT2DDS_STATUS_LIVELINESS_CHANGED: u32 = 1 << 12;
+pub const INT2DDS_STATUS_PUBLICATION_MATCHED: u32 = 1 << 13;
+pub const INT2DDS_STATUS_SUBSCRIPTION_MATCHED: u32 = 1 << 14;
 
 /// Get the StatusCondition from a DataReader
 ///
@@ -211,10 +212,10 @@ mod tests {
 
     #[test]
     fn test_status_mask_constants() {
-        // Verify status mask constants are distinct powers of 2
-        assert_eq!(INT2DDS_STATUS_DATA_ON_READERS, 1);
-        assert_eq!(INT2DDS_STATUS_DATA_AVAILABLE, 2);
-        assert_eq!(INT2DDS_STATUS_SUBSCRIPTION_MATCHED, 128);
-        assert_eq!(INT2DDS_STATUS_PUBLICATION_MATCHED, 2048);
+        // Verify status mask constants match int2dds Rust library
+        assert_eq!(INT2DDS_STATUS_DATA_ON_READERS, 1 << 9);
+        assert_eq!(INT2DDS_STATUS_DATA_AVAILABLE, 1 << 10);
+        assert_eq!(INT2DDS_STATUS_SUBSCRIPTION_MATCHED, 1 << 14);
+        assert_eq!(INT2DDS_STATUS_PUBLICATION_MATCHED, 1 << 13);
     }
 }
