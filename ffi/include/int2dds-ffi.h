@@ -24,29 +24,31 @@
 
 #define INT2DDS_QOS_HISTORY_KEEP_ALL 1
 
-#define INT2DDS_STATUS_DATA_ON_READERS (1 << 0)
+#define INT2DDS_STATUS_INCONSISTENT_TOPIC (1 << 0)
 
-#define INT2DDS_STATUS_DATA_AVAILABLE (1 << 1)
+#define INT2DDS_STATUS_OFFERED_DEADLINE_MISSED (1 << 1)
 
-#define INT2DDS_STATUS_SAMPLE_REJECTED (1 << 2)
+#define INT2DDS_STATUS_REQUESTED_DEADLINE_MISSED (1 << 2)
 
-#define INT2DDS_STATUS_LIVELINESS_CHANGED (1 << 3)
+#define INT2DDS_STATUS_OFFERED_INCOMPATIBLE_QOS (1 << 5)
 
-#define INT2DDS_STATUS_REQUESTED_DEADLINE_MISSED (1 << 4)
+#define INT2DDS_STATUS_REQUESTED_INCOMPATIBLE_QOS (1 << 6)
 
-#define INT2DDS_STATUS_REQUESTED_INCOMPATIBLE_QOS (1 << 5)
+#define INT2DDS_STATUS_SAMPLE_LOST (1 << 7)
 
-#define INT2DDS_STATUS_SAMPLE_LOST (1 << 6)
+#define INT2DDS_STATUS_SAMPLE_REJECTED (1 << 8)
 
-#define INT2DDS_STATUS_SUBSCRIPTION_MATCHED (1 << 7)
+#define INT2DDS_STATUS_DATA_ON_READERS (1 << 9)
 
-#define INT2DDS_STATUS_OFFERED_DEADLINE_MISSED (1 << 8)
+#define INT2DDS_STATUS_DATA_AVAILABLE (1 << 10)
 
-#define INT2DDS_STATUS_OFFERED_INCOMPATIBLE_QOS (1 << 9)
+#define INT2DDS_STATUS_LIVELINESS_LOST (1 << 11)
 
-#define INT2DDS_STATUS_LIVELINESS_LOST (1 << 10)
+#define INT2DDS_STATUS_LIVELINESS_CHANGED (1 << 12)
 
-#define INT2DDS_STATUS_PUBLICATION_MATCHED (1 << 11)
+#define INT2DDS_STATUS_PUBLICATION_MATCHED (1 << 13)
+
+#define INT2DDS_STATUS_SUBSCRIPTION_MATCHED (1 << 14)
 
 /**
  * C-compatible QoS policy ID enum
@@ -141,7 +143,7 @@ typedef struct Int2DdsPublisher Int2DdsPublisher;
 
 /**
  * Opaque handle to a StatusCondition
- * StatusCondition is wrapped as a trait object to handle the generic QoS type.
+ * `inner` is used by WaitSet (trait object), `kind` provides concrete access.
  */
 typedef struct Int2DdsStatusCondition Int2DdsStatusCondition;
 
