@@ -34,6 +34,8 @@ struct Resolver {
     bitmask_defs: Vec<(String, BitmaskDef)>,
     bitset_defs: Vec<(String, BitsetDef)>,
     union_defs: Vec<(String, UnionDef)>,
+    interface_defs: Vec<(String, InterfaceDef)>,
+    exception_defs: Vec<(String, ExceptionDef)>,
     known_types: HashSet<String>,
 }
 
@@ -46,6 +48,8 @@ impl Resolver {
             bitmask_defs: Vec::new(),
             bitset_defs: Vec::new(),
             union_defs: Vec::new(),
+            interface_defs: Vec::new(),
+            exception_defs: Vec::new(),
             known_types: HashSet::new(),
         }
     }
@@ -105,7 +109,19 @@ impl Resolver {
                     self.known_types.insert(u.name.clone());
                     self.union_defs.push((qname, u.clone()));
                 }
-                Definition::Interface(_) | Definition::Exception(_) | Definition::Const(_) => {}
+                Definition::Interface(iface) => {
+                    let qname = Self::qualified_name(scope, &iface.name);
+                    self.known_types.insert(qname.clone());
+                    self.known_types.insert(iface.name.clone());
+                    self.interface_defs.push((qname, iface.clone()));
+                }
+                Definition::Exception(exc) => {
+                    let qname = Self::qualified_name(scope, &exc.name);
+                    self.known_types.insert(qname.clone());
+                    self.known_types.insert(exc.name.clone());
+                    self.exception_defs.push((qname, exc.clone()));
+                }
+                Definition::Const(_) => {}
             }
         }
         Ok(())
@@ -141,7 +157,17 @@ impl Resolver {
         // Topological sort structs by dependencies
         structs = self.topo_sort_structs(structs);
 
-        Ok(IdlModel { structs, enums, bitmasks, bitsets, unions })
+        let mut interfaces = Vec::new();
+        for (qname, idef) in &self.interface_defs {
+            interfaces.push(self.resolve_interface(qname, idef)?);
+        }
+
+        let mut exceptions = Vec::new();
+        for (qname, edef) in &self.exception_defs {
+            exceptions.push(self.resolve_exception(qname, edef)?);
+        }
+
+        Ok(IdlModel { structs, enums, bitmasks, bitsets, unions, interfaces, exceptions })
     }
 
     fn resolve_enum(&self, qname: &str, edef: &EnumDef) -> Result<ResolvedEnum, ResolveError> {
@@ -520,6 +546,72 @@ impl Resolver {
             }
         }
         None
+    }
+
+    fn resolve_interface(
+        &self,
+        qname: &str,
+        idef: &InterfaceDef,
+    ) -> Result<ResolvedInterface, ResolveError> {
+        let mut operations = Vec::new();
+        for op in &idef.operations {
+            let return_type = match &op.return_type {
+                Some(ts) => Some(self.resolve_type_spec(ts)?),
+                None => None,
+            };
+            let mut params = Vec::new();
+            for p in &op.params {
+                params.push(ResolvedParam {
+                    name: p.name.clone(),
+                    resolved_type: self.resolve_type_spec(&p.type_spec)?,
+                    direction: match p.direction {
+                        ParamDirection::In => ResolvedParamDirection::In,
+                        ParamDirection::Out => ResolvedParamDirection::Out,
+                        ParamDirection::Inout => ResolvedParamDirection::Inout,
+                    },
+                });
+            }
+            operations.push(ResolvedOperation {
+                name: op.name.clone(),
+                return_type,
+                params,
+                raises: op.raises.clone(),
+            });
+        }
+
+        let mut attributes = Vec::new();
+        for attr in &idef.attributes {
+            attributes.push(ResolvedAttribute {
+                name: attr.name.clone(),
+                resolved_type: self.resolve_type_spec(&attr.type_spec)?,
+                readonly: attr.readonly,
+                raises: attr.raises.clone(),
+            });
+        }
+
+        Ok(ResolvedInterface {
+            name: idef.name.clone(),
+            qualified_name: qname.to_string(),
+            base_interfaces: idef.base_interfaces.clone(),
+            operations,
+            attributes,
+        })
+    }
+
+    fn resolve_exception(
+        &self,
+        qname: &str,
+        edef: &ExceptionDef,
+    ) -> Result<ResolvedException, ResolveError> {
+        let mut members = Vec::new();
+        for m in &edef.members {
+            members.push(self.resolve_member(m)?);
+        }
+        Ok(ResolvedException {
+            name: edef.name.clone(),
+            qualified_name: qname.to_string(),
+            members,
+        })
     }
 
     /// Topological sort: structs that depend on other structs come after their dependencies.
