@@ -1841,9 +1841,23 @@ impl UnicastMessageProcessor for UserLogic {
         let key = (remote_writer_guid, data_frag.writer_sn);
         let total_size = data_frag.sample_size;
 
-        let reader = participant
-            .find_reader_from_entity_id(data_frag.reader_id)
-            .ok_or_else(|| RtpsError::new(RtpsErrorCode::InvalidEntityKind, "Reader not found"))?;
+        let matched_readers = if data_frag.reader_id != EntityId::UNKNOWN {
+            let reader =
+                participant.find_reader_from_entity_id(data_frag.reader_id).ok_or_else(|| {
+                    RtpsError::new(RtpsErrorCode::InvalidEntityKind, "Reader not found")
+                })?;
+            vec![reader]
+        } else {
+            let readers =
+                participant.find_readers_matched_with_remote_writer(remote_writer_guid)?;
+            if readers.is_empty() {
+                return Err(RtpsError::new(
+                    RtpsErrorCode::RtpsEntityNotFound,
+                    "No matched reader found for DataFrag",
+                ));
+            }
+            readers
+        };
 
         // DashMap is thread-safe, so no explicit lock is needed
         //println!("[DEBUG] FragmentBuffer count: {}, size: {}", self.fragment_buffers.len(), self.fragment_buffers.iter().map(|entry| entry.value().total_size as usize).sum::<usize>());
@@ -1862,33 +1876,31 @@ impl UnicastMessageProcessor for UserLogic {
                 buffer.copy_fragment_data(fragment_num, data_frag.serialized_data());
             }
         } // buffer RefMut is automatically dropped here
-          // For StatefulReader case, update WriterProxy's ChangeFromWriter state
 
-        let mut ownership_strength = None;
+        // For StatefulReader case, update WriterProxy's ChangeFromWriter state for all matched readers
+        for reader in &matched_readers {
+            if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
+                // Query buffer information from DashMap again
+                if let Some(buffer_ref) = self.fragment_buffers.get(&key) {
+                    let writer_proxies = stateful_reader.writer_proxies();
+                    let mut matched_writers = writer_proxies.lock().map_err(|e| {
+                        RtpsError::new(
+                            RtpsErrorCode::LockError,
+                            format!("Failed to acquire writer_proxies lock: {}", e),
+                        )
+                    })?;
 
-        if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
-            // Query buffer information from DashMap again
-            if let Some(buffer_ref) = self.fragment_buffers.get(&key) {
-                let writer_proxies = stateful_reader.writer_proxies();
-                let mut matched_writers = writer_proxies.lock().map_err(|e| {
-                    RtpsError::new(
-                        RtpsErrorCode::LockError,
-                        format!("Failed to acquire writer_proxies lock: {}", e),
-                    )
-                })?;
-
-                if let Some(writer_proxy) = matched_writers
-                    .iter_mut()
-                    .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
-                {
-                    // Update fragment information
-                    writer_proxy.mark_frag_received(
-                        data_frag.writer_sn,
-                        buffer_ref.total_fragments,
-                        buffer_ref.received_fragments.clone(),
-                    );
-
-                    ownership_strength = Some(writer_proxy.get_ownership_strength());
+                    if let Some(writer_proxy) = matched_writers
+                        .iter_mut()
+                        .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
+                    {
+                        // Update fragment information
+                        writer_proxy.mark_frag_received(
+                            data_frag.writer_sn,
+                            buffer_ref.total_fragments,
+                            buffer_ref.received_fragments.clone(),
+                        );
+                    }
                 }
             }
         }
@@ -1904,28 +1916,52 @@ impl UnicastMessageProcessor for UserLogic {
                 drop(buffer_ref);
 
                 // Move payload from buffer without cloning
-                let (_, mut buffer) = self.fragment_buffers.remove(&key).unwrap();
+                let removed = self.fragment_buffers.remove(&key);
+                if removed.is_none() {
+                    return Ok(());
+                }
+                let (_, mut buffer) = removed.unwrap();
                 let assembled_payload = std::mem::take(&mut buffer.payload);
                 let serialized_data: SerializedData = Arc::<[u8]>::from(assembled_payload);
 
-                let mut assembled_change = CacheChange::new(
-                    ChangeKind::Alive,
-                    remote_writer_guid,
-                    InstanceHandle::NIL,
-                    data_frag.writer_sn,
-                    serialized_data,
-                    source_timestamp,
-                );
+                for reader in &matched_readers {
+                    let mut ownership_strength = None;
+                    if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
+                        let writer_proxies = stateful_reader.writer_proxies();
+                        let matched_writers = writer_proxies.lock().ok();
+                        if let Some(guard) = matched_writers {
+                            if let Some(writer_proxy) = guard
+                                .iter()
+                                .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
+                            {
+                                ownership_strength = Some(writer_proxy.get_ownership_strength());
+                            }
+                        }
+                    }
 
-                assembled_change.set_ownership_strength(ownership_strength);
+                    let mut assembled_change = CacheChange::new(
+                        ChangeKind::Alive,
+                        remote_writer_guid,
+                        InstanceHandle::NIL,
+                        data_frag.writer_sn,
+                        serialized_data.clone(),
+                        source_timestamp,
+                    );
 
-                let _ = self.deliver_change_to_reader(
-                    assembled_change,
-                    reader.as_ref(),
-                    data_frag.writer_sn,
-                    remote_writer_guid,
-                    Some(FragmentInfo { total_fragments, received_fragments, is_complete }),
-                );
+                    assembled_change.set_ownership_strength(ownership_strength);
+
+                    let _ = self.deliver_change_to_reader(
+                        assembled_change,
+                        reader.as_ref(),
+                        data_frag.writer_sn,
+                        remote_writer_guid,
+                        Some(FragmentInfo {
+                            total_fragments,
+                            received_fragments: received_fragments.clone(),
+                            is_complete,
+                        }),
+                    );
+                }
 
                 // Remove completed fragment buffer
                 self.fragment_buffers.remove(&key);
