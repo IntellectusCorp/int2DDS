@@ -117,7 +117,7 @@ class DataReader(Generic[T]):
         ...         print(sample.data)
     """
 
-    __slots__ = ("_handle", "_subscriber", "_topic", "_qos_handle", "_buffer", "_buffer_size", "_closed")
+    __slots__ = ("_handle", "_subscriber", "_topic", "_qos_handle", "_buffer", "_buffer_size", "_closed","_listener_ctx_id")
 
     # Default buffer size for reading samples
     DEFAULT_BUFFER_SIZE = 65536
