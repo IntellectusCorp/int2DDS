@@ -132,6 +132,15 @@ ffi.cdef("""
         const Int2DdsTopicQos *qos,
         Int2DdsTopic **topic_out
     );
+    Int2DdsRet int2dds_create_topic_keyed(
+        const Int2DdsParticipant *participant,
+        const char *topic_name,
+        const char *dds_type_name,
+        int32_t extensibility,
+        bool has_key,
+        const Int2DdsTopicQos *qos,
+        Int2DdsTopic **topic_out
+    );
     Int2DdsRet int2dds_delete_topic(Int2DdsTopic *topic);
     Int2DdsRet int2dds_topic_get_name(
         const Int2DdsTopic *topic,
