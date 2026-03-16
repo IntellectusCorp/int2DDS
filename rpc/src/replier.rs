@@ -1,5 +1,7 @@
 //! Replier<TReq, TRep> — receives requests and sends replies (7.11.1.4.5)
 
+use std::fmt::Debug;
+use std::sync::Arc;
 use std::time::Duration;
 
 use int2dds::common::instance_handle::InstanceHandle;
@@ -12,6 +14,7 @@ use int2dds::dcps::infrastructure::status::StatusMask;
 use int2dds::dcps::publication::data_writer::DataWriter;
 use int2dds::dcps::publication::qos::{DataWriterQos, DATAWRITER_QOS_DEFAULT};
 use int2dds::dcps::subscription::data_reader::DataReader;
+use int2dds::dcps::subscription::data_reader_listener::DataReaderListener;
 use int2dds::dcps::subscription::qos::{DataReaderQos, DATAREADER_QOS_DEFAULT};
 use int2dds::dcps::subscription::sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind};
 use int2dds::dcps::topic::qos::TopicQos;
@@ -20,10 +23,11 @@ use int2dds::serialize::cdr::{CdrDeserialize, CdrSerialize, XcdrDeserialize, Xcd
 
 use crate::entity::RpcEntity;
 use crate::error::{DdsRpcError, DdsRpcResult};
+use crate::listener::{ReplierListener, SimpleReplierListener};
 use crate::params::ReplierParams;
 use crate::sample::Sample;
 use crate::topic_name::TopicNameConfig;
-use crate::types::{RemoteExceptionCode, Reply, Request, SampleIdentity};
+use crate::types::{RemoteExceptionCode, Reply, ReplyHeader, Request, SampleIdentity};
 
 pub struct Replier<TReq, TRep> {
     request_reader: Option<DataReader<Request<TReq>>>,
@@ -202,6 +206,158 @@ where
 
     fn is_closed(&self) -> bool {
         self.closed
+    }
+}
+
+// Listener-based request reception (7.11.1.4.7, 7.11.1.4.8)
+impl<TReq, TRep> Replier<TReq, TRep>
+where
+    TReq: DdsType + Clone + Debug + CdrSerialize + CdrDeserialize + XcdrSerialize + XcdrDeserialize,
+    TRep: DdsType + Clone + Debug + CdrSerialize + CdrDeserialize + XcdrSerialize + XcdrDeserialize,
+{
+    /// Install a SimpleReplierListener. The middleware takes each arriving request,
+    /// calls `process_request`, and automatically sends the returned reply. (7.11.1.4.7)
+    /// Pass `None` to remove an existing listener.
+    pub fn set_simple_replier_listener(
+        &self,
+        listener: Option<Arc<dyn SimpleReplierListener<TReq, TRep>>>,
+    ) -> DdsRpcResult<()> {
+        let reader = self.reader()?;
+        match listener {
+            Some(l) => {
+                let adapter: Arc<dyn DataReaderListener<Foo = Request<TReq>>> =
+                    Arc::new(SimpleReplierDdsAdapter {
+                        listener: l,
+                        reply_writer: self.writer()?.clone(),
+                    });
+                reader.set_listener(Some(adapter), StatusMask::DATA_AVAILABLE)?;
+            }
+            None => {
+                reader.set_listener(None, StatusMask::default())?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Install a ReplierListener. The middleware calls `on_request_available`
+    /// when requests arrive; the user must call `take_request` / `send_reply`
+    /// manually. (7.11.1.4.8)
+    /// Pass `None` to remove an existing listener.
+    pub fn set_replier_listener(
+        &self,
+        listener: Option<Arc<dyn ReplierListener<TReq, TRep>>>,
+    ) -> DdsRpcResult<()> {
+        let reader = self.reader()?;
+        match listener {
+            Some(l) => {
+                let proxy = Replier {
+                    request_reader: self.request_reader.clone(),
+                    reply_writer: self.reply_writer.clone(),
+                    closed: false,
+                };
+                let adapter: Arc<dyn DataReaderListener<Foo = Request<TReq>>> =
+                    Arc::new(ReplierDdsAdapter { listener: l, proxy });
+                reader.set_listener(Some(adapter), StatusMask::DATA_AVAILABLE)?;
+            }
+            None => {
+                reader.set_listener(None, StatusMask::default())?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// DDS DataReaderListener adapter for SimpleReplierListener.
+/// Takes all available requests, dispatches each to `process_request`,
+/// and sends the returned reply automatically.
+struct SimpleReplierDdsAdapter<TReq, TRep> {
+    listener: Arc<dyn SimpleReplierListener<TReq, TRep>>,
+    reply_writer: DataWriter<Reply<TRep>>,
+}
+
+unsafe impl<TReq, TRep> Send for SimpleReplierDdsAdapter<TReq, TRep> {}
+unsafe impl<TReq, TRep> Sync for SimpleReplierDdsAdapter<TReq, TRep> {}
+
+impl<TReq, TRep> DataReaderListener for SimpleReplierDdsAdapter<TReq, TRep>
+where
+    TReq: 'static
+        + Clone
+        + Debug
+        + DdsType
+        + CdrSerialize
+        + CdrDeserialize
+        + XcdrSerialize
+        + XcdrDeserialize,
+    TRep: 'static
+        + Clone
+        + Debug
+        + DdsType
+        + CdrSerialize
+        + CdrDeserialize
+        + XcdrSerialize
+        + XcdrDeserialize,
+{
+    type Foo = Request<TReq>;
+
+    fn on_data_available(&self, reader: &DataReader<Self::Foo>) {
+        if let Ok(samples) = reader.take(
+            i32::MAX,
+            &[SampleStateKind::NOT_READ_SAMPLE_STATE],
+            &[ViewStateKind::ANY_VIEW_STATE],
+            &[InstanceStateKind::ALIVE_INSTANCE_STATE],
+        ) {
+            for sample in &samples {
+                if let Ok(data) = sample.data() {
+                    let request_id = data.header.request_id;
+                    if let Some(reply_data) = self.listener.process_request(sample, &request_id) {
+                        let mut reply = Reply {
+                            header: ReplyHeader {
+                                related_request_id: request_id,
+                                remote_ex: RemoteExceptionCode::Ok,
+                            },
+                            data: reply_data,
+                        };
+                        let _ = self.reply_writer.write(&mut reply, InstanceHandle::NIL);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// DDS DataReaderListener adapter for ReplierListener.
+/// Notifies `on_request_available` with a proxy that shares the same DDS entities.
+struct ReplierDdsAdapter<TReq, TRep> {
+    listener: Arc<dyn ReplierListener<TReq, TRep>>,
+    proxy: Replier<TReq, TRep>,
+}
+
+unsafe impl<TReq, TRep> Send for ReplierDdsAdapter<TReq, TRep> {}
+unsafe impl<TReq, TRep> Sync for ReplierDdsAdapter<TReq, TRep> {}
+
+impl<TReq, TRep> DataReaderListener for ReplierDdsAdapter<TReq, TRep>
+where
+    TReq: 'static
+        + Clone
+        + Debug
+        + DdsType
+        + CdrSerialize
+        + CdrDeserialize
+        + XcdrSerialize
+        + XcdrDeserialize,
+    TRep: 'static
+        + Clone
+        + Debug
+        + DdsType
+        + CdrSerialize
+        + CdrDeserialize
+        + XcdrSerialize
+        + XcdrDeserialize,
+{
+    type Foo = Request<TReq>;
+
+    fn on_data_available(&self, _reader: &DataReader<Self::Foo>) {
+        self.listener.on_request_available(&self.proxy);
     }
 }
 

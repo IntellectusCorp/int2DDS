@@ -1,6 +1,7 @@
 //! Requester<TReq, TRep> — sends requests and receives replies (7.11.1.4.3)
 
 use std::fmt::Debug;
+use std::sync::Arc;
 use std::time::Duration;
 
 use int2dds::common::instance_handle::InstanceHandle;
@@ -14,6 +15,7 @@ use int2dds::dcps::infrastructure::wait_set::WaitSet;
 use int2dds::dcps::publication::data_writer::DataWriter;
 use int2dds::dcps::publication::qos::{DataWriterQos, DATAWRITER_QOS_DEFAULT};
 use int2dds::dcps::subscription::data_reader::DataReader;
+use int2dds::dcps::subscription::data_reader_listener::DataReaderListener;
 use int2dds::dcps::subscription::qos::{DataReaderQos, DATAREADER_QOS_DEFAULT};
 use int2dds::dcps::subscription::query_condition::QueryCondition;
 use int2dds::dcps::subscription::sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind};
@@ -23,6 +25,7 @@ use int2dds::serialize::cdr::{CdrDeserialize, CdrSerialize, XcdrDeserialize, Xcd
 
 use crate::entity::{RpcEntity, ServiceProxy};
 use crate::error::{DdsRpcError, DdsRpcResult};
+use crate::listener::{RequesterListener, SimpleRequesterListener};
 use crate::params::RequesterParams;
 use crate::sample::Sample;
 use crate::topic_name::TopicNameConfig;
@@ -303,7 +306,7 @@ where
     }
 }
 
-/// Blocking future for receiving a reply to a specific request.
+/// Future-based reply reception.
 /// Wraps a WaitSet + QueryCondition to wait only for the correlated reply. (7.11.1.4.3)
 pub struct Future<TRep: 'static + Clone + Debug> {
     reader: DataReader<crate::types::Reply<TRep>>,
@@ -331,6 +334,137 @@ where
         wait_set.wait(dds_timeout)?;
         let samples = self.reader.take_w_condition(1, self.condition)?;
         samples.into_iter().next().ok_or(DdsRpcError::Timeout)
+    }
+}
+
+// Listener-based reply reception (7.11.1.4.9, 7.11.1.4.10) --
+impl<TReq, TRep> Requester<TReq, TRep>
+where
+    TReq: DdsType + Clone + Debug + CdrSerialize + CdrDeserialize + XcdrSerialize + XcdrDeserialize,
+    TRep: DdsType + Clone + Debug + CdrSerialize + CdrDeserialize + XcdrSerialize + XcdrDeserialize,
+{
+    /// Install a SimpleRequesterListener. The middleware takes each arriving reply
+    /// and dispatches it to `process_reply`. (7.11.1.4.9)
+    /// Pass `None` to remove an existing listener.
+    pub fn set_simple_requester_listener(
+        &self,
+        listener: Option<Arc<dyn SimpleRequesterListener<TRep>>>,
+    ) -> DdsRpcResult<()> {
+        let reader = self.reader()?;
+        match listener {
+            Some(l) => {
+                let adapter: Arc<dyn DataReaderListener<Foo = crate::types::Reply<TRep>>> =
+                    Arc::new(SimpleRequesterDdsAdapter { listener: l });
+                reader.set_listener(Some(adapter), StatusMask::DATA_AVAILABLE)?;
+            }
+            None => {
+                reader.set_listener(None, StatusMask::default())?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Install a RequesterListener. The middleware calls `on_reply_available`
+    /// when replies arrive; the user must call `take_reply` manually. (7.11.1.4.10)
+    /// Pass `None` to remove an existing listener.
+    pub fn set_requester_listener(
+        &self,
+        listener: Option<Arc<dyn RequesterListener<TReq, TRep>>>,
+    ) -> DdsRpcResult<()> {
+        let reader = self.reader()?;
+        match listener {
+            Some(l) => {
+                // Build a lightweight proxy that shares the same DDS entities.
+                let proxy = Requester {
+                    request_writer: self.request_writer.clone(),
+                    reply_reader: self.reply_reader.clone(),
+                    bound_instance: self.bound_instance.clone(),
+                    closed: false,
+                };
+                let adapter: Arc<dyn DataReaderListener<Foo = crate::types::Reply<TRep>>> =
+                    Arc::new(RequesterDdsAdapter { listener: l, proxy });
+                reader.set_listener(Some(adapter), StatusMask::DATA_AVAILABLE)?;
+            }
+            None => {
+                reader.set_listener(None, StatusMask::default())?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// DDS DataReaderListener adapter for SimpleRequesterListener.
+/// Takes all available replies and dispatches each to `process_reply`.
+struct SimpleRequesterDdsAdapter<TRep> {
+    listener: Arc<dyn SimpleRequesterListener<TRep>>,
+}
+
+// Safety: listener is Send + Sync (trait bound), no other mutable state.
+unsafe impl<TRep> Send for SimpleRequesterDdsAdapter<TRep> {}
+unsafe impl<TRep> Sync for SimpleRequesterDdsAdapter<TRep> {}
+
+impl<TRep> DataReaderListener for SimpleRequesterDdsAdapter<TRep>
+where
+    TRep: 'static
+        + Clone
+        + Debug
+        + DdsType
+        + CdrSerialize
+        + CdrDeserialize
+        + XcdrSerialize
+        + XcdrDeserialize,
+{
+    type Foo = crate::types::Reply<TRep>;
+
+    fn on_data_available(&self, reader: &DataReader<Self::Foo>) {
+        if let Ok(samples) = reader.take(
+            i32::MAX,
+            &[SampleStateKind::NOT_READ_SAMPLE_STATE],
+            &[ViewStateKind::ANY_VIEW_STATE],
+            &[InstanceStateKind::ALIVE_INSTANCE_STATE],
+        ) {
+            for sample in &samples {
+                if let Ok(data) = sample.data() {
+                    self.listener.process_reply(sample, &data.header.related_request_id);
+                }
+            }
+        }
+    }
+}
+
+/// DDS DataReaderListener adapter for RequesterListener.
+/// Notifies `on_reply_available` with a proxy that shares the same DDS entities.
+struct RequesterDdsAdapter<TReq, TRep> {
+    listener: Arc<dyn RequesterListener<TReq, TRep>>,
+    proxy: Requester<TReq, TRep>,
+}
+
+unsafe impl<TReq, TRep> Send for RequesterDdsAdapter<TReq, TRep> {}
+unsafe impl<TReq, TRep> Sync for RequesterDdsAdapter<TReq, TRep> {}
+
+impl<TReq, TRep> DataReaderListener for RequesterDdsAdapter<TReq, TRep>
+where
+    TReq: 'static
+        + Clone
+        + Debug
+        + DdsType
+        + CdrSerialize
+        + CdrDeserialize
+        + XcdrSerialize
+        + XcdrDeserialize,
+    TRep: 'static
+        + Clone
+        + Debug
+        + DdsType
+        + CdrSerialize
+        + CdrDeserialize
+        + XcdrSerialize
+        + XcdrDeserialize,
+{
+    type Foo = crate::types::Reply<TRep>;
+
+    fn on_data_available(&self, _reader: &DataReader<Self::Foo>) {
+        self.listener.on_reply_available(&self.proxy);
     }
 }
 
