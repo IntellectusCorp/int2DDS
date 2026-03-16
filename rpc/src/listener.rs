@@ -25,11 +25,7 @@ pub trait ReplierListener<TReq, TRep>: Send + Sync + 'static {
 /// Reply notification with automatic take for a Requester. (7.11.1.4.9)
 /// The middleware takes the reply and passes it directly to `process_reply`.
 pub trait SimpleRequesterListener<TRep>: Send + Sync + 'static {
-    fn process_reply(
-        &self,
-        reply: &Sample<Reply<TRep>>,
-        related_request_id: &SampleIdentity,
-    );
+    fn process_reply(&self, reply: &Sample<Reply<TRep>>, related_request_id: &SampleIdentity);
 }
 
 /// Reply arrival notification for a Requester. (7.11.1.4.10)

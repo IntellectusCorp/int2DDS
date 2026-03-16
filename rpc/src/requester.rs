@@ -32,8 +32,8 @@ use crate::topic_name::TopicNameConfig;
 use crate::types::{InstanceName, Request, SampleIdentity};
 
 pub struct Requester<TReq, TRep> {
-    request_writer: Option<DataWriter<Request<TReq>>>,
-    reply_reader: Option<DataReader<crate::types::Reply<TRep>>>,
+    request_writer: Option<Arc<DataWriter<Request<TReq>>>>,
+    reply_reader: Option<Arc<DataReader<crate::types::Reply<TRep>>>>,
     bound_instance: Option<InstanceName>,
     closed: bool,
 }
@@ -105,19 +105,19 @@ where
         )?;
 
         Ok(Self {
-            request_writer: Some(request_writer),
-            reply_reader: Some(reply_reader),
+            request_writer: Some(Arc::new(request_writer)),
+            reply_reader: Some(Arc::new(reply_reader)),
             bound_instance: None,
             closed: false,
         })
     }
 
     fn writer(&self) -> DdsRpcResult<&DataWriter<Request<TReq>>> {
-        self.request_writer.as_ref().ok_or(DdsError::AlreadyDeleted.into())
+        self.request_writer.as_deref().ok_or(DdsError::AlreadyDeleted.into())
     }
 
     fn reader(&self) -> DdsRpcResult<&DataReader<crate::types::Reply<TRep>>> {
-        self.reply_reader.as_ref().ok_or(DdsError::AlreadyDeleted.into())
+        self.reply_reader.as_deref().ok_or(DdsError::AlreadyDeleted.into())
     }
 
     /// Send a request. The middleware fills in `RequestHeader.requestId`
@@ -250,13 +250,22 @@ where
     TRep: DdsType + CdrSerialize + CdrDeserialize + XcdrSerialize + XcdrDeserialize,
 {
     fn close(&mut self) -> DdsRpcResult<()> {
-        if let Some(writer) = self.request_writer.take() {
-            let publisher = writer.get_publisher()?;
-            publisher.delete_datawriter(writer)?;
+        // Detach listener first to release any adapter-held Arc references
+        if let Some(ref reader) = self.reply_reader {
+            let _ = reader.set_listener(None, StatusMask::default());
         }
-        if let Some(reader) = self.reply_reader.take() {
-            let subscriber = reader.get_subscriber()?;
-            subscriber.delete_datareader(reader)?;
+        if let Some(writer_arc) = self.request_writer.take() {
+            // delete_datawriter/reader requires owned value, not Arc
+            if let Ok(writer) = Arc::try_unwrap(writer_arc) {
+                let publisher = writer.get_publisher()?;
+                publisher.delete_datawriter(writer)?;
+            }
+        }
+        if let Some(reader_arc) = self.reply_reader.take() {
+            if let Ok(reader) = Arc::try_unwrap(reader_arc) {
+                let subscriber = reader.get_subscriber()?;
+                subscriber.delete_datareader(reader)?;
+            }
         }
         self.closed = true;
         Ok(())
@@ -337,7 +346,8 @@ where
     }
 }
 
-// Listener-based reply reception (7.11.1.4.9, 7.11.1.4.10) --
+// Listener-based reply reception (7.11.1.4.9, 7.11.1.4.10)
+
 impl<TReq, TRep> Requester<TReq, TRep>
 where
     TReq: DdsType + Clone + Debug + CdrSerialize + CdrDeserialize + XcdrSerialize + XcdrDeserialize,
@@ -374,7 +384,8 @@ where
         let reader = self.reader()?;
         match listener {
             Some(l) => {
-                // Build a lightweight proxy that shares the same DDS entities.
+                // Proxy shares the same DDS entities via Arc — no dependency on
+                // DataReader/DataWriter Clone semantics.
                 let proxy = Requester {
                     request_writer: self.request_writer.clone(),
                     reply_reader: self.reply_reader.clone(),
@@ -433,7 +444,7 @@ where
 }
 
 /// DDS DataReaderListener adapter for RequesterListener.
-/// Notifies `on_reply_available` with a proxy that shares the same DDS entities.
+/// Notifies `on_reply_available` with a proxy that shares the same DDS entities via Arc.
 struct RequesterDdsAdapter<TReq, TRep> {
     listener: Arc<dyn RequesterListener<TReq, TRep>>,
     proxy: Requester<TReq, TRep>,
