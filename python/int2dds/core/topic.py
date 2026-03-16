@@ -48,17 +48,19 @@ class Topic(Generic[T]):
         extensibility: Extensibility = getattr(
             type_class, "_extensibility", Extensibility.FINAL
         )
+        has_key: bool = getattr(type_class, "_has_key", False)
 
         topic_name_c = ffi.new("char[]", topic_name.encode())
         type_name_c = ffi.new("char[]", self._type_name.encode())
 
         topic_ptr = ffi.new("Int2DdsTopic **")
         check_ret(
-            lib.int2dds_create_topic(
+            lib.int2dds_create_topic_keyed(
                 participant._handle,
                 topic_name_c,
                 type_name_c,
                 int(extensibility),
+                has_key,
                 ffi.NULL,  # qos
                 topic_ptr,
             )
