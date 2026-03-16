@@ -528,6 +528,89 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
     /// * `Timeout` - Same conditions as `write()` when RELIABILITY QoS is RELIABLE
     /// * `OutOfResources` - Resource limits exceeded
     /// * The writer has been deleted
+    /// Dispose an instance using pre-serialized key bytes.
+    ///
+    /// This is the serialized-key variant of `dispose`, designed for FFI callers.
+    /// Marks the instance as no longer valid. Readers will see the instance
+    /// state change to NOT_ALIVE_DISPOSED.
+    pub fn dispose_serialized(&self, key_bytes: &[u8], handle: InstanceHandle) -> DdsResult<()> {
+        self.is_enabled()?;
+        let timestamp = Time::now();
+
+        if key_bytes.is_empty() {
+            log::warn!("dispose_serialized on empty key has no effect");
+            return Ok(());
+        }
+
+        if timestamp.is_infinite() || timestamp.sec < 0 || !timestamp.is_valid() {
+            return Err(DdsError::BadParameter);
+        }
+
+        let key_data: SerializedData = Arc::from(key_bytes);
+
+        // Look up the instance handle from key_instances
+        let instance_handle = match self.key_instances.lock() {
+            Ok(mut key_instances) => {
+                if let Some(instance_handle) = key_instances.remove(&key_data) {
+                    instance_handle
+                } else {
+                    Self::compute_instance_handle_from_key(key_bytes)
+                }
+            }
+            Err(e) => return Err(DdsError::Error(e.to_string())),
+        };
+
+        // Validate handle: if not NIL, must match the looked-up handle
+        let handle = if handle.is_nil() {
+            instance_handle
+        } else {
+            if handle != instance_handle {
+                return Err(DdsError::PreconditionNotMet);
+            }
+            instance_handle
+        };
+
+        {
+            let mut instances =
+                self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+
+            match instances.get(&handle) {
+                Some((_, _, InstanceState::Registered))
+                | Some((_, _, InstanceState::Unregistered)) => {
+                    // OK, in disposable state
+                }
+                Some((_, _, InstanceState::Disposed)) => {
+                    return Ok(());
+                }
+                None => {
+                    return Err(DdsError::BadParameter);
+                }
+            }
+
+            instances.insert(handle, (key_data.clone(), timestamp, InstanceState::Disposed));
+
+            let monitor_guard =
+                self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            if !handle.is_nil() {
+                if let Some(monitor) = monitor_guard.as_ref() {
+                    monitor.cancel_instance(&handle);
+                }
+            }
+
+            self.add_change(
+                ChangeKind::NotAliveDisposed,
+                key_data,
+                handle,
+                Some(timestamp.into()),
+            )?;
+
+            self.update_liveliness()?;
+
+            log::debug!("Disposing Instance (serialized) - handle: {:?}", handle);
+
+            Ok(())
+        }
+    }
     pub fn dispose(&self, data: &Foo, handle: InstanceHandle) -> DdsResult<()> {
         /*
             This operation requests the middleware to delete the data (actual deletion is deferred until the data is no longer in use anywhere in the system).
@@ -960,7 +1043,29 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             }
         }
     }
+    /// Look up an instance handle using pre-serialized key bytes.
+    ///
+    /// This is the serialized-key variant of `lookup_instance`, designed for
+    /// FFI callers. Returns the handle for a previously registered instance,
+    /// or HANDLE_NIL if the instance is not known. Does NOT register the instance.
+    pub fn lookup_instance_serialized(&self, key_bytes: &[u8]) -> DdsResult<InstanceHandle> {
+        self.is_deleted()?;
 
+        if key_bytes.is_empty() {
+            return Ok(InstanceHandle::NIL);
+        }
+
+        let computed_handle = Self::compute_instance_handle_from_key(key_bytes);
+
+        {
+            let instances = self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+
+            Ok(match instances.get(&computed_handle) {
+                Some((_, _, _)) => computed_handle,
+                None => InstanceHandle::NIL,
+            })
+        }
+    }
     pub fn lookup_instance(&self, instance: &Foo) -> DdsResult<InstanceHandle> {
         // in: instance: <Foo>
         // out: InstanceHandle
@@ -1590,7 +1695,146 @@ where
         }
         Ok(handle)
     }
+    /// Register an instance using pre-serialized key bytes.
+    ///
+    /// This is the serialized-key variant of `register_instance`, designed for
+    /// FFI callers that already have serialized key bytes rather than a typed instance.
+    /// The behavior is identical to `register_instance`: idempotent, returns the
+    /// existing handle if already registered.
+    pub fn register_instance_serialized(&self, key_bytes: &[u8]) -> DdsResult<InstanceHandle> {
+        self.is_enabled()?;
+        let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
 
+        if key_bytes.is_empty() {
+            return Ok(InstanceHandle::NIL);
+        }
+
+        if timestamp.is_infinite() || timestamp.sec < 0 || !timestamp.is_valid() {
+            return Err(DdsError::BadParameter);
+        }
+
+        let key_data: SerializedData = Arc::from(key_bytes);
+        let computed_handle = Self::compute_instance_handle_from_key(key_bytes);
+
+        // Idempotent: if already registered, return existing handle
+        {
+            let instances = self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            if let Some((_, _, InstanceState::Registered)) = instances.get(&computed_handle) {
+                return Ok(computed_handle);
+            }
+        }
+
+        // Register instance in DataWriterCache
+        self.register_instance_to_datawriter_cache(computed_handle)?;
+
+        {
+            let mut instances =
+                self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            instances
+                .insert(computed_handle, (key_data.clone(), timestamp, InstanceState::Registered));
+
+            let mut key_instances =
+                self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            key_instances.insert(key_data, computed_handle);
+
+            let monitor_guard =
+                self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            if let Some(monitor) = monitor_guard.as_ref() {
+                monitor.track_instance(&computed_handle);
+            }
+
+            log::debug!("Registering Instance (serialized) - handle: {:?}", computed_handle);
+        }
+        Ok(computed_handle)
+    }
+
+    /// Unregister an instance using pre-serialized key bytes.
+    ///
+    /// This is the serialized-key variant of `unregister_instance`, designed for
+    /// FFI callers. Changes the instance state from Registered to Unregistered
+    /// and notifies readers via NOT_ALIVE_NO_WRITERS.
+    pub fn unregister_instance_serialized(
+        &self,
+        key_bytes: &[u8],
+        handle: InstanceHandle,
+    ) -> DdsResult<()> {
+        self.is_enabled()?;
+        let timestamp = Time::now();
+
+        if key_bytes.is_empty() {
+            log::warn!("unregister_instance_serialized on empty key has no effect");
+            return Ok(());
+        }
+
+        if timestamp.is_infinite() || timestamp.sec < 0 || !timestamp.is_valid() {
+            return Err(DdsError::BadParameter);
+        }
+
+        let key_data: SerializedData = Arc::from(key_bytes);
+
+        // Look up the instance handle from key_instances
+        let instance_handle = match self.key_instances.lock() {
+            Ok(key_instances) => {
+                if let Some(instance_handle) = key_instances.get(&key_data) {
+                    *instance_handle
+                } else {
+                    return Err(DdsError::BadParameter);
+                }
+            }
+            Err(e) => return Err(DdsError::Error(e.to_string())),
+        };
+
+        // Validate handle: if not NIL, must match the looked-up handle
+        let handle = if handle.is_nil() {
+            instance_handle
+        } else {
+            if handle != instance_handle {
+                return Err(DdsError::PreconditionNotMet);
+            }
+            instance_handle
+        };
+
+        {
+            let mut instances =
+                self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+
+            match instances.get(&handle) {
+                Some((_, _, InstanceState::Registered)) => {
+                    // OK, in registered state
+                }
+                Some((_, _, _)) => {
+                    return Err(DdsError::BadParameter);
+                }
+                None => {
+                    return Err(DdsError::BadParameter);
+                }
+            }
+
+            // Change state: Registered → Unregistered
+            instances.insert(handle, (key_data.clone(), timestamp, InstanceState::Unregistered));
+
+            let monitor_guard =
+                self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            if let Some(monitor) = monitor_guard.as_ref() {
+                monitor.cancel_instance(&handle);
+            }
+
+            let change_kind =
+                if self.get_qos()?.writer_data_lifecycle.autodispose_unregistered_instances {
+                    ChangeKind::NotAliveDisposedUnregistered
+                } else {
+                    ChangeKind::NotAliveUnregistered
+                };
+
+            self.add_change(change_kind, key_data, handle, Some(timestamp.into()))?;
+
+            self.update_liveliness()?;
+
+            log::debug!("Unregistering Instance (serialized) - handle: {:?}", handle);
+
+            Ok(())
+        }
+    }
     pub fn unregister_instance(&self, instance: &Foo, handle: InstanceHandle) -> DdsResult<()> {
         // in: instance: <Foo>, handle: InstanceHandle
         // out: DdsError_t
