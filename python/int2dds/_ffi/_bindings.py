@@ -173,7 +173,31 @@ ffi.cdef("""
         const uint8_t *key,
         size_t key_len
     );
-
+    /* Instance Management */
+    Int2DdsRet int2dds_register_instance_serialized(
+        const Int2DdsDataWriter *writer,
+        const uint8_t *key,
+        size_t key_len,
+        uint8_t handle_out[16]
+    );
+    Int2DdsRet int2dds_unregister_instance_serialized(
+        const Int2DdsDataWriter *writer,
+        const uint8_t *key,
+        size_t key_len,
+        const uint8_t handle[16]
+    );
+    Int2DdsRet int2dds_dispose_serialized(
+        const Int2DdsDataWriter *writer,
+        const uint8_t *key,
+        size_t key_len,
+        const uint8_t handle[16]
+    );
+    Int2DdsRet int2dds_lookup_instance_serialized(
+        const Int2DdsDataWriter *writer,
+        const uint8_t *key,
+        size_t key_len,
+        uint8_t handle_out[16]
+    );
     /* DataReader */
     Int2DdsRet int2dds_create_datareader(
         const Int2DdsSubscriber *subscriber,
