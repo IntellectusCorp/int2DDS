@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use int2dds::{
     common::instance_handle::InstanceHandle,
+    core::time::{Duration, Time},
     infrastructure::status::StatusMask,
     publication::{data_writer_listener::DataWriterListener, qos::PublisherQos},
 };
@@ -446,6 +447,103 @@ pub unsafe extern "C" fn int2dds_write_serialized(
     };
 
     match writer_ref.inner.write_serialized(serialized_data, serialized_key) {
+        Ok(()) => INT2DDS_RET_OK,
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
+/// Write pre-serialized data with an explicit source timestamp.
+///
+/// Same as `int2dds_write_serialized`, but allows the caller to specify a
+/// source timestamp instead of using the current time.
+///
+/// # Parameters
+/// - `writer`: A valid datawriter
+/// - `data`: Pointer to the CDR-serialized byte buffer
+/// - `data_len`: Length of the serialized data in bytes
+/// - `key`: Pointer to the serialized key bytes (can be null if no key)
+/// - `key_len`: Length of the key bytes
+/// - `timestamp_sec`: Seconds component of the source timestamp
+/// - `timestamp_nanosec`: Nanoseconds component of the source timestamp
+///
+/// # Safety
+/// - `writer` must be a valid datawriter
+/// - `data` must point to at least `data_len` readable bytes
+/// - If `key` is not null, it must point to at least `key_len` readable bytes
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_write_serialized_w_timestamp(
+    writer: *const Int2DdsDataWriter,
+    data: *const u8,
+    data_len: usize,
+    key: *const u8,
+    key_len: usize,
+    timestamp_sec: i32,
+    timestamp_nanosec: u32,
+) -> Int2DdsRet {
+    check_null!(writer);
+    check_null!(data);
+
+    let writer_ref = &*writer;
+    let serialized_data = std::slice::from_raw_parts(data, data_len);
+
+    let serialized_key = if key.is_null() || key_len == 0 {
+        None
+    } else {
+        Some(std::slice::from_raw_parts(key, key_len))
+    };
+
+    let timestamp = Time { sec: timestamp_sec, nanosec: timestamp_nanosec };
+
+    match writer_ref.inner.write_serialized_w_timestamp(serialized_data, serialized_key, timestamp)
+    {
+        Ok(()) => INT2DDS_RET_OK,
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
+/// Block until all reliable DataReader entities have acknowledged all written data,
+/// or until the timeout expires.
+///
+/// # Safety
+/// - `writer` must be a valid datawriter
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_wait_for_acknowledgments(
+    writer: *const Int2DdsDataWriter,
+    timeout_ms: i64,
+) -> Int2DdsRet {
+    check_null!(writer);
+
+    let writer_ref = &*writer;
+    let max_wait = Duration {
+        sec: (timeout_ms / 1000) as i32,
+        nanosec: ((timeout_ms % 1000) * 1_000_000) as u32,
+    };
+
+    match writer_ref.inner.wait_for_acknowledgments(max_wait) {
+        Ok(()) => INT2DDS_RET_OK,
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
+/// Block until all reliable DataWriter entities owned by this Publisher have been
+/// acknowledged by all matched reliable DataReader entities, or until the timeout expires.
+///
+/// # Safety
+/// - `publisher` must be a valid publisher
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publisher_wait_for_acknowledgments(
+    publisher: *const Int2DdsPublisher,
+    timeout_ms: i64,
+) -> Int2DdsRet {
+    check_null!(publisher);
+
+    let publisher_ref = &*publisher;
+    let max_wait = Duration {
+        sec: (timeout_ms / 1000) as i32,
+        nanosec: ((timeout_ms % 1000) * 1_000_000) as u32,
+    };
+
+    match publisher_ref.inner.wait_for_acknowledgments(max_wait) {
         Ok(()) => INT2DDS_RET_OK,
         Err(e) => dds_error_to_code(&e),
     }

@@ -206,6 +206,11 @@ typedef struct Int2DdsParticipant Int2DdsParticipant;
 typedef struct Int2DdsParticipantFactory Int2DdsParticipantFactory;
 
 /**
+ * Opaque QoS handle for DomainParticipant
+ */
+typedef struct Int2DdsParticipantQos Int2DdsParticipantQos;
+
+/**
  * Opaque handle to a Publisher
  */
 typedef struct Int2DdsPublisher Int2DdsPublisher;
@@ -859,6 +864,54 @@ Int2DdsRet int2dds_write_serialized(const struct Int2DdsDataWriter *writer,
                                     uintptr_t key_len);
 
 /**
+ * Write pre-serialized data with an explicit source timestamp.
+ *
+ * Same as `int2dds_write_serialized`, but allows the caller to specify a
+ * source timestamp instead of using the current time.
+ *
+ * # Parameters
+ * - `writer`: A valid datawriter
+ * - `data`: Pointer to the CDR-serialized byte buffer
+ * - `data_len`: Length of the serialized data in bytes
+ * - `key`: Pointer to the serialized key bytes (can be null if no key)
+ * - `key_len`: Length of the key bytes
+ * - `timestamp_sec`: Seconds component of the source timestamp
+ * - `timestamp_nanosec`: Nanoseconds component of the source timestamp
+ *
+ * # Safety
+ * - `writer` must be a valid datawriter
+ * - `data` must point to at least `data_len` readable bytes
+ * - If `key` is not null, it must point to at least `key_len` readable bytes
+ */
+Int2DdsRet int2dds_write_serialized_w_timestamp(const struct Int2DdsDataWriter *writer,
+                                                const uint8_t *data,
+                                                uintptr_t data_len,
+                                                const uint8_t *key,
+                                                uintptr_t key_len,
+                                                int32_t timestamp_sec,
+                                                uint32_t timestamp_nanosec);
+
+/**
+ * Block until all reliable DataReader entities have acknowledged all written data,
+ * or until the timeout expires.
+ *
+ * # Safety
+ * - `writer` must be a valid datawriter
+ */
+Int2DdsRet int2dds_datawriter_wait_for_acknowledgments(const struct Int2DdsDataWriter *writer,
+                                                       int64_t timeout_ms);
+
+/**
+ * Block until all reliable DataWriter entities owned by this Publisher have been
+ * acknowledged by all matched reliable DataReader entities, or until the timeout expires.
+ *
+ * # Safety
+ * - `publisher` must be a valid publisher
+ */
+Int2DdsRet int2dds_publisher_wait_for_acknowledgments(const struct Int2DdsPublisher *publisher,
+                                                      int64_t timeout_ms);
+
+/**
  * Register an instance with serialized key bytes
  *
  * # Safety
@@ -1338,6 +1391,35 @@ Int2DdsRet int2dds_topic_qos_set_data_representation(struct Int2DdsTopicQos *qos
 Int2DdsRet int2dds_topic_qos_destroy(struct Int2DdsTopicQos *qos);
 
 /**
+ * Create default DomainParticipant QoS
+ *
+ * # Safety
+ * - `qos_out` must be a valid pointer to a null pointer
+ * - The returned QoS must be freed with `int2dds_participant_qos_destroy`
+ */
+Int2DdsRet int2dds_participant_qos_create_default(struct Int2DdsParticipantQos **qos_out);
+
+/**
+ * Set user data QoS for DomainParticipant
+ *
+ * # Safety
+ * - `qos` must be a valid QoS handle
+ * - `data` must point to `data_len` bytes, or be null if `data_len` is 0
+ */
+Int2DdsRet int2dds_participant_qos_set_user_data(struct Int2DdsParticipantQos *qos,
+                                                 const uint8_t *data,
+                                                 uintptr_t data_len);
+
+/**
+ * Destroy DomainParticipant QoS
+ *
+ * # Safety
+ * - `qos` must be a valid QoS handle
+ * - `qos` must not be used after this call
+ */
+Int2DdsRet int2dds_participant_qos_destroy(struct Int2DdsParticipantQos *qos);
+
+/**
  * Set deadline QoS for DataWriter
  *
  * # Safety
@@ -1809,6 +1891,16 @@ Int2DdsRet int2dds_read_serialized_batch_w_condition(const struct Int2DdsDataRea
                                                      uint32_t sample_state_mask,
                                                      uint32_t view_state_mask,
                                                      uint32_t instance_state_mask);
+
+/**
+ * Block until the DataReader has received all historical data from matched
+ * TRANSIENT_LOCAL writers, or until the timeout expires.
+ *
+ * # Safety
+ * - `reader` must be a valid datareader
+ */
+Int2DdsRet int2dds_datareader_wait_for_historical_data(const struct Int2DdsDataReader *reader,
+                                                       int64_t timeout_ms);
 
 /**
  * Create a Topic
