@@ -367,8 +367,8 @@ mod tests {
         datafrag.fragment_size = 3;
         datafrag.sample_size = 3;
 
-        // serialized data of 5 bytes when only 3 are expected
-        datafrag.serialized_data = Arc::from(vec![1, 2, 3, 4, 5]);
+        // serialized data of 7 bytes when only 3 (+3 padding max) are expected
+        datafrag.serialized_data = Arc::from(vec![1, 2, 3, 4, 5, 6, 7]);
 
         let buffer = datafrag.write_to_vec_with_ctx(Endianness::BigEndian).unwrap();
 
