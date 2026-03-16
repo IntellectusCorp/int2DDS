@@ -404,6 +404,140 @@ pub unsafe extern "C" fn int2dds_write_serialized(
     }
 }
 
+/// Register an instance and return its handle (16-byte key hash).
+///
+/// Pre-registers an instance in the DataWriter for the given key,
+/// allowing the DDS service to pre-allocate resources. Returns the
+/// InstanceHandle for use in subsequent write/dispose/unregister calls.
+///
+/// # Safety
+/// - `writer` must be a valid datawriter
+/// - `key` must point to at least `key_len` readable bytes
+/// - `handle_out` must be a valid pointer to a 16-byte array
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_register_instance_serialized(
+    writer: *const Int2DdsDataWriter,
+    key: *const u8,
+    key_len: usize,
+    handle_out: *mut [u8; 16],
+) -> Int2DdsRet {
+    check_null!(writer);
+    check_null!(key);
+    check_null!(handle_out);
+
+    let writer_ref = &*writer;
+    let key_bytes = std::slice::from_raw_parts(key, key_len);
+
+    match writer_ref.inner.register_instance_serialized(key_bytes) {
+        Ok(handle) => {
+            *handle_out = *handle.value();
+            INT2DDS_RET_OK
+        }
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
+/// Unregister a previously registered instance.
+///
+/// Informs the DDS service that this DataWriter will no longer modify
+/// the specified instance. Readers will eventually see the instance
+/// state change to NOT_ALIVE_NO_WRITERS.
+///
+/// # Safety
+/// - `writer` must be a valid datawriter
+/// - `key` must point to at least `key_len` readable bytes
+/// - `handle` must be a valid pointer to a 16-byte array (from register_instance),
+///   or all zeros for HANDLE_NIL (auto-detect from key)
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_unregister_instance_serialized(
+    writer: *const Int2DdsDataWriter,
+    key: *const u8,
+    key_len: usize,
+    handle: *const [u8; 16],
+) -> Int2DdsRet {
+    check_null!(writer);
+    check_null!(key);
+    check_null!(handle);
+
+    let writer_ref = &*writer;
+    let key_bytes = std::slice::from_raw_parts(key, key_len);
+    let handle_bytes = &*handle;
+
+    let instance_handle = int2dds::common::instance_handle::InstanceHandle::new(*handle_bytes);
+
+    match writer_ref.inner.unregister_instance_serialized(key_bytes, instance_handle) {
+        Ok(()) => INT2DDS_RET_OK,
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
+/// Dispose an instance, marking it as no longer valid.
+///
+/// Readers will see the instance state change to NOT_ALIVE_DISPOSED.
+/// Unlike unregister, dispose indicates the instance data itself is
+/// no longer meaningful.
+///
+/// # Safety
+/// - `writer` must be a valid datawriter
+/// - `key` must point to at least `key_len` readable bytes
+/// - `handle` must be a valid pointer to a 16-byte array (from register_instance),
+///   or all zeros for HANDLE_NIL (auto-detect from key)
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_dispose_serialized(
+    writer: *const Int2DdsDataWriter,
+    key: *const u8,
+    key_len: usize,
+    handle: *const [u8; 16],
+) -> Int2DdsRet {
+    check_null!(writer);
+    check_null!(key);
+    check_null!(handle);
+
+    let writer_ref = &*writer;
+    let key_bytes = std::slice::from_raw_parts(key, key_len);
+    let handle_bytes = &*handle;
+
+    let instance_handle = int2dds::common::instance_handle::InstanceHandle::new(*handle_bytes);
+
+    match writer_ref.inner.dispose_serialized(key_bytes, instance_handle) {
+        Ok(()) => INT2DDS_RET_OK,
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
+/// Look up the handle of a previously registered instance.
+///
+/// Returns the InstanceHandle for the given key if the instance
+/// is known, or all zeros (HANDLE_NIL) if not found.
+/// This does NOT register the instance.
+///
+/// # Safety
+/// - `writer` must be a valid datawriter
+/// - `key` must point to at least `key_len` readable bytes
+/// - `handle_out` must be a valid pointer to a 16-byte array
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_lookup_instance_serialized(
+    writer: *const Int2DdsDataWriter,
+    key: *const u8,
+    key_len: usize,
+    handle_out: *mut [u8; 16],
+) -> Int2DdsRet {
+    check_null!(writer);
+    check_null!(key);
+    check_null!(handle_out);
+
+    let writer_ref = &*writer;
+    let key_bytes = std::slice::from_raw_parts(key, key_len);
+
+    match writer_ref.inner.lookup_instance_serialized(key_bytes) {
+        Ok(handle) => {
+            *handle_out = *handle.value();
+            INT2DDS_RET_OK
+        }
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

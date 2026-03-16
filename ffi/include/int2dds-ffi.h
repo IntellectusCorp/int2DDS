@@ -736,6 +736,76 @@ Int2DdsRet int2dds_write_serialized(const struct Int2DdsDataWriter *writer,
                                     uintptr_t key_len);
 
 /**
+ * Register an instance and return its handle (16-byte key hash).
+ *
+ * Pre-registers an instance in the DataWriter for the given key,
+ * allowing the DDS service to pre-allocate resources. Returns the
+ * InstanceHandle for use in subsequent write/dispose/unregister calls.
+ *
+ * # Safety
+ * - `writer` must be a valid datawriter
+ * - `key` must point to at least `key_len` readable bytes
+ * - `handle_out` must be a valid pointer to a 16-byte array
+ */
+Int2DdsRet int2dds_register_instance_serialized(const struct Int2DdsDataWriter *writer,
+                                                const uint8_t *key,
+                                                uintptr_t key_len,
+                                                uint8_t (*handle_out)[16]);
+
+/**
+ * Unregister a previously registered instance.
+ *
+ * Informs the DDS service that this DataWriter will no longer modify
+ * the specified instance. Readers will eventually see the instance
+ * state change to NOT_ALIVE_NO_WRITERS.
+ *
+ * # Safety
+ * - `writer` must be a valid datawriter
+ * - `key` must point to at least `key_len` readable bytes
+ * - `handle` must be a valid pointer to a 16-byte array (from register_instance),
+ *   or all zeros for HANDLE_NIL (auto-detect from key)
+ */
+Int2DdsRet int2dds_unregister_instance_serialized(const struct Int2DdsDataWriter *writer,
+                                                  const uint8_t *key,
+                                                  uintptr_t key_len,
+                                                  const uint8_t (*handle)[16]);
+
+/**
+ * Dispose an instance, marking it as no longer valid.
+ *
+ * Readers will see the instance state change to NOT_ALIVE_DISPOSED.
+ * Unlike unregister, dispose indicates the instance data itself is
+ * no longer meaningful.
+ *
+ * # Safety
+ * - `writer` must be a valid datawriter
+ * - `key` must point to at least `key_len` readable bytes
+ * - `handle` must be a valid pointer to a 16-byte array (from register_instance),
+ *   or all zeros for HANDLE_NIL (auto-detect from key)
+ */
+Int2DdsRet int2dds_dispose_serialized(const struct Int2DdsDataWriter *writer,
+                                      const uint8_t *key,
+                                      uintptr_t key_len,
+                                      const uint8_t (*handle)[16]);
+
+/**
+ * Look up the handle of a previously registered instance.
+ *
+ * Returns the InstanceHandle for the given key if the instance
+ * is known, or all zeros (HANDLE_NIL) if not found.
+ * This does NOT register the instance.
+ *
+ * # Safety
+ * - `writer` must be a valid datawriter
+ * - `key` must point to at least `key_len` readable bytes
+ * - `handle_out` must be a valid pointer to a 16-byte array
+ */
+Int2DdsRet int2dds_lookup_instance_serialized(const struct Int2DdsDataWriter *writer,
+                                              const uint8_t *key,
+                                              uintptr_t key_len,
+                                              uint8_t (*handle_out)[16]);
+
+/**
  * Create default DataWriter QoS
  *
  * # Safety
