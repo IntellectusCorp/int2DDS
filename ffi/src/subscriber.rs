@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use int2dds::{
+    core::time::Duration,
     infrastructure::status::StatusMask,
     subscription::{
         data_reader_listener::DataReaderListener,
@@ -1029,6 +1030,30 @@ pub unsafe extern "C" fn int2dds_read_serialized_batch_w_condition(
 
     *seq_out = Box::into_raw(Box::new(Int2DdsSampleSeq { samples }));
     INT2DDS_RET_OK
+}
+
+/// Block until the DataReader has received all historical data from matched
+/// TRANSIENT_LOCAL writers, or until the timeout expires.
+///
+/// # Safety
+/// - `reader` must be a valid datareader
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_wait_for_historical_data(
+    reader: *const Int2DdsDataReader,
+    timeout_ms: i64,
+) -> Int2DdsRet {
+    check_null!(reader);
+
+    let reader_ref = &*reader;
+    let max_wait = Duration {
+        sec: (timeout_ms / 1000) as i32,
+        nanosec: ((timeout_ms % 1000) * 1_000_000) as u32,
+    };
+
+    match reader_ref.inner.wait_for_historical_data(max_wait) {
+        Ok(()) => INT2DDS_RET_OK,
+        Err(e) => dds_error_to_code(&e),
+    }
 }
 
 #[cfg(test)]

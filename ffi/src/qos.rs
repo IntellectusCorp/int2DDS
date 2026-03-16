@@ -24,6 +24,7 @@ use std::os::raw::c_char;
 
 use int2dds::{
     core::time::Duration,
+    domain::qos::DomainParticipantQos,
     infrastructure::qos_policy::{
         DataRepresentationId, DataRepresentationQosPolicy, DestinationOrderQosPolicyKind,
         DurabilityQosPolicyKind, HistoryQosPolicyKind, LivelinessQosPolicyKind,
@@ -1022,6 +1023,76 @@ pub unsafe extern "C" fn int2dds_topic_qos_set_data_representation(
 /// - `qos` must not be used after this call
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_topic_qos_destroy(qos: *mut Int2DdsTopicQos) -> Int2DdsRet {
+    if qos.is_null() {
+        return INT2DDS_RET_NULL_POINTER;
+    }
+
+    let _qos = Box::from_raw(qos);
+
+    INT2DDS_RET_OK
+}
+
+// ============================================================================
+// DomainParticipant QoS
+// ============================================================================
+
+/// Opaque QoS handle for DomainParticipant
+pub struct Int2DdsParticipantQos {
+    pub(crate) inner: DomainParticipantQos,
+}
+
+/// Create default DomainParticipant QoS
+///
+/// # Safety
+/// - `qos_out` must be a valid pointer to a null pointer
+/// - The returned QoS must be freed with `int2dds_participant_qos_destroy`
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_participant_qos_create_default(
+    qos_out: *mut *mut Int2DdsParticipantQos,
+) -> Int2DdsRet {
+    check_null!(qos_out);
+
+    let qos = Box::new(Int2DdsParticipantQos { inner: DomainParticipantQos::default() });
+    *qos_out = Box::into_raw(qos);
+
+    INT2DDS_RET_OK
+}
+
+/// Set user data QoS for DomainParticipant
+///
+/// # Safety
+/// - `qos` must be a valid QoS handle
+/// - `data` must point to `data_len` bytes, or be null if `data_len` is 0
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_participant_qos_set_user_data(
+    qos: *mut Int2DdsParticipantQos,
+    data: *const u8,
+    data_len: usize,
+) -> Int2DdsRet {
+    check_null!(qos);
+
+    let qos_ref = &mut *qos;
+
+    if data_len == 0 {
+        qos_ref.inner.user_data.value = Vec::new();
+        return INT2DDS_RET_OK;
+    }
+
+    check_null!(data);
+    qos_ref.inner.user_data.value = std::slice::from_raw_parts(data, data_len).to_vec();
+
+    INT2DDS_RET_OK
+}
+
+/// Destroy DomainParticipant QoS
+///
+/// # Safety
+/// - `qos` must be a valid QoS handle
+/// - `qos` must not be used after this call
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_participant_qos_destroy(
+    qos: *mut Int2DdsParticipantQos,
+) -> Int2DdsRet {
     if qos.is_null() {
         return INT2DDS_RET_NULL_POINTER;
     }
