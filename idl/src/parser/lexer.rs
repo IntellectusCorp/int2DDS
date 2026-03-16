@@ -29,6 +29,16 @@ pub enum Token {
     Switch,
     Case,
     Default,
+    Interface,
+    In,
+    Out,
+    Inout,
+    Void,
+    Raises,
+    Attribute,
+    Readonly,
+    Exception,
+    Const,
 
     // Literals
     IntLiteral(i64),
@@ -334,6 +344,16 @@ pub fn tokenize(source: &str) -> Result<Vec<SpannedToken>, LexError> {
                 "switch" => Token::Switch,
                 "case" => Token::Case,
                 "default" => Token::Default,
+                "interface" => Token::Interface,
+                "in" => Token::In,
+                "out" => Token::Out,
+                "inout" => Token::Inout,
+                "void" => Token::Void,
+                "raises" => Token::Raises,
+                "attribute" => Token::Attribute,
+                "readonly" => Token::Readonly,
+                "exception" => Token::Exception,
+                "const" => Token::Const,
                 _ => Token::Ident(ident),
             };
 
