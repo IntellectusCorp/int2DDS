@@ -1834,30 +1834,22 @@ impl UnicastMessageProcessor for UserLogic {
         data_frag: &DataFrag,
         message_receiver: &MessageReceiver,
     ) -> RtpsResult<()> {
-        let participant = self.get_upgraded_participant()?;
         let source_timestamp = message_receiver.get_source_timestamp();
         let remote_writer_guid = Guid::new(rtps_header.guid_prefix(), data_frag.writer_id);
 
         let key = (remote_writer_guid, data_frag.writer_sn);
         let total_size = data_frag.sample_size;
 
-        let matched_readers = if data_frag.reader_id != EntityId::UNKNOWN {
-            let reader =
-                participant.find_reader_from_entity_id(data_frag.reader_id).ok_or_else(|| {
-                    RtpsError::new(RtpsErrorCode::InvalidEntityKind, "Reader not found")
-                })?;
-            vec![reader]
-        } else {
-            let readers =
-                participant.find_readers_matched_with_remote_writer(remote_writer_guid)?;
-            if readers.is_empty() {
-                return Err(RtpsError::new(
-                    RtpsErrorCode::RtpsEntityNotFound,
-                    "No matched reader found for DataFrag",
-                ));
-            }
-            readers
-        };
+        let matched_readers: Vec<Arc<dyn Reader + Send + Sync>> =
+            self.get_matched_readers(remote_writer_guid, data_frag.reader_id)?;
+
+        if matched_readers.is_empty() {
+            debug!(
+                "[DATA] No matched readers found for remote writer: {:?}, skipping data handling.",
+                remote_writer_guid
+            );
+            return Ok(());
+        }
 
         // DashMap is thread-safe, so no explicit lock is needed
         //println!("[DEBUG] FragmentBuffer count: {}, size: {}", self.fragment_buffers.len(), self.fragment_buffers.iter().map(|entry| entry.value().total_size as usize).sum::<usize>());
@@ -1941,7 +1933,8 @@ impl UnicastMessageProcessor for UserLogic {
 
                 for reader in &matched_readers {
                     let mut ownership_strength = None;
-                    if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
+                    if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>()
+                    {
                         let writer_proxies = stateful_reader.writer_proxies();
                         let matched_writers = writer_proxies.lock().ok();
                         if let Some(guard) = matched_writers {
