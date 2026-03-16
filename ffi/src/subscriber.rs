@@ -46,6 +46,11 @@ use super::{
     error::*,
     listener::{FfiDataReaderListener, Int2DdsDataReaderListener},
     qos::{Int2DdsDataReaderQos, Int2DdsSubscriberQos},
+    status::{
+        Int2DdsLivelinessChangedStatus, Int2DdsRequestedDeadlineMissedStatus,
+        Int2DdsRequestedIncompatibleQosStatus, Int2DdsSampleLostStatus,
+        Int2DdsSampleRejectedStatus,
+    },
     types::*,
 };
 
@@ -401,6 +406,126 @@ pub unsafe extern "C" fn int2dds_get_subscription_matched_status(
         Ok(status) => {
             *total_count_out = status.total_count();
             *current_count_out = status.current_count();
+            INT2DDS_RET_OK
+        }
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
+/// Get liveliness changed status for a DataReader
+///
+/// # Safety
+/// - `reader` must be a valid datareader
+/// - `status_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_get_liveliness_changed_status(
+    reader: *const Int2DdsDataReader,
+    status_out: *mut Int2DdsLivelinessChangedStatus,
+) -> Int2DdsRet {
+    check_null!(reader);
+    check_null!(status_out);
+
+    let reader_ref = &*reader;
+
+    match reader_ref.inner.get_liveliness_changed_status() {
+        Ok(status) => {
+            *status_out = Int2DdsLivelinessChangedStatus::from(&status);
+            INT2DDS_RET_OK
+        }
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
+/// Get sample rejected status for a DataReader
+///
+/// # Safety
+/// - `reader` must be a valid datareader
+/// - `status_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_get_sample_rejected_status(
+    reader: *const Int2DdsDataReader,
+    status_out: *mut Int2DdsSampleRejectedStatus,
+) -> Int2DdsRet {
+    check_null!(reader);
+    check_null!(status_out);
+
+    let reader_ref = &*reader;
+
+    match reader_ref.inner.get_sample_rejected_status() {
+        Ok(status) => {
+            *status_out = Int2DdsSampleRejectedStatus::from(&status);
+            INT2DDS_RET_OK
+        }
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
+/// Get sample lost status for a DataReader
+///
+/// # Safety
+/// - `reader` must be a valid datareader
+/// - `status_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_get_sample_lost_status(
+    reader: *const Int2DdsDataReader,
+    status_out: *mut Int2DdsSampleLostStatus,
+) -> Int2DdsRet {
+    check_null!(reader);
+    check_null!(status_out);
+
+    let reader_ref = &*reader;
+
+    match reader_ref.inner.get_sample_lost_status() {
+        Ok(status) => {
+            *status_out = Int2DdsSampleLostStatus::from(&status);
+            INT2DDS_RET_OK
+        }
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
+/// Get requested deadline missed status for a DataReader
+///
+/// # Safety
+/// - `reader` must be a valid datareader
+/// - `status_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_get_requested_deadline_missed_status(
+    reader: *const Int2DdsDataReader,
+    status_out: *mut Int2DdsRequestedDeadlineMissedStatus,
+) -> Int2DdsRet {
+    check_null!(reader);
+    check_null!(status_out);
+
+    let reader_ref = &*reader;
+
+    match reader_ref.inner.get_requested_deadline_missed_status() {
+        Ok(status) => {
+            *status_out = Int2DdsRequestedDeadlineMissedStatus::from(&status);
+            INT2DDS_RET_OK
+        }
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
+/// Get requested incompatible QoS status for a DataReader
+///
+/// # Safety
+/// - `reader` must be a valid datareader
+/// - `status_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_get_requested_incompatible_qos_status(
+    reader: *const Int2DdsDataReader,
+    status_out: *mut Int2DdsRequestedIncompatibleQosStatus,
+) -> Int2DdsRet {
+    check_null!(reader);
+    check_null!(status_out);
+
+    let reader_ref = &*reader;
+
+    match reader_ref.inner.get_requested_incompatible_qos_status() {
+        Ok(status) => {
+            *status_out = Int2DdsRequestedIncompatibleQosStatus::from(&status);
             INT2DDS_RET_OK
         }
         Err(e) => dds_error_to_code(&e),
