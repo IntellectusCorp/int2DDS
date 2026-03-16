@@ -30,8 +30,8 @@ use crate::topic_name::TopicNameConfig;
 use crate::types::{RemoteExceptionCode, Reply, ReplyHeader, Request, SampleIdentity};
 
 pub struct Replier<TReq, TRep> {
-    request_reader: Option<DataReader<Request<TReq>>>,
-    reply_writer: Option<DataWriter<Reply<TRep>>>,
+    request_reader: Option<Arc<DataReader<Request<TReq>>>>,
+    reply_writer: Option<Arc<DataWriter<Reply<TRep>>>>,
     closed: bool,
 }
 
@@ -102,18 +102,18 @@ where
         )?;
 
         Ok(Self {
-            request_reader: Some(request_reader),
-            reply_writer: Some(reply_writer),
+            request_reader: Some(Arc::new(request_reader)),
+            reply_writer: Some(Arc::new(reply_writer)),
             closed: false,
         })
     }
 
     fn reader(&self) -> DdsRpcResult<&DataReader<Request<TReq>>> {
-        self.request_reader.as_ref().ok_or(DdsError::AlreadyDeleted.into())
+        self.request_reader.as_deref().ok_or(DdsError::AlreadyDeleted.into())
     }
 
     fn writer(&self) -> DdsRpcResult<&DataWriter<Reply<TRep>>> {
-        self.reply_writer.as_ref().ok_or(DdsError::AlreadyDeleted.into())
+        self.reply_writer.as_deref().ok_or(DdsError::AlreadyDeleted.into())
     }
 
     /// Send a reply correlated with the given request identity. (7.8.1)
@@ -192,13 +192,22 @@ where
     TRep: DdsType + Clone + CdrSerialize + CdrDeserialize + XcdrSerialize + XcdrDeserialize,
 {
     fn close(&mut self) -> DdsRpcResult<()> {
-        if let Some(reader) = self.request_reader.take() {
-            let subscriber = reader.get_subscriber()?;
-            subscriber.delete_datareader(reader)?;
+        // Detach listener first to release any adapter-held Arc references
+        if let Some(ref reader) = self.request_reader {
+            let _ = reader.set_listener(None, StatusMask::default());
         }
-        if let Some(writer) = self.reply_writer.take() {
-            let publisher = writer.get_publisher()?;
-            publisher.delete_datawriter(writer)?;
+        // delete_datareader/writer requires owned value, not Arc
+        if let Some(reader_arc) = self.request_reader.take() {
+            if let Ok(reader) = Arc::try_unwrap(reader_arc) {
+                let subscriber = reader.get_subscriber()?;
+                subscriber.delete_datareader(reader)?;
+            }
+        }
+        if let Some(writer_arc) = self.reply_writer.take() {
+            if let Ok(writer) = Arc::try_unwrap(writer_arc) {
+                let publisher = writer.get_publisher()?;
+                publisher.delete_datawriter(writer)?;
+            }
         }
         self.closed = true;
         Ok(())
@@ -210,6 +219,7 @@ where
 }
 
 // Listener-based request reception (7.11.1.4.7, 7.11.1.4.8)
+
 impl<TReq, TRep> Replier<TReq, TRep>
 where
     TReq: DdsType + Clone + Debug + CdrSerialize + CdrDeserialize + XcdrSerialize + XcdrDeserialize,
@@ -228,7 +238,7 @@ where
                 let adapter: Arc<dyn DataReaderListener<Foo = Request<TReq>>> =
                     Arc::new(SimpleReplierDdsAdapter {
                         listener: l,
-                        reply_writer: self.writer()?.clone(),
+                        reply_writer: self.reply_writer.clone().ok_or(DdsError::AlreadyDeleted)?,
                     });
                 reader.set_listener(Some(adapter), StatusMask::DATA_AVAILABLE)?;
             }
@@ -250,6 +260,8 @@ where
         let reader = self.reader()?;
         match listener {
             Some(l) => {
+                // Proxy shares the same DDS entities via Arc — no dependency on
+                // DataReader/DataWriter Clone semantics.
                 let proxy = Replier {
                     request_reader: self.request_reader.clone(),
                     reply_writer: self.reply_writer.clone(),
@@ -272,7 +284,7 @@ where
 /// and sends the returned reply automatically.
 struct SimpleReplierDdsAdapter<TReq, TRep> {
     listener: Arc<dyn SimpleReplierListener<TReq, TRep>>,
-    reply_writer: DataWriter<Reply<TRep>>,
+    reply_writer: Arc<DataWriter<Reply<TRep>>>,
 }
 
 unsafe impl<TReq, TRep> Send for SimpleReplierDdsAdapter<TReq, TRep> {}
@@ -326,7 +338,7 @@ where
 }
 
 /// DDS DataReaderListener adapter for ReplierListener.
-/// Notifies `on_request_available` with a proxy that shares the same DDS entities.
+/// Notifies `on_request_available` with a proxy that shares the same DDS entities via Arc.
 struct ReplierDdsAdapter<TReq, TRep> {
     listener: Arc<dyn ReplierListener<TReq, TRep>>,
     proxy: Replier<TReq, TRep>,
