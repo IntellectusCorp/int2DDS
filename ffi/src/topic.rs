@@ -48,6 +48,42 @@ pub unsafe extern "C" fn int2dds_create_topic(
     qos: *const Int2DdsTopicQos,
     topic_out: *mut *mut Int2DdsTopic,
 ) -> Int2DdsRet {
+    int2dds_create_topic_keyed(
+        participant,
+        topic_name,
+        dds_type_name,
+        extensibility,
+        false,
+        qos,
+        topic_out,
+    )
+}
+
+/// Create a Topic with key support
+///
+/// Same as `int2dds_create_topic` but with an explicit `has_key` parameter.
+/// Use this when the data type has key fields for instance management
+/// (register_instance, unregister_instance, dispose, lookup_instance).
+///
+/// # Safety
+/// - `participant` must be a valid participant
+/// - `topic_name` must be a valid null-terminated C string
+/// - `dds_type_name` must be a valid null-terminated C string (DDS registration name)
+/// - `extensibility`: 0 = Final, 1 = Appendable, 2 = Mutable
+/// - `has_key`: whether the data type has key fields
+/// - `qos` can be null for default QoS
+/// - `topic_out` must be a valid pointer to a null pointer
+/// - The returned topic must be freed with `int2dds_delete_topic`
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_create_topic_keyed(
+    participant: *const Int2DdsParticipant,
+    topic_name: *const std::os::raw::c_char,
+    dds_type_name: *const std::os::raw::c_char,
+    extensibility: i32,
+    has_key: bool,
+    qos: *const Int2DdsTopicQos,
+    topic_out: *mut *mut Int2DdsTopic,
+) -> Int2DdsRet {
     check_null!(participant);
     check_null!(topic_name);
     check_null!(dds_type_name);
@@ -73,7 +109,8 @@ pub unsafe extern "C" fn int2dds_create_topic(
     };
 
     // Create RawTypeSupport
-    let type_support = Arc::new(RawTypeSupport::new(dds_type_name_str.to_string(), ext_kind));
+    let type_support =
+        Arc::new(RawTypeSupport::new(dds_type_name_str.to_string(), ext_kind, has_key));
 
     // Register the RawTypeSupport with the participant
     ffi_try!(participant_ref

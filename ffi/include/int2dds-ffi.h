@@ -1099,6 +1099,31 @@ Int2DdsRet int2dds_create_topic(const struct Int2DdsParticipant *participant,
                                 struct Int2DdsTopic **topic_out);
 
 /**
+ * Create a Topic with key support
+ *
+ * Same as `int2dds_create_topic` but with an explicit `has_key` parameter.
+ * Use this when the data type has key fields for instance management
+ * (register_instance, unregister_instance, dispose, lookup_instance).
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `topic_name` must be a valid null-terminated C string
+ * - `dds_type_name` must be a valid null-terminated C string (DDS registration name)
+ * - `extensibility`: 0 = Final, 1 = Appendable, 2 = Mutable
+ * - `has_key`: whether the data type has key fields
+ * - `qos` can be null for default QoS
+ * - `topic_out` must be a valid pointer to a null pointer
+ * - The returned topic must be freed with `int2dds_delete_topic`
+ */
+Int2DdsRet int2dds_create_topic_keyed(const struct Int2DdsParticipant *participant,
+                                      const char *topic_name,
+                                      const char *dds_type_name,
+                                      int32_t extensibility,
+                                      bool has_key,
+                                      const struct Int2DdsTopicQos *qos,
+                                      struct Int2DdsTopic **topic_out);
+
+/**
  * Delete a Topic
  *
  * # Safety

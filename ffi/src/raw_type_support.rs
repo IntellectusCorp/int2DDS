@@ -25,11 +25,12 @@ use int2dds::{
 pub struct RawTypeSupport {
     type_name: String,
     extensibility: ExtensibilityKind,
+    has_key: bool,
 }
 
 impl RawTypeSupport {
-    pub fn new(type_name: String, extensibility: ExtensibilityKind) -> Self {
-        Self { type_name, extensibility }
+    pub fn new(type_name: String, extensibility: ExtensibilityKind, has_key: bool) -> Self {
+        Self { type_name, extensibility, has_key }
     }
 }
 
@@ -81,7 +82,7 @@ impl TypeSupport for RawTypeSupport {
     }
 
     fn is_compute_key_provided(&self) -> bool {
-        false
+        self.has_key
     }
 
     fn get_extensibility_kind(&self) -> ExtensibilityKind {
