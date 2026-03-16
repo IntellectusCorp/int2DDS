@@ -1871,6 +1871,13 @@ impl UnicastMessageProcessor for UserLogic {
                 FragmentBuffer::new(data_frag.writer_sn, total_size, data_frag.fragment_size)
             });
 
+            if buffer.source_timestamp.is_none() {
+                // timestamp does not be set in buffer.source_timestmap yet
+                if let Some(ts) = source_timestamp {
+                    buffer.source_timestamp = Some(ts); // store source_timestamp from first fragment that equals to INFO_TS
+                }
+            }
+
             for i in 0..data_frag.fragments_in_submessage {
                 let fragment_num = data_frag.fragment_starting_num + i as u32;
                 buffer.copy_fragment_data(fragment_num, data_frag.serialized_data());
@@ -1923,6 +1930,14 @@ impl UnicastMessageProcessor for UserLogic {
                 let (_, mut buffer) = removed.unwrap();
                 let assembled_payload = std::mem::take(&mut buffer.payload);
                 let serialized_data: SerializedData = Arc::<[u8]>::from(assembled_payload);
+                // Use timestamp from first fragment, fallback to current message
+                let assembled_timestamp = buffer.source_timestamp.or(source_timestamp);
+                if assembled_timestamp.is_none() {
+                    return Err(RtpsError::new(
+                        RtpsErrorCode::InvalidSubmessageBody,
+                        "No source timestamp available for assembled DataFrag (missing INFO_TS)",
+                    ));
+                }
 
                 for reader in &matched_readers {
                     let mut ownership_strength = None;
@@ -1945,7 +1960,7 @@ impl UnicastMessageProcessor for UserLogic {
                         InstanceHandle::NIL,
                         data_frag.writer_sn,
                         serialized_data.clone(),
-                        source_timestamp,
+                        assembled_timestamp,
                     );
 
                     assembled_change.set_ownership_strength(ownership_strength);

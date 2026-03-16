@@ -4,6 +4,7 @@
 //! that exceed the maximum transport message size. Samples are fragmented and
 //! reassembled at the receiver.
 
+use crate::rtps::common::time::RtpsTime;
 use bytes::Bytes;
 use speedy::{Context, Error, Readable, Writable, Writer};
 use std::time::Instant;
@@ -224,6 +225,7 @@ pub(crate) struct FragmentBuffer {
     pub received_fragments: HashSet<u32>,
     pub total_fragments: u32,
     pub fragment_size: u16,
+    pub source_timestamp: Option<RtpsTime>,
     pub created_at: Instant,
     pub last_updated: Instant,
 }
@@ -246,6 +248,7 @@ impl FragmentBuffer {
             received_fragments: std::collections::HashSet::new(),
             total_fragments,
             fragment_size,
+            source_timestamp: None,
             created_at: now,
             last_updated: now,
         }
