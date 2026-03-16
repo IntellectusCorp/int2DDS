@@ -99,7 +99,7 @@ class DataWriter(Generic[T]):
         >>> writer.write(MyType(value=42))
     """
 
-    __slots__ = ("_handle", "_publisher", "_topic", "_qos_handle", "_closed")
+    __slots__ = ("_handle", "_publisher", "_topic", "_qos_handle", "_closed", "_listener_ctx_id")
 
     def __init__(
         self,
