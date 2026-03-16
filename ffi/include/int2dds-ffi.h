@@ -830,6 +830,36 @@ Int2DdsRet int2dds_get_publication_matched_status(const struct Int2DdsDataWriter
                                                   int32_t *current_count_out);
 
 /**
+ * Get liveliness lost status for a DataWriter
+ *
+ * # Safety
+ * - `writer` must be a valid datawriter
+ * - `status_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_datawriter_get_liveliness_lost_status(const struct Int2DdsDataWriter *writer,
+                                                         struct Int2DdsLivelinessLostStatus *status_out);
+
+/**
+ * Get offered deadline missed status for a DataWriter
+ *
+ * # Safety
+ * - `writer` must be a valid datawriter
+ * - `status_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_datawriter_get_offered_deadline_missed_status(const struct Int2DdsDataWriter *writer,
+                                                                 struct Int2DdsOfferedDeadlineMissedStatus *status_out);
+
+/**
+ * Get offered incompatible QoS status for a DataWriter
+ *
+ * # Safety
+ * - `writer` must be a valid datawriter
+ * - `status_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_datawriter_get_offered_incompatible_qos_status(const struct Int2DdsDataWriter *writer,
+                                                                  struct Int2DdsOfferedIncompatibleQosStatus *status_out);
+
+/**
  * Delete all entities contained by a publisher
  *
  * This operation deletes all DataWriter objects contained by this Publisher.
@@ -1692,6 +1722,56 @@ Int2DdsRet int2dds_delete_datareader(struct Int2DdsDataReader *reader);
 Int2DdsRet int2dds_get_subscription_matched_status(const struct Int2DdsDataReader *reader,
                                                    int32_t *total_count_out,
                                                    int32_t *current_count_out);
+
+/**
+ * Get liveliness changed status for a DataReader
+ *
+ * # Safety
+ * - `reader` must be a valid datareader
+ * - `status_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_datareader_get_liveliness_changed_status(const struct Int2DdsDataReader *reader,
+                                                            struct Int2DdsLivelinessChangedStatus *status_out);
+
+/**
+ * Get sample rejected status for a DataReader
+ *
+ * # Safety
+ * - `reader` must be a valid datareader
+ * - `status_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_datareader_get_sample_rejected_status(const struct Int2DdsDataReader *reader,
+                                                         struct Int2DdsSampleRejectedStatus *status_out);
+
+/**
+ * Get sample lost status for a DataReader
+ *
+ * # Safety
+ * - `reader` must be a valid datareader
+ * - `status_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_datareader_get_sample_lost_status(const struct Int2DdsDataReader *reader,
+                                                     struct Int2DdsSampleLostStatus *status_out);
+
+/**
+ * Get requested deadline missed status for a DataReader
+ *
+ * # Safety
+ * - `reader` must be a valid datareader
+ * - `status_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_datareader_get_requested_deadline_missed_status(const struct Int2DdsDataReader *reader,
+                                                                   struct Int2DdsRequestedDeadlineMissedStatus *status_out);
+
+/**
+ * Get requested incompatible QoS status for a DataReader
+ *
+ * # Safety
+ * - `reader` must be a valid datareader
+ * - `status_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_datareader_get_requested_incompatible_qos_status(const struct Int2DdsDataReader *reader,
+                                                                    struct Int2DdsRequestedIncompatibleQosStatus *status_out);
 
 /**
  * Delete all entities contained by a subscriber
