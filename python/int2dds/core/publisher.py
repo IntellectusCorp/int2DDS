@@ -199,6 +199,119 @@ class DataWriter(Generic[T]):
         check_ret(
             lib.int2dds_write_serialized(self._handle, data_ptr, len(data), key_ptr, key_len)
         )
+    def register_instance(self, sample: T) -> bytes:
+        """
+        Register an instance and return a 16-byte InstanceHandle.
+
+        Args:
+            sample: A data sample with key fields set.
+
+        Returns:
+            16-byte InstanceHandle for use in subsequent write/dispose/unregister.
+        """
+        key: bytes | None = None
+        if getattr(sample, "_has_key", False):
+            key = sample._serialize_key()
+
+        if not key:
+            return b'\x00' * 16
+
+        key_ptr = ffi.from_buffer(key)
+        handle_out = ffi.new("uint8_t[16]")
+
+        check_ret(
+            lib.int2dds_register_instance_serialized(
+                self._handle, key_ptr, len(key), handle_out
+            )
+        )
+
+        return bytes(ffi.buffer(handle_out))
+
+    def unregister_instance(self, sample: T, handle: bytes) -> None:
+        """
+        Unregister a previously registered instance.
+
+        Informs the DDS service that this DataWriter will no longer modify
+        the specified instance. Readers will see NOT_ALIVE_NO_WRITERS.
+
+        Args:
+            sample: A data sample with key fields set.
+            handle: 16-byte InstanceHandle from register_instance().
+        """
+        key: bytes | None = None
+        if getattr(sample, "_has_key", False):
+            key = sample._serialize_key()
+
+        if not key:
+            return
+
+        key_ptr = ffi.from_buffer(key)
+        handle_ptr = ffi.from_buffer(handle)
+
+        check_ret(
+            lib.int2dds_unregister_instance_serialized(
+                self._handle, key_ptr, len(key), handle_ptr
+            )
+        )
+
+    def dispose(self, sample: T, handle: bytes) -> None:
+        """
+        Dispose an instance, marking it as no longer valid.
+
+        Readers will see the instance state change to NOT_ALIVE_DISPOSED.
+        Unlike unregister, dispose indicates the data itself is invalid.
+
+        Args:
+            sample: A data sample with key fields set.
+            handle: 16-byte InstanceHandle from register_instance().
+        """
+        key: bytes | None = None
+        if getattr(sample, "_has_key", False):
+            key = sample._serialize_key()
+
+        if not key:
+            return
+
+        key_ptr = ffi.from_buffer(key)
+        handle_ptr = ffi.from_buffer(handle)
+
+        check_ret(
+            lib.int2dds_dispose_serialized(
+                self._handle, key_ptr, len(key), handle_ptr
+            )
+        )
+
+    def lookup_instance(self, sample: T) -> bytes:
+        """
+        Look up the handle of a previously registered instance.
+
+        Returns the 16-byte InstanceHandle if the instance is known,
+        or 16 zero bytes (HANDLE_NIL) if not found.
+        Does NOT register the instance.
+
+        Args:
+            sample: A data sample with key fields set.
+
+        Returns:
+            16-byte InstanceHandle, or NIL (all zeros) if not found.
+        """
+        key: bytes | None = None
+        if getattr(sample, "_has_key", False):
+            key = sample._serialize_key()
+
+        if not key:
+            return b'\x00' * 16
+
+        key_ptr = ffi.from_buffer(key)
+        handle_out = ffi.new("uint8_t[16]")
+
+        check_ret(
+            lib.int2dds_lookup_instance_serialized(
+                self._handle, key_ptr, len(key), handle_out
+            )
+        )
+
+        return bytes(ffi.buffer(handle_out))
 
     def get_publication_matched_status(self) -> tuple[int, int]:
         """
