@@ -51,6 +51,7 @@ pub mod error;
 pub mod condition;
 pub mod context;
 pub mod data;
+pub mod discovery;
 pub mod listener;
 pub mod participant;
 pub mod publisher;
