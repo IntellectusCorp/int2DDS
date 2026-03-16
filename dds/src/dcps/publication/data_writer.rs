@@ -1003,6 +1003,254 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         InstanceHandle::new(hash)
     }
 
+    /// Register an instance using raw serialized key bytes.
+    pub fn register_instance_serialized(&self, key: &[u8]) -> DdsResult<InstanceHandle> {
+        let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
+        self.register_instance_serialized_w_timestamp(key, timestamp)
+    }
+
+    /// Register an instance using raw serialized key bytes with explicit timestamp.
+    pub fn register_instance_serialized_w_timestamp(
+        &self,
+        key: &[u8],
+        timestamp: Time,
+    ) -> DdsResult<InstanceHandle> {
+        self.is_enabled()?;
+
+        if key.is_empty() {
+            return Ok(InstanceHandle::NIL);
+        }
+
+        if timestamp.is_infinite() || timestamp.sec < 0 || !timestamp.is_valid() {
+            return Err(DdsError::BadParameter);
+        }
+
+        let key_data: SerializedData = Arc::from(key);
+        let handle = Self::compute_instance_handle_from_key(key);
+
+        self.register_instance_to_datawriter_cache(handle)?;
+
+        {
+            let mut instances =
+                self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+
+            match instances.get(&handle) {
+                Some((_, _, InstanceState::Registered)) => {
+                    return Ok(handle);
+                }
+                Some((_, _, InstanceState::Unregistered))
+                | Some((_, _, InstanceState::Disposed))
+                | None => {}
+            }
+
+            instances.insert(handle, (key_data.clone(), timestamp, InstanceState::Registered));
+
+            let mut key_instances =
+                self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            key_instances.insert(key_data, handle);
+
+            let monitor_guard =
+                self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            if let Some(monitor) = monitor_guard.as_ref() {
+                monitor.track_instance(&handle);
+            }
+
+            log::debug!("Registering Instance (serialized) - handle: {:?}", handle);
+        }
+        Ok(handle)
+    }
+
+    /// Dispose an instance using raw serialized key bytes.
+    pub fn dispose_serialized(&self, key: &[u8], handle: InstanceHandle) -> DdsResult<()> {
+        let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
+        self.dispose_serialized_w_timestamp(key, handle, timestamp)
+    }
+
+    /// Dispose an instance using raw serialized key bytes with explicit timestamp.
+    pub fn dispose_serialized_w_timestamp(
+        &self,
+        key: &[u8],
+        handle: InstanceHandle,
+        timestamp: Time,
+    ) -> DdsResult<()> {
+        self.is_enabled()?;
+
+        if key.is_empty() {
+            return Ok(());
+        }
+
+        if timestamp.is_infinite() || timestamp.sec < 0 || !timestamp.is_valid() {
+            return Err(DdsError::BadParameter);
+        }
+
+        let serialized_key: SerializedData = Arc::from(key);
+        let computed_handle = Self::compute_instance_handle_from_key(key);
+
+        let instance_handle = {
+            let key_instances =
+                self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            key_instances.get(&serialized_key).copied().unwrap_or(computed_handle)
+        };
+
+        let resolved_handle = if handle.is_nil() {
+            instance_handle
+        } else {
+            if handle != instance_handle {
+                return Err(DdsError::PreconditionNotMet);
+            }
+            instance_handle
+        };
+
+        {
+            let mut instances =
+                self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+
+            match instances.get(&resolved_handle) {
+                Some((_, _, InstanceState::Registered))
+                | Some((_, _, InstanceState::Unregistered)) => {}
+                Some((_, _, InstanceState::Disposed)) => {
+                    return Ok(());
+                }
+                None => {
+                    return Err(DdsError::BadParameter);
+                }
+            }
+
+            instances.insert(
+                resolved_handle,
+                (serialized_key.clone(), timestamp, InstanceState::Disposed),
+            );
+
+            let monitor_guard =
+                self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            if !resolved_handle.is_nil() {
+                if let Some(monitor) = monitor_guard.as_ref() {
+                    monitor.cancel_instance(&resolved_handle);
+                }
+            }
+
+            self.add_change(
+                ChangeKind::NotAliveDisposed,
+                serialized_key,
+                resolved_handle,
+                Some(timestamp.into()),
+            )?;
+
+            self.update_liveliness()?;
+
+            Ok(())
+        }
+    }
+
+    /// Unregister an instance using raw serialized key bytes.
+    pub fn unregister_instance_serialized(
+        &self,
+        key: &[u8],
+        handle: InstanceHandle,
+    ) -> DdsResult<()> {
+        let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
+        self.unregister_instance_serialized_w_timestamp(key, handle, timestamp)
+    }
+
+    /// Unregister an instance using raw serialized key bytes with explicit timestamp.
+    pub fn unregister_instance_serialized_w_timestamp(
+        &self,
+        key: &[u8],
+        handle: InstanceHandle,
+        timestamp: Time,
+    ) -> DdsResult<()> {
+        self.is_enabled()?;
+
+        if key.is_empty() {
+            return Ok(());
+        }
+
+        if timestamp.is_infinite() || timestamp.sec < 0 || !timestamp.is_valid() {
+            return Err(DdsError::BadParameter);
+        }
+
+        let serialized_key: SerializedData = Arc::from(key);
+        let instance_handle = {
+            let key_instances =
+                self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            match key_instances.get(&serialized_key) {
+                Some(h) => *h,
+                None => return Err(DdsError::BadParameter),
+            }
+        };
+
+        let resolved_handle = if handle.is_nil() {
+            instance_handle
+        } else {
+            if handle != instance_handle {
+                return Err(DdsError::PreconditionNotMet);
+            }
+            instance_handle
+        };
+
+        {
+            let mut instances =
+                self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+
+            match instances.get(&resolved_handle) {
+                Some((_, _, InstanceState::Registered)) => {}
+                Some((_, _, _)) => {
+                    return Err(DdsError::BadParameter);
+                }
+                None => {
+                    return Err(DdsError::BadParameter);
+                }
+            }
+
+            instances.insert(
+                resolved_handle,
+                (serialized_key.clone(), timestamp, InstanceState::Unregistered),
+            );
+
+            let monitor_guard =
+                self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            if let Some(monitor) = monitor_guard.as_ref() {
+                monitor.cancel_instance(&resolved_handle);
+            }
+
+            let change_kind =
+                if self.get_qos()?.writer_data_lifecycle.autodispose_unregistered_instances {
+                    ChangeKind::NotAliveDisposedUnregistered
+                } else {
+                    ChangeKind::NotAliveUnregistered
+                };
+
+            self.add_change(change_kind, serialized_key, resolved_handle, Some(timestamp.into()))?;
+
+            self.update_liveliness()?;
+
+            Ok(())
+        }
+    }
+
+    /// Lookup an instance handle from raw serialized key bytes.
+    pub fn lookup_instance_serialized(&self, key: &[u8]) -> DdsResult<InstanceHandle> {
+        if key.is_empty() {
+            return Ok(InstanceHandle::NIL);
+        }
+
+        let serialized_key: SerializedData = Arc::from(key);
+        let key_instances =
+            self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+
+        Ok(key_instances.get(&serialized_key).copied().unwrap_or(InstanceHandle::NIL))
+    }
+
+    /// Get the serialized key bytes for a given instance handle.
+    pub fn get_key_value_serialized(&self, handle: InstanceHandle) -> DdsResult<Arc<[u8]>> {
+        let instances = self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+
+        match instances.get(&handle) {
+            Some((key_data, _, _)) => Ok(key_data.clone()),
+            None => Err(DdsError::BadParameter),
+        }
+    }
+
     pub fn get_key_value(&self, key_holder: &mut Foo, handle: InstanceHandle) -> DdsResult<()> {
         // in: key_holder: <Foo>, handle: InstanceHandle
         // out: DdsError_t, key_holder: <Foo>

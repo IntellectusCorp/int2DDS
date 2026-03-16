@@ -15,8 +15,9 @@
 use std::sync::Arc;
 
 use int2dds::{
-    infrastructure::status::StatusMask, publication::data_writer_listener::DataWriterListener,
-    publication::qos::PublisherQos,
+    common::instance_handle::InstanceHandle,
+    infrastructure::status::StatusMask,
+    publication::{data_writer_listener::DataWriterListener, qos::PublisherQos},
 };
 
 use crate::data::Int2DdsData;
@@ -24,7 +25,7 @@ use crate::data::Int2DdsData;
 use super::{
     error::*,
     listener::{FfiDataWriterListener, Int2DdsDataWriterListener},
-    qos::Int2DdsDataWriterQos,
+    qos::{Int2DdsDataWriterQos, Int2DdsPublisherQos},
     types::*,
 };
 
@@ -56,6 +57,38 @@ pub unsafe extern "C" fn int2dds_create_publisher(
 
     let publisher_handle = Box::new(Int2DdsPublisher { inner: publisher_arc });
 
+    *publisher_out = Box::into_raw(publisher_handle);
+
+    INT2DDS_RET_OK
+}
+
+/// Create a Publisher with QoS
+///
+/// # Safety
+/// - `participant` must be a valid participant
+/// - `qos` must be a valid publisher QoS handle
+/// - `publisher_out` must be a valid pointer to a null pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_create_publisher_with_qos(
+    participant: *const Int2DdsParticipant,
+    qos: *const Int2DdsPublisherQos,
+    publisher_out: *mut *mut Int2DdsPublisher,
+) -> Int2DdsRet {
+    check_null!(participant);
+    check_null!(qos);
+    check_null!(publisher_out);
+
+    let participant_ref = &*participant;
+    let qos_ref = &*qos;
+
+    let publisher = ffi_try!(participant_ref.inner.create_publisher(
+        qos_ref.inner.clone(),
+        None,
+        StatusMask::default()
+    ));
+
+    let publisher_arc = Arc::new(publisher);
+    let publisher_handle = Box::new(Int2DdsPublisher { inner: publisher_arc });
     *publisher_out = Box::into_raw(publisher_handle);
 
     INT2DDS_RET_OK
@@ -416,6 +449,180 @@ pub unsafe extern "C" fn int2dds_write_serialized(
         Ok(()) => INT2DDS_RET_OK,
         Err(e) => dds_error_to_code(&e),
     }
+}
+
+// ============================================================================
+// Instance Lifecycle (Feature 2)
+// ============================================================================
+
+/// Helper to convert a C [u8; 16] handle pointer to InstanceHandle
+unsafe fn handle_from_c(handle_ptr: *const [u8; 16]) -> InstanceHandle {
+    if handle_ptr.is_null() {
+        return InstanceHandle::NIL;
+    }
+    let value = *handle_ptr;
+    if value == [0u8; 16] {
+        InstanceHandle::NIL
+    } else {
+        InstanceHandle::new(value)
+    }
+}
+
+/// Register an instance with serialized key bytes
+///
+/// # Safety
+/// - `writer` must be a valid datawriter
+/// - `key` must point to at least `key_len` readable bytes
+/// - `handle_out` must be a valid pointer to a 16-byte array
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_register_instance(
+    writer: *const Int2DdsDataWriter,
+    key: *const u8,
+    key_len: usize,
+    handle_out: *mut [u8; 16],
+) -> Int2DdsRet {
+    check_null!(writer);
+    check_null!(key);
+    check_null!(handle_out);
+
+    let writer_ref = &*writer;
+    let key_bytes = std::slice::from_raw_parts(key, key_len);
+
+    let handle = ffi_try!(writer_ref.inner.register_instance_serialized(key_bytes));
+    *handle_out = *handle.value();
+
+    INT2DDS_RET_OK
+}
+
+/// Dispose an instance with serialized key bytes
+///
+/// # Safety
+/// - `writer` must be a valid datawriter
+/// - `key` must point to at least `key_len` readable bytes
+/// - `handle` must be a valid pointer to a 16-byte instance handle (or null for NIL)
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_dispose(
+    writer: *const Int2DdsDataWriter,
+    key: *const u8,
+    key_len: usize,
+    handle: *const [u8; 16],
+) -> Int2DdsRet {
+    check_null!(writer);
+    check_null!(key);
+
+    let writer_ref = &*writer;
+    let key_bytes = std::slice::from_raw_parts(key, key_len);
+    let instance_handle = handle_from_c(handle);
+
+    ffi_try!(writer_ref.inner.dispose_serialized(key_bytes, instance_handle));
+
+    INT2DDS_RET_OK
+}
+
+/// Unregister an instance with serialized key bytes
+///
+/// # Safety
+/// - `writer` must be a valid datawriter
+/// - `key` must point to at least `key_len` readable bytes
+/// - `handle` must be a valid pointer to a 16-byte instance handle (or null for NIL)
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_unregister_instance(
+    writer: *const Int2DdsDataWriter,
+    key: *const u8,
+    key_len: usize,
+    handle: *const [u8; 16],
+) -> Int2DdsRet {
+    check_null!(writer);
+    check_null!(key);
+
+    let writer_ref = &*writer;
+    let key_bytes = std::slice::from_raw_parts(key, key_len);
+    let instance_handle = handle_from_c(handle);
+
+    ffi_try!(writer_ref.inner.unregister_instance_serialized(key_bytes, instance_handle));
+
+    INT2DDS_RET_OK
+}
+
+/// Lookup an instance handle from serialized key bytes
+///
+/// # Safety
+/// - `writer` must be a valid datawriter
+/// - `key` must point to at least `key_len` readable bytes
+/// - `handle_out` must be a valid pointer to a 16-byte array
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_lookup_instance(
+    writer: *const Int2DdsDataWriter,
+    key: *const u8,
+    key_len: usize,
+    handle_out: *mut [u8; 16],
+) -> Int2DdsRet {
+    check_null!(writer);
+    check_null!(key);
+    check_null!(handle_out);
+
+    let writer_ref = &*writer;
+    let key_bytes = std::slice::from_raw_parts(key, key_len);
+
+    let handle = ffi_try!(writer_ref.inner.lookup_instance_serialized(key_bytes));
+    *handle_out = *handle.value();
+
+    INT2DDS_RET_OK
+}
+
+/// Get key value for an instance handle
+///
+/// # Safety
+/// - `writer` must be a valid datawriter
+/// - `handle` must be a valid pointer to a 16-byte instance handle
+/// - `key_buf` must point to at least `key_capacity` writable bytes
+/// - `key_size_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_get_key_value(
+    writer: *const Int2DdsDataWriter,
+    handle: *const [u8; 16],
+    key_buf: *mut u8,
+    key_capacity: usize,
+    key_size_out: *mut usize,
+) -> Int2DdsRet {
+    check_null!(writer);
+    check_null!(handle);
+    check_null!(key_buf);
+    check_null!(key_size_out);
+
+    let writer_ref = &*writer;
+    let instance_handle = handle_from_c(handle);
+
+    let key_data = ffi_try!(writer_ref.inner.get_key_value_serialized(instance_handle));
+    *key_size_out = key_data.len();
+
+    if key_data.len() > key_capacity {
+        return INT2DDS_RET_ERROR;
+    }
+
+    std::ptr::copy_nonoverlapping(key_data.as_ptr(), key_buf, key_data.len());
+
+    INT2DDS_RET_OK
+}
+
+// ============================================================================
+// Assert Liveliness (Feature 5)
+// ============================================================================
+
+/// Assert liveliness for a DataWriter
+///
+/// # Safety
+/// - `writer` must be a valid datawriter
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_assert_liveliness(
+    writer: *const Int2DdsDataWriter,
+) -> Int2DdsRet {
+    check_null!(writer);
+
+    let writer_ref = &*writer;
+    ffi_try!(writer_ref.inner.assert_liveliness());
+
+    INT2DDS_RET_OK
 }
 
 #[cfg(test)]

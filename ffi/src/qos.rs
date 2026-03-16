@@ -19,14 +19,17 @@
 //! int2dds_datawriter_qos_destroy(qos);
 //! ```
 
+use std::ffi::CStr;
+use std::os::raw::c_char;
+
 use int2dds::{
     core::time::Duration,
     infrastructure::qos_policy::{
         DataRepresentationId, DataRepresentationQosPolicy, DurabilityQosPolicyKind,
-        HistoryQosPolicyKind, ReliabilityQosPolicyKind,
+        HistoryQosPolicyKind, LivelinessQosPolicyKind, ReliabilityQosPolicyKind,
     },
-    publication::qos::DataWriterQos,
-    subscription::qos::DataReaderQos,
+    publication::qos::{DataWriterQos, PublisherQos},
+    subscription::qos::{DataReaderQos, SubscriberQos},
     topic::qos::TopicQos,
 };
 
@@ -46,6 +49,11 @@ pub const INT2DDS_QOS_HISTORY_KEEP_ALL: i32 = 1;
 
 pub const INT2DDS_QOS_DATA_REPR_XCDR1: i32 = 0;
 pub const INT2DDS_QOS_DATA_REPR_XCDR2: i32 = 2;
+
+// Liveliness kinds
+pub const INT2DDS_QOS_LIVELINESS_AUTOMATIC: i32 = 0;
+pub const INT2DDS_QOS_LIVELINESS_MANUAL_BY_PARTICIPANT: i32 = 1;
+pub const INT2DDS_QOS_LIVELINESS_MANUAL_BY_TOPIC: i32 = 2;
 
 /// Opaque QoS handle for DataWriter
 pub struct Int2DdsDataWriterQos {
@@ -389,6 +397,276 @@ pub unsafe extern "C" fn int2dds_topic_qos_destroy(qos: *mut Int2DdsTopicQos) ->
     INT2DDS_RET_OK
 }
 
+// ============================================================================
+// Deadline QoS (Feature 4)
+// ============================================================================
+
+/// Set deadline QoS for DataWriter
+///
+/// # Safety
+/// - `qos` must be a valid QoS handle
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_qos_set_deadline(
+    qos: *mut Int2DdsDataWriterQos,
+    period_ns: i64,
+) -> Int2DdsRet {
+    check_null!(qos);
+
+    let qos_ref = &mut *qos;
+    qos_ref.inner.deadline.period = Duration {
+        sec: (period_ns / 1_000_000_000) as i32,
+        nanosec: (period_ns % 1_000_000_000) as u32,
+    };
+
+    INT2DDS_RET_OK
+}
+
+/// Set deadline QoS for DataReader
+///
+/// # Safety
+/// - `qos` must be a valid QoS handle
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_qos_set_deadline(
+    qos: *mut Int2DdsDataReaderQos,
+    period_ns: i64,
+) -> Int2DdsRet {
+    check_null!(qos);
+
+    let qos_ref = &mut *qos;
+    qos_ref.inner.deadline.period = Duration {
+        sec: (period_ns / 1_000_000_000) as i32,
+        nanosec: (period_ns % 1_000_000_000) as u32,
+    };
+
+    INT2DDS_RET_OK
+}
+
+// ============================================================================
+// Liveliness QoS (Feature 5)
+// ============================================================================
+
+/// Set liveliness QoS for DataWriter
+///
+/// # Safety
+/// - `qos` must be a valid QoS handle
+/// - `kind` must be a valid liveliness kind (0=Automatic, 1=ManualByParticipant, 2=ManualByTopic)
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_qos_set_liveliness(
+    qos: *mut Int2DdsDataWriterQos,
+    kind: i32,
+    lease_duration_ns: i64,
+) -> Int2DdsRet {
+    check_null!(qos);
+
+    let qos_ref = &mut *qos;
+
+    let liveliness_kind = match kind {
+        INT2DDS_QOS_LIVELINESS_AUTOMATIC => LivelinessQosPolicyKind::Automatic,
+        INT2DDS_QOS_LIVELINESS_MANUAL_BY_PARTICIPANT => {
+            LivelinessQosPolicyKind::ManualByParticipant
+        }
+        INT2DDS_QOS_LIVELINESS_MANUAL_BY_TOPIC => LivelinessQosPolicyKind::ManualByTopic,
+        _ => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    qos_ref.inner.liveliness.kind = liveliness_kind;
+    qos_ref.inner.liveliness.lease_duration = Duration {
+        sec: (lease_duration_ns / 1_000_000_000) as i32,
+        nanosec: (lease_duration_ns % 1_000_000_000) as u32,
+    };
+
+    INT2DDS_RET_OK
+}
+
+/// Set liveliness QoS for DataReader
+///
+/// # Safety
+/// - `qos` must be a valid QoS handle
+/// - `kind` must be a valid liveliness kind (0=Automatic, 1=ManualByParticipant, 2=ManualByTopic)
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_qos_set_liveliness(
+    qos: *mut Int2DdsDataReaderQos,
+    kind: i32,
+    lease_duration_ns: i64,
+) -> Int2DdsRet {
+    check_null!(qos);
+
+    let qos_ref = &mut *qos;
+
+    let liveliness_kind = match kind {
+        INT2DDS_QOS_LIVELINESS_AUTOMATIC => LivelinessQosPolicyKind::Automatic,
+        INT2DDS_QOS_LIVELINESS_MANUAL_BY_PARTICIPANT => {
+            LivelinessQosPolicyKind::ManualByParticipant
+        }
+        INT2DDS_QOS_LIVELINESS_MANUAL_BY_TOPIC => LivelinessQosPolicyKind::ManualByTopic,
+        _ => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    qos_ref.inner.liveliness.kind = liveliness_kind;
+    qos_ref.inner.liveliness.lease_duration = Duration {
+        sec: (lease_duration_ns / 1_000_000_000) as i32,
+        nanosec: (lease_duration_ns % 1_000_000_000) as u32,
+    };
+
+    INT2DDS_RET_OK
+}
+
+// ============================================================================
+// Publisher/Subscriber QoS (Feature 6)
+// ============================================================================
+
+/// Opaque QoS handle for Publisher
+pub struct Int2DdsPublisherQos {
+    pub(crate) inner: PublisherQos,
+}
+
+/// Opaque QoS handle for Subscriber
+pub struct Int2DdsSubscriberQos {
+    pub(crate) inner: SubscriberQos,
+}
+
+/// Create default Publisher QoS
+///
+/// # Safety
+/// - `qos_out` must be a valid pointer to a null pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publisher_qos_create_default(
+    qos_out: *mut *mut Int2DdsPublisherQos,
+) -> Int2DdsRet {
+    check_null!(qos_out);
+
+    let qos = Box::new(Int2DdsPublisherQos { inner: PublisherQos::default() });
+    *qos_out = Box::into_raw(qos);
+
+    INT2DDS_RET_OK
+}
+
+/// Set partition QoS for Publisher
+///
+/// # Safety
+/// - `qos` must be a valid QoS handle
+/// - `partitions` must point to `partition_count` valid C strings
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publisher_qos_set_partition(
+    qos: *mut Int2DdsPublisherQos,
+    partitions: *const *const c_char,
+    partition_count: usize,
+) -> Int2DdsRet {
+    check_null!(qos);
+
+    let qos_ref = &mut *qos;
+
+    if partition_count == 0 {
+        qos_ref.inner.partition.name = Vec::new();
+        return INT2DDS_RET_OK;
+    }
+
+    check_null!(partitions);
+
+    let partition_ptrs = std::slice::from_raw_parts(partitions, partition_count);
+    let mut names = Vec::with_capacity(partition_count);
+    for &ptr in partition_ptrs {
+        if ptr.is_null() {
+            return INT2DDS_RET_NULL_POINTER;
+        }
+        let c_str = CStr::from_ptr(ptr);
+        match c_str.to_str() {
+            Ok(s) => names.push(s.to_owned()),
+            Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+        }
+    }
+
+    qos_ref.inner.partition.name = names;
+
+    INT2DDS_RET_OK
+}
+
+/// Destroy Publisher QoS
+///
+/// # Safety
+/// - `qos` must be a valid QoS handle
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publisher_qos_destroy(
+    qos: *mut Int2DdsPublisherQos,
+) -> Int2DdsRet {
+    if qos.is_null() {
+        return INT2DDS_RET_NULL_POINTER;
+    }
+    let _ = Box::from_raw(qos);
+    INT2DDS_RET_OK
+}
+
+/// Create default Subscriber QoS
+///
+/// # Safety
+/// - `qos_out` must be a valid pointer to a null pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscriber_qos_create_default(
+    qos_out: *mut *mut Int2DdsSubscriberQos,
+) -> Int2DdsRet {
+    check_null!(qos_out);
+
+    let qos = Box::new(Int2DdsSubscriberQos { inner: SubscriberQos::default() });
+    *qos_out = Box::into_raw(qos);
+
+    INT2DDS_RET_OK
+}
+
+/// Set partition QoS for Subscriber
+///
+/// # Safety
+/// - `qos` must be a valid QoS handle
+/// - `partitions` must point to `partition_count` valid C strings
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscriber_qos_set_partition(
+    qos: *mut Int2DdsSubscriberQos,
+    partitions: *const *const c_char,
+    partition_count: usize,
+) -> Int2DdsRet {
+    check_null!(qos);
+
+    let qos_ref = &mut *qos;
+
+    if partition_count == 0 {
+        qos_ref.inner.partition.name = Vec::new();
+        return INT2DDS_RET_OK;
+    }
+
+    check_null!(partitions);
+
+    let partition_ptrs = std::slice::from_raw_parts(partitions, partition_count);
+    let mut names = Vec::with_capacity(partition_count);
+    for &ptr in partition_ptrs {
+        if ptr.is_null() {
+            return INT2DDS_RET_NULL_POINTER;
+        }
+        let c_str = CStr::from_ptr(ptr);
+        match c_str.to_str() {
+            Ok(s) => names.push(s.to_owned()),
+            Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+        }
+    }
+
+    qos_ref.inner.partition.name = names;
+
+    INT2DDS_RET_OK
+}
+
+/// Destroy Subscriber QoS
+///
+/// # Safety
+/// - `qos` must be a valid QoS handle
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscriber_qos_destroy(
+    qos: *mut Int2DdsSubscriberQos,
+) -> Int2DdsRet {
+    if qos.is_null() {
+        return INT2DDS_RET_NULL_POINTER;
+    }
+    let _ = Box::from_raw(qos);
+    INT2DDS_RET_OK
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,6 +701,100 @@ mod tests {
 
             // Destroy QoS
             let ret = int2dds_datawriter_qos_destroy(qos);
+            assert_eq!(ret, INT2DDS_RET_OK);
+        }
+    }
+
+    #[test]
+    fn test_deadline_qos() {
+        unsafe {
+            let mut qos: *mut Int2DdsDataWriterQos = ptr::null_mut();
+            let ret = int2dds_datawriter_qos_create_default(&mut qos as *mut _);
+            assert_eq!(ret, INT2DDS_RET_OK);
+
+            let ret = int2dds_datawriter_qos_set_deadline(qos, 1_000_000_000); // 1 second
+            assert_eq!(ret, INT2DDS_RET_OK);
+
+            let ret = int2dds_datawriter_qos_destroy(qos);
+            assert_eq!(ret, INT2DDS_RET_OK);
+
+            // DataReader
+            let mut rqos: *mut Int2DdsDataReaderQos = ptr::null_mut();
+            let ret = int2dds_datareader_qos_create_default(&mut rqos as *mut _);
+            assert_eq!(ret, INT2DDS_RET_OK);
+
+            let ret = int2dds_datareader_qos_set_deadline(rqos, 500_000_000); // 500ms
+            assert_eq!(ret, INT2DDS_RET_OK);
+
+            let ret = int2dds_datareader_qos_destroy(rqos);
+            assert_eq!(ret, INT2DDS_RET_OK);
+        }
+    }
+
+    #[test]
+    fn test_liveliness_qos() {
+        unsafe {
+            let mut qos: *mut Int2DdsDataWriterQos = ptr::null_mut();
+            let ret = int2dds_datawriter_qos_create_default(&mut qos as *mut _);
+            assert_eq!(ret, INT2DDS_RET_OK);
+
+            let ret = int2dds_datawriter_qos_set_liveliness(
+                qos,
+                INT2DDS_QOS_LIVELINESS_MANUAL_BY_TOPIC,
+                2_000_000_000, // 2 seconds
+            );
+            assert_eq!(ret, INT2DDS_RET_OK);
+
+            // Invalid kind
+            let ret = int2dds_datawriter_qos_set_liveliness(qos, 99, 1_000_000_000);
+            assert_eq!(ret, INT2DDS_RET_INVALID_ARGUMENT);
+
+            let ret = int2dds_datawriter_qos_destroy(qos);
+            assert_eq!(ret, INT2DDS_RET_OK);
+        }
+    }
+
+    #[test]
+    fn test_publisher_qos_create_destroy() {
+        unsafe {
+            let mut qos: *mut Int2DdsPublisherQos = ptr::null_mut();
+            let ret = int2dds_publisher_qos_create_default(&mut qos as *mut _);
+            assert_eq!(ret, INT2DDS_RET_OK);
+            assert!(!qos.is_null());
+
+            let ret = int2dds_publisher_qos_destroy(qos);
+            assert_eq!(ret, INT2DDS_RET_OK);
+        }
+    }
+
+    #[test]
+    fn test_subscriber_qos_create_destroy() {
+        unsafe {
+            let mut qos: *mut Int2DdsSubscriberQos = ptr::null_mut();
+            let ret = int2dds_subscriber_qos_create_default(&mut qos as *mut _);
+            assert_eq!(ret, INT2DDS_RET_OK);
+            assert!(!qos.is_null());
+
+            let ret = int2dds_subscriber_qos_destroy(qos);
+            assert_eq!(ret, INT2DDS_RET_OK);
+        }
+    }
+
+    #[test]
+    fn test_publisher_qos_partition() {
+        unsafe {
+            let mut qos: *mut Int2DdsPublisherQos = ptr::null_mut();
+            let ret = int2dds_publisher_qos_create_default(&mut qos as *mut _);
+            assert_eq!(ret, INT2DDS_RET_OK);
+
+            let p1 = b"partition_a\0".as_ptr() as *const c_char;
+            let p2 = b"partition_b\0".as_ptr() as *const c_char;
+            let partitions = [p1, p2];
+            let ret = int2dds_publisher_qos_set_partition(qos, partitions.as_ptr(), 2);
+            assert_eq!(ret, INT2DDS_RET_OK);
+            assert_eq!((*qos).inner.partition.name, vec!["partition_a", "partition_b"]);
+
+            let ret = int2dds_publisher_qos_destroy(qos);
             assert_eq!(ret, INT2DDS_RET_OK);
         }
     }
