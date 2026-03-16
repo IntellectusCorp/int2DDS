@@ -34,6 +34,14 @@
 
 #define INT2DDS_QOS_LIVELINESS_MANUAL_BY_TOPIC 2
 
+#define INT2DDS_QOS_OWNERSHIP_SHARED 0
+
+#define INT2DDS_QOS_OWNERSHIP_EXCLUSIVE 1
+
+#define INT2DDS_QOS_DEST_ORDER_BY_RECEPTION 0
+
+#define INT2DDS_QOS_DEST_ORDER_BY_SOURCE 1
+
 #define INT2DDS_STATUS_DATA_ON_READERS (1 << 0)
 
 #define INT2DDS_STATUS_DATA_AVAILABLE (1 << 1)
@@ -981,6 +989,92 @@ Int2DdsRet int2dds_datawriter_qos_set_data_representation(struct Int2DdsDataWrit
                                                           int32_t kind);
 
 /**
+ * Set ownership QoS for DataWriter
+ *
+ * # Safety
+ * - `qos` must be a valid QoS handle
+ * - `kind`: 0=Shared, 1=Exclusive
+ */
+Int2DdsRet int2dds_datawriter_qos_set_ownership(struct Int2DdsDataWriterQos *qos, int32_t kind);
+
+/**
+ * Set ownership strength QoS for DataWriter
+ *
+ * # Safety
+ * - `qos` must be a valid QoS handle
+ */
+Int2DdsRet int2dds_datawriter_qos_set_ownership_strength(struct Int2DdsDataWriterQos *qos,
+                                                         int32_t value);
+
+/**
+ * Set resource limits QoS for DataWriter
+ *
+ * # Safety
+ * - `qos` must be a valid QoS handle
+ */
+Int2DdsRet int2dds_datawriter_qos_set_resource_limits(struct Int2DdsDataWriterQos *qos,
+                                                      int32_t max_samples,
+                                                      int32_t max_instances,
+                                                      int32_t max_per_instance);
+
+/**
+ * Set lifespan QoS for DataWriter
+ *
+ * # Safety
+ * - `qos` must be a valid QoS handle
+ */
+Int2DdsRet int2dds_datawriter_qos_set_lifespan(struct Int2DdsDataWriterQos *qos,
+                                               int64_t duration_ns);
+
+/**
+ * Set destination order QoS for DataWriter
+ *
+ * # Safety
+ * - `qos` must be a valid QoS handle
+ * - `kind`: 0=ByReceptionTimestamp, 1=BySourceTimestamp
+ */
+Int2DdsRet int2dds_datawriter_qos_set_destination_order(struct Int2DdsDataWriterQos *qos,
+                                                        int32_t kind);
+
+/**
+ * Set latency budget QoS for DataWriter
+ *
+ * # Safety
+ * - `qos` must be a valid QoS handle
+ */
+Int2DdsRet int2dds_datawriter_qos_set_latency_budget(struct Int2DdsDataWriterQos *qos,
+                                                     int64_t duration_ns);
+
+/**
+ * Set transport priority QoS for DataWriter
+ *
+ * # Safety
+ * - `qos` must be a valid QoS handle
+ */
+Int2DdsRet int2dds_datawriter_qos_set_transport_priority(struct Int2DdsDataWriterQos *qos,
+                                                         int32_t priority);
+
+/**
+ * Set user data QoS for DataWriter
+ *
+ * # Safety
+ * - `qos` must be a valid QoS handle
+ * - `data` must point to `data_len` bytes, or be null if `data_len` is 0
+ */
+Int2DdsRet int2dds_datawriter_qos_set_user_data(struct Int2DdsDataWriterQos *qos,
+                                                const uint8_t *data,
+                                                uintptr_t data_len);
+
+/**
+ * Set writer data lifecycle QoS for DataWriter
+ *
+ * # Safety
+ * - `qos` must be a valid QoS handle
+ */
+Int2DdsRet int2dds_datawriter_qos_set_writer_data_lifecycle(struct Int2DdsDataWriterQos *qos,
+                                                            bool autodispose);
+
+/**
  * Destroy DataWriter QoS
  *
  * # Safety
@@ -1005,7 +1099,9 @@ Int2DdsRet int2dds_datareader_qos_create_default(struct Int2DdsDataReaderQos **q
  * - `qos` must be a valid QoS handle
  * - `kind` must be a valid reliability kind
  */
-Int2DdsRet int2dds_datareader_qos_set_reliability(struct Int2DdsDataReaderQos *qos, int32_t kind);
+Int2DdsRet int2dds_datareader_qos_set_reliability(struct Int2DdsDataReaderQos *qos,
+                                                  int32_t kind,
+                                                  int64_t max_blocking_time_ns);
 
 /**
  * Set durability QoS for DataReader
@@ -1043,6 +1139,75 @@ Int2DdsRet int2dds_datareader_qos_set_data_representation(struct Int2DdsDataRead
                                                           int32_t kind);
 
 /**
+ * Set ownership QoS for DataReader
+ *
+ * # Safety
+ * - `qos` must be a valid QoS handle
+ * - `kind`: 0=Shared, 1=Exclusive
+ */
+Int2DdsRet int2dds_datareader_qos_set_ownership(struct Int2DdsDataReaderQos *qos, int32_t kind);
+
+/**
+ * Set resource limits QoS for DataReader
+ *
+ * # Safety
+ * - `qos` must be a valid QoS handle
+ */
+Int2DdsRet int2dds_datareader_qos_set_resource_limits(struct Int2DdsDataReaderQos *qos,
+                                                      int32_t max_samples,
+                                                      int32_t max_instances,
+                                                      int32_t max_per_instance);
+
+/**
+ * Set destination order QoS for DataReader
+ *
+ * # Safety
+ * - `qos` must be a valid QoS handle
+ * - `kind`: 0=ByReceptionTimestamp, 1=BySourceTimestamp
+ */
+Int2DdsRet int2dds_datareader_qos_set_destination_order(struct Int2DdsDataReaderQos *qos,
+                                                        int32_t kind);
+
+/**
+ * Set time-based filter QoS for DataReader
+ *
+ * # Safety
+ * - `qos` must be a valid QoS handle
+ */
+Int2DdsRet int2dds_datareader_qos_set_time_based_filter(struct Int2DdsDataReaderQos *qos,
+                                                        int64_t minimum_separation_ns);
+
+/**
+ * Set latency budget QoS for DataReader
+ *
+ * # Safety
+ * - `qos` must be a valid QoS handle
+ */
+Int2DdsRet int2dds_datareader_qos_set_latency_budget(struct Int2DdsDataReaderQos *qos,
+                                                     int64_t duration_ns);
+
+/**
+ * Set user data QoS for DataReader
+ *
+ * # Safety
+ * - `qos` must be a valid QoS handle
+ * - `data` must point to `data_len` bytes, or be null if `data_len` is 0
+ */
+Int2DdsRet int2dds_datareader_qos_set_user_data(struct Int2DdsDataReaderQos *qos,
+                                                const uint8_t *data,
+                                                uintptr_t data_len);
+
+/**
+ * Set reader data lifecycle QoS for DataReader
+ *
+ * # Safety
+ * - `qos` must be a valid QoS handle
+ */
+Int2DdsRet int2dds_datareader_qos_set_reader_data_lifecycle(struct Int2DdsDataReaderQos *qos,
+                                                            int64_t autopurge_nowriter_ns,
+                                                            int64_t autopurge_disposed_ns);
+
+/**
  * Destroy DataReader QoS
  *
  * # Safety
@@ -1059,6 +1224,109 @@ Int2DdsRet int2dds_datareader_qos_destroy(struct Int2DdsDataReaderQos *qos);
  * - The returned QoS must be freed with `int2dds_topic_qos_destroy`
  */
 Int2DdsRet int2dds_topic_qos_create_default(struct Int2DdsTopicQos **qos_out);
+
+/**
+ * Set reliability QoS for Topic
+ *
+ * # Safety
+ * - `qos` must be a valid QoS handle
+ * - `kind` must be a valid reliability kind
+ */
+Int2DdsRet int2dds_topic_qos_set_reliability(struct Int2DdsTopicQos *qos,
+                                             int32_t kind,
+                                             int64_t max_blocking_time_ns);
+
+/**
+ * Set durability QoS for Topic
+ *
+ * # Safety
+ * - `qos` must be a valid QoS handle
+ * - `kind` must be a valid durability kind
+ */
+Int2DdsRet int2dds_topic_qos_set_durability(struct Int2DdsTopicQos *qos, int32_t kind);
+
+/**
+ * Set history QoS for Topic
+ *
+ * # Safety
+ * - `qos` must be a valid QoS handle
+ * - `kind` must be a valid history kind
+ * - For KEEP_LAST, `depth` must be > 0
+ */
+Int2DdsRet int2dds_topic_qos_set_history(struct Int2DdsTopicQos *qos, int32_t kind, int32_t depth);
+
+/**
+ * Set deadline QoS for Topic
+ *
+ * # Safety
+ * - `qos` must be a valid QoS handle
+ */
+Int2DdsRet int2dds_topic_qos_set_deadline(struct Int2DdsTopicQos *qos, int64_t period_ns);
+
+/**
+ * Set liveliness QoS for Topic
+ *
+ * # Safety
+ * - `qos` must be a valid QoS handle
+ * - `kind` must be a valid liveliness kind (0=Automatic, 1=ManualByParticipant, 2=ManualByTopic)
+ */
+Int2DdsRet int2dds_topic_qos_set_liveliness(struct Int2DdsTopicQos *qos,
+                                            int32_t kind,
+                                            int64_t lease_duration_ns);
+
+/**
+ * Set destination order QoS for Topic
+ *
+ * # Safety
+ * - `qos` must be a valid QoS handle
+ * - `kind`: 0=ByReceptionTimestamp, 1=BySourceTimestamp
+ */
+Int2DdsRet int2dds_topic_qos_set_destination_order(struct Int2DdsTopicQos *qos, int32_t kind);
+
+/**
+ * Set resource limits QoS for Topic
+ *
+ * # Safety
+ * - `qos` must be a valid QoS handle
+ */
+Int2DdsRet int2dds_topic_qos_set_resource_limits(struct Int2DdsTopicQos *qos,
+                                                 int32_t max_samples,
+                                                 int32_t max_instances,
+                                                 int32_t max_per_instance);
+
+/**
+ * Set transport priority QoS for Topic
+ *
+ * # Safety
+ * - `qos` must be a valid QoS handle
+ */
+Int2DdsRet int2dds_topic_qos_set_transport_priority(struct Int2DdsTopicQos *qos, int32_t priority);
+
+/**
+ * Set lifespan QoS for Topic
+ *
+ * # Safety
+ * - `qos` must be a valid QoS handle
+ */
+Int2DdsRet int2dds_topic_qos_set_lifespan(struct Int2DdsTopicQos *qos, int64_t duration_ns);
+
+/**
+ * Set ownership QoS for Topic
+ *
+ * # Safety
+ * - `qos` must be a valid QoS handle
+ * - `kind`: 0=Shared, 1=Exclusive
+ */
+Int2DdsRet int2dds_topic_qos_set_ownership(struct Int2DdsTopicQos *qos, int32_t kind);
+
+/**
+ * Set data representation QoS for Topic
+ *
+ * # Safety
+ * - `qos` must be a valid QoS handle
+ * - `kind` must be a valid data representation kind
+ */
+Int2DdsRet int2dds_topic_qos_set_data_representation(struct Int2DdsTopicQos *qos, int32_t kind);
 
 /**
  * Destroy Topic QoS
