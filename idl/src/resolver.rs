@@ -105,6 +105,7 @@ impl Resolver {
                     self.known_types.insert(u.name.clone());
                     self.union_defs.push((qname, u.clone()));
                 }
+                Definition::Interface(_) | Definition::Exception(_) | Definition::Const(_) => {}
             }
         }
         Ok(())
