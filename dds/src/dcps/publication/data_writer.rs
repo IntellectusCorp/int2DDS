@@ -569,57 +569,16 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             key_instances.get(&serialized_key).copied().unwrap_or(computed_handle)
         };
 
-        let handle = if handle.is_nil() {
+        let resolved_handle = if handle.is_nil() {
             instance_handle
         } else {
-            // If handle != HANDLE_NIL, verify that instance and handle match
             if handle != instance_handle {
                 return Err(DdsError::PreconditionNotMet);
             }
             instance_handle
         };
 
-        {
-            let mut instances =
-                self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-
-            match instances.get(&handle) {
-                Some((_, _, InstanceState::Registered))
-                | Some((_, _, InstanceState::Unregistered)) => {
-                    // OK, in disposable state
-                }
-                Some((_, _, InstanceState::Disposed)) => {
-                    // Already in disposed state
-                    return Ok(());
-                }
-                None => {
-                    // Does not exist
-                    return Err(DdsError::BadParameter);
-                }
-            }
-
-            instances.insert(handle, (serialized_key.clone(), timestamp, InstanceState::Disposed));
-
-            let monitor_guard =
-                self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-            if !handle.is_nil() {
-                if let Some(monitor) = monitor_guard.as_ref() {
-                    monitor.cancel_instance(&handle);
-                }
-            }
-
-            self.add_change(
-                ChangeKind::NotAliveDisposed,
-                serialized_key,
-                // ParameterList::default(),
-                handle,
-                Some(timestamp.into()),
-            )?;
-
-            self.update_liveliness()?;
-
-            Ok(())
-        }
+        self.dispose_inner(serialized_key, resolved_handle, timestamp)
     }
 
     /// Publishes a data sample to the topic.
@@ -731,52 +690,15 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             Self::resolve_serialization_format(&qos.data_representation.value, extensibility)?
         };
 
-        let mut instance_handle = InstanceHandle::NIL;
-        let mut is_new_instance = false;
-
-        if self.type_support.is_compute_key_provided() {
+        let key_info = if self.type_support.is_compute_key_provided() {
             let serialized_key = self.type_support.serialize_key(data as &dyn Any)?;
+            let computed_handle = self.type_support.compute_key(data as &dyn Any);
+            Some((serialized_key, computed_handle))
+        } else {
+            None
+        };
 
-            let existing_handle = {
-                let key_instances =
-                    self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-                key_instances.get(&serialized_key).copied()
-            };
-
-            instance_handle = if let Some(handle) = existing_handle {
-                handle
-            } else {
-                let computed_handle = self.type_support.compute_key(data as &dyn Any);
-                {
-                    let mut instances =
-                        self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-                    instances.insert(
-                        computed_handle,
-                        (serialized_key.clone(), timestamp, InstanceState::Registered),
-                    );
-                }
-                {
-                    let mut key_instances =
-                        self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-                    key_instances.insert(serialized_key, computed_handle);
-                }
-                is_new_instance = true;
-                computed_handle
-            };
-        }
-
-        if !handle.is_nil() && handle != instance_handle {
-            return Err(DdsError::PreconditionNotMet);
-        }
-
-        let monitor_guard =
-            self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-        if let Some(monitor) = monitor_guard.as_ref() {
-            if is_new_instance {
-                monitor.track_instance(&instance_handle);
-            }
-            monitor.reschedule_instance(&instance_handle);
-        }
+        let (instance_handle, _) = self.resolve_write_instance(key_info, handle, timestamp)?;
 
         let type_support = self.type_support.clone();
         let seq_num;
@@ -824,52 +746,16 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         };
 
         let serialized_data = self.type_support.serialize(data as &dyn Any, Some(&format))?;
-        let mut instance_handle = InstanceHandle::NIL;
-        let mut is_new_instance = false;
 
-        if self.type_support.is_compute_key_provided() {
+        let key_info = if self.type_support.is_compute_key_provided() {
             let serialized_key = self.type_support.serialize_key(data as &dyn Any)?;
+            let computed_handle = self.type_support.compute_key(data as &dyn Any);
+            Some((serialized_key, computed_handle))
+        } else {
+            None
+        };
 
-            let existing_handle = {
-                let key_instances =
-                    self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-                key_instances.get(&serialized_key).copied()
-            };
-
-            instance_handle = if let Some(handle) = existing_handle {
-                handle
-            } else {
-                let computed_handle = self.type_support.compute_key(data as &dyn Any);
-                {
-                    let mut instances =
-                        self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-                    instances.insert(
-                        computed_handle,
-                        (serialized_key.clone(), timestamp, InstanceState::Registered),
-                    );
-                }
-                {
-                    let mut key_instances =
-                        self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-                    key_instances.insert(serialized_key, computed_handle);
-                }
-                is_new_instance = true;
-                computed_handle
-            };
-        }
-
-        if !handle.is_nil() && handle != instance_handle {
-            return Err(DdsError::PreconditionNotMet);
-        }
-
-        let monitor_guard =
-            self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-        if let Some(monitor) = monitor_guard.as_ref() {
-            if is_new_instance {
-                monitor.track_instance(&instance_handle);
-            }
-            monitor.reschedule_instance(&instance_handle);
-        }
+        let (instance_handle, _) = self.resolve_write_instance(key_info, handle, timestamp)?;
 
         let seq_num = self.add_change(
             ChangeKind::Alive,
@@ -917,61 +803,18 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         }
 
         let data: SerializedData = Arc::from(serialized_data);
-        let mut instance_handle = InstanceHandle::NIL;
-        let mut is_new_instance = false;
 
-        if let Some(key_bytes) = serialized_key {
-            if !key_bytes.is_empty() {
+        let key_info = match serialized_key {
+            Some(key_bytes) if !key_bytes.is_empty() => {
                 let key_data: SerializedData = Arc::from(key_bytes);
-
-                // Compute InstanceHandle from key bytes:
-                // If key fits in 16 bytes, use directly; otherwise MD5 hash
                 let computed_handle = Self::compute_instance_handle_from_key(key_bytes);
-
-                // Fast path: check existing instances
-                let existing_handle = {
-                    let key_instances =
-                        self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-                    key_instances.get(&key_data).copied()
-                };
-
-                instance_handle = if let Some(handle) = existing_handle {
-                    handle
-                } else {
-                    // Slow path: register new instance
-                    {
-                        let mut instances =
-                            self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-                        instances.insert(
-                            computed_handle,
-                            (key_data.clone(), timestamp, InstanceState::Registered),
-                        );
-                    }
-
-                    {
-                        let mut key_instances = self
-                            .key_instances
-                            .lock()
-                            .map_err(|e| DdsError::Error(e.to_string()))?;
-                        key_instances.insert(key_data, computed_handle);
-                    }
-
-                    is_new_instance = true;
-                    computed_handle
-                };
+                Some((key_data, computed_handle))
             }
-        }
+            _ => None,
+        };
 
-        // Deadline monitor
-        let monitor_guard =
-            self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-
-        if let Some(monitor) = monitor_guard.as_ref() {
-            if is_new_instance {
-                monitor.track_instance(&instance_handle);
-            }
-            monitor.reschedule_instance(&instance_handle);
-        }
+        let (instance_handle, _) =
+            self.resolve_write_instance(key_info, InstanceHandle::NIL, timestamp)?;
 
         self.add_change(ChangeKind::Alive, data, instance_handle, Some(timestamp.into()))?;
 
@@ -1022,36 +865,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         let key_data: SerializedData = Arc::from(key);
         let handle = Self::compute_instance_handle_from_key(key);
 
-        self.register_instance_to_datawriter_cache(handle)?;
-
-        {
-            let mut instances =
-                self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-
-            match instances.get(&handle) {
-                Some((_, _, InstanceState::Registered)) => {
-                    return Ok(handle);
-                }
-                Some((_, _, InstanceState::Unregistered))
-                | Some((_, _, InstanceState::Disposed))
-                | None => {}
-            }
-
-            instances.insert(handle, (key_data.clone(), timestamp, InstanceState::Registered));
-
-            let mut key_instances =
-                self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-            key_instances.insert(key_data, handle);
-
-            let monitor_guard =
-                self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-            if let Some(monitor) = monitor_guard.as_ref() {
-                monitor.track_instance(&handle);
-            }
-
-            log::debug!("Registering Instance (serialized) - handle: {:?}", handle);
-        }
-        Ok(handle)
+        self.register_instance_inner(key_data, handle, timestamp)
     }
 
     /// Dispose an instance using raw serialized key bytes.
@@ -1095,45 +909,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             instance_handle
         };
 
-        {
-            let mut instances =
-                self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-
-            match instances.get(&resolved_handle) {
-                Some((_, _, InstanceState::Registered))
-                | Some((_, _, InstanceState::Unregistered)) => {}
-                Some((_, _, InstanceState::Disposed)) => {
-                    return Ok(());
-                }
-                None => {
-                    return Err(DdsError::BadParameter);
-                }
-            }
-
-            instances.insert(
-                resolved_handle,
-                (serialized_key.clone(), timestamp, InstanceState::Disposed),
-            );
-
-            let monitor_guard =
-                self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-            if !resolved_handle.is_nil() {
-                if let Some(monitor) = monitor_guard.as_ref() {
-                    monitor.cancel_instance(&resolved_handle);
-                }
-            }
-
-            self.add_change(
-                ChangeKind::NotAliveDisposed,
-                serialized_key,
-                resolved_handle,
-                Some(timestamp.into()),
-            )?;
-
-            self.update_liveliness()?;
-
-            Ok(())
-        }
+        self.dispose_inner(serialized_key, resolved_handle, timestamp)
     }
 
     /// Unregister an instance using raw serialized key bytes.
@@ -1182,44 +958,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             instance_handle
         };
 
-        {
-            let mut instances =
-                self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-
-            match instances.get(&resolved_handle) {
-                Some((_, _, InstanceState::Registered)) => {}
-                Some((_, _, _)) => {
-                    return Err(DdsError::BadParameter);
-                }
-                None => {
-                    return Err(DdsError::BadParameter);
-                }
-            }
-
-            instances.insert(
-                resolved_handle,
-                (serialized_key.clone(), timestamp, InstanceState::Unregistered),
-            );
-
-            let monitor_guard =
-                self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-            if let Some(monitor) = monitor_guard.as_ref() {
-                monitor.cancel_instance(&resolved_handle);
-            }
-
-            let change_kind =
-                if self.get_qos()?.writer_data_lifecycle.autodispose_unregistered_instances {
-                    ChangeKind::NotAliveDisposedUnregistered
-                } else {
-                    ChangeKind::NotAliveUnregistered
-                };
-
-            self.add_change(change_kind, serialized_key, resolved_handle, Some(timestamp.into()))?;
-
-            self.update_liveliness()?;
-
-            Ok(())
-        }
+        self.unregister_instance_inner(serialized_key, resolved_handle, timestamp)
     }
 
     /// Lookup an instance handle from raw serialized key bytes.
@@ -1772,6 +1511,195 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             }
         }
     }
+
+    /// Common logic for register_instance after key serialization and handle computation.
+    fn register_instance_inner(
+        &self,
+        serialized_key: SerializedData,
+        handle: InstanceHandle,
+        timestamp: Time,
+    ) -> DdsResult<InstanceHandle> {
+        self.register_instance_to_datawriter_cache(handle)?;
+
+        {
+            let mut instances =
+                self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+
+            match instances.get(&handle) {
+                Some((_, _, InstanceState::Registered)) => {
+                    return Ok(handle);
+                }
+                Some((_, _, InstanceState::Unregistered))
+                | Some((_, _, InstanceState::Disposed))
+                | None => {}
+            }
+
+            instances
+                .insert(handle, (serialized_key.clone(), timestamp, InstanceState::Registered));
+
+            let mut key_instances =
+                self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            key_instances.insert(serialized_key, handle);
+
+            let monitor_guard =
+                self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            if let Some(monitor) = monitor_guard.as_ref() {
+                monitor.track_instance(&handle);
+            }
+
+            log::debug!("Registering Instance - handle: {:?}", handle);
+        }
+        Ok(handle)
+    }
+
+    /// Common logic for dispose after key resolution and handle validation.
+    fn dispose_inner(
+        &self,
+        serialized_key: SerializedData,
+        resolved_handle: InstanceHandle,
+        timestamp: Time,
+    ) -> DdsResult<()> {
+        let mut instances = self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+
+        match instances.get(&resolved_handle) {
+            Some((_, _, InstanceState::Registered)) | Some((_, _, InstanceState::Unregistered)) => {
+            }
+            Some((_, _, InstanceState::Disposed)) => {
+                return Ok(());
+            }
+            None => {
+                return Err(DdsError::BadParameter);
+            }
+        }
+
+        instances
+            .insert(resolved_handle, (serialized_key.clone(), timestamp, InstanceState::Disposed));
+
+        let monitor_guard =
+            self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        if !resolved_handle.is_nil() {
+            if let Some(monitor) = monitor_guard.as_ref() {
+                monitor.cancel_instance(&resolved_handle);
+            }
+        }
+
+        self.add_change(
+            ChangeKind::NotAliveDisposed,
+            serialized_key,
+            resolved_handle,
+            Some(timestamp.into()),
+        )?;
+
+        self.update_liveliness()?;
+
+        Ok(())
+    }
+
+    /// Common logic for unregister_instance after key resolution and handle validation.
+    fn unregister_instance_inner(
+        &self,
+        serialized_key: SerializedData,
+        resolved_handle: InstanceHandle,
+        timestamp: Time,
+    ) -> DdsResult<()> {
+        let mut instances = self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+
+        match instances.get(&resolved_handle) {
+            Some((_, _, InstanceState::Registered)) => {}
+            Some((_, _, _)) => {
+                return Err(DdsError::BadParameter);
+            }
+            None => {
+                return Err(DdsError::BadParameter);
+            }
+        }
+
+        instances.insert(
+            resolved_handle,
+            (serialized_key.clone(), timestamp, InstanceState::Unregistered),
+        );
+
+        let monitor_guard =
+            self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        if let Some(monitor) = monitor_guard.as_ref() {
+            monitor.cancel_instance(&resolved_handle);
+        }
+
+        let change_kind =
+            if self.get_qos()?.writer_data_lifecycle.autodispose_unregistered_instances {
+                ChangeKind::NotAliveDisposedUnregistered
+            } else {
+                ChangeKind::NotAliveUnregistered
+            };
+
+        self.add_change(change_kind, serialized_key, resolved_handle, Some(timestamp.into()))?;
+
+        self.update_liveliness()?;
+
+        Ok(())
+    }
+
+    /// Common logic for write instance resolution: auto-register if needed, validate handle,
+    /// and update deadline monitor.
+    ///
+    /// `key_info`: If the topic has keys, `Some((serialized_key, computed_handle))`.
+    ///             For no-key topics, `None`.
+    /// `handle`: The user-provided handle (may be NIL).
+    /// `timestamp`: Source timestamp.
+    ///
+    /// Returns `(instance_handle, is_new_instance)`.
+    fn resolve_write_instance(
+        &self,
+        key_info: Option<(SerializedData, InstanceHandle)>,
+        handle: InstanceHandle,
+        timestamp: Time,
+    ) -> DdsResult<(InstanceHandle, bool)> {
+        let mut instance_handle = InstanceHandle::NIL;
+        let mut is_new_instance = false;
+
+        if let Some((serialized_key, computed_handle)) = key_info {
+            let existing_handle = {
+                let key_instances =
+                    self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+                key_instances.get(&serialized_key).copied()
+            };
+
+            instance_handle = if let Some(h) = existing_handle {
+                h
+            } else {
+                {
+                    let mut instances =
+                        self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+                    instances.insert(
+                        computed_handle,
+                        (serialized_key.clone(), timestamp, InstanceState::Registered),
+                    );
+                }
+                {
+                    let mut key_instances =
+                        self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+                    key_instances.insert(serialized_key, computed_handle);
+                }
+                is_new_instance = true;
+                computed_handle
+            };
+        }
+
+        if !handle.is_nil() && handle != instance_handle {
+            return Err(DdsError::PreconditionNotMet);
+        }
+
+        let monitor_guard =
+            self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        if let Some(monitor) = monitor_guard.as_ref() {
+            if is_new_instance {
+                monitor.track_instance(&instance_handle);
+            }
+            monitor.reschedule_instance(&instance_handle);
+        }
+
+        Ok((instance_handle, is_new_instance))
+    }
 }
 
 impl<Foo> DataWriter<Foo>
@@ -1871,45 +1799,9 @@ where
         }
 
         let serialized_key = self.type_support.serialize_key(instance as &dyn Any)?;
-        // 3. Deserialize key
         let handle = self.type_support.compute_key(instance as &dyn Any);
 
-        // Register instance in DataWriterCache and check if there is enough space
-        self.register_instance_to_datawriter_cache(handle)?;
-
-        {
-            let mut instances =
-                self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-
-            match instances.get(&handle) {
-                Some((_, _, InstanceState::Registered)) => {
-                    return Ok(handle);
-                }
-                Some((_, _, InstanceState::Unregistered))
-                | Some((_, _, InstanceState::Disposed))
-                | None => {
-                    // OK, in registerable state
-                }
-            }
-
-            // Register new instance
-            instances
-                .insert(handle, (serialized_key.clone(), timestamp, InstanceState::Registered));
-
-            let mut key_instances =
-                self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-            key_instances.insert(serialized_key.clone(), handle);
-
-            let monitor_guard =
-                self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-
-            if let Some(monitor) = monitor_guard.as_ref() {
-                monitor.track_instance(&handle);
-            }
-
-            log::debug!("Registering Instance - handle: {:?}", handle);
-        }
-        Ok(handle)
+        self.register_instance_inner(serialized_key, handle, timestamp)
     }
 
     pub fn unregister_instance(&self, instance: &Foo, handle: InstanceHandle) -> DdsResult<()> {
@@ -1970,74 +1862,25 @@ where
         }
 
         let serialized_key = self.type_support.serialize_key(instance as &dyn Any)?;
-        let instance_handle = match self.key_instances.lock() {
-            Ok(key_instances) => {
-                if let Some(instance_handle) = key_instances.get(&serialized_key) {
-                    *instance_handle
-                } else {
-                    return Err(DdsError::BadParameter);
-                }
+        let instance_handle = {
+            let key_instances =
+                self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            match key_instances.get(&serialized_key) {
+                Some(h) => *h,
+                None => return Err(DdsError::BadParameter),
             }
-            Err(e) => return Err(DdsError::Error(e.to_string())),
         };
 
-        let handle = if handle.is_nil() {
+        let resolved_handle = if handle.is_nil() {
             instance_handle
         } else {
-            // If handle != HANDLE_NIL, verify that instance and handle match
             if handle != instance_handle {
                 return Err(DdsError::PreconditionNotMet);
             }
             instance_handle
         };
 
-        {
-            let mut instances =
-                self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-
-            match instances.get(&handle) {
-                Some((_, _, InstanceState::Registered)) => {
-                    // OK, in registered state
-                }
-                Some((_, _, _)) => {
-                    // Exists in different state - might be an error
-                    return Err(DdsError::BadParameter);
-                }
-                None => {
-                    // Does not exist
-                    return Err(DdsError::BadParameter);
-                }
-            }
-
-            // Change state from Registered → Unregistered
-            instances
-                .insert(handle, (serialized_key.clone(), timestamp, InstanceState::Unregistered));
-
-            let monitor_guard =
-                self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-            if let Some(monitor) = monitor_guard.as_ref() {
-                monitor.cancel_instance(&handle);
-            }
-
-            let change_kind =
-                if self.get_qos()?.writer_data_lifecycle.autodispose_unregistered_instances {
-                    ChangeKind::NotAliveDisposedUnregistered
-                } else {
-                    ChangeKind::NotAliveUnregistered
-                };
-
-            self.add_change(
-                change_kind,
-                serialized_key,
-                // ParameterList::default(),
-                handle,
-                Some(timestamp.into()),
-            )?;
-
-            self.update_liveliness()?;
-
-            Ok(())
-        }
+        self.unregister_instance_inner(serialized_key, resolved_handle, timestamp)
     }
 }
 
