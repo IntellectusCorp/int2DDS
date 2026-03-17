@@ -397,7 +397,7 @@ impl PlCdrSerializer {
                 // PID_SENTINEL has no data, just return empty buffer
             }
             ParameterValue::Count(count) => {
-                self.write_i32(&mut buffer, *count);
+                self.write_u32(&mut buffer, *count);
             }
             ParameterValue::Unknown(data) => {
                 buffer.extend_from_slice(data);
