@@ -22,7 +22,7 @@ use crate::{
         },
         instance_handle::InstanceHandle,
     },
-    dcps::topic::type_support::DdsType,
+    dcps::{infrastructure::status::StatusKind, topic::type_support::DdsType},
     infrastructure::qos_policy::{
         DurabilityQosPolicyKind, QosPolicyId, ReliabilityQosPolicyKind,
         TypeConsistencyEnforcementQosPolicy, TypeConsistencyKind,
@@ -123,8 +123,27 @@ fn validate_endpoint_compatibility<L>(
     requested: &SubscriptionBuiltinTopicData,
     offered: &PublicationBuiltinTopicData,
     update_incompatible_qos: impl Fn(&L, QosPolicyId),
+    update_inconsistent_topic: impl Fn(&L),
     who: &'static str, // for log
 ) -> RtpsResult<()> {
+    // TopicKind - reject if writer and reader disagree on keyed vs keyless
+    let writer_keyed = offered.endpoint_guid().entity_kind().is_with_key();
+    let reader_keyed = requested.endpoint_guid().entity_kind().is_with_key();
+    if writer_keyed != reader_keyed {
+        update_inconsistent_topic(local);
+        debug!(
+            "[{}] TopicKind mismatch: writer keyed={}, reader keyed={}",
+            who, writer_keyed, reader_keyed
+        );
+        return Err(RtpsError::new(
+            RtpsErrorCode::TopicKindIncompatible,
+            format!(
+                "[TopicKind mismatch: writer keyed={}, reader keyed={} :{}]",
+                writer_keyed, reader_keyed, who
+            ),
+        ));
+    }
+
     // QoS
     if !check_qos_compatibility(requested, offered) {
         if let Some(pid) = check_qos_compatibility_with_policy_id(requested, offered) {
@@ -727,6 +746,7 @@ impl SedpLogic {
                 &subscription_builtin_topic_data,
                 &writer.publication_builtin_topic_data()?,
                 |w, pid| w.update_offered_incompatible_qos_status(pid),
+                |w| w.update_status(StatusKind::INCONSISTENT_TOPIC, None),
                 "writer->reader",
             ) {
                 // Incompatible - remove matching
@@ -791,6 +811,7 @@ impl SedpLogic {
             &subscription_builtin_topic_data,
             &writer.publication_builtin_topic_data()?,
             |w, pid| w.update_offered_incompatible_qos_status(pid),
+            |w| w.update_status(StatusKind::INCONSISTENT_TOPIC, None),
             "writer->reader",
         )?;
 
@@ -868,6 +889,7 @@ impl SedpLogic {
                 &subscription_builtin_topic_data,
                 &writer.publication_builtin_topic_data()?,
                 |w, pid| w.update_offered_incompatible_qos_status(pid),
+                |w| w.update_status(StatusKind::INCONSISTENT_TOPIC, None),
                 "writer->reader",
             ) {
                 // Incompatible - remove matching
@@ -933,6 +955,7 @@ impl SedpLogic {
             &subscription_builtin_topic_data,
             &writer.publication_builtin_topic_data()?,
             |w, pid| w.update_offered_incompatible_qos_status(pid),
+            |w| w.update_status(StatusKind::INCONSISTENT_TOPIC, None),
             "writer->reader",
         ) {
             error!("StatelessWriter compatibility error -> {}", e);
@@ -1112,6 +1135,7 @@ impl SedpLogic {
                 &reader.subscription_builtin_topic_data()?,
                 &publication_builtin_topic_data,
                 |r, pid| r.update_requested_incompatible_qos_status(pid),
+                |r| r.update_status(StatusKind::INCONSISTENT_TOPIC, None),
                 "reader->writer",
             ) {
                 // Incompatible - remove matching
@@ -1176,6 +1200,7 @@ impl SedpLogic {
             &reader.subscription_builtin_topic_data()?,
             &publication_builtin_topic_data,
             |r, pid| r.update_requested_incompatible_qos_status(pid),
+            |r| r.update_status(StatusKind::INCONSISTENT_TOPIC, None),
             "reader->writer",
         )?;
 
@@ -1224,6 +1249,7 @@ impl SedpLogic {
                 &reader.subscription_builtin_topic_data()?,
                 &publication_builtin_topic_data,
                 |r, pid| r.update_requested_incompatible_qos_status(pid),
+                |r| r.update_status(StatusKind::INCONSISTENT_TOPIC, None),
                 "reader->writer",
             ) {
                 // Incompatible - remove matching
@@ -1290,6 +1316,7 @@ impl SedpLogic {
             &reader.subscription_builtin_topic_data()?,
             &publication_builtin_topic_data,
             |r, pid| r.update_requested_incompatible_qos_status(pid),
+            |r| r.update_status(StatusKind::INCONSISTENT_TOPIC, None),
             "reader->writer",
         )?;
 
