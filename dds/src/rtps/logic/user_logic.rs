@@ -571,7 +571,7 @@ impl UserLogic {
         reader_proxy: &ReaderProxy,
         writer_id: EntityId,
         fragment_num: u32,
-        heartbeat_info: Option<(i32, SequenceNumber, SequenceNumber, bool, bool)>,
+        heartbeat_info: Option<(u32, SequenceNumber, SequenceNumber, bool, bool)>,
         timestamp: DateTime<Utc>,
     ) -> bool {
         if let Some(fragment_data) = change.get_fragment_data(fragment_num) {
@@ -1515,13 +1515,22 @@ impl UnicastMessageProcessor for UserLogic {
                         )
                     })?;
 
-                if heartbeat.count <= writer_proxy.last_heartbeat_count() {
-                    debug!(
-                        "[UserLogic] [Heartbeat] Ignoring old Heartbeat: count={} <= last_count={}",
-                        heartbeat.count,
-                        writer_proxy.last_heartbeat_count()
-                    );
-                    return Ok(());
+                match writer_proxy.last_heartbeat_count() {
+                    Some(prev) => {
+                        if (heartbeat.count.wrapping_sub(prev) as i32) <= 0 {
+                            debug!(
+                                "[UserLogic] [Heartbeat] Ignoring old Heartbeat: count={} <= last_count={}",
+                                heartbeat.count, prev
+                            );
+                            return Ok(());
+                        }
+                    }
+                    None => {
+                        debug!(
+                            "[UserLogic] [Heartbeat] First Heartbeat received: count={}",
+                            heartbeat.count
+                        );
+                    }
                 }
 
                 writer_proxy.set_last_heartbeat_count(heartbeat.count);
@@ -1719,14 +1728,19 @@ impl UnicastMessageProcessor for UserLogic {
             .find(|rp| rp.remote_reader_guid() == remote_reader_guid)
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
 
-        let last_acknack_count = reader_proxy.last_acknack_count();
-
-        if acknack.count <= last_acknack_count {
-            debug!(
-                "[UserLogic] [AckNack] Ignoring old ACKNACK: count={} <= last_count={}",
-                acknack.count, last_acknack_count
-            );
-            return Ok(());
+        match reader_proxy.last_acknack_count() {
+            Some(prev) => {
+                if (acknack.count.wrapping_sub(prev) as i32) <= 0 {
+                    debug!(
+                        "[UserLogic] [AckNack] Ignoring old ACKNACK: count={} <= last_count={}",
+                        acknack.count, prev
+                    );
+                    return Ok(());
+                }
+            }
+            None => {
+                debug!("[UserLogic] [AckNack] First AckNack received: count={}", acknack.count);
+            }
         }
 
         if acknack.reader_sn_state.bitmap_base() == SequenceNumber::from_i64(0)
@@ -1834,16 +1848,22 @@ impl UnicastMessageProcessor for UserLogic {
         data_frag: &DataFrag,
         message_receiver: &MessageReceiver,
     ) -> RtpsResult<()> {
-        let participant = self.get_upgraded_participant()?;
         let source_timestamp = message_receiver.get_source_timestamp();
         let remote_writer_guid = Guid::new(rtps_header.guid_prefix(), data_frag.writer_id);
 
         let key = (remote_writer_guid, data_frag.writer_sn);
         let total_size = data_frag.sample_size;
 
-        let reader = participant
-            .find_reader_from_entity_id(data_frag.reader_id)
-            .ok_or_else(|| RtpsError::new(RtpsErrorCode::InvalidEntityKind, "Reader not found"))?;
+        let matched_readers: Vec<Arc<dyn Reader + Send + Sync>> =
+            self.get_matched_readers(remote_writer_guid, data_frag.reader_id)?;
+
+        if matched_readers.is_empty() {
+            debug!(
+                "[DATA] No matched readers found for remote writer: {:?}, skipping data handling.",
+                remote_writer_guid
+            );
+            return Ok(());
+        }
 
         // DashMap is thread-safe, so no explicit lock is needed
         //println!("[DEBUG] FragmentBuffer count: {}, size: {}", self.fragment_buffers.len(), self.fragment_buffers.iter().map(|entry| entry.value().total_size as usize).sum::<usize>());
@@ -1857,38 +1877,43 @@ impl UnicastMessageProcessor for UserLogic {
                 FragmentBuffer::new(data_frag.writer_sn, total_size, data_frag.fragment_size)
             });
 
+            if buffer.source_timestamp.is_none() {
+                // timestamp does not be set in buffer.source_timestmap yet
+                if let Some(ts) = source_timestamp {
+                    buffer.source_timestamp = Some(ts); // store source_timestamp from first fragment that equals to INFO_TS
+                }
+            }
+
             for i in 0..data_frag.fragments_in_submessage {
                 let fragment_num = data_frag.fragment_starting_num + i as u32;
                 buffer.copy_fragment_data(fragment_num, data_frag.serialized_data());
             }
         } // buffer RefMut is automatically dropped here
-          // For StatefulReader case, update WriterProxy's ChangeFromWriter state
 
-        let mut ownership_strength = None;
+        // For StatefulReader case, update WriterProxy's ChangeFromWriter state for all matched readers
+        for reader in &matched_readers {
+            if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
+                // Query buffer information from DashMap again
+                if let Some(buffer_ref) = self.fragment_buffers.get(&key) {
+                    let writer_proxies = stateful_reader.writer_proxies();
+                    let mut matched_writers = writer_proxies.lock().map_err(|e| {
+                        RtpsError::new(
+                            RtpsErrorCode::LockError,
+                            format!("Failed to acquire writer_proxies lock: {}", e),
+                        )
+                    })?;
 
-        if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
-            // Query buffer information from DashMap again
-            if let Some(buffer_ref) = self.fragment_buffers.get(&key) {
-                let writer_proxies = stateful_reader.writer_proxies();
-                let mut matched_writers = writer_proxies.lock().map_err(|e| {
-                    RtpsError::new(
-                        RtpsErrorCode::LockError,
-                        format!("Failed to acquire writer_proxies lock: {}", e),
-                    )
-                })?;
-
-                if let Some(writer_proxy) = matched_writers
-                    .iter_mut()
-                    .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
-                {
-                    // Update fragment information
-                    writer_proxy.mark_frag_received(
-                        data_frag.writer_sn,
-                        buffer_ref.total_fragments,
-                        buffer_ref.received_fragments.clone(),
-                    );
-
-                    ownership_strength = Some(writer_proxy.get_ownership_strength());
+                    if let Some(writer_proxy) = matched_writers
+                        .iter_mut()
+                        .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
+                    {
+                        // Update fragment information
+                        writer_proxy.mark_frag_received(
+                            data_frag.writer_sn,
+                            buffer_ref.total_fragments,
+                            buffer_ref.received_fragments.clone(),
+                        );
+                    }
                 }
             }
         }
@@ -1904,28 +1929,61 @@ impl UnicastMessageProcessor for UserLogic {
                 drop(buffer_ref);
 
                 // Move payload from buffer without cloning
-                let (_, mut buffer) = self.fragment_buffers.remove(&key).unwrap();
+                let removed = self.fragment_buffers.remove(&key);
+                if removed.is_none() {
+                    return Ok(());
+                }
+                let (_, mut buffer) = removed.unwrap();
                 let assembled_payload = std::mem::take(&mut buffer.payload);
                 let serialized_data: SerializedData = Arc::<[u8]>::from(assembled_payload);
+                // Use timestamp from first fragment, fallback to current message
+                let assembled_timestamp = buffer.source_timestamp.or(source_timestamp);
+                if assembled_timestamp.is_none() {
+                    return Err(RtpsError::new(
+                        RtpsErrorCode::InvalidSubmessageBody,
+                        "No source timestamp available for assembled DataFrag (missing INFO_TS)",
+                    ));
+                }
 
-                let mut assembled_change = CacheChange::new(
-                    ChangeKind::Alive,
-                    remote_writer_guid,
-                    InstanceHandle::NIL,
-                    data_frag.writer_sn,
-                    serialized_data,
-                    source_timestamp,
-                );
+                for reader in &matched_readers {
+                    let mut ownership_strength = None;
+                    if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>()
+                    {
+                        let writer_proxies = stateful_reader.writer_proxies();
+                        let matched_writers = writer_proxies.lock().ok();
+                        if let Some(guard) = matched_writers {
+                            if let Some(writer_proxy) = guard
+                                .iter()
+                                .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
+                            {
+                                ownership_strength = Some(writer_proxy.get_ownership_strength());
+                            }
+                        }
+                    }
 
-                assembled_change.set_ownership_strength(ownership_strength);
+                    let mut assembled_change = CacheChange::new(
+                        ChangeKind::Alive,
+                        remote_writer_guid,
+                        InstanceHandle::NIL,
+                        data_frag.writer_sn,
+                        serialized_data.clone(),
+                        assembled_timestamp,
+                    );
 
-                let _ = self.deliver_change_to_reader(
-                    assembled_change,
-                    reader.as_ref(),
-                    data_frag.writer_sn,
-                    remote_writer_guid,
-                    Some(FragmentInfo { total_fragments, received_fragments, is_complete }),
-                );
+                    assembled_change.set_ownership_strength(ownership_strength);
+
+                    let _ = self.deliver_change_to_reader(
+                        assembled_change,
+                        reader.as_ref(),
+                        data_frag.writer_sn,
+                        remote_writer_guid,
+                        Some(FragmentInfo {
+                            total_fragments,
+                            received_fragments: received_fragments.clone(),
+                            is_complete,
+                        }),
+                    );
+                }
 
                 // Remove completed fragment buffer
                 self.fragment_buffers.remove(&key);
@@ -1962,13 +2020,19 @@ impl UnicastMessageProcessor for UserLogic {
             })?;
 
         // Check for duplicate NACK_FRAG
-        if nack_frag.count <= reader_proxy.last_nackfrag_count() {
-            debug!(
-                "[UserLogic] [NackFrag] Ignoring old NACK_FRAG: count={} <= last_count={}",
-                nack_frag.count,
-                reader_proxy.last_nackfrag_count()
-            );
-            return Ok(());
+        match reader_proxy.last_nackfrag_count() {
+            Some(prev) => {
+                if (nack_frag.count.wrapping_sub(prev) as i32) <= 0 {
+                    debug!(
+                        "[UserLogic] [NackFrag] Ignoring old NACK_FRAG: count={} <= last_count={}",
+                        nack_frag.count, prev
+                    );
+                    return Ok(());
+                }
+            }
+            None => {
+                debug!("[UserLogic] [NackFrag] First NackFrag received: count={}", nack_frag.count);
+            }
         }
         reader_proxy.set_last_nackfrag_count(nack_frag.count);
 

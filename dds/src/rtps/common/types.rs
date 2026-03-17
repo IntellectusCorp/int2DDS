@@ -78,7 +78,7 @@ pub struct WriterGroupInfo {
     writer_set: GroupDigest,
 }
 
-pub type Count = i32;
+pub type Count = u32;
 
 pub type UExtension4 = [u8; 4];
 pub type WExtension8 = [u8; 8];
@@ -119,4 +119,55 @@ pub type SerializedDataFragment = Arc<[u8]>;
 pub struct GroupInfo<'a> {
     pub group_entity_id: u32,
     pub group_data: &'a [u8],
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Wrapping count comparison: `(current.wrapping_sub(previous) as i32) <= 0`
+    #[test]
+    fn count_wrapping_comparison_boundary_values() {
+        // Basic: newer count should pass
+        let is_old = |current: Count, previous: Count| -> bool {
+            (current.wrapping_sub(previous) as i32) <= 0
+        };
+
+        // Same count: old (duplicate)
+        assert!(is_old(5, 5));
+
+        // Simple increment: not old
+        assert!(!is_old(6, 5));
+
+        // Simple decrement: old
+        assert!(is_old(4, 5));
+
+        // Wrap around u32::MAX: not old (MAX -> 0 is forward by 1)
+        assert!(!is_old(0, u32::MAX));
+
+        // Wrap around u32::MAX: not old (MAX -> 1 is forward by 2)
+        assert!(!is_old(1, u32::MAX));
+
+        // Reverse wrap: old (0 -> MAX is backward by 1)
+        assert!(is_old(u32::MAX, 0));
+
+        // Half-range boundary: exactly i32::MAX apart: not old
+        assert!(!is_old(i32::MAX as u32, 0));
+
+        // Half-range boundary: i32::MAX + 1 apart: old (ambiguous, treated as backward).
+        // Safe because consecutive comparisons never differ by more than 2^31 (RFC 1982).
+        assert!(is_old(i32::MAX as u32 + 1, 0));
+
+        // Large gap forward near wrap
+        assert!(!is_old(u32::MAX - 1, u32::MAX - 5));
+
+        // Both near MAX, current behind
+        assert!(is_old(u32::MAX - 5, u32::MAX - 1));
+
+        // Wrap: previous near MAX, current small
+        assert!(!is_old(3, u32::MAX - 2));
+
+        // Wrap: previous small, current near MAX: old (backward)
+        assert!(is_old(u32::MAX - 2, 3));
+    }
 }
