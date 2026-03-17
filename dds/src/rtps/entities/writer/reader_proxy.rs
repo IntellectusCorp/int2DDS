@@ -21,8 +21,8 @@ pub(crate) struct ReaderProxy {
     max_acked_sn: SequenceNumber,
     expects_inline_qos: bool, // false
     is_active: bool,
-    last_acknack_count: i32,
-    last_nackfrag_count: i32,
+    last_acknack_count: Option<u32>,
+    last_nackfrag_count: Option<u32>,
     content_filter_signatures: Option<Vec<FilterSignature>>, // Content filter signatures for this reader
     subscription_builtin_topic_data: SubscriptionBuiltinTopicData,
     last_irrelevant_sn: SequenceNumber, // Sequence numbers <= this value are irrelevant for this reader and should be responded with GAP.
@@ -69,8 +69,8 @@ impl ReaderProxy {
             max_acked_sn,
             expects_inline_qos,
             is_active,
-            last_acknack_count: 0,
-            last_nackfrag_count: 0,
+            last_acknack_count: None,
+            last_nackfrag_count: None,
             content_filter_signatures: None,
             subscription_builtin_topic_data,
             last_irrelevant_sn,
@@ -189,20 +189,20 @@ impl ReaderProxy {
         }
     }
 
-    pub(crate) fn last_acknack_count(&self) -> i32 {
+    pub(crate) fn last_acknack_count(&self) -> Option<u32> {
         self.last_acknack_count
     }
 
-    pub(crate) fn set_last_acknack_count(&mut self, last_acknack_count: i32) {
-        self.last_acknack_count = last_acknack_count;
+    pub(crate) fn set_last_acknack_count(&mut self, last_acknack_count: u32) {
+        self.last_acknack_count = Some(last_acknack_count);
     }
 
-    pub(crate) fn last_nackfrag_count(&self) -> i32 {
+    pub(crate) fn last_nackfrag_count(&self) -> Option<u32> {
         self.last_nackfrag_count
     }
 
-    pub(crate) fn set_last_nackfrag_count(&mut self, last_nackfrag_count: i32) {
-        self.last_nackfrag_count = last_nackfrag_count;
+    pub(crate) fn set_last_nackfrag_count(&mut self, last_nackfrag_count: u32) {
+        self.last_nackfrag_count = Some(last_nackfrag_count);
     }
 
     pub(crate) fn content_filter_signatures(&self) -> Option<&Vec<FilterSignature>> {
