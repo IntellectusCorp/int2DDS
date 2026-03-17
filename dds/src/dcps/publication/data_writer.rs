@@ -500,6 +500,58 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         Err(DdsError::Error("No supported DataRepresentationId found in QoS policy".to_string()))
     }
 
+    fn validate_timestamp(timestamp: &Time) -> DdsResult<()> {
+        if timestamp.is_infinite() || timestamp.sec < 0 || !timestamp.is_valid() {
+            return Err(DdsError::BadParameter);
+        }
+        Ok(())
+    }
+
+    fn resolve_handle(
+        instance_handle: InstanceHandle,
+        user_handle: InstanceHandle,
+    ) -> DdsResult<InstanceHandle> {
+        if user_handle.is_nil() {
+            Ok(instance_handle)
+        } else if user_handle != instance_handle {
+            Err(DdsError::PreconditionNotMet)
+        } else {
+            Ok(instance_handle)
+        }
+    }
+
+    fn resolve_dispose_key(
+        &self,
+        serialized_key: SerializedData,
+        computed_handle: InstanceHandle,
+        user_handle: InstanceHandle,
+    ) -> DdsResult<(SerializedData, InstanceHandle)> {
+        let instance_handle = {
+            let key_instances =
+                self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            key_instances.get(&serialized_key).copied().unwrap_or(computed_handle)
+        };
+        let resolved = Self::resolve_handle(instance_handle, user_handle)?;
+        Ok((serialized_key, resolved))
+    }
+
+    fn resolve_unregister_key(
+        &self,
+        serialized_key: SerializedData,
+        user_handle: InstanceHandle,
+    ) -> DdsResult<(SerializedData, InstanceHandle)> {
+        let instance_handle = {
+            let key_instances =
+                self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            match key_instances.get(&serialized_key) {
+                Some(h) => *h,
+                None => return Err(DdsError::BadParameter),
+            }
+        };
+        let resolved = Self::resolve_handle(instance_handle, user_handle)?;
+        Ok((serialized_key, resolved))
+    }
+
     /// Disposes of a data instance, indicating it is no longer valid.
     ///
     /// This operation requests that the middleware delete the data instance. The actual deletion
@@ -557,26 +609,12 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             return Ok(());
         }
 
-        if timestamp.is_infinite() || timestamp.sec < 0 || !timestamp.is_valid() {
-            return Err(DdsError::BadParameter);
-        }
+        Self::validate_timestamp(&timestamp)?;
 
         let serialized_key = self.type_support.serialize_key(data as &dyn Any)?;
         let computed_handle = self.type_support.compute_key(data as &dyn Any);
-        let instance_handle = {
-            let key_instances =
-                self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-            key_instances.get(&serialized_key).copied().unwrap_or(computed_handle)
-        };
-
-        let resolved_handle = if handle.is_nil() {
-            instance_handle
-        } else {
-            if handle != instance_handle {
-                return Err(DdsError::PreconditionNotMet);
-            }
-            instance_handle
-        };
+        let (serialized_key, resolved_handle) =
+            self.resolve_dispose_key(serialized_key, computed_handle, handle)?;
 
         self.dispose_inner(serialized_key, resolved_handle, timestamp)
     }
@@ -680,9 +718,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
     ) -> DdsResult<(Guid, SequenceNumber)> {
         self.is_enabled()?;
         let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
-        if timestamp.is_infinite() || timestamp.sec < 0 || !timestamp.is_valid() {
-            return Err(DdsError::BadParameter);
-        }
+        Self::validate_timestamp(&timestamp)?;
 
         let format = {
             let qos = self.qos.lock().map_err(|e| DdsError::Error(e.to_string()))?;
@@ -735,9 +771,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         timestamp: Time,
     ) -> DdsResult<SequenceNumber> {
         self.is_enabled()?;
-        if timestamp.is_infinite() || timestamp.sec < 0 || !timestamp.is_valid() {
-            return Err(DdsError::BadParameter);
-        }
+        Self::validate_timestamp(&timestamp)?;
 
         let format = {
             let qos = self.qos.lock().map_err(|e| DdsError::Error(e.to_string()))?;
@@ -798,9 +832,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         timestamp: Time,
     ) -> DdsResult<()> {
         self.is_enabled()?;
-        if timestamp.is_infinite() || timestamp.sec < 0 || !timestamp.is_valid() {
-            return Err(DdsError::BadParameter);
-        }
+        Self::validate_timestamp(&timestamp)?;
 
         let data: SerializedData = Arc::from(serialized_data);
 
@@ -858,9 +890,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             return Ok(InstanceHandle::NIL);
         }
 
-        if timestamp.is_infinite() || timestamp.sec < 0 || !timestamp.is_valid() {
-            return Err(DdsError::BadParameter);
-        }
+        Self::validate_timestamp(&timestamp)?;
 
         let key_data: SerializedData = Arc::from(key);
         let handle = Self::compute_instance_handle_from_key(key);
@@ -887,27 +917,12 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             return Ok(());
         }
 
-        if timestamp.is_infinite() || timestamp.sec < 0 || !timestamp.is_valid() {
-            return Err(DdsError::BadParameter);
-        }
+        Self::validate_timestamp(&timestamp)?;
 
         let serialized_key: SerializedData = Arc::from(key);
         let computed_handle = Self::compute_instance_handle_from_key(key);
-
-        let instance_handle = {
-            let key_instances =
-                self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-            key_instances.get(&serialized_key).copied().unwrap_or(computed_handle)
-        };
-
-        let resolved_handle = if handle.is_nil() {
-            instance_handle
-        } else {
-            if handle != instance_handle {
-                return Err(DdsError::PreconditionNotMet);
-            }
-            instance_handle
-        };
+        let (serialized_key, resolved_handle) =
+            self.resolve_dispose_key(serialized_key, computed_handle, handle)?;
 
         self.dispose_inner(serialized_key, resolved_handle, timestamp)
     }
@@ -935,28 +950,11 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             return Ok(());
         }
 
-        if timestamp.is_infinite() || timestamp.sec < 0 || !timestamp.is_valid() {
-            return Err(DdsError::BadParameter);
-        }
+        Self::validate_timestamp(&timestamp)?;
 
         let serialized_key: SerializedData = Arc::from(key);
-        let instance_handle = {
-            let key_instances =
-                self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-            match key_instances.get(&serialized_key) {
-                Some(h) => *h,
-                None => return Err(DdsError::BadParameter),
-            }
-        };
-
-        let resolved_handle = if handle.is_nil() {
-            instance_handle
-        } else {
-            if handle != instance_handle {
-                return Err(DdsError::PreconditionNotMet);
-            }
-            instance_handle
-        };
+        let (serialized_key, resolved_handle) =
+            self.resolve_unregister_key(serialized_key, handle)?;
 
         self.unregister_instance_inner(serialized_key, resolved_handle, timestamp)
     }
@@ -1794,9 +1792,7 @@ where
             return Ok(InstanceHandle::NIL);
         }
 
-        if timestamp.is_infinite() || timestamp.sec < 0 || !timestamp.is_valid() {
-            return Err(DdsError::BadParameter);
-        }
+        Self::validate_timestamp(&timestamp)?;
 
         let serialized_key = self.type_support.serialize_key(instance as &dyn Any)?;
         let handle = self.type_support.compute_key(instance as &dyn Any);
@@ -1857,28 +1853,11 @@ where
             log::warn!("unregister on no-key topic has no effect");
             return Ok(());
         }
-        if timestamp.is_infinite() || timestamp.sec < 0 || !timestamp.is_valid() {
-            return Err(DdsError::BadParameter);
-        }
+        Self::validate_timestamp(&timestamp)?;
 
         let serialized_key = self.type_support.serialize_key(instance as &dyn Any)?;
-        let instance_handle = {
-            let key_instances =
-                self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-            match key_instances.get(&serialized_key) {
-                Some(h) => *h,
-                None => return Err(DdsError::BadParameter),
-            }
-        };
-
-        let resolved_handle = if handle.is_nil() {
-            instance_handle
-        } else {
-            if handle != instance_handle {
-                return Err(DdsError::PreconditionNotMet);
-            }
-            instance_handle
-        };
+        let (serialized_key, resolved_handle) =
+            self.resolve_unregister_key(serialized_key, handle)?;
 
         self.unregister_instance_inner(serialized_key, resolved_handle, timestamp)
     }
