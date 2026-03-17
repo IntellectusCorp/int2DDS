@@ -78,7 +78,7 @@ pub struct WriterGroupInfo {
     writer_set: GroupDigest,
 }
 
-pub type Count = i32;
+pub type Count = u32;
 
 pub type UExtension4 = [u8; 4];
 pub type WExtension8 = [u8; 8];
