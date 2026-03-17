@@ -80,7 +80,7 @@ impl WriterProxy {
     }
 
     pub(crate) fn increase_acknack_count(&mut self) {
-        self.acknack_count += 1;
+        self.acknack_count = self.acknack_count.wrapping_add(1);
     }
 
     pub(crate) fn acknack_count(&self) -> i32 {
@@ -88,7 +88,7 @@ impl WriterProxy {
     }
 
     pub(crate) fn increase_nackfrag_count(&mut self) {
-        self.nackfrag_count += 1;
+        self.nackfrag_count = self.nackfrag_count.wrapping_add(1);
     }
 
     pub(crate) fn nackfrag_count(&self) -> i32 {

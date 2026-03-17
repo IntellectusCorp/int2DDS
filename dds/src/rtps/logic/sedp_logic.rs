@@ -2238,7 +2238,7 @@ impl UnicastMessageProcessor for SedpLogic {
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::RtpsEntityNotFound, None))?;
 
         // Check for duplicate Heartbeat
-        if heartbeat.count <= writer_proxy.last_heartbeat_count() {
+        if heartbeat.count.wrapping_sub(writer_proxy.last_heartbeat_count()) <= 0 {
             debug!(
                 "[SEDP] [Heartbeat] Ignoring old Heartbeat: count={} <= last_count={}",
                 heartbeat.count,
@@ -2332,7 +2332,7 @@ impl UnicastMessageProcessor for SedpLogic {
             .find(|rp| rp.remote_reader_guid() == remote_reader_guid)
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
 
-        if acknack.count <= reader_proxy.last_acknack_count() {
+        if acknack.count.wrapping_sub(reader_proxy.last_acknack_count()) <= 0 {
             debug!(
                 "[SEDP] [AckNack] Ignoring old AckNack: count={} <= last_count={}",
                 acknack.count,
