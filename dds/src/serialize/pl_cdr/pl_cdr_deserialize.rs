@@ -390,7 +390,7 @@ impl PlCdrParser {
             }
             ParameterId::PidParticipantManualLivelinessCount => {
                 if data.len() >= 4 {
-                    ParameterValue::Count(self.read_i32(data))
+                    ParameterValue::Count(self.read_u32(data))
                 } else {
                     return Err("Invalid Manual Liveliness Count data".to_string());
                 }

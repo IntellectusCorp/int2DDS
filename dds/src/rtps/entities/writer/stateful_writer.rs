@@ -69,7 +69,7 @@ pub(crate) struct StatefulWriter {
     data_max_size_serialized: i32,
     matched_readers: Arc<Mutex<Vec<ReaderProxy>>>,
     writer_cache: Arc<Mutex<WriterHistoryCache>>,
-    heartbeat_count: Arc<Mutex<i32>>,
+    heartbeat_count: Arc<Mutex<u32>>,
     #[allow(clippy::type_complexity)]
     callback:
         Arc<Mutex<Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>>>,
@@ -298,7 +298,7 @@ impl StatefulWriter {
     pub(crate) fn increase_heartbeat_count(&self) {
         match self.heartbeat_count.lock() {
             Ok(mut heartbeat_count) => {
-                *heartbeat_count += 1;
+                *heartbeat_count = heartbeat_count.wrapping_add(1);
             }
             Err(e) => {
                 error!("Failed to acquire heartbeat_count lock: {}", e);
@@ -306,7 +306,7 @@ impl StatefulWriter {
         }
     }
 
-    pub(crate) fn heartbeat_count(&self) -> i32 {
+    pub(crate) fn heartbeat_count(&self) -> u32 {
         match self.heartbeat_count.lock() {
             Ok(heartbeat_count) => *heartbeat_count,
             Err(e) => {
