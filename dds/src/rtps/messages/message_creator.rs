@@ -79,7 +79,7 @@ impl MessageCreator {
     pub(crate) fn create_heartbeat_message(
         local_guid_prefix: GuidPrefix,
         target_guid_prefix: GuidPrefix,
-        heartbeat_count: i32,
+        heartbeat_count: u32,
         reader_entity_id: EntityId,
         writer_entity_id: EntityId,
         first_sn: SequenceNumber,
@@ -114,7 +114,7 @@ impl MessageCreator {
         reader_entity_id: EntityId,
         writer_entity_id: EntityId,
         missing_changes: Vec<SequenceNumber>,
-        acknack_count: i32,
+        acknack_count: u32,
         bitmap_base: SequenceNumber,
         is_preemptive: bool,
     ) -> Result<Arc<Vec<u8>>, Box<dyn std::error::Error>> {
@@ -142,7 +142,7 @@ impl MessageCreator {
         remote_guid: Guid,
         reader_entity_id: EntityId,
         writer_entity_id: EntityId,
-        heartbeat_info: Option<(i32, SequenceNumber, SequenceNumber, bool, bool)>,
+        heartbeat_info: Option<(u32, SequenceNumber, SequenceNumber, bool, bool)>,
         use_inline_qos: bool, // TODO: Can be changed to Vec<Parameter> in the future
         content_filter_info: Option<ContentFilterInfo>,
     ) -> Result<Arc<Vec<u8>>, Box<dyn std::error::Error>> {
@@ -262,7 +262,7 @@ impl MessageCreator {
         fragment_size: u16,
         sample_size: u32,
         fragment_data: SerializedData,
-        heartbeat_info: Option<(i32, SequenceNumber, SequenceNumber, bool, bool)>,
+        heartbeat_info: Option<(u32, SequenceNumber, SequenceNumber, bool, bool)>,
         timestamp: DateTime<Utc>,
     ) -> Result<Arc<Vec<u8>>, Box<dyn std::error::Error>> {
         let mut rtps_message = RtpsMessage::new(Header::new(cache_change.writer_guid().prefix()));
@@ -384,8 +384,8 @@ impl MessageCreator {
         writer_entity_id: EntityId,
         writer_sn: SequenceNumber,
         fragment_number_state: FragmentNumberSet,
-        nackfrag_count: i32,
-        acknack_info: Option<(i32, SequenceNumber, Vec<SequenceNumber>)>,
+        nackfrag_count: u32,
+        acknack_info: Option<(u32, SequenceNumber, Vec<SequenceNumber>)>,
     ) -> Result<Arc<Vec<u8>>, Box<dyn std::error::Error>> {
         let mut rtps_message = RtpsMessage::new(Header::new(reader_guid.prefix()));
 

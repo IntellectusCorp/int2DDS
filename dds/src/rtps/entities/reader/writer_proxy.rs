@@ -32,10 +32,10 @@ pub(crate) struct WriterProxy {
     multicast_locator_list: Vec<Locator>,
     data_max_size_serialized: u32,
     changes_from_writer: BTreeMap<SequenceNumber, ChangeFromWriter>,
-    acknack_count: i32,
-    nackfrag_count: i32,
+    acknack_count: u32,
+    nackfrag_count: u32,
     expected_sn: SequenceNumber, // Expected next sequence number from writer
-    last_heartbeat_count: i32,
+    last_heartbeat_count: Option<u32>,
     buffered_change: BTreeSet<CacheChange>, // Changes that reader has not processed yet
     publication_builtin_topic_data: PublicationBuiltinTopicData,
     #[allow(clippy::type_complexity)]
@@ -72,7 +72,7 @@ impl WriterProxy {
             acknack_count: 0,
             nackfrag_count: 0,
             expected_sn: SequenceNumber::UNKNOWN,
-            last_heartbeat_count: 0,
+            last_heartbeat_count: None,
             buffered_change: BTreeSet::new(),
             publication_builtin_topic_data,
             status_callback,
@@ -83,7 +83,7 @@ impl WriterProxy {
         self.acknack_count = self.acknack_count.wrapping_add(1);
     }
 
-    pub(crate) fn acknack_count(&self) -> i32 {
+    pub(crate) fn acknack_count(&self) -> u32 {
         self.acknack_count
     }
 
@@ -91,7 +91,7 @@ impl WriterProxy {
         self.nackfrag_count = self.nackfrag_count.wrapping_add(1);
     }
 
-    pub(crate) fn nackfrag_count(&self) -> i32 {
+    pub(crate) fn nackfrag_count(&self) -> u32 {
         self.nackfrag_count
     }
 
@@ -99,12 +99,12 @@ impl WriterProxy {
         self.expected_sn
     }
 
-    pub(crate) fn last_heartbeat_count(&self) -> i32 {
+    pub(crate) fn last_heartbeat_count(&self) -> Option<u32> {
         self.last_heartbeat_count
     }
 
-    pub(crate) fn set_last_heartbeat_count(&mut self, count: i32) {
-        self.last_heartbeat_count = count;
+    pub(crate) fn set_last_heartbeat_count(&mut self, count: u32) {
+        self.last_heartbeat_count = Some(count);
     }
 
     pub(crate) fn add_new_changes_from_writer(&mut self, change_from_writer: ChangeFromWriter) {

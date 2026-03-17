@@ -1652,7 +1652,7 @@ impl SedpLogic {
         reader_entity_id: EntityId,
         writer_entity_id: EntityId,
         missing_changes: Vec<SequenceNumber>,
-        acknack_count: i32,
+        acknack_count: u32,
         bitmap_base: SequenceNumber,
     ) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
@@ -2238,13 +2238,19 @@ impl UnicastMessageProcessor for SedpLogic {
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::RtpsEntityNotFound, None))?;
 
         // Check for duplicate Heartbeat
-        if heartbeat.count.wrapping_sub(writer_proxy.last_heartbeat_count()) <= 0 {
-            debug!(
-                "[SEDP] [Heartbeat] Ignoring old Heartbeat: count={} <= last_count={}",
-                heartbeat.count,
-                writer_proxy.last_heartbeat_count()
-            );
-            return Ok(());
+        match writer_proxy.last_heartbeat_count() {
+            Some(prev) => {
+                if (heartbeat.count.wrapping_sub(prev) as i32) <= 0 {
+                    debug!(
+                        "[SEDP] [Heartbeat] Ignoring old Heartbeat: count={} <= last_count={}",
+                        heartbeat.count, prev
+                    );
+                    return Ok(());
+                }
+            }
+            None => {
+                debug!("[SEDP] [Heartbeat] First Heartbeat received: count={}", heartbeat.count);
+            }
         }
         writer_proxy.set_last_heartbeat_count(heartbeat.count);
 
@@ -2332,13 +2338,19 @@ impl UnicastMessageProcessor for SedpLogic {
             .find(|rp| rp.remote_reader_guid() == remote_reader_guid)
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
 
-        if acknack.count.wrapping_sub(reader_proxy.last_acknack_count()) <= 0 {
-            debug!(
-                "[SEDP] [AckNack] Ignoring old AckNack: count={} <= last_count={}",
-                acknack.count,
-                reader_proxy.last_acknack_count()
-            );
-            return Ok(());
+        match reader_proxy.last_acknack_count() {
+            Some(prev) => {
+                if (acknack.count.wrapping_sub(prev) as i32) <= 0 {
+                    debug!(
+                        "[SEDP] [AckNack] Ignoring old AckNack: count={} <= last_count={}",
+                        acknack.count, prev
+                    );
+                    return Ok(());
+                }
+            }
+            None => {
+                debug!("[SEDP] [AckNack] First AckNack received: count={}", acknack.count);
+            }
         }
         reader_proxy.set_last_acknack_count(acknack.count);
         drop(reader_proxies_guard);
