@@ -571,7 +571,7 @@ impl UserLogic {
         reader_proxy: &ReaderProxy,
         writer_id: EntityId,
         fragment_num: u32,
-        heartbeat_info: Option<(i32, SequenceNumber, SequenceNumber, bool, bool)>,
+        heartbeat_info: Option<(u32, SequenceNumber, SequenceNumber, bool, bool)>,
         timestamp: DateTime<Utc>,
     ) -> bool {
         if let Some(fragment_data) = change.get_fragment_data(fragment_num) {
@@ -1515,13 +1515,22 @@ impl UnicastMessageProcessor for UserLogic {
                         )
                     })?;
 
-                if heartbeat.count <= writer_proxy.last_heartbeat_count() {
-                    debug!(
-                        "[UserLogic] [Heartbeat] Ignoring old Heartbeat: count={} <= last_count={}",
-                        heartbeat.count,
-                        writer_proxy.last_heartbeat_count()
-                    );
-                    return Ok(());
+                match writer_proxy.last_heartbeat_count() {
+                    Some(prev) => {
+                        if (heartbeat.count.wrapping_sub(prev) as i32) <= 0 {
+                            debug!(
+                                "[UserLogic] [Heartbeat] Ignoring old Heartbeat: count={} <= last_count={}",
+                                heartbeat.count, prev
+                            );
+                            return Ok(());
+                        }
+                    }
+                    None => {
+                        debug!(
+                            "[UserLogic] [Heartbeat] First Heartbeat received: count={}",
+                            heartbeat.count
+                        );
+                    }
                 }
 
                 writer_proxy.set_last_heartbeat_count(heartbeat.count);
@@ -1719,14 +1728,19 @@ impl UnicastMessageProcessor for UserLogic {
             .find(|rp| rp.remote_reader_guid() == remote_reader_guid)
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
 
-        let last_acknack_count = reader_proxy.last_acknack_count();
-
-        if acknack.count <= last_acknack_count {
-            debug!(
-                "[UserLogic] [AckNack] Ignoring old ACKNACK: count={} <= last_count={}",
-                acknack.count, last_acknack_count
-            );
-            return Ok(());
+        match reader_proxy.last_acknack_count() {
+            Some(prev) => {
+                if (acknack.count.wrapping_sub(prev) as i32) <= 0 {
+                    debug!(
+                        "[UserLogic] [AckNack] Ignoring old ACKNACK: count={} <= last_count={}",
+                        acknack.count, prev
+                    );
+                    return Ok(());
+                }
+            }
+            None => {
+                debug!("[UserLogic] [AckNack] First AckNack received: count={}", acknack.count);
+            }
         }
 
         if acknack.reader_sn_state.bitmap_base() == SequenceNumber::from_i64(0)
@@ -2006,13 +2020,19 @@ impl UnicastMessageProcessor for UserLogic {
             })?;
 
         // Check for duplicate NACK_FRAG
-        if nack_frag.count <= reader_proxy.last_nackfrag_count() {
-            debug!(
-                "[UserLogic] [NackFrag] Ignoring old NACK_FRAG: count={} <= last_count={}",
-                nack_frag.count,
-                reader_proxy.last_nackfrag_count()
-            );
-            return Ok(());
+        match reader_proxy.last_nackfrag_count() {
+            Some(prev) => {
+                if (nack_frag.count.wrapping_sub(prev) as i32) <= 0 {
+                    debug!(
+                        "[UserLogic] [NackFrag] Ignoring old NACK_FRAG: count={} <= last_count={}",
+                        nack_frag.count, prev
+                    );
+                    return Ok(());
+                }
+            }
+            None => {
+                debug!("[UserLogic] [NackFrag] First NackFrag received: count={}", nack_frag.count);
+            }
         }
         reader_proxy.set_last_nackfrag_count(nack_frag.count);
 
