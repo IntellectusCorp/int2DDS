@@ -1515,7 +1515,7 @@ impl UnicastMessageProcessor for UserLogic {
                         )
                     })?;
 
-                if heartbeat.count <= writer_proxy.last_heartbeat_count() {
+                if heartbeat.count.wrapping_sub(writer_proxy.last_heartbeat_count()) <= 0 {
                     debug!(
                         "[UserLogic] [Heartbeat] Ignoring old Heartbeat: count={} <= last_count={}",
                         heartbeat.count,
@@ -1721,7 +1721,7 @@ impl UnicastMessageProcessor for UserLogic {
 
         let last_acknack_count = reader_proxy.last_acknack_count();
 
-        if acknack.count <= last_acknack_count {
+        if acknack.count.wrapping_sub(last_acknack_count) <= 0 {
             debug!(
                 "[UserLogic] [AckNack] Ignoring old ACKNACK: count={} <= last_count={}",
                 acknack.count, last_acknack_count
@@ -2006,7 +2006,7 @@ impl UnicastMessageProcessor for UserLogic {
             })?;
 
         // Check for duplicate NACK_FRAG
-        if nack_frag.count <= reader_proxy.last_nackfrag_count() {
+        if nack_frag.count.wrapping_sub(reader_proxy.last_nackfrag_count()) <= 0 {
             debug!(
                 "[UserLogic] [NackFrag] Ignoring old NACK_FRAG: count={} <= last_count={}",
                 nack_frag.count,

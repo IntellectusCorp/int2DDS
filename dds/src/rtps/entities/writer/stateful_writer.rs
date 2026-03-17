@@ -298,7 +298,7 @@ impl StatefulWriter {
     pub(crate) fn increase_heartbeat_count(&self) {
         match self.heartbeat_count.lock() {
             Ok(mut heartbeat_count) => {
-                *heartbeat_count += 1;
+                *heartbeat_count = heartbeat_count.wrapping_add(1);
             }
             Err(e) => {
                 error!("Failed to acquire heartbeat_count lock: {}", e);
