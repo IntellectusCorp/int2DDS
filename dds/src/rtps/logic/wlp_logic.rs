@@ -715,7 +715,7 @@ impl WlpLogic {
         reader_entity_id: EntityId,
         writer_entity_id: EntityId,
         missing_changes: Vec<SequenceNumber>,
-        acknack_count: i32,
+        acknack_count: u32,
         bitmap_base: SequenceNumber,
     ) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
