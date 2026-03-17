@@ -4,6 +4,7 @@
 //! that exceed the maximum transport message size. Samples are fragmented and
 //! reassembled at the receiver.
 
+use crate::rtps::common::time::RtpsTime;
 use bytes::Bytes;
 use speedy::{Context, Error, Readable, Writable, Writer};
 use std::time::Instant;
@@ -171,15 +172,18 @@ impl DataFrag {
         let serialized_data_bytes = buffer.slice(start_pos..);
 
         // 8.3.7.3.3 Validity
-        if serialized_data_bytes.len() > (fragments_in_submessage * fragment_size) as usize {
+        // allow up to 3 extra bytes for RTPS submessage 4-byte alignment padding
+        let expected_data_size = (fragments_in_submessage as u32 * fragment_size as u32) as usize;
+        if serialized_data_bytes.len() > expected_data_size + 3 {
             return Err(RtpsError::new(
                 RtpsErrorCode::InvalidSubmessageBody,
                 "Serialized data size exceeds the expected size based on fragments_in_submessage and fragment_size",
             ));
         }
 
-        // Convert Bytes to SerializedData (Arc<[u8]>)
-        let serialized_data = Arc::from(serialized_data_bytes.to_vec());
+        // truncate padding bytes - only keep actual fragment data
+        let actual_len = std::cmp::min(serialized_data_bytes.len(), expected_data_size);
+        let serialized_data = Arc::from(serialized_data_bytes[..actual_len].to_vec());
 
         Ok(Self {
             reader_id,
@@ -224,6 +228,7 @@ pub(crate) struct FragmentBuffer {
     pub received_fragments: HashSet<u32>,
     pub total_fragments: u32,
     pub fragment_size: u16,
+    pub source_timestamp: Option<RtpsTime>,
     pub created_at: Instant,
     pub last_updated: Instant,
 }
@@ -246,6 +251,7 @@ impl FragmentBuffer {
             received_fragments: std::collections::HashSet::new(),
             total_fragments,
             fragment_size,
+            source_timestamp: None,
             created_at: now,
             last_updated: now,
         }
@@ -361,8 +367,8 @@ mod tests {
         datafrag.fragment_size = 3;
         datafrag.sample_size = 3;
 
-        // serialized data of 5 bytes when only 3 are expected
-        datafrag.serialized_data = Arc::from(vec![1, 2, 3, 4, 5]);
+        // serialized data of 7 bytes when only 3 (+3 padding max) are expected
+        datafrag.serialized_data = Arc::from(vec![1, 2, 3, 4, 5, 6, 7]);
 
         let buffer = datafrag.write_to_vec_with_ctx(Endianness::BigEndian).unwrap();
 
