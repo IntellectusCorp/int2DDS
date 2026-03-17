@@ -562,17 +562,11 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         }
 
         let serialized_key = self.type_support.serialize_key(data as &dyn Any)?;
-        let instance_handle = match self.key_instances.lock() {
-            Ok(mut key_instances) => {
-                if let Some(instance_handle) = key_instances.remove(&serialized_key) {
-                    instance_handle
-                } else {
-                    // 3. Deserialize key
-                    //hashing
-                    self.type_support.compute_key(data as &dyn Any)
-                }
-            }
-            Err(e) => return Err(DdsError::Error(e.to_string())),
+        let computed_handle = self.type_support.compute_key(data as &dyn Any);
+        let instance_handle = {
+            let key_instances =
+                self.key_instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            key_instances.get(&serialized_key).copied().unwrap_or(computed_handle)
         };
 
         let handle = if handle.is_nil() {
