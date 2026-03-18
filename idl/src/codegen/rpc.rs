@@ -4,6 +4,7 @@
 //! In/Out structs, Result/Call/Return unions, Request/Reply wrappers.
 
 use crate::naming;
+use crate::naming::to_snake_case;
 use crate::types::*;
 
 /// HASH function (7.5.1.1.2)
@@ -29,9 +30,26 @@ pub fn generate(model: &IdlModel, opts: &RpcOptions) -> String {
     gen.line(&format!("use {}::prelude::*;", opts.crate_path));
     gen.line(&format!("use {}_derive::DdsType;", opts.crate_path));
     gen.line(&format!(
-        "use {}_rpc::types::{{UnusedMember, UnknownOperation, RequestHeader, ReplyHeader}};",
+        "use {}_rpc::types::{{UnusedMember, UnknownOperation, UnknownException, RequestHeader, ReplyHeader, RemoteExceptionCode}};",
         opts.crate_path
     ));
+    gen.line(&format!(
+        "use {}_rpc::client::{{Client, ClientParams}};",
+        opts.crate_path
+    ));
+    gen.line(&format!(
+        "use {}_rpc::service::{{Service, ServiceParams, RequestHandler}};",
+        opts.crate_path
+    ));
+    gen.line(&format!(
+        "use {}_rpc::error::{{DdsRpcError, DdsRpcResult}};",
+        opts.crate_path
+    ));
+    gen.line(&format!(
+        "use {}_rpc::types::SampleIdentity;",
+        opts.crate_path
+    ));
+    gen.line("use std::time::Duration;");
     gen.line("");
 
     for iface in &model.interfaces {
@@ -88,6 +106,14 @@ impl<'a> RpcGen<'a> {
         self.emit_request_struct(&iface.name);
         self.line("");
         self.emit_reply_struct(&iface.name);
+        self.line("");
+
+        // Function-call style (7.11.1.5)
+        self.emit_service_trait(&iface.name, &all_ops);
+        self.line("");
+        self.emit_service_dispatcher(&iface.name, &all_ops);
+        self.line("");
+        self.emit_client_struct(&iface.name, &all_ops);
         self.line("");
     }
 
@@ -358,6 +384,359 @@ impl<'a> RpcGen<'a> {
         self.line(&format!("pub data: {},", return_type));
         self.indent -= 1;
         self.line("}");
+    }
+
+    /// (7.11.1.5) Generate service trait.
+    /// Users implement this trait to provide the service logic.
+    fn emit_service_trait(&mut self, iface_name: &str, ops: &[ResolvedOperation]) {
+        self.line(&format!("pub trait {} {{", iface_name));
+        self.indent += 1;
+
+        for op in ops {
+            let method_name = to_snake_case(&op.name);
+
+            let mut params = String::from("&self");
+            for p in &op.params {
+                match p.direction {
+                    ResolvedParamDirection::In => {
+                        let ty = self.type_to_rust(&p.resolved_type);
+                        params.push_str(&format!(", {}: {}", to_snake_case(&p.name), ty));
+                    }
+                    ResolvedParamDirection::Out => {
+                        let ty = self.type_to_rust(&p.resolved_type);
+                        params.push_str(&format!(", {}: &mut {}", to_snake_case(&p.name), ty));
+                    }
+                    ResolvedParamDirection::Inout => {
+                        let ty = self.type_to_rust(&p.resolved_type);
+                        params.push_str(&format!(", {}: &mut {}", to_snake_case(&p.name), ty));
+                    }
+                }
+            }
+
+            let ret = if let Some(ret_type) = &op.return_type {
+                format!(" -> {}", self.type_to_rust(ret_type))
+            } else {
+                String::new()
+            };
+
+            self.line(&format!("fn {}({}){};", method_name, params, ret));
+        }
+
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// (7.9.2.1) Generate dispatcher that bridges Call/Return unions to the service trait.
+    fn emit_service_dispatcher(&mut self, iface_name: &str, ops: &[ResolvedOperation]) {
+        let call_type = format!("{}_Call", iface_name);
+        let return_type = format!("{}_Return", iface_name);
+
+        // Wrapper struct
+        self.line(&format!(
+            "pub struct {0}Dispatcher<T: {0}> {{", iface_name
+        ));
+        self.indent += 1;
+        self.line("inner: T,");
+        self.indent -= 1;
+        self.line("}");
+        self.line("");
+
+        self.line(&format!(
+            "impl<T: {0}> {0}Dispatcher<T> {{", iface_name
+        ));
+        self.indent += 1;
+        self.line(&format!("pub fn new(inner: T) -> Self {{"));
+        self.indent += 1;
+        self.line("Self { inner }");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.line("");
+
+        // RequestHandler impl
+        self.line(&format!(
+            "impl<T: {iface} + Send + 'static> RequestHandler<{call}, {ret}> for {iface}Dispatcher<T> {{",
+            iface = iface_name, call = call_type, ret = return_type
+        ));
+        self.indent += 1;
+        self.line(&format!("fn handle_request(&self, request: &{}) -> {} {{", call_type, return_type));
+        self.indent += 1;
+        self.line("match request {");
+        self.indent += 1;
+
+        for op in ops {
+            let variant = naming::to_pascal_case(&op.name);
+            let in_type = format!("{}_{}_In", iface_name, op.name);
+            let out_type = format!("{}_{}_Out", iface_name, op.name);
+            let result_type = format!("{}_{}_Result", iface_name, op.name);
+            let method_name = to_snake_case(&op.name);
+
+            // Build parameter destructure and call args
+            let in_params: Vec<&ResolvedParam> = op.params.iter()
+                .filter(|p| matches!(p.direction, ResolvedParamDirection::In | ResolvedParamDirection::Inout))
+                .collect();
+
+            let out_params: Vec<&ResolvedParam> = op.params.iter()
+                .filter(|p| matches!(p.direction, ResolvedParamDirection::Out | ResolvedParamDirection::Inout))
+                .collect();
+
+            if in_params.is_empty() {
+                self.line(&format!("{}::{}(_) => {{", call_type, variant));
+            } else {
+                let fields: Vec<String> = in_params.iter()
+                    .map(|p| p.name.clone())
+                    .collect();
+                self.line(&format!("{}::{}({} {{ {} }}) => {{",
+                    call_type, variant, in_type,
+                    fields.join(", ")));
+            }
+            self.indent += 1;
+
+            // Build the call arguments
+            let mut call_args = Vec::new();
+            for p in &op.params {
+                match p.direction {
+                    ResolvedParamDirection::In => {
+                        // Check if the type is Copy-like (primitives) or needs clone
+                        if Self::is_copy_type(&p.resolved_type) {
+                            call_args.push(format!("*{}", p.name));
+                        } else {
+                            call_args.push(format!("{}.clone()", p.name));
+                        }
+                    }
+                    ResolvedParamDirection::Out => {
+                        // Out params: initialize default, pass as &mut
+                        self.line(&format!("let mut {} = Default::default();",
+                            to_snake_case(&p.name)));
+                        call_args.push(format!("&mut {}", to_snake_case(&p.name)));
+                    }
+                    ResolvedParamDirection::Inout => {
+                        // Inout: clone from In struct, pass as &mut
+                        self.line(&format!("let mut {0}_mut = {0}.clone();", p.name));
+                        call_args.push(format!("&mut {}_mut", p.name));
+                    }
+                }
+            }
+
+            let call_str = call_args.join(", ");
+
+            if op.return_type.is_some() {
+                self.line(&format!("let return_ = self.inner.{}({});", method_name, call_str));
+            } else {
+                self.line(&format!("self.inner.{}({});", method_name, call_str));
+            }
+
+            // Build Out struct
+            let mut out_fields = Vec::new();
+            for p in &op.params {
+                match p.direction {
+                    ResolvedParamDirection::Out => {
+                        out_fields.push(format!("{0}: {0}", to_snake_case(&p.name)));
+                    }
+                    ResolvedParamDirection::Inout => {
+                        out_fields.push(format!("{}: {}_mut", p.name, p.name));
+                    }
+                    _ => {}
+                }
+            }
+            if op.return_type.is_some() {
+                let return_name = Self::resolve_return_name(
+                    &out_params.iter().map(|p| *p).collect::<Vec<_>>()
+                );
+                out_fields.push(format!("{}: return_", return_name));
+            }
+
+            if out_fields.is_empty() {
+                // void with no out params → dummy
+                self.line(&format!(
+                    "{}::{}({}::Result({} {{ dummy: UnusedMember }}))",
+                    return_type, variant, result_type, out_type));
+            } else {
+                self.line(&format!(
+                    "{}::{}({}::Result({} {{ {} }}))",
+                    return_type, variant, result_type, out_type,
+                    out_fields.join(", ")));
+            }
+
+            self.indent -= 1;
+            self.line("}");
+        }
+
+        // Default case for unknown operations
+        self.line(&format!(
+            "{}::UnknownOp(_) => {}::UnknownOp(UnknownOperation),",
+            call_type, return_type));
+
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// (7.11.1.5.4) Generate typed client with per-operation methods.
+    fn emit_client_struct(&mut self, iface_name: &str, ops: &[ResolvedOperation]) {
+        let _request_type = format!("{}_Request", iface_name);
+        let _reply_type = format!("{}_Reply", iface_name);
+        let call_type = format!("{}_Call", iface_name);
+        let return_type = format!("{}_Return", iface_name);
+        let client_name = format!("{}Client", iface_name);
+
+        // Struct definition
+        self.line(&format!("pub struct {} {{", client_name));
+        self.indent += 1;
+        self.line(&format!("client: Client<{}, {}>,", call_type, return_type));
+        self.indent -= 1;
+        self.line("}");
+        self.line("");
+
+        // impl block
+        self.line(&format!("impl {} {{", client_name));
+        self.indent += 1;
+
+        // Constructor
+        self.line("pub fn new(params: ClientParams) -> DdsRpcResult<Self> {");
+        self.indent += 1;
+        self.line("let client = Client::new(params)?;");
+        self.line("Ok(Self { client })");
+        self.indent -= 1;
+        self.line("}");
+
+        // Per-operation sync methods
+        for op in ops {
+            self.line("");
+            let method_name = to_snake_case(&op.name);
+            let variant = naming::to_pascal_case(&op.name);
+            let in_type = format!("{}_{}_In", iface_name, op.name);
+
+            // Build method signature params
+            let mut sig_params = String::from("&self");
+            let in_params: Vec<&ResolvedParam> = op.params.iter()
+                .filter(|p| matches!(p.direction, ResolvedParamDirection::In | ResolvedParamDirection::Inout))
+                .collect();
+
+            let out_params: Vec<&ResolvedParam> = op.params.iter()
+                .filter(|p| matches!(p.direction, ResolvedParamDirection::Out | ResolvedParamDirection::Inout))
+                .collect();
+
+            for p in &in_params {
+                let ty = self.type_to_rust(&p.resolved_type);
+                sig_params.push_str(&format!(", {}: {}", to_snake_case(&p.name), ty));
+            }
+            sig_params.push_str(", timeout: Duration");
+
+            // Return type
+            let has_return = op.return_type.is_some();
+            let has_out = !out_params.is_empty();
+
+            let ret_type = if !has_return && !has_out {
+                "()".to_string()
+            } else {
+                let mut parts = Vec::new();
+                for p in &out_params {
+                    parts.push(self.type_to_rust(&p.resolved_type));
+                }
+                if let Some(ret) = &op.return_type {
+                    parts.push(self.type_to_rust(ret));
+                }
+                if parts.len() == 1 {
+                    parts[0].clone()
+                } else {
+                    format!("({})", parts.join(", "))
+                }
+            };
+
+            self.line(&format!(
+                "pub fn {}({}) -> DdsRpcResult<{}> {{",
+                method_name, sig_params, ret_type
+            ));
+            self.indent += 1;
+
+            // Build In struct
+            if in_params.is_empty() {
+                self.line(&format!("let call = {}::{}({} {{ dummy: UnusedMember }});",
+                    call_type, variant, in_type));
+            } else {
+                let fields: Vec<String> = in_params.iter()
+                    .map(|p| to_snake_case(&p.name))
+                    .collect();
+                self.line(&format!("let call = {}::{}({} {{ {} }});",
+                    call_type, variant, in_type, fields.join(", ")));
+            }
+
+            // Send and receive
+            self.line("let id = self.client.send_request(&call)?;");
+            self.line("let reply = self.client.receive_reply(timeout)?;");
+            self.line("let data = reply.data().map_err(|e| DdsRpcError::Dds(e.into()))?;");
+            self.line("");
+
+            // Check remote exception
+            self.line("if data.header.remote_ex != RemoteExceptionCode::Ok {");
+            self.indent += 1;
+            self.line("return Err(DdsRpcError::Remote(data.header.remote_ex));");
+            self.indent -= 1;
+            self.line("}");
+            self.line("");
+
+            // Unpack Return union
+            let result_type = format!("{}_{}_Result", iface_name, op.name);
+            self.line(&format!("match &data.data {{"));
+            self.indent += 1;
+            self.line(&format!("{}::{}(result) => match result {{", return_type, variant));
+            self.indent += 1;
+            self.line(&format!("{}::Result(out) => {{", result_type));
+            self.indent += 1;
+
+            // Extract return value
+            if !has_return && !has_out {
+                self.line("Ok(())");
+            } else {
+                let mut fields = Vec::new();
+                for p in &out_params {
+                    fields.push(format!("out.{}.clone()", to_snake_case(&p.name)));
+                }
+                if has_return {
+                    let return_name = Self::resolve_return_name(
+                        &out_params.iter().map(|p| *p).collect::<Vec<_>>()
+                    );
+                    fields.push(format!("out.{}.clone()", return_name));
+                }
+                if fields.len() == 1 {
+                    self.line(&format!("Ok({})", fields[0]));
+                } else {
+                    self.line(&format!("Ok(({}))", fields.join(", ")));
+                }
+            }
+
+            self.indent -= 1;
+            self.line("}");
+            // Exception variants
+            self.line("_ => Err(DdsRpcError::Remote(RemoteExceptionCode::UnknownException)),");
+            self.indent -= 1;
+            self.line("}");
+            // Wrong operation in return
+            self.line("_ => Err(DdsRpcError::Remote(RemoteExceptionCode::UnknownOperation)),");
+            self.indent -= 1;
+            self.line("}");
+
+            self.indent -= 1;
+            self.line("}");
+        }
+
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    fn is_copy_type(ty: &ResolvedType) -> bool {
+        matches!(ty,
+            ResolvedType::Bool | ResolvedType::U8 | ResolvedType::I8 |
+            ResolvedType::I16 | ResolvedType::U16 | ResolvedType::I32 |
+            ResolvedType::U32 | ResolvedType::I64 | ResolvedType::U64 |
+            ResolvedType::F32 | ResolvedType::F64 | ResolvedType::Char |
+            ResolvedType::WChar
+        )
     }
 
     fn type_to_rust(&self, ty: &ResolvedType) -> String {
@@ -1004,5 +1383,173 @@ mod tests {
 
         assert!(code.contains("pub struct Calculator_Request {"));
         assert!(code.contains("pub struct Calculator_Reply {"));
+    }
+
+    #[test]
+    fn test_service_trait() {
+        let defs = parse_idl(
+            r#"
+            interface RobotControl {
+                void setSpeed(in float speed);
+                float getSpeed();
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, &RpcOptions::default());
+
+        assert!(code.contains("pub trait RobotControl {"));
+        assert!(code.contains("fn set_speed(&self, speed: f32);"));
+        assert!(code.contains("fn get_speed(&self) -> f32;"));
+    }
+
+    #[test]
+    fn test_service_trait_out_params() {
+        let defs = parse_idl(
+            r#"
+            interface Foo {
+                void getPosition(out float x, out float y);
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, &RpcOptions::default());
+
+        assert!(code.contains("fn get_position(&self, x: &mut f32, y: &mut f32);"));
+    }
+
+    #[test]
+    fn test_service_dispatcher() {
+        let defs = parse_idl(
+            r#"
+            interface RobotControl {
+                void setSpeed(in float speed);
+                float getSpeed();
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, &RpcOptions::default());
+
+        assert!(code.contains("pub struct RobotControlDispatcher<T: RobotControl>"));
+        assert!(code.contains("impl<T: RobotControl + Send + 'static> RequestHandler<RobotControl_Call, RobotControl_Return> for RobotControlDispatcher<T>"));
+        assert!(code.contains("fn handle_request(&self, request: &RobotControl_Call) -> RobotControl_Return"));
+    }
+
+    #[test]
+    fn test_service_dispatcher_void_dispatch() {
+        let defs = parse_idl(
+            r#"
+            interface Foo {
+                void fire();
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, &RpcOptions::default());
+
+        // void operation → dispatches, constructs Out with dummy
+        assert!(code.contains("self.inner.fire();"));
+        assert!(code.contains("dummy: UnusedMember"));
+    }
+
+    #[test]
+    fn test_service_dispatcher_return_value() {
+        let defs = parse_idl(
+            r#"
+            interface Foo {
+                float getSpeed();
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, &RpcOptions::default());
+
+        assert!(code.contains("let return_ = self.inner.get_speed();"));
+        assert!(code.contains("return_: return_"));
+    }
+
+    #[test]
+    fn test_client_struct() {
+        let defs = parse_idl(
+            r#"
+            interface RobotControl {
+                void setSpeed(in float speed);
+                float getSpeed();
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, &RpcOptions::default());
+
+        assert!(code.contains("pub struct RobotControlClient {"));
+        assert!(code.contains("client: Client<RobotControl_Call, RobotControl_Return>,"));
+        assert!(code.contains("pub fn new(params: ClientParams) -> DdsRpcResult<Self>"));
+        assert!(code.contains("pub fn set_speed(&self, speed: f32, timeout: Duration) -> DdsRpcResult<()>"));
+        assert!(code.contains("pub fn get_speed(&self, timeout: Duration) -> DdsRpcResult<f32>"));
+    }
+
+    #[test]
+    fn test_client_out_params() {
+        let defs = parse_idl(
+            r#"
+            interface Foo {
+                long compute(in long x, out double y);
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, &RpcOptions::default());
+
+        // out param + return → tuple return
+        assert!(code.contains("pub fn compute(&self, x: i32, timeout: Duration) -> DdsRpcResult<(f64, i32)>"));
+    }
+
+    /// Full RobotControl example: verify trait + dispatcher + client are all generated
+    #[test]
+    fn test_full_robot_control_function_call() {
+        let defs = parse_idl(
+            r#"
+            enum Command { CYCLIC, POSITION };
+            exception TooFast { float speed; };
+            interface RobotControl {
+                void command(in Command com);
+                void setSpeed(in float speed) raises (TooFast);
+                float getSpeed();
+                long getStatus();
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, &RpcOptions::default());
+
+        // Service trait
+        assert!(code.contains("pub trait RobotControl {"));
+        assert!(code.contains("fn command(&self, com: Command);"));
+        assert!(code.contains("fn set_speed(&self, speed: f32);"));
+        assert!(code.contains("fn get_speed(&self) -> f32;"));
+        assert!(code.contains("fn get_status(&self) -> i32;"));
+
+        // Dispatcher
+        assert!(code.contains("pub struct RobotControlDispatcher<T: RobotControl>"));
+        assert!(code.contains("RobotControl_Call::Command("));
+        assert!(code.contains("RobotControl_Call::SetSpeed("));
+        assert!(code.contains("RobotControl_Call::GetSpeed("));
+        assert!(code.contains("RobotControl_Call::GetStatus("));
+
+        // Client
+        assert!(code.contains("pub struct RobotControlClient {"));
+        assert!(code.contains("pub fn command(&self, com: Command, timeout: Duration) -> DdsRpcResult<()>"));
+        assert!(code.contains("pub fn set_speed(&self, speed: f32, timeout: Duration) -> DdsRpcResult<()>"));
+        assert!(code.contains("pub fn get_speed(&self, timeout: Duration) -> DdsRpcResult<f32>"));
+        assert!(code.contains("pub fn get_status(&self, timeout: Duration) -> DdsRpcResult<i32>"));
     }
 }
