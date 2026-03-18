@@ -143,6 +143,53 @@ pub struct ResolvedUnionCaseMember {
     pub resolved_type: ResolvedType,
 }
 
+#[derive(Debug, Clone)]
+pub struct ResolvedInterface {
+    pub name: String,
+    pub qualified_name: String,
+    pub base_interfaces: Vec<String>,
+    pub operations: Vec<ResolvedOperation>,
+    pub attributes: Vec<ResolvedAttribute>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedOperation {
+    pub name: String,
+    pub return_type: Option<ResolvedType>, // None = void
+    pub params: Vec<ResolvedParam>,
+    pub raises: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedParam {
+    pub name: String,
+    pub resolved_type: ResolvedType,
+    pub direction: ResolvedParamDirection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedParamDirection {
+    In,
+    Out,
+    Inout,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedAttribute {
+    pub name: String,
+    pub resolved_type: ResolvedType,
+    pub readonly: bool,
+    pub raises: Vec<String>,
+}
+
+/// Resolved exception definition.
+#[derive(Debug, Clone)]
+pub struct ResolvedException {
+    pub name: String,
+    pub qualified_name: String,
+    pub members: Vec<ResolvedMember>,
+}
+
 /// Complete resolved IDL model.
 #[derive(Debug, Clone)]
 pub struct IdlModel {
@@ -151,4 +198,6 @@ pub struct IdlModel {
     pub bitmasks: Vec<ResolvedBitmask>,
     pub bitsets: Vec<ResolvedBitset>,
     pub unions: Vec<ResolvedUnion>,
+    pub interfaces: Vec<ResolvedInterface>,
+    pub exceptions: Vec<ResolvedException>,
 }
