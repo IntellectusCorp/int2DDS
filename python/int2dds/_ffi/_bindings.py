@@ -166,6 +166,21 @@ ffi.cdef("""
         int32_t *total_count_out,
         int32_t *current_count_out
     );
+
+    /* --- Writer Status Getters --- */
+    Int2DdsRet int2dds_datawriter_get_liveliness_lost_status(
+        const Int2DdsDataWriter *writer,
+        Int2DdsLivelinessLostStatus *status_out
+    );
+    Int2DdsRet int2dds_datawriter_get_offered_deadline_missed_status(
+        const Int2DdsDataWriter *writer,
+        Int2DdsOfferedDeadlineMissedStatus *status_out
+    );
+    Int2DdsRet int2dds_datawriter_get_offered_incompatible_qos_status(
+        const Int2DdsDataWriter *writer,
+        Int2DdsOfferedIncompatibleQosStatus *status_out
+    );
+
     Int2DdsRet int2dds_write_serialized(
         const Int2DdsDataWriter *writer,
         const uint8_t *data,
@@ -211,6 +226,29 @@ ffi.cdef("""
         int32_t *total_count_out,
         int32_t *current_count_out
     );
+
+    /* --- Reader Status Getters --- */
+    Int2DdsRet int2dds_datareader_get_liveliness_changed_status(
+        const Int2DdsDataReader *reader,
+        Int2DdsLivelinessChangedStatus *status_out
+    );
+    Int2DdsRet int2dds_datareader_get_sample_rejected_status(
+        const Int2DdsDataReader *reader,
+        Int2DdsSampleRejectedStatus *status_out
+    );
+    Int2DdsRet int2dds_datareader_get_sample_lost_status(
+        const Int2DdsDataReader *reader,
+        Int2DdsSampleLostStatus *status_out
+    );
+    Int2DdsRet int2dds_datareader_get_requested_deadline_missed_status(
+        const Int2DdsDataReader *reader,
+        Int2DdsRequestedDeadlineMissedStatus *status_out
+    );
+    Int2DdsRet int2dds_datareader_get_requested_incompatible_qos_status(
+        const Int2DdsDataReader *reader,
+        Int2DdsRequestedIncompatibleQosStatus *status_out
+    );
+
     Int2DdsRet int2dds_take_serialized(
         const Int2DdsDataReader *reader,
         uint8_t *buffer,

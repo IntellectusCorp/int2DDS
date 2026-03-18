@@ -331,6 +331,48 @@ class DataWriter(Generic[T]):
         _, current = self.get_publication_matched_status()
         return current
 
+    def get_liveliness_lost_status(self) -> dict:
+        """Get liveliness lost status.
+
+        Returns:
+            dict with total_count, total_count_change
+        """
+        status = ffi.new("Int2DdsLivelinessLostStatus *")
+        check_ret(lib.int2dds_datawriter_get_liveliness_lost_status(self._handle, status))
+        return {
+            "total_count": status.total_count,
+            "total_count_change": status.total_count_change,
+        }
+
+    def get_offered_deadline_missed_status(self) -> dict:
+        """Get offered deadline missed status.
+
+        Returns:
+            dict with total_count, total_count_change, last_instance_handle
+        """
+        status = ffi.new("Int2DdsOfferedDeadlineMissedStatus *")
+        check_ret(lib.int2dds_datawriter_get_offered_deadline_missed_status(self._handle, status))
+        return {
+            "total_count": status.total_count,
+            "total_count_change": status.total_count_change,
+            "last_instance_handle": bytes(status.last_instance_handle),
+        }
+
+    def get_offered_incompatible_qos_status(self) -> dict:
+        """Get offered incompatible QoS status.
+
+        Returns:
+            dict with total_count, total_count_change, last_policy_id, policies_count
+        """
+        status = ffi.new("Int2DdsOfferedIncompatibleQosStatus *")
+        check_ret(lib.int2dds_datawriter_get_offered_incompatible_qos_status(self._handle, status))
+        return {
+            "total_count": status.total_count,
+            "total_count_change": status.total_count_change,
+            "last_policy_id": int(status.last_policy_id),
+            "policies_count": status.policies_count,
+        }
+
     def close(self) -> None:
         """Delete the DataWriter."""
         if not self._closed and self._handle is not None:
