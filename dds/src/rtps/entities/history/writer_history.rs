@@ -57,12 +57,12 @@ impl HistoryCache for WriterHistoryCache {
             .collect()
     }
 
-    fn get_seq_num_min(&self) -> SequenceNumber {
-        self.changes.keys().next().copied().unwrap_or(SequenceNumber::new(0, 1))
+    fn get_seq_num_min(&self) -> Option<SequenceNumber> {
+        self.changes.keys().next().copied()
     }
 
-    fn get_seq_num_max(&self) -> SequenceNumber {
-        self.changes.keys().next_back().copied().unwrap_or(SequenceNumber::new(0, 0))
+    fn get_seq_num_max(&self) -> Option<SequenceNumber> {
+        self.changes.keys().next_back().copied()
     }
 }
 

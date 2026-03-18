@@ -42,6 +42,7 @@ use crate::{
             writer::{StatefulWriter, Writer},
         },
     },
+    utils::timer::timer_id::TimerId,
 };
 
 #[derive(Debug)]
@@ -57,7 +58,7 @@ pub(crate) struct DataWriterHistoryCache<Foo> {
     is_reliable: bool,
     max_blocking_time: Duration,
     has_key: bool,
-    lifespan_timers: Arc<Mutex<HashMap<Guid, String>>>, // writer_guid -> timer_id
+    lifespan_timers: Arc<Mutex<HashMap<Guid, TimerId>>>, // writer_guid -> timer_id
 }
 
 impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
@@ -96,7 +97,7 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
     }
 
     // Returns the map of lifespan timers keyed by writer GUID.
-    fn get_lifespan_timers(&self) -> Arc<Mutex<HashMap<Guid, String>>> {
+    fn get_lifespan_timers(&self) -> Arc<Mutex<HashMap<Guid, TimerId>>> {
         self.lifespan_timers.clone()
     }
 
@@ -126,9 +127,11 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
             drop(timers_guard);
 
             if !timer_exists {
-                if let Err(e) =
-                    self.register_lifespan_timer(writer_guid, duration, "lifespan_timer_writer")
-                {
+                if let Err(e) = self.register_lifespan_timer(
+                    writer_guid,
+                    duration,
+                    TimerId::LifespanWriter { writer_guid },
+                ) {
                     debug!("Failed to ensure lifespan timer: {:?}", e);
                 }
             }
@@ -210,7 +213,7 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
         &self,
         writer_guid: Guid,
         lifespan_duration: Duration,
-        timer_id_prefix: &str,
+        timer_id: TimerId,
     ) -> DdsResult<()> {
         let data_writer_weak = if let Some(data_writer) = self.data_writer.upgrade() {
             Arc::downgrade(&data_writer)
@@ -239,7 +242,7 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
         self.register_lifespan_timer_with_callback(
             writer_guid,
             lifespan_duration,
-            timer_id_prefix,
+            timer_id,
             callback,
         )
     }

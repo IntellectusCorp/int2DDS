@@ -12,7 +12,6 @@ use std::{
 };
 
 use log::{debug, error, warn};
-use rand::random_range;
 use speedy::{Endianness, Writable};
 
 use crate::{
@@ -23,7 +22,7 @@ use crate::{
         },
         instance_handle::InstanceHandle,
     },
-    dcps::topic::type_support::DdsType,
+    dcps::{infrastructure::status::StatusKind, topic::type_support::DdsType},
     infrastructure::qos_policy::{
         DurabilityQosPolicyKind, QosPolicyId, ReliabilityQosPolicyKind,
         TypeConsistencyEnforcementQosPolicy, TypeConsistencyKind,
@@ -93,7 +92,7 @@ use crate::{
         },
     },
     serialize::pl_cdr::InlineQosParameters,
-    utils::timer::timer_handler::TimerHandler,
+    utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
     xtypes::{check_structural_compatibility, TypeIdentifier, TypeObject},
 };
 
@@ -124,8 +123,27 @@ fn validate_endpoint_compatibility<L>(
     requested: &SubscriptionBuiltinTopicData,
     offered: &PublicationBuiltinTopicData,
     update_incompatible_qos: impl Fn(&L, QosPolicyId),
+    update_inconsistent_topic: impl Fn(&L),
     who: &'static str, // for log
 ) -> RtpsResult<()> {
+    // TopicKind - reject if writer and reader disagree on keyed vs keyless
+    let writer_keyed = offered.endpoint_guid().entity_kind().is_with_key();
+    let reader_keyed = requested.endpoint_guid().entity_kind().is_with_key();
+    if writer_keyed != reader_keyed {
+        update_inconsistent_topic(local);
+        debug!(
+            "[{}] TopicKind mismatch: writer keyed={}, reader keyed={}",
+            who, writer_keyed, reader_keyed
+        );
+        return Err(RtpsError::new(
+            RtpsErrorCode::TopicKindIncompatible,
+            format!(
+                "[TopicKind mismatch: writer keyed={}, reader keyed={} :{}]",
+                writer_keyed, reader_keyed, who
+            ),
+        ));
+    }
+
     // QoS
     if !check_qos_compatibility(requested, offered) {
         if let Some(pid) = check_qos_compatibility_with_policy_id(requested, offered) {
@@ -728,6 +746,7 @@ impl SedpLogic {
                 &subscription_builtin_topic_data,
                 &writer.publication_builtin_topic_data()?,
                 |w, pid| w.update_offered_incompatible_qos_status(pid),
+                |w| w.update_status(StatusKind::INCONSISTENT_TOPIC, None),
                 "writer->reader",
             ) {
                 // Incompatible - remove matching
@@ -792,6 +811,7 @@ impl SedpLogic {
             &subscription_builtin_topic_data,
             &writer.publication_builtin_topic_data()?,
             |w, pid| w.update_offered_incompatible_qos_status(pid),
+            |w| w.update_status(StatusKind::INCONSISTENT_TOPIC, None),
             "writer->reader",
         )?;
 
@@ -869,6 +889,7 @@ impl SedpLogic {
                 &subscription_builtin_topic_data,
                 &writer.publication_builtin_topic_data()?,
                 |w, pid| w.update_offered_incompatible_qos_status(pid),
+                |w| w.update_status(StatusKind::INCONSISTENT_TOPIC, None),
                 "writer->reader",
             ) {
                 // Incompatible - remove matching
@@ -934,6 +955,7 @@ impl SedpLogic {
             &subscription_builtin_topic_data,
             &writer.publication_builtin_topic_data()?,
             |w, pid| w.update_offered_incompatible_qos_status(pid),
+            |w| w.update_status(StatusKind::INCONSISTENT_TOPIC, None),
             "writer->reader",
         ) {
             error!("StatelessWriter compatibility error -> {}", e);
@@ -1113,6 +1135,7 @@ impl SedpLogic {
                 &reader.subscription_builtin_topic_data()?,
                 &publication_builtin_topic_data,
                 |r, pid| r.update_requested_incompatible_qos_status(pid),
+                |r| r.update_status(StatusKind::INCONSISTENT_TOPIC, None),
                 "reader->writer",
             ) {
                 // Incompatible - remove matching
@@ -1177,6 +1200,7 @@ impl SedpLogic {
             &reader.subscription_builtin_topic_data()?,
             &publication_builtin_topic_data,
             |r, pid| r.update_requested_incompatible_qos_status(pid),
+            |r| r.update_status(StatusKind::INCONSISTENT_TOPIC, None),
             "reader->writer",
         )?;
 
@@ -1225,6 +1249,7 @@ impl SedpLogic {
                 &reader.subscription_builtin_topic_data()?,
                 &publication_builtin_topic_data,
                 |r, pid| r.update_requested_incompatible_qos_status(pid),
+                |r| r.update_status(StatusKind::INCONSISTENT_TOPIC, None),
                 "reader->writer",
             ) {
                 // Incompatible - remove matching
@@ -1291,6 +1316,7 @@ impl SedpLogic {
             &reader.subscription_builtin_topic_data()?,
             &publication_builtin_topic_data,
             |r, pid| r.update_requested_incompatible_qos_status(pid),
+            |r| r.update_status(StatusKind::INCONSISTENT_TOPIC, None),
             "reader->writer",
         )?;
 
@@ -1433,10 +1459,11 @@ impl SedpLogic {
         let writer_entity_id = writer.guid().entity_id();
 
         let (first_sn, last_sn, heartbeat_count) = {
+            let last_change_sn = writer.last_change_sequence_number();
             match writer.writer_cache().lock() {
                 Ok(writer_cache) => (
-                    writer_cache.get_seq_num_min(),
-                    writer_cache.get_seq_num_max(),
+                    writer_cache.get_seq_num_min().unwrap_or(last_change_sn + 1),
+                    writer_cache.get_seq_num_max().unwrap_or(last_change_sn),
                     writer.heartbeat_count(),
                 ),
                 Err(e) => {
@@ -1580,13 +1607,10 @@ impl SedpLogic {
         let participant = self.get_upgraded_participant()?;
         let participant_weak = self.participant.clone();
 
-        // Generate unique timer ID using participant GUID, timestamp and random number
-        let timer_id = format!(
-            "sedp_send_{:?}_{}_{:?}",
-            participant.guid().prefix(),
-            logic_start_time.elapsed().as_nanos(),
-            random_range(0..10000)
-        );
+        let timer_id = TimerId::SedpScheduledMessage {
+            guid_prefix: participant.guid().prefix(),
+            elapsed_nano: logic_start_time.elapsed().as_nanos() as u64,
+        };
 
         let message = Arc::new(message);
         if let Ok(timer_handler) = self.timer_handler.lock() {
@@ -1655,7 +1679,7 @@ impl SedpLogic {
         reader_entity_id: EntityId,
         writer_entity_id: EntityId,
         missing_changes: Vec<SequenceNumber>,
-        acknack_count: i32,
+        acknack_count: u32,
         bitmap_base: SequenceNumber,
     ) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
@@ -1881,11 +1905,8 @@ impl SedpLogic {
         remote_writer_guid: Guid,
     ) -> RtpsResult<()> {
         let stateful_reader_id = stateful_reader.guid().entity_id();
-        let timer_id = format!(
-            "preemptive_acknack_{:?}_{:?}",
-            stateful_reader_id,
-            chrono::Local::now().to_rfc3339()
-        );
+        let timer_id =
+            TimerId::PreemptiveAcknack { entity_id: stateful_reader_id, remote_writer_guid };
 
         let participant = self.get_upgraded_participant()?;
 
@@ -1920,11 +1941,8 @@ impl SedpLogic {
         remote_reader_guid: Guid,
     ) -> RtpsResult<()> {
         let stateful_writer_id = stateful_writer.guid().entity_id();
-        let timer_id = format!(
-            "preemptive_heartbeat_{:?}_{:?}",
-            stateful_writer_id,
-            chrono::Local::now().to_rfc3339()
-        );
+        let timer_id =
+            TimerId::PreemptiveHeartbeat { entity_id: stateful_writer_id, remote_reader_guid };
 
         let participant = self.get_upgraded_participant()?;
 
@@ -2247,13 +2265,19 @@ impl UnicastMessageProcessor for SedpLogic {
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::RtpsEntityNotFound, None))?;
 
         // Check for duplicate Heartbeat
-        if heartbeat.count <= writer_proxy.last_heartbeat_count() {
-            debug!(
-                "[SEDP] [Heartbeat] Ignoring old Heartbeat: count={} <= last_count={}",
-                heartbeat.count,
-                writer_proxy.last_heartbeat_count()
-            );
-            return Ok(());
+        match writer_proxy.last_heartbeat_count() {
+            Some(prev) => {
+                if (heartbeat.count.wrapping_sub(prev) as i32) <= 0 {
+                    debug!(
+                        "[SEDP] [Heartbeat] Ignoring old Heartbeat: count={} <= last_count={}",
+                        heartbeat.count, prev
+                    );
+                    return Ok(());
+                }
+            }
+            None => {
+                debug!("[SEDP] [Heartbeat] First Heartbeat received: count={}", heartbeat.count);
+            }
         }
         writer_proxy.set_last_heartbeat_count(heartbeat.count);
 
@@ -2274,7 +2298,7 @@ impl UnicastMessageProcessor for SedpLogic {
             let acknack_count = writer_proxy.acknack_count();
             self.send_sedp_acknack_message(
                 remote_writer_guid,
-                heartbeat.reader_id,
+                local_reader.guid().entity_id(),
                 heartbeat.writer_id,
                 missing_changes,
                 acknack_count,
@@ -2341,13 +2365,19 @@ impl UnicastMessageProcessor for SedpLogic {
             .find(|rp| rp.remote_reader_guid() == remote_reader_guid)
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
 
-        if acknack.count <= reader_proxy.last_acknack_count() {
-            debug!(
-                "[SEDP] [AckNack] Ignoring old AckNack: count={} <= last_count={}",
-                acknack.count,
-                reader_proxy.last_acknack_count()
-            );
-            return Ok(());
+        match reader_proxy.last_acknack_count() {
+            Some(prev) => {
+                if (acknack.count.wrapping_sub(prev) as i32) <= 0 {
+                    debug!(
+                        "[SEDP] [AckNack] Ignoring old AckNack: count={} <= last_count={}",
+                        acknack.count, prev
+                    );
+                    return Ok(());
+                }
+            }
+            None => {
+                debug!("[SEDP] [AckNack] First AckNack received: count={}", acknack.count);
+            }
         }
         reader_proxy.set_last_acknack_count(acknack.count);
         drop(reader_proxies_guard);
@@ -2423,7 +2453,9 @@ impl UnicastMessageProcessor for SedpLogic {
             .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
 
-        let mut irrelevant_changes = Vec::new();
+        let capacity =
+            (gap.gap_list.bitmap_base().to_i64() - gap.gap_start.to_i64()).max(0) as usize;
+        let mut irrelevant_changes = Vec::with_capacity(capacity);
 
         for sn in gap.gap_start.to_i64()..gap.gap_list.bitmap_base().to_i64() {
             irrelevant_changes.push(SequenceNumber::from_i64(sn));

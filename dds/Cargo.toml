@@ -78,8 +78,8 @@ winapi = { version = "0.3", features = [
 windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_Memory"] }
 
 [[example]]
-name = "hello_world_param"
-path = "examples/hello_world/hello_world_param.rs"
+name = "hello_world"
+path = "examples/hello_world/hello_world.rs"
 
 [[example]]
 name = "qos_profile_publisher"

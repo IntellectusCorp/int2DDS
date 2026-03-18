@@ -15,7 +15,8 @@ use int2dds::{
     rtps::common::types::SerializedData,
     serialize::cdr::ExtensibilityKind,
     topic::sql::ast::Parameter,
-    topic::type_support::{SerializationFormat, TypeSupport},
+    topic::type_support::{FieldAccessor, SerializationFormat, TypeSupport},
+    xtypes::{TypeIdentifier, TypeObject},
 };
 
 /// Lightweight TypeSupport for raw bytes FFI path.
@@ -26,18 +27,53 @@ pub struct RawTypeSupport {
     type_name: String,
     extensibility: ExtensibilityKind,
     has_key: bool,
+    type_identifier: Option<TypeIdentifier>,
+    type_object: Option<TypeObject>,
 }
 
 impl RawTypeSupport {
-    pub fn new(type_name: String, extensibility: ExtensibilityKind, has_key: bool) -> Self {
-        Self { type_name, extensibility, has_key }
+    pub fn new(type_name: String, extensibility: ExtensibilityKind) -> Self {
+        Self { type_name, extensibility, has_key: false, type_identifier: None, type_object: None }
     }
+
     pub fn new_with_key(
         type_name: String,
         extensibility: ExtensibilityKind,
         has_key: bool,
     ) -> Self {
-        Self { type_name, extensibility, has_key }
+        Self { type_name, extensibility, has_key, type_identifier: None, type_object: None }
+    }
+
+    /// Create a RawTypeSupport with pre-built TypeIdentifier and TypeObject.
+    ///
+    /// This enables DDS-XTypes discovery parameters (0x0069, 0x0072) to be sent
+    /// during endpoint matching.
+    pub fn with_type_info(
+        type_name: String,
+        extensibility: ExtensibilityKind,
+        has_key: bool,
+        type_identifier: TypeIdentifier,
+        type_object: TypeObject,
+    ) -> Self {
+        Self {
+            type_name,
+            extensibility,
+            has_key,
+            type_identifier: Some(type_identifier),
+            type_object: Some(type_object),
+        }
+    }
+}
+
+impl FieldAccessor for RawTypeSupport {
+    fn get_field_value(&self, _data: &dyn Any, _field_path: &str) -> DdsResult<Parameter> {
+        Err(DdsError::Error(
+            "RawTypeSupport: field access not supported in raw bytes mode".to_string(),
+        ))
+    }
+
+    fn has_field(&self, _field_path: &str) -> bool {
+        false
     }
 }
 
@@ -48,16 +84,6 @@ impl TypeSupport for RawTypeSupport {
 
     fn get_type_name(&self) -> &str {
         &self.type_name
-    }
-
-    fn get_field_value(&self, _data: &dyn Any, _field_path: &str) -> DdsResult<Parameter> {
-        Err(DdsError::Error(
-            "RawTypeSupport: field access not supported in raw bytes mode".to_string(),
-        ))
-    }
-
-    fn has_field(&self, _field_path: &str) -> bool {
-        false
     }
 
     fn serialize(
@@ -73,7 +99,10 @@ impl TypeSupport for RawTypeSupport {
         _data: &[u8],
         _format: Option<&SerializationFormat>,
     ) -> DdsResult<Box<dyn Any>> {
-        Err(DdsError::Error("RawTypeSupport: use take_serialized() instead".to_string()))
+        // Return a dummy Int2DdsData so that the DDS internal key extraction
+        // (update_instance_state) succeeds and data is stored in the cache.
+        // Actual deserialization is done by C users via take_serialized().
+        Ok(Box::new(crate::data::Int2DdsData))
     }
 
     fn serialize_key(&self, _data: &dyn Any) -> DdsResult<SerializedData> {
@@ -94,5 +123,13 @@ impl TypeSupport for RawTypeSupport {
 
     fn get_extensibility_kind(&self) -> ExtensibilityKind {
         self.extensibility
+    }
+
+    fn get_type_identifier(&self) -> Option<TypeIdentifier> {
+        self.type_identifier.clone()
+    }
+
+    fn get_type_object(&self) -> Option<TypeObject> {
+        self.type_object.clone()
     }
 }

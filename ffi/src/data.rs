@@ -16,7 +16,7 @@ use int2dds::{
     serialize::cdr::ExtensibilityKind,
     topic::{
         sql::ast::Parameter,
-        type_support::{DdsType, SerializationFormat, TypeSupport},
+        type_support::{DdsType, FieldAccessor, SerializationFormat, TypeSupport},
     },
 };
 
@@ -39,6 +39,16 @@ unsafe impl Sync for Int2DdsData {}
 #[derive(Debug, Clone, Default)]
 pub struct Int2DdsDataTypeSupport;
 
+impl FieldAccessor for Int2DdsDataTypeSupport {
+    fn get_field_value(&self, _data: &dyn Any, _field_path: &str) -> DdsResult<Parameter> {
+        Err(DdsError::Error("Int2DdsDataTypeSupport: Use registered TypeSupport".to_string()))
+    }
+
+    fn has_field(&self, _field_path: &str) -> bool {
+        false
+    }
+}
+
 impl TypeSupport for Int2DdsDataTypeSupport {
     fn type_id(&self) -> TypeId {
         TypeId::of::<Int2DdsData>()
@@ -46,14 +56,6 @@ impl TypeSupport for Int2DdsDataTypeSupport {
 
     fn get_type_name(&self) -> &str {
         "Int2DdsData"
-    }
-
-    fn get_field_value(&self, _data: &dyn Any, _field_path: &str) -> DdsResult<Parameter> {
-        Err(DdsError::Error("Int2DdsDataTypeSupport: Use registered TypeSupport".to_string()))
-    }
-
-    fn has_field(&self, _field_path: &str) -> bool {
-        false
     }
 
     fn serialize(
@@ -95,4 +97,5 @@ impl TypeSupport for Int2DdsDataTypeSupport {
 
 impl DdsType for Int2DdsData {
     type TypeSupport = Int2DdsDataTypeSupport;
+    type FieldAccessor = Int2DdsDataTypeSupport;
 }

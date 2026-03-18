@@ -7,6 +7,12 @@ pub enum Definition {
     Struct(StructDef),
     Enum(EnumDef),
     Typedef(TypedefDef),
+    Bitmask(BitmaskDef),
+    Bitset(BitsetDef),
+    Union(UnionDef),
+    Interface(InterfaceDef),
+    Exception(ExceptionDef),
+    Const(ConstDef),
 }
 
 #[derive(Debug, Clone)]
@@ -18,6 +24,7 @@ pub struct ModuleDef {
 #[derive(Debug, Clone)]
 pub struct StructDef {
     pub name: String,
+    pub base_type: Option<String>,
     pub members: Vec<StructMember>,
     pub annotations: Vec<Annotation>,
 }
@@ -48,6 +55,53 @@ pub struct TypedefDef {
     pub type_spec: TypeSpec,
 }
 
+#[derive(Debug, Clone)]
+pub struct BitmaskDef {
+    pub name: String,
+    pub flags: Vec<BitmaskFlag>,
+    pub annotations: Vec<Annotation>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BitmaskFlag {
+    pub name: String,
+    pub annotations: Vec<Annotation>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BitsetDef {
+    pub name: String,
+    pub fields: Vec<BitsetField>,
+    pub annotations: Vec<Annotation>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BitsetField {
+    pub name: String,
+    pub bit_width: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct UnionDef {
+    pub name: String,
+    pub discriminant_type: TypeSpec,
+    pub cases: Vec<UnionCase>,
+    pub default_case: Option<UnionCaseMember>,
+    pub annotations: Vec<Annotation>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UnionCase {
+    pub labels: Vec<ConstExpr>,
+    pub member: UnionCaseMember,
+}
+
+#[derive(Debug, Clone)]
+pub struct UnionCaseMember {
+    pub type_spec: TypeSpec,
+    pub name: String,
+}
+
 /// Type specifier in IDL.
 #[derive(Debug, Clone)]
 pub enum TypeSpec {
@@ -55,6 +109,7 @@ pub enum TypeSpec {
     Boolean,
     Octet,
     Char,
+    WChar,
     Int16,
     Uint16,
     Int32,
@@ -66,10 +121,12 @@ pub enum TypeSpec {
 
     // Strings
     String(Option<u32>),
+    WString(Option<u32>),
 
     // Collections
     Sequence(Box<TypeSpec>, Option<u32>),
     Array(Box<TypeSpec>, u32),
+    Map(Box<TypeSpec>, Box<TypeSpec>, Option<u32>),
 
     // Named type reference
     Named(String),
@@ -94,4 +151,66 @@ pub enum ConstExpr {
     String(String),
     Ident(String),
     Bool(bool),
+}
+
+/// (7) interface_header + (9) export
+#[derive(Debug, Clone)]
+pub struct InterfaceDef {
+    pub name: String,
+    pub base_interfaces: Vec<String>,
+    pub operations: Vec<OperationDef>,
+    pub attributes: Vec<AttributeDef>,
+    pub annotations: Vec<Annotation>,
+}
+
+/// (87) op_dcl
+#[derive(Debug, Clone)]
+pub struct OperationDef {
+    pub name: String,
+    pub return_type: Option<TypeSpec>, // None = void
+    pub params: Vec<ParamDef>,
+    pub raises: Vec<String>,
+    pub annotations: Vec<Annotation>,
+}
+
+/// (91) param_dcl
+#[derive(Debug, Clone)]
+pub struct ParamDef {
+    pub name: String,
+    pub type_spec: TypeSpec,
+    pub direction: ParamDirection,
+    pub annotations: Vec<Annotation>,
+}
+
+/// (92) param_attribute
+#[derive(Debug, Clone, PartialEq)]
+pub enum ParamDirection {
+    In,
+    Out,
+    Inout,
+}
+
+/// (104) readonly_attr_spec + (106) attr_spec
+#[derive(Debug, Clone)]
+pub struct AttributeDef {
+    pub name: String,
+    pub type_spec: TypeSpec,
+    pub readonly: bool,
+    pub raises: Vec<String>,
+    pub annotations: Vec<Annotation>,
+}
+
+/// exception declaration — similar to struct
+#[derive(Debug, Clone)]
+pub struct ExceptionDef {
+    pub name: String,
+    pub members: Vec<StructMember>,
+}
+
+/// const declaration
+#[derive(Debug, Clone)]
+pub struct ConstDef {
+    pub name: String,
+    pub type_spec: TypeSpec,
+    pub value: ConstExpr,
 }

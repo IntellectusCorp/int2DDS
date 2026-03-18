@@ -22,7 +22,10 @@ use int2dds::{
         wait_set::WaitSet,
     },
     publication::{data_writer::DataWriter, publisher::Publisher, qos::DataWriterQos},
-    subscription::{data_reader::DataReader, qos::DataReaderQos, subscriber::Subscriber},
+    subscription::{
+        data_reader::DataReader, qos::DataReaderQos, sample_info::SampleInfo,
+        subscriber::Subscriber,
+    },
     topic::topic::Topic,
 };
 
@@ -103,6 +106,58 @@ pub struct Int2DdsConditionSeq {
     pub(crate) conditions: Vec<Arc<dyn Condition + Send + Sync>>,
 }
 
+// ============================================================================
+// SampleInfo FFI type
+// ============================================================================
+
+/// FFI-safe SampleInfo returned to C callers
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct Int2DdsSampleInfo {
+    pub source_timestamp_sec: i32,
+    pub source_timestamp_nanosec: u32,
+    pub sample_state: u32,
+    pub view_state: u32,
+    pub instance_state: u32,
+    pub instance_handle: [u8; 16],
+    pub publication_handle: [u8; 16],
+    pub disposed_generation_count: i32,
+    pub no_writers_generation_count: i32,
+    pub sample_rank: i32,
+    pub generation_rank: i32,
+    pub absolute_generation_rank: i32,
+    pub valid_data: bool,
+}
+
+impl From<&SampleInfo> for Int2DdsSampleInfo {
+    fn from(info: &SampleInfo) -> Self {
+        Self {
+            source_timestamp_sec: info.source_timestamp.sec,
+            source_timestamp_nanosec: info.source_timestamp.nanosec,
+            sample_state: info.sample_state.bits(),
+            view_state: info.view_state.bits(),
+            instance_state: info.instance_state.bits(),
+            instance_handle: *info.instance_handle.value(),
+            publication_handle: *info.publication_handle.value(),
+            disposed_generation_count: info.disposed_generation_count,
+            no_writers_generation_count: info.no_writers_generation_count,
+            sample_rank: info.sample_rank,
+            generation_rank: info.generation_rank,
+            absolute_generation_rank: info.absolute_generation_rank,
+            valid_data: info.valid_data,
+        }
+    }
+}
+
+// ============================================================================
+// Sample Sequence for batch read/take
+// ============================================================================
+
+/// Opaque sequence of (serialized data, SampleInfo) pairs for batch read/take
+pub struct Int2DdsSampleSeq {
+    pub(crate) samples: Vec<(Arc<[u8]>, SampleInfo)>,
+}
+
 // Safety: All types use Arc which is thread-safe
 unsafe impl Send for Int2DdsParticipantFactory {}
 unsafe impl Sync for Int2DdsParticipantFactory {}
@@ -128,3 +183,5 @@ unsafe impl Send for Int2DdsCondition {}
 unsafe impl Sync for Int2DdsCondition {}
 unsafe impl Send for Int2DdsConditionSeq {}
 unsafe impl Sync for Int2DdsConditionSeq {}
+unsafe impl Send for Int2DdsSampleSeq {}
+unsafe impl Sync for Int2DdsSampleSeq {}

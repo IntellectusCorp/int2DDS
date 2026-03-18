@@ -13,6 +13,7 @@
 //! and pass CDR bytes directly via `int2dds_write_serialized` / `int2dds_take_serialized`.
 
 use std::ffi::{CStr, CString};
+use std::os::raw::c_char;
 use std::sync::Arc;
 
 use int2dds::{
@@ -22,6 +23,7 @@ use int2dds::{
 
 use crate::data::Int2DdsData;
 use crate::raw_type_support::RawTypeSupport;
+use crate::type_info::Int2DdsTypeInfo;
 
 use super::{error::*, qos::Int2DdsTopicQos, types::*};
 
@@ -135,6 +137,78 @@ pub unsafe extern "C" fn int2dds_create_topic_keyed(
     INT2DDS_RET_OK
 }
 
+/// Create a Topic with type information for DDS-XTypes discovery
+///
+/// Creates a topic using a pre-built `Int2DdsTypeInfo` which provides
+/// TypeIdentifier and TypeObject for DDS discovery parameters (0x0069, 0x0072).
+/// This enables interoperability with implementations that require type information
+///
+/// # Safety
+/// - `participant` must be a valid participant
+/// - `topic_name` must be a valid null-terminated C string
+/// - `type_info` must be a valid `Int2DdsTypeInfo` created by `int2dds_type_info_create`
+/// - `qos` can be null for default QoS
+/// - `topic_out` must be a valid pointer to a null pointer
+/// - The returned topic must be freed with `int2dds_delete_topic`
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_create_topic_with_type_info(
+    participant: *const Int2DdsParticipant,
+    topic_name: *const std::os::raw::c_char,
+    type_info: *const Int2DdsTypeInfo,
+    qos: *const Int2DdsTopicQos,
+    topic_out: *mut *mut Int2DdsTopic,
+) -> Int2DdsRet {
+    check_null!(participant);
+    check_null!(topic_name);
+    check_null!(type_info);
+    check_null!(topic_out);
+
+    let participant_ref = &*participant;
+    let ti = &*type_info;
+
+    let topic_name_str = match CStr::from_ptr(topic_name).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    let dds_type_name = &ti.type_name;
+
+    // Build TypeIdentifier and TypeObject from the type info
+    let type_identifier = ti.build_type_identifier();
+    let type_object = ti.build_type_object();
+
+    // Create RawTypeSupport with type info for discovery
+    let type_support = Arc::new(RawTypeSupport::with_type_info(
+        dds_type_name.clone(),
+        ti.extensibility,
+        ti.has_key_field(),
+        type_identifier,
+        type_object,
+    ));
+
+    // Register the RawTypeSupport with the participant
+    ffi_try!(participant_ref
+        .inner
+        .register_type_support(type_support as Arc<dyn TypeSupport>, dds_type_name));
+
+    let topic_qos = if qos.is_null() { TopicQos::default() } else { (*qos).inner.clone() };
+
+    let topic = ffi_try!(participant_ref.inner.create_topic::<Int2DdsData>(
+        topic_name_str,
+        dds_type_name,
+        topic_qos,
+        None,
+        StatusMask::default()
+    ));
+
+    let topic_handle =
+        Box::new(Int2DdsTopic { inner: Arc::new(topic), type_name: dds_type_name.clone() });
+
+    *topic_out = Box::into_raw(topic_handle);
+
+    INT2DDS_RET_OK
+}
+
 /// Delete a Topic
 ///
 /// # Safety
@@ -198,7 +272,7 @@ pub unsafe extern "C" fn int2dds_topic_get_name(
         return INT2DDS_RET_ERROR;
     }
 
-    std::ptr::copy_nonoverlapping(name_bytes.as_ptr() as *const i8, name_out, name_bytes.len());
+    std::ptr::copy_nonoverlapping(name_bytes.as_ptr() as *const c_char, name_out, name_bytes.len());
 
     INT2DDS_RET_OK
 }
@@ -233,7 +307,7 @@ pub unsafe extern "C" fn int2dds_topic_get_type_name(
     }
 
     std::ptr::copy_nonoverlapping(
-        type_name_bytes.as_ptr() as *const i8,
+        type_name_bytes.as_ptr() as *const c_char,
         type_name_out,
         type_name_bytes.len(),
     );
