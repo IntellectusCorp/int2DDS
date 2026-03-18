@@ -1,0 +1,9 @@
+@extensibility(APPENDABLE)
+struct ArraysType {
+    @key long id;
+    boolean bool_array[4];
+    octet byte_array[8];
+    long i32_array[4];
+    float f32_array[4];
+    double f64_array[4];
+};

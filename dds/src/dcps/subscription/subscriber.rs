@@ -534,7 +534,7 @@ impl Subscriber {
             let mut bridge_guard = participant.get_dcps_bridge()?;
             match bridge_guard.as_mut() {
                 Some(bridge) => bridge
-                    .delete_rtps_reader(topic_name.clone(), self.guid.entity_id())
+                    .delete_rtps_reader(topic_name.clone(), handle.to_guid().entity_id())
                     .map_err(|e| DdsError::Error(e.message))?,
                 None => return Err(DdsError::Error("DCPS Bridge is not initialized".to_string())),
             };
@@ -1275,6 +1275,131 @@ mod tests {
         drop(subscriber);
         let contains_subscriber = domain_participant.contains_entity(subscriber_handle).unwrap();
         assert!(contains_subscriber, "Subscriber deleted!")
+    }
+
+    #[test]
+    fn test_delete_datareader_removes_rtps_reader() {
+        use crate::{
+            core::time::Duration,
+            infrastructure::{
+                qos_policy::{ReliabilityQosPolicy, ReliabilityQosPolicyKind},
+                wait_set::WaitSet,
+            },
+            publication::qos::{DataWriterQos, PublisherQos},
+            test_utils::unique_domain_id,
+        };
+
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+
+        // Participant 1: publisher side
+        let participant1 = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let topic1 = participant1
+            .create_topic::<HelloWorld>(
+                "test_delete_reader",
+                "HelloWorldType",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let reliable_qos = ReliabilityQosPolicy {
+            kind: ReliabilityQosPolicyKind::Reliable,
+            max_blocking_time: Duration::from_seconds(1),
+        };
+
+        let publisher = participant1
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let writer = publisher
+            .create_datawriter::<HelloWorld>(
+                &topic1,
+                DataWriterQos { reliability: reliable_qos.clone(), ..Default::default() },
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        // Participant 2: subscriber side
+        let participant2 = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let topic2 = participant2
+            .create_topic::<HelloWorld>(
+                "test_delete_reader",
+                "HelloWorldType",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let subscriber = participant2
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let reader = subscriber
+            .create_datareader::<HelloWorld>(
+                &topic2,
+                DataReaderQos { reliability: reliable_qos, ..Default::default() },
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        // Wait for publication matched
+        let wait_set = WaitSet::new();
+        let mut cond = writer.get_statuscondition().unwrap().clone();
+        cond.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
+        wait_set.attach_condition(cond.clone()).unwrap();
+        wait_set.wait(Duration::from_seconds(5)).unwrap();
+        let pub_status = writer.get_publication_matched_status().unwrap();
+        assert_eq!(pub_status.current_count(), 1);
+        wait_set.detach_condition(cond).unwrap();
+
+        // Wait for subscription matched
+        let mut cond = reader.get_statuscondition().unwrap().clone();
+        cond.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
+        wait_set.attach_condition(cond.clone()).unwrap();
+        wait_set.wait(Duration::from_seconds(5)).unwrap();
+        let sub_status = reader.get_subscription_matched_status().unwrap();
+        assert_eq!(sub_status.current_count(), 1);
+        wait_set.detach_condition(cond).unwrap();
+
+        // Delete reader
+        subscriber.delete_datareader(reader).unwrap();
+
+        // Wait for publication matched to drop to 0
+        let mut cond = writer.get_statuscondition().unwrap().clone();
+        cond.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
+        wait_set.attach_condition(cond.clone()).unwrap();
+        wait_set.wait(Duration::from_seconds(5)).unwrap();
+        let pub_status = writer.get_publication_matched_status().unwrap();
+        assert_eq!(
+            pub_status.current_count(),
+            0,
+            "Writer should see 0 matched readers after delete_datareader"
+        );
+        wait_set.detach_condition(cond).unwrap();
+
+        participant1.delete_contained_entities().unwrap();
+        factory.delete_participant(participant1).unwrap();
+        participant2.delete_contained_entities().unwrap();
+        factory.delete_participant(participant2).unwrap();
     }
 
     #[test]

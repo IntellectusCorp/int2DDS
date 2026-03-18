@@ -1,0 +1,12 @@
+@extensibility(APPENDABLE)
+struct IntegersType {
+    @key long id;
+    int8 i8_val;
+    int16 i16_val;
+    int32 i32_val;
+    int64 i64_val;
+    uint8 u8_val;
+    uint16 u16_val;
+    uint32 u32_val;
+    uint64 u64_val;
+};

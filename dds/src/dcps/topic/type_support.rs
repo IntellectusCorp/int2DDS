@@ -57,6 +57,7 @@ pub enum SerializationFormat {
 
 pub trait DdsType: 'static + Send + Sync + Clone + Debug {
     type TypeSupport: TypeSupport + Default;
+    type FieldAccessor: FieldAccessor + Default;
 
     fn get_type_support() -> Arc<Self::TypeSupport> {
         Arc::new(Self::TypeSupport::default())
@@ -80,19 +81,22 @@ pub trait DdsType: 'static + Send + Sync + Clone + Debug {
     }
 
     fn get_field_value(&self, field_path: &str) -> DdsResult<Parameter> {
-        Self::TypeSupport::default().get_field_value(self as &dyn Any, field_path)
+        Self::FieldAccessor::default().get_field_value(self as &dyn Any, field_path)
     }
 
     fn has_field(&self, field_path: &str) -> DdsResult<bool> {
-        Ok(Self::TypeSupport::default().has_field(field_path))
+        Ok(Self::FieldAccessor::default().has_field(field_path))
     }
+}
+
+pub trait FieldAccessor: Send + Sync + 'static {
+    fn get_field_value(&self, data: &dyn Any, field_path: &str) -> DdsResult<Parameter>;
+    fn has_field(&self, field_path: &str) -> bool;
 }
 
 pub trait TypeSupport: Send + Sync + 'static {
     fn type_id(&self) -> TypeId;
     fn get_type_name(&self) -> &str;
-    fn get_field_value(&self, data: &dyn Any, field_path: &str) -> DdsResult<Parameter>;
-    fn has_field(&self, field_path: &str) -> bool;
 
     // Serialization with optional format override.
     // When format is None, the implementation uses its own default behavior.
@@ -151,5 +155,41 @@ pub trait TypeSupport: Send + Sync + 'static {
     {
         let type_support: Arc<dyn TypeSupport> = self;
         participant.register_type(type_support, type_name)
+    }
+}
+
+/// Autoref specialization helper for dot-notation nested field access.
+///
+/// Allows derive macro generated code to delegate field access into nested struct
+/// fields without knowing at macro expansion time whether a field type implements
+/// `DdsType`. Uses the autoref specialization pattern:
+/// - If `T: DdsType`, inherent methods on `NestedAccessor<T>` are resolved first.
+/// - Otherwise, auto-ref finds the fallback trait impl on `&NestedAccessor<T>`.
+pub mod nested_access {
+    use super::*;
+
+    pub struct NestedAccessor<T>(pub core::marker::PhantomData<T>);
+
+    /// Fallback for types that do NOT implement DdsType.
+    pub trait NestedAccessFallback {
+        fn nested_has_field(&self, _rest: &str) -> bool {
+            false
+        }
+        fn nested_get_field_value(&self, _data: &dyn Any, rest: &str) -> DdsResult<Parameter> {
+            Err(DdsError::Error(format!("Type has no nested field '{}'", rest)))
+        }
+    }
+
+    impl<T> NestedAccessFallback for NestedAccessor<T> {}
+
+    /// Preferred path for types that DO implement DdsType.
+    impl<T: DdsType> NestedAccessor<T> {
+        pub fn nested_has_field(&self, rest: &str) -> bool {
+            T::FieldAccessor::default().has_field(rest)
+        }
+
+        pub fn nested_get_field_value(&self, data: &dyn Any, rest: &str) -> DdsResult<Parameter> {
+            T::FieldAccessor::default().get_field_value(data, rest)
+        }
     }
 }

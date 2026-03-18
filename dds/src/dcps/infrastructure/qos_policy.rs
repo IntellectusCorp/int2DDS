@@ -1840,20 +1840,20 @@ impl QosPolicy for DataRepresentationQosPolicy {
 
 /// Specifies the type consistency enforcement level for DDS-XTypes.
 ///
-/// - `DisallowTypeCoercion`: Strict type matching required (default)
-/// - `AllowTypeCoercion`: Allow compatible type coercion during deserialization
+/// - `DisallowTypeCoercion`: Strict type matching required
+/// - `AllowTypeCoercion`: Allow compatible type coercion during deserialization (default per DDS-XTypes spec)
 #[derive(DdsType, PartialEq, Default, Copy, Eq)]
 #[dds_type(crate_path = "crate", no_default, no_partialeq)]
 pub enum TypeConsistencyKind {
     /// Strict type matching - types must be identical.
-    #[default]
     DisallowTypeCoercion = 0,
     /// Allow type coercion for compatible types (e.g., adding optional fields).
+    #[default]
     AllowTypeCoercion = 1,
 }
 
 impl ConstDefault for TypeConsistencyKind {
-    const DEFAULT: Self = TypeConsistencyKind::DisallowTypeCoercion;
+    const DEFAULT: Self = TypeConsistencyKind::AllowTypeCoercion;
 }
 
 impl TypeConsistencyKind {
@@ -1875,8 +1875,8 @@ impl TypeConsistencyKind {
 /// The compatibility checking logic may be extended in future versions.
 ///
 /// # Values
-/// - `DisallowTypeCoercion`: Strict type matching required (default)
-/// - `AllowTypeCoercion`: Allow compatible type coercion (e.g., adding optional fields)
+/// - `DisallowTypeCoercion`: Strict type matching required
+/// - `AllowTypeCoercion`: Allow compatible type coercion (default per DDS-XTypes spec)
 ///
 /// # Example
 /// ```no_run
@@ -1903,12 +1903,12 @@ impl TypeConsistencyKind {
 ///     .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
 ///     .unwrap();
 ///
-/// // Allow type coercion for forward compatibility
+/// // Strict type matching (disallow type coercion)
 /// let reader_qos = DataReaderQos {
 ///     type_consistency_enforcement: TypeConsistencyEnforcementQosPolicy {
-///         kind: TypeConsistencyKind::AllowTypeCoercion,
-///         ignore_sequence_bounds: true,
-///         ignore_string_bounds: true,
+///         kind: TypeConsistencyKind::DisallowTypeCoercion,
+///         ignore_sequence_bounds: false,
+///         ignore_string_bounds: false,
 ///         ignore_member_names: false,
 ///         prevent_type_widening: false,
 ///         force_type_validation: false,
@@ -1940,9 +1940,9 @@ pub struct TypeConsistencyEnforcementQosPolicy {
 impl Default for TypeConsistencyEnforcementQosPolicy {
     fn default() -> Self {
         Self {
-            kind: TypeConsistencyKind::DisallowTypeCoercion,
-            ignore_sequence_bounds: false,
-            ignore_string_bounds: false,
+            kind: TypeConsistencyKind::AllowTypeCoercion,
+            ignore_sequence_bounds: true,
+            ignore_string_bounds: true,
             ignore_member_names: false,
             prevent_type_widening: false,
             force_type_validation: false,
@@ -1953,8 +1953,8 @@ impl Default for TypeConsistencyEnforcementQosPolicy {
 impl ConstDefault for TypeConsistencyEnforcementQosPolicy {
     const DEFAULT: Self = Self {
         kind: TypeConsistencyKind::DEFAULT,
-        ignore_sequence_bounds: false,
-        ignore_string_bounds: false,
+        ignore_sequence_bounds: true,
+        ignore_string_bounds: true,
         ignore_member_names: false,
         prevent_type_widening: false,
         force_type_validation: false,

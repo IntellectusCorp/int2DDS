@@ -45,7 +45,7 @@ use crate::{
         task::sending_handler::{MessageType, SendingHandler},
         transport::{Transport, TransportSender},
     },
-    utils::timer::timer_handler::TimerHandler,
+    utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
 };
 use std::{
     collections::HashMap,
@@ -464,10 +464,13 @@ impl WlpLogic {
         liveliness_flag: bool,
         final_flag: bool,
     ) -> RtpsResult<()> {
+        let last_change_sn = writer.last_change_sequence_number();
         let (first_sn, last_sn, heartbeat_count) = match writer.writer_cache().lock() {
-            Ok(cache) => {
-                (cache.get_seq_num_min(), cache.get_seq_num_max(), writer.heartbeat_count())
-            }
+            Ok(cache) => (
+                cache.get_seq_num_min().unwrap_or(last_change_sn + 1),
+                cache.get_seq_num_max().unwrap_or(last_change_sn),
+                writer.heartbeat_count(),
+            ),
             Err(_) => (SequenceNumber::UNKNOWN, SequenceNumber::UNKNOWN, writer.heartbeat_count()),
         };
 
@@ -602,18 +605,15 @@ impl WlpLogic {
                         continue; // Skip this reader proxy
                     }
                 };
-                let info = Some((
-                    writer.heartbeat_count(),
-                    cache_guard.get_seq_num_min(),
-                    cache_guard.get_seq_num_max(),
-                    false,
-                    false,
-                ));
+                let wlp_last_change_sn = writer.last_change_sequence_number();
+                let first_sn = cache_guard.get_seq_num_min().unwrap_or(wlp_last_change_sn + 1);
+                let last_sn = cache_guard.get_seq_num_max().unwrap_or(wlp_last_change_sn);
+                let info = Some((writer.heartbeat_count(), first_sn, last_sn, false, false));
                 debug!(
                     "[WLP] heartbeat_info: count={}, first={:?}, last={:?}",
                     writer.heartbeat_count(),
-                    cache_guard.get_seq_num_min(),
-                    cache_guard.get_seq_num_max()
+                    first_sn,
+                    last_sn
                 );
                 info
             };
@@ -715,7 +715,7 @@ impl WlpLogic {
         reader_entity_id: EntityId,
         writer_entity_id: EntityId,
         missing_changes: Vec<SequenceNumber>,
-        acknack_count: i32,
+        acknack_count: u32,
         bitmap_base: SequenceNumber,
     ) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
@@ -762,11 +762,7 @@ impl WlpLogic {
         let participant = self.get_upgraded_participant()?;
         let participant_weak = self.participant.clone();
 
-        let timer_id = format!(
-            "wlp_p2p_{:?}_{}",
-            participant.guid().prefix(),
-            logic_start_time.elapsed().as_nanos(),
-        );
+        let timer_id = TimerId::WlpP2p { guid_prefix: participant.guid().prefix() };
 
         let message = Arc::new(message);
         if let Ok(handler) = self.timer_handler.lock() {
@@ -942,7 +938,7 @@ impl WlpLogic {
                     let acknack_count = writer_proxy.acknack_count();
                     self.send_liveliness_acknack_message(
                         remote_guid,
-                        heartbeat.reader_id,
+                        local_reader.guid().entity_id(),
                         heartbeat.writer_id,
                         missing_changes,
                         acknack_count,
@@ -1515,10 +1511,11 @@ impl UnicastMessageProcessor for WlpLogic {
                     }
                 };
 
+                let wlp_last_change_sn = writer.last_change_sequence_number();
                 Some((
                     writer.heartbeat_count(),
-                    cache_guard.get_seq_num_min(),
-                    cache_guard.get_seq_num_max(),
+                    cache_guard.get_seq_num_min().unwrap_or(wlp_last_change_sn + 1),
+                    cache_guard.get_seq_num_max().unwrap_or(wlp_last_change_sn),
                     false,
                     false,
                 ))

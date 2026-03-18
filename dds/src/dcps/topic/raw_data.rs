@@ -14,7 +14,7 @@ use crate::{
     topic::sql::ast::Parameter,
 };
 
-use super::type_support::{DdsType, SerializationFormat, TypeSupport};
+use super::type_support::{DdsType, FieldAccessor, SerializationFormat, TypeSupport};
 
 /// Raw data wrapper for FFI
 ///
@@ -92,6 +92,7 @@ impl RawData {
 
 impl DdsType for RawData {
     type TypeSupport = RawDataTypeSupport;
+    type FieldAccessor = RawDataTypeSupport;
 
     fn get_type_name() -> String {
         "RawData".to_string()
@@ -120,6 +121,16 @@ impl RawDataTypeSupport {
     }
 }
 
+impl FieldAccessor for RawDataTypeSupport {
+    fn get_field_value(&self, _data: &dyn Any, _field_path: &str) -> DdsResult<Parameter> {
+        Err(DdsError::Unsupported)
+    }
+
+    fn has_field(&self, _field_path: &str) -> bool {
+        false
+    }
+}
+
 impl TypeSupport for RawDataTypeSupport {
     fn type_id(&self) -> TypeId {
         TypeId::of::<RawData>()
@@ -127,15 +138,6 @@ impl TypeSupport for RawDataTypeSupport {
 
     fn get_type_name(&self) -> &str {
         &self.type_name
-    }
-
-    fn get_field_value(&self, _data: &dyn Any, _field_path: &str) -> DdsResult<Parameter> {
-        // RawData doesn't support field access
-        Err(DdsError::Unsupported)
-    }
-
-    fn has_field(&self, _field_path: &str) -> bool {
-        false
     }
 
     fn serialize(

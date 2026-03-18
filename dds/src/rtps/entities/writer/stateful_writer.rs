@@ -51,7 +51,7 @@ use crate::{
         },
         task::sending_handler::{MessageType, SendingHandler},
     },
-    utils::timer::timer_handler::TimerHandler,
+    utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
 };
 
 use super::{reader_proxy::ReaderProxy, Writer};
@@ -65,11 +65,11 @@ pub(crate) struct StatefulWriter {
     multicast_locator_list: Vec<Locator>,
     endpoint_id: EntityId,
     last_change_sequence_number: Arc<Mutex<SequenceNumber>>,
-    periodic_heartbeat_timer_id: String,
+    periodic_heartbeat_timer_id: TimerId,
     data_max_size_serialized: i32,
     matched_readers: Arc<Mutex<Vec<ReaderProxy>>>,
     writer_cache: Arc<Mutex<WriterHistoryCache>>,
-    heartbeat_count: Arc<Mutex<i32>>,
+    heartbeat_count: Arc<Mutex<u32>>,
     #[allow(clippy::type_complexity)]
     callback:
         Arc<Mutex<Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>>>,
@@ -106,10 +106,7 @@ impl StatefulWriter {
             topic_kind,
             endpoint_id,
             last_change_sequence_number: Arc::new(Mutex::new(SequenceNumber::new(0, 0))),
-            periodic_heartbeat_timer_id: format!(
-                "periodic_heartbeat_writer_{:?}",
-                guid.entity_id().entity_key
-            ),
+            periodic_heartbeat_timer_id: TimerId::PeriodicHeartbeat { entity_id: guid.entity_id() },
             data_max_size_serialized,
             matched_readers: Arc::new(Mutex::new(Vec::new())),
             writer_cache: Arc::new(Mutex::new(WriterHistoryCache::new(
@@ -136,8 +133,8 @@ impl StatefulWriter {
         RtpsDuration::from(self.writer_reliability_extension.initial_heartbeat_delay)
     }
 
-    pub(crate) fn periodic_heartbeat_timer_id(&self) -> String {
-        self.periodic_heartbeat_timer_id.clone()
+    pub(crate) fn periodic_heartbeat_timer_id(&self) -> TimerId {
+        self.periodic_heartbeat_timer_id
     }
 
     pub(crate) fn heartbeat_timer_running(&self) -> bool {
@@ -201,7 +198,7 @@ impl StatefulWriter {
         let heartbeat_period = self.heartbeat_period().to_std_duration();
         let timer_id = self.periodic_heartbeat_timer_id();
         let heartbeat_timer_running = Arc::clone(&self.heartbeat_timer_running);
-        let delay_timer_id = format!("{}_delay", timer_id);
+        let delay_timer_id = TimerId::PeriodicHeartbeatDelay { entity_id: self.guid.entity_id() };
 
         // Clone Arcs for the callback to check is_acked_by_all
         let matched_readers = Arc::clone(&self.matched_readers);
@@ -223,7 +220,7 @@ impl StatefulWriter {
                         guid_prefix,
                         guid,
                         heartbeat_period,
-                        timer_id.clone(),
+                        timer_id,
                         heartbeat_timer_running.clone(),
                     );
                 },
@@ -251,7 +248,7 @@ impl StatefulWriter {
         guid_prefix: GuidPrefix,
         guid: Guid,
         heartbeat_period: std::time::Duration,
-        timer_id: String,
+        timer_id: TimerId,
         heartbeat_timer_running: Arc<AtomicBool>,
     ) {
         // CAS check - if already running, skip
@@ -301,7 +298,7 @@ impl StatefulWriter {
     pub(crate) fn increase_heartbeat_count(&self) {
         match self.heartbeat_count.lock() {
             Ok(mut heartbeat_count) => {
-                *heartbeat_count += 1;
+                *heartbeat_count = heartbeat_count.wrapping_add(1);
             }
             Err(e) => {
                 error!("Failed to acquire heartbeat_count lock: {}", e);
@@ -309,7 +306,7 @@ impl StatefulWriter {
         }
     }
 
-    pub(crate) fn heartbeat_count(&self) -> i32 {
+    pub(crate) fn heartbeat_count(&self) -> u32 {
         match self.heartbeat_count.lock() {
             Ok(heartbeat_count) => *heartbeat_count,
             Err(e) => {
@@ -358,11 +355,11 @@ impl StatefulWriter {
             Err(_) => return false,
         };
 
-        if cache.is_empty() {
-            return true;
-        }
+        let latest_sn = match cache.get_seq_num_max() {
+            Some(sn) => sn,
+            None => return true,
+        };
 
-        let latest_sn = cache.get_seq_num_max();
         drop(cache);
 
         Self::is_change_acked_by_all_impl(matched_readers, latest_sn)
@@ -544,6 +541,48 @@ impl Writer for StatefulWriter {
             )
         } else {
             // Create regular cache change for small payload
+            CacheChange::new(
+                kind,
+                self.guid,
+                handle,
+                last_change_sequence_number,
+                data,
+                source_timestamp,
+            )
+        }
+    }
+
+    fn new_change_with_rpc_callback(
+        &self,
+        kind: ChangeKind,
+        handle: InstanceHandle,
+        source_timestamp: Option<RtpsTime>,
+        data_fn: Box<dyn FnOnce(Guid, SequenceNumber) -> SerializedData + '_>,
+    ) -> CacheChange {
+        let last_change_sequence_number = match self.last_change_sequence_number.lock() {
+            Ok(mut last_change_sequence_number) => {
+                *last_change_sequence_number += 1;
+                *last_change_sequence_number
+            }
+            Err(e) => {
+                error!("Failed to acquire last_change_sequence_number lock: {}", e);
+                SequenceNumber::UNKNOWN
+            }
+        };
+
+        let data = data_fn(self.guid, last_change_sequence_number);
+
+        if data.len() > self.data_max_size_serialized as usize {
+            CacheChange::create_fragmented(
+                kind,
+                self.guid,
+                handle,
+                last_change_sequence_number,
+                &data,
+                source_timestamp,
+                self.data_max_size_serialized as usize,
+            )
+        } else {
             CacheChange::new(
                 kind,
                 self.guid,

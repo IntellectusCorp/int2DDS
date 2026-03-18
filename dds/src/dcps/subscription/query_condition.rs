@@ -462,4 +462,141 @@ mod tests {
 
         assert_eq!(query_condition.get_trigger_value(), Ok(false));
     }
+
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "crate")]
+    struct Inner {
+        x: i32,
+        y: i32,
+    }
+
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "crate")]
+    struct Outer {
+        inner: Inner,
+        label: String,
+    }
+
+    #[test]
+    fn test_querycondition_nested_struct_field() {
+        let domain_id = unique_domain_id();
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(
+                domain_id,
+                DomainParticipantQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let topic = participant
+            .create_topic::<Outer>(
+                "nested_query_topic",
+                "Outer",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+
+        let subscriber = participant
+            .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+            .unwrap();
+        let rdr_qos = DataReaderQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let reader = subscriber
+            .create_datareader::<Outer>(&topic, rdr_qos, None, StatusMask::default())
+            .unwrap();
+
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        let wtr_qos = DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration::from_seconds(1),
+            },
+            ..Default::default()
+        };
+        let writer = publisher
+            .create_datawriter::<Outer>(&topic, wtr_qos, None, StatusMask::default())
+            .unwrap();
+
+        // Wait for matching
+        let mut condition = reader.get_statuscondition().unwrap().clone();
+        condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
+        let wait_set = WaitSet::new();
+        wait_set.attach_condition(condition.clone()).unwrap();
+        wait_set.wait(Duration::from_seconds(10)).unwrap();
+        wait_set.detach_condition(condition).unwrap();
+
+        // Filter on nested field: inner.x > 50
+        let qc = reader
+            .create_querycondition(
+                &[SampleStateKind::NOT_READ_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ALIVE_INSTANCE_STATE],
+                "inner.x > %0",
+                vec!["50".to_string()],
+            )
+            .unwrap();
+
+        writer
+            .write(
+                &Outer { inner: Inner { x: 10, y: 1 }, label: "a".to_string() },
+                InstanceHandle::NIL,
+            )
+            .unwrap();
+        writer
+            .write(
+                &Outer { inner: Inner { x: 100, y: 2 }, label: "b".to_string() },
+                InstanceHandle::NIL,
+            )
+            .unwrap();
+        writer
+            .write(
+                &Outer { inner: Inner { x: 30, y: 3 }, label: "c".to_string() },
+                InstanceHandle::NIL,
+            )
+            .unwrap();
+        writer
+            .write(
+                &Outer { inner: Inner { x: 200, y: 4 }, label: "d".to_string() },
+                InstanceHandle::NIL,
+            )
+            .unwrap();
+
+        writer.wait_for_acknowledgments(Duration::from_seconds(10)).unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+
+        // Only inner.x > 50 should match: x=100 ("b") and x=200 ("d")
+        let samples = reader.take_w_condition(10, qc).unwrap();
+        assert_eq!(samples.len(), 2);
+
+        let data0 = samples[0].data().unwrap();
+        let data1 = samples[1].data().unwrap();
+        assert_eq!(data0.inner.x, 100);
+        assert_eq!(data0.label, "b");
+        assert_eq!(data1.inner.x, 200);
+        assert_eq!(data1.label, "d");
+
+        // Non-matching samples (x=10, x=30) should still be in cache
+        let remaining = reader
+            .take(
+                10,
+                &[SampleStateKind::NOT_READ_SAMPLE_STATE],
+                &[ViewStateKind::ANY_VIEW_STATE],
+                &[InstanceStateKind::ALIVE_INSTANCE_STATE],
+            )
+            .unwrap();
+        assert_eq!(remaining.len(), 2);
+    }
 }

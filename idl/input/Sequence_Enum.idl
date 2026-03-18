@@ -1,0 +1,13 @@
+enum Color {
+    RED,
+    GREEN,
+    BLUE,
+    YELLOW,
+    PURPLE
+};
+
+@extensibility(APPENDABLE)
+struct SequenceEnumType {
+    @key long id;
+    sequence<Color> color_seq;
+};

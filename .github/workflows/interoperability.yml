@@ -84,6 +84,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: omg-dds/dds-rtps
+          ref: 2e1f98d3422e49091cefa1ebce2b2e2a5f4e6a2d
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11.4"
@@ -244,6 +245,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: omg-dds/dds-rtps
+          ref: 2e1f98d3422e49091cefa1ebce2b2e2a5f4e6a2d
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:

@@ -9,6 +9,8 @@ pub enum Token {
     Typedef,
     Sequence,
     StringKw,
+    WStringKw,
+    WCharKw,
     Boolean,
     Octet,
     Char,
@@ -19,6 +21,24 @@ pub enum Token {
     Unsigned,
     True,
     False,
+    Map,
+    Bitmask,
+    Bitset,
+    Bitfield,
+    Union,
+    Switch,
+    Case,
+    Default,
+    Interface,
+    In,
+    Out,
+    Inout,
+    Void,
+    Raises,
+    Attribute,
+    Readonly,
+    Exception,
+    Const,
 
     // Literals
     IntLiteral(i64),
@@ -40,6 +60,7 @@ pub enum Token {
     RightBracket,
     Semicolon,
     Comma,
+    Colon,
     ColonColon,
     Equals,
 
@@ -295,7 +316,8 @@ pub fn tokenize(source: &str) -> Result<Vec<SpannedToken>, LexError> {
                 "module" => Token::Module,
                 "typedef" => Token::Typedef,
                 "sequence" => Token::Sequence,
-                "string" | "wstring" => Token::StringKw,
+                "string" => Token::StringKw,
+                "wstring" => Token::WStringKw,
                 "boolean" => Token::Boolean,
                 "octet" | "uint8" | "int8" => {
                     // uint8/int8 are aliases
@@ -305,7 +327,8 @@ pub fn tokenize(source: &str) -> Result<Vec<SpannedToken>, LexError> {
                         Token::Octet
                     }
                 }
-                "char" | "wchar" => Token::Char,
+                "char" => Token::Char,
+                "wchar" => Token::WCharKw,
                 "short" => Token::Short,
                 "long" => Token::Long,
                 "float" => Token::Float,
@@ -313,6 +336,24 @@ pub fn tokenize(source: &str) -> Result<Vec<SpannedToken>, LexError> {
                 "unsigned" => Token::Unsigned,
                 "TRUE" | "true" => Token::True,
                 "FALSE" | "false" => Token::False,
+                "map" => Token::Map,
+                "bitmask" => Token::Bitmask,
+                "bitset" => Token::Bitset,
+                "bitfield" => Token::Bitfield,
+                "union" => Token::Union,
+                "switch" => Token::Switch,
+                "case" => Token::Case,
+                "default" => Token::Default,
+                "interface" => Token::Interface,
+                "in" => Token::In,
+                "out" => Token::Out,
+                "inout" => Token::Inout,
+                "void" => Token::Void,
+                "raises" => Token::Raises,
+                "attribute" => Token::Attribute,
+                "readonly" => Token::Readonly,
+                "exception" => Token::Exception,
+                "const" => Token::Const,
                 _ => Token::Ident(ident),
             };
 
@@ -391,6 +432,11 @@ pub fn tokenize(source: &str) -> Result<Vec<SpannedToken>, LexError> {
                 col += 2;
                 Token::ColonColon
             }
+            ':' => {
+                pos += 1;
+                col += 1;
+                Token::Colon
+            }
             ch => {
                 return Err(LexError {
                     line: tok_line,
@@ -460,5 +506,37 @@ mod tests {
         let tokens = tokenize("// line comment\nstruct /* block */ Foo {};").unwrap();
         assert!(matches!(tokens[0].token, Token::Struct));
         assert!(matches!(&tokens[1].token, Token::Ident(n) if n == "Foo"));
+    }
+
+    #[test]
+    fn test_wstring_wchar() {
+        let tokens = tokenize("wstring<128> wchar").unwrap();
+        assert!(matches!(tokens[0].token, Token::WStringKw));
+        assert!(matches!(tokens[1].token, Token::LeftAngle));
+        assert!(matches!(tokens[2].token, Token::IntLiteral(128)));
+        assert!(matches!(tokens[3].token, Token::RightAngle));
+        assert!(matches!(tokens[4].token, Token::WCharKw));
+    }
+
+    #[test]
+    fn test_colon() {
+        let tokens = tokenize("struct Derived : Base {};").unwrap();
+        assert!(matches!(tokens[0].token, Token::Struct));
+        assert!(matches!(&tokens[1].token, Token::Ident(n) if n == "Derived"));
+        assert!(matches!(tokens[2].token, Token::Colon));
+        assert!(matches!(&tokens[3].token, Token::Ident(n) if n == "Base"));
+    }
+
+    #[test]
+    fn test_new_keywords() {
+        let tokens = tokenize("map bitmask bitset bitfield union switch case default").unwrap();
+        assert!(matches!(tokens[0].token, Token::Map));
+        assert!(matches!(tokens[1].token, Token::Bitmask));
+        assert!(matches!(tokens[2].token, Token::Bitset));
+        assert!(matches!(tokens[3].token, Token::Bitfield));
+        assert!(matches!(tokens[4].token, Token::Union));
+        assert!(matches!(tokens[5].token, Token::Switch));
+        assert!(matches!(tokens[6].token, Token::Case));
+        assert!(matches!(tokens[7].token, Token::Default));
     }
 }

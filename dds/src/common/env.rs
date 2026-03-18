@@ -325,10 +325,20 @@ pub fn set_extended_discovery(enabled: bool) {
     unsafe { std::env::set_var("INT2DDS_EXTENDED_DISCOVERY", enabled.to_string()) };
 }
 
+/// Get the network interface from environment variable
+pub fn get_network_interface() -> Option<String> {
+    std::env::var("INT2DDS_NETWORK_INTERFACE").ok()
+}
+
 /// Set the network interface via environment variable
 pub fn set_network_interface(interface: &str) {
     log::info!("Environment variable set: INT2DDS_NETWORK_INTERFACE = {}", interface);
     unsafe { std::env::set_var("INT2DDS_NETWORK_INTERFACE", interface) };
+}
+
+/// Get the network IP from environment variable
+pub fn get_network_ip() -> Option<String> {
+    std::env::var("INT2DDS_NETWORK_IP").ok()
 }
 
 /// Set the network IP via environment variable

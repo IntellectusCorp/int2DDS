@@ -20,9 +20,7 @@ use crate::{
     },
     infrastructure::history_cache::HistoryCache,
     rtps::{
-        common::{
-            guid::Guid, rtps_error_code::RtpsResult, sequence::SequenceNumber, time::RtpsDuration,
-        },
+        common::{guid::Guid, rtps_error_code::RtpsResult, time::RtpsDuration},
         entities::{
             endpoint::Endpoint,
             entity::Entity,
@@ -41,8 +39,6 @@ pub(crate) trait Reader: Entity + Endpoint + Debug + Any {
     fn matched_writer_is_matched(&self, writer_guid: Guid) -> bool;
     fn matched_writers_guids(&self) -> Vec<Guid>;
     fn on_change(&self, change: Arc<CacheChange>);
-
-    fn get_next_sequence_number(&self) -> SequenceNumber;
 
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;

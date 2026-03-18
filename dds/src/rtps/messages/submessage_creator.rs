@@ -55,7 +55,7 @@ impl SubmessageCreator {
     }
 
     pub(crate) fn create_heartbeat_submessage(
-        heartbeat_count: i32,
+        heartbeat_count: u32,
         reader_entity_id: EntityId,
         writer_entity_id: EntityId,
         first_sn: SequenceNumber,
@@ -89,7 +89,7 @@ impl SubmessageCreator {
         reader_entity_id: EntityId,
         writer_entity_id: EntityId,
         missing_changes: Vec<SequenceNumber>,
-        acknack_count: i32,
+        acknack_count: u32,
         bitmap_base: SequenceNumber,
         is_preemptive: bool,
     ) -> Result<Submessage, Box<dyn std::error::Error>> {
@@ -194,7 +194,7 @@ impl SubmessageCreator {
         writer_entity_id: EntityId,
         writer_sn: SequenceNumber,
         fragment_number_state: FragmentNumberSet,
-        nackfrag_count: i32,
+        nackfrag_count: u32,
     ) -> Result<Submessage, Box<dyn std::error::Error>> {
         let mut nackfrag_header_flag = SubmessageHeaderFlag::new();
         nackfrag_header_flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::NACK_FRAG);

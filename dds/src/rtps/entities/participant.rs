@@ -510,9 +510,9 @@ impl Participant {
             let writer_info = if let Some(stateful_writer) =
                 writer.as_any().downcast_ref::<StatefulWriter>()
             {
-                // Remove heartbeat timer
+                // Remove all timers for this writer (heartbeat, heartbeat delay, nack response)
                 if let Ok(handler) = TimerHandler::get_instance(self.guid().prefix()).lock() {
-                    handler.remove_timer(stateful_writer.periodic_heartbeat_timer_id());
+                    handler.remove_timers_by_entity(entity_id);
                 }
                 stateful_writer.compare_and_set_heartbeat_timer_running(true, false)?;
                 Some((stateful_writer.guid(), stateful_writer.publication_builtin_topic_data()?))
@@ -588,6 +588,11 @@ impl Participant {
         let reader_arc = self.rtps_reader_store.get(entity_id);
 
         if let Some(reader) = reader_arc {
+            // Remove all timers for this reader (acknack, nackfrag)
+            if let Ok(handler) = TimerHandler::get_instance(self.guid().prefix()).lock() {
+                handler.remove_timers_by_entity(entity_id);
+            }
+
             let reader_info = if let Some(stateful_reader) =
                 reader.as_any().downcast_ref::<StatefulReader>()
             {

@@ -119,6 +119,10 @@ pub fn generate_additional_derives(
         }
     }
 
+    if config.no_additional_derives {
+        return quote! {};
+    }
+
     let debug_fields = generate_debug_fields(input);
     let clone_fields = generate_clone_fields(input);
     let eq_fields = generate_eq_fields(input);
@@ -321,6 +325,10 @@ fn generate_enum_additional_derives(
     name: &syn::Ident,
     config: &DdsTypeConfig,
 ) -> proc_macro2::TokenStream {
+    if config.no_additional_derives {
+        return quote! {};
+    }
+
     if let Data::Enum(data) = &input.data {
         let variants = &data.variants;
 
