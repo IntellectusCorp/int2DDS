@@ -75,7 +75,7 @@ def main():
     print("=" * 60)
 
     with DomainParticipant(domain_id=1, name="InstancePub") as dp:
-        print(f"[Setup] DomainParticipant (domain=0)")
+        print(f"[Setup] DomainParticipant {dp.domain_id}")
 
         topic = dp.create_topic("instance_demo", SensorData)
         pub = dp.create_publisher()
