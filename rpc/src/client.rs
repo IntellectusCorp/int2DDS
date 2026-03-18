@@ -124,7 +124,7 @@ pub trait ClientEndpoint: ServiceProxy {
     fn get_reply_datareader(&self) -> DdsRpcResult<&DataReader<Reply<Self::TRep>>>;
 }
 
-/// (7.11.1.5.4)
+/// 7.11.1.5.4
 pub struct Client<TReq, TRep> {
     requester: Requester<TReq, TRep>,
 }

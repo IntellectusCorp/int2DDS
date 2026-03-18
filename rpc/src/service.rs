@@ -156,10 +156,10 @@ impl<TReq: DdsRpcType, TRep: DdsRpcType, H: RequestHandler<TReq, TRep>> Service<
         Ok(Self { replier, handler: Arc::new(handler), status: ServiceStatus::Running })
     }
 
-    /// Try to process one pending request.
+    /// Try to dispatch one pending request.
     /// Returns Ok(true) if a request was processed, Ok(false) if none available
     /// or service is not running.
-    pub(crate) fn try_process_one(&self) -> DdsRpcResult<bool> {
+    pub(crate) fn try_dispatch_one(&self) -> DdsRpcResult<bool> {
         if self.status != ServiceStatus::Running {
             return Ok(false);
         }
@@ -231,16 +231,8 @@ where
     TRep: DdsRpcType + Send,
     H: RequestHandler<TReq, TRep> + Send + Sync,
 {
-    fn try_process_one(&self) -> DdsRpcResult<bool> {
-        Service::try_process_one(self)
-    }
-
-    fn close(&mut self) -> DdsRpcResult<()> {
-        RpcEntity::close(self)
-    }
-
-    fn is_closed(&self) -> bool {
-        RpcEntity::is_closed(self)
+    fn try_dispatch_one(&self) -> DdsRpcResult<bool> {
+        Service::try_dispatch_one(self)
     }
 
     fn status(&self) -> ServiceStatus {
