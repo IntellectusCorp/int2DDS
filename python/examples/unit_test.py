@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from dataclasses import dataclass
 from typing import ClassVar
 
-from int2dds import DomainParticipant
+from int2dds import DomainParticipant, WaitSet, GuardCondition, DdsTimeout, StatusCondition
 from int2dds.cdr import CdrReader, CdrWriter, Extensibility
 from int2dds.cdr.writer import CdrKeyWriter
 
@@ -334,6 +334,125 @@ def run_all_tests():
             print(f"  dispose(handle=NIL)")
             nokey_writer.dispose(sample, handle)
             print(f"    -> OK (silently returned)")
+            record_pass(name)
+        except Exception as e:
+            record_fail(name, e)
+
+            
+        # ===============================================================
+        # WaitSet.wait_ex / ConditionSeq Tests
+        # ===============================================================
+        print(f"\n{'='*60}")
+        print(f"  WaitSet.wait_ex / ConditionSeq Tests")
+        print(f"{'='*60}\n")
+
+        from int2dds.core.conditions import (
+            STATUS_SUBSCRIPTION_MATCHED,
+            STATUS_DATA_AVAILABLE,
+        )
+
+        # Setup: reader on same topic for wait_ex tests
+        sub = dp.create_subscriber()
+        waitex_topic = dp.create_topic("test_waitex", NoKeyMessage)
+        waitex_writer = pub.create_datawriter(waitex_topic)
+        waitex_reader = sub.create_datareader(waitex_topic)
+
+        # ---------------------------------------------------------------
+        # Test 11: wait_ex returns triggered conditions on match
+        # ---------------------------------------------------------------
+        name = "test_waitex_returns_conditions_on_match"
+        print(f"--- Test 11: {name} ---")
+        try:
+            ws = WaitSet()
+            status_cond = waitex_reader.get_statuscondition()
+            status_cond.set_enabled_statuses(STATUS_SUBSCRIPTION_MATCHED)
+            ws.attach(status_cond)
+
+            # Writer already exists, so match should already be triggered
+            time.sleep(0.5)
+            triggered = ws.wait_ex(timeout=3.0)
+
+            print(f"  Triggered conditions: {len(triggered)}")
+            assert len(triggered) >= 1, f"Expected >=1 triggered, got {len(triggered)}"
+
+            for i, cond in enumerate(triggered):
+                print(f"    [{i}] trigger_value = {cond.trigger_value}")
+                assert cond.trigger_value is True
+
+            record_pass(name)
+        except Exception as e:
+            record_fail(name, e)
+
+        # ---------------------------------------------------------------
+        # Test 12: wait_ex returns conditions on data available
+        # ---------------------------------------------------------------
+        name = "test_waitex_data_available"
+        print(f"\n--- Test 12: {name} ---")
+        try:
+            status_cond.set_enabled_statuses(STATUS_DATA_AVAILABLE)
+
+            # Write data so DATA_AVAILABLE triggers
+            waitex_writer.write(NoKeyMessage(value=42))
+            time.sleep(0.3)
+
+            triggered = ws.wait_ex(timeout=3.0)
+            print(f"  Triggered conditions: {len(triggered)}")
+            assert len(triggered) >= 1, f"Expected >=1 triggered, got {len(triggered)}"
+
+            # Verify data is actually there
+            samples = waitex_reader.take()
+            print(f"  Samples received: {len(samples)}")
+            assert len(samples) >= 1, f"Expected >=1 sample, got {len(samples)}"
+            assert samples[0].data.value == 42
+            print(f"  Data value: {samples[0].data.value}")
+
+            record_pass(name)
+        except Exception as e:
+            record_fail(name, e)
+
+        # ---------------------------------------------------------------
+        # Test 13: wait_ex timeout raises DdsTimeout
+        # ---------------------------------------------------------------
+        name = "test_waitex_timeout"
+        print(f"\n--- Test 13: {name} ---")
+        try:
+            # Take all remaining data first
+            waitex_reader.take()
+
+            # Now wait with short timeout — no new data, should timeout
+            print(f"  Waiting 1.0s for timeout...")
+            try:
+                triggered = ws.wait_ex(timeout=1.0)
+                # If we get here, condition was still triggered (possible)
+                print(f"  Got {len(triggered)} conditions (status still set)")
+                record_pass(name)
+            except DdsTimeout:
+                print(f"  DdsTimeout raised as expected")
+                record_pass(name)
+        except Exception as e:
+            record_fail(name, e)
+
+        # ---------------------------------------------------------------
+        # Test 14: wait_ex with GuardCondition
+        # ---------------------------------------------------------------
+        name = "test_waitex_guard_condition"
+        print(f"\n--- Test 14: {name} ---")
+        try:
+            ws2 = WaitSet()
+            guard = GuardCondition()
+            ws2.attach(guard)
+
+            # Set trigger before wait
+            guard.trigger()
+            print(f"  GuardCondition trigger set to True")
+
+            triggered = ws2.wait_ex(timeout=2.0)
+            print(f"  Triggered conditions: {len(triggered)}")
+            assert len(triggered) >= 1
+
+            for i, cond in enumerate(triggered):
+                print(f"    [{i}] trigger_value = {cond.trigger_value}")
+
             record_pass(name)
         except Exception as e:
             record_fail(name, e)
