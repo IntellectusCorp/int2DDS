@@ -470,7 +470,7 @@ def run_all_tests():
 
 def main():
     print("=" * 60)
-    print("  Instance Management Unit Tests")
+    print("  ALL Unit Tests")
     print("=" * 60)
 
     results = run_all_tests()

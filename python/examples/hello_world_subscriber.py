@@ -7,6 +7,9 @@ Subscribes to HelloWorld samples to demonstrate int2dds Python bindings.
 Usage:
     python hello_world_subscriber.py
 """
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from hello_world_type import HelloWorld
 

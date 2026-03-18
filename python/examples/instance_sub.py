@@ -68,7 +68,7 @@ def main():
     print("=" * 60)
 
     with DomainParticipant(domain_id=1, name="InstanceSub") as dp:
-        print(f"[Setup] DomainParticipant (domain=0)")
+        print(f"[Setup] DomainParticipant {dp.domain_id}")
 
         topic = dp.create_topic("instance_demo", SensorData)
         sub = dp.create_subscriber()
