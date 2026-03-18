@@ -166,6 +166,94 @@ ffi.cdef("""
         int32_t *total_count_out,
         int32_t *current_count_out
     );
+    typedef struct Int2DdsOfferedDeadlineMissedStatus {
+        int32_t total_count;
+        int32_t total_count_change;
+        uint8_t last_instance_handle[16];
+    } Int2DdsOfferedDeadlineMissedStatus;
+
+    typedef struct Int2DdsRequestedDeadlineMissedStatus {
+        int32_t total_count;
+        int32_t total_count_change;
+        uint8_t last_instance_handle[16];
+    } Int2DdsRequestedDeadlineMissedStatus;
+
+    typedef struct Int2DdsLivelinessLostStatus {
+        int32_t total_count;
+        int32_t total_count_change;
+    } Int2DdsLivelinessLostStatus;
+
+    typedef struct Int2DdsLivelinessChangedStatus {
+        int32_t alive_count;
+        int32_t not_alive_count;
+        int32_t alive_count_change;
+        int32_t not_alive_count_change;
+        uint8_t last_publication_handle[16];
+    } Int2DdsLivelinessChangedStatus;
+
+    typedef struct Int2DdsSampleLostStatus {
+        int32_t total_count;
+        int32_t total_count_change;
+    } Int2DdsSampleLostStatus;
+
+
+    /* Sample Rejected Status */
+    typedef enum {
+        INT2DDS_SAMPLE_NOT_REJECTED = 0,
+        INT2DDS_SAMPLE_REJECTED_BY_INSTANCES_LIMIT = 1,
+        INT2DDS_SAMPLE_REJECTED_BY_SAMPLES_LIMIT = 2,
+        INT2DDS_SAMPLE_REJECTED_BY_SAMPLES_PER_INSTANCE_LIMIT = 3
+    } Int2DdsSampleRejectedStatusKind;
+
+    typedef struct Int2DdsSampleRejectedStatus {
+        int32_t total_count;
+        int32_t total_count_change;
+        Int2DdsSampleRejectedStatusKind last_reason;
+        uint8_t last_instance_handle[16];
+    } Int2DdsSampleRejectedStatus;
+
+    /* QoS Policy ID for Incompatible QoS Status */
+    typedef enum {
+        INT2DDS_QOS_POLICY_INVALID = 0,
+        INT2DDS_QOS_POLICY_USERDATA = 1,
+        INT2DDS_QOS_POLICY_DURABILITY = 2,
+        INT2DDS_QOS_POLICY_PRESENTATION = 3,
+        INT2DDS_QOS_POLICY_DEADLINE = 4,
+        INT2DDS_QOS_POLICY_LATENCYBUDGET = 5,
+        INT2DDS_QOS_POLICY_OWNERSHIP = 6,
+        INT2DDS_QOS_POLICY_OWNERSHIPSTRENGTH = 7,
+        INT2DDS_QOS_POLICY_LIVELINESS = 8,
+        INT2DDS_QOS_POLICY_TIMEBASEDFILTER = 9,
+        INT2DDS_QOS_POLICY_PARTITION = 10,
+        INT2DDS_QOS_POLICY_RELIABILITY = 11,
+        INT2DDS_QOS_POLICY_DESTINATIONORDER = 12,
+        INT2DDS_QOS_POLICY_HISTORY = 13,
+        INT2DDS_QOS_POLICY_RESOURCELIMITS = 14,
+        INT2DDS_QOS_POLICY_ENTITYFACTORY = 15,
+        INT2DDS_QOS_POLICY_WRITERDATALIFECYCLE = 16,
+        INT2DDS_QOS_POLICY_READERDATALIFECYCLE = 17,
+        INT2DDS_QOS_POLICY_TOPICDATA = 18,
+        INT2DDS_QOS_POLICY_GROUPDATA = 19,
+        INT2DDS_QOS_POLICY_TRANSPORTPRIORITY = 20,
+        INT2DDS_QOS_POLICY_LIFESPAN = 21,
+        INT2DDS_QOS_POLICY_DURABILITYSERVICE = 22,
+        INT2DDS_QOS_POLICY_DATAREPRESENTATION = 23,
+        INT2DDS_QOS_POLICY_TYPECONSISTENCYENFORCEMENT = 24
+    } Int2DdsQosPolicyId;
+
+    typedef struct Int2DdsRequestedIncompatibleQosStatus {
+        int32_t total_count;
+        int32_t total_count_change;
+        Int2DdsQosPolicyId last_policy_id;
+        uint32_t policies_count;
+    } Int2DdsRequestedIncompatibleQosStatus;
+
+    typedef struct Int2DdsOfferedIncompatibleQosStatus {
+        int32_t total_count;
+        int32_t total_count_change;
+        Int2DdsQosPolicyId last_policy_id;
+        uint32_t policies_count;
+    } Int2DdsOfferedIncompatibleQosStatus;
 
     /* --- Writer Status Getters --- */
     Int2DdsRet int2dds_datawriter_get_liveliness_lost_status(
@@ -423,94 +511,6 @@ ffi.cdef("""
         uint8_t last_publication_handle[16];
     } Int2DdsSubscriptionMatchedStatus;
 
-    typedef struct Int2DdsOfferedDeadlineMissedStatus {
-        int32_t total_count;
-        int32_t total_count_change;
-        uint8_t last_instance_handle[16];
-    } Int2DdsOfferedDeadlineMissedStatus;
-
-    typedef struct Int2DdsRequestedDeadlineMissedStatus {
-        int32_t total_count;
-        int32_t total_count_change;
-        uint8_t last_instance_handle[16];
-    } Int2DdsRequestedDeadlineMissedStatus;
-
-    typedef struct Int2DdsLivelinessLostStatus {
-        int32_t total_count;
-        int32_t total_count_change;
-    } Int2DdsLivelinessLostStatus;
-
-    typedef struct Int2DdsLivelinessChangedStatus {
-        int32_t alive_count;
-        int32_t not_alive_count;
-        int32_t alive_count_change;
-        int32_t not_alive_count_change;
-        uint8_t last_publication_handle[16];
-    } Int2DdsLivelinessChangedStatus;
-
-    typedef struct Int2DdsSampleLostStatus {
-        int32_t total_count;
-        int32_t total_count_change;
-    } Int2DdsSampleLostStatus;
-
-
-    /* Sample Rejected Status */
-    typedef enum {
-        INT2DDS_SAMPLE_NOT_REJECTED = 0,
-        INT2DDS_SAMPLE_REJECTED_BY_INSTANCES_LIMIT = 1,
-        INT2DDS_SAMPLE_REJECTED_BY_SAMPLES_LIMIT = 2,
-        INT2DDS_SAMPLE_REJECTED_BY_SAMPLES_PER_INSTANCE_LIMIT = 3
-    } Int2DdsSampleRejectedStatusKind;
-
-    typedef struct Int2DdsSampleRejectedStatus {
-        int32_t total_count;
-        int32_t total_count_change;
-        Int2DdsSampleRejectedStatusKind last_reason;
-        uint8_t last_instance_handle[16];
-    } Int2DdsSampleRejectedStatus;
-
-    /* QoS Policy ID for Incompatible QoS Status */
-    typedef enum {
-        INT2DDS_QOS_POLICY_INVALID = 0,
-        INT2DDS_QOS_POLICY_USERDATA = 1,
-        INT2DDS_QOS_POLICY_DURABILITY = 2,
-        INT2DDS_QOS_POLICY_PRESENTATION = 3,
-        INT2DDS_QOS_POLICY_DEADLINE = 4,
-        INT2DDS_QOS_POLICY_LATENCYBUDGET = 5,
-        INT2DDS_QOS_POLICY_OWNERSHIP = 6,
-        INT2DDS_QOS_POLICY_OWNERSHIPSTRENGTH = 7,
-        INT2DDS_QOS_POLICY_LIVELINESS = 8,
-        INT2DDS_QOS_POLICY_TIMEBASEDFILTER = 9,
-        INT2DDS_QOS_POLICY_PARTITION = 10,
-        INT2DDS_QOS_POLICY_RELIABILITY = 11,
-        INT2DDS_QOS_POLICY_DESTINATIONORDER = 12,
-        INT2DDS_QOS_POLICY_HISTORY = 13,
-        INT2DDS_QOS_POLICY_RESOURCELIMITS = 14,
-        INT2DDS_QOS_POLICY_ENTITYFACTORY = 15,
-        INT2DDS_QOS_POLICY_WRITERDATALIFECYCLE = 16,
-        INT2DDS_QOS_POLICY_READERDATALIFECYCLE = 17,
-        INT2DDS_QOS_POLICY_TOPICDATA = 18,
-        INT2DDS_QOS_POLICY_GROUPDATA = 19,
-        INT2DDS_QOS_POLICY_TRANSPORTPRIORITY = 20,
-        INT2DDS_QOS_POLICY_LIFESPAN = 21,
-        INT2DDS_QOS_POLICY_DURABILITYSERVICE = 22,
-        INT2DDS_QOS_POLICY_DATAREPRESENTATION = 23,
-        INT2DDS_QOS_POLICY_TYPECONSISTENCYENFORCEMENT = 24
-    } Int2DdsQosPolicyId;
-
-    typedef struct Int2DdsRequestedIncompatibleQosStatus {
-        int32_t total_count;
-        int32_t total_count_change;
-        Int2DdsQosPolicyId last_policy_id;
-        uint32_t policies_count;
-    } Int2DdsRequestedIncompatibleQosStatus;
-
-    typedef struct Int2DdsOfferedIncompatibleQosStatus {
-        int32_t total_count;
-        int32_t total_count_change;
-        Int2DdsQosPolicyId last_policy_id;
-        uint32_t policies_count;
-    } Int2DdsOfferedIncompatibleQosStatus;
 
     /* User context for callbacks */
     typedef void *Int2DdsUserContext;
