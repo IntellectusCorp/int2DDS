@@ -1,6 +1,5 @@
 //! Replier<TReq, TRep> — receives requests and sends replies (7.11.1.4.5)
 
-use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,7 +18,6 @@ use int2dds::dcps::subscription::qos::{DataReaderQos, DATAREADER_QOS_DEFAULT};
 use int2dds::dcps::subscription::sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind};
 use int2dds::dcps::topic::qos::TopicQos;
 use int2dds::dcps::topic::type_support::DdsType;
-use int2dds::serialize::cdr::{CdrDeserialize, CdrSerialize, XcdrDeserialize, XcdrSerialize};
 
 use crate::entity::RpcEntity;
 use crate::error::{DdsRpcError, DdsRpcResult};
@@ -27,7 +25,7 @@ use crate::listener::{ReplierListener, SimpleReplierListener};
 use crate::params::ReplierParams;
 use crate::sample::Sample;
 use crate::topic_name::TopicNameConfig;
-use crate::types::{RemoteExceptionCode, Reply, ReplyHeader, Request, SampleIdentity};
+use crate::types::{DdsRpcType, RemoteExceptionCode, Reply, ReplyHeader, Request, SampleIdentity};
 
 pub struct Replier<TReq, TRep> {
     request_reader: Option<Arc<DataReader<Request<TReq>>>>,
@@ -35,11 +33,7 @@ pub struct Replier<TReq, TRep> {
     closed: bool,
 }
 
-impl<TReq, TRep> Replier<TReq, TRep>
-where
-    TReq: DdsType + CdrSerialize + CdrDeserialize + XcdrSerialize + XcdrDeserialize,
-    TRep: DdsType + Clone + CdrSerialize + CdrDeserialize + XcdrSerialize + XcdrDeserialize,
-{
+impl<TReq: DdsRpcType, TRep: DdsRpcType> Replier<TReq, TRep> {
     pub fn new(params: ReplierParams) -> DdsRpcResult<Self> {
         let topic_config = TopicNameConfig {
             interface_name: None,
@@ -119,7 +113,7 @@ where
     /// Send a reply correlated with the given request identity. (7.8.1)
     pub fn send_reply(&self, data: &TRep, related_request_id: &SampleIdentity) -> DdsRpcResult<()> {
         let mut reply = Reply {
-            header: crate::types::ReplyHeader {
+            header: ReplyHeader {
                 related_request_id: *related_request_id,
                 remote_ex: RemoteExceptionCode::Ok,
             },
@@ -184,47 +178,7 @@ where
     pub fn get_reply_datawriter(&self) -> DdsRpcResult<&DataWriter<Reply<TRep>>> {
         self.writer()
     }
-}
 
-impl<TReq, TRep> RpcEntity for Replier<TReq, TRep>
-where
-    TReq: DdsType + CdrSerialize + CdrDeserialize + XcdrSerialize + XcdrDeserialize,
-    TRep: DdsType + Clone + CdrSerialize + CdrDeserialize + XcdrSerialize + XcdrDeserialize,
-{
-    fn close(&mut self) -> DdsRpcResult<()> {
-        // Detach listener first to release any adapter-held Arc references
-        if let Some(ref reader) = self.request_reader {
-            let _ = reader.set_listener(None, StatusMask::default());
-        }
-        // delete_datareader/writer requires owned value, not Arc
-        if let Some(reader_arc) = self.request_reader.take() {
-            if let Ok(reader) = Arc::try_unwrap(reader_arc) {
-                let subscriber = reader.get_subscriber()?;
-                subscriber.delete_datareader(reader)?;
-            }
-        }
-        if let Some(writer_arc) = self.reply_writer.take() {
-            if let Ok(writer) = Arc::try_unwrap(writer_arc) {
-                let publisher = writer.get_publisher()?;
-                publisher.delete_datawriter(writer)?;
-            }
-        }
-        self.closed = true;
-        Ok(())
-    }
-
-    fn is_closed(&self) -> bool {
-        self.closed
-    }
-}
-
-// Listener-based request reception (7.11.1.4.7, 7.11.1.4.8)
-
-impl<TReq, TRep> Replier<TReq, TRep>
-where
-    TReq: DdsType + Clone + Debug + CdrSerialize + CdrDeserialize + XcdrSerialize + XcdrDeserialize,
-    TRep: DdsType + Clone + Debug + CdrSerialize + CdrDeserialize + XcdrSerialize + XcdrDeserialize,
-{
     /// Install a SimpleReplierListener. The middleware takes each arriving request,
     /// calls `process_request`, and automatically sends the returned reply. (7.11.1.4.7)
     /// Pass `None` to remove an existing listener.
@@ -279,6 +233,34 @@ where
     }
 }
 
+impl<TReq: DdsRpcType, TRep: DdsRpcType> RpcEntity for Replier<TReq, TRep> {
+    fn close(&mut self) -> DdsRpcResult<()> {
+        // Detach listener first to release any adapter-held Arc references
+        if let Some(ref reader) = self.request_reader {
+            let _ = reader.set_listener(None, StatusMask::default());
+        }
+        // delete_datareader/writer requires owned value, not Arc
+        if let Some(reader_arc) = self.request_reader.take() {
+            if let Ok(reader) = Arc::try_unwrap(reader_arc) {
+                let subscriber = reader.get_subscriber()?;
+                subscriber.delete_datareader(reader)?;
+            }
+        }
+        if let Some(writer_arc) = self.reply_writer.take() {
+            if let Ok(writer) = Arc::try_unwrap(writer_arc) {
+                let publisher = writer.get_publisher()?;
+                publisher.delete_datawriter(writer)?;
+            }
+        }
+        self.closed = true;
+        Ok(())
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed
+    }
+}
+
 /// DDS DataReaderListener adapter for SimpleReplierListener.
 /// Takes all available requests, dispatches each to `process_request`,
 /// and sends the returned reply automatically.
@@ -290,24 +272,8 @@ struct SimpleReplierDdsAdapter<TReq, TRep> {
 unsafe impl<TReq, TRep> Send for SimpleReplierDdsAdapter<TReq, TRep> {}
 unsafe impl<TReq, TRep> Sync for SimpleReplierDdsAdapter<TReq, TRep> {}
 
-impl<TReq, TRep> DataReaderListener for SimpleReplierDdsAdapter<TReq, TRep>
-where
-    TReq: 'static
-        + Clone
-        + Debug
-        + DdsType
-        + CdrSerialize
-        + CdrDeserialize
-        + XcdrSerialize
-        + XcdrDeserialize,
-    TRep: 'static
-        + Clone
-        + Debug
-        + DdsType
-        + CdrSerialize
-        + CdrDeserialize
-        + XcdrSerialize
-        + XcdrDeserialize,
+impl<TReq: DdsRpcType, TRep: DdsRpcType> DataReaderListener
+    for SimpleReplierDdsAdapter<TReq, TRep>
 {
     type Foo = Request<TReq>;
 
@@ -347,25 +313,7 @@ struct ReplierDdsAdapter<TReq, TRep> {
 unsafe impl<TReq, TRep> Send for ReplierDdsAdapter<TReq, TRep> {}
 unsafe impl<TReq, TRep> Sync for ReplierDdsAdapter<TReq, TRep> {}
 
-impl<TReq, TRep> DataReaderListener for ReplierDdsAdapter<TReq, TRep>
-where
-    TReq: 'static
-        + Clone
-        + Debug
-        + DdsType
-        + CdrSerialize
-        + CdrDeserialize
-        + XcdrSerialize
-        + XcdrDeserialize,
-    TRep: 'static
-        + Clone
-        + Debug
-        + DdsType
-        + CdrSerialize
-        + CdrDeserialize
-        + XcdrSerialize
-        + XcdrDeserialize,
-{
+impl<TReq: DdsRpcType, TRep: DdsRpcType> DataReaderListener for ReplierDdsAdapter<TReq, TRep> {
     type Foo = Request<TReq>;
 
     fn on_data_available(&self, _reader: &DataReader<Self::Foo>) {
