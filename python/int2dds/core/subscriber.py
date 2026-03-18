@@ -295,6 +295,80 @@ class DataReader(Generic[T]):
         """Get the current number of matched writers."""
         _, current = self.get_subscription_matched_status()
         return current
+    def get_liveliness_changed_status(self) -> dict:
+        """Get liveliness changed status.
+
+        Returns:
+            dict with alive_count, not_alive_count, alive_count_change,
+            not_alive_count_change, last_publication_handle
+        """
+        status = ffi.new("Int2DdsLivelinessChangedStatus *")
+        check_ret(lib.int2dds_datareader_get_liveliness_changed_status(self._handle, status))
+        return {
+            "alive_count": status.alive_count,
+            "not_alive_count": status.not_alive_count,
+            "alive_count_change": status.alive_count_change,
+            "not_alive_count_change": status.not_alive_count_change,
+            "last_publication_handle": bytes(status.last_publication_handle),
+        }
+
+    def get_sample_rejected_status(self) -> dict:
+        """Get sample rejected status.
+
+        Returns:
+            dict with total_count, total_count_change, last_reason, last_instance_handle
+        """
+        status = ffi.new("Int2DdsSampleRejectedStatus *")
+        check_ret(lib.int2dds_datareader_get_sample_rejected_status(self._handle, status))
+        return {
+            "total_count": status.total_count,
+            "total_count_change": status.total_count_change,
+            "last_reason": int(status.last_reason),
+            "last_instance_handle": bytes(status.last_instance_handle),
+        }
+
+    def get_sample_lost_status(self) -> dict:
+        """Get sample lost status.
+
+        Returns:
+            dict with total_count, total_count_change
+        """
+        status = ffi.new("Int2DdsSampleLostStatus *")
+        check_ret(lib.int2dds_datareader_get_sample_lost_status(self._handle, status))
+        return {
+            "total_count": status.total_count,
+            "total_count_change": status.total_count_change,
+        }
+
+    def get_requested_deadline_missed_status(self) -> dict:
+        """Get requested deadline missed status.
+
+        Returns:
+            dict with total_count, total_count_change, last_instance_handle
+        """
+        status = ffi.new("Int2DdsRequestedDeadlineMissedStatus *")
+        check_ret(lib.int2dds_datareader_get_requested_deadline_missed_status(self._handle, status))
+        return {
+            "total_count": status.total_count,
+            "total_count_change": status.total_count_change,
+            "last_instance_handle": bytes(status.last_instance_handle),
+        }
+
+    def get_requested_incompatible_qos_status(self) -> dict:
+        """Get requested incompatible QoS status.
+
+        Returns:
+            dict with total_count, total_count_change, last_policy_id, policies_count
+        """
+        status = ffi.new("Int2DdsRequestedIncompatibleQosStatus *")
+        check_ret(lib.int2dds_datareader_get_requested_incompatible_qos_status(self._handle, status))
+        return {
+            "total_count": status.total_count,
+            "total_count_change": status.total_count_change,
+            "last_policy_id": int(status.last_policy_id),
+            "policies_count": status.policies_count,
+        }
+
     def get_statuscondition(self) -> StatusCondition:
         """Get the StatusCondition associated with this DataReader."""
         cond_ptr = ffi.new("Int2DdsStatusCondition **")
