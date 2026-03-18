@@ -1,10 +1,21 @@
 //! DDS-RPC common types (7.5.1.1.1)
 
 use std::any::Any;
+use std::fmt::Debug;
 
 use int2dds::dcps::core::error::{DdsError, DdsResult};
 use int2dds::dcps::topic::type_support::{DdsType, FieldAccessor};
+use int2dds::serialize::cdr::{CdrDeserialize, CdrSerialize, XcdrDeserialize, XcdrSerialize};
 use int2dds::topic::sql::ast::Parameter;
+
+pub trait DdsRpcType:
+    DdsType + Clone + Debug + CdrSerialize + CdrDeserialize + XcdrSerialize + XcdrDeserialize
+{
+}
+impl<T> DdsRpcType for T where
+    T: DdsType + Clone + Debug + CdrSerialize + CdrDeserialize + XcdrSerialize + XcdrDeserialize
+{
+}
 
 pub use int2dds::dcps::core::error::RETCODE_OK;
 pub use int2dds::rtps::common::guid::Guid;
