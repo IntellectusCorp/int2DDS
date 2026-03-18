@@ -32,6 +32,13 @@ impl RawTypeSupport {
     pub fn new(type_name: String, extensibility: ExtensibilityKind, has_key: bool) -> Self {
         Self { type_name, extensibility, has_key }
     }
+    pub fn new_with_key(
+        type_name: String,
+        extensibility: ExtensibilityKind,
+        has_key: bool,
+    ) -> Self {
+        Self { type_name, extensibility, has_key }
+    }
 }
 
 impl TypeSupport for RawTypeSupport {

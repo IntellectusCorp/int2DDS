@@ -110,7 +110,7 @@ pub unsafe extern "C" fn int2dds_create_topic_keyed(
 
     // Create RawTypeSupport
     let type_support =
-        Arc::new(RawTypeSupport::new(dds_type_name_str.to_string(), ext_kind, has_key));
+        Arc::new(RawTypeSupport::new_with_key(dds_type_name_str.to_string(), ext_kind, has_key));
 
     // Register the RawTypeSupport with the participant
     ffi_try!(participant_ref
