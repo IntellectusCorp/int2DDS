@@ -110,17 +110,24 @@ impl<TReq: DdsRpcType, TRep: DdsRpcType> Replier<TReq, TRep> {
         self.reply_writer.as_deref().ok_or(DdsError::AlreadyDeleted.into())
     }
 
-    /// Send a reply correlated with the given request identity. (7.8.1)
-    pub fn send_reply(&self, data: &TRep, related_request_id: &SampleIdentity) -> DdsRpcResult<()> {
+    /// Send a reply with explicit RemoteExceptionCode. (7.8.1)
+    pub fn send_reply_ex(
+        &self,
+        data: &TRep,
+        related_request_id: &SampleIdentity,
+        remote_ex: RemoteExceptionCode,
+    ) -> DdsRpcResult<()> {
         let mut reply = Reply {
-            header: ReplyHeader {
-                related_request_id: *related_request_id,
-                remote_ex: RemoteExceptionCode::Ok,
-            },
+            header: ReplyHeader { related_request_id: *related_request_id, remote_ex },
             data: data.clone(),
         };
         self.writer()?.write(&mut reply, InstanceHandle::NIL)?;
         Ok(())
+    }
+
+    /// Send a reply correlated with the given request identity. (7.8.1)
+    pub fn send_reply(&self, data: &TRep, related_request_id: &SampleIdentity) -> DdsRpcResult<()> {
+        self.send_reply_ex(data, related_request_id, RemoteExceptionCode::Ok)
     }
 
     /// Take a single pending request (non-blocking).

@@ -16,7 +16,7 @@ use crate::error::DdsRpcResult;
 use crate::params::ReplierParams;
 use crate::replier::Replier;
 use crate::server::Dispatchable;
-use crate::types::{DdsRpcType, Reply, Request};
+use crate::types::{DdsRpcType, RemoteExceptionCode, Reply, Request};
 
 /// (7.9.1)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,8 +139,9 @@ pub trait ServiceEndpoint: RpcEntity {
 
 /// Request dispatch abstraction (7.9.2.1).
 /// IDL code generators produce per-interface implementations of this trait.
+/// Returns reply data + RemoteExceptionCode for the reply header.
 pub trait RequestHandler<TReq, TRep>: Send + 'static {
-    fn handle_request(&self, request: &TReq) -> TRep;
+    fn handle_request(&self, request: &TReq) -> (TRep, RemoteExceptionCode);
 }
 
 /// (7.11.1.5.1)
@@ -174,8 +175,8 @@ impl<TReq: DdsRpcType, TRep: DdsRpcType, H: RequestHandler<TReq, TRep>> Service<
 
         let data = sample.data().map_err(|e| DdsError::Error(e.to_string()))?;
         let request_id = data.header.request_id;
-        let reply_data = self.handler.handle_request(&data.data);
-        self.replier.send_reply(&reply_data, &request_id)?;
+        let (reply_data, remote_ex) = self.handler.handle_request(&data.data);
+        self.replier.send_reply_ex(&reply_data, &request_id, remote_ex)?;
         Ok(true)
     }
 }
