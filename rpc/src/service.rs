@@ -235,8 +235,4 @@ where
     fn try_dispatch_one(&self) -> DdsRpcResult<bool> {
         Service::try_dispatch_one(self)
     }
-
-    fn status(&self) -> ServiceStatus {
-        ServiceEndpoint::status(self)
-    }
 }
