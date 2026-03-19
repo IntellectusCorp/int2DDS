@@ -544,7 +544,6 @@ impl Socket {
         self.working_ips.from_feature
     }
 
-    // Sender bind address:
     fn get_sender_bind_addr(&self) -> String {
         // From int2DDS-feature: bind to the feature-specified IP directly
         if self.working_ips.from_feature {
@@ -554,10 +553,10 @@ impl Socket {
         let only_loopback =
             self.working_ips.ips.len() == 1 && self.working_ips.ips[0] == "127.0.0.1";
         if only_loopback {
-            // 0.0.0.0 bind fails when no physical NIC exists, use loopback directly
+            // No physical NIC available, 0.0.0.0 has no interface to route through
             "127.0.0.1".to_string()
         } else {
-            // otherwise: 0.0.0.0 (OS routing)
+            // 0.0.0.0 allows unicast to reach any subnet via OS routing table
             "0.0.0.0".to_string()
         }
     }
