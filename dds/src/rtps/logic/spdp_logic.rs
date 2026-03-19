@@ -102,16 +102,18 @@ impl SpdpLogic {
         let start = Instant::now();
         match data {
             Some(ref data) => {
-                // Send via multicast (UDP)
-                if let Some(ref sender) = self.sender {
-                    let _ = sender.send_multicast(domain_id, data);
-                    log::debug!("discovery multicast packet send");
+                if self.initial_peers.is_empty() {
+                    // No initial peers: use multicast (default behavior)
+                    if let Some(ref sender) = self.sender {
+                        let _ = sender.send_multicast(domain_id, data);
+                        log::debug!("discovery multicast packet send");
+                    } else {
+                        log::debug!("UDP sender not available, skipping SPDP multicast");
+                    }
                 } else {
-                    log::debug!("UDP sender not available, skipping SPDP multicast");
+                    // Initial peers configured: send unicast only
+                    self.send_spdp_to_initial_peers(data);
                 }
-
-                // Also send to initial peers via TCP (if configured and in TCP/Hybrid mode)
-                self.send_spdp_to_initial_peers(data);
             }
             None => {
                 log::error!("spdp message is not set");
@@ -164,50 +166,40 @@ impl SpdpLogic {
         Ok(())
     }
 
-    /// Send SPDP message to initial peers via TCP unicast
-    /// Only works in TCP or Hybrid transport modes
+    /// Send SPDP message to initial peers via unicast
     pub(crate) fn send_spdp_to_initial_peers(&self, data: &[u8]) {
-        // Check transport mode - only send to initial peers in TCP or Hybrid mode
-        let transport_type = crate::rtps::transport::get_transport_type();
-
-        if transport_type != TransportType::TCP && transport_type != TransportType::Hybrid {
-            return; // Skip for UDP-only mode
-        }
-
-        // Skip if no initial peers configured
         if self.initial_peers.is_empty() {
-            log::warn!("[SPDP] No initial peers configured! TCP discovery will not work.");
             return;
         }
 
-        log::info!(
+        log::debug!(
             "[SPDP] Sending to {} initial peers: {:?}",
             self.initial_peers.len(),
             self.initial_peers
         );
 
-        // Send to each initial peer via TCP
-        if let Some(ref tcp_sender) = self.tcp_sender {
-            for peer_addr in &self.initial_peers {
-                match tcp_sender.send(peer_addr, data) {
-                    Ok(_bytes_sent) => {
-                        // log::debug!(
-                        //     "[SPDP] Successfully sent {} bytes to initial peer {:?}",
-                        //     _bytes_sent,
-                        //     peer_addr
-                        // );
+        let transport_type = crate::rtps::transport::get_transport_type();
+
+        match transport_type {
+            TransportType::TCP | TransportType::Hybrid => {
+                if let Some(ref tcp_sender) = self.tcp_sender {
+                    for peer_addr in &self.initial_peers {
+                        let _ = tcp_sender.send(peer_addr, data);
                     }
-                    Err(_e) => {
-                        // log::error!(
-                        //     "[SPDP] Failed to send SPDP to initial peer {:?}: {:?}",
-                        //     peer_addr,
-                        //     _e
-                        // );
-                    }
+                } else {
+                    log::error!("[SPDP] TCP sender not available for initial peers");
                 }
             }
-        } else {
-            log::error!("[SPDP] TCP sender NOT available! Cannot send SPDP to initial peers.");
+            _ => {
+                // UDP / SHM: send via UDP unicast
+                if let Some(ref sender) = self.sender {
+                    for peer_addr in &self.initial_peers {
+                        let _ = sender.send(peer_addr, data);
+                    }
+                } else {
+                    log::error!("[SPDP] UDP sender not available for initial peers");
+                }
+            }
         }
     }
 
@@ -220,11 +212,17 @@ impl SpdpLogic {
         {
             let buffer = rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian);
             if let Ok(buffer) = buffer {
-                if let Some(ref sender) = self.sender {
-                    let _ = sender.send_multicast(participant.domain_id(), &buffer);
-                    log::debug!("discovery multicast packet send");
+                if self.initial_peers.is_empty() {
+                    if let Some(ref sender) = self.sender {
+                        let _ = sender.send_multicast(participant.domain_id(), &buffer);
+                        log::debug!("discovery multicast packet send");
+                    } else {
+                        log::debug!(
+                            "UDP sender not available, skipping SPDP termination multicast"
+                        );
+                    }
                 } else {
-                    log::debug!("UDP sender not available, skipping SPDP termination multicast");
+                    self.send_spdp_to_initial_peers(&buffer);
                 }
             } else {
                 log::error!("Failed to serialize SPDP message with inline qos");
