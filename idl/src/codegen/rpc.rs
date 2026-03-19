@@ -2121,6 +2121,11 @@ mod tests {
 
         assert!(code.contains("pub struct Foo_setSpeed_Future {"));
         assert!(code.contains("pub fn get(self) -> DdsRpcResult<(), TooFast>"));
+
+        // Body: exception variant → UserException
+        assert!(code.contains("Foo_setSpeed_Result::TooFast_ex(ex) => Err(DdsRpcError::UserException(ex.clone())),"));
+        // Body: remote exception check
+        assert!(code.contains("if data.header.remote_ex != RemoteExceptionCode::Ok {"));
     }
 
     #[test]
@@ -2264,5 +2269,93 @@ mod tests {
         assert!(code.contains("fn set_speed(&self, speed: f32) -> Result<(), TooFast>;"));
         // 2+ raises → Result<T, ErrorEnum>
         assert!(code.contains("fn navigate(&self, x: f32) -> Result<(), Robot_navigate_Error>;"));
+    }
+
+    #[test]
+    fn test_type_to_rust_collections() {
+        let defs = parse_idl(
+            r#"
+            interface Foo {
+                void bar(in sequence<long> ids, in sequence<double, 10> bounded);
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, &RpcOptions::default());
+
+        let body = extract_body(&code, "pub struct Foo_bar_In {");
+        assert!(body.contains("pub ids: Vec<i32>,"));
+        assert!(body.contains("pub bounded: Vec<f64>,"));
+    }
+
+    #[test]
+    fn test_dispatcher_body_out_and_inout_params() {
+        let defs = parse_idl(
+            r#"
+            interface Foo {
+                long compute(in long x, out double y, inout string z);
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, &RpcOptions::default());
+
+        // out param → Default::default() initialization
+        assert!(code.contains("let mut y = Default::default();"));
+        // inout param → clone + _mut
+        assert!(code.contains("let mut z_mut = z.clone();"));
+        // call with correct references
+        assert!(code.contains("self.inner.compute(*x, &mut y, &mut z_mut)"));
+        // Out struct field mapping
+        assert!(code.contains("y: y"));
+        assert!(code.contains("z: z_mut"));
+    }
+
+    #[test]
+    fn test_client_body_multi_exception_mapping() {
+        let defs = parse_idl(
+            r#"
+            exception TooFast { float speed; };
+            exception InvalidInput { string reason; };
+            interface Robot {
+                void navigate(in float x) raises (TooFast, InvalidInput);
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, &RpcOptions::default());
+
+        // Client method body: each exception → UserException(ErrorEnum::Variant)
+        assert!(code.contains(
+            "Robot_navigate_Result::TooFast_ex(ex) => Err(DdsRpcError::UserException(Robot_navigate_Error::TooFast(ex.clone()))),"
+        ));
+        assert!(code.contains(
+            "Robot_navigate_Result::InvalidInput_ex(ex) => Err(DdsRpcError::UserException(Robot_navigate_Error::InvalidInput(ex.clone()))),"
+        ));
+        // Remote exception code check
+        assert!(code.contains("if data.header.remote_ex != RemoteExceptionCode::Ok {"));
+        assert!(code.contains("return Err(DdsRpcError::Remote(data.header.remote_ex));"));
+    }
+
+    #[test]
+    fn test_client_async_impl_non_copy_clone() {
+        let defs = parse_idl(
+            r#"
+            interface Foo {
+                void bar(in string name, in long id);
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, &RpcOptions::default());
+
+        // Async impl: non-copy param (String) → .clone(), copy param (i32) → as-is
+        assert!(code.contains("impl FooAsync for FooClient {"));
+        assert!(code.contains("fn bar_async(&self, name: &String, id: i32) -> DdsRpcResult<Foo_bar_Future>"));
+        assert!(code.contains("name: name.clone()"));
     }
 }
