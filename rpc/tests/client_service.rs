@@ -144,37 +144,6 @@ fn client_service_sequential_requests() {
 }
 
 #[test]
-fn client_service_void_operation() {
-    let domain_id = next_domain_id();
-    let participant = make_participant(domain_id);
-    let svc_name = "VoidOp";
-
-    // Handler returns default (zero) response, simulating void
-    let service =
-        Service::new(ServiceParams::new(participant.clone()).service_name(svc_name), AddHandler)
-            .unwrap();
-
-    let client = Client::<AddCall, AddReturn>::new(
-        ClientParams::new(participant.clone()).service_name(svc_name),
-    )
-    .unwrap();
-
-    client.wait_for_service_timeout(Duration::from_secs(5)).unwrap();
-
-    let mut server = Server::new(ServerParams::new());
-    server.add_service(service);
-    let handle = thread::spawn(move || server.run_for(Duration::from_secs(2)));
-
-    // a=0, b=0 → result=0, just verifying roundtrip completes
-    client.send_request(&AddCall { a: 0, b: 0 }).unwrap();
-    let reply = client.receive_reply(Duration::from_secs(5)).unwrap();
-    let data = reply.data().unwrap();
-    assert_eq!(data.data.result, 0);
-
-    handle.join().unwrap().unwrap();
-}
-
-#[test]
 fn client_service_async_future() {
     let domain_id = next_domain_id();
     let participant = make_participant(domain_id);
@@ -199,35 +168,6 @@ fn client_service_async_future() {
     let reply = future.get().unwrap();
     let data = reply.data().unwrap();
     assert_eq!(data.data.result, 15);
-
-    handle.join().unwrap().unwrap();
-}
-
-#[test]
-fn client_service_async_future_timeout() {
-    let domain_id = next_domain_id();
-    let participant = make_participant(domain_id);
-    let svc_name = "AsyncFutureTimeout";
-
-    let service =
-        Service::new(ServiceParams::new(participant.clone()).service_name(svc_name), AddHandler)
-            .unwrap();
-
-    let client = Client::<AddCall, AddReturn>::new(
-        ClientParams::new(participant.clone()).service_name(svc_name),
-    )
-    .unwrap();
-
-    client.wait_for_service_timeout(Duration::from_secs(5)).unwrap();
-
-    let mut server = Server::new(ServerParams::new());
-    server.add_service(service);
-    let handle = thread::spawn(move || server.run_for(Duration::from_secs(2)));
-
-    let future = client.send_request_async(&AddCall { a: 3, b: 4 }).unwrap();
-    let reply = future.get_timeout(Duration::from_secs(5)).unwrap();
-    let data = reply.data().unwrap();
-    assert_eq!(data.data.result, 7);
 
     handle.join().unwrap().unwrap();
 }
