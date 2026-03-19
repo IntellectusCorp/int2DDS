@@ -176,7 +176,7 @@ impl<TReq: DdsRpcType, TRep: DdsRpcType, H: RequestHandler<TReq, TRep>> Service<
         let data = sample.data().map_err(|e| DdsError::Error(e.to_string()))?;
         let request_id = data.header.request_id;
         let (reply_data, remote_ex) = self.handler.handle_request(&data.data);
-        self.replier.send_reply_ex(&reply_data, &request_id, remote_ex)?;
+        self.replier.send_reply_with_exception_code(&reply_data, &request_id, remote_ex)?;
         Ok(true)
     }
 }
