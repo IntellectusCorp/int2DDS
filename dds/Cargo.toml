@@ -117,3 +117,7 @@ tempfile = "3"
 [[bench]]
 name = "reliable" # Name of the Rust source file where the benchmark code will be written
 harness = false   # Set to false to disable the default benchmark functionality and enable Criterion
+
+[[bench]]
+name = "besteffort"
+harness = false
