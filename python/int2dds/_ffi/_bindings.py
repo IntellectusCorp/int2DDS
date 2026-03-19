@@ -25,6 +25,15 @@ ffi.cdef("""
     #define INT2DDS_QOS_DURABILITY_PERSISTENT 3
     #define INT2DDS_QOS_HISTORY_KEEP_LAST 0
     #define INT2DDS_QOS_HISTORY_KEEP_ALL 1
+    #define INT2DDS_QOS_OWNERSHIP_SHARED 0
+    #define INT2DDS_QOS_OWNERSHIP_EXCLUSIVE 1
+    #define INT2DDS_QOS_DESTINATION_ORDER_BY_RECEPTION 0
+    #define INT2DDS_QOS_DESTINATION_ORDER_BY_SOURCE 1
+    #define INT2DDS_QOS_LIVELINESS_AUTOMATIC 0
+    #define INT2DDS_QOS_LIVELINESS_MANUAL_BY_PARTICIPANT 1
+    #define INT2DDS_QOS_LIVELINESS_MANUAL_BY_TOPIC 2
+    #define INT2DDS_QOS_DATA_REPRESENTATION_XCDR1 0
+    #define INT2DDS_QOS_DATA_REPRESENTATION_XCDR2 2
 
     /* Status mask bits */
     #define INT2DDS_STATUS_DATA_ON_READERS ...
@@ -73,6 +82,9 @@ ffi.cdef("""
     typedef struct Int2DdsDataWriterQos Int2DdsDataWriterQos;
     typedef struct Int2DdsDataReaderQos Int2DdsDataReaderQos;
     typedef struct Int2DdsTopicQos Int2DdsTopicQos;
+    typedef struct Int2DdsParticipantQos Int2DdsParticipantQos;
+    typedef struct Int2DdsPublisherQos Int2DdsPublisherQos;
+    typedef struct Int2DdsSubscriberQos Int2DdsSubscriberQos;
 
     typedef int32_t Int2DdsRet;
 
@@ -108,6 +120,11 @@ ffi.cdef("""
         const Int2DdsParticipant *participant,
         Int2DdsPublisher **publisher_out
     );
+    Int2DdsRet int2dds_create_publisher_with_qos(
+        const Int2DdsParticipant *participant,
+        const Int2DdsPublisherQos *qos,
+        Int2DdsPublisher **publisher_out
+    );
     Int2DdsRet int2dds_delete_publisher(Int2DdsPublisher *publisher);
     Int2DdsRet int2dds_publisher_delete_contained_entities(
         const Int2DdsPublisher *publisher
@@ -116,6 +133,11 @@ ffi.cdef("""
     /* Subscriber */
     Int2DdsRet int2dds_create_subscriber(
         const Int2DdsParticipant *participant,
+        Int2DdsSubscriber **subscriber_out
+    );
+    Int2DdsRet int2dds_create_subscriber_with_qos(
+        const Int2DdsParticipant *participant,
+        const Int2DdsSubscriberQos *qos,
         Int2DdsSubscriber **subscriber_out
     );
     Int2DdsRet int2dds_delete_subscriber(Int2DdsSubscriber *subscriber);
@@ -277,25 +299,25 @@ ffi.cdef("""
         size_t key_len
     );
     /* Instance Management */
-    Int2DdsRet int2dds_register_instance_serialized(
+    Int2DdsRet int2dds_datawriter_register_instance(
         const Int2DdsDataWriter *writer,
         const uint8_t *key,
         size_t key_len,
         uint8_t handle_out[16]
     );
-    Int2DdsRet int2dds_unregister_instance_serialized(
+    Int2DdsRet int2dds_datawriter_unregister_instance(
         const Int2DdsDataWriter *writer,
         const uint8_t *key,
         size_t key_len,
         const uint8_t handle[16]
     );
-    Int2DdsRet int2dds_dispose_serialized(
+    Int2DdsRet int2dds_datawriter_dispose(
         const Int2DdsDataWriter *writer,
         const uint8_t *key,
         size_t key_len,
         const uint8_t handle[16]
     );
-    Int2DdsRet int2dds_lookup_instance_serialized(
+    Int2DdsRet int2dds_datawriter_lookup_instance(
         const Int2DdsDataWriter *writer,
         const uint8_t *key,
         size_t key_len,
@@ -370,6 +392,58 @@ ffi.cdef("""
         int32_t kind,
         int32_t depth
     );
+    Int2DdsRet int2dds_datawriter_qos_set_ownership(
+        Int2DdsDataWriterQos *qos,
+        int32_t kind
+    );
+    Int2DdsRet int2dds_datawriter_qos_set_ownership_strength(
+        Int2DdsDataWriterQos *qos,
+        int32_t value
+    );
+    Int2DdsRet int2dds_datawriter_qos_set_resource_limits(
+        Int2DdsDataWriterQos *qos,
+        int32_t max_samples,
+        int32_t max_instances,
+        int32_t max_samples_per_instance
+    );
+    Int2DdsRet int2dds_datawriter_qos_set_lifespan(
+        Int2DdsDataWriterQos *qos,
+        int64_t duration_ns
+    );
+    Int2DdsRet int2dds_datawriter_qos_set_destination_order(
+        Int2DdsDataWriterQos *qos,
+        int32_t kind
+    );
+    Int2DdsRet int2dds_datawriter_qos_set_latency_budget(
+        Int2DdsDataWriterQos *qos,
+        int64_t duration_ns
+    );
+    Int2DdsRet int2dds_datawriter_qos_set_transport_priority(
+        Int2DdsDataWriterQos *qos,
+        int32_t priority
+    );
+    Int2DdsRet int2dds_datawriter_qos_set_user_data(
+        Int2DdsDataWriterQos *qos,
+        const uint8_t *data,
+        size_t data_len
+    );
+    Int2DdsRet int2dds_datawriter_qos_set_writer_data_lifecycle(
+        Int2DdsDataWriterQos *qos,
+        bool autodispose_unregistered_instances
+    );
+    Int2DdsRet int2dds_datawriter_qos_set_data_representation(
+        Int2DdsDataWriterQos *qos,
+        int32_t kind
+    );
+    Int2DdsRet int2dds_datawriter_qos_set_deadline(
+        Int2DdsDataWriterQos *qos,
+        int64_t period_ns
+    );
+    Int2DdsRet int2dds_datawriter_qos_set_liveliness(
+        Int2DdsDataWriterQos *qos,
+        int32_t kind,
+        int64_t lease_duration_ns
+    );
     Int2DdsRet int2dds_datawriter_qos_destroy(Int2DdsDataWriterQos *qos);
 
     /* DataReader QoS */
@@ -389,11 +463,132 @@ ffi.cdef("""
         int32_t kind,
         int32_t depth
     );
+    Int2DdsRet int2dds_datareader_qos_set_ownership(
+        Int2DdsDataReaderQos *qos,
+        int32_t kind
+    );
+    Int2DdsRet int2dds_datareader_qos_set_resource_limits(
+        Int2DdsDataReaderQos *qos,
+        int32_t max_samples,
+        int32_t max_instances,
+        int32_t max_samples_per_instance
+    );
+    Int2DdsRet int2dds_datareader_qos_set_destination_order(
+        Int2DdsDataReaderQos *qos,
+        int32_t kind
+    );
+    Int2DdsRet int2dds_datareader_qos_set_time_based_filter(
+        Int2DdsDataReaderQos *qos,
+        int64_t minimum_separation_ns
+    );
+    Int2DdsRet int2dds_datareader_qos_set_latency_budget(
+        Int2DdsDataReaderQos *qos,
+        int64_t duration_ns
+    );
+    Int2DdsRet int2dds_datareader_qos_set_user_data(
+        Int2DdsDataReaderQos *qos,
+        const uint8_t *data,
+        size_t data_len
+    );
+    Int2DdsRet int2dds_datareader_qos_set_reader_data_lifecycle(
+        Int2DdsDataReaderQos *qos,
+        int64_t autopurge_nowriter_samples_delay_ns,
+        int64_t autopurge_disposed_samples_delay_ns
+    );
+    Int2DdsRet int2dds_datareader_qos_set_data_representation(
+        Int2DdsDataReaderQos *qos,
+        int32_t kind
+    );
+    Int2DdsRet int2dds_datareader_qos_set_deadline(
+        Int2DdsDataReaderQos *qos,
+        int64_t period_ns
+    );
+    Int2DdsRet int2dds_datareader_qos_set_liveliness(
+        Int2DdsDataReaderQos *qos,
+        int32_t kind,
+        int64_t lease_duration_ns
+    );
     Int2DdsRet int2dds_datareader_qos_destroy(Int2DdsDataReaderQos *qos);
 
     /* Topic QoS */
     Int2DdsRet int2dds_topic_qos_create_default(Int2DdsTopicQos **qos_out);
+    Int2DdsRet int2dds_topic_qos_set_reliability(
+        Int2DdsTopicQos *qos,
+        int32_t kind,
+        int64_t max_blocking_time_ns
+    );
+    Int2DdsRet int2dds_topic_qos_set_durability(
+        Int2DdsTopicQos *qos,
+        int32_t kind
+    );
+    Int2DdsRet int2dds_topic_qos_set_history(
+        Int2DdsTopicQos *qos,
+        int32_t kind,
+        int32_t depth
+    );
+    Int2DdsRet int2dds_topic_qos_set_deadline(
+        Int2DdsTopicQos *qos,
+        int64_t period_ns
+    );
+    Int2DdsRet int2dds_topic_qos_set_liveliness(
+        Int2DdsTopicQos *qos,
+        int32_t kind,
+        int64_t lease_duration_ns
+    );
+    Int2DdsRet int2dds_topic_qos_set_destination_order(
+        Int2DdsTopicQos *qos,
+        int32_t kind
+    );
+    Int2DdsRet int2dds_topic_qos_set_resource_limits(
+        Int2DdsTopicQos *qos,
+        int32_t max_samples,
+        int32_t max_instances,
+        int32_t max_samples_per_instance
+    );
+    Int2DdsRet int2dds_topic_qos_set_transport_priority(
+        Int2DdsTopicQos *qos,
+        int32_t priority
+    );
+    Int2DdsRet int2dds_topic_qos_set_lifespan(
+        Int2DdsTopicQos *qos,
+        int64_t duration_ns
+    );
+    Int2DdsRet int2dds_topic_qos_set_ownership(
+        Int2DdsTopicQos *qos,
+        int32_t kind
+    );
+    Int2DdsRet int2dds_topic_qos_set_data_representation(
+        Int2DdsTopicQos *qos,
+        int32_t kind
+    );
     Int2DdsRet int2dds_topic_qos_destroy(Int2DdsTopicQos *qos);
+
+    /* Publisher QoS */
+    Int2DdsRet int2dds_publisher_qos_create_default(Int2DdsPublisherQos **qos_out);
+    Int2DdsRet int2dds_publisher_qos_set_partition(
+        Int2DdsPublisherQos *qos,
+        const char *const *partitions,
+        size_t partition_count
+    );
+    Int2DdsRet int2dds_publisher_qos_destroy(Int2DdsPublisherQos *qos);
+
+    /* Subscriber QoS */
+    Int2DdsRet int2dds_subscriber_qos_create_default(Int2DdsSubscriberQos **qos_out);
+    Int2DdsRet int2dds_subscriber_qos_set_partition(
+        Int2DdsSubscriberQos *qos,
+        const char *const *partitions,
+        size_t partition_count
+    );
+    Int2DdsRet int2dds_subscriber_qos_destroy(Int2DdsSubscriberQos *qos);
+
+    /* Participant QoS */
+    Int2DdsRet int2dds_participant_qos_create_default(Int2DdsParticipantQos **qos_out);
+    Int2DdsRet int2dds_participant_qos_set_user_data(
+        Int2DdsParticipantQos *qos,
+        const uint8_t *data,
+        size_t data_len
+    );
+    Int2DdsRet int2dds_participant_qos_destroy(Int2DdsParticipantQos *qos);
 
     /* WaitSet */
     Int2DdsRet int2dds_waitset_new(Int2DdsWaitSet **waitset_out);

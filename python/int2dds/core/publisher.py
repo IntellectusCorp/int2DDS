@@ -33,12 +33,24 @@ class Publisher:
 
     __slots__ = ("_handle", "_participant", "_closed")
 
-    def __init__(self, participant: DomainParticipant) -> None:
+    def __init__(self, participant: DomainParticipant, qos: "PublisherQos | None" = None) -> None:
         self._participant = participant
         self._closed = False
 
         publisher_ptr = ffi.new("Int2DdsPublisher **")
-        check_ret(lib.int2dds_create_publisher(participant._handle, publisher_ptr))
+        if qos is not None and qos.partition is not None and qos.partition.names:
+            qos_handle_ptr = ffi.new("Int2DdsPublisherQos **")
+            check_ret(lib.int2dds_publisher_qos_create_default(qos_handle_ptr))
+            qos_handle = qos_handle_ptr[0]
+            c_strings = [ffi.new("char[]", n.encode()) for n in qos.partition.names]
+            c_array = ffi.new("char*[]", c_strings)
+            check_ret(lib.int2dds_publisher_qos_set_partition(
+                qos_handle, c_array, len(qos.partition.names)))
+            check_ret(lib.int2dds_create_publisher_with_qos(
+                participant._handle, qos_handle, publisher_ptr))
+            lib.int2dds_publisher_qos_destroy(qos_handle)
+        else:
+            check_ret(lib.int2dds_create_publisher(participant._handle, publisher_ptr))
         self._handle = publisher_ptr[0]
 
     def create_datawriter(
@@ -140,6 +152,46 @@ class DataWriter(Generic[T]):
                     self._qos_handle, qos.history._kind_int, qos.history.depth
                 )
             )
+            if qos.ownership is not None:
+                check_ret(lib.int2dds_datawriter_qos_set_ownership(
+                    self._qos_handle, qos.ownership._kind_int))
+            if qos.ownership_strength is not None:
+                check_ret(lib.int2dds_datawriter_qos_set_ownership_strength(
+                    self._qos_handle, qos.ownership_strength.value))
+            if qos.resource_limits is not None:
+                check_ret(lib.int2dds_datawriter_qos_set_resource_limits(
+                    self._qos_handle,
+                    qos.resource_limits.max_samples,
+                    qos.resource_limits.max_instances,
+                    qos.resource_limits.max_samples_per_instance))
+            if qos.lifespan is not None:
+                check_ret(lib.int2dds_datawriter_qos_set_lifespan(
+                    self._qos_handle, qos.lifespan._duration_ns))
+            if qos.destination_order is not None:
+                check_ret(lib.int2dds_datawriter_qos_set_destination_order(
+                    self._qos_handle, qos.destination_order._kind_int))
+            if qos.latency_budget is not None:
+                check_ret(lib.int2dds_datawriter_qos_set_latency_budget(
+                    self._qos_handle, qos.latency_budget._duration_ns))
+            if qos.transport_priority is not None:
+                check_ret(lib.int2dds_datawriter_qos_set_transport_priority(
+                    self._qos_handle, qos.transport_priority.value))
+            if qos.user_data is not None and qos.user_data.data:
+                data_ptr = ffi.from_buffer(qos.user_data.data)
+                check_ret(lib.int2dds_datawriter_qos_set_user_data(
+                    self._qos_handle, data_ptr, len(qos.user_data.data)))
+            if qos.writer_data_lifecycle is not None:
+                check_ret(lib.int2dds_datawriter_qos_set_writer_data_lifecycle(
+                    self._qos_handle, qos.writer_data_lifecycle.autodispose_unregistered_instances))
+            if qos.data_representation is not None:
+                check_ret(lib.int2dds_datawriter_qos_set_data_representation(
+                    self._qos_handle, qos.data_representation._kind_int))
+            if qos.deadline is not None:
+                check_ret(lib.int2dds_datawriter_qos_set_deadline(
+                    self._qos_handle, qos.deadline._period_ns))
+            if qos.liveliness is not None:
+                check_ret(lib.int2dds_datawriter_qos_set_liveliness(
+                    self._qos_handle, qos.liveliness._kind_int, qos.liveliness._lease_duration_ns))
             qos_ptr = self._qos_handle
 
         writer_ptr = ffi.new("Int2DdsDataWriter **")
@@ -220,7 +272,7 @@ class DataWriter(Generic[T]):
         handle_out = ffi.new("uint8_t[16]")
 
         check_ret(
-            lib.int2dds_register_instance_serialized(
+            lib.int2dds_datawriter_register_instance(
                 self._handle, key_ptr, len(key), handle_out
             )
         )
@@ -249,7 +301,7 @@ class DataWriter(Generic[T]):
         handle_ptr = ffi.from_buffer(handle)
 
         check_ret(
-            lib.int2dds_unregister_instance_serialized(
+            lib.int2dds_datawriter_unregister_instance(
                 self._handle, key_ptr, len(key), handle_ptr
             )
         )
@@ -276,7 +328,7 @@ class DataWriter(Generic[T]):
         handle_ptr = ffi.from_buffer(handle)
 
         check_ret(
-            lib.int2dds_dispose_serialized(
+            lib.int2dds_datawriter_dispose(
                 self._handle, key_ptr, len(key), handle_ptr
             )
         )
@@ -306,7 +358,7 @@ class DataWriter(Generic[T]):
         handle_out = ffi.new("uint8_t[16]")
 
         check_ret(
-            lib.int2dds_lookup_instance_serialized(
+            lib.int2dds_datawriter_lookup_instance(
                 self._handle, key_ptr, len(key), handle_out
             )
         )

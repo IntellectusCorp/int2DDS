@@ -11,9 +11,28 @@ from int2dds.core.topic import Topic
 from int2dds.core.qos import (
     DataReaderQos,
     DataWriterQos,
+    DataRepresentation,
+    Deadline,
+    DestinationOrder,
     Durability,
     History,
+    LatencyBudget,
+    Lifespan,
+    Liveliness,
+    Ownership,
+    OwnershipStrength,
+    Partition,
+    ParticipantQos,
+    PublisherQos,
+    ReaderDataLifecycle,
     Reliability,
+    ResourceLimits,
+    SubscriberQos,
+    TimeBasedFilter,
+    TopicQos,
+    TransportPriority,
+    UserData,
+    WriterDataLifecycle,
 )
 from int2dds.core.conditions import GuardCondition, StatusCondition, WaitSet
 from int2dds.core.async_support import AsyncDataReader, AsyncWaitSet, async_wait

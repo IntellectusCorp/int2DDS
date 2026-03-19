@@ -12,6 +12,7 @@ from int2dds.exceptions import check_ret
 
 if TYPE_CHECKING:
     from int2dds.core.participant import DomainParticipant
+    from int2dds.core.qos import TopicQos
     from int2dds.types.base import DdsType
 
 T = TypeVar("T", bound="DdsType")
@@ -36,7 +37,7 @@ class Topic(Generic[T]):
         participant: DomainParticipant,
         topic_name: str,
         type_class: type[T],
-        qos: None = None,
+        qos: TopicQos | None = None,
     ) -> None:
         self._participant = participant
         self._name = topic_name
@@ -53,6 +54,51 @@ class Topic(Generic[T]):
         topic_name_c = ffi.new("char[]", topic_name.encode())
         type_name_c = ffi.new("char[]", self._type_name.encode())
 
+        # Create Topic QoS if provided
+        qos_ptr = ffi.NULL
+        qos_handle = None
+        if qos is not None:
+            qos_handle_ptr = ffi.new("Int2DdsTopicQos **")
+            check_ret(lib.int2dds_topic_qos_create_default(qos_handle_ptr))
+            qos_handle = qos_handle_ptr[0]
+            if qos.reliability is not None:
+                check_ret(lib.int2dds_topic_qos_set_reliability(
+                    qos_handle, qos.reliability._kind_int, qos.reliability._max_blocking_time_ns))
+            if qos.durability is not None:
+                check_ret(lib.int2dds_topic_qos_set_durability(
+                    qos_handle, qos.durability._kind_int))
+            if qos.history is not None:
+                check_ret(lib.int2dds_topic_qos_set_history(
+                    qos_handle, qos.history._kind_int, qos.history.depth))
+            if qos.deadline is not None:
+                check_ret(lib.int2dds_topic_qos_set_deadline(
+                    qos_handle, qos.deadline._period_ns))
+            if qos.liveliness is not None:
+                check_ret(lib.int2dds_topic_qos_set_liveliness(
+                    qos_handle, qos.liveliness._kind_int, qos.liveliness._lease_duration_ns))
+            if qos.destination_order is not None:
+                check_ret(lib.int2dds_topic_qos_set_destination_order(
+                    qos_handle, qos.destination_order._kind_int))
+            if qos.resource_limits is not None:
+                check_ret(lib.int2dds_topic_qos_set_resource_limits(
+                    qos_handle,
+                    qos.resource_limits.max_samples,
+                    qos.resource_limits.max_instances,
+                    qos.resource_limits.max_samples_per_instance))
+            if qos.transport_priority is not None:
+                check_ret(lib.int2dds_topic_qos_set_transport_priority(
+                    qos_handle, qos.transport_priority.value))
+            if qos.lifespan is not None:
+                check_ret(lib.int2dds_topic_qos_set_lifespan(
+                    qos_handle, qos.lifespan._duration_ns))
+            if qos.ownership is not None:
+                check_ret(lib.int2dds_topic_qos_set_ownership(
+                    qos_handle, qos.ownership._kind_int))
+            if qos.data_representation is not None:
+                check_ret(lib.int2dds_topic_qos_set_data_representation(
+                    qos_handle, qos.data_representation._kind_int))
+            qos_ptr = qos_handle
+
         topic_ptr = ffi.new("Int2DdsTopic **")
         check_ret(
             lib.int2dds_create_topic_keyed(
@@ -61,11 +107,15 @@ class Topic(Generic[T]):
                 type_name_c,
                 int(extensibility),
                 has_key,
-                ffi.NULL,  # qos
+                qos_ptr,
                 topic_ptr,
             )
         )
         self._handle = topic_ptr[0]
+
+        # Clean up QoS handle after use
+        if qos_handle is not None:
+            lib.int2dds_topic_qos_destroy(qos_handle)
 
     @property
     def name(self) -> str:
