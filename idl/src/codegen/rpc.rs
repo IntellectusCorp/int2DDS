@@ -49,6 +49,22 @@ pub fn generate(model: &IdlModel, opts: &RpcOptions) -> String {
         "use {}_rpc::types::SampleIdentity;",
         opts.crate_path
     ));
+    gen.line(&format!(
+        "use {}_rpc::requester::Future;",
+        opts.crate_path
+    ));
+    gen.line(&format!(
+        "use {}_rpc::entity::{{RpcEntity, ServiceProxy}};",
+        opts.crate_path
+    ));
+    gen.line(&format!(
+        "use {}_rpc::client::ClientEndpoint;",
+        opts.crate_path
+    ));
+    gen.line(&format!(
+        "use {}_rpc::types::InstanceName;",
+        opts.crate_path
+    ));
     gen.line("use std::time::Duration;");
     gen.line("");
 
@@ -94,6 +110,11 @@ impl<'a> RpcGen<'a> {
             self.line("");
         }
 
+        // Per-operation service error enums (Step 4: raises 2+ only)
+        for op in &all_ops {
+            self.emit_service_error_enum(&iface.name, op);
+        }
+
         // Operation hash constants (shared by Call and Return)
         self.emit_operation_hash_constants(&iface.name, &all_ops);
         self.line("");
@@ -108,12 +129,24 @@ impl<'a> RpcGen<'a> {
         self.emit_reply_struct(&iface.name);
         self.line("");
 
+        // Per-operation Future wrappers (Step 9)
+        for op in &all_ops {
+            self.emit_operation_future(&iface.name, op);
+            self.line("");
+        }
+
         // Function-call style (7.11.1.5)
         self.emit_service_trait(&iface.name, &all_ops);
+        self.line("");
+        self.emit_async_trait(&iface.name, &all_ops);
         self.line("");
         self.emit_service_dispatcher(&iface.name, &all_ops);
         self.line("");
         self.emit_client_struct(&iface.name, &all_ops);
+        self.line("");
+        self.emit_client_async_impl(&iface.name, &all_ops);
+        self.line("");
+        self.emit_client_endpoint_impl(&iface.name);
         self.line("");
     }
 
@@ -388,6 +421,7 @@ impl<'a> RpcGen<'a> {
 
     /// (7.11.1.5) Generate service trait.
     /// Users implement this trait to provide the service logic.
+    /// raises clause → Result<T, E> return type.
     fn emit_service_trait(&mut self, iface_name: &str, ops: &[ResolvedOperation]) {
         self.line(&format!("pub trait {} {{", iface_name));
         self.indent += 1;
@@ -413,10 +447,17 @@ impl<'a> RpcGen<'a> {
                 }
             }
 
-            let ret = if let Some(ret_type) = &op.return_type {
-                format!(" -> {}", self.type_to_rust(ret_type))
+            let inner_ret = if let Some(ret_type) = &op.return_type {
+                self.type_to_rust(ret_type)
             } else {
-                String::new()
+                "()".to_string()
+            };
+
+            let ret = if op.raises.is_empty() {
+                if inner_ret == "()" { String::new() } else { format!(" -> {}", inner_ret) }
+            } else {
+                let err_type = Self::error_type_for_op(iface_name, op);
+                format!(" -> Result<{}, {}>", inner_ret, err_type)
             };
 
             self.line(&format!("fn {}({}){};", method_name, params, ret));
@@ -427,6 +468,7 @@ impl<'a> RpcGen<'a> {
     }
 
     /// (7.9.2.1) Generate dispatcher that bridges Call/Return unions to the service trait.
+    /// Returns `(TRep, RemoteExceptionCode)` to support user exceptions and interface evolution.
     fn emit_service_dispatcher(&mut self, iface_name: &str, ops: &[ResolvedOperation]) {
         let call_type = format!("{}_Call", iface_name);
         let return_type = format!("{}_Return", iface_name);
@@ -445,7 +487,7 @@ impl<'a> RpcGen<'a> {
             "impl<T: {0}> {0}Dispatcher<T> {{", iface_name
         ));
         self.indent += 1;
-        self.line(&format!("pub fn new(inner: T) -> Self {{"));
+        self.line("pub fn new(inner: T) -> Self {");
         self.indent += 1;
         self.line("Self { inner }");
         self.indent -= 1;
@@ -454,13 +496,16 @@ impl<'a> RpcGen<'a> {
         self.line("}");
         self.line("");
 
-        // RequestHandler impl
+        // RequestHandler impl — returns (TRep, RemoteExceptionCode)
         self.line(&format!(
             "impl<T: {iface} + Send + 'static> RequestHandler<{call}, {ret}> for {iface}Dispatcher<T> {{",
             iface = iface_name, call = call_type, ret = return_type
         ));
         self.indent += 1;
-        self.line(&format!("fn handle_request(&self, request: &{}) -> {} {{", call_type, return_type));
+        self.line(&format!(
+            "fn handle_request(&self, request: &{}) -> ({}, RemoteExceptionCode) {{",
+            call_type, return_type
+        ));
         self.indent += 1;
         self.line("match request {");
         self.indent += 1;
@@ -472,7 +517,6 @@ impl<'a> RpcGen<'a> {
             let result_type = format!("{}_{}_Result", iface_name, op.name);
             let method_name = to_snake_case(&op.name);
 
-            // Build parameter destructure and call args
             let in_params: Vec<&ResolvedParam> = op.params.iter()
                 .filter(|p| matches!(p.direction, ResolvedParamDirection::In | ResolvedParamDirection::Inout))
                 .collect();
@@ -493,12 +537,11 @@ impl<'a> RpcGen<'a> {
             }
             self.indent += 1;
 
-            // Build the call arguments
+            // Build the call arguments + out param setup
             let mut call_args = Vec::new();
             for p in &op.params {
                 match p.direction {
                     ResolvedParamDirection::In => {
-                        // Check if the type is Copy-like (primitives) or needs clone
                         if Self::is_copy_type(&p.resolved_type) {
                             call_args.push(format!("*{}", p.name));
                         } else {
@@ -506,13 +549,11 @@ impl<'a> RpcGen<'a> {
                         }
                     }
                     ResolvedParamDirection::Out => {
-                        // Out params: initialize default, pass as &mut
                         self.line(&format!("let mut {} = Default::default();",
                             to_snake_case(&p.name)));
                         call_args.push(format!("&mut {}", to_snake_case(&p.name)));
                     }
                     ResolvedParamDirection::Inout => {
-                        // Inout: clone from In struct, pass as &mut
                         self.line(&format!("let mut {0}_mut = {0}.clone();", p.name));
                         call_args.push(format!("&mut {}_mut", p.name));
                     }
@@ -521,51 +562,78 @@ impl<'a> RpcGen<'a> {
 
             let call_str = call_args.join(", ");
 
-            if op.return_type.is_some() {
-                self.line(&format!("let return_ = self.inner.{}({});", method_name, call_str));
-            } else {
-                self.line(&format!("self.inner.{}({});", method_name, call_str));
-            }
+            // Build Out struct fields
+            let out_fields = Self::build_out_fields(op, &out_params);
 
-            // Build Out struct
-            let mut out_fields = Vec::new();
-            for p in &op.params {
-                match p.direction {
-                    ResolvedParamDirection::Out => {
-                        out_fields.push(format!("{0}: {0}", to_snake_case(&p.name)));
-                    }
-                    ResolvedParamDirection::Inout => {
-                        out_fields.push(format!("{}: {}_mut", p.name, p.name));
-                    }
-                    _ => {}
-                }
-            }
-            if op.return_type.is_some() {
-                let return_name = Self::resolve_return_name(
-                    &out_params.iter().map(|p| *p).collect::<Vec<_>>()
-                );
-                out_fields.push(format!("{}: return_", return_name));
-            }
-
-            if out_fields.is_empty() {
-                // void with no out params → dummy
-                self.line(&format!(
-                    "{}::{}({}::Result({} {{ dummy: UnusedMember }}))",
-                    return_type, variant, result_type, out_type));
+            let ok_expr = if out_fields.is_empty() {
+                format!("{}::{}({}::Result({} {{ dummy: UnusedMember }}))",
+                    return_type, variant, result_type, out_type)
             } else {
-                self.line(&format!(
-                    "{}::{}({}::Result({} {{ {} }}))",
+                format!("{}::{}({}::Result({} {{ {} }}))",
                     return_type, variant, result_type, out_type,
-                    out_fields.join(", ")));
+                    out_fields.join(", "))
+            };
+
+            if op.raises.is_empty() {
+                // No raises: direct call, wrap in tuple with Ok
+                if op.return_type.is_some() {
+                    self.line(&format!("let return_ = self.inner.{}({});", method_name, call_str));
+                } else {
+                    self.line(&format!("self.inner.{}({});", method_name, call_str));
+                }
+                self.line(&format!("({}, RemoteExceptionCode::Ok)", ok_expr));
+            } else {
+                // raises: match on Result
+                self.line(&format!("match self.inner.{}({}) {{", method_name, call_str));
+                self.indent += 1;
+
+                // Ok branch
+                if op.return_type.is_some() {
+                    self.line(&format!("Ok(return_) => ({}, RemoteExceptionCode::Ok),", ok_expr));
+                } else {
+                    self.line(&format!("Ok(()) => ({}, RemoteExceptionCode::Ok),", ok_expr));
+                }
+
+                // Err branch
+                if op.raises.len() == 1 {
+                    // Single exception: Err(ex) directly
+                    let exc_name = &op.raises[0];
+                    let simple = exc_name.rsplit("::").next().unwrap_or(exc_name);
+                    let member_name = format!("{}_ex", naming::to_pascal_case(simple));
+                    self.line(&format!(
+                        "Err(ex) => ({}::{}({}::{}(ex)), RemoteExceptionCode::Ok),",
+                        return_type, variant, result_type, member_name
+                    ));
+                } else {
+                    // Multiple exceptions: error enum match
+                    let error_enum = format!("{}_{}_Error", iface_name, op.name);
+                    self.line("Err(err) => match err {");
+                    self.indent += 1;
+                    for exc_name in &op.raises {
+                        let simple = exc_name.rsplit("::").next().unwrap_or(exc_name);
+                        let pascal = naming::to_pascal_case(simple);
+                        let member_name = format!("{}_ex", pascal);
+                        self.line(&format!(
+                            "{}::{}(ex) => ({}::{}({}::{}(ex)), RemoteExceptionCode::Ok),",
+                            error_enum, pascal,
+                            return_type, variant, result_type, member_name
+                        ));
+                    }
+                    self.indent -= 1;
+                    self.line("},");
+                }
+
+                self.indent -= 1;
+                self.line("}");
             }
 
             self.indent -= 1;
             self.line("}");
         }
 
-        // Default case for unknown operations
+        // (7.7.1) UnknownOp → Unsupported
         self.line(&format!(
-            "{}::UnknownOp(_) => {}::UnknownOp(UnknownOperation),",
+            "{}::UnknownOp(_) => ({}::UnknownOp(UnknownOperation), RemoteExceptionCode::Unsupported),",
             call_type, return_type));
 
         self.indent -= 1;
@@ -577,17 +645,17 @@ impl<'a> RpcGen<'a> {
     }
 
     /// (7.11.1.5.4) Generate typed client with per-operation methods.
+    /// raises → DdsRpcResult<T, E>, no raises → DdsRpcResult<T>.
     fn emit_client_struct(&mut self, iface_name: &str, ops: &[ResolvedOperation]) {
-        let _request_type = format!("{}_Request", iface_name);
-        let _reply_type = format!("{}_Reply", iface_name);
         let call_type = format!("{}_Call", iface_name);
         let return_type = format!("{}_Return", iface_name);
         let client_name = format!("{}Client", iface_name);
 
-        // Struct definition
+        // Struct definition with default_timeout
         self.line(&format!("pub struct {} {{", client_name));
         self.indent += 1;
         self.line(&format!("client: Client<{}, {}>,", call_type, return_type));
+        self.line("default_timeout: Duration,");
         self.indent -= 1;
         self.line("}");
         self.line("");
@@ -596,100 +664,284 @@ impl<'a> RpcGen<'a> {
         self.line(&format!("impl {} {{", client_name));
         self.indent += 1;
 
-        // Constructor
+        // Constructor (default 10s timeout)
         self.line("pub fn new(params: ClientParams) -> DdsRpcResult<Self> {");
         self.indent += 1;
         self.line("let client = Client::new(params)?;");
-        self.line("Ok(Self { client })");
+        self.line("Ok(Self { client, default_timeout: Duration::from_secs(10) })");
+        self.indent -= 1;
+        self.line("}");
+        self.line("");
+
+        // Constructor with explicit timeout
+        self.line("pub fn with_timeout(params: ClientParams, timeout: Duration) -> DdsRpcResult<Self> {");
+        self.indent += 1;
+        self.line("let client = Client::new(params)?;");
+        self.line("Ok(Self { client, default_timeout: timeout })");
         self.indent -= 1;
         self.line("}");
 
         // Per-operation sync methods
         for op in ops {
             self.line("");
-            let method_name = to_snake_case(&op.name);
-            let variant = naming::to_pascal_case(&op.name);
-            let in_type = format!("{}_{}_In", iface_name, op.name);
+            self.emit_client_method(iface_name, op);
+        }
 
-            // Build method signature params
-            let mut sig_params = String::from("&self");
-            let in_params: Vec<&ResolvedParam> = op.params.iter()
-                .filter(|p| matches!(p.direction, ResolvedParamDirection::In | ResolvedParamDirection::Inout))
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    fn emit_client_method(&mut self, iface_name: &str, op: &ResolvedOperation) {
+        let call_type = format!("{}_Call", iface_name);
+        let return_type = format!("{}_Return", iface_name);
+        let method_name = to_snake_case(&op.name);
+        let variant = naming::to_pascal_case(&op.name);
+        let in_type = format!("{}_{}_In", iface_name, op.name);
+        let result_type = format!("{}_{}_Result", iface_name, op.name);
+
+        let in_params: Vec<&ResolvedParam> = op.params.iter()
+            .filter(|p| matches!(p.direction, ResolvedParamDirection::In | ResolvedParamDirection::Inout))
+            .collect();
+
+        let out_params: Vec<&ResolvedParam> = op.params.iter()
+            .filter(|p| matches!(p.direction, ResolvedParamDirection::Out | ResolvedParamDirection::Inout))
+            .collect();
+
+        // Build method signature params
+        let mut sig_params = String::from("&self");
+        for p in &in_params {
+            let ty = self.type_to_rust(&p.resolved_type);
+            sig_params.push_str(&format!(", {}: {}", to_snake_case(&p.name), ty));
+        }
+        sig_params.push_str(", timeout: Duration");
+
+        // Inner value type (what's extracted from Out struct)
+        let inner_ret = Self::client_return_type(op, &out_params, |t| self.type_to_rust(t));
+
+        // Full return type with DdsRpcResult<T> or DdsRpcResult<T, E>
+        let ret_sig = if op.raises.is_empty() {
+            format!("DdsRpcResult<{}>", inner_ret)
+        } else {
+            let err_type = Self::error_type_for_op(iface_name, op);
+            format!("DdsRpcResult<{}, {}>", inner_ret, err_type)
+        };
+
+        self.line(&format!("pub fn {}({}) -> {} {{", method_name, sig_params, ret_sig));
+        self.indent += 1;
+
+        // Build In struct
+        if in_params.is_empty() {
+            self.line(&format!("let call = {}::{}({} {{ dummy: UnusedMember }});",
+                call_type, variant, in_type));
+        } else {
+            let fields: Vec<String> = in_params.iter()
+                .map(|p| to_snake_case(&p.name))
                 .collect();
+            self.line(&format!("let call = {}::{}({} {{ {} }});",
+                call_type, variant, in_type, fields.join(", ")));
+        }
 
-            let out_params: Vec<&ResolvedParam> = op.params.iter()
-                .filter(|p| matches!(p.direction, ResolvedParamDirection::Out | ResolvedParamDirection::Inout))
-                .collect();
+        // Send and receive
+        self.line("let _id = self.client.send_request(&call)?;");
+        self.line("let reply = self.client.receive_reply(timeout)?;");
+        self.line("let data = reply.data().map_err(|e| DdsRpcError::Dds(e.into()))?;");
+        self.line("");
 
-            for p in &in_params {
-                let ty = self.type_to_rust(&p.resolved_type);
-                sig_params.push_str(&format!(", {}: {}", to_snake_case(&p.name), ty));
+        // Check remote exception
+        self.line("if data.header.remote_ex != RemoteExceptionCode::Ok {");
+        self.indent += 1;
+        self.line("return Err(DdsRpcError::Remote(data.header.remote_ex));");
+        self.indent -= 1;
+        self.line("}");
+        self.line("");
+
+        // Unpack Return union
+        self.line("match &data.data {");
+        self.indent += 1;
+        self.line(&format!("{}::{}(result) => match result {{", return_type, variant));
+        self.indent += 1;
+        self.line(&format!("{}::Result(out) => {{", result_type));
+        self.indent += 1;
+
+        // Extract return value
+        let has_return = op.return_type.is_some();
+        let has_out = !out_params.is_empty();
+
+        if !has_return && !has_out {
+            self.line("Ok(())");
+        } else {
+            let mut fields = Vec::new();
+            for p in &out_params {
+                fields.push(format!("out.{}.clone()", to_snake_case(&p.name)));
             }
-            sig_params.push_str(", timeout: Duration");
-
-            // Return type
-            let has_return = op.return_type.is_some();
-            let has_out = !out_params.is_empty();
-
-            let ret_type = if !has_return && !has_out {
-                "()".to_string()
+            if has_return {
+                let return_name = Self::resolve_return_name(
+                    &out_params.iter().map(|p| *p).collect::<Vec<_>>()
+                );
+                fields.push(format!("out.{}.clone()", return_name));
+            }
+            if fields.len() == 1 {
+                self.line(&format!("Ok({})", fields[0]));
             } else {
-                let mut parts = Vec::new();
-                for p in &out_params {
-                    parts.push(self.type_to_rust(&p.resolved_type));
+                self.line(&format!("Ok(({}))", fields.join(", ")));
+            }
+        }
+
+        self.indent -= 1;
+        self.line("}");
+
+        // Exception variants → UserException
+        if op.raises.is_empty() {
+            self.line("_ => Err(DdsRpcError::Remote(RemoteExceptionCode::UnknownException)),");
+        } else if op.raises.len() == 1 {
+            let exc_name = &op.raises[0];
+            let simple = exc_name.rsplit("::").next().unwrap_or(exc_name);
+            let member_name = format!("{}_ex", naming::to_pascal_case(simple));
+            self.line(&format!(
+                "{}::{}(ex) => Err(DdsRpcError::UserException(ex.clone())),",
+                result_type, member_name
+            ));
+            self.line("_ => Err(DdsRpcError::Remote(RemoteExceptionCode::UnknownException)),");
+        } else {
+            // Multiple exceptions: wrap into error enum
+            let error_enum = format!("{}_{}_Error", iface_name, op.name);
+            for exc_name in &op.raises {
+                let simple = exc_name.rsplit("::").next().unwrap_or(exc_name);
+                let pascal = naming::to_pascal_case(simple);
+                let member_name = format!("{}_ex", pascal);
+                self.line(&format!(
+                    "{}::{}(ex) => Err(DdsRpcError::UserException({}::{}(ex.clone()))),",
+                    result_type, member_name, error_enum, pascal
+                ));
+            }
+            self.line("_ => Err(DdsRpcError::Remote(RemoteExceptionCode::UnknownException)),");
+        }
+
+        self.indent -= 1;
+        self.line("}");
+        // Wrong operation in return
+        self.line("_ => Err(DdsRpcError::Remote(RemoteExceptionCode::UnknownOperation)),");
+        self.indent -= 1;
+        self.line("}");
+
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// (Step 4) Generate service error enum for operations with 2+ raises.
+    fn emit_service_error_enum(&mut self, iface_name: &str, op: &ResolvedOperation) {
+        if op.raises.len() < 2 {
+            return;
+        }
+
+        let enum_name = format!("{}_{}_Error", iface_name, op.name);
+        self.line("#[derive(Debug, Clone)]");
+        self.line(&format!("pub enum {} {{", enum_name));
+        self.indent += 1;
+        for exc_name in &op.raises {
+            let simple = exc_name.rsplit("::").next().unwrap_or(exc_name);
+            let pascal = naming::to_pascal_case(simple);
+            self.line(&format!("{}({}),", pascal, pascal));
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.line("");
+    }
+
+    /// (Step 8) Generate `${Interface}Async` trait (7.11.1.1.2 rule 7).
+    fn emit_async_trait(&mut self, iface_name: &str, ops: &[ResolvedOperation]) {
+        let trait_name = format!("{}Async", iface_name);
+        self.line(&format!("pub trait {} {{", trait_name));
+        self.indent += 1;
+
+        for op in ops {
+            let method_name = format!("{}_async", to_snake_case(&op.name));
+            let future_type = format!("{}_{}_Future", iface_name, op.name);
+
+            // (7.11.1.1.2 rule 7) In/InOut params only, all as immutable references
+            let mut sig_params = String::from("&self");
+            for p in &op.params {
+                match p.direction {
+                    ResolvedParamDirection::In | ResolvedParamDirection::Inout => {
+                        let ty = self.type_to_rust(&p.resolved_type);
+                        if Self::is_copy_type(&p.resolved_type) {
+                            sig_params.push_str(&format!(", {}: {}", to_snake_case(&p.name), ty));
+                        } else {
+                            sig_params.push_str(&format!(", {}: &{}", to_snake_case(&p.name), ty));
+                        }
+                    }
+                    ResolvedParamDirection::Out => {}
                 }
-                if let Some(ret) = &op.return_type {
-                    parts.push(self.type_to_rust(ret));
-                }
-                if parts.len() == 1 {
-                    parts[0].clone()
-                } else {
-                    format!("({})", parts.join(", "))
-                }
-            };
+            }
 
             self.line(&format!(
-                "pub fn {}({}) -> DdsRpcResult<{}> {{",
-                method_name, sig_params, ret_type
+                "fn {}({}) -> DdsRpcResult<{}>;",
+                method_name, sig_params, future_type
             ));
+        }
+
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// (Step 9) Generate per-operation Future wrapper struct + get/get_timeout.
+    fn emit_operation_future(&mut self, iface_name: &str, op: &ResolvedOperation) {
+        let return_type = format!("{}_Return", iface_name);
+        let result_type = format!("{}_{}_Result", iface_name, op.name);
+        let future_name = format!("{}_{}_Future", iface_name, op.name);
+        let variant = naming::to_pascal_case(&op.name);
+
+        let out_params: Vec<&ResolvedParam> = op.params.iter()
+            .filter(|p| matches!(p.direction, ResolvedParamDirection::Out | ResolvedParamDirection::Inout))
+            .collect();
+
+        let inner_ret = Self::client_return_type(op, &out_params, |t| self.type_to_rust(t));
+
+        let ret_sig = if op.raises.is_empty() {
+            format!("DdsRpcResult<{}>", inner_ret)
+        } else {
+            let err_type = Self::error_type_for_op(iface_name, op);
+            format!("DdsRpcResult<{}, {}>", inner_ret, err_type)
+        };
+
+        // Struct
+        self.line(&format!("pub struct {} {{", future_name));
+        self.indent += 1;
+        self.line(&format!("inner: Future<{}>,", return_type));
+        self.indent -= 1;
+        self.line("}");
+        self.line("");
+
+        // impl with get() and get_timeout()
+        self.line(&format!("impl {} {{", future_name));
+        self.indent += 1;
+
+        // Helper: emit the reply-unpacking logic (shared by get and get_timeout)
+        // We generate two methods with different sample acquisition.
+        for (method_sig, get_call) in [
+            (format!("pub fn get(self) -> {}", ret_sig), "self.inner.get()?"),
+            (format!("pub fn get_timeout(self, timeout: Duration) -> {}", ret_sig), "self.inner.get_timeout(timeout)?"),
+        ] {
+            self.line(&format!("{} {{", method_sig));
             self.indent += 1;
-
-            // Build In struct
-            if in_params.is_empty() {
-                self.line(&format!("let call = {}::{}({} {{ dummy: UnusedMember }});",
-                    call_type, variant, in_type));
-            } else {
-                let fields: Vec<String> = in_params.iter()
-                    .map(|p| to_snake_case(&p.name))
-                    .collect();
-                self.line(&format!("let call = {}::{}({} {{ {} }});",
-                    call_type, variant, in_type, fields.join(", ")));
-            }
-
-            // Send and receive
-            self.line("let id = self.client.send_request(&call)?;");
-            self.line("let reply = self.client.receive_reply(timeout)?;");
-            self.line("let data = reply.data().map_err(|e| DdsRpcError::Dds(e.into()))?;");
-            self.line("");
-
-            // Check remote exception
+            self.line(&format!("let sample = {};", get_call));
+            self.line("let data = sample.data().map_err(|e| DdsRpcError::Dds(e.into()))?;");
             self.line("if data.header.remote_ex != RemoteExceptionCode::Ok {");
             self.indent += 1;
             self.line("return Err(DdsRpcError::Remote(data.header.remote_ex));");
             self.indent -= 1;
             self.line("}");
-            self.line("");
 
-            // Unpack Return union
-            let result_type = format!("{}_{}_Result", iface_name, op.name);
-            self.line(&format!("match &data.data {{"));
+            self.line("match &data.data {");
             self.indent += 1;
             self.line(&format!("{}::{}(result) => match result {{", return_type, variant));
             self.indent += 1;
             self.line(&format!("{}::Result(out) => {{", result_type));
             self.indent += 1;
 
-            // Extract return value
+            let has_return = op.return_type.is_some();
+            let has_out = !out_params.is_empty();
+
             if !has_return && !has_out {
                 self.line("Ok(())");
             } else {
@@ -712,14 +964,105 @@ impl<'a> RpcGen<'a> {
 
             self.indent -= 1;
             self.line("}");
+
             // Exception variants
-            self.line("_ => Err(DdsRpcError::Remote(RemoteExceptionCode::UnknownException)),");
+            if op.raises.is_empty() {
+                self.line("_ => Err(DdsRpcError::Remote(RemoteExceptionCode::UnknownException)),");
+            } else if op.raises.len() == 1 {
+                let exc_name = &op.raises[0];
+                let simple = exc_name.rsplit("::").next().unwrap_or(exc_name);
+                let member_name = format!("{}_ex", naming::to_pascal_case(simple));
+                self.line(&format!(
+                    "{}::{}(ex) => Err(DdsRpcError::UserException(ex.clone())),",
+                    result_type, member_name
+                ));
+                self.line("_ => Err(DdsRpcError::Remote(RemoteExceptionCode::UnknownException)),");
+            } else {
+                let error_enum = format!("{}_{}_Error", iface_name, op.name);
+                for exc_name in &op.raises {
+                    let simple = exc_name.rsplit("::").next().unwrap_or(exc_name);
+                    let pascal = naming::to_pascal_case(simple);
+                    let member_name = format!("{}_ex", pascal);
+                    self.line(&format!(
+                        "{}::{}(ex) => Err(DdsRpcError::UserException({}::{}(ex.clone()))),",
+                        result_type, member_name, error_enum, pascal
+                    ));
+                }
+                self.line("_ => Err(DdsRpcError::Remote(RemoteExceptionCode::UnknownException)),");
+            }
+
             self.indent -= 1;
             self.line("}");
-            // Wrong operation in return
             self.line("_ => Err(DdsRpcError::Remote(RemoteExceptionCode::UnknownOperation)),");
             self.indent -= 1;
             self.line("}");
+
+            self.indent -= 1;
+            self.line("}");
+            self.line("");
+        }
+
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// (Step 10) Generate `impl ${Interface}Async for ${Interface}Client`.
+    fn emit_client_async_impl(&mut self, iface_name: &str, ops: &[ResolvedOperation]) {
+        let call_type = format!("{}_Call", iface_name);
+        let client_name = format!("{}Client", iface_name);
+        let trait_name = format!("{}Async", iface_name);
+
+        self.line(&format!("impl {} for {} {{", trait_name, client_name));
+        self.indent += 1;
+
+        for op in ops {
+            let method_name = format!("{}_async", to_snake_case(&op.name));
+            let future_type = format!("{}_{}_Future", iface_name, op.name);
+            let variant = naming::to_pascal_case(&op.name);
+            let in_type = format!("{}_{}_In", iface_name, op.name);
+
+            let in_params: Vec<&ResolvedParam> = op.params.iter()
+                .filter(|p| matches!(p.direction, ResolvedParamDirection::In | ResolvedParamDirection::Inout))
+                .collect();
+
+            // Signature
+            let mut sig_params = String::from("&self");
+            for p in &in_params {
+                let ty = self.type_to_rust(&p.resolved_type);
+                if Self::is_copy_type(&p.resolved_type) {
+                    sig_params.push_str(&format!(", {}: {}", to_snake_case(&p.name), ty));
+                } else {
+                    sig_params.push_str(&format!(", {}: &{}", to_snake_case(&p.name), ty));
+                }
+            }
+
+            self.line(&format!(
+                "fn {}({}) -> DdsRpcResult<{}> {{",
+                method_name, sig_params, future_type
+            ));
+            self.indent += 1;
+
+            // Build call value
+            if in_params.is_empty() {
+                self.line(&format!("let call = {}::{}({} {{ dummy: UnusedMember }});",
+                    call_type, variant, in_type));
+            } else {
+                let fields: Vec<String> = in_params.iter()
+                    .map(|p| {
+                        let name = to_snake_case(&p.name);
+                        if Self::is_copy_type(&p.resolved_type) {
+                            name
+                        } else {
+                            format!("{}: {}.clone()", name, name)
+                        }
+                    })
+                    .collect();
+                self.line(&format!("let call = {}::{}({} {{ {} }});",
+                    call_type, variant, in_type, fields.join(", ")));
+            }
+
+            self.line("let future = self.client.send_request_async(&call)?;");
+            self.line(&format!("Ok({} {{ inner: future }})", future_type));
 
             self.indent -= 1;
             self.line("}");
@@ -727,6 +1070,120 @@ impl<'a> RpcGen<'a> {
 
         self.indent -= 1;
         self.line("}");
+    }
+
+    /// (Step 11) Generate RpcEntity + ServiceProxy + ClientEndpoint impls for the Client struct.
+    fn emit_client_endpoint_impl(&mut self, iface_name: &str) {
+        let call_type = format!("{}_Call", iface_name);
+        let return_type = format!("{}_Return", iface_name);
+        let client_name = format!("{}Client", iface_name);
+
+        // RpcEntity
+        self.line(&format!("impl RpcEntity for {} {{", client_name));
+        self.indent += 1;
+        self.line("fn close(&mut self) -> DdsRpcResult<()> { self.client.close() }");
+        self.line("fn is_closed(&self) -> bool { self.client.is_closed() }");
+        self.indent -= 1;
+        self.line("}");
+        self.line("");
+
+        // ServiceProxy
+        self.line(&format!("impl ServiceProxy for {} {{", client_name));
+        self.indent += 1;
+        self.line("fn bind_instance(&mut self, name: InstanceName) -> DdsRpcResult<()> { self.client.bind_instance(name) }");
+        self.line("fn unbind(&mut self) -> DdsRpcResult<()> { self.client.unbind() }");
+        self.line("fn get_bound_instance_name(&self) -> Option<&str> { self.client.get_bound_instance_name() }");
+        self.line("fn wait_for_service(&self) -> DdsRpcResult<()> { self.client.wait_for_service() }");
+        self.line("fn wait_for_service_timeout(&self, timeout: Duration) -> DdsRpcResult<()> { self.client.wait_for_service_timeout(timeout) }");
+        self.indent -= 1;
+        self.line("}");
+        self.line("");
+
+        // ClientEndpoint
+        self.line(&format!("impl ClientEndpoint for {} {{", client_name));
+        self.indent += 1;
+        self.line(&format!("type TReq = {};", call_type));
+        self.line(&format!("type TRep = {};", return_type));
+        self.line(&format!(
+            "fn get_request_datawriter(&self) -> DdsRpcResult<&{}::dcps::publication::data_writer::DataWriter<{}_rpc::types::Request<Self::TReq>>> {{",
+            self.opts.crate_path, self.opts.crate_path
+        ));
+        self.indent += 1;
+        self.line("self.client.get_request_datawriter()");
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!(
+            "fn get_reply_datareader(&self) -> DdsRpcResult<&{}::dcps::subscription::data_reader::DataReader<{}_rpc::types::Reply<Self::TRep>>> {{",
+            self.opts.crate_path, self.opts.crate_path
+        ));
+        self.indent += 1;
+        self.line("self.client.get_reply_datareader()");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// Build out_fields vec for dispatcher use.
+    fn build_out_fields(op: &ResolvedOperation, out_params: &[&ResolvedParam]) -> Vec<String> {
+        let mut out_fields = Vec::new();
+        for p in &op.params {
+            match p.direction {
+                ResolvedParamDirection::Out => {
+                    out_fields.push(format!("{0}: {0}", to_snake_case(&p.name)));
+                }
+                ResolvedParamDirection::Inout => {
+                    out_fields.push(format!("{}: {}_mut", p.name, p.name));
+                }
+                _ => {}
+            }
+        }
+        if op.return_type.is_some() {
+            let return_name = Self::resolve_return_name(
+                &out_params.iter().map(|p| *p).collect::<Vec<_>>()
+            );
+            out_fields.push(format!("{}: return_", return_name));
+        }
+        out_fields
+    }
+
+    /// Get the error type name for an operation with raises.
+    /// 1 exception → exception type directly; 2+ → generated error enum.
+    fn error_type_for_op(iface_name: &str, op: &ResolvedOperation) -> String {
+        if op.raises.len() == 1 {
+            let exc_name = &op.raises[0];
+            let simple = exc_name.rsplit("::").next().unwrap_or(exc_name);
+            naming::to_pascal_case(simple)
+        } else {
+            format!("{}_{}_Error", iface_name, op.name)
+        }
+    }
+
+    /// Compute the inner return type for client/future methods.
+    fn client_return_type<F: Fn(&ResolvedType) -> String>(
+        op: &ResolvedOperation,
+        out_params: &[&ResolvedParam],
+        type_to_rust: F,
+    ) -> String {
+        let has_return = op.return_type.is_some();
+        let has_out = !out_params.is_empty();
+
+        if !has_return && !has_out {
+            "()".to_string()
+        } else {
+            let mut parts = Vec::new();
+            for p in out_params {
+                parts.push(type_to_rust(&p.resolved_type));
+            }
+            if let Some(ret) = &op.return_type {
+                parts.push(type_to_rust(ret));
+            }
+            if parts.len() == 1 {
+                parts[0].clone()
+            } else {
+                format!("({})", parts.join(", "))
+            }
+        }
     }
 
     fn is_copy_type(ty: &ResolvedType) -> bool {
@@ -1436,7 +1893,7 @@ mod tests {
 
         assert!(code.contains("pub struct RobotControlDispatcher<T: RobotControl>"));
         assert!(code.contains("impl<T: RobotControl + Send + 'static> RequestHandler<RobotControl_Call, RobotControl_Return> for RobotControlDispatcher<T>"));
-        assert!(code.contains("fn handle_request(&self, request: &RobotControl_Call) -> RobotControl_Return"));
+        assert!(code.contains("fn handle_request(&self, request: &RobotControl_Call) -> (RobotControl_Return, RemoteExceptionCode)"));
     }
 
     #[test]
@@ -1534,7 +1991,7 @@ mod tests {
         // Service trait
         assert!(code.contains("pub trait RobotControl {"));
         assert!(code.contains("fn command(&self, com: Command);"));
-        assert!(code.contains("fn set_speed(&self, speed: f32);"));
+        assert!(code.contains("fn set_speed(&self, speed: f32) -> Result<(), TooFast>;"));
         assert!(code.contains("fn get_speed(&self) -> f32;"));
         assert!(code.contains("fn get_status(&self) -> i32;"));
 
@@ -1548,8 +2005,264 @@ mod tests {
         // Client
         assert!(code.contains("pub struct RobotControlClient {"));
         assert!(code.contains("pub fn command(&self, com: Command, timeout: Duration) -> DdsRpcResult<()>"));
-        assert!(code.contains("pub fn set_speed(&self, speed: f32, timeout: Duration) -> DdsRpcResult<()>"));
+        assert!(code.contains("pub fn set_speed(&self, speed: f32, timeout: Duration) -> DdsRpcResult<(), TooFast>"));
         assert!(code.contains("pub fn get_speed(&self, timeout: Duration) -> DdsRpcResult<f32>"));
         assert!(code.contains("pub fn get_status(&self, timeout: Duration) -> DdsRpcResult<i32>"));
+    }
+
+    #[test]
+    fn test_service_error_enum() {
+        let defs = parse_idl(
+            r#"
+            exception TooFast { float speed; };
+            exception InvalidInput { string reason; };
+            interface Robot {
+                void navigate(in float x) raises (TooFast, InvalidInput);
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, &RpcOptions::default());
+
+        // 2+ raises → error enum generated
+        assert!(code.contains("pub enum Robot_navigate_Error {"));
+        assert!(code.contains("TooFast(TooFast),"));
+        assert!(code.contains("InvalidInput(InvalidInput),"));
+    }
+
+    #[test]
+    fn test_no_error_enum_single_raises() {
+        let defs = parse_idl(
+            r#"
+            exception TooFast { float speed; };
+            interface Robot {
+                void setSpeed(in float speed) raises (TooFast);
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, &RpcOptions::default());
+
+        // 1 raises → no error enum
+        assert!(!code.contains("Robot_setSpeed_Error"));
+    }
+
+    #[test]
+    fn test_async_trait() {
+        let defs = parse_idl(
+            r#"
+            exception TooFast { float speed; };
+            interface RobotControl {
+                void setSpeed(in float speed) raises (TooFast);
+                float getSpeed();
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, &RpcOptions::default());
+
+        assert!(code.contains("pub trait RobotControlAsync {"));
+        assert!(code.contains("fn set_speed_async(&self, speed: f32) -> DdsRpcResult<RobotControl_setSpeed_Future>;"));
+        assert!(code.contains("fn get_speed_async(&self) -> DdsRpcResult<RobotControl_getSpeed_Future>;"));
+    }
+
+    #[test]
+    fn test_async_trait_ref_params() {
+        let defs = parse_idl(
+            r#"
+            interface Foo {
+                void bar(in string name);
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, &RpcOptions::default());
+
+        // Non-copy type → immutable reference in async trait
+        assert!(code.contains("fn bar_async(&self, name: &String) -> DdsRpcResult<Foo_bar_Future>;"));
+    }
+
+    #[test]
+    fn test_operation_future() {
+        let defs = parse_idl(
+            r#"
+            interface Foo {
+                float getSpeed();
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, &RpcOptions::default());
+
+        assert!(code.contains("pub struct Foo_getSpeed_Future {"));
+        assert!(code.contains("inner: Future<Foo_Return>,"));
+        assert!(code.contains("pub fn get(self) -> DdsRpcResult<f32>"));
+        assert!(code.contains("pub fn get_timeout(self, timeout: Duration) -> DdsRpcResult<f32>"));
+    }
+
+    #[test]
+    fn test_operation_future_with_raises() {
+        let defs = parse_idl(
+            r#"
+            exception TooFast { float speed; };
+            interface Foo {
+                void setSpeed(in float speed) raises (TooFast);
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, &RpcOptions::default());
+
+        assert!(code.contains("pub struct Foo_setSpeed_Future {"));
+        assert!(code.contains("pub fn get(self) -> DdsRpcResult<(), TooFast>"));
+    }
+
+    #[test]
+    fn test_client_async_impl() {
+        let defs = parse_idl(
+            r#"
+            interface Foo {
+                float getSpeed();
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, &RpcOptions::default());
+
+        assert!(code.contains("impl FooAsync for FooClient {"));
+        assert!(code.contains("fn get_speed_async(&self) -> DdsRpcResult<Foo_getSpeed_Future>"));
+        assert!(code.contains("Ok(Foo_getSpeed_Future { inner: future })"));
+    }
+
+    #[test]
+    fn test_client_endpoint_impl() {
+        let defs = parse_idl(
+            r#"
+            interface Foo {
+                void bar();
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, &RpcOptions::default());
+
+        assert!(code.contains("impl RpcEntity for FooClient {"));
+        assert!(code.contains("impl ServiceProxy for FooClient {"));
+        assert!(code.contains("impl ClientEndpoint for FooClient {"));
+        assert!(code.contains("type TReq = Foo_Call;"));
+        assert!(code.contains("type TRep = Foo_Return;"));
+    }
+
+    #[test]
+    fn test_unknown_op_handling() {
+        let defs = parse_idl(
+            r#"
+            interface Foo {
+                void bar();
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, &RpcOptions::default());
+
+        // (7.7.1) UnknownOp → Unsupported
+        assert!(code.contains(
+            "Foo_Call::UnknownOp(_) => (Foo_Return::UnknownOp(UnknownOperation), RemoteExceptionCode::Unsupported),"
+        ));
+    }
+
+    #[test]
+    fn test_exception_dispatch_single() {
+        let defs = parse_idl(
+            r#"
+            exception TooFast { float speed; };
+            interface Robot {
+                void setSpeed(in float speed) raises (TooFast);
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, &RpcOptions::default());
+
+        // Dispatcher should match on Result and map Err to exception variant
+        assert!(code.contains("match self.inner.set_speed("));
+        assert!(code.contains("Err(ex) => (Robot_Return::SetSpeed(Robot_setSpeed_Result::TooFast_ex(ex)), RemoteExceptionCode::Ok),"));
+    }
+
+    #[test]
+    fn test_exception_dispatch_multiple() {
+        let defs = parse_idl(
+            r#"
+            exception TooFast { float speed; };
+            exception InvalidInput { string reason; };
+            interface Robot {
+                void navigate(in float x) raises (TooFast, InvalidInput);
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, &RpcOptions::default());
+
+        // Dispatcher should match on error enum variants
+        assert!(code.contains("Err(err) => match err {"));
+        assert!(code.contains("Robot_navigate_Error::TooFast(ex)"));
+        assert!(code.contains("Robot_navigate_Error::InvalidInput(ex)"));
+    }
+
+
+    #[test]
+    fn test_default_timeout_field() {
+        let defs = parse_idl(
+            r#"
+            interface Foo {
+                void bar();
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, &RpcOptions::default());
+
+        assert!(code.contains("default_timeout: Duration,"));
+        assert!(code.contains("default_timeout: Duration::from_secs(10)"));
+        assert!(code.contains("pub fn with_timeout(params: ClientParams, timeout: Duration) -> DdsRpcResult<Self>"));
+    }
+
+    #[test]
+    fn test_service_trait_raises_result() {
+        let defs = parse_idl(
+            r#"
+            exception TooFast { float speed; };
+            exception InvalidInput { string reason; };
+            interface Robot {
+                void command();
+                void setSpeed(in float speed) raises (TooFast);
+                void navigate(in float x) raises (TooFast, InvalidInput);
+                float getSpeed();
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, &RpcOptions::default());
+
+        // No raises → no Result wrapper
+        assert!(code.contains("fn command(&self);"));
+        assert!(code.contains("fn get_speed(&self) -> f32;"));
+        // 1 raises → Result<T, ExType>
+        assert!(code.contains("fn set_speed(&self, speed: f32) -> Result<(), TooFast>;"));
+        // 2+ raises → Result<T, ErrorEnum>
+        assert!(code.contains("fn navigate(&self, x: f32) -> Result<(), Robot_navigate_Error>;"));
     }
 }
