@@ -49,12 +49,24 @@ class Subscriber:
 
     __slots__ = ("_handle", "_participant", "_closed")
 
-    def __init__(self, participant: DomainParticipant) -> None:
+    def __init__(self, participant: DomainParticipant, qos: "SubscriberQos | None" = None) -> None:
         self._participant = participant
         self._closed = False
 
         subscriber_ptr = ffi.new("Int2DdsSubscriber **")
-        check_ret(lib.int2dds_create_subscriber(participant._handle, subscriber_ptr))
+        if qos is not None and qos.partition is not None and qos.partition.names:
+            qos_handle_ptr = ffi.new("Int2DdsSubscriberQos **")
+            check_ret(lib.int2dds_subscriber_qos_create_default(qos_handle_ptr))
+            qos_handle = qos_handle_ptr[0]
+            c_strings = [ffi.new("char[]", n.encode()) for n in qos.partition.names]
+            c_array = ffi.new("char*[]", c_strings)
+            check_ret(lib.int2dds_subscriber_qos_set_partition(
+                qos_handle, c_array, len(qos.partition.names)))
+            check_ret(lib.int2dds_create_subscriber_with_qos(
+                participant._handle, qos_handle, subscriber_ptr))
+            lib.int2dds_subscriber_qos_destroy(qos_handle)
+        else:
+            check_ret(lib.int2dds_create_subscriber(participant._handle, subscriber_ptr))
         self._handle = subscriber_ptr[0]
 
     def create_datareader(
@@ -161,6 +173,42 @@ class DataReader(Generic[T]):
                     self._qos_handle, qos.history._kind_int, qos.history.depth
                 )
             )
+            if qos.ownership is not None:
+                check_ret(lib.int2dds_datareader_qos_set_ownership(
+                    self._qos_handle, qos.ownership._kind_int))
+            if qos.resource_limits is not None:
+                check_ret(lib.int2dds_datareader_qos_set_resource_limits(
+                    self._qos_handle,
+                    qos.resource_limits.max_samples,
+                    qos.resource_limits.max_instances,
+                    qos.resource_limits.max_samples_per_instance))
+            if qos.destination_order is not None:
+                check_ret(lib.int2dds_datareader_qos_set_destination_order(
+                    self._qos_handle, qos.destination_order._kind_int))
+            if qos.time_based_filter is not None:
+                check_ret(lib.int2dds_datareader_qos_set_time_based_filter(
+                    self._qos_handle, qos.time_based_filter._minimum_separation_ns))
+            if qos.latency_budget is not None:
+                check_ret(lib.int2dds_datareader_qos_set_latency_budget(
+                    self._qos_handle, qos.latency_budget._duration_ns))
+            if qos.user_data is not None and qos.user_data.data:
+                data_ptr = ffi.from_buffer(qos.user_data.data)
+                check_ret(lib.int2dds_datareader_qos_set_user_data(
+                    self._qos_handle, data_ptr, len(qos.user_data.data)))
+            if qos.reader_data_lifecycle is not None:
+                check_ret(lib.int2dds_datareader_qos_set_reader_data_lifecycle(
+                    self._qos_handle,
+                    qos.reader_data_lifecycle._autopurge_nowriter_ns,
+                    qos.reader_data_lifecycle._autopurge_disposed_ns))
+            if qos.data_representation is not None:
+                check_ret(lib.int2dds_datareader_qos_set_data_representation(
+                    self._qos_handle, qos.data_representation._kind_int))
+            if qos.deadline is not None:
+                check_ret(lib.int2dds_datareader_qos_set_deadline(
+                    self._qos_handle, qos.deadline._period_ns))
+            if qos.liveliness is not None:
+                check_ret(lib.int2dds_datareader_qos_set_liveliness(
+                    self._qos_handle, qos.liveliness._kind_int, qos.liveliness._lease_duration_ns))
             qos_ptr = self._qos_handle
 
         reader_ptr = ffi.new("Int2DdsDataReader **")
