@@ -837,7 +837,7 @@ def _find_library() -> str:
         search_paths.append(Path(env_path))
 
     # 2. Relative to this package (for development)
-    package_dir = Path(__file__).parent.parent.parent
+    package_dir = Path(__file__).resolve().parent.parent.parent
     search_paths.extend([
         package_dir / lib_name,
         package_dir.parent / "target" / "release" / lib_name,
