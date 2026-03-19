@@ -588,7 +588,7 @@ impl Socket {
             .iter()
             .find(|ip| ip.as_str() != "127.0.0.1")
             .cloned()
-            .unwrap_or_else(|| "127.0.0.1".to_string())
+            .unwrap_or_else(|| "127.0.0.1".to_string()) // Fallback to loopback if no other IPs are available
     }
 }
 
