@@ -769,7 +769,7 @@ ffi.cdef("""
     typedef struct Int2DdsDataWriterListener {
         Int2DdsOnPublicationMatchedCallback on_publication_matched;
         Int2DdsOnOfferedDeadlineMissedCallback on_offered_deadline_missed;
-        void *on_offered_incompatible_qos;  /* Not fully exposed */
+        Int2DdsOnOfferedIncompatibleQosCallback on_offered_incompatible_qos;
         Int2DdsOnLivelinessLostCallback on_liveliness_lost;
         Int2DdsUserContext user_context;
     } Int2DdsDataWriterListener;
@@ -778,10 +778,10 @@ ffi.cdef("""
     typedef struct Int2DdsDataReaderListener {
         Int2DdsOnDataAvailableCallback on_data_available;
         Int2DdsOnSubscriptionMatchedCallback on_subscription_matched;
-        void *on_sample_rejected;  /* Not fully exposed */
+        Int2DdsOnSampleRejectedCallback on_sample_rejected;
         Int2DdsOnLivelinessChangedCallback on_liveliness_changed;
         Int2DdsOnRequestedDeadlineMissedCallback on_requested_deadline_missed;
-        void *on_requested_incompatible_qos;  /* Not fully exposed */
+        Int2DdsOnRequestedIncompatibleQosCallback on_requested_incompatible_qos;
         Int2DdsOnSampleLostCallback on_sample_lost;
         Int2DdsUserContext user_context;
     } Int2DdsDataReaderListener;
