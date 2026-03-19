@@ -392,11 +392,12 @@ cargo run --example hello_world -- --int2dds-tcp-nodelay
 
 ### INT2DDS_INITIAL_PEERS
 
-Sets the initial peer list for TCP/Hybrid mode. Format is comma-separated socket addresses.
+Sets the initial peer list for SPDP unicast discovery. When set, SPDP messages are sent via unicast to these peers instead of multicast. Works with all transport modes. Format is comma-separated socket addresses.
 
 - Format: `ip:port,ip:port,...`
-- Discovery port calculation: `7400 + (250 * domain_id) + 10 + (2 * participant_id)`
-  - For Domain 40: participant 0 = 17410, participant 1 = 17412
+- The port must be the remote participant's **metatraffic unicast port** (discovery unicast port)
+- Port calculation: `7400 + (250 * domain_id) + 10 + (2 * participant_id)`
+  - `participant_id` is assigned sequentially starting from 0 for each participant created on the same host
 
 #### Configuration
 
