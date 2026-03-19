@@ -111,7 +111,7 @@ impl<TReq: DdsRpcType, TRep: DdsRpcType> Replier<TReq, TRep> {
     }
 
     /// Send a reply with explicit RemoteExceptionCode. (7.8.1)
-    pub fn send_reply_ex(
+    pub fn send_reply_with_exception_code(
         &self,
         data: &TRep,
         related_request_id: &SampleIdentity,
@@ -127,7 +127,7 @@ impl<TReq: DdsRpcType, TRep: DdsRpcType> Replier<TReq, TRep> {
 
     /// Send a reply correlated with the given request identity. (7.8.1)
     pub fn send_reply(&self, data: &TRep, related_request_id: &SampleIdentity) -> DdsRpcResult<()> {
-        self.send_reply_ex(data, related_request_id, RemoteExceptionCode::Ok)
+        self.send_reply_with_exception_code(data, related_request_id, RemoteExceptionCode::Ok)
     }
 
     /// Take a single pending request (non-blocking).
