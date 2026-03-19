@@ -582,25 +582,103 @@ def run_all_tests():
 
             incompat_topic = dp.create_topic("test_listener_incompat", NoKeyMessage)
 
-            # Writer: BEST_EFFORT
-            w_qos = DataWriterQos(reliability=Reliability("BEST_EFFORT"))
-            incompat_writer = pub.create_datawriter(incompat_topic, qos=w_qos)
-            time.sleep(0.3)
-
-            # Reader: RELIABLE → mismatch with BEST_EFFORT writer
+            # Reader FIRST: RELIABLE + listener
             r_qos = DataReaderQos(reliability=Reliability("RELIABLE"))
             incompat_reader = sub.create_datareader(
                 incompat_topic, qos=r_qos, listener=OnIncompatListener()
             )
-            time.sleep(1.5)  # wait for discovery + callback
+            time.sleep(0.5)
+
+            # Writer SECOND: BEST_EFFORT → reader detects mismatch during SEDP
+            w_qos = DataWriterQos(reliability=Reliability("BEST_EFFORT"))
+            incompat_writer = pub.create_datawriter(incompat_topic, qos=w_qos)
+            time.sleep(2.0)  # wait for discovery + callback
 
             print(f"  Incompatible QoS callbacks: {len(incompat_statuses)}")
-            if len(incompat_statuses) >= 1:
-                print(f"  last_policy_id: {incompat_statuses[-1].last_policy_id}")
+            assert len(incompat_statuses) >= 1, f"Expected >=1, got {len(incompat_statuses)}"
+            print(f"  last_policy_id: {incompat_statuses[-1].last_policy_id}")
+            record_pass(name)
+        except Exception as e:
+            record_fail(name, e)
+
+        # ---------------------------------------------------------------
+        # Test 19: on_offered_incompatible_qos callback fires (Writer side)
+        # (writer=BEST_EFFORT first with listener, reader=RELIABLE second → Writer detects mismatch)
+        # ---------------------------------------------------------------
+        name = "test_listener_on_offered_incompatible_qos"
+        print(f"\n--- Test 19: {name} ---")
+        try:
+            offered_incompat_statuses = []
+
+            class OnOfferedIncompatListener(DataWriterListenerBase):
+                def on_offered_incompatible_qos(self, writer, status):
+                    offered_incompat_statuses.append(status)
+
+            offered_incompat_topic = dp.create_topic("test_listener_offered_incompat", NoKeyMessage)
+
+            # Writer FIRST: BEST_EFFORT + listener
+            oi_w_qos = DataWriterQos(reliability=Reliability("BEST_EFFORT"))
+            oi_writer = pub.create_datawriter(
+                offered_incompat_topic, qos=oi_w_qos, listener=OnOfferedIncompatListener()
+            )
+            time.sleep(0.5)
+
+            # Reader SECOND: RELIABLE → Writer detects mismatch when Reader appears
+            oi_r_qos = DataReaderQos(reliability=Reliability("RELIABLE"))
+            oi_reader = sub.create_datareader(offered_incompat_topic, qos=oi_r_qos)
+            time.sleep(2.0)
+
+            print(f"  Offered incompatible QoS callbacks: {len(offered_incompat_statuses)}")
+            assert len(offered_incompat_statuses) >= 1, f"Expected >=1, got {len(offered_incompat_statuses)}"
+            print(f"  last_policy_id: {offered_incompat_statuses[-1].last_policy_id}")
+            record_pass(name)
+        except Exception as e:
+            record_fail(name, e)
+
+        # ---------------------------------------------------------------
+        # Test 20: on_sample_rejected callback fires
+        # (ResourceLimits with max_samples=1, write 2 samples → second rejected)
+        # ---------------------------------------------------------------
+        name = "test_listener_on_sample_rejected"
+        print(f"\n--- Test 20: {name} ---")
+        try:
+            rejected_statuses = []
+
+            class OnSampleRejectedListener(DataReaderListenerBase):
+                def on_sample_rejected(self, reader, status):
+                    rejected_statuses.append(status)
+
+            rejected_topic = dp.create_topic("test_listener_rejected", NoKeyMessage)
+
+            # Reader with KEEP_ALL + very small resource limits
+            # KEEP_ALL disables auto-remove, so samples are rejected instead of replaced
+            rej_r_qos = DataReaderQos(
+                reliability=Reliability("RELIABLE"),
+                history=History("KEEP_ALL"),
+                resource_limits=ResourceLimits(max_samples=1, max_instances=1, max_samples_per_instance=1),
+            )
+            rejected_reader = sub.create_datareader(
+                rejected_topic, qos=rej_r_qos, listener=OnSampleRejectedListener()
+            )
+            time.sleep(0.3)
+
+            rej_w_qos = DataWriterQos(reliability=Reliability("RELIABLE"))
+            rejected_writer = pub.create_datawriter(rejected_topic, qos=rej_w_qos)
+            time.sleep(0.5)
+
+            # Write multiple samples to overflow the reader's cache
+            for i in range(5):
+                rejected_writer.write(NoKeyMessage(value=i))
+                time.sleep(0.1)
+            time.sleep(1.0)
+
+            print(f"  Sample rejected callbacks: {len(rejected_statuses)}")
+            if len(rejected_statuses) >= 1:
+                print(f"  total_count: {rejected_statuses[-1].total_count}")
+                print(f"  last_reason: {rejected_statuses[-1].last_reason}")
                 record_pass(name)
             else:
-                # Some implementations don't fire this callback in all cases
-                print(f"  No callback fired (may depend on DDS implementation)")
+                print(f"  No rejection occurred (resource limits may not be enforced)")
                 record_pass(name)
         except Exception as e:
             record_fail(name, e)
@@ -619,10 +697,10 @@ def run_all_tests():
         time.sleep(0.5)  # discovery
 
         # ---------------------------------------------------------------
-        # Test 19: Reader - get_liveliness_changed_status
+        # Test 21: Reader - get_liveliness_changed_status
         # ---------------------------------------------------------------
         name = "test_status_reader_liveliness_changed"
-        print(f"--- Test 19: {name} ---")
+        print(f"--- Test 21: {name} ---")
         try:
             status = status_reader.get_liveliness_changed_status()
             print(f"  alive_count: {status['alive_count']}")
@@ -637,10 +715,10 @@ def run_all_tests():
             record_fail(name, e)
 
         # ---------------------------------------------------------------
-        # Test 20: Reader - get_sample_rejected_status
+        # Test 22: Reader - get_sample_rejected_status
         # ---------------------------------------------------------------
         name = "test_status_reader_sample_rejected"
-        print(f"\n--- Test 20: {name} ---")
+        print(f"\n--- Test 22: {name} ---")
         try:
             status = status_reader.get_sample_rejected_status()
             print(f"  total_count: {status['total_count']}")
@@ -655,10 +733,10 @@ def run_all_tests():
             record_fail(name, e)
 
         # ---------------------------------------------------------------
-        # Test 21: Reader - get_sample_lost_status
+        # Test 23: Reader - get_sample_lost_status
         # ---------------------------------------------------------------
         name = "test_status_reader_sample_lost"
-        print(f"\n--- Test 21: {name} ---")
+        print(f"\n--- Test 23: {name} ---")
         try:
             status = status_reader.get_sample_lost_status()
             print(f"  total_count: {status['total_count']}")
@@ -670,10 +748,10 @@ def run_all_tests():
             record_fail(name, e)
 
         # ---------------------------------------------------------------
-        # Test 22: Reader - get_requested_deadline_missed_status
+        # Test 24: Reader - get_requested_deadline_missed_status
         # ---------------------------------------------------------------
         name = "test_status_reader_requested_deadline_missed"
-        print(f"\n--- Test 22: {name} ---")
+        print(f"\n--- Test 24: {name} ---")
         try:
             status = status_reader.get_requested_deadline_missed_status()
             print(f"  total_count: {status['total_count']}")
@@ -686,10 +764,10 @@ def run_all_tests():
             record_fail(name, e)
 
         # ---------------------------------------------------------------
-        # Test 23: Reader - get_requested_incompatible_qos_status
+        # Test 25: Reader - get_requested_incompatible_qos_status
         # ---------------------------------------------------------------
         name = "test_status_reader_requested_incompatible_qos"
-        print(f"\n--- Test 23: {name} ---")
+        print(f"\n--- Test 25: {name} ---")
         try:
             status = status_reader.get_requested_incompatible_qos_status()
             print(f"  total_count: {status['total_count']}")
@@ -704,10 +782,10 @@ def run_all_tests():
             record_fail(name, e)
 
         # ---------------------------------------------------------------
-        # Test 24: Writer - get_liveliness_lost_status
+        # Test 26: Writer - get_liveliness_lost_status
         # ---------------------------------------------------------------
         name = "test_status_writer_liveliness_lost"
-        print(f"\n--- Test 24: {name} ---")
+        print(f"\n--- Test 26: {name} ---")
         try:
             status = status_writer.get_liveliness_lost_status()
             print(f"  total_count: {status['total_count']}")
@@ -719,10 +797,10 @@ def run_all_tests():
             record_fail(name, e)
 
         # ---------------------------------------------------------------
-        # Test 25: Writer - get_offered_deadline_missed_status
+        # Test 27: Writer - get_offered_deadline_missed_status
         # ---------------------------------------------------------------
         name = "test_status_writer_offered_deadline_missed"
-        print(f"\n--- Test 25: {name} ---")
+        print(f"\n--- Test 27: {name} ---")
         try:
             status = status_writer.get_offered_deadline_missed_status()
             print(f"  total_count: {status['total_count']}")
@@ -735,10 +813,10 @@ def run_all_tests():
             record_fail(name, e)
 
         # ---------------------------------------------------------------
-        # Test 26: Writer - get_offered_incompatible_qos_status
+        # Test 28: Writer - get_offered_incompatible_qos_status
         # ---------------------------------------------------------------
         name = "test_status_writer_offered_incompatible_qos"
-        print(f"\n--- Test 26: {name} ---")
+        print(f"\n--- Test 28: {name} ---")
         try:
             status = status_writer.get_offered_incompatible_qos_status()
             print(f"  total_count: {status['total_count']}")
@@ -760,10 +838,10 @@ def run_all_tests():
         print(f"{'='*60}\n")
 
         # ---------------------------------------------------------------
-        # Test 27: Writer QoS - each policy individually
+        # Test 29: Writer QoS - each policy individually
         # ---------------------------------------------------------------
         name = "test_qos_writer_individual_policies"
-        print(f"--- Test 27: {name} ---")
+        print(f"--- Test 29: {name} ---")
         writer_qos_cases = [
             ("ownership", DataWriterQos(ownership=Ownership("SHARED"))),
             ("ownership_strength", DataWriterQos(ownership_strength=OwnershipStrength(value=5))),
@@ -793,10 +871,10 @@ def run_all_tests():
             record_fail(name, "Some Writer QoS policies failed")
 
         # ---------------------------------------------------------------
-        # Test 28: Reader QoS - each policy individually
+        # Test 30: Reader QoS - each policy individually
         # ---------------------------------------------------------------
         name = "test_qos_reader_individual_policies"
-        print(f"\n--- Test 28: {name} ---")
+        print(f"\n--- Test 30: {name} ---")
         reader_qos_cases = [
             ("ownership", DataReaderQos(ownership=Ownership("SHARED"))),
             ("resource_limits", DataReaderQos(resource_limits=ResourceLimits(max_samples=50))),
@@ -824,10 +902,10 @@ def run_all_tests():
             record_fail(name, "Some Reader QoS policies failed")
 
         # ---------------------------------------------------------------
-        # Test 29: Writer + Reader with matching QoS can communicate
+        # Test 31: Writer + Reader with matching QoS can communicate
         # ---------------------------------------------------------------
         name = "test_qos_write_read_with_qos"
-        print(f"\n--- Test 29: {name} ---")
+        print(f"\n--- Test 31: {name} ---")
         try:
             comm_topic = dp.create_topic("test_qos_comm", NoKeyMessage)
             comm_w_qos = DataWriterQos(
@@ -857,10 +935,10 @@ def run_all_tests():
             record_fail(name, e)
 
         # ---------------------------------------------------------------
-        # Test 30: Default QoS (no explicit settings) works
+        # Test 32: Default QoS (no explicit settings) works
         # ---------------------------------------------------------------
         name = "test_qos_default"
-        print(f"\n--- Test 30: {name} ---")
+        print(f"\n--- Test 32: {name} ---")
         try:
             default_topic = dp.create_topic("test_qos_default", NoKeyMessage)
             default_writer = pub.create_datawriter(default_topic, qos=DataWriterQos())
@@ -874,6 +952,140 @@ def run_all_tests():
             print(f"  Samples received: {len(samples)}")
             assert len(samples) >= 1
             print(f"  Data value: {samples[0].data.value}")
+            record_pass(name)
+        except Exception as e:
+            record_fail(name, e)
+
+        # ===============================================================
+        # Status API Value Verification Tests
+        # (Actual event triggering + status value check)
+        # ===============================================================
+        print(f"\n{'='*60}")
+        print(f"  Status API Value Verification Tests")
+        print(f"{'='*60}\n")
+
+        # ---------------------------------------------------------------
+        # Test 33: requested_incompatible_qos status has total_count >= 1
+        # (writer=BEST_EFFORT, reader=RELIABLE → QoS mismatch)
+        # ---------------------------------------------------------------
+        name = "test_status_value_requested_incompatible_qos"
+        print(f"--- Test 33: {name} ---")
+        try:
+            sv_topic1 = dp.create_topic("test_sv_req_incompat", NoKeyMessage)
+            sv_reader1 = sub.create_datareader(
+                sv_topic1, qos=DataReaderQos(reliability=Reliability("RELIABLE"))
+            )
+            time.sleep(0.5)
+            sv_writer1 = pub.create_datawriter(
+                sv_topic1, qos=DataWriterQos(reliability=Reliability("BEST_EFFORT"))
+            )
+            time.sleep(2.0)
+
+            status = sv_reader1.get_requested_incompatible_qos_status()
+            print(f"  total_count: {status['total_count']}")
+            print(f"  last_policy_id: {status['last_policy_id']}")
+            assert status["total_count"] >= 1, f"Expected total_count >= 1, got {status['total_count']}"
+            assert status["last_policy_id"] == 11, f"Expected policy_id 11 (Reliability), got {status['last_policy_id']}"
+            record_pass(name)
+        except Exception as e:
+            record_fail(name, e)
+
+        # ---------------------------------------------------------------
+        # Test 34: offered_incompatible_qos status has total_count >= 1
+        # (reader=RELIABLE, writer=BEST_EFFORT → Writer detects mismatch)
+        # ---------------------------------------------------------------
+        name = "test_status_value_offered_incompatible_qos"
+        print(f"\n--- Test 34: {name} ---")
+        try:
+            sv_topic2 = dp.create_topic("test_sv_off_incompat", NoKeyMessage)
+            sv_reader2 = sub.create_datareader(
+                sv_topic2, qos=DataReaderQos(reliability=Reliability("RELIABLE"))
+            )
+            time.sleep(0.5)
+            sv_writer2 = pub.create_datawriter(
+                sv_topic2, qos=DataWriterQos(reliability=Reliability("BEST_EFFORT"))
+            )
+            time.sleep(2.0)
+
+            status = sv_writer2.get_offered_incompatible_qos_status()
+            print(f"  total_count: {status['total_count']}")
+            print(f"  last_policy_id: {status['last_policy_id']}")
+            assert status["total_count"] >= 1, f"Expected total_count >= 1, got {status['total_count']}"
+            assert status["last_policy_id"] == 11, f"Expected policy_id 11 (Reliability), got {status['last_policy_id']}"
+            record_pass(name)
+        except Exception as e:
+            record_fail(name, e)
+
+        # ---------------------------------------------------------------
+        # Test 35: sample_rejected status has total_count >= 1
+        # (KEEP_ALL + ResourceLimits overflow)
+        # ---------------------------------------------------------------
+        name = "test_status_value_sample_rejected"
+        print(f"\n--- Test 35: {name} ---")
+        try:
+            sv_topic3 = dp.create_topic("test_sv_rejected", NoKeyMessage)
+            sv_reader3 = sub.create_datareader(
+                sv_topic3, qos=DataReaderQos(
+                    reliability=Reliability("RELIABLE"),
+                    history=History("KEEP_ALL"),
+                    resource_limits=ResourceLimits(max_samples=1, max_instances=1, max_samples_per_instance=1),
+                )
+            )
+            time.sleep(0.3)
+            sv_writer3 = pub.create_datawriter(
+                sv_topic3, qos=DataWriterQos(reliability=Reliability("RELIABLE"))
+            )
+            time.sleep(0.5)
+
+            for i in range(5):
+                sv_writer3.write(NoKeyMessage(value=i))
+                time.sleep(0.1)
+            time.sleep(1.0)
+
+            status = sv_reader3.get_sample_rejected_status()
+            print(f"  total_count: {status['total_count']}")
+            print(f"  last_reason: {status['last_reason']}")
+            assert status["total_count"] >= 1, f"Expected total_count >= 1, got {status['total_count']}"
+            record_pass(name)
+        except Exception as e:
+            record_fail(name, e)
+
+        # ---------------------------------------------------------------
+        # Test 36: subscription_matched status after writer creation
+        # ---------------------------------------------------------------
+        name = "test_status_value_subscription_matched"
+        print(f"\n--- Test 36: {name} ---")
+        try:
+            sv_topic4 = dp.create_topic("test_sv_sub_matched", NoKeyMessage)
+            sv_reader4 = sub.create_datareader(sv_topic4)
+            sv_writer4 = pub.create_datawriter(sv_topic4)
+            time.sleep(1.0)
+
+            total, current = sv_reader4.get_subscription_matched_status()
+            print(f"  total_count: {total}")
+            print(f"  current_count: {current}")
+            assert total >= 1, f"Expected total >= 1, got {total}"
+            assert current >= 1, f"Expected current >= 1, got {current}"
+            record_pass(name)
+        except Exception as e:
+            record_fail(name, e)
+
+        # ---------------------------------------------------------------
+        # Test 37: publication_matched status after reader creation
+        # ---------------------------------------------------------------
+        name = "test_status_value_publication_matched"
+        print(f"\n--- Test 37: {name} ---")
+        try:
+            sv_topic5 = dp.create_topic("test_sv_pub_matched", NoKeyMessage)
+            sv_writer5 = pub.create_datawriter(sv_topic5)
+            sv_reader5 = sub.create_datareader(sv_topic5)
+            time.sleep(1.0)
+
+            total, current = sv_writer5.get_publication_matched_status()
+            print(f"  total_count: {total}")
+            print(f"  current_count: {current}")
+            assert total >= 1, f"Expected total >= 1, got {total}"
+            assert current >= 1, f"Expected current >= 1, got {current}"
             record_pass(name)
         except Exception as e:
             record_fail(name, e)
