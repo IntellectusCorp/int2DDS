@@ -524,9 +524,11 @@ impl Socket {
         }
 
         let use_loopback = crate::common::env::get_use_loopback_interface();
-        let should_add_loopback = !ips.contains(&"127.0.0.1".to_string()) && use_loopback;
+        let should_add_loopback =
+            !from_feature && !ips.contains(&"127.0.0.1".to_string()) && use_loopback;
 
         // If no NIC available or loopback is set to use, add localhost IP to the list
+        // also skipped when from_feature — feature-specified NIC takes full control
         if ips.is_empty() || should_add_loopback {
             ips.push("127.0.0.1".to_string());
         }
@@ -548,10 +550,11 @@ impl Socket {
         if self.working_ips.from_feature {
             return self.working_ips.ips[0].clone();
         }
-        // only loopback: 127.0.0.1
+        // This happens when no physical NIC exists
         let only_loopback =
             self.working_ips.ips.len() == 1 && self.working_ips.ips[0] == "127.0.0.1";
         if only_loopback {
+            // 0.0.0.0 bind fails when no physical NIC exists, use loopback directly
             "127.0.0.1".to_string()
         } else {
             // otherwise: 0.0.0.0 (OS routing)
