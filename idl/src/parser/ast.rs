@@ -10,6 +10,9 @@ pub enum Definition {
     Bitmask(BitmaskDef),
     Bitset(BitsetDef),
     Union(UnionDef),
+    Interface(InterfaceDef),
+    Exception(ExceptionDef),
+    Const(ConstDef),
 }
 
 #[derive(Debug, Clone)]
@@ -148,4 +151,66 @@ pub enum ConstExpr {
     String(String),
     Ident(String),
     Bool(bool),
+}
+
+/// (7) interface_header + (9) export
+#[derive(Debug, Clone)]
+pub struct InterfaceDef {
+    pub name: String,
+    pub base_interfaces: Vec<String>,
+    pub operations: Vec<OperationDef>,
+    pub attributes: Vec<AttributeDef>,
+    pub annotations: Vec<Annotation>,
+}
+
+/// (87) op_dcl
+#[derive(Debug, Clone)]
+pub struct OperationDef {
+    pub name: String,
+    pub return_type: Option<TypeSpec>, // None = void
+    pub params: Vec<ParamDef>,
+    pub raises: Vec<String>,
+    pub annotations: Vec<Annotation>,
+}
+
+/// (91) param_dcl
+#[derive(Debug, Clone)]
+pub struct ParamDef {
+    pub name: String,
+    pub type_spec: TypeSpec,
+    pub direction: ParamDirection,
+    pub annotations: Vec<Annotation>,
+}
+
+/// (92) param_attribute
+#[derive(Debug, Clone, PartialEq)]
+pub enum ParamDirection {
+    In,
+    Out,
+    Inout,
+}
+
+/// (104) readonly_attr_spec + (106) attr_spec
+#[derive(Debug, Clone)]
+pub struct AttributeDef {
+    pub name: String,
+    pub type_spec: TypeSpec,
+    pub readonly: bool,
+    pub raises: Vec<String>,
+    pub annotations: Vec<Annotation>,
+}
+
+/// exception declaration — similar to struct
+#[derive(Debug, Clone)]
+pub struct ExceptionDef {
+    pub name: String,
+    pub members: Vec<StructMember>,
+}
+
+/// const declaration
+#[derive(Debug, Clone)]
+pub struct ConstDef {
+    pub name: String,
+    pub type_spec: TypeSpec,
+    pub value: ConstExpr,
 }

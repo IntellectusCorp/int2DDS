@@ -157,6 +157,29 @@ impl Parser {
             Token::Bitmask => Ok(Definition::Bitmask(self.parse_bitmask(annotations)?)),
             Token::Bitset => Ok(Definition::Bitset(self.parse_bitset(annotations)?)),
             Token::Union => Ok(Definition::Union(self.parse_union(annotations)?)),
+            Token::Interface => Ok(Definition::Interface(self.parse_interface(annotations)?)),
+            Token::Exception => {
+                if !annotations.is_empty() {
+                    let cur = self.current();
+                    return Err(ParseError {
+                        line: cur.line,
+                        col: cur.col,
+                        message: "annotations on exceptions are not supported".to_string(),
+                    });
+                }
+                Ok(Definition::Exception(self.parse_exception()?))
+            }
+            Token::Const => {
+                if !annotations.is_empty() {
+                    let cur = self.current();
+                    return Err(ParseError {
+                        line: cur.line,
+                        col: cur.col,
+                        message: "annotations on constants are not supported".to_string(),
+                    });
+                }
+                Ok(Definition::Const(self.parse_const()?))
+            }
             _ => {
                 let cur = self.current();
                 Err(ParseError {
@@ -488,6 +511,214 @@ impl Parser {
         self.eat_semicolons();
 
         Ok(UnionDef { name, discriminant_type, cases, default_case, annotations })
+    }
+
+    /// (7) interface_header + body
+    fn parse_interface(&mut self, annotations: Vec<Annotation>) -> Result<InterfaceDef, ParseError> {
+        self.expect(&Token::Interface)?;
+        let name = self.expect_ident()?;
+
+        // Optional inheritance: interface Foo : Bar, Baz
+        let mut base_interfaces = Vec::new();
+        if matches!(self.peek(), Token::Colon) {
+            self.advance();
+            base_interfaces.push(self.parse_scoped_name()?);
+            while matches!(self.peek(), Token::Comma) {
+                self.advance();
+                base_interfaces.push(self.parse_scoped_name()?);
+            }
+        }
+
+        self.expect(&Token::LeftBrace)?;
+
+        // (9) export: attr_dcl | op_dcl
+        let mut operations = Vec::new();
+        let mut attributes = Vec::new();
+        while !matches!(self.peek(), Token::RightBrace) {
+            let member_annotations = self.parse_annotations()?;
+
+            match self.peek() {
+                Token::Readonly => {
+                    attributes.push(self.parse_readonly_attr(member_annotations)?);
+                }
+                Token::Attribute => {
+                    attributes.push(self.parse_attr(member_annotations)?);
+                }
+                _ => {
+                    // op_dcl: return_type name(params) [raises(...)];
+                    operations.push(self.parse_operation(member_annotations)?);
+                }
+            }
+        }
+
+        self.expect(&Token::RightBrace)?;
+        self.eat_semicolons();
+
+        Ok(InterfaceDef {
+            name,
+            base_interfaces,
+            operations,
+            attributes,
+            annotations,
+        })
+    }
+
+    /// (87) op_dcl
+    fn parse_operation(&mut self, annotations: Vec<Annotation>) -> Result<OperationDef, ParseError> {
+        // (88) op_type_spec: void | type_spec
+        let return_type = if matches!(self.peek(), Token::Void) {
+            self.advance();
+            None
+        } else {
+            Some(self.parse_type_spec()?)
+        };
+
+        let name = self.expect_ident()?;
+
+        // parameter_dcls: '(' [param_dcl {',' param_dcl}] ')'
+        self.expect(&Token::LeftParen)?;
+        let mut params = Vec::new();
+        if !matches!(self.peek(), Token::RightParen) {
+            params.push(self.parse_param()?);
+            while matches!(self.peek(), Token::Comma) {
+                self.advance();
+                params.push(self.parse_param()?);
+            }
+        }
+        self.expect(&Token::RightParen)?;
+
+        // Optional raises_expr: 'raises' '(' name {',' name} ')'
+        let raises = if matches!(self.peek(), Token::Raises) {
+            self.advance();
+            self.parse_raises_list()?
+        } else {
+            Vec::new()
+        };
+
+        self.expect(&Token::Semicolon)?;
+
+        Ok(OperationDef {
+            name,
+            return_type,
+            params,
+            raises,
+            annotations,
+        })
+    }
+
+    /// (91) param_dcl
+    fn parse_param(&mut self) -> Result<ParamDef, ParseError> {
+        let annotations = self.parse_annotations()?;
+
+        // (92) param_attribute
+        let direction = match self.peek() {
+            Token::In => { self.advance(); ParamDirection::In }
+            Token::Out => { self.advance(); ParamDirection::Out }
+            Token::Inout => { self.advance(); ParamDirection::Inout }
+            _ => {
+                let cur = self.current();
+                return Err(ParseError {
+                    line: cur.line,
+                    col: cur.col,
+                    message: format!("expected 'in', 'out', or 'inout', found {:?}", cur.token),
+                });
+            }
+        };
+
+        let type_spec = self.parse_type_spec()?;
+        let name = self.expect_ident()?;
+
+        Ok(ParamDef { name, type_spec, direction, annotations })
+    }
+
+    /// (104) readonly_attr_spec
+    fn parse_readonly_attr(&mut self, annotations: Vec<Annotation>) -> Result<AttributeDef, ParseError> {
+        self.expect(&Token::Readonly)?;
+        self.expect(&Token::Attribute)?;
+        let type_spec = self.parse_type_spec()?;
+        let name = self.expect_ident()?;
+
+        let raises = if matches!(self.peek(), Token::Raises) {
+            self.advance();
+            self.parse_raises_list()?
+        } else {
+            Vec::new()
+        };
+
+        self.expect(&Token::Semicolon)?;
+
+        Ok(AttributeDef { name, type_spec, readonly: true, raises, annotations })
+    }
+
+    /// (106) attr_spec
+    fn parse_attr(&mut self, annotations: Vec<Annotation>) -> Result<AttributeDef, ParseError> {
+        self.expect(&Token::Attribute)?;
+        let type_spec = self.parse_type_spec()?;
+        let name = self.expect_ident()?;
+
+        let raises = if matches!(self.peek(), Token::Raises) {
+            self.advance();
+            self.parse_raises_list()?
+        } else {
+            Vec::new()
+        };
+
+        self.expect(&Token::Semicolon)?;
+
+        Ok(AttributeDef { name, type_spec, readonly: false, raises, annotations })
+    }
+
+    /// exception declaration — like struct but with 'exception' keyword
+    fn parse_exception(&mut self) -> Result<ExceptionDef, ParseError> {
+        self.expect(&Token::Exception)?;
+        let name = self.expect_ident()?;
+        self.expect(&Token::LeftBrace)?;
+
+        let mut members = Vec::new();
+        while !matches!(self.peek(), Token::RightBrace) {
+            members.push(self.parse_struct_member()?);
+        }
+
+        self.expect(&Token::RightBrace)?;
+        self.eat_semicolons();
+
+        Ok(ExceptionDef { name, members })
+    }
+
+    /// const declaration: 'const' type_spec name '=' const_expr ';'
+    fn parse_const(&mut self) -> Result<ConstDef, ParseError> {
+        self.expect(&Token::Const)?;
+        let type_spec = self.parse_type_spec()?;
+        let name = self.expect_ident()?;
+        self.expect(&Token::Equals)?;
+        let value = self.parse_const_expr()?;
+        self.expect(&Token::Semicolon)?;
+
+        Ok(ConstDef { name, type_spec, value })
+    }
+
+    /// raises_expr: '(' scoped_name {',' scoped_name} ')'
+    fn parse_raises_list(&mut self) -> Result<Vec<String>, ParseError> {
+        self.expect(&Token::LeftParen)?;
+        let mut names = Vec::new();
+        names.push(self.parse_scoped_name()?);
+        while matches!(self.peek(), Token::Comma) {
+            self.advance();
+            names.push(self.parse_scoped_name()?);
+        }
+        self.expect(&Token::RightParen)?;
+        Ok(names)
+    }
+
+    /// Parse a scoped name: Foo or Foo::Bar::Baz
+    fn parse_scoped_name(&mut self) -> Result<String, ParseError> {
+        let mut name = self.expect_ident()?;
+        while matches!(self.peek(), Token::ColonColon) {
+            self.advance();
+            let part = self.expect_ident()?;
+            name = format!("{}::{}", name, part);
+        }
+        Ok(name)
     }
 
     /// Parse a type specifier (without the field name / array dimensions).
@@ -950,6 +1181,113 @@ mod tests {
             assert_eq!(u.default_case.as_ref().unwrap().name, "default_val");
         } else {
             panic!("expected union");
+        }
+    }
+
+    #[test]
+    fn test_interface() {
+        let defs = parse_str(
+            r#"
+            @service
+            interface RobotControl {
+                long moveTo(in float x, in float y, in float z);
+                void stop();
+                readonly attribute string status;
+                attribute float speed;
+            };
+            "#,
+        );
+        if let Definition::Interface(i) = &defs[0] {
+            assert_eq!(i.name, "RobotControl");
+            assert_eq!(i.annotations.len(), 1);
+            assert_eq!(i.annotations[0].name, "service");
+            assert_eq!(i.base_interfaces.len(), 0);
+            assert_eq!(i.operations.len(), 2);
+
+            assert_eq!(i.operations[0].name, "moveTo");
+            assert!(matches!(i.operations[0].return_type, Some(TypeSpec::Int32)));
+            assert_eq!(i.operations[0].params.len(), 3);
+            assert_eq!(i.operations[0].params[0].direction, ParamDirection::In);
+            assert_eq!(i.operations[0].params[0].name, "x");
+
+            assert_eq!(i.operations[1].name, "stop");
+            assert!(i.operations[1].return_type.is_none());
+            assert_eq!(i.operations[1].params.len(), 0);
+
+            assert_eq!(i.attributes.len(), 2);
+            assert!(i.attributes[0].readonly);
+            assert_eq!(i.attributes[0].name, "status");
+            assert!(!i.attributes[1].readonly);
+            assert_eq!(i.attributes[1].name, "speed");
+        } else {
+            panic!("expected interface");
+        }
+    }
+
+    #[test]
+    fn test_interface_inheritance_and_raises() {
+        let defs = parse_str(
+            r#"
+            exception CollisionEx {
+                string message;
+            };
+            interface Base {
+                void ping();
+            };
+            @service
+            interface Robot : Base {
+                long moveTo(in float x, in float y) raises (CollisionEx);
+            };
+            "#,
+        );
+        assert_eq!(defs.len(), 3);
+
+        if let Definition::Exception(e) = &defs[0] {
+            assert_eq!(e.name, "CollisionEx");
+            assert_eq!(e.members.len(), 1);
+        } else {
+            panic!("expected exception");
+        }
+
+        if let Definition::Interface(i) = &defs[2] {
+            assert_eq!(i.name, "Robot");
+            assert_eq!(i.base_interfaces, vec!["Base".to_string()]);
+            assert_eq!(i.operations[0].raises, vec!["CollisionEx".to_string()]);
+        } else {
+            panic!("expected interface");
+        }
+    }
+
+    #[test]
+    fn test_const() {
+        let defs = parse_str("const long MAX_SIZE = 100;");
+        if let Definition::Const(c) = &defs[0] {
+            assert_eq!(c.name, "MAX_SIZE");
+            assert!(matches!(c.type_spec, TypeSpec::Int32));
+            assert!(matches!(c.value, ConstExpr::Int(100)));
+        } else {
+            panic!("expected const");
+        }
+    }
+
+    #[test]
+    fn test_operation_with_out_inout() {
+        let defs = parse_str(
+            r#"
+            interface Calc {
+                void divide(in long a, in long b, out long quotient, inout long remainder);
+            };
+            "#,
+        );
+        if let Definition::Interface(i) = &defs[0] {
+            let op = &i.operations[0];
+            assert_eq!(op.params.len(), 4);
+            assert_eq!(op.params[0].direction, ParamDirection::In);
+            assert_eq!(op.params[1].direction, ParamDirection::In);
+            assert_eq!(op.params[2].direction, ParamDirection::Out);
+            assert_eq!(op.params[3].direction, ParamDirection::Inout);
+        } else {
+            panic!("expected interface");
         }
     }
 }

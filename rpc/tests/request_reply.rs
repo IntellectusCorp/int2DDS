@@ -9,6 +9,7 @@ use int2dds::dcps::infrastructure::status::StatusMask;
 use int2dds::dcps::topic::type_support::DdsType;
 
 use int2dds_rpc::entity::{RpcEntity, ServiceProxy};
+use int2dds_rpc::error::DdsRpcError;
 use int2dds_rpc::params::{ReplierParams, RequesterParams};
 use int2dds_rpc::replier::Replier;
 use int2dds_rpc::requester::Requester;
@@ -302,6 +303,80 @@ fn bind_and_unbind_instance() {
 
     requester.unbind().unwrap();
     assert!(requester.get_bound_instance_name().is_none());
+}
+
+#[test]
+fn send_request_async_with_correlation() {
+    let domain_id = next_domain_id();
+    let factory = DomainParticipantFactory::get_instance();
+    let participant = factory
+        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+
+    let service_name = "FutureService";
+
+    let requester = Requester::<AddRequest, AddResponse>::new(
+        RequesterParams::new(participant.clone()).service_name(service_name),
+    )
+    .unwrap();
+
+    let replier = Replier::<AddRequest, AddResponse>::new(
+        ReplierParams::new(participant.clone()).service_name(service_name),
+    )
+    .unwrap();
+
+    requester.wait_for_service_timeout(Duration::from_secs(3)).unwrap();
+
+    // Send two requests via send_request_async
+    let future1 = requester.send_request_async(&AddRequest { a: 10, b: 20 }).unwrap();
+    let future2 = requester.send_request_async(&AddRequest { a: 100, b: 200 }).unwrap();
+
+    // Replier handles both (order may differ from send order)
+    for _ in 0..2 {
+        let sample = replier.receive_request(Duration::from_secs(3)).unwrap();
+        let r = sample.data().unwrap();
+        let ret = AddResponse { result: r.data.a + r.data.b };
+        replier.send_reply(&ret, &r.header.request_id).unwrap();
+    }
+
+    // future1.get() — blocks until the correlated reply arrives
+    let reply1 = future1.get().unwrap();
+    let data1 = reply1.data().unwrap();
+    assert_eq!(data1.data.result, 30);
+
+    // future2.get_timeout() — same but with explicit timeout
+    let reply2 = future2.get_timeout(Duration::from_secs(3)).unwrap();
+    let data2 = reply2.data().unwrap();
+    assert_eq!(data2.data.result, 300);
+}
+
+#[test]
+fn future_get_timeout_expires() {
+    let domain_id = next_domain_id();
+    let factory = DomainParticipantFactory::get_instance();
+    let participant = factory
+        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+
+    let requester = Requester::<AddRequest, AddResponse>::new(
+        RequesterParams::new(participant.clone()).service_name("FutureTimeoutService"),
+    )
+    .unwrap();
+
+    // Create a replier just so send_request succeeds, but don't reply
+    let _replier = Replier::<AddRequest, AddResponse>::new(
+        ReplierParams::new(participant.clone()).service_name("FutureTimeoutService"),
+    )
+    .unwrap();
+
+    requester.wait_for_service_timeout(Duration::from_secs(3)).unwrap();
+
+    let future = requester.send_request_async(&AddRequest { a: 1, b: 2 }).unwrap();
+
+    // No reply sent — should timeout
+    let result = future.get_timeout(Duration::from_millis(200));
+    assert!(result.is_err());
+    assert!(matches!(result.unwrap_err(), DdsRpcError::Timeout | DdsRpcError::Dds(_)));
 }
 
 #[test]
