@@ -231,8 +231,7 @@ However, new participants will not be discovered since loopback multicast discov
 
 #### Interaction with Other Settings
 
-- Even if specific IPs are already configured via `INT2DDS_NETWORK_IP` or `INT2DDS_NETWORK_INTERFACE`, the loopback address will be added to the available IP list when this option is enabled.
-  If the loopback address is already set through these variables, this setting is ignored.
+- When int2DDS-feature provides the working IP, this setting is ignored. The feature-specified NIC takes full control of the network interface selection.
 - If no network interfaces are available (e.g., WiFi and Ethernet disconnected), loopback is automatically used without setting this variable.
 
 #### Configuration
@@ -392,11 +391,12 @@ cargo run --example hello_world -- --int2dds-tcp-nodelay
 
 ### INT2DDS_INITIAL_PEERS
 
-Sets the initial peer list for TCP/Hybrid mode. Format is comma-separated socket addresses.
+Sets the initial peer list for SPDP unicast discovery. When set, SPDP messages are sent via unicast to these peers instead of multicast. Works with all transport modes. Format is comma-separated socket addresses.
 
 - Format: `ip:port,ip:port,...`
-- Discovery port calculation: `7400 + (250 * domain_id) + 10 + (2 * participant_id)`
-  - For Domain 40: participant 0 = 17410, participant 1 = 17412
+- The port must be the remote participant's **metatraffic unicast port** (discovery unicast port)
+- Port calculation: `7400 + (250 * domain_id) + 10 + (2 * participant_id)`
+  - `participant_id` is assigned sequentially starting from 0 for each participant created on the same host
 
 #### Configuration
 
