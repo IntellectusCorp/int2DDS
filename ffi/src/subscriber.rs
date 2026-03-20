@@ -275,6 +275,13 @@ pub unsafe extern "C" fn int2dds_create_datareader_with_listener(
                 }
             }
         }
+        if mask & crate::status_condition::INT2DDS_STATUS_REQUESTED_INCOMPATIBLE_QOS != 0 {
+            if let Ok(status) = reader_handle.inner.get_requested_incompatible_qos_status() {
+                if status.total_count() > 0 {
+                    listener_arc.on_requested_incompatible_qos(&reader_handle.inner, &status);
+                }
+            }
+        }
     }
 
     *reader_out = Box::into_raw(reader_handle);
