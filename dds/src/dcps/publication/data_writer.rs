@@ -1355,7 +1355,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
 
         // Listener
         let mask = self.get_listener_mask()?;
-        if mask.contains(StatusKind::SAMPLE_LOST) {
+        if mask.contains(StatusKind::OFFERED_INCOMPATIBLE_QOS) {
             let mut listener_called = false;
             if let Some(listener) = self.get_listener()? {
                 listener.on_offered_incompatible_qos(self, &status);
@@ -1446,7 +1446,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
 
         // Listener
         let mask = self.get_listener_mask()?;
-        if mask.contains(StatusKind::SAMPLE_LOST) {
+        if mask.contains(StatusKind::PUBLICATION_MATCHED) {
             let mut listener_called = false;
             if let Some(listener) = self.get_listener()? {
                 listener.on_publication_matched(self, &status);
@@ -2723,6 +2723,199 @@ mod tests {
         assert_eq!(
             count_before_delete, count_after_delete,
             "Deadline miss should not occur after delete (shutdown)"
+        );
+    }
+
+    // ========================================================================
+    // Listener mask tests - verify that individual StatusKind mask correctly
+    // gates listener callback invocation.
+    //
+    // These tests call update_status() directly with a specific StatusKind mask
+    // to verify that the corresponding listener callback is invoked.
+    // Before the fix, handle_offered_incompatible_qos_status and
+    // handle_publication_matched_status checked StatusKind::SAMPLE_LOST
+    // instead of their correct StatusKind, so callbacks never fired
+    // with individual masks.
+    // ========================================================================
+
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct MaskTestListener {
+        offered_deadline_missed_called: AtomicBool,
+        offered_incompatible_qos_called: AtomicBool,
+        liveliness_lost_called: AtomicBool,
+        publication_matched_called: AtomicBool,
+    }
+
+    impl MaskTestListener {
+        fn new() -> Self {
+            Self {
+                offered_deadline_missed_called: AtomicBool::new(false),
+                offered_incompatible_qos_called: AtomicBool::new(false),
+                liveliness_lost_called: AtomicBool::new(false),
+                publication_matched_called: AtomicBool::new(false),
+            }
+        }
+    }
+
+    impl DataWriterListener for MaskTestListener {
+        type Foo = TestData;
+
+        fn on_offered_deadline_missed(
+            &self,
+            _writer: &DataWriter<TestData>,
+            _status: &OfferedDeadlineMissedStatus,
+        ) {
+            self.offered_deadline_missed_called.store(true, Ordering::SeqCst);
+        }
+
+        fn on_offered_incompatible_qos(
+            &self,
+            _writer: &DataWriter<TestData>,
+            _status: &OfferedIncompatibleQosStatus,
+        ) {
+            self.offered_incompatible_qos_called.store(true, Ordering::SeqCst);
+        }
+
+        fn on_liveliness_lost(
+            &self,
+            _writer: &DataWriter<TestData>,
+            _status: &LivelinessLostStatus,
+        ) {
+            self.liveliness_lost_called.store(true, Ordering::SeqCst);
+        }
+
+        fn on_publication_matched(
+            &self,
+            _writer: &DataWriter<TestData>,
+            _status: &PublicationMatchedStatus,
+        ) {
+            self.publication_matched_called.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn setup_mask_test() -> (
+        crate::domain::domain_participant::DomainParticipant,
+        crate::publication::publisher::Publisher,
+        crate::topic::topic::Topic,
+    ) {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
+            .unwrap();
+        let topic = participant
+            .create_topic::<TestData>(
+                "MaskTestTopic",
+                "TestData",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+        (participant, publisher, topic)
+    }
+
+    #[test]
+    fn test_mask_offered_incompatible_qos() {
+        let (_participant, publisher, topic) = setup_mask_test();
+
+        let listener = Arc::new(MaskTestListener::new());
+        let writer = publisher
+            .create_datawriter::<TestData>(
+                &topic,
+                DataWriterQos::default(),
+                Some(listener.clone() as Arc<dyn DataWriterListener<Foo = TestData>>),
+                StatusKind::OFFERED_INCOMPATIBLE_QOS,
+            )
+            .unwrap();
+
+        let status = Arc::new(OfferedIncompatibleQosStatus::default());
+        writer.update_status(StatusKind::OFFERED_INCOMPATIBLE_QOS, Some(status)).unwrap();
+
+        assert!(
+            listener
+                .offered_incompatible_qos_called
+                .load(Ordering::SeqCst),
+            "on_offered_incompatible_qos should be called when mask contains OFFERED_INCOMPATIBLE_QOS"
+        );
+    }
+
+    #[test]
+    fn test_mask_publication_matched() {
+        let (_participant, publisher, topic) = setup_mask_test();
+
+        let listener = Arc::new(MaskTestListener::new());
+        let writer = publisher
+            .create_datawriter::<TestData>(
+                &topic,
+                DataWriterQos::default(),
+                Some(listener.clone() as Arc<dyn DataWriterListener<Foo = TestData>>),
+                StatusKind::PUBLICATION_MATCHED,
+            )
+            .unwrap();
+
+        let status = Arc::new(PublicationMatchedStatus {
+            total_count: 0,
+            total_count_change: 1,
+            current_count: 0,
+            current_count_change: 1,
+            last_subscription_handle: InstanceHandle::default(),
+        });
+        writer.update_status(StatusKind::PUBLICATION_MATCHED, Some(status)).unwrap();
+
+        assert!(
+            listener.publication_matched_called.load(Ordering::SeqCst),
+            "on_publication_matched should be called when mask contains PUBLICATION_MATCHED"
+        );
+    }
+
+    #[test]
+    fn test_mask_liveliness_lost() {
+        let (_participant, publisher, topic) = setup_mask_test();
+
+        let listener = Arc::new(MaskTestListener::new());
+        let writer = publisher
+            .create_datawriter::<TestData>(
+                &topic,
+                DataWriterQos::default(),
+                Some(listener.clone() as Arc<dyn DataWriterListener<Foo = TestData>>),
+                StatusKind::LIVELINESS_LOST,
+            )
+            .unwrap();
+
+        writer.update_status(StatusKind::LIVELINESS_LOST, None).unwrap();
+
+        assert!(
+            listener.liveliness_lost_called.load(Ordering::SeqCst),
+            "on_liveliness_lost should be called when mask contains LIVELINESS_LOST"
+        );
+    }
+
+    #[test]
+    fn test_mask_offered_deadline_missed() {
+        let (_participant, publisher, topic) = setup_mask_test();
+
+        let listener = Arc::new(MaskTestListener::new());
+        let writer = publisher
+            .create_datawriter::<TestData>(
+                &topic,
+                DataWriterQos::default(),
+                Some(listener.clone() as Arc<dyn DataWriterListener<Foo = TestData>>),
+                StatusKind::OFFERED_DEADLINE_MISSED,
+            )
+            .unwrap();
+
+        let status = Arc::new(OfferedDeadlineMissedStatus::default());
+        writer.update_status(StatusKind::OFFERED_DEADLINE_MISSED, Some(status)).unwrap();
+
+        assert!(
+            listener
+                .offered_deadline_missed_called
+                .load(Ordering::SeqCst),
+            "on_offered_deadline_missed should be called when mask contains OFFERED_DEADLINE_MISSED"
         );
     }
 }
