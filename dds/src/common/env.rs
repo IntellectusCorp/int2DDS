@@ -36,7 +36,7 @@ pub fn init_from_env() {
     // - INT2DDS_TCP_WRITE_TIMEOUT: Set TCP write timeout (milliseconds) - Default: 10000
     // - INT2DDS_TCP_NODELAY: Enable TCP Nodelay (disable Nagle algorithm) (true, false) - Default: true
 
-    // - INT2DDS_INITIAL_PEERS: Set initial peers for TCP/Hybrid discovery (comma-separated, e.g., "192.168.1.10:7412,192.168.1.11:7412") - Default: none
+    // - INT2DDS_INITIAL_PEERS: Set initial peers for SPDP unicast discovery (comma-separated, e.g., "192.168.1.10:7410,192.168.1.11:7410") - Default: none
 
     apply_cli_args_to_env();
 
@@ -183,7 +183,7 @@ fn apply_cli_args_to_env() {
                 Arg::new("int2dds_initial_peers")
                     .long("int2dds-initial-peers")
                     .value_name("PEERS")
-                    .help("Initial peers for TCP/Hybrid discovery (comma-separated, e.g., \"192.168.1.10:7412,192.168.1.11:7412\")")
+                    .help("Initial peers for SPDP unicast discovery (comma-separated, e.g., \"192.168.1.10:7410,192.168.1.11:7410\")")
                     .num_args(1)
                     .value_hint(ValueHint::Other),
             )
@@ -464,10 +464,11 @@ pub fn set_discovery_mode(mode: DiscoveryMode) {
     unsafe { std::env::set_var("INT2DDS_DISCOVERY_MODE", mode.to_string()) };
 }
 
-/// Get initial peers from environment variable for TCP-only discovery
+/// Get initial peers from environment variable for SPDP unicast discovery.
+/// When set, SPDP messages are sent via unicast to these peers instead of multicast.
 ///
 /// Reads INT2DDS_INITIAL_PEERS environment variable.
-/// Format: "ip:port,ip:port,..." (comma-separated socket addresses)
+/// Format: "ip:port,ip:port,..." (comma-separated socket addresses, port must be metatraffic unicast port)
 ///
 /// # Examples
 ///

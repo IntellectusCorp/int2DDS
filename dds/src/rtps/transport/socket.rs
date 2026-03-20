@@ -41,7 +41,13 @@ pub(crate) struct Socket {
 
     domain_id: DomainId,
     participant_id: ParticipantId,
-    working_ips: Vec<String>,
+    working_ips: WorkingIps,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct WorkingIps {
+    pub ips: Vec<String>,
+    pub from_feature: bool,
 }
 
 pub const MAX_EVENTS: usize = 512;
@@ -50,7 +56,7 @@ impl Socket {
     pub(crate) fn new(domain_id: DomainId) -> Self {
         let working_ip = Self::get_new_working_ips().unwrap_or_else(|e| {
             log::error!("[socket] Failed to determine working IP: {}. Using fallback 127.0.0.1", e);
-            vec!["127.0.0.1".to_string()]
+            WorkingIps { ips: vec!["127.0.0.1".to_string()], from_feature: false }
         });
         Self {
             //sender
@@ -264,7 +270,7 @@ impl Socket {
     fn create_discovery_multicast_listener(&mut self, domain_id: u32) {
         let udp_listener: Option<UdpListener> = UdpListener::new_multicast(
             PortManager::get_discovery_traffic_multicast_port(domain_id),
-            &self.working_ips,
+            &self.working_ips.ips,
         )
         .ok();
         self.discovery_traffic_multicast_listener = udp_listener;
@@ -295,7 +301,7 @@ impl Socket {
     fn create_user_traffic_multicast_listener(&mut self, domain_id: u32) {
         let udp_listener: Option<UdpListener> = UdpListener::new_multicast(
             PortManager::get_user_traffic_multicast_port(domain_id),
-            &self.working_ips,
+            &self.working_ips.ips,
         )
         .ok();
         self.user_traffic_multicast_listener = udp_listener;
@@ -482,8 +488,9 @@ impl Socket {
         log::info!("[socket] all listeners and senders closed");
     }
 
-    fn get_new_working_ips() -> std::io::Result<Vec<String>> {
+    fn get_new_working_ips() -> std::io::Result<WorkingIps> {
         let mut ips: Vec<String> = Vec::new();
+        let mut from_feature = false;
 
         // Check if user specified which network to use via env variable
         let is_network_specified = get_network_interface().is_some() || get_network_ip().is_some();
@@ -492,6 +499,7 @@ impl Socket {
             // int2DDS-feature enabled
             if is_network_specified {
                 ips.push(ip);
+                from_feature = true;
             } else {
                 log::warn!(
                     "int2DDS-feature is enabled but no network interface specified. \
@@ -516,23 +524,34 @@ impl Socket {
         }
 
         let use_loopback = crate::common::env::get_use_loopback_interface();
-        let should_add_loopback = !ips.contains(&"127.0.0.1".to_string()) && use_loopback;
+        let should_add_loopback =
+            !from_feature && !ips.contains(&"127.0.0.1".to_string()) && use_loopback;
 
         // If no NIC available or loopback is set to use, add localhost IP to the list
+        // also skipped when from_feature — feature-specified NIC takes full control
         if ips.is_empty() || should_add_loopback {
             ips.push("127.0.0.1".to_string());
         }
 
-        Ok(ips)
+        Ok(WorkingIps { ips, from_feature })
     }
 
     pub(crate) fn working_ips(&self) -> Vec<String> {
-        self.working_ips.clone()
+        self.working_ips.ips.clone()
     }
 
-    // Sender bind address: loopback-only -> 127.0.0.1, otherwise -> 0.0.0.0
+    pub(crate) fn is_working_ips_from_feature(&self) -> bool {
+        self.working_ips.from_feature
+    }
+
     fn get_sender_bind_addr(&self) -> String {
-        let only_loopback = self.working_ips.len() == 1 && self.working_ips[0] == "127.0.0.1";
+        // From int2DDS-feature: bind to the feature-specified IP directly
+        if self.working_ips.from_feature {
+            return self.working_ips.ips[0].clone();
+        }
+        // This happens when no physical NIC exists
+        let only_loopback =
+            self.working_ips.ips.len() == 1 && self.working_ips.ips[0] == "127.0.0.1";
         if only_loopback {
             // No physical NIC available, 0.0.0.0 has no interface to route through
             "127.0.0.1".to_string()
@@ -547,6 +566,11 @@ impl Socket {
     // 0.0.0.0 relies on default route, which doesn't exist in gateway-less environments,
     // and multicast addresses (e.g. 239.x) don't match any subnet route.
     fn get_sender_multicast_if_addr(&self) -> String {
+        // From int2DDS-feature: use the feature-specified IP directly
+        if self.working_ips.from_feature {
+            return self.working_ips.ips[0].clone();
+        }
+
         // Check if OS can resolve a default route (gateway exists)
         let has_default_route = std::net::UdpSocket::bind("0.0.0.0:0")
             .and_then(|s| s.connect("8.8.8.8:80").map(|_| s))
@@ -560,6 +584,7 @@ impl Socket {
         // No default route (e.g. direct Ethernet without gateway):
         // pick the first non-loopback IP from working_ips
         self.working_ips
+            .ips
             .iter()
             .find(|ip| ip.as_str() != "127.0.0.1")
             .cloned()
