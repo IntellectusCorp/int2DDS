@@ -848,9 +848,9 @@ def run_all_tests():
             ("resource_limits", DataWriterQos(resource_limits=ResourceLimits(max_samples=100, max_instances=10, max_samples_per_instance=10))),
             ("lifespan", DataWriterQos(lifespan=Lifespan(duration=10.0))),
             ("destination_order", DataWriterQos(destination_order=DestinationOrder("BY_RECEPTION"))),
-            # ("latency_budget", DataWriterQos(latency_budget=LatencyBudget(duration=0.01))),  # int2DDS 코어 미지원
-            # ("transport_priority", DataWriterQos(transport_priority=TransportPriority(value=1))),  # int2DDS 코어 미지원
-            # ("user_data", DataWriterQos(user_data=UserData(data=b"test"))),  # int2DDS 코어 미지원
+            # ("latency_budget", DataWriterQos(latency_budget=LatencyBudget(duration=0.01))),  # not supported int2DDS Core
+            # ("transport_priority", DataWriterQos(transport_priority=TransportPriority(value=1))),  # not supported int2DDS Core
+            # ("user_data", DataWriterQos(user_data=UserData(data=b"test"))), # not supported int2DDS Core
             ("writer_data_lifecycle", DataWriterQos(writer_data_lifecycle=WriterDataLifecycle(autodispose_unregistered_instances=True))),
             ("data_representation", DataWriterQos(data_representation=DataRepresentation("XCDR2"))),
             ("deadline", DataWriterQos(deadline=Deadline(period=5.0))),
@@ -879,9 +879,9 @@ def run_all_tests():
             ("ownership", DataReaderQos(ownership=Ownership("SHARED"))),
             ("resource_limits", DataReaderQos(resource_limits=ResourceLimits(max_samples=50))),
             ("destination_order", DataReaderQos(destination_order=DestinationOrder("BY_RECEPTION"))),
-            # ("time_based_filter", DataReaderQos(time_based_filter=TimeBasedFilter(minimum_separation=0.1))),  # int2DDS 코어 미지원
-            # ("latency_budget", DataReaderQos(latency_budget=LatencyBudget(duration=0.005))),  # int2DDS 코어 미지원
-            # ("user_data", DataReaderQos(user_data=UserData(data=b"test"))),  # int2DDS 코어 미지원
+            # ("time_based_filter", DataReaderQos(time_based_filter=TimeBasedFilter(minimum_separation=0.1))), # not supported int2DDS Core
+            # ("latency_budget", DataReaderQos(latency_budget=LatencyBudget(duration=0.005))),  # not supported int2DDS Core
+            # ("user_data", DataReaderQos(user_data=UserData(data=b"test"))),  # not supported int2DDS Core
             ("reader_data_lifecycle", DataReaderQos(reader_data_lifecycle=ReaderDataLifecycle(autopurge_nowriter_samples_delay=5.0, autopurge_disposed_samples_delay=5.0))),
             ("data_representation", DataReaderQos(data_representation=DataRepresentation("XCDR2"))),
             ("deadline", DataReaderQos(deadline=Deadline(period=5.0))),
