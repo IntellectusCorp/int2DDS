@@ -120,6 +120,8 @@ mod tests {
             service_name: None,
             request_topic_override: Some("RobotRequestTopic".into()),
             reply_topic_override: Some("RobotReplyTopic".into()),
+            request_type_override: None,
+            reply_type_override: None,
         };
         assert_eq!(config.request_topic(), "RobotRequestTopic");
         assert_eq!(config.reply_topic(), "RobotReplyTopic");
