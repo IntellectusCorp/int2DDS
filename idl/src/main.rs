@@ -9,8 +9,10 @@ struct Args {
     input_file: String,
     rust_output: Option<String>,
     c_output: Option<String>,
+    python_output: Option<String>,
     output_dir: Option<String>,
     crate_path: String,
+    python_module: String,
     default_string_bound: u32,
     string_pointer: bool,
 }
@@ -21,8 +23,10 @@ fn parse_args() -> Args {
     let mut input_file = None;
     let mut rust_output = None;
     let mut c_output = None;
+    let mut python_output = None;
     let mut output_dir = None;
     let mut crate_path = "int2dds".to_string();
+    let mut python_module = "int2dds".to_string();
     let mut default_string_bound = 256u32;
     let mut string_pointer = false;
 
@@ -37,6 +41,10 @@ fn parse_args() -> Args {
                 i += 1;
                 c_output = Some(args.get(i).cloned().unwrap_or_default());
             }
+            "-p" | "--python" => {
+                i += 1;
+                python_output = Some(args.get(i).cloned().unwrap_or_default());
+            }
             "-o" | "--output-dir" => {
                 i += 1;
                 output_dir = Some(args.get(i).cloned().unwrap_or_default());
@@ -44,6 +52,10 @@ fn parse_args() -> Args {
             "--crate-path" => {
                 i += 1;
                 crate_path = args.get(i).cloned().unwrap_or_default();
+            }
+            "--python-module" => {
+                i += 1;
+                python_module = args.get(i).cloned().unwrap_or_default();
             }
             "--string-bound" => {
                 i += 1;
@@ -87,8 +99,10 @@ fn parse_args() -> Args {
         input_file,
         rust_output,
         c_output,
+        python_output,
         output_dir,
         crate_path,
+        python_module,
         default_string_bound,
         string_pointer,
     }
@@ -98,13 +112,15 @@ fn print_usage() {
     eprintln!(
         "Usage: int2dds-idl [OPTIONS] <INPUT.idl>
 
-Generates Rust and C code from OMG IDL files.
+Generates Rust, C, and Python code from OMG IDL files.
 
 OPTIONS:
     -r, --rust <PATH>       Generate Rust output to PATH
     -c, --c-header <PATH>   Generate C header output to PATH
+    -p, --python <PATH>     Generate Python output to PATH
     -o, --output-dir <DIR>  Output directory (auto-names files)
     --crate-path <PATH>     Rust crate path (default: int2dds)
+    --python-module <PATH>  Python module path (default: int2dds)
     --string-bound <N>      Default unbounded string size in C (default: 256)
     --string-pointer        Use char* pointers for strings (OMG standard)
     -h, --help              Print help
@@ -160,16 +176,23 @@ fn main() {
             .as_ref()
             .map(|dir| format!("{}/{}.h", dir, base_name))
     });
+    let python_path = args.python_output.or_else(|| {
+        args.output_dir
+            .as_ref()
+            .map(|dir| format!("{}/{}.py", dir, base_name))
+    });
 
-    // If neither -r, -c, nor -o specified, default to generating both
-    let (rust_path, c_path) = if rust_path.is_none() && c_path.is_none() {
-        (
-            Some(format!("{}.rs", base_name)),
-            Some(format!("{}.h", base_name)),
-        )
-    } else {
-        (rust_path, c_path)
-    };
+    // If neither -r, -c, -p, nor -o specified, default to generating Rust and C
+    let (rust_path, c_path, python_path) =
+        if rust_path.is_none() && c_path.is_none() && python_path.is_none() {
+            (
+                Some(format!("{}.rs", base_name)),
+                Some(format!("{}.h", base_name)),
+                None, // Don't generate Python by default for backward compatibility
+            )
+        } else {
+            (rust_path, c_path, python_path)
+        };
 
     // Generate Rust
     if let Some(path) = &rust_path {
@@ -195,6 +218,19 @@ fn main() {
             },
         };
         let code = codegen::c::generate(&model, idl_filename, &c_opts);
+        if let Err(e) = write_file(path, &code) {
+            eprintln!("error: cannot write '{}': {}", path, e);
+            process::exit(1);
+        }
+        eprintln!("generated: {}", path);
+    }
+
+    // Generate Python
+    if let Some(path) = &python_path {
+        let python_opts = codegen::python::PythonOptions {
+            int2dds_module: args.python_module.clone(),
+        };
+        let code = codegen::python::generate(&model, idl_filename, &python_opts);
         if let Err(e) = write_file(path, &code) {
             eprintln!("error: cannot write '{}': {}", path, e);
             process::exit(1);
