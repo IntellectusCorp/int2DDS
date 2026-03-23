@@ -2296,7 +2296,7 @@ mod tests {
 
         // (7.7.1) UnknownOp → Unsupported
         assert!(code.contains(
-            "Foo_Call::UnknownOp(_) => (Foo_Return::UnknownOp(UnknownOperation), RemoteExceptionCode::Unsupported),"
+            "Foo_Call::UnknownOp(_) => (Foo_Return::UnknownOp(UnknownOperation {}), RemoteExceptionCode::Unsupported),"
         ));
     }
 
