@@ -25,10 +25,6 @@ pub fn generate(model: &IdlModel, opts: &RpcOptions) -> String {
         return gen.out;
     }
 
-    gen.line("#![allow(non_camel_case_types)]");
-    gen.line("");
-    gen.line(&format!("use {}::prelude::*;", opts.crate_path));
-    gen.line(&format!("use {}_derive::DdsType;", opts.crate_path));
     gen.line(&format!(
         "use {}_rpc::types::{{UnusedMember, UnknownOperation, UnknownException, RequestHeader, ReplyHeader, RemoteExceptionCode}};",
         opts.crate_path
@@ -66,6 +62,10 @@ pub fn generate(model: &IdlModel, opts: &RpcOptions) -> String {
         opts.crate_path
     ));
     gen.line("use std::time::Duration;");
+    gen.line(&format!(
+        "use {}::serialize::cdr::serializer::primitive::PrimitiveSerialize;",
+        opts.crate_path
+    ));
     gen.line("");
 
     for exc in &model.exceptions {
@@ -99,10 +99,8 @@ impl<'a> RpcGen<'a> {
     /// Emit exception as a `#[derive(DdsType, Clone)]` struct.
     fn emit_exception(&mut self, exc: &ResolvedException) {
         let rust_name = naming::to_pascal_case(&exc.name);
-        self.line("#[derive(DdsType, Clone, Debug)]");
-        if self.opts.crate_path != "int2dds" {
-            self.line(&format!("#[dds_type(crate_path = \"{}\")]", self.opts.crate_path));
-        }
+        self.line("#[derive(DdsType, Debug, Clone)]");
+        self.line(&format!("#[dds_type(crate_path = \"{}\", no_additional_derives)]", self.opts.crate_path));
         self.line(&format!("pub struct {} {{", rust_name));
         self.indent += 1;
         for m in &exc.members {
@@ -121,6 +119,22 @@ impl<'a> RpcGen<'a> {
         for attr in &iface.attributes {
             Self::validate_attribute_names(attr, &iface.operations);
             all_ops.extend(Self::expand_attribute(attr));
+        }
+
+        // (rule 4) Emit unique exception hash constants for the entire interface
+        let mut emitted_exc_hashes = std::collections::HashSet::new();
+        for op in &all_ops {
+            for exc_name in &op.raises {
+                if emitted_exc_hashes.insert(exc_name.clone()) {
+                    let simple = exc_name.rsplit("::").next().unwrap_or(exc_name);
+                    let hash_const_name = format!("{}_EX_HASH", naming::to_screaming_snake(simple));
+                    let hash_value = rpc_hash(exc_name);
+                    self.line(&format!("pub const {}: i32 = {};", hash_const_name, hash_value));
+                }
+            }
+        }
+        if !emitted_exc_hashes.is_empty() {
+            self.line("");
         }
 
         // Per-operation types: In, Out, Result
@@ -226,7 +240,8 @@ impl<'a> RpcGen<'a> {
             .filter(|p| matches!(p.direction, ResolvedParamDirection::In | ResolvedParamDirection::Inout))
             .collect();
 
-        self.line("#[derive(DdsType)]");
+        self.line("#[derive(DdsType, Debug, Clone)]");
+        self.line(&format!("#[dds_type(crate_path = \"{}\", no_additional_derives)]", self.opts.crate_path));
         self.line(&format!("pub struct {} {{", struct_name));
         self.indent += 1;
 
@@ -256,7 +271,8 @@ impl<'a> RpcGen<'a> {
         let has_return = op.return_type.is_some();
         let has_out_params = !out_params.is_empty();
 
-        self.line("#[derive(DdsType)]");
+        self.line("#[derive(DdsType, Debug, Clone)]");
+        self.line(&format!("#[dds_type(crate_path = \"{}\", no_additional_derives)]", self.opts.crate_path));
         self.line(&format!("pub struct {} {{", struct_name));
         self.indent += 1;
 
@@ -300,21 +316,8 @@ impl<'a> RpcGen<'a> {
         let union_name = format!("{}_{}_Result", iface_name, op.name);
         let out_type = format!("{}_{}_Out", iface_name, op.name);
 
-        // (rule 4) exception hash constants
-        for exc_name in &op.raises {
-            let simple = exc_name.rsplit("::").next().unwrap_or(exc_name);
-            let hash_const_name = format!("{}_EX_HASH", naming::to_screaming_snake(simple));
-            let hash_value = rpc_hash(exc_name);
-            self.line(&format!(
-                "pub const {}: i32 = {};",
-                hash_const_name, hash_value
-            ));
-        }
-        if !op.raises.is_empty() {
-            self.line("");
-        }
-
-        self.line("#[derive(DdsType)]");
+        self.line("#[derive(DdsType, Debug, Clone)]");
+        self.line(&format!("#[dds_type(crate_path = \"{}\", no_additional_derives)]", self.opts.crate_path));
         self.line("#[repr(i32)]");
         self.line(&format!("pub enum {} {{", union_name));
         self.indent += 1;
@@ -354,7 +357,8 @@ impl<'a> RpcGen<'a> {
     fn emit_call_union(&mut self, iface_name: &str, ops: &[ResolvedOperation]) {
         let union_name = format!("{}_Call", iface_name);
 
-        self.line("#[derive(DdsType)]");
+        self.line("#[derive(DdsType, Debug, Clone)]");
+        self.line(&format!("#[dds_type(crate_path = \"{}\", no_additional_derives)]", self.opts.crate_path));
         self.line("#[repr(i32)]");
         self.line(&format!("pub enum {} {{", union_name));
         self.indent += 1;
@@ -386,7 +390,8 @@ impl<'a> RpcGen<'a> {
     fn emit_return_union(&mut self, iface_name: &str, ops: &[ResolvedOperation]) {
         let union_name = format!("{}_Return", iface_name);
 
-        self.line("#[derive(DdsType)]");
+        self.line("#[derive(DdsType, Debug, Clone)]");
+        self.line(&format!("#[dds_type(crate_path = \"{}\", no_additional_derives)]", self.opts.crate_path));
         self.line("#[repr(i32)]");
         self.line(&format!("pub enum {} {{", union_name));
         self.indent += 1;
@@ -419,7 +424,8 @@ impl<'a> RpcGen<'a> {
         let struct_name = format!("{}_Request", iface_name);
         let call_type = format!("{}_Call", iface_name);
 
-        self.line("#[derive(DdsType)]");
+        self.line("#[derive(DdsType, Debug, Clone)]");
+        self.line(&format!("#[dds_type(crate_path = \"{}\", no_additional_derives)]", self.opts.crate_path));
         self.line(&format!("pub struct {} {{", struct_name));
         self.indent += 1;
         self.line("pub header: RequestHeader,");
@@ -433,7 +439,8 @@ impl<'a> RpcGen<'a> {
         let struct_name = format!("{}_Reply", iface_name);
         let return_type = format!("{}_Return", iface_name);
 
-        self.line("#[derive(DdsType)]");
+        self.line("#[derive(DdsType, Debug, Clone)]");
+        self.line(&format!("#[dds_type(crate_path = \"{}\", no_additional_derives)]", self.opts.crate_path));
         self.line(&format!("pub struct {} {{", struct_name));
         self.indent += 1;
         self.line("pub header: ReplyHeader,");
@@ -589,7 +596,7 @@ impl<'a> RpcGen<'a> {
             let out_fields = Self::build_out_fields(op, &out_params);
 
             let ok_expr = if out_fields.is_empty() {
-                format!("{}::{}({}::Result({} {{ dummy: UnusedMember }}))",
+                format!("{}::{}({}::Result({} {{ dummy: UnusedMember {{}} }}))",
                     return_type, variant, result_type, out_type)
             } else {
                 format!("{}::{}({}::Result({} {{ {} }}))",
@@ -656,7 +663,7 @@ impl<'a> RpcGen<'a> {
 
         // (7.7.1) UnknownOp → Unsupported
         self.line(&format!(
-            "{}::UnknownOp(_) => ({}::UnknownOp(UnknownOperation), RemoteExceptionCode::Unsupported),",
+            "{}::UnknownOp(_) => ({}::UnknownOp(UnknownOperation {{}}), RemoteExceptionCode::Unsupported),",
             call_type, return_type));
 
         self.indent -= 1;
@@ -754,7 +761,7 @@ impl<'a> RpcGen<'a> {
 
         // Build In struct
         if in_params.is_empty() {
-            self.line(&format!("let call = {}::{}({} {{ dummy: UnusedMember }});",
+            self.line(&format!("let call = {}::{}({} {{ dummy: UnusedMember {{}} }});",
                 call_type, variant, in_type));
         } else {
             let fields: Vec<String> = in_params.iter()
@@ -765,8 +772,8 @@ impl<'a> RpcGen<'a> {
         }
 
         // Send and receive
-        self.line("let _id = self.client.send_request(&call)?;");
-        self.line("let reply = self.client.receive_reply(timeout)?;");
+        self.line("let _id = self.client.send_request(&call).map_err(DdsRpcError::from_untyped)?;");
+        self.line("let reply = self.client.receive_reply(timeout).map_err(DdsRpcError::from_untyped)?;");
         self.line("let data = reply.data().map_err(|e| DdsRpcError::Dds(e.into()))?;");
         self.line("");
 
@@ -942,8 +949,8 @@ impl<'a> RpcGen<'a> {
         // Helper: emit the reply-unpacking logic (shared by get and get_timeout)
         // We generate two methods with different sample acquisition.
         for (method_sig, get_call) in [
-            (format!("pub fn get(self) -> {}", ret_sig), "self.inner.get()?"),
-            (format!("pub fn get_timeout(self, timeout: Duration) -> {}", ret_sig), "self.inner.get_timeout(timeout)?"),
+            (format!("pub fn get(self) -> {}", ret_sig), "self.inner.get().map_err(DdsRpcError::from_untyped)?"),
+            (format!("pub fn get_timeout(self, timeout: Duration) -> {}", ret_sig), "self.inner.get_timeout(timeout).map_err(DdsRpcError::from_untyped)?"),
         ] {
             self.line(&format!("{} {{", method_sig));
             self.indent += 1;
@@ -1067,7 +1074,7 @@ impl<'a> RpcGen<'a> {
 
             // Build call value
             if in_params.is_empty() {
-                self.line(&format!("let call = {}::{}({} {{ dummy: UnusedMember }});",
+                self.line(&format!("let call = {}::{}({} {{ dummy: UnusedMember {{}} }});",
                     call_type, variant, in_type));
             } else {
                 let fields: Vec<String> = in_params.iter()
@@ -1084,7 +1091,7 @@ impl<'a> RpcGen<'a> {
                     call_type, variant, in_type, fields.join(", ")));
             }
 
-            self.line("let future = self.client.send_request_async(&call)?;");
+            self.line("let future = self.client.send_request_async(&call).map_err(DdsRpcError::from_untyped)?;");
             self.line(&format!("Ok({} {{ inner: future }})", future_type));
 
             self.indent -= 1;
