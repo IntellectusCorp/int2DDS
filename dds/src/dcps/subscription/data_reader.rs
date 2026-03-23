@@ -1559,6 +1559,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                 info.instance_state = InstanceStateKind::ALIVE_INSTANCE_STATE;
 
                 if info.key.is_empty() && instance_handle.is_nil() {
+                    // Non-keyed Type: Save NIL handle
                     info.key = Arc::from(instance_handle.value().as_slice());
                 } else if info.key.is_empty() && cache_change.is_some() {
                     log::debug!("Extracting and serializing key from data");
@@ -1570,15 +1571,26 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                             ))?
                             .data_value(),
                         None,
-                    )?;
-                    #[allow(clippy::disallowed_names)]
-                    let foo = data
-                        .downcast::<Foo>()
-                        .map(|boxed| *boxed)
-                        .map_err(|_| DdsError::Error("Type downcast failed".to_string()))?;
-                    log::trace!("Deserialized data: {:?}", &foo);
-                    let ser_key = self.type_support.serialize_key(&foo as &dyn Any)?;
-                    info.key = ser_key;
+                    );
+                    match data {
+                        Ok(deserialized) => {
+                            // Native Type : deserialize success → serialize_key
+                            #[allow(clippy::disallowed_names)]
+                            let foo = deserialized
+                                .downcast::<Foo>()
+                                .map(|boxed| *boxed)
+                                .map_err(|_| DdsError::Error("Type downcast failed".to_string()))?;
+                            log::trace!("Deserialized data: {:?}", &foo);
+                            let ser_key = self.type_support.serialize_key(&foo as &dyn Any)?;
+                            info.key = ser_key;
+                        }
+                        Err(_) if !instance_handle.is_nil() => {
+                            // FFI Type: deserialize not supported → Use already calculated handle hash
+                            log::debug!("Using pre-computed instance handle as key (FFI path)");
+                            info.key = Arc::from(instance_handle.value().as_slice());
+                        }
+                        Err(e) => return Err(e), // Unexpected errors
+                    }
                 }
 
                 let monitor_guard =
