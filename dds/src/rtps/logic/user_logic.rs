@@ -1889,8 +1889,12 @@ impl UnicastMessageProcessor for UserLogic {
             for i in 0..data_frag.fragments_in_submessage {
                 let fragment_num = data_frag.fragment_starting_num + i as u32;
                 let frag_data_start = i as usize * frag_size;
-                let frag_data_end = std::cmp::min(frag_data_start + frag_size, serialized_data.len());
-                buffer.copy_fragment_data(fragment_num, &serialized_data[frag_data_start..frag_data_end]);
+                let frag_data_end =
+                    std::cmp::min(frag_data_start + frag_size, serialized_data.len());
+                buffer.copy_fragment_data(
+                    fragment_num,
+                    &serialized_data[frag_data_start..frag_data_end],
+                );
             }
         } // buffer RefMut is automatically dropped here
 
