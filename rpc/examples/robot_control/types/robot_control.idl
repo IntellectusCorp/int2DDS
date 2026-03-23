@@ -1,0 +1,24 @@
+module robot {
+    enum Command { START_COMMAND, STOP_COMMAND };
+
+    struct Status {
+        string msg;
+        long code;
+    };
+
+    exception TooFast {
+        float max_speed;
+    };
+
+    exception InvalidCommand {
+        string reason;
+    };
+
+    interface RobotControl {
+        void command(in Command com);
+        float setSpeed(in float speed) raises (TooFast);
+        float getSpeed();
+        void getStatus(out Status status);
+        void navigate(in float x, in float y) raises (TooFast, InvalidCommand);
+    };
+};
