@@ -68,6 +68,10 @@ pub fn generate(model: &IdlModel, opts: &RpcOptions) -> String {
     gen.line("use std::time::Duration;");
     gen.line("");
 
+    for exc in &model.exceptions {
+        gen.emit_exception(exc);
+    }
+
     for iface in &model.interfaces {
         gen.emit_interface(iface);
     }
@@ -92,6 +96,25 @@ struct RpcGen<'a> {
 }
 
 impl<'a> RpcGen<'a> {
+    /// Emit exception as a `#[derive(DdsType, Clone)]` struct.
+    fn emit_exception(&mut self, exc: &ResolvedException) {
+        let rust_name = naming::to_pascal_case(&exc.name);
+        self.line("#[derive(DdsType, Clone, Debug)]");
+        if self.opts.crate_path != "int2dds" {
+            self.line(&format!("#[dds_type(crate_path = \"{}\")]", self.opts.crate_path));
+        }
+        self.line(&format!("pub struct {} {{", rust_name));
+        self.indent += 1;
+        for m in &exc.members {
+            let field_name = naming::to_snake_case(&m.name);
+            let field_type = self.type_to_rust(&m.resolved_type);
+            self.line(&format!("pub {}: {},", field_name, field_type));
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.line("");
+    }
+
     fn emit_interface(&mut self, iface: &ResolvedInterface) {
         // (7.5.1.1.3) Expand attributes to implied operations
         let mut all_ops = iface.operations.clone();
