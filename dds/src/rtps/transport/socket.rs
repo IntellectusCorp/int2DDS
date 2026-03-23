@@ -11,7 +11,9 @@ use crate::rtps::transport::tcp::tcp_listener::TcpListenerRole;
 use crate::rtps::transport::tcp::tcp_sender::TcpSender;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 use crate::rtps::transport::udp::udp_sender::UdpSender;
-use crate::rtps::transport::{get_transport_type, Transport, TransportSender, TransportType};
+use crate::rtps::transport::{
+    get_transport_type, Listener, Transport, TransportSender, TransportType,
+};
 
 #[derive(Debug)]
 pub(crate) struct Socket {
@@ -34,6 +36,7 @@ pub(crate) struct Socket {
     user_traffic_unicast_listener: Option<UdpListener>,
 
     //TCP listeners (used when transport = TCP or Hybrid)
+    control_tcp_listener: Option<TcpListener>,
     discovery_tcp_listener: Option<TcpListener>,
     user_traffic_tcp_listener: Option<TcpListener>,
 
@@ -79,6 +82,7 @@ impl Socket {
             user_traffic_unicast_listener: None,
 
             //TCP listeners
+            control_tcp_listener: None,
             discovery_tcp_listener: None,
             user_traffic_tcp_listener: None,
 
@@ -335,6 +339,22 @@ impl Socket {
 
     //TCP listeners
     fn create_tcp_listeners(&mut self) {
+        // Create control listener with ephemeral port (port=0)
+        // OS assigns a free port automatically
+        match TcpListener::new(0, TcpListenerRole::Control) {
+            Ok(listener) => {
+                log::info!(
+                    "[socket] Control TCP listener created on port {} (ephemeral)",
+                    listener.port()
+                );
+                self.control_tcp_listener = Some(listener);
+            }
+            Err(e) => {
+                log::error!("[socket] Failed to create control TCP listener: {}", e);
+                panic!("Control TCP listener is not created");
+            }
+        }
+
         loop {
             // Try to create discovery listener
             let discovery_port = PortManager::get_discovery_traffic_unicast_port(
@@ -384,6 +404,19 @@ impl Socket {
                 }
             }
         }
+    }
+
+    pub(crate) fn control_tcp_listener(&mut self) -> Option<TcpListener> {
+        self.control_tcp_listener.take()
+    }
+
+    /// Get the control TCP listener port
+    ///
+    /// Returns the ephemeral port assigned by OS.
+    /// Used to advertise the control port in HandshakeData
+    /// before the listener is taken by the listening task.
+    pub(crate) fn control_tcp_port(&self) -> Option<u16> {
+        self.control_tcp_listener.as_ref().map(|l| l.port())
     }
 
     pub(crate) fn discovery_tcp_listener(&mut self) -> Option<TcpListener> {
@@ -474,6 +507,10 @@ impl Socket {
         }
 
         // Close TCP listeners
+        if let Some(mut listener) = self.control_tcp_listener.take() {
+            // 추가
+            listener.close();
+        }
         if let Some(mut listener) = self.discovery_tcp_listener.take() {
             listener.close();
         }
