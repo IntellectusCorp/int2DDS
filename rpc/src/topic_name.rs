@@ -35,21 +35,17 @@ impl TopicNameConfig {
     /// Synthesize the request type name (7.5.1.1.6)
     /// "${interfaceName}_Request"
     pub(crate) fn request_type(&self) -> Option<String> {
-        self.request_type_override.clone().or_else(|| {
-            self.interface_name
-                .as_ref()
-                .map(|iface| format!("{}_Request", fully_qualified_name(iface)))
-        })
+        self.request_type_override
+            .clone()
+            .or_else(|| self.interface_name.as_ref().map(|iface| format!("{}_Request", iface)))
     }
 
     /// Synthesize the reply type name (7.5.1.1.7)
     /// "${interfaceName}_Reply"
     pub(crate) fn reply_type(&self) -> Option<String> {
-        self.reply_type_override.clone().or_else(|| {
-            self.interface_name
-                .as_ref()
-                .map(|iface| format!("{}_Reply", fully_qualified_name(iface)))
-        })
+        self.reply_type_override
+            .clone()
+            .or_else(|| self.interface_name.as_ref().map(|iface| format!("{}_Reply", iface)))
     }
 
     fn synthesize(&self, suffix: &str) -> String {
