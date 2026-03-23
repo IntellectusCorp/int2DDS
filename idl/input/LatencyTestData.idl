@@ -1,6 +1,0 @@
-struct LatencyTestData {
-    unsigned long long seq_num;
-    unsigned long long send_timestamp;
-    unsigned long long echo_timestamp;
-    sequence<octet> data;
-};
