@@ -42,29 +42,31 @@
 
 #define INT2DDS_QOS_DEST_ORDER_BY_SOURCE 1
 
-#define INT2DDS_STATUS_DATA_ON_READERS (1 << 0)
+#define INT2DDS_STATUS_INCONSISTENT_TOPIC (1 << 0)
 
-#define INT2DDS_STATUS_DATA_AVAILABLE (1 << 1)
+#define INT2DDS_STATUS_OFFERED_DEADLINE_MISSED (1 << 1)
 
-#define INT2DDS_STATUS_SAMPLE_REJECTED (1 << 2)
+#define INT2DDS_STATUS_REQUESTED_DEADLINE_MISSED (1 << 2)
 
-#define INT2DDS_STATUS_LIVELINESS_CHANGED (1 << 3)
+#define INT2DDS_STATUS_OFFERED_INCOMPATIBLE_QOS (1 << 5)
 
-#define INT2DDS_STATUS_REQUESTED_DEADLINE_MISSED (1 << 4)
+#define INT2DDS_STATUS_REQUESTED_INCOMPATIBLE_QOS (1 << 6)
 
-#define INT2DDS_STATUS_REQUESTED_INCOMPATIBLE_QOS (1 << 5)
+#define INT2DDS_STATUS_SAMPLE_LOST (1 << 7)
 
-#define INT2DDS_STATUS_SAMPLE_LOST (1 << 6)
+#define INT2DDS_STATUS_SAMPLE_REJECTED (1 << 8)
 
-#define INT2DDS_STATUS_SUBSCRIPTION_MATCHED (1 << 7)
+#define INT2DDS_STATUS_DATA_ON_READERS (1 << 9)
 
-#define INT2DDS_STATUS_OFFERED_DEADLINE_MISSED (1 << 8)
+#define INT2DDS_STATUS_DATA_AVAILABLE (1 << 10)
 
-#define INT2DDS_STATUS_OFFERED_INCOMPATIBLE_QOS (1 << 9)
+#define INT2DDS_STATUS_LIVELINESS_LOST (1 << 11)
 
-#define INT2DDS_STATUS_LIVELINESS_LOST (1 << 10)
+#define INT2DDS_STATUS_LIVELINESS_CHANGED (1 << 12)
 
-#define INT2DDS_STATUS_PUBLICATION_MATCHED (1 << 11)
+#define INT2DDS_STATUS_PUBLICATION_MATCHED (1 << 13)
+
+#define INT2DDS_STATUS_SUBSCRIPTION_MATCHED (1 << 14)
 
 #define INT2DDS_SAMPLE_STATE_READ 1
 
@@ -231,7 +233,7 @@ typedef struct Int2DdsSampleSeq Int2DdsSampleSeq;
 
 /**
  * Opaque handle to a StatusCondition
- * StatusCondition is wrapped as a trait object to handle the generic QoS type.
+ * `inner` is used by WaitSet (trait object), `kind` provides concrete access.
  */
 typedef struct Int2DdsStatusCondition Int2DdsStatusCondition;
 
@@ -2166,6 +2168,31 @@ Int2DdsRet int2dds_create_topic(const struct Int2DdsParticipant *participant,
                                 struct Int2DdsTopic **topic_out);
 
 /**
+ * Create a Topic with key support
+ *
+ * Same as `int2dds_create_topic` but with an explicit `has_key` parameter.
+ * Use this when the data type has key fields for instance management
+ * (register_instance, unregister_instance, dispose, lookup_instance).
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `topic_name` must be a valid null-terminated C string
+ * - `dds_type_name` must be a valid null-terminated C string (DDS registration name)
+ * - `extensibility`: 0 = Final, 1 = Appendable, 2 = Mutable
+ * - `has_key`: whether the data type has key fields
+ * - `qos` can be null for default QoS
+ * - `topic_out` must be a valid pointer to a null pointer
+ * - The returned topic must be freed with `int2dds_delete_topic`
+ */
+Int2DdsRet int2dds_create_topic_keyed(const struct Int2DdsParticipant *participant,
+                                      const char *topic_name,
+                                      const char *dds_type_name,
+                                      int32_t extensibility,
+                                      bool has_key,
+                                      const struct Int2DdsTopicQos *qos,
+                                      struct Int2DdsTopic **topic_out);
+
+/**
  * Create a Topic with type information for DDS-XTypes discovery
  *
  * Creates a topic using a pre-built `Int2DdsTypeInfo` which provides
@@ -2503,194 +2530,6 @@ Int2DdsRet int2dds_waitset_detach_datawriter(const struct Int2DdsWaitSet *waitse
  * - All conditions should be detached first
  */
 Int2DdsRet int2dds_waitset_delete(struct Int2DdsWaitSet *waitset);
-
-/* ============================================================================
- * Discovery API
- * ============================================================================ */
-
-/* Opaque builtin topic data types */
-struct Int2DdsParticipantBuiltinTopicData;
-struct Int2DdsPublicationBuiltinTopicData;
-struct Int2DdsSubscriptionBuiltinTopicData;
-
-/* --- Handle list functions --- */
-
-/**
- * Get discovered participant instance handles.
- *
- * Writes up to `capacity` handles into `handles_out`.
- * `count_out` receives the total number of discovered participants
- * (may be larger than `capacity`).
- *
- * # Safety
- * - `participant` must be a valid participant
- * - `handles_out` may be NULL (to query count only); otherwise must point to
- *   an array of at least `capacity` elements of uint8_t[16]
- * - `count_out` must be a valid pointer
- */
-Int2DdsRet int2dds_participant_get_discovered_participants(
-    const struct Int2DdsParticipant *participant,
-    uint8_t (*handles_out)[16],
-    uintptr_t capacity,
-    uintptr_t *count_out);
-
-/**
- * Get matched subscription instance handles for a DataWriter.
- *
- * # Safety
- * - `writer` must be a valid datawriter
- * - `handles_out` may be NULL; otherwise must have `capacity` slots
- * - `count_out` must be a valid pointer
- */
-Int2DdsRet int2dds_datawriter_get_matched_subscriptions(
-    const struct Int2DdsDataWriter *writer,
-    uint8_t (*handles_out)[16],
-    uintptr_t capacity,
-    uintptr_t *count_out);
-
-/**
- * Get matched publication instance handles for a DataReader.
- *
- * # Safety
- * - `reader` must be a valid datareader
- * - `handles_out` may be NULL; otherwise must have `capacity` slots
- * - `count_out` must be a valid pointer
- */
-Int2DdsRet int2dds_datareader_get_matched_publications(
-    const struct Int2DdsDataReader *reader,
-    uint8_t (*handles_out)[16],
-    uintptr_t capacity,
-    uintptr_t *count_out);
-
-/* --- BuiltinTopicData retrieval --- */
-
-/**
- * Get discovered participant data for a given handle.
- * The returned pointer must be freed with
- * `int2dds_participant_builtin_topic_data_destroy`.
- *
- * # Safety
- * - `participant` must be a valid participant
- * - `handle` must point to a 16-byte instance handle
- * - `data_out` must be a valid pointer to a null pointer
- */
-Int2DdsRet int2dds_participant_get_discovered_participant_data(
-    const struct Int2DdsParticipant *participant,
-    const uint8_t (*handle)[16],
-    struct Int2DdsParticipantBuiltinTopicData **data_out);
-
-/**
- * Get matched subscription data for a given handle.
- * The returned pointer must be freed with
- * `int2dds_subscription_builtin_topic_data_destroy`.
- *
- * # Safety
- * - `writer` must be a valid datawriter
- * - `handle` must point to a 16-byte instance handle
- * - `data_out` must be a valid pointer to a null pointer
- */
-Int2DdsRet int2dds_datawriter_get_matched_subscription_data(
-    const struct Int2DdsDataWriter *writer,
-    const uint8_t (*handle)[16],
-    struct Int2DdsSubscriptionBuiltinTopicData **data_out);
-
-/**
- * Get matched publication data for a given handle.
- * The returned pointer must be freed with
- * `int2dds_publication_builtin_topic_data_destroy`.
- *
- * # Safety
- * - `reader` must be a valid datareader
- * - `handle` must point to a 16-byte instance handle
- * - `data_out` must be a valid pointer to a null pointer
- */
-Int2DdsRet int2dds_datareader_get_matched_publication_data(
-    const struct Int2DdsDataReader *reader,
-    const uint8_t (*handle)[16],
-    struct Int2DdsPublicationBuiltinTopicData **data_out);
-
-/* --- ParticipantBuiltinTopicData getters + destroy --- */
-
-/**
- * Get the key (12 bytes, big-endian [i32; 3]) from ParticipantBuiltinTopicData.
- */
-Int2DdsRet int2dds_participant_builtin_topic_data_get_key(
-    const struct Int2DdsParticipantBuiltinTopicData *data,
-    uint8_t (*key_out)[12]);
-
-/**
- * Get user_data bytes from ParticipantBuiltinTopicData.
- * `size_out` receives the actual byte count.
- */
-Int2DdsRet int2dds_participant_builtin_topic_data_get_user_data(
-    const struct Int2DdsParticipantBuiltinTopicData *data,
-    uint8_t *buf,
-    uintptr_t capacity,
-    uintptr_t *size_out);
-
-/**
- * Free a ParticipantBuiltinTopicData.
- */
-Int2DdsRet int2dds_participant_builtin_topic_data_destroy(
-    struct Int2DdsParticipantBuiltinTopicData *data);
-
-/* --- PublicationBuiltinTopicData getters + destroy --- */
-
-Int2DdsRet int2dds_publication_builtin_topic_data_get_key(
-    const struct Int2DdsPublicationBuiltinTopicData *data,
-    uint8_t (*key_out)[12]);
-
-Int2DdsRet int2dds_publication_builtin_topic_data_get_participant_key(
-    const struct Int2DdsPublicationBuiltinTopicData *data,
-    uint8_t (*key_out)[12]);
-
-/**
- * Get topic name as null-terminated UTF-8 string.
- * `size_out` receives the required size including null terminator.
- */
-Int2DdsRet int2dds_publication_builtin_topic_data_get_topic_name(
-    const struct Int2DdsPublicationBuiltinTopicData *data,
-    uint8_t *buf,
-    uintptr_t capacity,
-    uintptr_t *size_out);
-
-/**
- * Get type name as null-terminated UTF-8 string.
- * `size_out` receives the required size including null terminator.
- */
-Int2DdsRet int2dds_publication_builtin_topic_data_get_type_name(
-    const struct Int2DdsPublicationBuiltinTopicData *data,
-    uint8_t *buf,
-    uintptr_t capacity,
-    uintptr_t *size_out);
-
-Int2DdsRet int2dds_publication_builtin_topic_data_destroy(
-    struct Int2DdsPublicationBuiltinTopicData *data);
-
-/* --- SubscriptionBuiltinTopicData getters + destroy --- */
-
-Int2DdsRet int2dds_subscription_builtin_topic_data_get_key(
-    const struct Int2DdsSubscriptionBuiltinTopicData *data,
-    uint8_t (*key_out)[12]);
-
-Int2DdsRet int2dds_subscription_builtin_topic_data_get_participant_key(
-    const struct Int2DdsSubscriptionBuiltinTopicData *data,
-    uint8_t (*key_out)[12]);
-
-Int2DdsRet int2dds_subscription_builtin_topic_data_get_topic_name(
-    const struct Int2DdsSubscriptionBuiltinTopicData *data,
-    uint8_t *buf,
-    uintptr_t capacity,
-    uintptr_t *size_out);
-
-Int2DdsRet int2dds_subscription_builtin_topic_data_get_type_name(
-    const struct Int2DdsSubscriptionBuiltinTopicData *data,
-    uint8_t *buf,
-    uintptr_t capacity,
-    uintptr_t *size_out);
-
-Int2DdsRet int2dds_subscription_builtin_topic_data_destroy(
-    struct Int2DdsSubscriptionBuiltinTopicData *data);
 
 #ifdef __cplusplus
 }  // extern "C"
