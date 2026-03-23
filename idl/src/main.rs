@@ -15,6 +15,7 @@ struct Args {
     python_module: String,
     default_string_bound: u32,
     string_pointer: bool,
+    rpc_output: Option<String>,
 }
 
 fn parse_args() -> Args {
@@ -29,6 +30,7 @@ fn parse_args() -> Args {
     let mut python_module = "int2dds".to_string();
     let mut default_string_bound = 256u32;
     let mut string_pointer = false;
+    let mut rpc_output = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -66,6 +68,10 @@ fn parse_args() -> Args {
             }
             "--string-pointer" => {
                 string_pointer = true;
+            }
+            "--rpc" => {
+                i += 1;
+                rpc_output = Some(args.get(i).cloned().unwrap_or_default());
             }
             "-h" | "--help" => {
                 print_usage();
@@ -105,6 +111,7 @@ fn parse_args() -> Args {
         python_module,
         default_string_bound,
         string_pointer,
+        rpc_output,
     }
 }
 
@@ -123,6 +130,7 @@ OPTIONS:
     --python-module <PATH>  Python module path (default: int2dds)
     --string-bound <N>      Default unbounded string size in C (default: 256)
     --string-pointer        Use char* pointers for strings (OMG standard)
+    --rpc <PATH>            Generate RPC types (includes base types + RPC infrastructure)
     -h, --help              Print help
     -V, --version           Print version"
     );
@@ -181,17 +189,24 @@ fn main() {
             .as_ref()
             .map(|dir| format!("{}/{}.py", dir, base_name))
     });
+    let rpc_path = args.rpc_output.or_else(|| {
+        args.output_dir
+            .as_ref()
+            .map(|dir| format!("{}/{}_rpc.rs", dir, base_name))
+    });
 
-    // If neither -r, -c, -p, nor -o specified, default to generating Rust and C
-    let (rust_path, c_path, python_path) =
-        if rust_path.is_none() && c_path.is_none() && python_path.is_none() {
+    // If no output flags specified, default to generating Rust and C
+    let (rust_path, c_path, python_path, rpc_path) =
+        if rust_path.is_none() && c_path.is_none() && python_path.is_none() && rpc_path.is_none()
+        {
             (
                 Some(format!("{}.rs", base_name)),
                 Some(format!("{}.h", base_name)),
-                None, // Don't generate Python by default for backward compatibility
+                None,
+                None,
             )
         } else {
-            (rust_path, c_path, python_path)
+            (rust_path, c_path, python_path, rpc_path)
         };
 
     // Generate Rust
@@ -225,12 +240,30 @@ fn main() {
         eprintln!("generated: {}", path);
     }
 
-    // Generate Python
-    if let Some(path) = &python_path {
-        let python_opts = codegen::python::PythonOptions {
-            int2dds_module: args.python_module.clone(),
+    // // Generate Python
+    // if let Some(path) = &python_path {
+    //     let python_opts = codegen::python::PythonOptions {
+    //         int2dds_module: args.python_module.clone(),
+    //     };
+    //     let code = codegen::python::generate(&model, idl_filename, &python_opts);
+    //     if let Err(e) = write_file(path, &code) {
+    //         eprintln!("error: cannot write '{}': {}", path, e);
+    //         process::exit(1);
+    //     }
+    //     eprintln!("generated: {}", path);
+    // }
+
+    // Generate RPC (base types + RPC infrastructure)
+    if let Some(path) = &rpc_path {
+        let rust_opts = codegen::rust::RustOptions {
+            crate_path: args.crate_path.clone(),
         };
-        let code = codegen::python::generate(&model, idl_filename, &python_opts);
+        let rpc_opts = codegen::rpc::RpcOptions {
+            crate_path: args.crate_path.clone(),
+        };
+        let mut code = codegen::rpc::generate(&model, &rpc_opts);
+        code.push('\n');
+        code.push_str(&codegen::rust::generate(&model, idl_filename, &rust_opts));
         if let Err(e) = write_file(path, &code) {
             eprintln!("error: cannot write '{}': {}", path, e);
             process::exit(1);
