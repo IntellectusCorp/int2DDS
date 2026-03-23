@@ -175,7 +175,9 @@ impl Resolver {
         let mut next_value: i32 = 0;
 
         for v in &edef.variants {
-            let value = if let Some(explicit) = v.value {
+            // Support both `= N` inline syntax and `@value(N)` annotation
+            let explicit = v.value.or_else(|| self.extract_value(&v.annotations));
+            let value = if let Some(explicit) = explicit {
                 let val = explicit as i32;
                 next_value = val + 1;
                 val
@@ -506,6 +508,17 @@ impl Resolver {
         Ok(None)
     }
 
+    fn extract_value(&self, annotations: &[Annotation]) -> Option<i64> {
+        for ann in annotations {
+            if ann.name == "value" {
+                if let Some(AnnotationParam::Positional(ConstExpr::Int(v))) = ann.params.first() {
+                    return Some(*v);
+                }
+            }
+        }
+        None
+    }
+
     fn extract_position(&self, annotations: &[Annotation]) -> Result<Option<u32>, ResolveError> {
         for ann in annotations {
             if ann.name == "position" {
@@ -736,6 +749,28 @@ mod tests {
         assert_eq!(e.variants[0].value, 0);
         assert_eq!(e.variants[1].value, 5);
         assert_eq!(e.variants[2].value, 6);
+    }
+
+    #[test]
+    fn test_resolve_enum_value_annotation() {
+        let defs = parse_idl(
+            r#"
+            enum Priority {
+                LOW,
+                @value(5) MEDIUM,
+                @value(10) HIGH,
+                @value(100) CRITICAL
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        assert_eq!(model.enums.len(), 1);
+        let e = &model.enums[0];
+        assert_eq!(e.variants[0].value, 0);   // LOW (auto)
+        assert_eq!(e.variants[1].value, 5);   // @value(5)
+        assert_eq!(e.variants[2].value, 10);  // @value(10)
+        assert_eq!(e.variants[3].value, 100); // @value(100)
     }
 
     #[test]

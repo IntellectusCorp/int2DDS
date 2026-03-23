@@ -165,6 +165,12 @@ impl<'a> PyGen<'a> {
             }
             ResolvedType::Struct(name) => format!("\"{}\"", name),
             ResolvedType::Enum(name) => name.clone(),
+            ResolvedType::WChar => "str".to_string(),
+            ResolvedType::WString { .. } => "str".to_string(),
+            ResolvedType::Map { key, value, .. } => {
+                format!("dict[{}, {}]", self.type_to_python(key), self.type_to_python(value))
+            }
+            ResolvedType::Bitmask(name) => name.clone(),
         }
     }
 
@@ -193,6 +199,10 @@ impl<'a> PyGen<'a> {
                 }
                 format!("{}(0)", name)
             }
+            ResolvedType::WChar => "\"\"".to_string(),
+            ResolvedType::WString { .. } => "\"\"".to_string(),
+            ResolvedType::Map { .. } => "field(default_factory=dict)".to_string(),
+            ResolvedType::Bitmask(name) => format!("{}(0)", name),
         }
     }
 
@@ -276,6 +286,17 @@ impl<'a> PyGen<'a> {
                 self.emit_write_field(element, "_item");
                 self.indent -= 1;
             }
+            ResolvedType::WChar => self.line(&format!("w.write_wchar({})", accessor)),
+            ResolvedType::WString { .. } => self.line(&format!("w.write_wstring({})", accessor)),
+            ResolvedType::Map { key, value, .. } => {
+                self.line(&format!("w.write_seq_header(len({}))", accessor));
+                self.line(&format!("for _k, _v in {}.items():", accessor));
+                self.indent += 1;
+                self.emit_write_field(key, "_k");
+                self.emit_write_field(value, "_v");
+                self.indent -= 1;
+            }
+            ResolvedType::Bitmask(_) => self.line(&format!("w.write_u32(int({}))", accessor)),
         }
     }
 
@@ -405,6 +426,21 @@ impl<'a> PyGen<'a> {
                 self.emit_read_field(element, &item_name);
                 self.line(&format!("{}.append({})", name, item_name));
                 self.indent -= 1;
+            }
+            ResolvedType::WChar => self.line(&format!("{} = r.read_wchar()", name)),
+            ResolvedType::WString { .. } => self.line(&format!("{} = r.read_wstring()", name)),
+            ResolvedType::Map { key, value, .. } => {
+                self.line(&format!("_{}_count = r.read_seq_header()", name));
+                self.line(&format!("{} = {{}}", name));
+                self.line(&format!("for _ in range(_{}_count):", name));
+                self.indent += 1;
+                self.emit_read_field(key, "_k");
+                self.emit_read_field(value, "_v");
+                self.line(&format!("{}[_k] = _v", name));
+                self.indent -= 1;
+            }
+            ResolvedType::Bitmask(bitmask_name) => {
+                self.line(&format!("{} = {}(r.read_u32())", name, bitmask_name));
             }
         }
     }
