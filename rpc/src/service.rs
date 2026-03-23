@@ -30,6 +30,7 @@ pub enum ServiceStatus {
 pub struct ServiceParams {
     pub(crate) participant: DomainParticipant,
     pub(crate) service_name: Option<String>,
+    pub(crate) interface_name: Option<String>,
     pub(crate) instance_name: Option<String>,
     pub(crate) request_topic_name: Option<String>,
     pub(crate) reply_topic_name: Option<String>,
@@ -46,6 +47,7 @@ impl ServiceParams {
         Self {
             participant,
             service_name: None,
+            interface_name: None,
             instance_name: None,
             request_topic_name: None,
             reply_topic_name: None,
@@ -60,6 +62,11 @@ impl ServiceParams {
 
     pub fn service_name(mut self, name: impl Into<String>) -> Self {
         self.service_name = Some(name.into());
+        self
+    }
+
+    pub fn interface_name(mut self, name: impl Into<String>) -> Self {
+        self.interface_name = Some(name.into());
         self
     }
 
@@ -112,6 +119,7 @@ impl ServiceParams {
     pub fn into_replier_params(self) -> ReplierParams {
         let mut params = ReplierParams::new(self.participant);
         params.service_name = self.service_name;
+        params.interface_name = self.interface_name;
         params.instance_name = self.instance_name;
         params.request_topic_name = self.request_topic_name;
         params.reply_topic_name = self.reply_topic_name;

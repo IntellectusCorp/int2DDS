@@ -39,6 +39,18 @@ impl<E> From<RemoteExceptionCode> for DdsRpcError<E> {
     }
 }
 
+impl<E> DdsRpcError<E> {
+    /// Convert from `DdsRpcError<()>` to `DdsRpcError<E>`.
+    pub fn from_untyped(err: DdsRpcError) -> Self {
+        match err {
+            DdsRpcError::Remote(c) => DdsRpcError::Remote(c),
+            DdsRpcError::Dds(e) => DdsRpcError::Dds(e),
+            DdsRpcError::Timeout => DdsRpcError::Timeout,
+            DdsRpcError::UserException(()) => unreachable!(),
+        }
+    }
+}
+
 pub type DdsRpcResult<T, E = ()> = Result<T, DdsRpcError<E>>;
 
 #[cfg(test)]

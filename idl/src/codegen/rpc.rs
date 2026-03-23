@@ -58,6 +58,10 @@ pub fn generate(model: &IdlModel, opts: &RpcOptions) -> String {
         opts.crate_path
     ));
     gen.line(&format!(
+        "use {}_rpc::server::Dispatchable;",
+        opts.crate_path
+    ));
+    gen.line(&format!(
         "use {}_rpc::types::InstanceName;",
         opts.crate_path
     ));
@@ -178,6 +182,8 @@ impl<'a> RpcGen<'a> {
         self.emit_async_trait(&iface.name, &all_ops);
         self.line("");
         self.emit_service_dispatcher(&iface.name, &all_ops);
+        self.line("");
+        self.emit_service_wrapper(&iface.name);
         self.line("");
         self.emit_client_struct(&iface.name, &all_ops);
         self.line("");
@@ -674,6 +680,79 @@ impl<'a> RpcGen<'a> {
         self.line("}");
     }
 
+    /// Generate typed service wrapper that auto-injects interface_name into ServiceParams.
+    fn emit_service_wrapper(&mut self, iface_name: &str) {
+        let call_type = format!("{}_Call", iface_name);
+        let return_type = format!("{}_Return", iface_name);
+        let service_name = format!("{}Service", iface_name);
+        let dispatcher_type = format!("{}Dispatcher", iface_name);
+
+        // Struct
+        self.line(&format!(
+            "pub struct {}<T: {} + Send + 'static> {{",
+            service_name, iface_name
+        ));
+        self.indent += 1;
+        self.line(&format!(
+            "inner: Service<{}, {}, {}<T>>,",
+            call_type, return_type, dispatcher_type
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.line("");
+
+        // impl
+        self.line(&format!(
+            "impl<T: {} + Send + 'static> {}<T> {{",
+            iface_name, service_name
+        ));
+        self.indent += 1;
+
+        self.line("pub fn new(params: ServiceParams, handler: T) -> DdsRpcResult<Self> {");
+        self.indent += 1;
+        self.line(&format!(
+            "let params = params.interface_name(\"{}\");",
+            iface_name
+        ));
+        self.line(&format!(
+            "let inner = Service::new(params, {}::new(handler))?;",
+            dispatcher_type
+        ));
+        self.line("Ok(Self { inner })");
+        self.indent -= 1;
+        self.line("}");
+
+        self.indent -= 1;
+        self.line("}");
+        self.line("");
+
+        // Dispatchable
+        self.line(&format!(
+            "impl<T: {} + Send + Sync + 'static> Dispatchable for {}<T> {{",
+            iface_name, service_name
+        ));
+        self.indent += 1;
+        self.line("fn try_dispatch_one(&self) -> DdsRpcResult<bool> {");
+        self.indent += 1;
+        self.line("self.inner.try_dispatch_one()");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.line("");
+
+        // RpcEntity
+        self.line(&format!(
+            "impl<T: {} + Send + 'static> RpcEntity for {}<T> {{",
+            iface_name, service_name
+        ));
+        self.indent += 1;
+        self.line("fn close(&mut self) -> DdsRpcResult<()> { self.inner.close() }");
+        self.line("fn is_closed(&self) -> bool { self.inner.is_closed() }");
+        self.indent -= 1;
+        self.line("}");
+    }
+
     /// (7.11.1.5.4) Generate typed client with per-operation methods.
     /// raises → DdsRpcResult<T, E>, no raises → DdsRpcResult<T>.
     fn emit_client_struct(&mut self, iface_name: &str, ops: &[ResolvedOperation]) {
@@ -697,7 +776,10 @@ impl<'a> RpcGen<'a> {
         // Constructor (default 10s timeout)
         self.line("pub fn new(params: ClientParams) -> DdsRpcResult<Self> {");
         self.indent += 1;
-        self.line("let client = Client::new(params)?;");
+        self.line(&format!(
+            "let client = Client::new(params.interface_name(\"{}\"))?;",
+            iface_name
+        ));
         self.line("Ok(Self { client, default_timeout: Duration::from_secs(10) })");
         self.indent -= 1;
         self.line("}");
@@ -706,7 +788,10 @@ impl<'a> RpcGen<'a> {
         // Constructor with explicit timeout
         self.line("pub fn with_timeout(params: ClientParams, timeout: Duration) -> DdsRpcResult<Self> {");
         self.indent += 1;
-        self.line("let client = Client::new(params)?;");
+        self.line(&format!(
+            "let client = Client::new(params.interface_name(\"{}\"))?;",
+            iface_name
+        ));
         self.line("Ok(Self { client, default_timeout: timeout })");
         self.indent -= 1;
         self.line("}");

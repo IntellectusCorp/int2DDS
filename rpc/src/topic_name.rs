@@ -13,6 +13,8 @@ pub(crate) struct TopicNameConfig {
     pub(crate) service_name: Option<String>,
     pub(crate) request_topic_override: Option<String>,
     pub(crate) reply_topic_override: Option<String>,
+    pub(crate) request_type_override: Option<String>,
+    pub(crate) reply_type_override: Option<String>,
 }
 
 impl TopicNameConfig {
@@ -28,6 +30,26 @@ impl TopicNameConfig {
             return name.clone();
         }
         self.synthesize("Reply")
+    }
+
+    /// Synthesize the request type name (7.5.1.1.6)
+    /// "${interfaceName}_Request"
+    pub(crate) fn request_type(&self) -> Option<String> {
+        self.request_type_override.clone().or_else(|| {
+            self.interface_name
+                .as_ref()
+                .map(|iface| format!("{}_Request", fully_qualified_name(iface)))
+        })
+    }
+
+    /// Synthesize the reply type name (7.5.1.1.7)
+    /// "${interfaceName}_Reply"
+    pub(crate) fn reply_type(&self) -> Option<String> {
+        self.reply_type_override.clone().or_else(|| {
+            self.interface_name
+                .as_ref()
+                .map(|iface| format!("{}_Reply", fully_qualified_name(iface)))
+        })
     }
 
     fn synthesize(&self, suffix: &str) -> String {
@@ -57,6 +79,8 @@ mod tests {
             service_name: None,
             request_topic_override: None,
             reply_topic_override: None,
+            request_type_override: None,
+            reply_type_override: None,
         };
         assert_eq!(config.request_topic(), "robot_RobotControl_Service_Request");
         assert_eq!(config.reply_topic(), "robot_RobotControl_Service_Reply");
@@ -69,6 +93,8 @@ mod tests {
             service_name: Some("MyService".into()),
             request_topic_override: None,
             reply_topic_override: None,
+            request_type_override: None,
+            reply_type_override: None,
         };
         assert_eq!(config.request_topic(), "MyService_Request");
         assert_eq!(config.reply_topic(), "MyService_Reply");
@@ -81,6 +107,8 @@ mod tests {
             service_name: Some("MyRobot".into()),
             request_topic_override: None,
             reply_topic_override: None,
+            request_type_override: None,
+            reply_type_override: None,
         };
         assert_eq!(config.request_topic(), "RobotControl_MyRobot_Request");
     }
