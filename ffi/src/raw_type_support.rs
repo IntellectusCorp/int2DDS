@@ -36,6 +36,14 @@ impl RawTypeSupport {
         Self { type_name, extensibility, has_key: false, type_identifier: None, type_object: None }
     }
 
+    pub fn new_with_key(
+        type_name: String,
+        extensibility: ExtensibilityKind,
+        has_key: bool,
+    ) -> Self {
+        Self { type_name, extensibility, has_key, type_identifier: None, type_object: None }
+    }
+
     /// Create a RawTypeSupport with pre-built TypeIdentifier and TypeObject.
     ///
     /// This enables DDS-XTypes discovery parameters (0x0069, 0x0072) to be sent
