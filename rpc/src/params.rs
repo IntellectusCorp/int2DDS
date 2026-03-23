@@ -14,6 +14,7 @@ pub struct RequesterParams {
     pub(crate) publisher: Option<Publisher>,
     pub(crate) subscriber: Option<Subscriber>,
     pub(crate) service_name: Option<String>,
+    pub(crate) interface_name: Option<String>,
     pub(crate) request_topic_name: Option<String>,
     pub(crate) reply_topic_name: Option<String>,
     pub(crate) datawriter_qos: Option<DataWriterQos>,
@@ -27,6 +28,7 @@ impl RequesterParams {
         Self {
             participant,
             service_name: None,
+            interface_name: None,
             request_topic_name: None,
             reply_topic_name: None,
             datawriter_qos: None,
@@ -40,6 +42,11 @@ impl RequesterParams {
 
     pub fn service_name(mut self, name: impl Into<String>) -> Self {
         self.service_name = Some(name.into());
+        self
+    }
+
+    pub fn interface_name(mut self, name: impl Into<String>) -> Self {
+        self.interface_name = Some(name.into());
         self
     }
 
@@ -90,6 +97,7 @@ pub struct ReplierParams {
     pub(crate) publisher: Option<Publisher>,
     pub(crate) subscriber: Option<Subscriber>,
     pub(crate) service_name: Option<String>,
+    pub(crate) interface_name: Option<String>,
     pub(crate) instance_name: Option<String>,
     pub(crate) request_topic_name: Option<String>,
     pub(crate) reply_topic_name: Option<String>,
@@ -106,6 +114,7 @@ impl ReplierParams {
             publisher: None,
             subscriber: None,
             service_name: None,
+            interface_name: None,
             instance_name: None,
             request_topic_name: None,
             reply_topic_name: None,
@@ -118,6 +127,11 @@ impl ReplierParams {
 
     pub fn service_name(mut self, name: impl Into<String>) -> Self {
         self.service_name = Some(name.into());
+        self
+    }
+
+    pub fn interface_name(mut self, name: impl Into<String>) -> Self {
+        self.interface_name = Some(name.into());
         self
     }
 

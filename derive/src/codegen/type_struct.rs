@@ -523,13 +523,8 @@ fn generate_unified_type_support_impl(
     let get_type_name_impl = if gc.has_type_params {
         quote! {
             fn get_type_name(&self) -> &str {
-                // Generic types use runtime type_name since stringify cannot capture type params
-                // Use a leaked &'static str for the required lifetime
-                use std::sync::OnceLock;
-                static NAME: OnceLock<String> = OnceLock::new();
-                // Note: for generic types this will use the first instantiation's name.
-                // This is acceptable since TypeSupport instances are per-concrete-type.
-                NAME.get_or_init(|| std::any::type_name::<#full_type>().to_string())
+                // std::any::type_name returns &'static str, unique per concrete type
+                std::any::type_name::<#full_type>()
             }
         }
     } else {

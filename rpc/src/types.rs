@@ -142,16 +142,19 @@ pub struct Reply<T> {
 }
 
 /// Default case in Call/Return unions for unrecognized operations (7.5.1.1.6, 7.5.1.1.7)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct UnknownOperation;
+#[derive(int2dds_derive::DdsType, Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[dds_type(crate_path = "int2dds", no_additional_derives)]
+pub struct UnknownOperation {}
 
 /// Default case in Result unions for unrecognized exceptions
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct UnknownException;
+#[derive(int2dds_derive::DdsType, Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[dds_type(crate_path = "int2dds", no_additional_derives)]
+pub struct UnknownException {}
 
 /// Dummy member for In/Out structs with no parameters (7.5.1.1.4)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct UnusedMember;
+#[derive(int2dds_derive::DdsType, Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[dds_type(crate_path = "int2dds", no_additional_derives)]
+pub struct UnusedMember {}
 
 #[cfg(test)]
 mod tests {
