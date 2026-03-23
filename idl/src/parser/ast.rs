@@ -47,6 +47,7 @@ pub struct EnumDef {
 pub struct EnumVariant {
     pub name: String,
     pub value: Option<i64>,
+    pub annotations: Vec<Annotation>,
 }
 
 #[derive(Debug, Clone)]
