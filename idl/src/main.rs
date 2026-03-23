@@ -10,9 +10,11 @@ struct Args {
     rust_output: Option<String>,
     c_output: Option<String>,
     python_output: Option<String>,
+    csharp_output: Option<String>,
     output_dir: Option<String>,
     crate_path: String,
     python_module: String,
+    csharp_namespace: String,
     default_string_bound: u32,
     string_pointer: bool,
 }
@@ -24,9 +26,11 @@ fn parse_args() -> Args {
     let mut rust_output = None;
     let mut c_output = None;
     let mut python_output = None;
+    let mut csharp_output = None;
     let mut output_dir = None;
     let mut crate_path = "int2dds".to_string();
     let mut python_module = "int2dds".to_string();
+    let mut csharp_namespace = "GeneratedTypes".to_string();
     let mut default_string_bound = 256u32;
     let mut string_pointer = false;
 
@@ -45,6 +49,10 @@ fn parse_args() -> Args {
                 i += 1;
                 python_output = Some(args.get(i).cloned().unwrap_or_default());
             }
+            "-s" | "--csharp" => {
+                i += 1;
+                csharp_output = Some(args.get(i).cloned().unwrap_or_default());
+            }
             "-o" | "--output-dir" => {
                 i += 1;
                 output_dir = Some(args.get(i).cloned().unwrap_or_default());
@@ -56,6 +64,10 @@ fn parse_args() -> Args {
             "--python-module" => {
                 i += 1;
                 python_module = args.get(i).cloned().unwrap_or_default();
+            }
+            "--csharp-namespace" => {
+                i += 1;
+                csharp_namespace = args.get(i).cloned().unwrap_or_default();
             }
             "--string-bound" => {
                 i += 1;
@@ -100,9 +112,11 @@ fn parse_args() -> Args {
         rust_output,
         c_output,
         python_output,
+        csharp_output,
         output_dir,
         crate_path,
         python_module,
+        csharp_namespace,
         default_string_bound,
         string_pointer,
     }
@@ -112,19 +126,21 @@ fn print_usage() {
     eprintln!(
         "Usage: int2dds-idl [OPTIONS] <INPUT.idl>
 
-Generates Rust, C, and Python code from OMG IDL files.
+Generates Rust, C, Python, and C# code from OMG IDL files.
 
 OPTIONS:
-    -r, --rust <PATH>       Generate Rust output to PATH
-    -c, --c-header <PATH>   Generate C header output to PATH
-    -p, --python <PATH>     Generate Python output to PATH
-    -o, --output-dir <DIR>  Output directory (auto-names files)
-    --crate-path <PATH>     Rust crate path (default: int2dds)
-    --python-module <PATH>  Python module path (default: int2dds)
-    --string-bound <N>      Default unbounded string size in C (default: 256)
-    --string-pointer        Use char* pointers for strings (OMG standard)
-    -h, --help              Print help
-    -V, --version           Print version"
+    -r, --rust <PATH>         Generate Rust output to PATH
+    -c, --c-header <PATH>     Generate C header output to PATH
+    -p, --python <PATH>       Generate Python output to PATH
+    -s, --csharp <PATH>       Generate C# output to PATH
+    -o, --output-dir <DIR>    Output directory (auto-names files)
+    --crate-path <PATH>       Rust crate path (default: int2dds)
+    --python-module <PATH>    Python module path (default: int2dds)
+    --csharp-namespace <NS>   C# namespace (default: GeneratedTypes)
+    --string-bound <N>        Default unbounded string size in C (default: 256)
+    --string-pointer          Use char* pointers for strings (OMG standard)
+    -h, --help                Print help
+    -V, --version             Print version"
     );
 }
 
@@ -181,17 +197,23 @@ fn main() {
             .as_ref()
             .map(|dir| format!("{}/{}.py", dir, base_name))
     });
+    let csharp_path = args.csharp_output.or_else(|| {
+        args.output_dir
+            .as_ref()
+            .map(|dir| format!("{}/{}.cs", dir, naming::to_pascal_case(&base_name)))
+    });
 
-    // If neither -r, -c, -p, nor -o specified, default to generating Rust and C
-    let (rust_path, c_path, python_path) =
-        if rust_path.is_none() && c_path.is_none() && python_path.is_none() {
+    // If neither -r, -c, -p, -s, nor -o specified, default to generating Rust and C
+    let (rust_path, c_path, python_path, csharp_path) =
+        if rust_path.is_none() && c_path.is_none() && python_path.is_none() && csharp_path.is_none() {
             (
                 Some(format!("{}.rs", base_name)),
                 Some(format!("{}.h", base_name)),
                 None, // Don't generate Python by default for backward compatibility
+                None, // Don't generate C# by default
             )
         } else {
-            (rust_path, c_path, python_path)
+            (rust_path, c_path, python_path, csharp_path)
         };
 
     // Generate Rust
@@ -231,6 +253,19 @@ fn main() {
             int2dds_module: args.python_module.clone(),
         };
         let code = codegen::python::generate(&model, idl_filename, &python_opts);
+        if let Err(e) = write_file(path, &code) {
+            eprintln!("error: cannot write '{}': {}", path, e);
+            process::exit(1);
+        }
+        eprintln!("generated: {}", path);
+    }
+
+    // Generate C#
+    if let Some(path) = &csharp_path {
+        let csharp_opts = codegen::csharp::CSharpOptions {
+            namespace: args.csharp_namespace.clone(),
+        };
+        let code = codegen::csharp::generate(&model, idl_filename, &csharp_opts);
         if let Err(e) = write_file(path, &code) {
             eprintln!("error: cannot write '{}': {}", path, e);
             process::exit(1);
