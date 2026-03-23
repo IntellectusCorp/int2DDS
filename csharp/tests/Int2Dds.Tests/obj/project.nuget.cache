@@ -1,0 +1,27 @@
+{
+  "version": 2,
+  "dgSpecHash": "Z1+hBITgaMw=",
+  "success": true,
+  "projectFilePath": "C:\\Users\\suble\\Desktop\\int2\\project\\int2DDS\\csharp\\tests\\Int2Dds.Tests\\Int2Dds.Tests.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\suble\\.nuget\\packages\\microsoft.codecoverage\\17.14.1\\microsoft.codecoverage.17.14.1.nupkg.sha512",
+    "C:\\Users\\suble\\.nuget\\packages\\microsoft.net.test.sdk\\17.14.1\\microsoft.net.test.sdk.17.14.1.nupkg.sha512",
+    "C:\\Users\\suble\\.nuget\\packages\\microsoft.testplatform.objectmodel\\17.14.1\\microsoft.testplatform.objectmodel.17.14.1.nupkg.sha512",
+    "C:\\Users\\suble\\.nuget\\packages\\microsoft.testplatform.testhost\\17.14.1\\microsoft.testplatform.testhost.17.14.1.nupkg.sha512",
+    "C:\\Users\\suble\\.nuget\\packages\\newtonsoft.json\\13.0.3\\newtonsoft.json.13.0.3.nupkg.sha512",
+    "C:\\Users\\suble\\.nuget\\packages\\system.collections.immutable\\8.0.0\\system.collections.immutable.8.0.0.nupkg.sha512",
+    "C:\\Users\\suble\\.nuget\\packages\\system.reflection.metadata\\8.0.0\\system.reflection.metadata.8.0.0.nupkg.sha512",
+    "C:\\Users\\suble\\.nuget\\packages\\xunit\\2.9.3\\xunit.2.9.3.nupkg.sha512",
+    "C:\\Users\\suble\\.nuget\\packages\\xunit.abstractions\\2.0.3\\xunit.abstractions.2.0.3.nupkg.sha512",
+    "C:\\Users\\suble\\.nuget\\packages\\xunit.analyzers\\1.18.0\\xunit.analyzers.1.18.0.nupkg.sha512",
+    "C:\\Users\\suble\\.nuget\\packages\\xunit.assert\\2.9.3\\xunit.assert.2.9.3.nupkg.sha512",
+    "C:\\Users\\suble\\.nuget\\packages\\xunit.core\\2.9.3\\xunit.core.2.9.3.nupkg.sha512",
+    "C:\\Users\\suble\\.nuget\\packages\\xunit.extensibility.core\\2.9.3\\xunit.extensibility.core.2.9.3.nupkg.sha512",
+    "C:\\Users\\suble\\.nuget\\packages\\xunit.extensibility.execution\\2.9.3\\xunit.extensibility.execution.2.9.3.nupkg.sha512",
+    "C:\\Users\\suble\\.nuget\\packages\\xunit.runner.visualstudio\\2.8.2\\xunit.runner.visualstudio.2.8.2.nupkg.sha512",
+    "C:\\Users\\suble\\.nuget\\packages\\microsoft.netcore.app.ref\\8.0.23\\microsoft.netcore.app.ref.8.0.23.nupkg.sha512",
+    "C:\\Users\\suble\\.nuget\\packages\\microsoft.windowsdesktop.app.ref\\8.0.23\\microsoft.windowsdesktop.app.ref.8.0.23.nupkg.sha512",
+    "C:\\Users\\suble\\.nuget\\packages\\microsoft.aspnetcore.app.ref\\8.0.23\\microsoft.aspnetcore.app.ref.8.0.23.nupkg.sha512"
+  ],
+  "logs": []
+}

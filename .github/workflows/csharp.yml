@@ -1,0 +1,85 @@
+name: C# Binding CI
+
+on:
+  push:
+    branches: [develop, main]
+    paths:
+      - 'csharp/**'
+      - 'ffi/**'
+  pull_request:
+    branches: [develop, main]
+    paths:
+      - 'csharp/**'
+      - 'ffi/**'
+  workflow_dispatch:
+
+jobs:
+  csharp-test:
+    name: C# Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ffi/target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-rust-ffi-${{ hashFiles('ffi/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-ffi-
+
+      - name: Build FFI library
+        working-directory: ffi
+        run: cargo build --release
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Set INT2DDS_FFI_PATH (Linux)
+        if: runner.os == 'Linux'
+        run: echo "INT2DDS_FFI_PATH=${{ github.workspace }}/target/release/libint2dds_ffi.so" >> $GITHUB_ENV
+
+      - name: Set INT2DDS_FFI_PATH (Windows)
+        if: runner.os == 'Windows'
+        run: echo "INT2DDS_FFI_PATH=${{ github.workspace }}\target\release\int2dds_ffi.dll" >> $env:GITHUB_ENV
+
+      - name: Build C# solution
+        working-directory: csharp
+        run: dotnet build -c Release
+
+      - name: Run tests
+        working-directory: csharp
+        run: dotnet test -c Release --verbosity normal
+
+  csharp-cdr-only:
+    name: C# CDR Tests (no FFI)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build C# library
+        working-directory: csharp
+        run: dotnet build -c Release src/Int2Dds/Int2Dds.csproj
+
+      - name: Run CDR tests only
+        working-directory: csharp
+        run: dotnet test -c Release --filter "FullyQualifiedName~Cdr" --verbosity normal
