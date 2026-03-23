@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>Int2Dds</RootNamespace>
+    <AssemblyName>Int2Dds</AssemblyName>
+
+    <!-- Package metadata -->
+    <PackageId>Int2Dds</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>IntellectusCorp</Authors>
+    <Description>C# binding for int2DDS - a high-performance DDS implementation</Description>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Int2Dds.Tests" />
+  </ItemGroup>
+
+</Project>
