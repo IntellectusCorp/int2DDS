@@ -2,6 +2,7 @@
 #![allow(unused_variables)]
 
 use std::collections::HashMap;
+use std::fmt;
 use std::io::{self, ErrorKind};
 use std::net::{Ipv4Addr, SocketAddr};
 
@@ -12,12 +13,38 @@ use mio::{Interest, Registry, Token};
 use crate::rtps::transport::tcp::framing::FramedReader;
 use crate::rtps::transport::Listener;
 
+/// Role of a TCP listener
+///
+/// Determines what kind of messages are expected on accepted connections.
+/// The participant creates two TcpListener instances: one for control port,
+/// one for data port.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum TcpListenerRole {
+    // Accepts control connections (handshake, keepalive, close)
+    Control,
+    // Accepts data connections (RTPS messages only)
+    Data,
+}
+
+impl fmt::Display for TcpListenerRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TcpListenerRole::Control => write!(f, "Control"),
+            TcpListenerRole::Data => write!(f, "Data"),
+        }
+    }
+}
+
 /// TCP listener for DDS/RTPS communication
 ///
 /// Manages incoming TCP connections and receives framed messages.
 /// Works with mio for event-driven I/O.
+/// Each instance serves one role (control or data), determined at creation.
 #[derive(Debug)]
 pub(crate) struct TcpListener {
+    /// Role of this listener (control or data)
+    role: TcpListenerRole,
+
     /// Port number this listener is bound to
     port: u16,
 
@@ -42,10 +69,11 @@ impl TcpListener {
     ///
     /// # Arguments
     /// * `port` - The port to bind to
+    /// * `role` - The role of this listener (Control or Data)
     ///
     /// # Returns
     /// A new TcpListener instance or an error
-    pub(crate) fn new(port: u16) -> io::Result<Self> {
+    pub(crate) fn new(port: u16, role: TcpListenerRole) -> io::Result<Self> {
         debug!("TcpListener: Creating listener on port {}", port);
 
         // Bind to all interfaces (0.0.0.0)
@@ -57,6 +85,7 @@ impl TcpListener {
         debug!("TcpListener: Successfully bound to {:?}", listener.local_addr()?);
 
         Ok(Self {
+            role,
             port: actual_port,
             listener: Some(listener),
             connections: HashMap::new(),
@@ -64,6 +93,11 @@ impl TcpListener {
             token_to_addr: HashMap::new(),
             framed_readers: HashMap::new(),
         })
+    }
+
+    /// Get the role of this listener
+    pub(crate) fn role(&self) -> TcpListenerRole {
+        self.role
     }
 
     /// Accept a new incoming connection and register it with the poll
@@ -262,15 +296,24 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn test_tcp_listener_creation() {
-        let listener = TcpListener::new(0).unwrap(); // port 0 = random port
+    fn test_tcp_listener_creation_control() {
+        let listener = TcpListener::new(0, TcpListenerRole::Control).unwrap();
         assert!(listener.port() > 0);
+        assert_eq!(listener.role(), TcpListenerRole::Control);
+        assert_eq!(listener.connection_count(), 0);
+    }
+
+    #[test]
+    fn test_tcp_listener_creation_data() {
+        let listener = TcpListener::new(0, TcpListenerRole::Data).unwrap();
+        assert!(listener.port() > 0);
+        assert_eq!(listener.role(), TcpListenerRole::Data);
         assert_eq!(listener.connection_count(), 0);
     }
 
     #[test]
     fn test_tcp_listener_accept() {
-        let mut listener = TcpListener::new(0).unwrap();
+        let mut listener = TcpListener::new(0, TcpListenerRole::Data).unwrap();
         let port = listener.port();
 
         // Spawn a client thread
@@ -300,7 +343,7 @@ mod tests {
 
     #[test]
     fn test_tcp_listener_multiple_connections() {
-        let mut listener = TcpListener::new(0).unwrap();
+        let mut listener = TcpListener::new(0, TcpListenerRole::Control).unwrap();
         let port = listener.port();
 
         let client_handles: Vec<_> = (0..3)
@@ -333,7 +376,7 @@ mod tests {
 
     #[test]
     fn test_tcp_listener_remove_connection() {
-        let mut listener = TcpListener::new(0).unwrap();
+        let mut listener = TcpListener::new(0, TcpListenerRole::Data).unwrap();
         let port = listener.port();
 
         let _client = StdTcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
@@ -359,7 +402,7 @@ mod tests {
 
     #[test]
     fn test_tcp_listener_close() {
-        let mut listener = TcpListener::new(0).unwrap();
+        let mut listener = TcpListener::new(0, TcpListenerRole::Control).unwrap();
         let port = listener.port();
 
         let _client = StdTcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();

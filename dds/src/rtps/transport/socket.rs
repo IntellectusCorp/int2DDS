@@ -7,6 +7,7 @@ use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::shm::shm_listener::ShmListener;
 use crate::rtps::transport::shm::shm_sender::ShmSender;
 use crate::rtps::transport::tcp::tcp_listener::TcpListener;
+use crate::rtps::transport::tcp::tcp_listener::TcpListenerRole;
 use crate::rtps::transport::tcp::tcp_sender::TcpSender;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 use crate::rtps::transport::udp::udp_sender::UdpSender;
@@ -340,7 +341,7 @@ impl Socket {
                 self.domain_id,
                 self.participant_id,
             );
-            match TcpListener::new(discovery_port) {
+            match TcpListener::new(discovery_port, TcpListenerRole::Data) {
                 Ok(listener) => {
                     log::info!(
                         "[socket] Discovery TCP listener created on port {}",
@@ -362,7 +363,7 @@ impl Socket {
             // Try to create user traffic listener
             let user_port =
                 PortManager::get_user_traffic_unicast_port(self.domain_id, self.participant_id);
-            match TcpListener::new(user_port) {
+            match TcpListener::new(user_port, TcpListenerRole::Data) {
                 Ok(listener) => {
                     log::info!("[socket] User traffic TCP listener created on port {}", user_port);
                     self.user_traffic_tcp_listener = Some(listener);
