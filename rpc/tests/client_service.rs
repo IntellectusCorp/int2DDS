@@ -131,7 +131,7 @@ fn client_service_sequential_requests() {
 
     let mut server = Server::new(ServerParams::new());
     server.add_service(service);
-    let handle = thread::spawn(move || server.run_for(Duration::from_secs(5)));
+    let handle = thread::spawn(move || server.run_for(Duration::from_secs(2)));
 
     for i in 0..3 {
         client.send_request(&AddCall { a: i, b: i * 10 }).unwrap();
@@ -272,7 +272,7 @@ fn server_multiple_services() {
     let mut server = Server::new(ServerParams::new());
     server.add_service(add_service);
     server.add_service(echo_service);
-    let handle = thread::spawn(move || server.run_for(Duration::from_secs(5)));
+    let handle = thread::spawn(move || server.run_for(Duration::from_secs(2)));
 
     // Add service
     add_client.send_request(&AddCall { a: 5, b: 3 }).unwrap();
