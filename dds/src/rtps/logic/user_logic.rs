@@ -657,15 +657,15 @@ impl UserLogic {
 
         // Send heartbeat once per participant
         for (target_participant_prefix, locators) in participant_locators.iter() {
-            let last_change_sn = writer.last_change_sequence_number();
+            let highest_sn = history_cache.highest_sn();
             let buffer = MessageCreator::create_heartbeat_message(
                 writer.guid().prefix(),
                 *target_participant_prefix,
                 writer.heartbeat_count(),
                 EntityId::UNKNOWN, // This ensures all readers in the participant receive the heartbeat
                 writer.endpoint_id(),
-                history_cache.get_seq_num_min().unwrap_or(last_change_sn + 1),
-                history_cache.get_seq_num_max().unwrap_or(last_change_sn),
+                history_cache.get_seq_num_min().unwrap_or(highest_sn + 1),
+                history_cache.get_seq_num_max().unwrap_or(highest_sn),
                 false,
                 false,
             );
@@ -742,15 +742,16 @@ impl UserLogic {
             }
         };
 
-        let last_change_sn = writer.last_change_sequence_number();
+        let highest_sn = history_cache.highest_sn();
+
         let buffer = MessageCreator::create_heartbeat_message(
             writer.guid().prefix(),
             reader_proxy.remote_reader_guid().prefix(),
             writer.heartbeat_count(),
             reader_proxy.remote_group_entity_id(),
             writer.endpoint_id(),
-            history_cache.get_seq_num_min().unwrap_or(last_change_sn + 1),
-            history_cache.get_seq_num_max().unwrap_or(last_change_sn),
+            history_cache.get_seq_num_min().unwrap_or(highest_sn + 1),
+            history_cache.get_seq_num_max().unwrap_or(highest_sn),
             false,
             false,
         );

@@ -19,6 +19,7 @@ pub struct WriterHistoryCache {
     participant_guid: Guid,
     owner_id: EntityId,
     changes: BTreeMap<SequenceNumber, Arc<CacheChange>>,
+    highest_sn: SequenceNumber, // Highest sequence number ever added to this cache
 }
 
 impl HistoryCache for WriterHistoryCache {
@@ -68,7 +69,12 @@ impl HistoryCache for WriterHistoryCache {
 
 impl WriterHistoryCache {
     pub(crate) fn new(participant_guid: Guid, owner_id: EntityId) -> Self {
-        Self { participant_guid, owner_id, changes: BTreeMap::new() }
+        Self {
+            participant_guid,
+            owner_id,
+            changes: BTreeMap::new(),
+            highest_sn: SequenceNumber::new(0, 0),
+        }
     }
 
     pub(crate) fn get_change(&self, seq_num: SequenceNumber) -> Option<Arc<CacheChange>> {
@@ -80,6 +86,10 @@ impl WriterHistoryCache {
 
         if !self.is_builtin() {
             self.changes.insert(sn, a_change.clone());
+
+            if sn > self.highest_sn {
+                self.highest_sn = sn;
+            }
 
             // Let RTPS writer know that there is a CacheChange that has not been sent
             if let Some(handler) =
@@ -99,6 +109,10 @@ impl WriterHistoryCache {
         }
 
         Ok(())
+    }
+
+    pub(crate) fn highest_sn(&self) -> SequenceNumber {
+        self.highest_sn
     }
 
     pub(crate) fn is_empty(&self) -> bool {
