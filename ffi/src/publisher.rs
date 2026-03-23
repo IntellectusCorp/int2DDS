@@ -253,6 +253,13 @@ pub unsafe extern "C" fn int2dds_create_datawriter_with_listener(
                 }
             }
         }
+        if mask & crate::status_condition::INT2DDS_STATUS_OFFERED_INCOMPATIBLE_QOS != 0 {
+            if let Ok(status) = writer_handle.inner.get_offered_incompatible_qos_status() {
+                if status.total_count() > 0 {
+                    listener_arc.on_offered_incompatible_qos(&writer_handle.inner, &status);
+                }
+            }
+        }
     }
 
     *writer_out = Box::into_raw(writer_handle);

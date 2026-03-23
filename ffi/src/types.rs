@@ -13,13 +13,19 @@
 //! All handle types implement Send and Sync, making them safe to use
 //! across threads in both Rust and C code.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use int2dds::{
     domain::domain_participant::DomainParticipant,
-    infrastructure::{condition::Condition, guard_condition::GuardCondition, wait_set::WaitSet},
-    publication::{data_writer::DataWriter, publisher::Publisher},
-    subscription::{data_reader::DataReader, sample_info::SampleInfo, subscriber::Subscriber},
+    infrastructure::{
+        condition::Condition, guard_condition::GuardCondition, status_condition::StatusCondition,
+        wait_set::WaitSet,
+    },
+    publication::{data_writer::DataWriter, publisher::Publisher, qos::DataWriterQos},
+    subscription::{
+        data_reader::DataReader, qos::DataReaderQos, sample_info::SampleInfo,
+        subscriber::Subscriber,
+    },
     topic::topic::Topic,
 };
 
@@ -75,10 +81,19 @@ pub struct Int2DdsGuardCondition {
     pub(crate) inner: Arc<GuardCondition>,
 }
 
+/// Concrete StatusCondition variant for set/get_enabled_statuses access.
+/// The generic Condition trait doesn't expose these methods, so we keep
+/// a clone of the concrete type alongside the trait object.
+pub(crate) enum StatusConditionKind {
+    Reader(StatusCondition<DataReaderQos>),
+    Writer(StatusCondition<DataWriterQos>),
+}
+
 /// Opaque handle to a StatusCondition
-/// StatusCondition is wrapped as a trait object to handle the generic QoS type.
+/// `inner` is used by WaitSet (trait object), `kind` provides concrete access.
 pub struct Int2DdsStatusCondition {
     pub(crate) inner: Arc<dyn Condition + Send + Sync>,
+    pub(crate) kind: Mutex<StatusConditionKind>,
 }
 
 /// Generic condition handle for use with WaitSet
