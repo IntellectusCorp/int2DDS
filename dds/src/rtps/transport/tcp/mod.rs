@@ -1,5 +1,6 @@
 pub(crate) mod framing;
 pub(crate) mod tcp_handshake;
+pub(crate) mod tcp_keep_alive;
 pub(crate) mod tcp_listener;
 pub(crate) mod tcp_sender;
 
