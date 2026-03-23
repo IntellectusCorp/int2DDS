@@ -411,7 +411,6 @@ class TestDomainParticipant:
     def test_context_manager(self, domain_id: int):
         with DomainParticipant(domain_id=domain_id) as dp:
             assert dp.domain_id == domain_id
-        # Should be closed after exiting context
 
     def test_create_publisher(self, domain_id: int):
         with DomainParticipant(domain_id=domain_id) as dp:
@@ -469,7 +468,7 @@ class TestPublisher:
             writer = pub.create_datawriter(topic)
 
             sample = TestMessage(value=42, text="Hello")
-            writer.write(sample)  # Should not raise
+            writer.write(sample)
 
 
 class TestSubscriber:
@@ -680,3 +679,359 @@ class TestRoundtrip:
             result = self._roundtrip(dp, MutableMsg, original, "MutableTopic")
             assert result.id == original.id
             assert abs(result.value - original.value) < 1e-10
+
+
+class TestQoS:
+    """QoS delivery verification tests."""
+
+    def test_reliability_incompatible(self, domain_id: int):
+        """BEST_EFFORT writer + RELIABLE reader should not match."""
+        from int2dds.core.qos import DataWriterQos, DataReaderQos, Reliability
+
+        with DomainParticipant(domain_id=domain_id) as dp:
+            topic = dp.create_topic("QoS_Reliability_Topic", TestMessage)
+            pub = dp.create_publisher()
+            sub = dp.create_subscriber()
+
+            writer_qos = DataWriterQos(reliability=Reliability("BEST_EFFORT"))
+            reader_qos = DataReaderQos(reliability=Reliability("RELIABLE"))
+
+            writer = pub.create_datawriter(topic, qos=writer_qos)
+            reader = sub.create_datareader(topic, qos=reader_qos)
+
+            import time
+            time.sleep(1.0)
+
+            # Should not match due to QoS incompatibility
+            assert writer.matched_readers == 0
+            assert reader.matched_writers == 0
+
+    def test_reliability_compatible(self, domain_id: int):
+        """RELIABLE writer + RELIABLE reader should match and communicate."""
+        from int2dds import DdsTimeout
+        from int2dds.core.qos import DataWriterQos, DataReaderQos, Reliability
+        from int2dds.core.conditions import STATUS_SUBSCRIPTION_MATCHED, STATUS_DATA_AVAILABLE
+
+        with DomainParticipant(domain_id=domain_id) as dp:
+            topic = dp.create_topic("QoS_ReliableOK_Topic", TestMessage)
+            pub = dp.create_publisher()
+            sub = dp.create_subscriber()
+
+            writer_qos = DataWriterQos(reliability=Reliability("RELIABLE"))
+            reader_qos = DataReaderQos(reliability=Reliability("RELIABLE"))
+
+            writer = pub.create_datawriter(topic, qos=writer_qos)
+            reader = sub.create_datareader(topic, qos=reader_qos)
+
+            # Wait for discovery
+            status_cond = reader.get_statuscondition()
+            status_cond.set_enabled_statuses(STATUS_SUBSCRIPTION_MATCHED)
+            waitset = WaitSet()
+            waitset.attach(status_cond)
+
+            deadline = 5.0
+            while writer.matched_readers == 0 and deadline > 0:
+                try:
+                    waitset.wait(timeout=1.0)
+                except DdsTimeout:
+                    pass
+                deadline -= 1.0
+            assert writer.matched_readers > 0, "RELIABLE/RELIABLE should match"
+
+            # Write and read
+            status_cond.set_enabled_statuses(STATUS_DATA_AVAILABLE)
+            writer.write(TestMessage(value=100, text="reliable"))
+            try:
+                waitset.wait(timeout=5.0)
+            except DdsTimeout:
+                pass
+            samples = reader.take()
+            assert len(samples) > 0
+            assert samples[0].data.value == 100
+
+    def test_durability_transient_local(self, domain_id: int):
+        """TRANSIENT_LOCAL: late-joining reader should receive previously written data."""
+        from int2dds import DdsTimeout
+        from int2dds.core.qos import (
+            DataWriterQos, DataReaderQos, Reliability, Durability,
+        )
+        from int2dds.core.conditions import STATUS_SUBSCRIPTION_MATCHED, STATUS_DATA_AVAILABLE
+
+        with DomainParticipant(domain_id=domain_id) as dp:
+            topic = dp.create_topic("QoS_Durability_Topic", TestMessage)
+            pub = dp.create_publisher()
+
+            writer_qos = DataWriterQos(
+                reliability=Reliability("RELIABLE"),
+                durability=Durability("TRANSIENT_LOCAL"),
+            )
+            writer = pub.create_datawriter(topic, qos=writer_qos)
+
+            # Write BEFORE reader exists
+            writer.write(TestMessage(value=999, text="late join"))
+
+            # Now create reader with TRANSIENT_LOCAL
+            sub = dp.create_subscriber()
+            reader_qos = DataReaderQos(
+                reliability=Reliability("RELIABLE"),
+                durability=Durability("TRANSIENT_LOCAL"),
+            )
+            reader = sub.create_datareader(topic, qos=reader_qos)
+
+            # Wait for discovery first
+            status_cond = reader.get_statuscondition()
+            status_cond.set_enabled_statuses(STATUS_SUBSCRIPTION_MATCHED)
+            waitset = WaitSet()
+            waitset.attach(status_cond)
+
+            deadline = 5.0
+            while reader.matched_writers == 0 and deadline > 0:
+                try:
+                    waitset.wait(timeout=1.0)
+                except DdsTimeout:
+                    pass
+                deadline -= 1.0
+            assert reader.matched_writers > 0, "Discovery failed"
+
+            # After discovery, wait for TRANSIENT_LOCAL data delivery
+            status_cond.set_enabled_statuses(STATUS_DATA_AVAILABLE)
+            deadline = 5.0
+            samples = []
+            while deadline > 0 and len(samples) == 0:
+                try:
+                    waitset.wait(timeout=1.0)
+                except DdsTimeout:
+                    pass
+                samples = reader.take()
+                deadline -= 1.0
+
+            assert len(samples) > 0, "Late-joining reader should receive TRANSIENT_LOCAL data"
+            assert samples[0].data.value == 999
+
+    def test_durability_volatile(self, domain_id: int):
+        """VOLATILE: late-joining reader should NOT receive previously written data."""
+        from int2dds import DdsTimeout
+        from int2dds.core.qos import DataWriterQos, DataReaderQos, Reliability, Durability
+        from int2dds.core.conditions import STATUS_SUBSCRIPTION_MATCHED
+
+        with DomainParticipant(domain_id=domain_id) as dp:
+            topic = dp.create_topic("QoS_Volatile_Topic", TestMessage)
+            pub = dp.create_publisher()
+
+            writer_qos = DataWriterQos(
+                reliability=Reliability("RELIABLE"),
+                durability=Durability("VOLATILE"),
+            )
+            writer = pub.create_datawriter(topic, qos=writer_qos)
+
+            # Write BEFORE reader exists
+            writer.write(TestMessage(value=888, text="volatile"))
+
+            # Now create reader with VOLATILE
+            sub = dp.create_subscriber()
+            reader_qos = DataReaderQos(
+                reliability=Reliability("RELIABLE"),
+                durability=Durability("VOLATILE"),
+            )
+            reader = sub.create_datareader(topic, qos=reader_qos)
+
+            # Wait for discovery
+            status_cond = reader.get_statuscondition()
+            status_cond.set_enabled_statuses(STATUS_SUBSCRIPTION_MATCHED)
+            waitset = WaitSet()
+            waitset.attach(status_cond)
+
+            deadline = 5.0
+            while reader.matched_writers == 0 and deadline > 0:
+                try:
+                    waitset.wait(timeout=1.0)
+                except DdsTimeout:
+                    pass
+                deadline -= 1.0
+            assert reader.matched_writers > 0, "Discovery failed"
+
+            # Try to take - should be empty (VOLATILE does not resend past data)
+            import time
+            time.sleep(0.5)
+            samples = reader.take()
+            assert len(samples) == 0, "VOLATILE reader should not receive past data"
+
+    def test_history_keep_last(self, domain_id: int):
+        """KEEP_LAST depth=1: only the last sample should be available."""
+        from int2dds import DdsTimeout
+        from int2dds.core.qos import (
+            DataWriterQos, DataReaderQos, Reliability, History,
+        )
+        from int2dds.core.conditions import STATUS_SUBSCRIPTION_MATCHED, STATUS_DATA_AVAILABLE
+
+        with DomainParticipant(domain_id=domain_id) as dp:
+            topic = dp.create_topic("QoS_History_Topic", TestMessage)
+            pub = dp.create_publisher()
+            sub = dp.create_subscriber()
+
+            writer_qos = DataWriterQos(
+                reliability=Reliability("RELIABLE"),
+                history=History("KEEP_LAST", depth=1),
+            )
+            reader_qos = DataReaderQos(
+                reliability=Reliability("RELIABLE"),
+                history=History("KEEP_LAST", depth=1),
+            )
+
+            writer = pub.create_datawriter(topic, qos=writer_qos)
+            reader = sub.create_datareader(topic, qos=reader_qos)
+
+            # Wait for discovery
+            status_cond = reader.get_statuscondition()
+            status_cond.set_enabled_statuses(STATUS_SUBSCRIPTION_MATCHED)
+            waitset = WaitSet()
+            waitset.attach(status_cond)
+
+            deadline = 5.0
+            while writer.matched_readers == 0 and deadline > 0:
+                try:
+                    waitset.wait(timeout=1.0)
+                except DdsTimeout:
+                    pass
+                deadline -= 1.0
+            assert writer.matched_readers > 0
+
+            # Write multiple samples rapidly
+            for i in range(5):
+                writer.write(TestMessage(value=i, text=f"msg_{i}"))
+
+            # Wait for data
+            status_cond.set_enabled_statuses(STATUS_DATA_AVAILABLE)
+            try:
+                waitset.wait(timeout=5.0)
+            except DdsTimeout:
+                pass
+
+            import time
+            time.sleep(0.5)
+
+            samples = reader.take()
+            # With KEEP_LAST depth=1, should receive at most 1 sample (the latest)
+            assert len(samples) <= 1, f"Expected at most 1 sample, got {len(samples)}"
+            if len(samples) == 1:
+                assert samples[0].data.value == 4  # last written value
+
+    def test_history_keep_all(self, domain_id: int):
+        """KEEP_ALL: all written samples should be available."""
+        from int2dds import DdsTimeout
+        from int2dds.core.qos import (
+            DataWriterQos, DataReaderQos, Reliability, History,
+        )
+        from int2dds.core.conditions import STATUS_SUBSCRIPTION_MATCHED, STATUS_DATA_AVAILABLE
+
+        with DomainParticipant(domain_id=domain_id) as dp:
+            topic = dp.create_topic("QoS_HistoryAll_Topic", TestMessage)
+            pub = dp.create_publisher()
+            sub = dp.create_subscriber()
+
+            writer_qos = DataWriterQos(
+                reliability=Reliability("RELIABLE"),
+                history=History("KEEP_ALL"),
+            )
+            reader_qos = DataReaderQos(
+                reliability=Reliability("RELIABLE"),
+                history=History("KEEP_ALL"),
+            )
+
+            writer = pub.create_datawriter(topic, qos=writer_qos)
+            reader = sub.create_datareader(topic, qos=reader_qos)
+
+            # Wait for discovery
+            status_cond = reader.get_statuscondition()
+            status_cond.set_enabled_statuses(STATUS_SUBSCRIPTION_MATCHED)
+            waitset = WaitSet()
+            waitset.attach(status_cond)
+
+            deadline = 5.0
+            while writer.matched_readers == 0 and deadline > 0:
+                try:
+                    waitset.wait(timeout=1.0)
+                except DdsTimeout:
+                    pass
+                deadline -= 1.0
+            assert writer.matched_readers > 0
+
+            # Write multiple samples
+            status_cond.set_enabled_statuses(STATUS_DATA_AVAILABLE)
+            for i in range(5):
+                writer.write(TestMessage(value=i, text=f"msg_{i}"))
+
+            # Wait for all data to arrive
+            import time
+            time.sleep(1.0)
+
+            samples = reader.take()
+            values = [s.data.value for s in samples]
+            # With KEEP_ALL, should receive all 5 samples
+            assert len(samples) == 5, f"Expected 5 samples, got {len(samples)}"
+            assert values == [0, 1, 2, 3, 4]
+
+    def test_partition_mismatch(self, domain_id: int):
+        """Different partitions should not communicate."""
+        from int2dds.core.publisher import Publisher
+        from int2dds.core.subscriber import Subscriber
+        from int2dds.core.qos import PublisherQos, SubscriberQos, Partition
+
+        with DomainParticipant(domain_id=domain_id) as dp:
+            topic = dp.create_topic("QoS_Partition_Topic", TestMessage)
+
+            pub = Publisher(dp, qos=PublisherQos(partition=Partition(names=["groupA"])))
+            sub = Subscriber(dp, qos=SubscriberQos(partition=Partition(names=["groupB"])))
+
+            writer = pub.create_datawriter(topic)
+            reader = sub.create_datareader(topic)
+
+            import time
+            time.sleep(1.0)
+
+            # Different partitions should not match
+            assert writer.matched_readers == 0
+            assert reader.matched_writers == 0
+
+    def test_partition_match(self, domain_id: int):
+        """Same partition should communicate."""
+        from int2dds import DdsTimeout
+        from int2dds.core.publisher import Publisher
+        from int2dds.core.subscriber import Subscriber
+        from int2dds.core.qos import PublisherQos, SubscriberQos, Partition
+        from int2dds.core.conditions import STATUS_SUBSCRIPTION_MATCHED, STATUS_DATA_AVAILABLE
+
+        with DomainParticipant(domain_id=domain_id) as dp:
+            topic = dp.create_topic("QoS_PartitionOK_Topic", TestMessage)
+
+            pub = Publisher(dp, qos=PublisherQos(partition=Partition(names=["groupA"])))
+            sub = Subscriber(dp, qos=SubscriberQos(partition=Partition(names=["groupA"])))
+
+            writer = pub.create_datawriter(topic)
+            reader = sub.create_datareader(topic)
+
+            # Wait for discovery
+            status_cond = reader.get_statuscondition()
+            status_cond.set_enabled_statuses(STATUS_SUBSCRIPTION_MATCHED)
+            waitset = WaitSet()
+            waitset.attach(status_cond)
+
+            deadline = 5.0
+            while writer.matched_readers == 0 and deadline > 0:
+                try:
+                    waitset.wait(timeout=1.0)
+                except DdsTimeout:
+                    pass
+                deadline -= 1.0
+            assert writer.matched_readers > 0, "Same partition should match"
+
+            # Write and read
+            status_cond.set_enabled_statuses(STATUS_DATA_AVAILABLE)
+            writer.write(TestMessage(value=77, text="partition ok"))
+            try:
+                waitset.wait(timeout=5.0)
+            except DdsTimeout:
+                pass
+            samples = reader.take()
+            assert len(samples) > 0
+            assert samples[0].data.value == 77
