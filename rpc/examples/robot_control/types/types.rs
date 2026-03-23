@@ -514,7 +514,7 @@ pub struct RobotControlService<T: RobotControl + Send + 'static> {
 
 impl<T: RobotControl + Send + 'static> RobotControlService<T> {
     pub fn new(params: ServiceParams, handler: T) -> DdsRpcResult<Self> {
-        let params = params.interface_name("RobotControl");
+        let params = params.interface_name("robot::RobotControl");
         let inner = Service::new(params, RobotControlDispatcher::new(handler))?;
         Ok(Self { inner })
     }
@@ -542,12 +542,12 @@ pub struct RobotControlClient {
 
 impl RobotControlClient {
     pub fn new(params: ClientParams) -> DdsRpcResult<Self> {
-        let client = Client::new(params.interface_name("RobotControl"))?;
+        let client = Client::new(params.interface_name("robot::RobotControl"))?;
         Ok(Self { client, default_timeout: Duration::from_secs(10) })
     }
 
     pub fn with_timeout(params: ClientParams, timeout: Duration) -> DdsRpcResult<Self> {
-        let client = Client::new(params.interface_name("RobotControl"))?;
+        let client = Client::new(params.interface_name("robot::RobotControl"))?;
         Ok(Self { client, default_timeout: timeout })
     }
 

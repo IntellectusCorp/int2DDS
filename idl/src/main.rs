@@ -12,7 +12,7 @@ struct Args {
     python_output: Option<String>,
     output_dir: Option<String>,
     crate_path: String,
-    _python_module: String,
+    python_module: String,
     default_string_bound: u32,
     string_pointer: bool,
     rpc_output: Option<String>,
@@ -108,7 +108,7 @@ fn parse_args() -> Args {
         python_output,
         output_dir,
         crate_path,
-        _python_module: python_module,
+        python_module,
         default_string_bound,
         string_pointer,
         rpc_output,
@@ -196,7 +196,7 @@ fn main() {
     });
 
     // If no output flags specified, default to generating Rust and C
-    let (rust_path, c_path, _python_path, rpc_path) =
+    let (rust_path, c_path, python_path, rpc_path) =
         if rust_path.is_none() && c_path.is_none() && python_path.is_none() && rpc_path.is_none()
         {
             (
@@ -240,18 +240,18 @@ fn main() {
         eprintln!("generated: {}", path);
     }
 
-    // // Generate Python
-    // if let Some(path) = &python_path {
-    //     let python_opts = codegen::python::PythonOptions {
-    //         int2dds_module: args.python_module.clone(),
-    //     };
-    //     let code = codegen::python::generate(&model, idl_filename, &python_opts);
-    //     if let Err(e) = write_file(path, &code) {
-    //         eprintln!("error: cannot write '{}': {}", path, e);
-    //         process::exit(1);
-    //     }
-    //     eprintln!("generated: {}", path);
-    // }
+    // Generate Python
+    if let Some(path) = &python_path {
+        let python_opts = codegen::python::PythonOptions {
+            int2dds_module: args.python_module.clone(),
+        };
+        let code = codegen::python::generate(&model, idl_filename, &python_opts);
+        if let Err(e) = write_file(path, &code) {
+            eprintln!("error: cannot write '{}': {}", path, e);
+            process::exit(1);
+        }
+        eprintln!("generated: {}", path);
+    }
 
     // Generate RPC (base types + RPC infrastructure)
     if let Some(path) = &rpc_path {
