@@ -36,18 +36,24 @@ pub struct Replier<TReq, TRep> {
 impl<TReq: DdsRpcType, TRep: DdsRpcType> Replier<TReq, TRep> {
     pub fn new(params: ReplierParams) -> DdsRpcResult<Self> {
         let topic_config = TopicNameConfig {
-            interface_name: None,
+            interface_name: params.interface_name.clone(),
             service_name: params.service_name.clone(),
             request_topic_override: params.request_topic_name.clone(),
             reply_topic_override: params.reply_topic_name.clone(),
+            request_type_override: None,
+            reply_type_override: None,
         };
 
         let request_topic_name = topic_config.request_topic();
         let reply_topic_name = topic_config.reply_topic();
+        let request_type_name =
+            topic_config.request_type().unwrap_or_else(|| Request::<TReq>::get_type_name());
+        let reply_type_name =
+            topic_config.reply_type().unwrap_or_else(|| Reply::<TRep>::get_type_name());
 
         let request_topic = params.participant.create_topic::<Request<TReq>>(
             &request_topic_name,
-            &Request::<TReq>::get_type_name(),
+            &request_type_name,
             TopicQos::default(),
             None,
             StatusMask::default(),
@@ -55,7 +61,7 @@ impl<TReq: DdsRpcType, TRep: DdsRpcType> Replier<TReq, TRep> {
 
         let reply_topic = params.participant.create_topic::<Reply<TRep>>(
             &reply_topic_name,
-            &Reply::<TRep>::get_type_name(),
+            &reply_type_name,
             TopicQos::default(),
             None,
             StatusMask::default(),
@@ -110,17 +116,24 @@ impl<TReq: DdsRpcType, TRep: DdsRpcType> Replier<TReq, TRep> {
         self.reply_writer.as_deref().ok_or(DdsError::AlreadyDeleted.into())
     }
 
-    /// Send a reply correlated with the given request identity. (7.8.1)
-    pub fn send_reply(&self, data: &TRep, related_request_id: &SampleIdentity) -> DdsRpcResult<()> {
+    /// Send a reply with explicit RemoteExceptionCode. (7.8.1)
+    pub fn send_reply_with_exception_code(
+        &self,
+        data: &TRep,
+        related_request_id: &SampleIdentity,
+        remote_ex: RemoteExceptionCode,
+    ) -> DdsRpcResult<()> {
         let mut reply = Reply {
-            header: ReplyHeader {
-                related_request_id: *related_request_id,
-                remote_ex: RemoteExceptionCode::Ok,
-            },
+            header: ReplyHeader { related_request_id: *related_request_id, remote_ex },
             data: data.clone(),
         };
         self.writer()?.write(&mut reply, InstanceHandle::NIL)?;
         Ok(())
+    }
+
+    /// Send a reply correlated with the given request identity. (7.8.1)
+    pub fn send_reply(&self, data: &TRep, related_request_id: &SampleIdentity) -> DdsRpcResult<()> {
+        self.send_reply_with_exception_code(data, related_request_id, RemoteExceptionCode::Ok)
     }
 
     /// Take a single pending request (non-blocking).
