@@ -1035,3 +1035,100 @@ class TestQoS:
             samples = reader.take()
             assert len(samples) > 0
             assert samples[0].data.value == 77
+
+
+class TestInstance:
+    """Instance management tests for keyed types."""
+
+    def test_register_instance(self, domain_id: int):
+        """register_instance should return a non-nil 16-byte handle."""
+        with DomainParticipant(domain_id=domain_id) as dp:
+            topic = dp.create_topic("Instance_Register_Topic", KeyedType)
+            pub = dp.create_publisher()
+            writer = pub.create_datawriter(topic)
+
+            sample = KeyedType(sensor_id=1, value=10.0)
+            handle = writer.register_instance(sample)
+            assert len(handle) == 16
+            assert handle != b'\x00' * 16  # not NIL
+
+    def test_lookup_instance(self, domain_id: int):
+        """lookup_instance should return the same handle as register_instance."""
+        with DomainParticipant(domain_id=domain_id) as dp:
+            topic = dp.create_topic("Instance_Lookup_Topic", KeyedType)
+            pub = dp.create_publisher()
+            writer = pub.create_datawriter(topic)
+
+            sample = KeyedType(sensor_id=2, value=20.0)
+            handle = writer.register_instance(sample)
+            found = writer.lookup_instance(sample)
+            assert found == handle
+
+    def test_unregister_instance(self, domain_id: int):
+        """unregister_instance should complete without error."""
+        with DomainParticipant(domain_id=domain_id) as dp:
+            topic = dp.create_topic("Instance_Unregister_Topic", KeyedType)
+            pub = dp.create_publisher()
+            writer = pub.create_datawriter(topic)
+
+            sample = KeyedType(sensor_id=3, value=30.0)
+            handle = writer.register_instance(sample)
+            writer.unregister_instance(sample, handle)  # should not raise
+
+    def test_dispose_valid_data_false(self, domain_id: int):
+        """After dispose, reader should receive a sample with valid_data=False."""
+        from int2dds import DdsTimeout
+        from int2dds.core.qos import DataWriterQos, DataReaderQos, Reliability
+        from int2dds.core.conditions import STATUS_SUBSCRIPTION_MATCHED, STATUS_DATA_AVAILABLE
+
+        with DomainParticipant(domain_id=domain_id) as dp:
+            topic = dp.create_topic("Instance_Dispose_Topic", KeyedType)
+            pub = dp.create_publisher()
+            sub = dp.create_subscriber()
+
+            writer_qos = DataWriterQos(reliability=Reliability("RELIABLE"))
+            reader_qos = DataReaderQos(reliability=Reliability("RELIABLE"))
+
+            writer = pub.create_datawriter(topic, qos=writer_qos)
+            reader = sub.create_datareader(topic, qos=reader_qos)
+
+            # Wait for discovery
+            status_cond = reader.get_statuscondition()
+            status_cond.set_enabled_statuses(STATUS_SUBSCRIPTION_MATCHED)
+            waitset = WaitSet()
+            waitset.attach(status_cond)
+
+            deadline = 5.0
+            while writer.matched_readers == 0 and deadline > 0:
+                try:
+                    waitset.wait(timeout=1.0)
+                except DdsTimeout:
+                    pass
+                deadline -= 1.0
+            assert writer.matched_readers > 0
+
+            # Write, then dispose
+            sample = KeyedType(sensor_id=4, value=40.0)
+            handle = writer.register_instance(sample)
+            writer.write(sample)
+
+            status_cond.set_enabled_statuses(STATUS_DATA_AVAILABLE)
+            try:
+                waitset.wait(timeout=5.0)
+            except DdsTimeout:
+                pass
+            # Take the valid sample first
+            samples = reader.take()
+            assert len(samples) > 0
+            assert samples[0].valid_data
+
+            # Now dispose
+            writer.dispose(sample, handle)
+            try:
+                waitset.wait(timeout=5.0)
+            except DdsTimeout:
+                pass
+
+            samples = reader.take()
+            assert len(samples) > 0
+            assert not samples[0].valid_data  # disposed = invalid data
