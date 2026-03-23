@@ -39,18 +39,25 @@ pub struct Requester<TReq, TRep> {
 impl<TReq: DdsRpcType, TRep: DdsRpcType> Requester<TReq, TRep> {
     pub fn new(params: RequesterParams) -> DdsRpcResult<Self> {
         let topic_config = TopicNameConfig {
-            interface_name: None, // request-reply style: no interface name (7.4.1)
+            interface_name: params.interface_name.clone(),
             service_name: params.service_name.clone(),
             request_topic_override: params.request_topic_name.clone(),
             reply_topic_override: params.reply_topic_name.clone(),
+            request_type_override: None,
+            reply_type_override: None,
         };
 
         let request_topic_name = topic_config.request_topic();
         let reply_topic_name = topic_config.reply_topic();
+        let request_type_name =
+            topic_config.request_type().unwrap_or_else(|| Request::<TReq>::get_type_name());
+        let reply_type_name = topic_config
+            .reply_type()
+            .unwrap_or_else(|| crate::types::Reply::<TRep>::get_type_name());
 
         let request_topic = params.participant.create_topic::<Request<TReq>>(
             &request_topic_name,
-            &Request::<TReq>::get_type_name(),
+            &request_type_name,
             TopicQos::default(),
             None,
             StatusMask::default(),
@@ -58,7 +65,7 @@ impl<TReq: DdsRpcType, TRep: DdsRpcType> Requester<TReq, TRep> {
 
         let reply_topic = params.participant.create_topic::<crate::types::Reply<TRep>>(
             &reply_topic_name,
-            &crate::types::Reply::<TRep>::get_type_name(),
+            &reply_type_name,
             TopicQos::default(),
             None,
             StatusMask::default(),
