@@ -11,21 +11,25 @@ use dashmap::DashMap;
 use log::debug;
 use socket2::{Domain, Protocol, SockAddr, Socket as Socket2, Type};
 
+use crate::rtps::messages::tcp_control_message::TcpControlMessage;
 use crate::rtps::transport::tcp::framing::write_framed_message;
 use crate::rtps::transport::{Transport, TransportType};
 
-/// TCP sender for DDS/RTPS communication
+/// TCP sender for DDS/RTPS communication with connection separation
 ///
-/// Manages TCP connections to remote endpoints and sends framed messages.
-/// Connections are cached and reused for efficiency.
+/// Maintains separate connection pools for control and data connections:
+/// - Control connections: carry DDS handshake, keepalive, and close messages
+/// - Data connections: carry only RTPS messages
 #[derive(Debug, Clone)]
 pub(crate) struct TcpSender {
     /// Working IP address for binding
     working_ip: String,
 
-    /// Connection pool: SocketAddr -> TcpStream
-    /// Uses DashMap for lock-free concurrent access
-    connections: Arc<DashMap<SocketAddr, TcpStream>>,
+    /// Control connection pool: remote SocketAddr -> TcpStream
+    control_connections: Arc<DashMap<SocketAddr, TcpStream>>,
+
+    /// Data connection pool: remote SocketAddr -> TcpStream
+    data_connections: Arc<DashMap<SocketAddr, TcpStream>>,
 
     /// Connection timeout duration
     connect_timeout: Duration,
@@ -61,7 +65,8 @@ impl TcpSender {
 
         Ok(Self {
             working_ip,
-            connections: Arc::new(DashMap::new()),
+            control_connections: Arc::new(DashMap::new()),
+            data_connections: Arc::new(DashMap::new()),
             connect_timeout: Duration::from_millis(connect_timeout_ms),
         })
     }
@@ -91,25 +96,18 @@ impl TcpSender {
         0 // TCP sender uses ephemeral ports
     }
 
-    /// Connect to a remote address and cache the connection
+    /// Establish a TCP connection to a remote address
     ///
-    /// This method checks if a connection already exists before attempting to connect.
-    /// Thread-safe: only one connection will be established even if called concurrently.
-    /// Uses the working_ip to bind the local side of the connection.
+    /// Creates a socket bound to working_ip, connects with timeout,
+    /// and configures socket options (nodelay, write timeout).
     ///
     /// # Arguments
     /// * `addr` - The remote socket address to connect to
     ///
     /// # Returns
-    /// * `Ok(())` - Connection established successfully or already exists
-    /// * `Err(io::Error)` - Connection failed
-    fn connect(&self, addr: &SocketAddr) -> io::Result<()> {
-        // Check if connection already exists
-        if self.connections.contains_key(addr) {
-            return Ok(());
-        }
-
-        // Create socket using socket2 to bind to working_ip
+    /// A configured TcpStream connected to the remote address
+    fn establish_connection(&self, addr: &SocketAddr) -> io::Result<TcpStream> {
+        // Create socket using socket2 to bidn to working_ip
         let socket2 = Socket2::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
 
         // Bind to working_ip with ephemeral port (0)
@@ -125,9 +123,12 @@ impl TcpSender {
         // Attempt to connect
         match socket2.connect(&SockAddr::from(*addr)) {
             Ok(_) => {}
-            Err(e) if e.raw_os_error() == Some(10035) || e.kind() == ErrorKind::WouldBlock => {
+            Err(e)
+                if e.raw_os_error() == Some(10035)
+                    || e.raw_os_error() == Some(115)
+                    || e.kind() == ErrorKind::WouldBlock =>
+            {
                 // Connection in progress (Windows: WSAEWOULDBLOCK, Unix: EINPROGRESS)
-                // Wait for connection with timeout
                 use std::time::Instant;
                 let start = Instant::now();
 
@@ -139,28 +140,26 @@ impl TcpSender {
                         ));
                     }
 
-                    // Check if there's an error on the socket
                     match socket2.take_error() {
                         Ok(Some(err)) => {
-                            // Connection failed with error
                             debug!("TcpSender: Connection to {:?} failed: {:?}", addr, err);
                             return Err(io::Error::new(
                                 ErrorKind::ConnectionRefused,
                                 format!("Connection failed to {:?}: {:?}", addr, err),
                             ));
                         }
+
                         Ok(None) => {
-                            // No error - check if connection is established
                             if socket2.peer_addr().is_ok() {
-                                // Connection established
-                                debug!("TcpSender: Connection to {:?} established (peer_addr check passed)", addr);
+                                debug!(
+                                    "TcpSender: Connection to {:?} established (peer_addr check passed)",
+                                    addr
+                                );
                                 break;
                             }
                         }
-                        Err(e) => {
-                            // take_error() itself failed
-                            return Err(e);
-                        }
+
+                        Err(e) => return Err(e),
                     }
 
                     std::thread::sleep(Duration::from_millis(10));
@@ -175,112 +174,187 @@ impl TcpSender {
         // Convert to TcpStream
         let stream: TcpStream = socket2.into();
 
-        // Configure socket options (best-effort, don't fail if these fail)
-        // These optimizations are nice-to-have but not critical for functionality
-        let nodelay = Self::get_nodelay();
-        if stream.set_nodelay(nodelay).is_err() {
-            // warn!(
-            //     "TcpSender: Failed to set nodelay={} for {:?}: {:?} (continuing anyway)",
-            //     nodelay, addr, e
-            // );
+        // Configure socket options (best-effort)
+        let _ = stream.set_nodelay(Self::get_nodelay());
+        let _ = stream.set_write_timeout(Some(Self::get_write_timeout()));
+
+        Ok(stream)
+    }
+
+    /// Connect to a remote control port
+    ///
+    /// Establishes a TCP connection for control message exchange
+    /// (handshake, keepalive, close).
+    ///
+    /// # Arguments
+    /// * `addr` - The remote control port address
+    pub(crate) fn connect_control(&self, addr: &SocketAddr) -> io::Result<()> {
+        if self.control_connections.contains_key(addr) {
+            return Ok(());
         }
 
-        let write_timeout = Self::get_write_timeout();
-        if stream.set_write_timeout(Some(write_timeout)).is_err() {
-            // warn!(
-            //     "TcpSender: Failed to set write timeout={:?} for {:?}: {:?} (continuing anyway)",
-            //     write_timeout, addr, e
-            // );
+        let stream = self.establish_connection(addr)?;
+
+        // consider concurrency issue(establish_connection takes hundreds of mills)
+        if let Some(old) = self.control_connections.insert(*addr, stream) {
+            debug!("TcpSender: Control connection to {:?} replaced by another thread", addr);
+            drop(old);
         }
 
-        // Store connection in the pool (DashMap handles concurrent inserts safely)
-        // Use insert, which returns the old value if the key was already present
-        if let Some(old_stream) = self.connections.insert(*addr, stream) {
-            debug!("TcpSender: Connection to {:?} established by another thread", addr);
-            drop(old_stream); // Close the old connection
-        }
-
-        debug!("TcpSender: Connected to {:?} from {}", addr, self.working_ip);
+        debug!("TcpSender: Control connection to {:?} from {}", addr, self.working_ip);
         Ok(())
     }
 
-    /// Disconnect from a remote address and remove from connection pool
+    /// Connect to a remote data port
+    ///
+    /// Establishes a TCP connection for RTPS message exchange.
+    /// Should only be called after handshake completes and the remote
+    /// data port is known.
     ///
     /// # Arguments
-    /// * `addr` - The remote socket address to disconnect from
-    pub(crate) fn disconnect(&self, addr: &SocketAddr) {
-        if let Some((_addr, stream)) = self.connections.remove(addr) {
-            drop(stream); // Close connection
-            debug!("TcpSender: Disconnected from {:?}", addr);
+    /// * `addr` - The remote data port address
+    pub(crate) fn connect_data(&self, addr: &SocketAddr) -> io::Result<()> {
+        if self.data_connections.contains_key(addr) {
+            return Ok(());
         }
+
+        let stream = self.establish_connection(addr)?;
+
+        // consider concurrency issue(establish_connection takes hundreds of mills)
+        if let Some(old) = self.data_connections.insert(*addr, stream) {
+            debug!("TcpSender: Data connection to {:?} replaced by another thread", addr);
+            drop(old);
+        }
+
+        debug!("TcpSender: Data connection to {:?} from {}", addr, self.working_ip);
+        Ok(())
     }
 
-    /// Send a message to a specific address
-    ///
-    /// Automatically establishes connection if not already connected.
-    /// Uses framing protocol to send the message.
-    ///
-    /// This method minimizes lock contention by:
-    /// 1. Holding the lock only to access the HashMap
-    /// 2. Cloning the TcpStream (cheap, uses Arc internally)
-    /// 3. Performing network I/O without holding the lock
+    /// Send a control message on the control connection
     ///
     /// # Arguments
-    /// * `addr` - The destination socket address
-    /// * `buffer` - The data to send
-    ///
-    /// # Returns
-    /// * `Ok(usize)` - Number of bytes sent (excluding framing overhead)
-    /// * `Err(io::Error)` - Send failed
-    pub(crate) fn send_msg(&self, addr: &SocketAddr, buffer: &[u8]) -> io::Result<usize> {
-        // Establish connection if it doesn't exist
-        if !self.connections.contains_key(addr) {
-            self.connect(addr)?;
+    /// * `addr` - The remote control port address
+    /// * `msg` - The control message to send
+    pub(crate) fn send_control(
+        &self,
+        addr: &SocketAddr,
+        msg: &TcpControlMessage,
+    ) -> io::Result<()> {
+        if !self.control_connections.contains_key(addr) {
+            self.connect_control(addr)?;
         }
 
-        // Get and clone the stream
-        // DashMap handles concurrent access without explicit locking
         let mut stream = self
-            .connections
+            .control_connections
             .get(addr)
-            .ok_or_else(|| io::Error::new(ErrorKind::NotConnected, "Connection not found"))?
+            .ok_or_else(|| io::Error::new(ErrorKind::NotConnected, "Control connection not found"))?
             .value()
             .try_clone()?;
 
-        // Perform network I/O without holding the lock
-        // This allows concurrent sends to different addresses
-        match write_framed_message(&mut stream, buffer) {
+        let bytes = msg.serialize()?;
+        match write_framed_message(&mut stream, &bytes) {
             Ok(()) => {
-                debug!("TcpSender: Sent {} bytes to {:?}", buffer.len(), addr);
-                Ok(buffer.len())
+                debug!("TcpSender: Sent control message to {:?}", addr);
+                Ok(())
             }
             Err(e) => {
-                // Connection might be broken, remove it
-                self.disconnect(addr);
+                self.disconnect_control(addr);
                 Err(e)
             }
         }
     }
 
-    /// Get the number of active connections
-    pub(crate) fn connection_count(&self) -> usize {
-        self.connections.len()
+    /// Send RTPS data on the data connection
+    ///
+    /// # Arguments
+    /// * `addr` - The remote data port address
+    /// * `buffer` - The RTPS message bytes to send
+    pub(crate) fn send_data(&self, addr: &SocketAddr, buffer: &[u8]) -> io::Result<usize> {
+        if !self.data_connections.contains_key(addr) {
+            return Err(io::Error::new(
+                ErrorKind::NotConnected,
+                format!("No data connection to {:?} (handshake required first)", addr),
+            ));
+        }
+
+        let mut stream = self
+            .data_connections
+            .get(addr)
+            .ok_or_else(|| io::Error::new(ErrorKind::NotConnected, "Data connection not found"))?
+            .value()
+            .try_clone()?;
+
+        match write_framed_message(&mut stream, buffer) {
+            Ok(()) => {
+                debug!("TcpSender: Sent {} bytes data to {:?}", buffer.len(), addr);
+                Ok(buffer.len())
+            }
+            Err(e) => {
+                self.disconnect_data(addr);
+                Err(e)
+            }
+        }
+    }
+
+    /// Disconnect a control connection
+    pub(crate) fn disconnect_control(&self, addr: &SocketAddr) {
+        if let Some((_addr, stream)) = self.control_connections.remove(addr) {
+            drop(stream);
+            debug!("TcpSender: Disconnected control from {:?}", addr);
+        }
+    }
+
+    /// Disconnect a data connection
+    pub(crate) fn disconnect_data(&self, addr: &SocketAddr) {
+        if let Some((_addr, stream)) = self.data_connections.remove(addr) {
+            drop(stream);
+            debug!("TcpSender: Disconnected data from {:?}", addr);
+        }
+    }
+
+    /// Disconnect all connections (control + data) for a remote address
+    pub(crate) fn disconnect(&self, addr: &SocketAddr) {
+        self.disconnect_control(addr);
+        self.disconnect_data(addr);
+    }
+
+    /// Get a mutable reference to a control connection stream
+    ///
+    /// Used by TcpHandshakeManager to write handshake messages directly
+    pub(crate) fn get_control_stream(
+        &self,
+        addr: &SocketAddr,
+    ) -> Option<dashmap::mapref::one::Ref<'_, SocketAddr, TcpStream>> {
+        self.control_connections.get(addr)
+    }
+
+    /// Get the number of active control connections
+    pub(crate) fn control_connection_count(&self) -> usize {
+        self.control_connections.len()
+    }
+
+    /// Get the number of active data connections
+    pub(crate) fn data_connection_count(&self) -> usize {
+        self.data_connections.len()
     }
 
     /// Close all connections
     pub(crate) fn close_all(self) {
-        self.connections.clear();
+        self.control_connections.clear();
+        self.data_connections.clear();
         debug!("TcpSender: All connections closed");
     }
 }
 
 /// Implementation of Transport trait for TcpSender
+///
+/// The Transport trait sends RTPS data, so it maps to data connections.
 impl Transport for TcpSender {
     fn send(&self, addr: &SocketAddr, data: &[u8]) -> io::Result<usize> {
-        self.send_msg(addr, data)
+        self.send_data(addr, data)
     }
 
-    fn send_multicast(&self, _domain_id: u32, _data: &[u8]) -> io::Result<usize> {
+    fn send_multicast(&self, domain_id: u32, data: &[u8]) -> io::Result<usize> {
         // TCP does not support multicast
         Err(io::Error::new(ErrorKind::Unsupported, "TCP transport does not support multicast"))
     }
@@ -297,7 +371,7 @@ impl Transport for TcpSender {
         self.close_all();
     }
 }
-#[cfg(target_os = "windows")]
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,91 +379,123 @@ mod tests {
     use std::net::TcpListener;
     use std::thread;
 
+    use crate::rtps::messages::tcp_control_message::HandshakeData;
+    use crate::rtps::transport::tcp::framing::read_framed_message;
+
     #[test]
     fn test_tcp_sender_creation() {
         let sender = TcpSender::new("127.0.0.1".to_string()).unwrap();
-        assert_eq!(sender.port(), 0); // Ephemeral port
-        assert_eq!(sender.connection_count(), 0);
+        assert_eq!(sender.port(), 0);
+        assert_eq!(sender.control_connection_count(), 0);
+        assert_eq!(sender.data_connection_count(), 0);
     }
 
     #[test]
-    fn test_tcp_sender_connect_and_send() {
-        // Start a simple TCP server
+    fn test_tcp_sender_control_send() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let server_addr = listener.local_addr().unwrap();
 
-        // Spawn server thread
         let server_handle = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-
-            // Read framed message
-            use crate::rtps::transport::tcp::framing::read_framed_message;
             let data = read_framed_message(&mut stream).unwrap();
-
-            assert_eq!(data, b"Hello, TCP!");
+            let msg = TcpControlMessage::deserialize(&data).unwrap();
+            assert!(matches!(msg, TcpControlMessage::Keepalive));
         });
 
-        // Client: Create sender and send message
         let sender = TcpSender::new("127.0.0.1".to_string()).unwrap();
-        let result = sender.send_msg(&server_addr, b"Hello, TCP!");
-
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 11); // "Hello, TCP!" length
-        assert_eq!(sender.connection_count(), 1);
+        sender.send_control(&server_addr, &TcpControlMessage::Keepalive).unwrap();
+        assert_eq!(sender.control_connection_count(), 1);
+        assert_eq!(sender.data_connection_count(), 0);
 
         server_handle.join().unwrap();
     }
 
     #[test]
-    fn test_tcp_sender_reuses_connection() {
+    fn test_tcp_sender_data_send() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let server_addr = listener.local_addr().unwrap();
 
         let server_handle = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-
-            use crate::rtps::transport::tcp::framing::read_framed_message;
-
-            // Receive two messages on same connection
-            let msg1 = read_framed_message(&mut stream).unwrap();
-            let msg2 = read_framed_message(&mut stream).unwrap();
-
-            assert_eq!(msg1, b"First");
-            assert_eq!(msg2, b"Second");
+            let data = read_framed_message(&mut stream).unwrap();
+            assert_eq!(data, b"RTPS data payload");
         });
 
         let sender = TcpSender::new("127.0.0.1".to_string()).unwrap();
 
-        // Send first message
-        sender.send_msg(&server_addr, b"First").unwrap();
-        assert_eq!(sender.connection_count(), 1);
-
-        // Send second message (should reuse connection)
-        sender.send_msg(&server_addr, b"Second").unwrap();
-        assert_eq!(sender.connection_count(), 1); // Still 1 connection
+        // Data send requires explicit connect_data first (no auto-connect)
+        sender.connect_data(&server_addr).unwrap();
+        let result = sender.send_data(&server_addr, b"RTPS data payload");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 17);
+        assert_eq!(sender.data_connection_count(), 1);
+        assert_eq!(sender.control_connection_count(), 0);
 
         server_handle.join().unwrap();
     }
 
     #[test]
-    fn test_tcp_sender_disconnect() {
+    fn test_tcp_sender_data_send_without_connect_fails() {
+        let sender = TcpSender::new("127.0.0.1".to_string()).unwrap();
+        let addr = SocketAddr::from(([127, 0, 0, 1], 9999));
+
+        // send_data without prior connect_data should fail
+        let result = sender.send_data(&addr, b"test");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::NotConnected);
+    }
+
+    #[test]
+    fn test_tcp_sender_disconnect_control() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let server_addr = listener.local_addr().unwrap();
 
         let _server_handle = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-
-            // Read the message to prevent connection abort
-            use crate::rtps::transport::tcp::framing::read_framed_message;
-            let _ = read_framed_message(&mut stream);
+            let (_stream, _) = listener.accept().unwrap();
+            thread::sleep(Duration::from_secs(1));
         });
 
         let sender = TcpSender::new("127.0.0.1".to_string()).unwrap();
-        sender.send_msg(&server_addr, b"Test").unwrap();
-        assert_eq!(sender.connection_count(), 1);
+        sender.connect_control(&server_addr).unwrap();
+        assert_eq!(sender.control_connection_count(), 1);
 
-        sender.disconnect(&server_addr);
-        assert_eq!(sender.connection_count(), 0);
+        sender.disconnect_control(&server_addr);
+        assert_eq!(sender.control_connection_count(), 0);
+    }
+
+    #[test]
+    fn test_tcp_sender_disconnect_all() {
+        let ctrl_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let data_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let ctrl_addr = ctrl_listener.local_addr().unwrap();
+        let data_addr = data_listener.local_addr().unwrap();
+
+        let h1 = thread::spawn(move || {
+            let _ = ctrl_listener.accept();
+            thread::sleep(Duration::from_secs(1));
+        });
+        let h2 = thread::spawn(move || {
+            let _ = data_listener.accept();
+            thread::sleep(Duration::from_secs(1));
+        });
+
+        let sender = TcpSender::new("127.0.0.1".to_string()).unwrap();
+        sender.connect_control(&ctrl_addr).unwrap();
+        sender.connect_data(&data_addr).unwrap();
+
+        assert_eq!(sender.control_connection_count(), 1);
+        assert_eq!(sender.data_connection_count(), 1);
+
+        // disconnect() removes both types for same addr, but here addrs differ
+        // Use specific disconnects
+        sender.disconnect_control(&ctrl_addr);
+        sender.disconnect_data(&data_addr);
+
+        assert_eq!(sender.control_connection_count(), 0);
+        assert_eq!(sender.data_connection_count(), 0);
+
+        let _ = h1.join();
+        let _ = h2.join();
     }
 
     #[test]
