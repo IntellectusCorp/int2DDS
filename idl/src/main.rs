@@ -261,7 +261,7 @@ fn main() {
         let rpc_opts = codegen::rpc::RpcOptions {
             crate_path: args.crate_path.clone(),
         };
-        let mut code = String::from("#![allow(non_camel_case_types)]\n\n");
+        let mut code = String::from("#![allow(non_camel_case_types, dead_code, unused_imports, unreachable_patterns, unused_variables)]\n\n");
         code.push_str(&codegen::rust::generate(&model, idl_filename, &rust_opts));
         code.push('\n');
         code.push_str(&codegen::rpc::generate(&model, &rpc_opts));
