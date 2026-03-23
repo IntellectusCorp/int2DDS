@@ -388,6 +388,7 @@ impl Parser {
     }
 
     fn parse_enum_variant(&mut self) -> Result<EnumVariant, ParseError> {
+        let annotations = self.parse_annotations()?;
         let name = self.expect_ident()?;
         let value = if matches!(self.peek(), Token::Equals) {
             self.advance();
@@ -395,7 +396,7 @@ impl Parser {
         } else {
             None
         };
-        Ok(EnumVariant { name, value })
+        Ok(EnumVariant { name, value, annotations })
     }
 
     fn parse_typedef(&mut self) -> Result<TypedefDef, ParseError> {
@@ -963,6 +964,35 @@ mod tests {
             assert_eq!(e.variants[1].name, "GREEN");
             assert_eq!(e.variants[1].value, Some(5));
             assert_eq!(e.variants[2].name, "BLUE");
+        } else {
+            panic!("expected enum");
+        }
+    }
+
+    #[test]
+    fn test_enum_value_annotation() {
+        let defs = parse_str(
+            r#"
+            enum Priority {
+                LOW,
+                @value(5) MEDIUM,
+                @value(10) HIGH,
+                @value(100) CRITICAL
+            };
+            "#,
+        );
+        if let Definition::Enum(e) = &defs[0] {
+            assert_eq!(e.name, "Priority");
+            assert_eq!(e.variants.len(), 4);
+            assert_eq!(e.variants[0].name, "LOW");
+            assert_eq!(e.variants[0].value, None);
+            assert!(e.variants[0].annotations.is_empty());
+            assert_eq!(e.variants[1].name, "MEDIUM");
+            assert_eq!(e.variants[1].annotations[0].name, "value");
+            assert_eq!(e.variants[2].name, "HIGH");
+            assert_eq!(e.variants[2].annotations[0].name, "value");
+            assert_eq!(e.variants[3].name, "CRITICAL");
+            assert_eq!(e.variants[3].annotations[0].name, "value");
         } else {
             panic!("expected enum");
         }
