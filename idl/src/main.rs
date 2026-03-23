@@ -12,7 +12,7 @@ struct Args {
     python_output: Option<String>,
     output_dir: Option<String>,
     crate_path: String,
-    python_module: String,
+    _python_module: String,
     default_string_bound: u32,
     string_pointer: bool,
     rpc_output: Option<String>,
@@ -108,7 +108,7 @@ fn parse_args() -> Args {
         python_output,
         output_dir,
         crate_path,
-        python_module,
+        _python_module: python_module,
         default_string_bound,
         string_pointer,
         rpc_output,
@@ -196,7 +196,7 @@ fn main() {
     });
 
     // If no output flags specified, default to generating Rust and C
-    let (rust_path, c_path, python_path, rpc_path) =
+    let (rust_path, c_path, _python_path, rpc_path) =
         if rust_path.is_none() && c_path.is_none() && python_path.is_none() && rpc_path.is_none()
         {
             (
@@ -261,9 +261,10 @@ fn main() {
         let rpc_opts = codegen::rpc::RpcOptions {
             crate_path: args.crate_path.clone(),
         };
-        let mut code = codegen::rpc::generate(&model, &rpc_opts);
-        code.push('\n');
+        let mut code = String::from("#![allow(non_camel_case_types)]\n\n");
         code.push_str(&codegen::rust::generate(&model, idl_filename, &rust_opts));
+        code.push('\n');
+        code.push_str(&codegen::rpc::generate(&model, &rpc_opts));
         if let Err(e) = write_file(path, &code) {
             eprintln!("error: cannot write '{}': {}", path, e);
             process::exit(1);
