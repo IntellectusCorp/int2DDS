@@ -183,9 +183,9 @@ impl<'a> RpcGen<'a> {
         self.line("");
         self.emit_service_dispatcher(&iface.name, &all_ops);
         self.line("");
-        self.emit_service_wrapper(&iface.name);
+        self.emit_service_wrapper(&iface.name, &iface.qualified_name);
         self.line("");
-        self.emit_client_struct(&iface.name, &all_ops);
+        self.emit_client_struct(&iface.name, &iface.qualified_name, &all_ops);
         self.line("");
         self.emit_client_async_impl(&iface.name, &all_ops);
         self.line("");
@@ -681,7 +681,7 @@ impl<'a> RpcGen<'a> {
     }
 
     /// Generate typed service wrapper that auto-injects interface_name into ServiceParams.
-    fn emit_service_wrapper(&mut self, iface_name: &str) {
+    fn emit_service_wrapper(&mut self, iface_name: &str, qualified_name: &str) {
         let call_type = format!("{}_Call", iface_name);
         let return_type = format!("{}_Return", iface_name);
         let service_name = format!("{}Service", iface_name);
@@ -712,7 +712,7 @@ impl<'a> RpcGen<'a> {
         self.indent += 1;
         self.line(&format!(
             "let params = params.interface_name(\"{}\");",
-            iface_name
+            qualified_name
         ));
         self.line(&format!(
             "let inner = Service::new(params, {}::new(handler))?;",
@@ -755,7 +755,7 @@ impl<'a> RpcGen<'a> {
 
     /// (7.11.1.5.4) Generate typed client with per-operation methods.
     /// raises → DdsRpcResult<T, E>, no raises → DdsRpcResult<T>.
-    fn emit_client_struct(&mut self, iface_name: &str, ops: &[ResolvedOperation]) {
+    fn emit_client_struct(&mut self, iface_name: &str, qualified_name: &str, ops: &[ResolvedOperation]) {
         let call_type = format!("{}_Call", iface_name);
         let return_type = format!("{}_Return", iface_name);
         let client_name = format!("{}Client", iface_name);
@@ -778,7 +778,7 @@ impl<'a> RpcGen<'a> {
         self.indent += 1;
         self.line(&format!(
             "let client = Client::new(params.interface_name(\"{}\"))?;",
-            iface_name
+            qualified_name
         ));
         self.line("Ok(Self { client, default_timeout: Duration::from_secs(10) })");
         self.indent -= 1;
@@ -790,7 +790,7 @@ impl<'a> RpcGen<'a> {
         self.indent += 1;
         self.line(&format!(
             "let client = Client::new(params.interface_name(\"{}\"))?;",
-            iface_name
+            qualified_name
         ));
         self.line("Ok(Self { client, default_timeout: timeout })");
         self.indent -= 1;
