@@ -1,4 +1,7 @@
-//! DDS-RPC common types (7.5.1.1.1)
+//! Common wire types shared across all RPC interactions.
+//!
+//! Includes SampleIdentity for request-reply correlation, RemoteExceptionCode
+//! for standard error codes, and the Request/Reply envelope traits.
 
 use std::any::Any;
 use std::fmt::Debug;
@@ -66,7 +69,7 @@ pub struct SampleIdentity {
     pub sequence_number: RpcSequenceNumber,
 }
 
-// QueryCondition support for SampleIdentity (7.2.3)
+// QueryCondition support for SampleIdentity
 //
 // writer_guid is compared as a 32-char hex string.
 // sequence_number is compared via nested .high (i32) and .low (u32) fields.
@@ -141,7 +144,7 @@ pub struct Reply<T> {
     pub data: T,
 }
 
-/// Default case in Call/Return unions for unrecognized operations (7.5.1.1.6, 7.5.1.1.7)
+/// Default case in Call/Return unions for unrecognized operations
 #[derive(int2dds_derive::DdsType, Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[dds_type(crate_path = "int2dds", no_additional_derives)]
 pub struct UnknownOperation {}
@@ -151,7 +154,7 @@ pub struct UnknownOperation {}
 #[dds_type(crate_path = "int2dds", no_additional_derives)]
 pub struct UnknownException {}
 
-/// Dummy member for In/Out structs with no parameters (7.5.1.1.4)
+/// Dummy member for In/Out structs with no parameters
 #[derive(int2dds_derive::DdsType, Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[dds_type(crate_path = "int2dds", no_additional_derives)]
 pub struct UnusedMember {}

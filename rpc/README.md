@@ -1,25 +1,23 @@
-# int2dds-rpc
+# int2DDS-rpc
 
 DDS-RPC (Remote Procedure Call over DDS) implementation for int2DDS, based on the [OMG DDS-RPC specification](https://www.omg.org/spec/DDS-RPC/).
+
+<br>
 
 ## Overview
 
 DDS excels at publish-subscribe communication, but many systems also require request-reply interactions. DDS-RPC addresses this by providing a standardized request-reply and function-call abstraction on top of DDS. This enables typed RPC semantics while retaining DDS’s QoS, discovery, and transport benefits.
 
-int2dds-rpc is an implementation of this model in Rust. It provides a function-call style API on top of DDS-RPC. You define service interfaces in OMG IDL, generate Rust code using int2dds-idl, and then use the generated client and service types to perform remote procedure calls over DDS.
+int2DDS-rpc is an implementation of this model in Rust. It provides a function-call style API on top of DDS-RPC. You define service interfaces in OMG IDL, generate Rust code using int2dds-idl, and then use the generated client and service types to perform remote procedure calls over DDS.
 
-> **Note:** Currently only the **Basic Service Mapping** profile is implemented. The Enhanced Service Mapping profile is not yet supported.
+Currently, int2DDS-rpc only supports Basic Service Mapping profile. The Enhanced Service Mapping profile is not yet implemented.
 
-**Workflow:**
 
-1. Define your interface in an `.idl` file
-2. Generate Rust types with `int2dds-idl --rpc`
-3. Implement the generated service trait
-4. Use the generated client to call remote methods
+<br>
 
 ## Quick Start: Robot Control Example
 
-### Step 1 — Define the IDL
+### Step 1: Define the IDL
 
 Create `robot_control.idl`:
 
@@ -50,7 +48,9 @@ module robot {
 };
 ```
 
-### Step 2 — Generate Rust Code
+<br>
+
+### Step 2: Generate Rust Code
 
 ```bash
 int2dds-idl --rpc types.rs robot_control.idl
@@ -66,7 +66,9 @@ This generates all the types needed for RPC communication:
 | `RobotControlService` | Service wrapper that dispatches requests to your implementation |
 | `RobotControl_navigate_Error` | Enum for methods that raise multiple exceptions |
 
-### Step 3 — Implement the Service
+<br>
+
+### Step 3: Implement the Service
 
 ```rust
 use int2dds::dcps::domain::domain_participant_factory::DomainParticipantFactory;
@@ -130,9 +132,12 @@ fn main() {
 }
 ```
 
-`Server` can host multiple services — just call `add_service()` for each one.
+`Server` can host multiple services. Just call `add_service()` for each one.
 
-### Step 4 — Use the Client
+
+<br>
+
+### Step 4: Use the Client
 
 ```rust
 use int2dds_rpc::client::ClientParams;
@@ -146,7 +151,6 @@ fn main() {
 
     let client = RobotControlClient::new(ClientParams::new(participant.clone())).unwrap();
 
-    // Wait for the service to be discovered
     client.wait_for_service_timeout(Duration::from_secs(10)).unwrap();
 
     let timeout = Duration::from_secs(5);
@@ -187,69 +191,16 @@ fn main() {
 }
 ```
 
+<br>
+
 ## Running the Example
 
 ```bash
-# Terminal 1 — start the service
+# Terminal 1: start the service
 cargo run --example robot_control_service
 
-# Terminal 2 — run the client
+# Terminal 2: run the client
 cargo run --example robot_control_client
 ```
 
-## Error Handling
-
-All client methods return `DdsRpcResult<T, E>`, which resolves to `Result<T, DdsRpcError<E>>`:
-
-```rust
-match client.some_method(args, timeout) {
-    Ok(value) => { /* success */ }
-    Err(DdsRpcError::UserException(ex))  => { /* IDL-defined exception */ }
-    Err(DdsRpcError::Remote(code))       => { /* RemoteExceptionCode (e.g. UnknownOperation) */ }
-    Err(DdsRpcError::Timeout)            => { /* no reply within timeout */ }
-    Err(DdsRpcError::Dds(err))           => { /* underlying DDS error */ }
-}
-```
-
-## Configuration
-
-Both `ClientParams` and `ServiceParams` support builder-style configuration:
-
-```rust
-let client = RobotControlClient::new(
-    ClientParams::new(participant)
-        .service_name("my_robot")
-        .instance_name("robot_1"),
-).unwrap();
-
-let service = RobotControlService::new(
-    ServiceParams::new(participant)
-        .service_name("my_robot")
-        .instance_name("robot_1"),
-    MyImpl::new(),
-).unwrap();
-```
-
-## Architecture
-
-```
-┌──────────────────────────────────────────────────────┐
-│                   IDL Definition                     │
-│              (robot_control.idl)                     │
-└──────────────────────┬───────────────────────────────┘
-                       │  int2dds-idl --rpc
-                       ▼
-┌──────────────────────────────────────────────────────┐
-│                Generated Code (types.rs)             │
-│  Traits, Client, Service, Call/Return enums, etc.    │
-└───────┬──────────────────────────────────┬───────────┘
-        │                                  │
-        ▼                                  ▼
-┌───────────────┐                 ┌────────────────┐
-│ Client Side   │    DDS Topics   │ Service Side   │
-│               │ ◄─────────────► │                │
-│ RobotControl- │  Request/Reply  │ RobotControl-  │
-│ Client        │                 │ Service        │
-│               │                 │   + Server     │
-└───────────────┘                 └────────────────┘
-```
+<br>
