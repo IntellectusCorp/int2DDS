@@ -1132,3 +1132,271 @@ class TestInstance:
             samples = reader.take()
             assert len(samples) > 0
             assert not samples[0].valid_data  # disposed = invalid data
+
+
+class TestCommunication:
+    """Tests for pub/sub communication patterns (Phase 2-1)."""
+
+    def _setup_pubsub(self, dp, topic_name, type_class):
+        """Helper: create matched writer/reader pair and wait for discovery."""
+        from int2dds import DdsTimeout
+        from int2dds.core.qos import DataWriterQos, DataReaderQos, Reliability
+        from int2dds.core.conditions import STATUS_SUBSCRIPTION_MATCHED
+
+        topic = dp.create_topic(topic_name, type_class)
+        pub = dp.create_publisher()
+        sub = dp.create_subscriber()
+
+        writer_qos = DataWriterQos(reliability=Reliability("RELIABLE"))
+        reader_qos = DataReaderQos(reliability=Reliability("RELIABLE"))
+
+        writer = pub.create_datawriter(topic, qos=writer_qos)
+        reader = sub.create_datareader(topic, qos=reader_qos)
+
+        status_cond = reader.get_statuscondition()
+        status_cond.set_enabled_statuses(STATUS_SUBSCRIPTION_MATCHED)
+        waitset = WaitSet()
+        waitset.attach(status_cond)
+
+        deadline = 5.0
+        while writer.matched_readers == 0 and deadline > 0:
+            try:
+                waitset.wait(timeout=1.0)
+            except DdsTimeout:
+                pass
+            deadline -= 1.0
+        assert writer.matched_readers > 0, "Discovery failed"
+
+        return writer, reader, waitset, status_cond
+
+    def test_read_returns_data(self, domain_id: int):
+        """read() should return written data via FFI."""
+        from int2dds import DdsTimeout
+        from int2dds.core.conditions import STATUS_DATA_AVAILABLE
+
+        with DomainParticipant(domain_id=domain_id) as dp:
+            writer, reader, waitset, status_cond = self._setup_pubsub(
+                dp, "ReadTopic", TestMessage
+            )
+            status_cond.set_enabled_statuses(STATUS_DATA_AVAILABLE)
+
+            writer.write(TestMessage(value=42, text="read test"))
+            try:
+                waitset.wait(timeout=5.0)
+            except DdsTimeout:
+                pass
+
+            # read() returns the data correctly
+            samples = reader.read()
+            assert len(samples) > 0
+            assert samples[0].data.value == 42
+            assert samples[0].data.text == "read test"
+
+    def test_multi_topic(self, domain_id: int):
+        """Two topics should carry independent data without cross-talk."""
+        from int2dds import DdsTimeout
+        from int2dds.core.conditions import STATUS_DATA_AVAILABLE
+
+        with DomainParticipant(domain_id=domain_id) as dp:
+            writer_a, reader_a, ws_a, sc_a = self._setup_pubsub(
+                dp, "MultiTopicA", TestMessage
+            )
+            writer_b, reader_b, ws_b, sc_b = self._setup_pubsub(
+                dp, "MultiTopicB", TestMessage
+            )
+            sc_a.set_enabled_statuses(STATUS_DATA_AVAILABLE)
+            sc_b.set_enabled_statuses(STATUS_DATA_AVAILABLE)
+
+            # Write different values to each topic
+            writer_a.write(TestMessage(value=1, text="topic A"))
+            writer_b.write(TestMessage(value=2, text="topic B"))
+
+            try:
+                ws_a.wait(timeout=5.0)
+            except DdsTimeout:
+                pass
+            try:
+                ws_b.wait(timeout=5.0)
+            except DdsTimeout:
+                pass
+
+            samples_a = reader_a.take()
+            samples_b = reader_b.take()
+
+            assert len(samples_a) > 0
+            assert len(samples_b) > 0
+            assert samples_a[0].data.value == 1  # TopicA data
+            assert samples_b[0].data.value == 2  # TopicB data
+
+
+class TestWaitSetAdvanced:
+    """Tests for WaitSet advanced patterns (Phase 2-2)."""
+
+    def test_guard_condition_trigger(self):
+        """GuardCondition trigger should wake up WaitSet."""
+        from int2dds.core.conditions import GuardCondition
+
+        guard = GuardCondition()
+        waitset = WaitSet()
+        waitset.attach(guard)
+
+        # Before trigger: value is False
+        assert guard.trigger_value is False
+
+        # Trigger from "another thread" (same thread for test simplicity)
+        guard.trigger()
+        assert guard.trigger_value is True
+
+        # WaitSet should return immediately (condition already triggered)
+        waitset.wait(timeout=1.0)  # should not raise DdsTimeout
+
+        # Reset and verify
+        guard.reset()
+        assert guard.trigger_value is False
+
+        waitset.close()
+        guard.close()
+
+    def test_multi_condition_wait_ex(self, domain_id: int):
+        """wait_ex() should return which conditions were triggered."""
+        from int2dds.core.conditions import GuardCondition, STATUS_DATA_AVAILABLE
+
+        with DomainParticipant(domain_id=domain_id) as dp:
+            topic = dp.create_topic("MultiCondTopic", TestMessage)
+            sub = dp.create_subscriber()
+
+            from int2dds.core.qos import DataReaderQos, Reliability
+            reader = sub.create_datareader(
+                topic, qos=DataReaderQos(reliability=Reliability("RELIABLE"))
+            )
+
+            # Create two conditions: GuardCondition + StatusCondition
+            guard = GuardCondition()
+            status_cond = reader.get_statuscondition()
+            status_cond.set_enabled_statuses(STATUS_DATA_AVAILABLE)
+
+            waitset = WaitSet()
+            waitset.attach(guard)
+            waitset.attach(status_cond)
+
+            # Trigger guard condition only
+            guard.trigger()
+
+            # wait_ex returns list of triggered conditions
+            triggered = waitset.wait_ex(timeout=1.0)
+            assert len(triggered) > 0  # at least guard was triggered
+
+            guard.close()
+            waitset.close()
+
+
+class TestDiscovery:
+    """Tests for discovery matching (Phase 2-3)."""
+
+    def test_matched_total_count_increases(self, domain_id: int):
+        """Creating a second writer should increase reader's total matched count."""
+        from int2dds import DdsTimeout
+        from int2dds.core.conditions import STATUS_SUBSCRIPTION_MATCHED
+
+        with DomainParticipant(domain_id=domain_id) as dp:
+            topic = dp.create_topic("DiscoveryCountTopic", TestMessage)
+            pub = dp.create_publisher()
+            sub = dp.create_subscriber()
+
+            from int2dds.core.qos import DataWriterQos, DataReaderQos, Reliability
+            reader = sub.create_datareader(
+                topic, qos=DataReaderQos(reliability=Reliability("RELIABLE"))
+            )
+
+            status_cond = reader.get_statuscondition()
+            status_cond.set_enabled_statuses(STATUS_SUBSCRIPTION_MATCHED)
+            waitset = WaitSet()
+            waitset.attach(status_cond)
+
+            # Create first writer and wait for match
+            writer1 = pub.create_datawriter(
+                topic, qos=DataWriterQos(reliability=Reliability("RELIABLE"))
+            )
+            deadline = 5.0
+            while reader.matched_writers == 0 and deadline > 0:
+                try:
+                    waitset.wait(timeout=1.0)
+                except DdsTimeout:
+                    pass
+                deadline -= 1.0
+
+            total1, current1 = reader.get_subscription_matched_status()
+            assert current1 >= 1
+
+            # Create second writer and wait for match
+            writer2 = pub.create_datawriter(
+                topic, qos=DataWriterQos(reliability=Reliability("RELIABLE"))
+            )
+            deadline = 5.0
+            prev_total = total1
+            while True:
+                try:
+                    waitset.wait(timeout=1.0)
+                except DdsTimeout:
+                    pass
+                total2, current2 = reader.get_subscription_matched_status()
+                if total2 > prev_total or deadline <= 0:
+                    break
+                deadline -= 1.0
+
+            assert total2 > total1  # total count increased
+            assert current2 >= 2    # two writers now matched
+
+            waitset.close()
+
+    def test_matched_decreases_on_cross_participant_delete(self, domain_id: int):
+        """Deleting a writer on a different participant should decrease matched count."""
+        from int2dds import DdsTimeout
+        from int2dds.core.conditions import STATUS_SUBSCRIPTION_MATCHED
+        from int2dds.core.qos import DataWriterQos, DataReaderQos, Reliability
+
+        with DomainParticipant(domain_id=domain_id) as dp_writer:
+            with DomainParticipant(domain_id=domain_id) as dp_reader:
+                topic_w = dp_writer.create_topic("CrossParticipantTopic", TestMessage)
+                topic_r = dp_reader.create_topic("CrossParticipantTopic", TestMessage)
+
+                pub = dp_writer.create_publisher()
+                sub = dp_reader.create_subscriber()
+
+                writer = pub.create_datawriter(
+                    topic_w, qos=DataWriterQos(reliability=Reliability("RELIABLE"))
+                )
+                reader = sub.create_datareader(
+                    topic_r, qos=DataReaderQos(reliability=Reliability("RELIABLE"))
+                )
+
+                # Wait for cross-participant discovery
+                status_cond = reader.get_statuscondition()
+                status_cond.set_enabled_statuses(STATUS_SUBSCRIPTION_MATCHED)
+                waitset = WaitSet()
+                waitset.attach(status_cond)
+
+                deadline = 10.0
+                while reader.matched_writers == 0 and deadline > 0:
+                    try:
+                        waitset.wait(timeout=1.0)
+                    except DdsTimeout:
+                        pass
+                    deadline -= 1.0
+                assert reader.matched_writers > 0
+
+                # Delete writer on dp_writer
+                writer.close()
+
+                # Wait for unmatch via SEDP termination message
+                deadline = 10.0
+                while reader.matched_writers > 0 and deadline > 0:
+                    try:
+                        waitset.wait(timeout=1.0)
+                    except DdsTimeout:
+                        pass
+                    deadline -= 1.0
+
+                assert reader.matched_writers == 0
+
+                waitset.close()
