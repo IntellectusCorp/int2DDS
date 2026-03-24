@@ -7,14 +7,14 @@ namespace Int2Dds.Listeners;
 public class DataWriterListenerBase : IDataWriterListener
 {
     /// <inheritdoc />
-    public virtual void OnPublicationMatched(nint writerHandle, PublicationMatchedStatus status) { }
+    public virtual void OnPublicationMatched(object writer, PublicationMatchedStatus status) { }
 
     /// <inheritdoc />
-    public virtual void OnOfferedDeadlineMissed(nint writerHandle, OfferedDeadlineMissedStatus status) { }
+    public virtual void OnOfferedDeadlineMissed(object writer, OfferedDeadlineMissedStatus status) { }
 
     /// <inheritdoc />
-    public virtual void OnLivelinessLost(nint writerHandle, LivelinessLostStatus status) { }
+    public virtual void OnLivelinessLost(object writer, LivelinessLostStatus status) { }
 
     /// <inheritdoc />
-    public virtual void OnOfferedIncompatibleQos(nint writerHandle, OfferedIncompatibleQosStatus status) { }
+    public virtual void OnOfferedIncompatibleQos(object writer, OfferedIncompatibleQosStatus status) { }
 }

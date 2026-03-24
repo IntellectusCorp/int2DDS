@@ -21,8 +21,10 @@ class Program
 
         // Wait for subscriber to connect
         Console.WriteLine("Waiting for subscriber...");
+        using var statusCondition = writer.GetStatusCondition();
+        statusCondition.EnabledStatuses = StatusMask.PublicationMatched;
         using var waitset = new WaitSet();
-        waitset.AttachDataWriter(writer.Handle);
+        waitset.Attach(statusCondition);
 
         while (writer.MatchedReaders == 0)
         {

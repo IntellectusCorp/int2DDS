@@ -17,6 +17,7 @@ public sealed class DataWriter<T> : IDisposable where T : IDdsType<T>
 {
     private readonly nint _handle;
     private readonly Topic<T> _topic;
+    private nint _listenerContextHandle;
     private bool _disposed;
 
     /// <summary>
@@ -47,8 +48,23 @@ public sealed class DataWriter<T> : IDisposable where T : IDdsType<T>
         {
             if (listener is not null)
             {
-                // Listener support will be implemented separately
-                throw new NotImplementedException("DataWriter listener support is not yet implemented.");
+                unsafe
+                {
+                    var (nativeListener, contextHandle) = ListenerRegistry.CreateWriterListener(listener, this);
+                    _listenerContextHandle = contextHandle;
+                    try
+                    {
+                        ReturnCodeHelper.CheckReturn(
+                            NativeMethods.int2dds_create_datawriter_with_listener(
+                                publisher.Handle, topic.Handle, qosHandle, &nativeListener, statusMask, out _handle));
+                    }
+                    catch
+                    {
+                        ListenerRegistry.FreeListener(_listenerContextHandle);
+                        _listenerContextHandle = 0;
+                        throw;
+                    }
+                }
             }
             else
             {
@@ -273,15 +289,41 @@ public sealed class DataWriter<T> : IDisposable where T : IDdsType<T>
         unsafe
         {
             fixed (byte* pHandle = handleBytes)
-            fixed (byte* pKey = keyBuffer)
             {
-                ReturnCodeHelper.CheckReturn(
-                    NativeMethods.int2dds_datawriter_get_key_value(
-                        _handle, pHandle, pKey, (nuint)keyBuffer.Length, out var keySize));
+                nuint keySize;
+                fixed (byte* pKey = keyBuffer)
+                {
+                    var ret = NativeMethods.int2dds_datawriter_get_key_value(
+                        _handle, pHandle, pKey, (nuint)keyBuffer.Length, out keySize);
 
-                var result = new byte[(int)keySize];
-                Array.Copy(keyBuffer, result, (int)keySize);
-                return result;
+                    if (ret == ReturnCode.Ok)
+                    {
+                        var result = new byte[(int)keySize];
+                        Array.Copy(keyBuffer, result, (int)keySize);
+                        return result;
+                    }
+
+                    // Buffer too small — retry with required size
+                    if ((int)keySize > keyBuffer.Length)
+                    {
+                        keyBuffer = new byte[(int)keySize];
+                    }
+                    else
+                    {
+                        ReturnCodeHelper.CheckReturn(ret);
+                    }
+                }
+
+                fixed (byte* pKey = keyBuffer)
+                {
+                    ReturnCodeHelper.CheckReturn(
+                        NativeMethods.int2dds_datawriter_get_key_value(
+                            _handle, pHandle, pKey, (nuint)keyBuffer.Length, out keySize));
+
+                    var result = new byte[(int)keySize];
+                    Array.Copy(keyBuffer, result, (int)keySize);
+                    return result;
+                }
             }
         }
     }
@@ -373,6 +415,46 @@ public sealed class DataWriter<T> : IDisposable where T : IDdsType<T>
     }
 
     /// <summary>
+    /// Sets new QoS policies on this DataWriter.
+    /// Some policies can only be changed before the entity is enabled.
+    /// </summary>
+    /// <param name="qos">The new QoS policies to apply.</param>
+    /// <summary>
+    /// Gets the current QoS policies of this DataWriter.
+    /// </summary>
+    public DataWriterQos GetQos()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_get_qos(_handle, out var qosHandle));
+        try
+        {
+            return ReadWriterQos(qosHandle);
+        }
+        finally
+        {
+            NativeMethods.int2dds_datawriter_qos_destroy(qosHandle);
+        }
+    }
+
+    public void SetQos(DataWriterQos qos)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        // Get current QoS as base, then apply user overrides on top
+        ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_get_qos(_handle, out var qosHandle));
+        try
+        {
+            ApplyWriterQos(qosHandle, qos);
+            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_set_qos(_handle, qosHandle));
+        }
+        finally
+        {
+            NativeMethods.int2dds_datawriter_qos_destroy(qosHandle);
+        }
+    }
+
+    /// <summary>
     /// Sets or replaces the listener for this DataWriter.
     /// </summary>
     /// <param name="listener">The listener to set, or null to remove.</param>
@@ -380,8 +462,38 @@ public sealed class DataWriter<T> : IDisposable where T : IDdsType<T>
     public void SetListener(IDataWriterListener? listener, uint statusMask)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        // Listener infrastructure will be implemented separately
-        throw new NotImplementedException("DataWriter listener support is not yet implemented.");
+
+        // Free old listener if any
+        if (_listenerContextHandle != 0)
+        {
+            ListenerRegistry.FreeListener(_listenerContextHandle);
+            _listenerContextHandle = 0;
+        }
+
+        unsafe
+        {
+            if (listener is not null)
+            {
+                var (nativeListener, contextHandle) = ListenerRegistry.CreateWriterListener(listener, this);
+                _listenerContextHandle = contextHandle;
+                try
+                {
+                    ReturnCodeHelper.CheckReturn(
+                        NativeMethods.int2dds_datawriter_set_listener(_handle, &nativeListener, statusMask));
+                }
+                catch
+                {
+                    ListenerRegistry.FreeListener(_listenerContextHandle);
+                    _listenerContextHandle = 0;
+                    throw;
+                }
+            }
+            else
+            {
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_datawriter_set_listener(_handle, null, 0));
+            }
+        }
     }
 
     /// <summary>
@@ -468,6 +580,42 @@ public sealed class DataWriter<T> : IDisposable where T : IDdsType<T>
                 qosHandle, (int)qos.Liveliness.Kind, qos.Liveliness.LeaseDurationNs));
     }
 
+    private static DataWriterQos ReadWriterQos(nint h)
+    {
+        NativeMethods.int2dds_datawriter_qos_get_reliability(h, out var relKind, out var relTime);
+        NativeMethods.int2dds_datawriter_qos_get_durability(h, out var durKind);
+        NativeMethods.int2dds_datawriter_qos_get_history(h, out var histKind, out var histDepth);
+        NativeMethods.int2dds_datawriter_qos_get_ownership(h, out var ownKind);
+        NativeMethods.int2dds_datawriter_qos_get_ownership_strength(h, out var ownStr);
+        NativeMethods.int2dds_datawriter_qos_get_resource_limits(h, out var maxS, out var maxI, out var maxPI);
+        NativeMethods.int2dds_datawriter_qos_get_lifespan(h, out var lifespanNs);
+        NativeMethods.int2dds_datawriter_qos_get_destination_order(h, out var destKind);
+        NativeMethods.int2dds_datawriter_qos_get_deadline(h, out var deadlineNs);
+        NativeMethods.int2dds_datawriter_qos_get_liveliness(h, out var liveKind, out var liveNs);
+        NativeMethods.int2dds_datawriter_qos_get_data_representation(h, out var reprKind);
+        NativeMethods.int2dds_datawriter_qos_get_transport_priority(h, out var transPri);
+        NativeMethods.int2dds_datawriter_qos_get_latency_budget(h, out var latNs);
+        NativeMethods.int2dds_datawriter_qos_get_writer_data_lifecycle(h, out var autoDispose);
+
+        return new DataWriterQos
+        {
+            Reliability = new Reliability((ReliabilityKind)relKind, TimeSpan.FromTicks(relTime / 100)),
+            Durability = new Durability((DurabilityKind)durKind),
+            History = new History((HistoryKind)histKind, histDepth),
+            Ownership = new Ownership((OwnershipKind)ownKind),
+            OwnershipStrength = new OwnershipStrength(ownStr),
+            ResourceLimits = new ResourceLimits(maxS, maxI, maxPI),
+            Lifespan = new Lifespan(TimeSpan.FromTicks(lifespanNs / 100)),
+            DestinationOrder = new DestinationOrder((DestinationOrderKind)destKind),
+            Deadline = new Deadline(TimeSpan.FromTicks(deadlineNs / 100)),
+            Liveliness = new Liveliness((LivelinessKind)liveKind, TimeSpan.FromTicks(liveNs / 100)),
+            DataRepresentation = new DataRepresentation((DataRepresentationKind)reprKind),
+            TransportPriority = new TransportPriority(transPri),
+            LatencyBudget = new LatencyBudget(TimeSpan.FromTicks(latNs / 100)),
+            WriterDataLifecycle = new WriterDataLifecycle(autoDispose),
+        };
+    }
+
     /// <summary>
     /// Releases all resources used by the DataWriter.
     /// </summary>
@@ -475,6 +623,14 @@ public sealed class DataWriter<T> : IDisposable where T : IDdsType<T>
     {
         if (_disposed) return;
         _disposed = true;
+        GC.SuppressFinalize(this);
+
+        if (_listenerContextHandle != 0)
+        {
+            ListenerRegistry.FreeListener(_listenerContextHandle);
+            _listenerContextHandle = 0;
+        }
+
         NativeMethods.int2dds_delete_datawriter(_handle);
     }
 

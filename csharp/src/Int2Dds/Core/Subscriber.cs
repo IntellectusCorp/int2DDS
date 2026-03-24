@@ -76,6 +76,57 @@ public sealed class Subscriber : IDisposable
     internal nint Handle => _handle;
 
     /// <summary>
+    /// Sets new QoS policies on this Subscriber.
+    /// Some policies can only be changed before the entity is enabled.
+    /// </summary>
+    /// <param name="qos">The new QoS policies to apply.</param>
+    public void SetQos(SubscriberQos qos)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        // Get current QoS as base, then apply user overrides on top
+        ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_subscriber_get_qos(_handle, out var qosHandle));
+        try
+        {
+            if (qos.Partition is { Names.Length: > 0 } partition)
+            {
+                unsafe
+                {
+                    var partitionByteArrays = partition.Names
+                        .Select(n => Encoding.UTF8.GetBytes(n + '\0'))
+                        .ToArray();
+                    var pinnedArrays = new System.Runtime.InteropServices.GCHandle[partitionByteArrays.Length];
+                    for (int i = 0; i < partitionByteArrays.Length; i++)
+                        pinnedArrays[i] = System.Runtime.InteropServices.GCHandle.Alloc(
+                            partitionByteArrays[i], System.Runtime.InteropServices.GCHandleType.Pinned);
+                    try
+                    {
+                        var ptrs = new byte*[partitionByteArrays.Length];
+                        for (int i = 0; i < ptrs.Length; i++)
+                            ptrs[i] = (byte*)pinnedArrays[i].AddrOfPinnedObject();
+                        fixed (byte** pPartitions = ptrs)
+                        {
+                            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_subscriber_qos_set_partition(
+                                qosHandle, pPartitions, (nuint)partition.Names.Length));
+                        }
+                    }
+                    finally
+                    {
+                        foreach (var pin in pinnedArrays)
+                            pin.Free();
+                    }
+                }
+            }
+
+            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_subscriber_set_qos(_handle, qosHandle));
+        }
+        finally
+        {
+            NativeMethods.int2dds_subscriber_qos_destroy(qosHandle);
+        }
+    }
+
+    /// <summary>
     /// Creates a DataReader for the given topic.
     /// </summary>
     /// <typeparam name="T">The DDS data type.</typeparam>
@@ -108,6 +159,7 @@ public sealed class Subscriber : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        GC.SuppressFinalize(this);
 
         NativeMethods.int2dds_subscriber_delete_contained_entities(_handle);
         NativeMethods.int2dds_delete_subscriber(_handle);
