@@ -1,4 +1,7 @@
-//! Configuration parameters for Requester and Replier (7.11.1.4.11, 7.11.1.4.12)
+//! Configuration parameters for Requester, Replier, Client, and Service.
+//!
+//! Bundles a DomainParticipant with optional QoS, Publisher/Subscriber, and
+//! topic name overrides needed to create RPC endpoints.
 
 use int2dds::dcps::domain::domain_participant::DomainParticipant;
 use int2dds::dcps::publication::publisher::Publisher;
@@ -8,7 +11,7 @@ use int2dds::dcps::subscription::qos::DataReaderQos;
 use int2dds::dcps::subscription::qos::SubscriberQos;
 use int2dds::dcps::subscription::subscriber::Subscriber;
 
-/// Configuration for constructing a Requester (7.11.1.4.11)
+/// Configuration for constructing a Requester
 pub struct RequesterParams {
     pub(crate) participant: DomainParticipant, // not Arc, already Arc-wrapped internally
     pub(crate) publisher: Option<Publisher>,
@@ -91,7 +94,7 @@ impl RequesterParams {
     }
 }
 
-/// Configuration for constructing a Replier (7.11.1.4.12)
+/// Configuration for constructing a Replier
 pub struct ReplierParams {
     pub(crate) participant: DomainParticipant,
     pub(crate) publisher: Option<Publisher>,
