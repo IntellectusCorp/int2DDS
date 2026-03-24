@@ -20,7 +20,7 @@ public sealed class DataReader<T> : IDisposable where T : IDdsType<T>
 
     private readonly nint _handle;
     private readonly Topic<T> _topic;
-    private readonly byte[] _buffer;
+    private nint _listenerContextHandle;
     private bool _disposed;
 
     /// <summary>
@@ -30,7 +30,6 @@ public sealed class DataReader<T> : IDisposable where T : IDdsType<T>
         IDataReaderListener? listener = null, uint statusMask = 0)
     {
         _topic = topic;
-        _buffer = ArrayPool<byte>.Shared.Rent(DefaultBufferSize);
 
         // Create QoS handle if provided
         nint qosHandle = 0;
@@ -52,8 +51,23 @@ public sealed class DataReader<T> : IDisposable where T : IDdsType<T>
         {
             if (listener is not null)
             {
-                // Listener infrastructure will be implemented separately
-                throw new NotImplementedException("DataReader listener support is not yet implemented.");
+                unsafe
+                {
+                    var (nativeListener, contextHandle) = ListenerRegistry.CreateReaderListener(listener, this);
+                    _listenerContextHandle = contextHandle;
+                    try
+                    {
+                        ReturnCodeHelper.CheckReturn(
+                            NativeMethods.int2dds_create_datareader_with_listener(
+                                subscriber.Handle, topic.Handle, qosHandle, &nativeListener, statusMask, out _handle));
+                    }
+                    catch
+                    {
+                        ListenerRegistry.FreeListener(_listenerContextHandle);
+                        _listenerContextHandle = 0;
+                        throw;
+                    }
+                }
             }
             else
             {
@@ -347,6 +361,46 @@ public sealed class DataReader<T> : IDisposable where T : IDdsType<T>
     }
 
     /// <summary>
+    /// Sets new QoS policies on this DataReader.
+    /// Some policies can only be changed before the entity is enabled.
+    /// </summary>
+    /// <param name="qos">The new QoS policies to apply.</param>
+    /// <summary>
+    /// Gets the current QoS policies of this DataReader.
+    /// </summary>
+    public DataReaderQos GetQos()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_get_qos(_handle, out var qosHandle));
+        try
+        {
+            return ReadReaderQos(qosHandle);
+        }
+        finally
+        {
+            NativeMethods.int2dds_datareader_qos_destroy(qosHandle);
+        }
+    }
+
+    public void SetQos(DataReaderQos qos)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        // Get current QoS as base, then apply user overrides on top
+        ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_get_qos(_handle, out var qosHandle));
+        try
+        {
+            ApplyReaderQos(qosHandle, qos);
+            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_set_qos(_handle, qosHandle));
+        }
+        finally
+        {
+            NativeMethods.int2dds_datareader_qos_destroy(qosHandle);
+        }
+    }
+
+    /// <summary>
     /// Sets or replaces the listener for this DataReader.
     /// </summary>
     /// <param name="listener">The listener to set, or null to remove.</param>
@@ -354,8 +408,38 @@ public sealed class DataReader<T> : IDisposable where T : IDdsType<T>
     public void SetListener(IDataReaderListener? listener, uint statusMask)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        // Listener infrastructure will be implemented separately
-        throw new NotImplementedException("DataReader listener support is not yet implemented.");
+
+        // Free old listener if any
+        if (_listenerContextHandle != 0)
+        {
+            ListenerRegistry.FreeListener(_listenerContextHandle);
+            _listenerContextHandle = 0;
+        }
+
+        unsafe
+        {
+            if (listener is not null)
+            {
+                var (nativeListener, contextHandle) = ListenerRegistry.CreateReaderListener(listener, this);
+                _listenerContextHandle = contextHandle;
+                try
+                {
+                    ReturnCodeHelper.CheckReturn(
+                        NativeMethods.int2dds_datareader_set_listener(_handle, &nativeListener, statusMask));
+                }
+                catch
+                {
+                    ListenerRegistry.FreeListener(_listenerContextHandle);
+                    _listenerContextHandle = 0;
+                    throw;
+                }
+            }
+            else
+            {
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_datareader_set_listener(_handle, null, 0));
+            }
+        }
     }
 
     /// <summary>
@@ -372,99 +456,158 @@ public sealed class DataReader<T> : IDisposable where T : IDdsType<T>
 
     // ── Private helpers ──────────────────────────────────────────────────
 
+    /// <summary>
+    /// Takes one sample using the batch API to avoid data loss on buffer overflow.
+    /// The batch API manages memory on the Rust side, so buffer size is never an issue.
+    /// </summary>
     private Sample<T>? TakeOneSample()
     {
-        unsafe
+        var ret = NativeMethods.int2dds_take_serialized_batch(_handle, 1, out var seqHandle);
+        if (ret == ReturnCode.NoData)
+            return null;
+        ReturnCodeHelper.CheckReturn(ret);
+
+        try
         {
-            fixed (byte* pBuffer = _buffer)
+            var length = (int)NativeMethods.int2dds_sample_seq_length(seqHandle);
+            if (length == 0)
+                return null;
+
+            unsafe
             {
-                var ret = NativeMethods.int2dds_take_serialized(
-                    _handle, pBuffer, (nuint)_buffer.Length, out var actualSize, out var validData);
+                NativeSampleInfo nativeInfo;
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_sample_seq_get_info(seqHandle, 0, &nativeInfo));
 
-                if (ret == ReturnCode.NoData)
-                    return null;
-                ReturnCodeHelper.CheckReturn(ret);
-
-                if (validData)
+                if (nativeInfo.ValidData)
                 {
-                    var data = T.DeserializeCdr(new ReadOnlySpan<byte>(_buffer, 0, (int)actualSize));
-                    return new Sample<T>(data, true);
+                    var buffer = ArrayPool<byte>.Shared.Rent(DefaultBufferSize);
+                    try
+                    {
+                        var data = ReadSampleData(seqHandle, 0, buffer);
+                        return new Sample<T>(data, true);
+                    }
+                    finally
+                    {
+                        ArrayPool<byte>.Shared.Return(buffer);
+                    }
                 }
                 return new Sample<T>(default, false);
             }
+        }
+        finally
+        {
+            NativeMethods.int2dds_sample_seq_delete(seqHandle);
         }
     }
 
     private Sample<T>? ReadOneSample()
     {
-        unsafe
+        var buffer = ArrayPool<byte>.Shared.Rent(DefaultBufferSize);
+        try
         {
-            fixed (byte* pBuffer = _buffer)
+            unsafe
             {
-                var ret = NativeMethods.int2dds_read_serialized(
-                    _handle, pBuffer, (nuint)_buffer.Length, out var actualSize, out var validData);
-
-                if (ret == ReturnCode.NoData)
-                    return null;
-                ReturnCodeHelper.CheckReturn(ret);
-
-                if (validData)
+                fixed (byte* pBuffer = buffer)
                 {
-                    var data = T.DeserializeCdr(new ReadOnlySpan<byte>(_buffer, 0, (int)actualSize));
-                    return new Sample<T>(data, true);
+                    var ret = NativeMethods.int2dds_read_serialized(
+                        _handle, pBuffer, (nuint)buffer.Length, out var actualSize, out var validData);
+
+                    if (ret == ReturnCode.NoData)
+                        return null;
+                    ReturnCodeHelper.CheckReturn(ret);
+
+                    if (validData)
+                    {
+                        var data = T.DeserializeCdr(new ReadOnlySpan<byte>(buffer, 0, (int)actualSize));
+                        return new Sample<T>(data, true);
+                    }
+                    return new Sample<T>(default, false);
                 }
-                return new Sample<T>(default, false);
             }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
         }
     }
 
+    /// <summary>
+    /// Takes one sample with info using the batch API to avoid data loss on buffer overflow.
+    /// </summary>
     private (Sample<T> Sample, SampleInfo Info)? TakeOneSampleWithInfo()
     {
-        unsafe
+        var ret = NativeMethods.int2dds_take_serialized_batch(_handle, 1, out var seqHandle);
+        if (ret == ReturnCode.NoData)
+            return null;
+        ReturnCodeHelper.CheckReturn(ret);
+
+        try
         {
-            fixed (byte* pBuffer = _buffer)
+            var length = (int)NativeMethods.int2dds_sample_seq_length(seqHandle);
+            if (length == 0)
+                return null;
+
+            unsafe
             {
                 NativeSampleInfo nativeInfo;
-                var ret = NativeMethods.int2dds_take_serialized_w_info(
-                    _handle, pBuffer, (nuint)_buffer.Length, out var actualSize, &nativeInfo);
-
-                if (ret == ReturnCode.NoData)
-                    return null;
-                ReturnCodeHelper.CheckReturn(ret);
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_sample_seq_get_info(seqHandle, 0, &nativeInfo));
 
                 var info = ConvertSampleInfo(ref nativeInfo);
+
                 if (nativeInfo.ValidData)
                 {
-                    var data = T.DeserializeCdr(new ReadOnlySpan<byte>(_buffer, 0, (int)actualSize));
-                    return (new Sample<T>(data, true), info);
+                    var buffer = ArrayPool<byte>.Shared.Rent(DefaultBufferSize);
+                    try
+                    {
+                        var data = ReadSampleData(seqHandle, 0, buffer);
+                        return (new Sample<T>(data, true), info);
+                    }
+                    finally
+                    {
+                        ArrayPool<byte>.Shared.Return(buffer);
+                    }
                 }
                 return (new Sample<T>(default, false), info);
             }
+        }
+        finally
+        {
+            NativeMethods.int2dds_sample_seq_delete(seqHandle);
         }
     }
 
     private (Sample<T> Sample, SampleInfo Info)? ReadOneSampleWithInfo()
     {
-        unsafe
+        var buffer = ArrayPool<byte>.Shared.Rent(DefaultBufferSize);
+        try
         {
-            fixed (byte* pBuffer = _buffer)
+            unsafe
             {
-                NativeSampleInfo nativeInfo;
-                var ret = NativeMethods.int2dds_read_serialized_w_info(
-                    _handle, pBuffer, (nuint)_buffer.Length, out var actualSize, &nativeInfo);
-
-                if (ret == ReturnCode.NoData)
-                    return null;
-                ReturnCodeHelper.CheckReturn(ret);
-
-                var info = ConvertSampleInfo(ref nativeInfo);
-                if (nativeInfo.ValidData)
+                fixed (byte* pBuffer = buffer)
                 {
-                    var data = T.DeserializeCdr(new ReadOnlySpan<byte>(_buffer, 0, (int)actualSize));
-                    return (new Sample<T>(data, true), info);
+                    NativeSampleInfo nativeInfo;
+                    var ret = NativeMethods.int2dds_read_serialized_w_info(
+                        _handle, pBuffer, (nuint)buffer.Length, out var actualSize, &nativeInfo);
+
+                    if (ret == ReturnCode.NoData)
+                        return null;
+                    ReturnCodeHelper.CheckReturn(ret);
+
+                    var info = ConvertSampleInfo(ref nativeInfo);
+                    if (nativeInfo.ValidData)
+                    {
+                        var data = T.DeserializeCdr(new ReadOnlySpan<byte>(buffer, 0, (int)actualSize));
+                        return (new Sample<T>(data, true), info);
+                    }
+                    return (new Sample<T>(default, false), info);
                 }
-                return (new Sample<T>(default, false), info);
             }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
         }
     }
 
@@ -473,13 +616,13 @@ public sealed class DataReader<T> : IDisposable where T : IDdsType<T>
         var length = (int)NativeMethods.int2dds_sample_seq_length(seqHandle);
         var results = new List<(Sample<T>, SampleInfo)>(length);
 
-        unsafe
+        var buffer = ArrayPool<byte>.Shared.Rent(DefaultBufferSize);
+        try
         {
-            fixed (byte* pBuffer = _buffer)
+            unsafe
             {
                 for (nuint i = 0; i < (nuint)length; i++)
                 {
-                    // Get sample info
                     NativeSampleInfo nativeInfo;
                     ReturnCodeHelper.CheckReturn(
                         NativeMethods.int2dds_sample_seq_get_info(seqHandle, i, &nativeInfo));
@@ -488,12 +631,7 @@ public sealed class DataReader<T> : IDisposable where T : IDdsType<T>
 
                     if (nativeInfo.ValidData)
                     {
-                        // Get sample data
-                        ReturnCodeHelper.CheckReturn(
-                            NativeMethods.int2dds_sample_seq_get_data(seqHandle, i, pBuffer,
-                                (nuint)_buffer.Length, out var actualSize));
-
-                        var data = T.DeserializeCdr(new ReadOnlySpan<byte>(_buffer, 0, (int)actualSize));
+                        var data = ReadSampleData(seqHandle, i, buffer);
                         results.Add((new Sample<T>(data, true), info));
                     }
                     else
@@ -503,8 +641,45 @@ public sealed class DataReader<T> : IDisposable where T : IDdsType<T>
                 }
             }
         }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
 
         return results;
+    }
+
+    /// <summary>
+    /// Reads sample data from a sequence handle, retrying with a larger buffer if needed.
+    /// </summary>
+    private static unsafe T ReadSampleData(nint seqHandle, nuint index, byte[] buffer)
+    {
+        fixed (byte* pBuffer = buffer)
+        {
+            var ret = NativeMethods.int2dds_sample_seq_get_data(seqHandle, index, pBuffer,
+                (nuint)buffer.Length, out var actualSize);
+
+            if (ret == ReturnCode.Ok)
+            {
+                return T.DeserializeCdr(new ReadOnlySpan<byte>(buffer, 0, (int)actualSize));
+            }
+
+            // Buffer too small — allocate exact size and retry
+            if ((int)actualSize > buffer.Length)
+            {
+                var largeBuffer = new byte[(int)actualSize];
+                fixed (byte* pLarge = largeBuffer)
+                {
+                    ReturnCodeHelper.CheckReturn(
+                        NativeMethods.int2dds_sample_seq_get_data(seqHandle, index, pLarge,
+                            (nuint)largeBuffer.Length, out actualSize));
+                    return T.DeserializeCdr(new ReadOnlySpan<byte>(largeBuffer, 0, (int)actualSize));
+                }
+            }
+
+            ReturnCodeHelper.CheckReturn(ret);
+            return default!; // unreachable
+        }
     }
 
     private static SampleInfo ConvertSampleInfo(ref NativeSampleInfo native)
@@ -603,6 +778,40 @@ public sealed class DataReader<T> : IDisposable where T : IDdsType<T>
                 qosHandle, (int)qos.Liveliness.Kind, qos.Liveliness.LeaseDurationNs));
     }
 
+    private static DataReaderQos ReadReaderQos(nint h)
+    {
+        NativeMethods.int2dds_datareader_qos_get_reliability(h, out var relKind, out var relTime);
+        NativeMethods.int2dds_datareader_qos_get_durability(h, out var durKind);
+        NativeMethods.int2dds_datareader_qos_get_history(h, out var histKind, out var histDepth);
+        NativeMethods.int2dds_datareader_qos_get_ownership(h, out var ownKind);
+        NativeMethods.int2dds_datareader_qos_get_resource_limits(h, out var maxS, out var maxI, out var maxPI);
+        NativeMethods.int2dds_datareader_qos_get_destination_order(h, out var destKind);
+        NativeMethods.int2dds_datareader_qos_get_deadline(h, out var deadlineNs);
+        NativeMethods.int2dds_datareader_qos_get_liveliness(h, out var liveKind, out var liveNs);
+        NativeMethods.int2dds_datareader_qos_get_data_representation(h, out var reprKind);
+        NativeMethods.int2dds_datareader_qos_get_latency_budget(h, out var latNs);
+        NativeMethods.int2dds_datareader_qos_get_time_based_filter(h, out var tbfNs);
+        NativeMethods.int2dds_datareader_qos_get_reader_data_lifecycle(h, out var purgeNowriterNs, out var purgeDisposedNs);
+
+        return new DataReaderQos
+        {
+            Reliability = new Reliability((ReliabilityKind)relKind, TimeSpan.FromTicks(relTime / 100)),
+            Durability = new Durability((DurabilityKind)durKind),
+            History = new History((HistoryKind)histKind, histDepth),
+            Ownership = new Ownership((OwnershipKind)ownKind),
+            ResourceLimits = new ResourceLimits(maxS, maxI, maxPI),
+            DestinationOrder = new DestinationOrder((DestinationOrderKind)destKind),
+            Deadline = new Deadline(TimeSpan.FromTicks(deadlineNs / 100)),
+            Liveliness = new Liveliness((LivelinessKind)liveKind, TimeSpan.FromTicks(liveNs / 100)),
+            DataRepresentation = new DataRepresentation((DataRepresentationKind)reprKind),
+            LatencyBudget = new LatencyBudget(TimeSpan.FromTicks(latNs / 100)),
+            TimeBasedFilter = new TimeBasedFilter(TimeSpan.FromTicks(tbfNs / 100)),
+            ReaderDataLifecycle = new ReaderDataLifecycle(
+                TimeSpan.FromTicks(purgeNowriterNs / 100),
+                TimeSpan.FromTicks(purgeDisposedNs / 100)),
+        };
+    }
+
     /// <summary>
     /// Releases all resources used by the DataReader.
     /// </summary>
@@ -610,8 +819,15 @@ public sealed class DataReader<T> : IDisposable where T : IDdsType<T>
     {
         if (_disposed) return;
         _disposed = true;
+        GC.SuppressFinalize(this);
+
+        if (_listenerContextHandle != 0)
+        {
+            ListenerRegistry.FreeListener(_listenerContextHandle);
+            _listenerContextHandle = 0;
+        }
+
         NativeMethods.int2dds_delete_datareader(_handle);
-        ArrayPool<byte>.Shared.Return(_buffer);
     }
 
     ~DataReader()

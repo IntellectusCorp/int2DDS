@@ -147,6 +147,7 @@ public sealed class DomainParticipant : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        GC.SuppressFinalize(this);
 
         NativeMethods.int2dds_participant_delete_contained_entities(_handle);
         NativeMethods.int2dds_delete_participant(_handle);

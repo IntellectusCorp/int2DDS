@@ -95,6 +95,28 @@ public sealed class Topic<T> : IDisposable where T : IDdsType<T>
     /// </summary>
     public Type TypeClass => typeof(T);
 
+    /// <summary>
+    /// Sets new QoS policies on this Topic.
+    /// Some policies can only be changed before the entity is enabled.
+    /// </summary>
+    /// <param name="qos">The new QoS policies to apply.</param>
+    public void SetQos(TopicQos qos)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        // Get current QoS as base, then apply user overrides on top
+        ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_topic_get_qos(_handle, out var qosHandle));
+        try
+        {
+            ApplyTopicQos(qosHandle, qos);
+            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_topic_set_qos(_handle, qosHandle));
+        }
+        finally
+        {
+            NativeMethods.int2dds_topic_qos_destroy(qosHandle);
+        }
+    }
+
     private static void ApplyTopicQos(nint qosHandle, TopicQos qos)
     {
         if (qos.Reliability is not null)
@@ -150,6 +172,7 @@ public sealed class Topic<T> : IDisposable where T : IDdsType<T>
     {
         if (_disposed) return;
         _disposed = true;
+        GC.SuppressFinalize(this);
         NativeMethods.int2dds_delete_topic(_handle);
     }
 

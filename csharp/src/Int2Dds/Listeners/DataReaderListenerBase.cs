@@ -7,23 +7,23 @@ namespace Int2Dds.Listeners;
 public class DataReaderListenerBase : IDataReaderListener
 {
     /// <inheritdoc />
-    public virtual void OnDataAvailable(nint readerHandle) { }
+    public virtual void OnDataAvailable(object reader) { }
 
     /// <inheritdoc />
-    public virtual void OnSubscriptionMatched(nint readerHandle, SubscriptionMatchedStatus status) { }
+    public virtual void OnSubscriptionMatched(object reader, SubscriptionMatchedStatus status) { }
 
     /// <inheritdoc />
-    public virtual void OnLivelinessChanged(nint readerHandle, LivelinessChangedStatus status) { }
+    public virtual void OnLivelinessChanged(object reader, LivelinessChangedStatus status) { }
 
     /// <inheritdoc />
-    public virtual void OnRequestedDeadlineMissed(nint readerHandle, RequestedDeadlineMissedStatus status) { }
+    public virtual void OnRequestedDeadlineMissed(object reader, RequestedDeadlineMissedStatus status) { }
 
     /// <inheritdoc />
-    public virtual void OnSampleLost(nint readerHandle, SampleLostStatus status) { }
+    public virtual void OnSampleLost(object reader, SampleLostStatus status) { }
 
     /// <inheritdoc />
-    public virtual void OnSampleRejected(nint readerHandle, SampleRejectedStatus status) { }
+    public virtual void OnSampleRejected(object reader, SampleRejectedStatus status) { }
 
     /// <inheritdoc />
-    public virtual void OnRequestedIncompatibleQos(nint readerHandle, RequestedIncompatibleQosStatus status) { }
+    public virtual void OnRequestedIncompatibleQos(object reader, RequestedIncompatibleQosStatus status) { }
 }
