@@ -4,7 +4,8 @@
 //! managing participant lifecycles, entity creation, and message routing between
 //! the two layers.
 
-use std::sync::{Arc, OnceLock, RwLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
+use std::thread::{self, JoinHandle};
 
 use log::debug;
 
@@ -49,8 +50,12 @@ use crate::{
         },
         messages::sedp_message::SEDPMessage,
         service::background_service::BackgroundService,
-        task::{sending_handler::SendingHandler, thread_monitor::ThreadMonitor},
-        transport::socket::Socket,
+        task::{
+            sending_handler::SendingHandler,
+            tcp_control_traffic::tcp_control_listening_task::TcpControlListeningTask,
+            thread_monitor::ThreadMonitor,
+        },
+        transport::{get_transport_type, socket::Socket, TransportType},
     },
     utils::timer::timer_handler::TimerHandler,
 };
@@ -66,6 +71,7 @@ pub(crate) struct DcpsBridge {
     sedp_logic: Arc<Option<SedpLogic>>,
     user_logic: Arc<Option<UserLogic>>,
     thread_monitor: Option<ThreadMonitor>,
+    tcp_control_listening_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 static BACKGROUND_SERVICE: OnceLock<Arc<BackgroundService>> = OnceLock::new();
@@ -106,6 +112,7 @@ impl DcpsBridge {
             sedp_logic,
             user_logic,
             thread_monitor: None,
+            tcp_control_listening_handle: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -128,6 +135,9 @@ impl DcpsBridge {
             log::error!("spdp_logic is not set");
         }
 
+        // Read TCP port before user_traffic_tcp_listener() takes ownership
+        let user_traffic_tcp_port = self.socket.user_traffic_tcp_port();
+
         // Start User traffic threads
         if let Some(user_logic) = self.user_logic.as_ref() {
             user_logic.start_user_traffic(
@@ -140,6 +150,46 @@ impl DcpsBridge {
             )?;
         } else {
             log::error!("user_logic is not set");
+        }
+
+        // Start TCP control listening thread (TCP or Hybrid mode only)
+        let transport_type = get_transport_type();
+        if matches!(transport_type, TransportType::TCP | TransportType::Hybrid) {
+            let local_data_port = user_traffic_tcp_port.unwrap_or(0);
+            let tcp_sender = self.socket.tcp_sender();
+
+            let mut tcp_control_listening_task = TcpControlListeningTask::new(
+                self.socket.control_tcp_listener(),
+                tcp_sender,
+                self.participant.clone(),
+                local_data_port,
+            );
+
+            let participant_guid = self.participant.guid();
+            let handle = thread::Builder::new()
+                .name("tcp_control_listening".to_string())
+                .spawn(move || {
+                    {
+                        use crate::rtps::task::thread_monitor::ThreadMonitor;
+                        ThreadMonitor::register_current_thread_name_with_guid_prefix(
+                            "tcp_control_listening",
+                            participant_guid.prefix(),
+                        );
+                    }
+
+                    let _ = tcp_control_listening_task.control_listening();
+
+                    {
+                        use crate::rtps::task::thread_monitor::ThreadMonitor;
+                        ThreadMonitor::remove_map_guard();
+                    }
+                    debug!("tcp control listening thread finished");
+                })
+                .expect("Failed to create tcp control listening thread");
+
+            if let Ok(mut handle_guard) = self.tcp_control_listening_handle.lock() {
+                *handle_guard = Some(handle);
+            }
         }
 
         BACKGROUND_SERVICE.get_or_init(|| {

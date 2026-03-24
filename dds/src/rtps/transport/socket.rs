@@ -433,6 +433,13 @@ impl Socket {
         self.user_traffic_tcp_listener.take()
     }
 
+    /// Get the user traffic TCP listener port (data port for handshake exchange)
+    ///
+    /// Must be called before `user_traffic_tcp_listener()` takes ownership.
+    pub(crate) fn user_traffic_tcp_port(&self) -> Option<u16> {
+        self.user_traffic_tcp_listener.as_ref().map(|l| l.port())
+    }
+
     //SHM listener
     fn create_shm_listener(&mut self) {
         match ShmListener::new(self.domain_id) {
