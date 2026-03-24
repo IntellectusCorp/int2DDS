@@ -1569,3 +1569,223 @@ class TestListener:
 
             # Set second listener
             reader.set_listener(SecondListener(), STATUS_SUBSCRIPTION_MATCHED)
+
+
+class TestEdgeCases:
+    """Tests for edge cases and boundary values."""
+
+    def _roundtrip(self, dp, type_class, sample, topic_name):
+        """Helper: write a sample, take it back, return the result."""
+        from int2dds import DdsTimeout
+        from int2dds.core.qos import DataWriterQos, DataReaderQos, Reliability
+        from int2dds.core.conditions import STATUS_SUBSCRIPTION_MATCHED, STATUS_DATA_AVAILABLE
+
+        topic = dp.create_topic(topic_name, type_class)
+        pub = dp.create_publisher()
+        sub = dp.create_subscriber()
+
+        writer_qos = DataWriterQos(reliability=Reliability("RELIABLE"))
+        reader_qos = DataReaderQos(reliability=Reliability("RELIABLE"))
+
+        writer = pub.create_datawriter(topic, qos=writer_qos)
+        reader = sub.create_datareader(topic, qos=reader_qos)
+
+        status_cond = reader.get_statuscondition()
+        status_cond.set_enabled_statuses(STATUS_SUBSCRIPTION_MATCHED)
+        waitset = WaitSet()
+        waitset.attach(status_cond)
+
+        deadline = 5.0
+        while writer.matched_readers == 0 and deadline > 0:
+            try:
+                waitset.wait(timeout=1.0)
+            except DdsTimeout:
+                pass
+            deadline -= 1.0
+        assert writer.matched_readers > 0, "Discovery failed"
+
+        status_cond.set_enabled_statuses(STATUS_DATA_AVAILABLE)
+        writer.write(sample)
+
+        try:
+            waitset.wait(timeout=5.0)
+        except DdsTimeout:
+            pass
+
+        samples = reader.take()
+        assert len(samples) > 0, "No samples received"
+        return samples[0].data
+
+    def test_empty_string(self, domain_id: int):
+        """Empty string should survive FFI roundtrip."""
+        with DomainParticipant(domain_id=domain_id) as dp:
+            original = TestMessage(value=1, text="")
+            result = self._roundtrip(dp, TestMessage, original, "EmptyStringTopic")
+            assert result.text == ""
+            assert result.value == 1
+
+    def test_empty_sequence(self, domain_id: int):
+        """Empty sequence should survive FFI roundtrip."""
+        with DomainParticipant(domain_id=domain_id) as dp:
+            original = SequenceType(items=[])
+            result = self._roundtrip(dp, SequenceType, original, "EmptySeqTopic")
+            assert result.items == []
+
+    def test_max_integers(self, domain_id: int):
+        """Maximum integer values should survive FFI roundtrip."""
+        with DomainParticipant(domain_id=domain_id) as dp:
+            original = AllPrimitives(
+                flag=True,
+                byte_val=255,              # u8 max
+                ibyte_val=-128,            # i8 min
+                short_val=-32768,          # i16 min
+                ushort_val=65535,          # u16 max
+                long_val=-2147483648,      # i32 min
+                ulong_val=4294967295,      # u32 max
+                llong_val=-9223372036854775808,   # i64 min
+                ullong_val=18446744073709551615,  # u64 max
+                float_val=3.4028235e+38,  # f32 near max
+                double_val=1.7976931348623157e+308,  # f64 near max
+                char_val="Z",
+                text="max values",
+            )
+            result = self._roundtrip(dp, AllPrimitives, original, "MaxIntTopic")
+            assert result.byte_val == 255
+            assert result.ibyte_val == -128
+            assert result.short_val == -32768
+            assert result.ushort_val == 65535
+            assert result.long_val == -2147483648
+            assert result.ulong_val == 4294967295
+            assert result.llong_val == -9223372036854775808
+            assert result.ullong_val == 18446744073709551615
+
+    def test_large_string(self, domain_id: int):
+        """10KB+ string should survive FFI roundtrip."""
+        with DomainParticipant(domain_id=domain_id) as dp:
+            large_text = "A" * 10240  # 10KB
+            original = TestMessage(value=42, text=large_text)
+            result = self._roundtrip(dp, TestMessage, original, "LargeStringTopic")
+            assert result.text == large_text
+            assert len(result.text) == 10240
+
+
+class TestHighVolume:
+    """Tests for large data and high-frequency write/take."""
+
+    def _setup_pubsub(self, dp, topic_name, type_class):
+        """Helper: create matched writer/reader pair and wait for discovery."""
+        from int2dds import DdsTimeout
+        from int2dds.core.qos import DataWriterQos, DataReaderQos, Reliability, History
+        from int2dds.core.conditions import STATUS_SUBSCRIPTION_MATCHED
+
+        topic = dp.create_topic(topic_name, type_class)
+        pub = dp.create_publisher()
+        sub = dp.create_subscriber()
+
+        writer_qos = DataWriterQos(
+            reliability=Reliability("RELIABLE"),
+            history=History("KEEP_ALL"),
+        )
+        reader_qos = DataReaderQos(
+            reliability=Reliability("RELIABLE"),
+            history=History("KEEP_ALL"),
+        )
+
+        writer = pub.create_datawriter(topic, qos=writer_qos)
+        reader = sub.create_datareader(topic, qos=reader_qos)
+
+        status_cond = reader.get_statuscondition()
+        status_cond.set_enabled_statuses(STATUS_SUBSCRIPTION_MATCHED)
+        waitset = WaitSet()
+        waitset.attach(status_cond)
+
+        deadline = 5.0
+        while writer.matched_readers == 0 and deadline > 0:
+            try:
+                waitset.wait(timeout=1.0)
+            except DdsTimeout:
+                pass
+            deadline -= 1.0
+        assert writer.matched_readers > 0, "Discovery failed"
+
+        return writer, reader, waitset, status_cond
+
+    def test_large_payload_near_buffer_limit(self, domain_id: int):
+        """Payload near DEFAULT_BUFFER_SIZE (64KB) should be transmitted."""
+        from int2dds import DdsTimeout
+        from int2dds.core.conditions import STATUS_DATA_AVAILABLE
+
+        with DomainParticipant(domain_id=domain_id) as dp:
+            writer, reader, waitset, status_cond = self._setup_pubsub(
+                dp, "LargePayloadTopic", TestMessage
+            )
+            status_cond.set_enabled_statuses(STATUS_DATA_AVAILABLE)
+
+            # 60KB - within 64KB buffer limit (leaves room for CDR header + length prefix)
+            large_text = "B" * (60 * 1024)
+            writer.write(TestMessage(value=1, text=large_text))
+
+            try:
+                waitset.wait(timeout=10.0)
+            except DdsTimeout:
+                pass
+
+            samples = reader.take()
+            assert len(samples) > 0, "No samples received"
+            assert len(samples[0].data.text) == 60 * 1024
+
+    def test_100_consecutive_writes(self, domain_id: int):
+        """100 consecutive writes should all be received via take."""
+        import time
+        from int2dds import DdsTimeout
+        from int2dds.core.conditions import STATUS_DATA_AVAILABLE
+
+        with DomainParticipant(domain_id=domain_id) as dp:
+            writer, reader, waitset, status_cond = self._setup_pubsub(
+                dp, "Batch100Topic", TestMessage
+            )
+            status_cond.set_enabled_statuses(STATUS_DATA_AVAILABLE)
+
+            for i in range(100):
+                writer.write(TestMessage(value=i, text=f"msg_{i}"))
+
+            time.sleep(2.0)
+
+            all_samples = []
+            while True:
+                samples = reader.take()
+                if not samples:
+                    break
+                all_samples.extend(samples)
+
+            assert len(all_samples) == 100, f"Expected 100, got {len(all_samples)}"
+            values = [s.data.value for s in all_samples]
+            assert values == list(range(100))
+
+    def test_1000_consecutive_writes(self, domain_id: int):
+        """1000 consecutive writes should all be received via take."""
+        import time
+        from int2dds import DdsTimeout
+        from int2dds.core.conditions import STATUS_DATA_AVAILABLE
+
+        with DomainParticipant(domain_id=domain_id) as dp:
+            writer, reader, waitset, status_cond = self._setup_pubsub(
+                dp, "Batch1000Topic", TestMessage
+            )
+            status_cond.set_enabled_statuses(STATUS_DATA_AVAILABLE)
+
+            for i in range(1000):
+                writer.write(TestMessage(value=i, text=f"msg_{i}"))
+
+            time.sleep(5.0)
+
+            all_samples = []
+            while True:
+                samples = reader.take()
+                if not samples:
+                    break
+                all_samples.extend(samples)
+
+            assert len(all_samples) == 1000, f"Expected 1000, got {len(all_samples)}"
+            values = [s.data.value for s in all_samples]
+            assert values == list(range(1000))
