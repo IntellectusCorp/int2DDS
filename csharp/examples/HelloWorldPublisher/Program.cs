@@ -35,12 +35,15 @@ class Program
         Console.WriteLine($"Matched {writer.MatchedReaders} reader(s)");
 
         // Publish samples
-        for (uint i = 0; i < 10; i++)
+        // for (uint i = 0; i < 100; i++)
+        uint i = 0;
+        while (true)
         {
             var sample = new HelloWorld(i, $"Hello from C#! ({i})");
             writer.Write(sample);
             Console.WriteLine($"Published: index={sample.Index}, message='{sample.Message}'");
             Thread.Sleep(500);
+            i++;
         }
 
         Console.WriteLine("Done publishing");
