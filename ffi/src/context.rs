@@ -29,7 +29,7 @@ pub unsafe extern "C" fn int2dds_domain_participant_factory_get_instance(
     check_null!(factory_out);
 
     // Initialize logging if not already done
-    let _ = env_logger::try_init();
+    // let _ = env_logger::try_init();
 
     let factory = Box::new(Int2DdsParticipantFactory { _initialized: true });
 
