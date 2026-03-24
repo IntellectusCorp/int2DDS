@@ -17,6 +17,7 @@ public sealed class DataWriter<T> : IDisposable where T : IDdsType<T>
 {
     private readonly nint _handle;
     private readonly Topic<T> _topic;
+    private readonly bool _xcdr2;
     private nint _listenerContextHandle;
     private bool _disposed;
 
@@ -27,6 +28,7 @@ public sealed class DataWriter<T> : IDisposable where T : IDdsType<T>
         IDataWriterListener? listener = null, uint statusMask = 0)
     {
         _topic = topic;
+        _xcdr2 = qos?.DataRepresentation?.Kind != Qos.DataRepresentationKind.Xcdr1;
 
         // Create QoS handle if provided
         nint qosHandle = 0;
@@ -110,7 +112,7 @@ public sealed class DataWriter<T> : IDisposable where T : IDdsType<T>
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        var data = sample.SerializeCdr();
+        var data = sample.SerializeCdr(_xcdr2);
         var key = T.HasKey ? sample.SerializeKey() : null;
 
         unsafe
@@ -136,7 +138,7 @@ public sealed class DataWriter<T> : IDisposable where T : IDdsType<T>
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        var data = sample.SerializeCdr();
+        var data = sample.SerializeCdr(_xcdr2);
         var key = T.HasKey ? sample.SerializeKey() : null;
 
         var epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
