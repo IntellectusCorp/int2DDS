@@ -17,6 +17,7 @@ use int2dds_rpc::service::ServiceParams;
 
 use types::*;
 
+// Service implementation that handles incoming RPC requests
 struct RobotControlImpl {
     speed: Mutex<f32>,
 }
@@ -27,6 +28,7 @@ impl RobotControlImpl {
     }
 }
 
+// Implement the RobotControl trait to define how each RPC call is handled
 impl RobotControl for RobotControlImpl {
     fn command(&self, com: Command) {
         print!("[Service] command({:?}) ... ", com);
@@ -74,20 +76,23 @@ impl RobotControl for RobotControlImpl {
 }
 
 fn main() {
+    // Create a DDS domain participant for communication
     let participant = DomainParticipantFactory::get_instance()
         .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
         .unwrap();
 
+    // Create the RPC service with the implementation
     let service =
         RobotControlService::new(ServiceParams::new(participant.clone()), RobotControlImpl::new())
             .unwrap();
 
+    // Create a server and register the service
     let mut server = Server::new(ServerParams::new());
     server.add_service(service);
 
     println!("[Service] Running RobotControl service...");
     println!("[Service] Press Ctrl+C to stop.");
 
-    // Run for 60 seconds (or until Ctrl+C)
+    // Run the server and process incoming requests
     server.run_for(Duration::from_secs(60)).unwrap();
 }

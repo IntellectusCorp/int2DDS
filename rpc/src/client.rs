@@ -1,4 +1,7 @@
-//! Function-call style Client abstraction (7.11.1.5.4, 7.11.1.5.5)
+//! Client — the caller-side proxy for function-call style RPC.
+//!
+//! Each generated client wraps a Requester, providing typed methods that
+//! serialize a request, send it, and wait for the corresponding reply.
 
 use std::time::Duration;
 
@@ -123,7 +126,7 @@ impl ClientParams {
     }
 }
 
-/// 7.11.1.5.5
+/// Exposes the underlying DDS DataWriter/DataReader for advanced use cases.
 pub trait ClientEndpoint: ServiceProxy {
     type TReq;
     type TRep;
@@ -132,7 +135,7 @@ pub trait ClientEndpoint: ServiceProxy {
     fn get_reply_datareader(&self) -> DdsRpcResult<&DataReader<Reply<Self::TRep>>>;
 }
 
-/// 7.11.1.5.4
+/// Wraps a Requester and exposes typed RPC methods to the caller.
 pub struct Client<TReq, TRep> {
     requester: Requester<TReq, TRep>,
 }
