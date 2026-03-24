@@ -54,6 +54,50 @@ internal static partial class NativeMethods
     [LibraryImport("int2dds_ffi")]
     internal static partial int int2dds_datawriter_qos_set_liveliness(nint qos, int kind, long lease_duration_ns);
 
+    // DataWriter QoS Getters
+
+    [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_datawriter_qos_get_reliability(nint qos, out int kind, out long max_blocking_time_ns);
+
+    [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_datawriter_qos_get_durability(nint qos, out int kind);
+
+    [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_datawriter_qos_get_history(nint qos, out int kind, out int depth);
+
+    [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_datawriter_qos_get_ownership(nint qos, out int kind);
+
+    [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_datawriter_qos_get_ownership_strength(nint qos, out int value);
+
+    [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_datawriter_qos_get_resource_limits(nint qos, out int max_samples, out int max_instances, out int max_per_instance);
+
+    [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_datawriter_qos_get_lifespan(nint qos, out long duration_ns);
+
+    [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_datawriter_qos_get_destination_order(nint qos, out int kind);
+
+    [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_datawriter_qos_get_deadline(nint qos, out long period_ns);
+
+    [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_datawriter_qos_get_liveliness(nint qos, out int kind, out long lease_duration_ns);
+
+    [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_datawriter_qos_get_data_representation(nint qos, out int kind);
+
+    [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_datawriter_qos_get_transport_priority(nint qos, out int value);
+
+    [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_datawriter_qos_get_latency_budget(nint qos, out long duration_ns);
+
+    [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_datawriter_qos_get_writer_data_lifecycle(nint qos, [MarshalAs(UnmanagedType.U1)] out bool autodispose);
+
     [LibraryImport("int2dds_ffi")]
     internal static partial int int2dds_datawriter_qos_destroy(nint qos);
 
@@ -100,6 +144,44 @@ internal static partial class NativeMethods
 
     [LibraryImport("int2dds_ffi")]
     internal static partial int int2dds_datareader_qos_set_liveliness(nint qos, int kind, long lease_duration_ns);
+
+    // DataReader QoS Getters
+
+    [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_datareader_qos_get_reliability(nint qos, out int kind, out long max_blocking_time_ns);
+
+    [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_datareader_qos_get_durability(nint qos, out int kind);
+
+    [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_datareader_qos_get_history(nint qos, out int kind, out int depth);
+
+    [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_datareader_qos_get_ownership(nint qos, out int kind);
+
+    [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_datareader_qos_get_resource_limits(nint qos, out int max_samples, out int max_instances, out int max_per_instance);
+
+    [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_datareader_qos_get_destination_order(nint qos, out int kind);
+
+    [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_datareader_qos_get_deadline(nint qos, out long period_ns);
+
+    [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_datareader_qos_get_liveliness(nint qos, out int kind, out long lease_duration_ns);
+
+    [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_datareader_qos_get_data_representation(nint qos, out int kind);
+
+    [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_datareader_qos_get_latency_budget(nint qos, out long duration_ns);
+
+    [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_datareader_qos_get_time_based_filter(nint qos, out long min_separation_ns);
+
+    [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_datareader_qos_get_reader_data_lifecycle(nint qos, out long autopurge_nowriter_ns, out long autopurge_disposed_ns);
 
     [LibraryImport("int2dds_ffi")]
     internal static partial int int2dds_datareader_qos_destroy(nint qos);

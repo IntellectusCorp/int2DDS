@@ -11,6 +11,12 @@ internal static partial class NativeMethods
     internal static partial int int2dds_create_publisher_with_qos(nint participant, nint qos, out nint publisher_out);
 
     [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_publisher_set_qos(nint publisher, nint qos);
+
+    [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_publisher_get_qos(nint publisher, out nint qos_out);
+
+    [LibraryImport("int2dds_ffi")]
     internal static partial int int2dds_delete_publisher(nint publisher);
 
     [LibraryImport("int2dds_ffi")]
@@ -30,6 +36,12 @@ internal static partial class NativeMethods
 
     [LibraryImport("int2dds_ffi")]
     internal static unsafe partial int int2dds_datawriter_get_listener(nint writer, NativeDataWriterListener* listener_out);
+
+    [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_datawriter_set_qos(nint writer, nint qos);
+
+    [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_datawriter_get_qos(nint writer, out nint qos_out);
 
     [LibraryImport("int2dds_ffi")]
     internal static partial int int2dds_delete_datawriter(nint writer);

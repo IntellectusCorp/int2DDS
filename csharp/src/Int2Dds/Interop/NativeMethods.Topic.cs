@@ -14,6 +14,12 @@ internal static partial class NativeMethods
     internal static unsafe partial int int2dds_create_topic_with_type_info(nint participant, byte* topic_name, nint type_info, nint qos, out nint topic_out);
 
     [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_topic_set_qos(nint topic, nint qos);
+
+    [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_topic_get_qos(nint topic, out nint qos_out);
+
+    [LibraryImport("int2dds_ffi")]
     internal static partial int int2dds_delete_topic(nint topic);
 
     [LibraryImport("int2dds_ffi")]
