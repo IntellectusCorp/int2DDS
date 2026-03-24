@@ -92,7 +92,7 @@ jobs:
         uses: robinraju/release-downloader@v1.10
         with:
           repository: "omg-dds/dds-rtps"
-          latest: true
+          tag: "v2.0.2025"
           fileName: "*"
       - name: Unzip
         run: |
