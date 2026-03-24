@@ -11,6 +11,12 @@ internal static partial class NativeMethods
     internal static partial int int2dds_create_subscriber_with_qos(nint participant, nint qos, out nint subscriber_out);
 
     [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_subscriber_set_qos(nint subscriber, nint qos);
+
+    [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_subscriber_get_qos(nint subscriber, out nint qos_out);
+
+    [LibraryImport("int2dds_ffi")]
     internal static partial int int2dds_delete_subscriber(nint subscriber);
 
     [LibraryImport("int2dds_ffi")]
@@ -27,6 +33,12 @@ internal static partial class NativeMethods
 
     [LibraryImport("int2dds_ffi")]
     internal static unsafe partial int int2dds_datareader_get_listener(nint reader, NativeDataReaderListener* listener_out);
+
+    [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_datareader_set_qos(nint reader, nint qos);
+
+    [LibraryImport("int2dds_ffi")]
+    internal static partial int int2dds_datareader_get_qos(nint reader, out nint qos_out);
 
     [LibraryImport("int2dds_ffi")]
     internal static partial int int2dds_delete_datareader(nint reader);
