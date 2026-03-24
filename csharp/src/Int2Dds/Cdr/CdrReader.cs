@@ -281,6 +281,7 @@ public sealed class CdrReader
     /// </summary>
     public (uint ObjectSize, int StartPos) ReadDheader()
     {
+        if (!_xcdr2) return (0, _pos); // XCDR1: no DHEADER
         uint objectSize = ReadU32();
         return (objectSize, _pos);
     }
@@ -291,6 +292,7 @@ public sealed class CdrReader
     /// </summary>
     public void ReadDheaderEnd(uint objectSize, int startPos)
     {
+        if (!_xcdr2) return; // XCDR1: no DHEADER
         int expectedEnd = startPos + (int)objectSize;
         if (expectedEnd > _data.Length)
             throw new CdrUnderflowException("DHEADER end exceeds buffer.");
