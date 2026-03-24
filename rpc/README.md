@@ -70,7 +70,7 @@ This generates all the types needed for RPC communication:
 
 ### Step 3: Implement the Service
 
-```rust
+```rust,ignore
 use int2dds::dcps::domain::domain_participant_factory::DomainParticipantFactory;
 use int2dds::dcps::domain::qos::DomainParticipantQos;
 use int2dds::dcps::infrastructure::status::StatusMask;
@@ -139,7 +139,7 @@ fn main() {
 
 ### Step 4: Use the Client
 
-```rust
+```rust,ignore
 use int2dds_rpc::client::ClientParams;
 use int2dds_rpc::entity::ServiceProxy;
 use int2dds_rpc::error::DdsRpcError;
