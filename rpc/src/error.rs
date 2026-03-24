@@ -1,4 +1,7 @@
-//! DDS-RPC error types (7.11.1.3)
+//! Error types for the DDS-RPC layer.
+//!
+//! Covers both infrastructure-level failures (DDS errors, timeouts) and
+//! application-level exceptions returned by service implementations.
 
 use std::fmt;
 

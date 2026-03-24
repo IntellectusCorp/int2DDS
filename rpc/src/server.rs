@@ -1,4 +1,7 @@
-//! Function-call style Server — container for Services (7.11.1.5.3)
+//! Server — a container that manages one or more Services.
+//!
+//! Runs an event loop that polls registered services for incoming requests
+//! and dispatches them to their respective handlers.
 
 use std::time::{Duration, Instant};
 
@@ -34,7 +37,7 @@ impl Default for ServerParams {
     }
 }
 
-/// Container of one or more Services (7.11.1.5.3).
+/// Container of one or more Services.
 /// Provides blocking and time-limited dispatch loops that poll
 /// all registered services for incoming requests.
 pub struct Server {

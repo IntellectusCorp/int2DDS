@@ -18,26 +18,32 @@ use int2dds_rpc::error::DdsRpcError;
 use types::*;
 
 fn main() {
+    // Create a DDS domain participant for communication
     let participant = DomainParticipantFactory::get_instance()
         .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
         .unwrap();
 
+    // Create the RPC client proxy
     let client = RobotControlClient::new(ClientParams::new(participant.clone())).unwrap();
 
+    // Wait until the service is discovered on the network
     println!("[Client] Waiting for service...");
     client.wait_for_service_timeout(Duration::from_secs(10)).unwrap();
     println!("[Client] Service found!");
 
     let timeout = Duration::from_secs(5);
 
+    // Fire-and-forget RPC call (no return value)
     print!("[Client] 1/7 command(StartCommand) ... ");
     client.command(Command::StartCommand, timeout).unwrap();
     println!("OK");
 
+    // RPC call that returns a value
     print!("[Client] 2/7 setSpeed(50.0) ... ");
     let old = client.set_speed(50.0, timeout).unwrap();
     println!("previous speed: {}", old);
 
+    // RPC call that returns a user-defined exception
     print!("[Client] 3/7 setSpeed(200.0) ... ");
     match client.set_speed(200.0, timeout) {
         Ok(v) => println!("unexpected success: {}", v),
@@ -51,6 +57,7 @@ fn main() {
     let speed = client.get_speed(timeout).unwrap();
     println!("speed: {}", speed);
 
+    // RPC call that returns a complex struct via out-parameter
     print!("[Client] 5/7 getStatus() ... ");
     let status = client.get_status(timeout).unwrap();
     println!("msg={}, code={}", status.msg, status.code);
@@ -59,6 +66,7 @@ fn main() {
     client.navigate(10.0, 20.0, timeout).unwrap();
     println!("OK");
 
+    // RPC call that returns a multi-variant error enum
     print!("[Client] 7/7 navigate(9999.0, 0.0) ... ");
     match client.navigate(9999.0, 0.0, timeout) {
         Ok(()) => println!("unexpected success"),
