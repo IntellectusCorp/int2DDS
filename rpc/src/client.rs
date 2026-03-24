@@ -21,6 +21,7 @@ use crate::types::{DdsRpcType, InstanceName, Reply, Request, SampleIdentity};
 pub struct ClientParams {
     pub(crate) participant: DomainParticipant,
     pub(crate) service_name: Option<String>,
+    pub(crate) interface_name: Option<String>,
     pub(crate) instance_name: Option<String>,
     pub(crate) request_topic_name: Option<String>,
     pub(crate) reply_topic_name: Option<String>,
@@ -37,6 +38,7 @@ impl ClientParams {
         Self {
             participant,
             service_name: None,
+            interface_name: None,
             instance_name: None,
             request_topic_name: None,
             reply_topic_name: None,
@@ -51,6 +53,11 @@ impl ClientParams {
 
     pub fn service_name(mut self, name: impl Into<String>) -> Self {
         self.service_name = Some(name.into());
+        self
+    }
+
+    pub fn interface_name(mut self, name: impl Into<String>) -> Self {
+        self.interface_name = Some(name.into());
         self
     }
 
@@ -103,6 +110,7 @@ impl ClientParams {
     pub fn into_requester_params(self) -> RequesterParams {
         let mut params = RequesterParams::new(self.participant);
         params.service_name = self.service_name;
+        params.interface_name = self.interface_name;
         params.request_topic_name = self.request_topic_name;
         params.reply_topic_name = self.reply_topic_name;
         params.datawriter_qos = self.datawriter_qos;

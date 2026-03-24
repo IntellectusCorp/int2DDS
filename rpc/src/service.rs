@@ -16,7 +16,7 @@ use crate::error::DdsRpcResult;
 use crate::params::ReplierParams;
 use crate::replier::Replier;
 use crate::server::Dispatchable;
-use crate::types::{DdsRpcType, Reply, Request};
+use crate::types::{DdsRpcType, RemoteExceptionCode, Reply, Request};
 
 /// (7.9.1)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +30,7 @@ pub enum ServiceStatus {
 pub struct ServiceParams {
     pub(crate) participant: DomainParticipant,
     pub(crate) service_name: Option<String>,
+    pub(crate) interface_name: Option<String>,
     pub(crate) instance_name: Option<String>,
     pub(crate) request_topic_name: Option<String>,
     pub(crate) reply_topic_name: Option<String>,
@@ -46,6 +47,7 @@ impl ServiceParams {
         Self {
             participant,
             service_name: None,
+            interface_name: None,
             instance_name: None,
             request_topic_name: None,
             reply_topic_name: None,
@@ -60,6 +62,11 @@ impl ServiceParams {
 
     pub fn service_name(mut self, name: impl Into<String>) -> Self {
         self.service_name = Some(name.into());
+        self
+    }
+
+    pub fn interface_name(mut self, name: impl Into<String>) -> Self {
+        self.interface_name = Some(name.into());
         self
     }
 
@@ -112,6 +119,7 @@ impl ServiceParams {
     pub fn into_replier_params(self) -> ReplierParams {
         let mut params = ReplierParams::new(self.participant);
         params.service_name = self.service_name;
+        params.interface_name = self.interface_name;
         params.instance_name = self.instance_name;
         params.request_topic_name = self.request_topic_name;
         params.reply_topic_name = self.reply_topic_name;
@@ -139,8 +147,9 @@ pub trait ServiceEndpoint: RpcEntity {
 
 /// Request dispatch abstraction (7.9.2.1).
 /// IDL code generators produce per-interface implementations of this trait.
+/// Returns reply data + RemoteExceptionCode for the reply header.
 pub trait RequestHandler<TReq, TRep>: Send + 'static {
-    fn handle_request(&self, request: &TReq) -> TRep;
+    fn handle_request(&self, request: &TReq) -> (TRep, RemoteExceptionCode);
 }
 
 /// (7.11.1.5.1)
@@ -174,8 +183,8 @@ impl<TReq: DdsRpcType, TRep: DdsRpcType, H: RequestHandler<TReq, TRep>> Service<
 
         let data = sample.data().map_err(|e| DdsError::Error(e.to_string()))?;
         let request_id = data.header.request_id;
-        let reply_data = self.handler.handle_request(&data.data);
-        self.replier.send_reply(&reply_data, &request_id)?;
+        let (reply_data, remote_ex) = self.handler.handle_request(&data.data);
+        self.replier.send_reply_with_exception_code(&reply_data, &request_id, remote_ex)?;
         Ok(true)
     }
 }
@@ -233,9 +242,5 @@ where
 {
     fn try_dispatch_one(&self) -> DdsRpcResult<bool> {
         Service::try_dispatch_one(self)
-    }
-
-    fn status(&self) -> ServiceStatus {
-        ServiceEndpoint::status(self)
     }
 }
