@@ -1400,3 +1400,177 @@ class TestDiscovery:
                 assert reader.matched_writers == 0
 
                 waitset.close()
+
+
+class TestListener:
+    """Tests for Listener callbacks (Phase 2-4)."""
+
+    def test_writer_on_publication_matched(self, domain_id: int):
+        """DataWriterListener.on_publication_matched should be called on discovery."""
+        import threading
+        from int2dds.core.listeners import DataWriterListenerBase, STATUS_PUBLICATION_MATCHED
+        from int2dds.core.qos import DataWriterQos, DataReaderQos, Reliability
+
+        matched_event = threading.Event()
+        received_status = {}
+
+        class WriterListener(DataWriterListenerBase):
+            def on_publication_matched(self, writer, status):
+                received_status["total_count"] = status.total_count
+                received_status["current_count"] = status.current_count
+                matched_event.set()
+
+        with DomainParticipant(domain_id=domain_id) as dp:
+            topic = dp.create_topic("WriterListenerTopic", TestMessage)
+            pub = dp.create_publisher()
+            sub = dp.create_subscriber()
+
+            listener = WriterListener()
+            writer = pub.create_datawriter(
+                topic,
+                qos=DataWriterQos(reliability=Reliability("RELIABLE")),
+                listener=listener,
+                status_mask=STATUS_PUBLICATION_MATCHED,
+            )
+
+            # Create reader to trigger matching
+            reader = sub.create_datareader(
+                topic, qos=DataReaderQos(reliability=Reliability("RELIABLE"))
+            )
+
+            # Wait for callback
+            assert matched_event.wait(timeout=10.0), "on_publication_matched not called"
+            assert received_status["current_count"] >= 1
+
+    def test_reader_on_subscription_matched(self, domain_id: int):
+        """DataReaderListener.on_subscription_matched should be called on discovery."""
+        import threading
+        from int2dds.core.listeners import DataReaderListenerBase, STATUS_SUBSCRIPTION_MATCHED
+        from int2dds.core.qos import DataWriterQos, DataReaderQos, Reliability
+
+        matched_event = threading.Event()
+        received_status = {}
+
+        class ReaderListener(DataReaderListenerBase):
+            def on_subscription_matched(self, reader, status):
+                received_status["total_count"] = status.total_count
+                received_status["current_count"] = status.current_count
+                matched_event.set()
+
+        with DomainParticipant(domain_id=domain_id) as dp:
+            topic = dp.create_topic("ReaderListenerTopic", TestMessage)
+            pub = dp.create_publisher()
+            sub = dp.create_subscriber()
+
+            listener = ReaderListener()
+            reader = sub.create_datareader(
+                topic,
+                qos=DataReaderQos(reliability=Reliability("RELIABLE")),
+                listener=listener,
+                status_mask=STATUS_SUBSCRIPTION_MATCHED,
+            )
+
+            # Create writer to trigger matching
+            writer = pub.create_datawriter(
+                topic, qos=DataWriterQos(reliability=Reliability("RELIABLE"))
+            )
+
+            # Wait for callback
+            assert matched_event.wait(timeout=5.0), "on_subscription_matched not called"
+            assert received_status["current_count"] >= 1
+
+    def test_reader_on_data_available(self, domain_id: int):
+        """DataReaderListener.on_data_available should be called when data arrives."""
+        import threading
+        from int2dds import DdsTimeout
+        from int2dds.core.listeners import DataReaderListenerBase, STATUS_DATA_AVAILABLE
+        from int2dds.core.conditions import STATUS_SUBSCRIPTION_MATCHED
+        from int2dds.core.qos import DataWriterQos, DataReaderQos, Reliability
+
+        data_event = threading.Event()
+
+        class ReaderListener(DataReaderListenerBase):
+            def on_data_available(self, reader):
+                data_event.set()
+
+        with DomainParticipant(domain_id=domain_id) as dp:
+            topic = dp.create_topic("DataAvailableListenerTopic", TestMessage)
+            pub = dp.create_publisher()
+            sub = dp.create_subscriber()
+
+            listener = ReaderListener()
+            reader = sub.create_datareader(
+                topic,
+                qos=DataReaderQos(reliability=Reliability("RELIABLE")),
+                listener=listener,
+                status_mask=STATUS_DATA_AVAILABLE,
+            )
+
+            writer = pub.create_datawriter(
+                topic, qos=DataWriterQos(reliability=Reliability("RELIABLE"))
+            )
+
+            # Wait for discovery first via polling
+            deadline = 5.0
+            while writer.matched_readers == 0 and deadline > 0:
+                import time
+                time.sleep(0.5)
+                deadline -= 0.5
+            assert writer.matched_readers > 0
+
+            # Write data
+            writer.write(TestMessage(value=99, text="listener test"))
+
+            # Wait for on_data_available callback
+            assert data_event.wait(timeout=5.0), "on_data_available not called"
+
+    def test_reader_set_and_remove_listener(self, domain_id: int):
+        """Setting and removing a listener should work without errors."""
+        import threading
+        from int2dds.core.listeners import (
+            DataReaderListenerBase,
+            STATUS_SUBSCRIPTION_MATCHED,
+            STATUS_MASK_NONE,
+        )
+        from int2dds.core.qos import DataWriterQos, DataReaderQos, Reliability
+
+        first_event = threading.Event()
+        second_event = threading.Event()
+
+        class FirstListener(DataReaderListenerBase):
+            def on_subscription_matched(self, reader, status):
+                first_event.set()
+
+        class SecondListener(DataReaderListenerBase):
+            def on_subscription_matched(self, reader, status):
+                second_event.set()
+
+        with DomainParticipant(domain_id=domain_id) as dp:
+            topic = dp.create_topic("SetListenerTopic", TestMessage)
+            pub = dp.create_publisher()
+            sub = dp.create_subscriber()
+
+            # Create reader with first listener
+            reader = sub.create_datareader(
+                topic,
+                qos=DataReaderQos(reliability=Reliability("RELIABLE")),
+                listener=FirstListener(),
+                status_mask=STATUS_SUBSCRIPTION_MATCHED,
+            )
+
+            # Trigger matching to call first listener
+            writer = pub.create_datawriter(
+                topic, qos=DataWriterQos(reliability=Reliability("RELIABLE"))
+            )
+            assert first_event.wait(timeout=5.0), "First listener not called"
+
+            # Remove listener (set to None)
+            reader.set_listener(None, STATUS_MASK_NONE)
+
+            # Set second listener
+            reader.set_listener(SecondListener(), STATUS_SUBSCRIPTION_MATCHED)
+
+            # Should not raise - listener swap completed
+            # Note: second_event may or may not fire depending on whether
+            # a new matching event occurs, but the set_listener call itself
+            # should succeed without errors
