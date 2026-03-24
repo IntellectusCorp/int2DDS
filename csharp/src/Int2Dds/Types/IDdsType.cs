@@ -9,6 +9,7 @@ public interface IDdsType<T> where T : IDdsType<T>
     static abstract bool HasKey { get; }
 
     byte[] SerializeCdr();
+    byte[] SerializeCdr(bool xcdr2) => SerializeCdr();
     static abstract T DeserializeCdr(ReadOnlySpan<byte> data);
     byte[] SerializeKey();
 }
