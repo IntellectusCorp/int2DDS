@@ -1135,7 +1135,7 @@ class TestInstance:
 
 
 class TestCommunication:
-    """Tests for pub/sub communication patterns (Phase 2-1)."""
+    """Tests for pub/sub communication patterns"""
 
     def _setup_pubsub(self, dp, topic_name, type_class):
         """Helper: create matched writer/reader pair and wait for discovery."""
@@ -1230,7 +1230,7 @@ class TestCommunication:
 
 
 class TestWaitSetAdvanced:
-    """Tests for WaitSet advanced patterns (Phase 2-2)."""
+    """Tests for WaitSet advanced patterns"""
 
     def test_guard_condition_trigger(self):
         """GuardCondition trigger should wake up WaitSet."""
@@ -1291,7 +1291,7 @@ class TestWaitSetAdvanced:
 
 
 class TestDiscovery:
-    """Tests for discovery matching (Phase 2-3)."""
+    """Tests for discovery matching."""
 
     def test_matched_total_count_increases(self, domain_id: int):
         """Creating a second writer should increase reader's total matched count."""
@@ -1403,7 +1403,7 @@ class TestDiscovery:
 
 
 class TestListener:
-    """Tests for Listener callbacks (Phase 2-4)."""
+    """Tests for Listener callbacks."""
 
     def test_writer_on_publication_matched(self, domain_id: int):
         """DataWriterListener.on_publication_matched should be called on discovery."""
@@ -1569,8 +1569,3 @@ class TestListener:
 
             # Set second listener
             reader.set_listener(SecondListener(), STATUS_SUBSCRIPTION_MATCHED)
-
-            # Should not raise - listener swap completed
-            # Note: second_event may or may not fire depending on whether
-            # a new matching event occurs, but the set_listener call itself
-            # should succeed without errors
