@@ -1,4 +1,7 @@
-//! Function-call style Service abstraction (7.9.1, 7.11.1.5.1, 7.11.1.5.2)
+//! Service — the callee-side handler for function-call style RPC.
+//!
+//! Each generated service wraps a Replier, dispatching incoming requests to
+//! the user's trait implementation and sending back serialized replies.
 
 use std::sync::Arc;
 
@@ -18,7 +21,6 @@ use crate::replier::Replier;
 use crate::server::Dispatchable;
 use crate::types::{DdsRpcType, RemoteExceptionCode, Reply, Request};
 
-/// (7.9.1)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceStatus {
     Closed,
@@ -133,7 +135,6 @@ impl ServiceParams {
     }
 }
 
-/// (7.11.1.5.2)
 pub trait ServiceEndpoint: RpcEntity {
     type TReq;
     type TRep;
@@ -145,14 +146,14 @@ pub trait ServiceEndpoint: RpcEntity {
     fn status(&self) -> ServiceStatus;
 }
 
-/// Request dispatch abstraction (7.9.2.1).
+/// Request dispatch abstraction.
 /// IDL code generators produce per-interface implementations of this trait.
 /// Returns reply data + RemoteExceptionCode for the reply header.
 pub trait RequestHandler<TReq, TRep>: Send + 'static {
     fn handle_request(&self, request: &TReq) -> (TRep, RemoteExceptionCode);
 }
 
-/// (7.11.1.5.1)
+/// Manages a Replier and dispatches incoming requests to a RequestHandler.
 pub struct Service<TReq, TRep, H> {
     replier: Replier<TReq, TRep>,
     handler: Arc<H>,
