@@ -4,14 +4,13 @@ use std::time::{Duration, Instant};
 
 use crate::entity::RpcEntity;
 use crate::error::DdsRpcResult;
-use crate::service::{ServiceParams, ServiceStatus};
+use crate::service::ServiceParams;
 
 /// Type-erased dispatch trait for heterogeneous Service storage.
 /// Service<TReq, TRep, H> implements this trait, allowing Server
 /// to hold services with different type parameters in a single Vec.
 pub trait Dispatchable: RpcEntity + Send {
     fn try_dispatch_one(&self) -> DdsRpcResult<bool>;
-    fn status(&self) -> ServiceStatus;
 }
 
 pub struct ServerParams {
