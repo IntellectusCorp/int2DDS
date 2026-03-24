@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+
 pub mod client;
 pub mod entity;
 pub mod error;
@@ -10,5 +12,4 @@ pub mod server;
 pub mod service;
 pub mod types;
 
-pub(crate) mod hash;
 pub(crate) mod topic_name;

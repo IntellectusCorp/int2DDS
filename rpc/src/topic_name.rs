@@ -1,13 +1,11 @@
-//! Topic name synthesis rules (7.4.1, 7.4.2)
+//! DDS topic name generation for RPC request/reply topics.
 //!
-//! BNF: <topic_name> ::= <interface_name> "_" <service_name> "_" [ "Request" | "Reply" ]
-//!                      | <user_def_alpha_num>
-//!
-//! For request-reply style, interface_name is NOT automatically included (7.4.1).
-//! Priority: runtime params > annotation > default (7.4.2.3)
+//! Builds topic names from service name, interface name, and a "Request"/"Reply"
+//! suffix. User-supplied overrides take priority over defaults.
 
 const DEFAULT_SERVICE_NAME: &str = "Service";
 
+/// Holds naming overrides and defaults for synthesizing RPC topic/type names.
 pub(crate) struct TopicNameConfig {
     pub(crate) interface_name: Option<String>,
     pub(crate) service_name: Option<String>,
@@ -32,7 +30,7 @@ impl TopicNameConfig {
         self.synthesize("Reply")
     }
 
-    /// Synthesize the request type name (7.5.1.1.6)
+    /// Synthesize the request type name
     /// "${interfaceName}_Request"
     pub(crate) fn request_type(&self) -> Option<String> {
         self.request_type_override
@@ -40,7 +38,7 @@ impl TopicNameConfig {
             .or_else(|| self.interface_name.as_ref().map(|iface| format!("{}_Request", iface)))
     }
 
-    /// Synthesize the reply type name (7.5.1.1.7)
+    /// Synthesize the reply type name
     /// "${interfaceName}_Reply"
     pub(crate) fn reply_type(&self) -> Option<String> {
         self.reply_type_override
@@ -48,6 +46,7 @@ impl TopicNameConfig {
             .or_else(|| self.interface_name.as_ref().map(|iface| format!("{}_Reply", iface)))
     }
 
+    /// Build a topic name from interface name, service name, and the given suffix.
     fn synthesize(&self, suffix: &str) -> String {
         let service = self.service_name.as_deref().unwrap_or(DEFAULT_SERVICE_NAME);
 
