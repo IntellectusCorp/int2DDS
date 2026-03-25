@@ -20,7 +20,7 @@ namespace Int2Dds.Types
     public interface IDdsType
     {
         byte[] SerializeCdr();
-        byte[] SerializeCdr(bool xcdr2) => SerializeCdr();
+        byte[] SerializeCdr(bool xcdr2);
         byte[] SerializeKey();
     }
 }

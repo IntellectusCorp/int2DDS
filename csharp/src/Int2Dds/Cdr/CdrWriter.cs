@@ -63,6 +63,9 @@ namespace Int2Dds.Cdr
         /// <summary>Current number of bytes written.</summary>
         public int Length => _pos;
 
+        /// <summary>Whether this writer uses XCDR2 encoding.</summary>
+        public bool IsXcdr2 => _xcdr2;
+
         // ---- Encapsulation Header -------------------------------------------
 
         private void WriteEncapsulationHeader(Extensibility extensibility)
@@ -257,6 +260,23 @@ namespace Int2Dds.Cdr
                 Encoding.UTF8.GetBytes(s.AsSpan(), _buffer.AsSpan(_pos));
             _buffer[_pos + byteCount] = 0; // null terminator
             _pos += byteCount + 1;
+        }
+
+        /// <summary>
+        /// Write a CDR wstring (wide string): uint32 length (number of UTF-16 code units including null)
+        /// + UTF-16 code units (each 2 bytes) + null terminator (2 bytes of zero).
+        /// </summary>
+        public void WriteWString(string s)
+        {
+            if (s == null) s = string.Empty;
+            char[] chars = s.ToCharArray();
+            uint cdrLen = (uint)(chars.Length + 1); // number of UTF-16 code units including null
+            WriteU32(cdrLen);
+            for (int i = 0; i < chars.Length; i++)
+            {
+                WriteU16((ushort)chars[i]);
+            }
+            WriteU16(0); // null terminator
         }
 
         /// <summary>Write a sequence header (uint32 element count).</summary>

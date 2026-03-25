@@ -163,6 +163,22 @@ namespace Int2Dds.Cdr
             _pos += byteCount + 1;
         }
 
+        /// <summary>
+        /// Write a CDR wstring: uint32 length (UTF-16 code units including null) + UTF-16 code units + null.
+        /// </summary>
+        public void WriteWString(string s)
+        {
+            if (s == null) s = string.Empty;
+            char[] chars = s.ToCharArray();
+            uint cdrLen = (uint)(chars.Length + 1);
+            WriteU32(cdrLen);
+            for (int i = 0; i < chars.Length; i++)
+            {
+                WriteU16((ushort)chars[i]);
+            }
+            WriteU16(0); // null terminator
+        }
+
         public void WriteEnum(int discriminant)
         {
             WriteI32(discriminant);
