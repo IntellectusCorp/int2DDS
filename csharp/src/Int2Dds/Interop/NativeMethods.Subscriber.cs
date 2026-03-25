@@ -12,6 +12,12 @@ namespace Int2Dds.Interop
         internal static extern int int2dds_create_subscriber_with_qos(IntPtr participant, IntPtr qos, out IntPtr subscriber_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_subscriber_set_qos(IntPtr subscriber, IntPtr qos);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_subscriber_get_qos(IntPtr subscriber, out IntPtr qos_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_delete_subscriber(IntPtr subscriber);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
@@ -28,6 +34,12 @@ namespace Int2Dds.Interop
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static unsafe extern int int2dds_datareader_get_listener(IntPtr reader, NativeDataReaderListener* listener_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datareader_set_qos(IntPtr reader, IntPtr qos);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datareader_get_qos(IntPtr reader, out IntPtr qos_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_delete_datareader(IntPtr reader);

@@ -38,6 +38,7 @@ namespace Int2Dds.Core
         private readonly IntPtr _handle;
         private readonly Topic<T> _topic;
         private readonly byte[] _buffer;
+        private IntPtr _listenerContextHandle;
         private bool _disposed;
 
         /// <summary>
@@ -69,8 +70,23 @@ namespace Int2Dds.Core
             {
                 if (listener != null)
                 {
-                    // Listener infrastructure will be implemented separately
-                    throw new NotImplementedException("DataReader listener support is not yet implemented.");
+                    unsafe
+                    {
+                        var (nativeListener, contextHandle) = ListenerRegistry.CreateReaderListener(listener, this);
+                        _listenerContextHandle = contextHandle;
+                        try
+                        {
+                            ReturnCodeHelper.CheckReturn(
+                                NativeMethods.int2dds_create_datareader_with_listener(
+                                    subscriber.Handle, topic.Handle, qosHandle, &nativeListener, statusMask, out _handle));
+                        }
+                        catch
+                        {
+                            ListenerRegistry.FreeListener(_listenerContextHandle);
+                            _listenerContextHandle = IntPtr.Zero;
+                            throw;
+                        }
+                    }
                 }
                 else
                 {
@@ -364,6 +380,46 @@ namespace Int2Dds.Core
         }
 
         /// <summary>
+        /// Gets the current QoS policies of this DataReader.
+        /// </summary>
+        public DataReaderQos GetQos()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+
+            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_get_qos(_handle, out var qosHandle));
+            try
+            {
+                return ReadReaderQos(qosHandle);
+            }
+            finally
+            {
+                NativeMethods.int2dds_datareader_qos_destroy(qosHandle);
+            }
+        }
+
+        /// <summary>
+        /// Sets new QoS policies on this DataReader.
+        /// Some policies can only be changed before the entity is enabled.
+        /// </summary>
+        /// <param name="qos">The new QoS policies to apply.</param>
+        public void SetQos(DataReaderQos qos)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+
+            // Get current QoS as base, then apply user overrides on top
+            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_get_qos(_handle, out var qosHandle));
+            try
+            {
+                ApplyReaderQos(qosHandle, qos);
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_set_qos(_handle, qosHandle));
+            }
+            finally
+            {
+                NativeMethods.int2dds_datareader_qos_destroy(qosHandle);
+            }
+        }
+
+        /// <summary>
         /// Sets or replaces the listener for this DataReader.
         /// </summary>
         /// <param name="listener">The listener to set, or null to remove.</param>
@@ -371,8 +427,38 @@ namespace Int2Dds.Core
         public void SetListener(IDataReaderListener? listener, uint statusMask)
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
-            // Listener infrastructure will be implemented separately
-            throw new NotImplementedException("DataReader listener support is not yet implemented.");
+
+            // Free old listener if any
+            if (_listenerContextHandle != IntPtr.Zero)
+            {
+                ListenerRegistry.FreeListener(_listenerContextHandle);
+                _listenerContextHandle = IntPtr.Zero;
+            }
+
+            unsafe
+            {
+                if (listener != null)
+                {
+                    var (nativeListener, contextHandle) = ListenerRegistry.CreateReaderListener(listener, this);
+                    _listenerContextHandle = contextHandle;
+                    try
+                    {
+                        ReturnCodeHelper.CheckReturn(
+                            NativeMethods.int2dds_datareader_set_listener(_handle, &nativeListener, statusMask));
+                    }
+                    catch
+                    {
+                        ListenerRegistry.FreeListener(_listenerContextHandle);
+                        _listenerContextHandle = IntPtr.Zero;
+                        throw;
+                    }
+                }
+                else
+                {
+                    ReturnCodeHelper.CheckReturn(
+                        NativeMethods.int2dds_datareader_set_listener(_handle, null, 0));
+                }
+            }
         }
 
         /// <summary>
@@ -624,6 +710,40 @@ namespace Int2Dds.Core
                     qosHandle, (int)qos.Liveliness.Kind, qos.Liveliness.LeaseDurationNs));
         }
 
+        private static DataReaderQos ReadReaderQos(IntPtr h)
+        {
+            NativeMethods.int2dds_datareader_qos_get_reliability(h, out var relKind, out var relTime);
+            NativeMethods.int2dds_datareader_qos_get_durability(h, out var durKind);
+            NativeMethods.int2dds_datareader_qos_get_history(h, out var histKind, out var histDepth);
+            NativeMethods.int2dds_datareader_qos_get_ownership(h, out var ownKind);
+            NativeMethods.int2dds_datareader_qos_get_resource_limits(h, out var maxS, out var maxI, out var maxPI);
+            NativeMethods.int2dds_datareader_qos_get_destination_order(h, out var destKind);
+            NativeMethods.int2dds_datareader_qos_get_deadline(h, out var deadlineNs);
+            NativeMethods.int2dds_datareader_qos_get_liveliness(h, out var liveKind, out var liveNs);
+            NativeMethods.int2dds_datareader_qos_get_data_representation(h, out var reprKind);
+            NativeMethods.int2dds_datareader_qos_get_latency_budget(h, out var latNs);
+            NativeMethods.int2dds_datareader_qos_get_time_based_filter(h, out var tbfNs);
+            NativeMethods.int2dds_datareader_qos_get_reader_data_lifecycle(h, out var purgeNowriterNs, out var purgeDisposedNs);
+
+            return new DataReaderQos
+            {
+                Reliability = new Reliability((ReliabilityKind)relKind, TimeSpan.FromTicks(relTime / 100)),
+                Durability = new Durability((DurabilityKind)durKind),
+                History = new History((HistoryKind)histKind, histDepth),
+                Ownership = new Ownership((OwnershipKind)ownKind),
+                ResourceLimits = new ResourceLimits(maxS, maxI, maxPI),
+                DestinationOrder = new DestinationOrder((DestinationOrderKind)destKind),
+                Deadline = new Deadline(TimeSpan.FromTicks(deadlineNs / 100)),
+                Liveliness = new Liveliness((LivelinessKind)liveKind, TimeSpan.FromTicks(liveNs / 100)),
+                DataRepresentation = new DataRepresentation((DataRepresentationKind)reprKind),
+                LatencyBudget = new LatencyBudget(TimeSpan.FromTicks(latNs / 100)),
+                TimeBasedFilter = new TimeBasedFilter(TimeSpan.FromTicks(tbfNs / 100)),
+                ReaderDataLifecycle = new ReaderDataLifecycle(
+                    TimeSpan.FromTicks(purgeNowriterNs / 100),
+                    TimeSpan.FromTicks(purgeDisposedNs / 100)),
+            };
+        }
+
         /// <summary>
         /// Releases all resources used by the DataReader.
         /// </summary>
@@ -631,6 +751,14 @@ namespace Int2Dds.Core
         {
             if (_disposed) return;
             _disposed = true;
+            GC.SuppressFinalize(this);
+
+            if (_listenerContextHandle != IntPtr.Zero)
+            {
+                ListenerRegistry.FreeListener(_listenerContextHandle);
+                _listenerContextHandle = IntPtr.Zero;
+            }
+
             NativeMethods.int2dds_delete_datareader(_handle);
             ArrayPool<byte>.Shared.Return(_buffer);
         }

@@ -98,6 +98,28 @@ namespace Int2Dds.Core
         /// </summary>
         public Type TypeClass => typeof(T);
 
+        /// <summary>
+        /// Sets new QoS policies on this Topic.
+        /// Some policies can only be changed before the entity is enabled.
+        /// </summary>
+        /// <param name="qos">The new QoS policies to apply.</param>
+        public void SetQos(TopicQos qos)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+
+            // Get current QoS as base, then apply user overrides on top
+            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_topic_get_qos(_handle, out var qosHandle));
+            try
+            {
+                ApplyTopicQos(qosHandle, qos);
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_topic_set_qos(_handle, qosHandle));
+            }
+            finally
+            {
+                NativeMethods.int2dds_topic_qos_destroy(qosHandle);
+            }
+        }
+
         private static void ApplyTopicQos(IntPtr qosHandle, TopicQos qos)
         {
             if (qos.Reliability != null)
@@ -153,6 +175,7 @@ namespace Int2Dds.Core
         {
             if (_disposed) return;
             _disposed = true;
+            GC.SuppressFinalize(this);
             NativeMethods.int2dds_delete_topic(_handle);
         }
 

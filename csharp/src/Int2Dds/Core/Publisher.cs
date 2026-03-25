@@ -96,6 +96,57 @@ namespace Int2Dds.Core
         }
 
         /// <summary>
+        /// Sets new QoS policies on this Publisher.
+        /// Some policies can only be changed before the entity is enabled.
+        /// </summary>
+        /// <param name="qos">The new QoS policies to apply.</param>
+        public void SetQos(PublisherQos qos)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+
+            // Get current QoS as base, then apply user overrides on top
+            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_publisher_get_qos(_handle, out var qosHandle));
+            try
+            {
+                if (qos.Partition is { Names: { Length: var len } } partition && len > 0)
+                {
+                    unsafe
+                    {
+                        var partitionByteArrays = partition.Names
+                            .Select(n => Encoding.UTF8.GetBytes(n + '\0'))
+                            .ToArray();
+                        var pinnedArrays = new GCHandle[partitionByteArrays.Length];
+                        for (int i = 0; i < partitionByteArrays.Length; i++)
+                            pinnedArrays[i] = GCHandle.Alloc(
+                                partitionByteArrays[i], GCHandleType.Pinned);
+                        try
+                        {
+                            var ptrs = new byte*[partitionByteArrays.Length];
+                            for (int i = 0; i < ptrs.Length; i++)
+                                ptrs[i] = (byte*)pinnedArrays[i].AddrOfPinnedObject();
+                            fixed (byte** pPartitions = ptrs)
+                            {
+                                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_publisher_qos_set_partition(
+                                    qosHandle, pPartitions, (UIntPtr)partition.Names.Length));
+                            }
+                        }
+                        finally
+                        {
+                            foreach (var pin in pinnedArrays)
+                                pin.Free();
+                        }
+                    }
+                }
+
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_publisher_set_qos(_handle, qosHandle));
+            }
+            finally
+            {
+                NativeMethods.int2dds_publisher_qos_destroy(qosHandle);
+            }
+        }
+
+        /// <summary>
         /// Waits until all written data has been acknowledged by matched readers.
         /// </summary>
         /// <param name="timeout">Maximum time to wait.</param>
@@ -122,6 +173,7 @@ namespace Int2Dds.Core
         {
             if (_disposed) return;
             _disposed = true;
+            GC.SuppressFinalize(this);
 
             NativeMethods.int2dds_publisher_delete_contained_entities(_handle);
             NativeMethods.int2dds_delete_publisher(_handle);
