@@ -1789,3 +1789,141 @@ class TestHighVolume:
             assert len(all_samples) == 1000, f"Expected 1000, got {len(all_samples)}"
             values = [s.data.value for s in all_samples]
             assert values == list(range(1000))
+
+
+class TestResourceCleanup:
+    """Tests for resource cleanup and re-creation."""
+
+    def test_context_manager_recreate(self, domain_id: int):
+        """After context manager exit, a new Participant should be creatable."""
+        with DomainParticipant(domain_id=domain_id) as dp1:
+            topic = dp1.create_topic("RecreateTest1", TestMessage)
+            assert topic.name == "RecreateTest1"
+            topic.close()
+
+        # After dp1 is closed, create a new one
+        with DomainParticipant(domain_id=domain_id) as dp2:
+            topic = dp2.create_topic("RecreateTest2", TestMessage)
+            assert topic.name == "RecreateTest2"
+            topic.close()
+
+    def test_participant_sequential_create_delete(self, domain_id: int):
+        """Sequential create/delete cycles should not leak resources."""
+        for i in range(5):
+            with DomainParticipant(domain_id=domain_id) as dp:
+                topic = dp.create_topic(f"SeqTest_{i}", TestMessage)
+                assert topic.name == f"SeqTest_{i}"
+                topic.close()
+
+    def test_writer_reader_recreate(self, domain_id: int):
+        """After deleting Writer/Reader, new ones should be creatable."""
+        with DomainParticipant(domain_id=domain_id) as dp:
+            topic = dp.create_topic("RecreateWRTopic", TestMessage)
+            pub = dp.create_publisher()
+            sub = dp.create_subscriber()
+
+            # First creation
+            writer = pub.create_datawriter(topic)
+            reader = sub.create_datareader(topic)
+
+            writer.close()
+            reader.close()
+
+            # Re-creation after delete
+            writer2 = pub.create_datawriter(topic)
+            reader2 = sub.create_datareader(topic)
+
+            assert writer2 is not None
+            assert reader2 is not None
+
+            writer2.close()
+            reader2.close()
+            pub.close()
+            sub.close()
+            topic.close()
+
+
+class TestErrorHandling:
+    """Tests for error handling on invalid operations."""
+
+    def test_write_on_closed_writer(self, domain_id: int):
+        """Writing on a closed DataWriter should raise an exception."""
+        with DomainParticipant(domain_id=domain_id) as dp:
+            topic = dp.create_topic("ClosedWriterTopic", TestMessage)
+            pub = dp.create_publisher()
+            writer = pub.create_datawriter(topic)
+            writer.close()
+
+            with pytest.raises(Exception):
+                writer.write(TestMessage(value=1, text="fail"))
+
+            pub.close()
+            topic.close()
+
+    def test_take_on_closed_reader(self, domain_id: int):
+        """Taking from a closed DataReader should raise an exception."""
+        with DomainParticipant(domain_id=domain_id) as dp:
+            topic = dp.create_topic("ClosedReaderTopic", TestMessage)
+            sub = dp.create_subscriber()
+            reader = sub.create_datareader(topic)
+            reader.close()
+
+            with pytest.raises(Exception):
+                reader.take()
+
+            sub.close()
+            topic.close()
+
+    def test_create_topic_on_closed_participant(self, domain_id: int):
+        """Creating a topic on a closed Participant should raise an exception."""
+        dp = DomainParticipant(domain_id=domain_id)
+        dp.close()
+
+        with pytest.raises(Exception):
+            dp.create_topic("FailTopic", TestMessage)
+
+    def test_incompatible_qos_combination(self, domain_id: int):
+        """Incompatible QoS should prevent matching, not crash."""
+        from int2dds.core.qos import (
+            DataReaderQos,
+            DataWriterQos,
+            Reliability,
+        )
+        import time
+
+        with DomainParticipant(domain_id=domain_id) as dp:
+            topic = dp.create_topic("BadQosTopic", TestMessage)
+            pub = dp.create_publisher()
+            sub = dp.create_subscriber()
+
+            writer_qos = DataWriterQos(reliability=Reliability("BEST_EFFORT"))
+            reader_qos = DataReaderQos(reliability=Reliability("RELIABLE"))
+
+            writer = pub.create_datawriter(topic, qos=writer_qos)
+            reader = sub.create_datareader(topic, qos=reader_qos)
+
+            time.sleep(1.0)
+
+            # Should not match - no crash, just 0 matched
+            assert writer.matched_readers == 0
+            assert reader.matched_writers == 0
+
+            writer.close()
+            reader.close()
+            pub.close()
+            sub.close()
+            topic.close()
+
+    def test_none_type_write(self, domain_id: int):
+        """Writing None should raise an exception."""
+        with DomainParticipant(domain_id=domain_id) as dp:
+            topic = dp.create_topic("NoneWriteTopic", TestMessage)
+            pub = dp.create_publisher()
+            writer = pub.create_datawriter(topic)
+
+            with pytest.raises(Exception):
+                writer.write(None)
+
+            writer.close()
+            pub.close()
+            topic.close()
