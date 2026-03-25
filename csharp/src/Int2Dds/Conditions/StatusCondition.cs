@@ -1,81 +1,83 @@
+using System;
 using Int2Dds.Exceptions;
 using Int2Dds.Interop;
 
-namespace Int2Dds.Conditions;
-
-/// <summary>
-/// A condition based on entity status changes.
-/// StatusConditions are obtained from DataReaders or DataWriters
-/// and can be attached to a WaitSet.
-/// </summary>
-public sealed class StatusCondition : IDisposable
+namespace Int2Dds.Conditions
 {
-    private nint _handle;
-    private bool _disposed;
-
     /// <summary>
-    /// Creates a StatusCondition wrapping an existing FFI handle.
+    /// A condition based on entity status changes.
+    /// StatusConditions are obtained from DataReaders or DataWriters
+    /// and can be attached to a WaitSet.
     /// </summary>
-    internal StatusCondition(nint handle)
+    public sealed class StatusCondition : IDisposable
     {
-        _handle = handle;
-    }
+        private IntPtr _handle;
+        private bool _disposed;
 
-    /// <summary>
-    /// Gets the native handle for this status condition.
-    /// </summary>
-    internal nint Handle
-    {
-        get
+        /// <summary>
+        /// Creates a StatusCondition wrapping an existing FFI handle.
+        /// </summary>
+        internal StatusCondition(IntPtr handle)
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            return _handle;
+            _handle = handle;
         }
-    }
 
-    /// <summary>
-    /// Gets or sets the enabled status mask.
-    /// </summary>
-    public StatusMask EnabledStatuses
-    {
-        get
+        /// <summary>
+        /// Gets the native handle for this status condition.
+        /// </summary>
+        internal IntPtr Handle
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            ReturnCodeHelper.CheckReturn(
-                NativeMethods.int2dds_statuscondition_get_enabled_statuses(_handle, out uint mask));
-            return (StatusMask)mask;
+            get
+            {
+                if (_disposed) throw new ObjectDisposedException(GetType().Name);
+                return _handle;
+            }
         }
-        set
+
+        /// <summary>
+        /// Gets or sets the enabled status mask.
+        /// </summary>
+        public StatusMask EnabledStatuses
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            ReturnCodeHelper.CheckReturn(
-                NativeMethods.int2dds_statuscondition_set_enabled_statuses(_handle, (uint)value));
+            get
+            {
+                if (_disposed) throw new ObjectDisposedException(GetType().Name);
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_statuscondition_get_enabled_statuses(_handle, out uint mask));
+                return (StatusMask)mask;
+            }
+            set
+            {
+                if (_disposed) throw new ObjectDisposedException(GetType().Name);
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_statuscondition_set_enabled_statuses(_handle, (uint)value));
+            }
         }
-    }
 
-    /// <summary>
-    /// Gets the current trigger value.
-    /// </summary>
-    public bool TriggerValue
-    {
-        get
+        /// <summary>
+        /// Gets the current trigger value.
+        /// </summary>
+        public bool TriggerValue
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            ReturnCodeHelper.CheckReturn(
-                NativeMethods.int2dds_statuscondition_get_trigger_value(_handle, out bool value));
-            return value;
+            get
+            {
+                if (_disposed) throw new ObjectDisposedException(GetType().Name);
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_statuscondition_get_trigger_value(_handle, out bool value));
+                return value;
+            }
         }
-    }
 
-    public void Dispose()
-    {
-        if (_disposed) return;
-        _disposed = true;
-
-        if (_handle != 0)
+        public void Dispose()
         {
-            NativeMethods.int2dds_statuscondition_delete(_handle);
-            _handle = 0;
+            if (_disposed) return;
+            _disposed = true;
+
+            if (_handle != IntPtr.Zero)
+            {
+                NativeMethods.int2dds_statuscondition_delete(_handle);
+                _handle = IntPtr.Zero;
+            }
         }
     }
 }

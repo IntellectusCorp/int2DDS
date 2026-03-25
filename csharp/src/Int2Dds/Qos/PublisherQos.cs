@@ -1,6 +1,9 @@
-namespace Int2Dds.Qos;
-
-public record PublisherQos
+namespace Int2Dds.Qos
 {
-    public Partition? Partition { get; init; }
+    public class PublisherQos
+    {
+        public Partition? Partition { get; set; }
+
+        public PublisherQos() { }
+    }
 }

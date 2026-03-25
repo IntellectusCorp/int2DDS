@@ -1,98 +1,100 @@
+using System;
 using System.Text;
 using Int2Dds.Exceptions;
 using Int2Dds.Interop;
 
-namespace Int2Dds.Discovery;
-
-/// <summary>
-/// Wrapper around a discovered subscription's builtin topic data.
-/// </summary>
-public sealed class SubscriptionBuiltinTopicData : IDisposable
+namespace Int2Dds.Discovery
 {
-    private nint _handle;
-    private bool _disposed;
-
-    internal SubscriptionBuiltinTopicData(nint handle)
+    /// <summary>
+    /// Wrapper around a discovered subscription's builtin topic data.
+    /// </summary>
+    public sealed class SubscriptionBuiltinTopicData : IDisposable
     {
-        _handle = handle;
-    }
+        private IntPtr _handle;
+        private bool _disposed;
 
-    public unsafe byte[] Key
-    {
-        get
+        internal SubscriptionBuiltinTopicData(IntPtr handle)
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            var key = new byte[12];
-            fixed (byte* p = key)
-            {
-                ReturnCodeHelper.CheckReturn(
-                    NativeMethods.int2dds_subscription_builtin_topic_data_get_key(_handle, p));
-            }
-            return key;
+            _handle = handle;
         }
-    }
 
-    public unsafe byte[] ParticipantKey
-    {
-        get
+        public unsafe byte[] Key
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            var key = new byte[12];
-            fixed (byte* p = key)
+            get
             {
-                ReturnCodeHelper.CheckReturn(
-                    NativeMethods.int2dds_subscription_builtin_topic_data_get_participant_key(_handle, p));
+                if (_disposed) throw new ObjectDisposedException(GetType().Name);
+                var key = new byte[12];
+                fixed (byte* p = key)
+                {
+                    ReturnCodeHelper.CheckReturn(
+                        NativeMethods.int2dds_subscription_builtin_topic_data_get_key(_handle, p));
+                }
+                return key;
             }
-            return key;
         }
-    }
 
-    public unsafe string TopicName
-    {
-        get
+        public unsafe byte[] ParticipantKey
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            nuint size;
-            var buf = new byte[256];
-            fixed (byte* p = buf)
+            get
             {
-                int ret = NativeMethods.int2dds_subscription_builtin_topic_data_get_topic_name(_handle, p, 256, out size);
-                if (ret == ReturnCode.NoData || size == 0) return string.Empty;
-                ReturnCodeHelper.CheckReturn(ret);
+                if (_disposed) throw new ObjectDisposedException(GetType().Name);
+                var key = new byte[12];
+                fixed (byte* p = key)
+                {
+                    ReturnCodeHelper.CheckReturn(
+                        NativeMethods.int2dds_subscription_builtin_topic_data_get_participant_key(_handle, p));
+                }
+                return key;
             }
-            int len = (int)size;
-            if (len > 0 && buf[len - 1] == 0) len--;
-            return Encoding.UTF8.GetString(buf, 0, len);
         }
-    }
 
-    public unsafe string TypeName
-    {
-        get
+        public unsafe string TopicName
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            nuint size;
-            var buf = new byte[256];
-            fixed (byte* p = buf)
+            get
             {
-                int ret = NativeMethods.int2dds_subscription_builtin_topic_data_get_type_name(_handle, p, 256, out size);
-                if (ret == ReturnCode.NoData || size == 0) return string.Empty;
-                ReturnCodeHelper.CheckReturn(ret);
+                if (_disposed) throw new ObjectDisposedException(GetType().Name);
+                UIntPtr size;
+                var buf = new byte[256];
+                fixed (byte* p = buf)
+                {
+                    int ret = NativeMethods.int2dds_subscription_builtin_topic_data_get_topic_name(_handle, p, (UIntPtr)256, out size);
+                    if (ret == ReturnCode.NoData || (uint)size == 0) return string.Empty;
+                    ReturnCodeHelper.CheckReturn(ret);
+                }
+                int len = (int)(uint)size;
+                if (len > 0 && buf[len - 1] == 0) len--;
+                return Encoding.UTF8.GetString(buf, 0, len);
             }
-            int len = (int)size;
-            if (len > 0 && buf[len - 1] == 0) len--;
-            return Encoding.UTF8.GetString(buf, 0, len);
         }
-    }
 
-    public void Dispose()
-    {
-        if (_disposed) return;
-        _disposed = true;
-        if (_handle != 0)
+        public unsafe string TypeName
         {
-            NativeMethods.int2dds_subscription_builtin_topic_data_destroy(_handle);
-            _handle = 0;
+            get
+            {
+                if (_disposed) throw new ObjectDisposedException(GetType().Name);
+                UIntPtr size;
+                var buf = new byte[256];
+                fixed (byte* p = buf)
+                {
+                    int ret = NativeMethods.int2dds_subscription_builtin_topic_data_get_type_name(_handle, p, (UIntPtr)256, out size);
+                    if (ret == ReturnCode.NoData || (uint)size == 0) return string.Empty;
+                    ReturnCodeHelper.CheckReturn(ret);
+                }
+                int len = (int)(uint)size;
+                if (len > 0 && buf[len - 1] == 0) len--;
+                return Encoding.UTF8.GetString(buf, 0, len);
+            }
+        }
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+            if (_handle != IntPtr.Zero)
+            {
+                NativeMethods.int2dds_subscription_builtin_topic_data_destroy(_handle);
+                _handle = IntPtr.Zero;
+            }
         }
     }
 }

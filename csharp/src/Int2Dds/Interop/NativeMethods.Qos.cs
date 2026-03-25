@@ -1,180 +1,182 @@
+using System;
 using System.Runtime.InteropServices;
 
-namespace Int2Dds.Interop;
-
-internal static partial class NativeMethods
+namespace Int2Dds.Interop
 {
-    // ── DataWriter QoS ──────────────────────────────────────────────────
+    internal static partial class NativeMethods
+    {
+        // ── DataWriter QoS ──────────────────────────────────────────────────
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_datawriter_qos_create_default(out nint qos_out);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datawriter_qos_create_default(out IntPtr qos_out);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_datawriter_qos_set_reliability(nint qos, int kind, long max_blocking_time_ns);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datawriter_qos_set_reliability(IntPtr qos, int kind, long max_blocking_time_ns);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_datawriter_qos_set_durability(nint qos, int kind);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datawriter_qos_set_durability(IntPtr qos, int kind);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_datawriter_qos_set_history(nint qos, int kind, int depth);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datawriter_qos_set_history(IntPtr qos, int kind, int depth);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_datawriter_qos_set_data_representation(nint qos, int kind);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datawriter_qos_set_data_representation(IntPtr qos, int kind);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_datawriter_qos_set_ownership(nint qos, int kind);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datawriter_qos_set_ownership(IntPtr qos, int kind);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_datawriter_qos_set_ownership_strength(nint qos, int value);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datawriter_qos_set_ownership_strength(IntPtr qos, int value);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_datawriter_qos_set_resource_limits(nint qos, int max_samples, int max_instances, int max_per_instance);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datawriter_qos_set_resource_limits(IntPtr qos, int max_samples, int max_instances, int max_per_instance);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_datawriter_qos_set_lifespan(nint qos, long duration_ns);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datawriter_qos_set_lifespan(IntPtr qos, long duration_ns);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_datawriter_qos_set_destination_order(nint qos, int kind);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datawriter_qos_set_destination_order(IntPtr qos, int kind);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_datawriter_qos_set_latency_budget(nint qos, long duration_ns);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datawriter_qos_set_latency_budget(IntPtr qos, long duration_ns);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_datawriter_qos_set_transport_priority(nint qos, int priority);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datawriter_qos_set_transport_priority(IntPtr qos, int priority);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static unsafe partial int int2dds_datawriter_qos_set_user_data(nint qos, byte* data, nuint data_len);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_datawriter_qos_set_user_data(IntPtr qos, byte* data, UIntPtr data_len);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_datawriter_qos_set_writer_data_lifecycle(nint qos, [MarshalAs(UnmanagedType.U1)] bool autodispose);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datawriter_qos_set_writer_data_lifecycle(IntPtr qos, [MarshalAs(UnmanagedType.U1)] bool autodispose);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_datawriter_qos_set_deadline(nint qos, long period_ns);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datawriter_qos_set_deadline(IntPtr qos, long period_ns);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_datawriter_qos_set_liveliness(nint qos, int kind, long lease_duration_ns);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datawriter_qos_set_liveliness(IntPtr qos, int kind, long lease_duration_ns);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_datawriter_qos_destroy(nint qos);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datawriter_qos_destroy(IntPtr qos);
 
-    // ── DataReader QoS ──────────────────────────────────────────────────
+        // ── DataReader QoS ──────────────────────────────────────────────────
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_datareader_qos_create_default(out nint qos_out);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datareader_qos_create_default(out IntPtr qos_out);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_datareader_qos_set_reliability(nint qos, int kind, long max_blocking_time_ns);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datareader_qos_set_reliability(IntPtr qos, int kind, long max_blocking_time_ns);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_datareader_qos_set_durability(nint qos, int kind);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datareader_qos_set_durability(IntPtr qos, int kind);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_datareader_qos_set_history(nint qos, int kind, int depth);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datareader_qos_set_history(IntPtr qos, int kind, int depth);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_datareader_qos_set_data_representation(nint qos, int kind);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datareader_qos_set_data_representation(IntPtr qos, int kind);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_datareader_qos_set_ownership(nint qos, int kind);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datareader_qos_set_ownership(IntPtr qos, int kind);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_datareader_qos_set_resource_limits(nint qos, int max_samples, int max_instances, int max_per_instance);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datareader_qos_set_resource_limits(IntPtr qos, int max_samples, int max_instances, int max_per_instance);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_datareader_qos_set_destination_order(nint qos, int kind);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datareader_qos_set_destination_order(IntPtr qos, int kind);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_datareader_qos_set_time_based_filter(nint qos, long minimum_separation_ns);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datareader_qos_set_time_based_filter(IntPtr qos, long minimum_separation_ns);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_datareader_qos_set_latency_budget(nint qos, long duration_ns);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datareader_qos_set_latency_budget(IntPtr qos, long duration_ns);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static unsafe partial int int2dds_datareader_qos_set_user_data(nint qos, byte* data, nuint data_len);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_datareader_qos_set_user_data(IntPtr qos, byte* data, UIntPtr data_len);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_datareader_qos_set_reader_data_lifecycle(nint qos, long autopurge_nowriter_ns, long autopurge_disposed_ns);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datareader_qos_set_reader_data_lifecycle(IntPtr qos, long autopurge_nowriter_ns, long autopurge_disposed_ns);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_datareader_qos_set_deadline(nint qos, long period_ns);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datareader_qos_set_deadline(IntPtr qos, long period_ns);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_datareader_qos_set_liveliness(nint qos, int kind, long lease_duration_ns);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datareader_qos_set_liveliness(IntPtr qos, int kind, long lease_duration_ns);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_datareader_qos_destroy(nint qos);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datareader_qos_destroy(IntPtr qos);
 
-    // ── Topic QoS ───────────────────────────────────────────────────────
+        // ── Topic QoS ───────────────────────────────────────────────────────
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_topic_qos_create_default(out nint qos_out);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_topic_qos_create_default(out IntPtr qos_out);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_topic_qos_set_reliability(nint qos, int kind, long max_blocking_time_ns);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_topic_qos_set_reliability(IntPtr qos, int kind, long max_blocking_time_ns);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_topic_qos_set_durability(nint qos, int kind);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_topic_qos_set_durability(IntPtr qos, int kind);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_topic_qos_set_history(nint qos, int kind, int depth);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_topic_qos_set_history(IntPtr qos, int kind, int depth);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_topic_qos_set_deadline(nint qos, long period_ns);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_topic_qos_set_deadline(IntPtr qos, long period_ns);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_topic_qos_set_liveliness(nint qos, int kind, long lease_duration_ns);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_topic_qos_set_liveliness(IntPtr qos, int kind, long lease_duration_ns);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_topic_qos_set_destination_order(nint qos, int kind);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_topic_qos_set_destination_order(IntPtr qos, int kind);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_topic_qos_set_resource_limits(nint qos, int max_samples, int max_instances, int max_per_instance);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_topic_qos_set_resource_limits(IntPtr qos, int max_samples, int max_instances, int max_per_instance);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_topic_qos_set_transport_priority(nint qos, int priority);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_topic_qos_set_transport_priority(IntPtr qos, int priority);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_topic_qos_set_lifespan(nint qos, long duration_ns);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_topic_qos_set_lifespan(IntPtr qos, long duration_ns);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_topic_qos_set_ownership(nint qos, int kind);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_topic_qos_set_ownership(IntPtr qos, int kind);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_topic_qos_set_data_representation(nint qos, int kind);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_topic_qos_set_data_representation(IntPtr qos, int kind);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_topic_qos_destroy(nint qos);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_topic_qos_destroy(IntPtr qos);
 
-    // ── Participant QoS ─────────────────────────────────────────────────
+        // ── Participant QoS ─────────────────────────────────────────────────
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_participant_qos_create_default(out nint qos_out);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_participant_qos_create_default(out IntPtr qos_out);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static unsafe partial int int2dds_participant_qos_set_user_data(nint qos, byte* data, nuint data_len);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_participant_qos_set_user_data(IntPtr qos, byte* data, UIntPtr data_len);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_participant_qos_destroy(nint qos);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_participant_qos_destroy(IntPtr qos);
 
-    // ── Publisher QoS ───────────────────────────────────────────────────
+        // ── Publisher QoS ───────────────────────────────────────────────────
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_publisher_qos_create_default(out nint qos_out);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_publisher_qos_create_default(out IntPtr qos_out);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static unsafe partial int int2dds_publisher_qos_set_partition(nint qos, byte** partitions, nuint partition_count);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_publisher_qos_set_partition(IntPtr qos, byte** partitions, UIntPtr partition_count);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_publisher_qos_destroy(nint qos);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_publisher_qos_destroy(IntPtr qos);
 
-    // ── Subscriber QoS ──────────────────────────────────────────────────
+        // ── Subscriber QoS ──────────────────────────────────────────────────
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_subscriber_qos_create_default(out nint qos_out);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_subscriber_qos_create_default(out IntPtr qos_out);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static unsafe partial int int2dds_subscriber_qos_set_partition(nint qos, byte** partitions, nuint partition_count);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_subscriber_qos_set_partition(IntPtr qos, byte** partitions, UIntPtr partition_count);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_subscriber_qos_destroy(nint qos);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_subscriber_qos_destroy(IntPtr qos);
+    }
 }

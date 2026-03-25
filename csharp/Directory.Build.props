@@ -1,0 +1,22 @@
+<Project>
+  <!--
+    ┌──────────────────────────────────────────────────────────────┐
+    │  int2DDS C# Binding – Target Framework Configuration        │
+    │                                                              │
+    │  Library (Int2Dds):       netstandard2.1                     │
+    │  Tests / Examples:        net6.0                             │
+    │  Language Version:        C# 8.0                             │
+    │                                                              │
+    │  The library targets netstandard2.1 for maximum              │
+    │  compatibility (.NET Core 3.0+, .NET 5+, .NET 6+,           │
+    │  .NET 8+, Unity 2021+, Xamarin, MAUI).                      │
+    │  Test and example projects target net6.0 as the minimum      │
+    │  runnable framework that supports netstandard2.1.            │
+    └──────────────────────────────────────────────────────────────┘
+  -->
+  <PropertyGroup>
+    <LangVersion>8.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+</Project>

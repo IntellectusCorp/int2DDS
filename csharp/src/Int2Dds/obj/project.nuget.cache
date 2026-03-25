@@ -1,12 +1,11 @@
 {
   "version": 2,
-  "dgSpecHash": "xPgIMgF++G8=",
+  "dgSpecHash": "qWoxWsbTMlE=",
   "success": true,
   "projectFilePath": "C:\\Users\\suble\\Desktop\\int2\\project\\int2DDS\\csharp\\src\\Int2Dds\\Int2Dds.csproj",
   "expectedPackageFiles": [
-    "C:\\Users\\suble\\.nuget\\packages\\microsoft.netcore.app.ref\\8.0.23\\microsoft.netcore.app.ref.8.0.23.nupkg.sha512",
-    "C:\\Users\\suble\\.nuget\\packages\\microsoft.windowsdesktop.app.ref\\8.0.23\\microsoft.windowsdesktop.app.ref.8.0.23.nupkg.sha512",
-    "C:\\Users\\suble\\.nuget\\packages\\microsoft.aspnetcore.app.ref\\8.0.23\\microsoft.aspnetcore.app.ref.8.0.23.nupkg.sha512"
+    "C:\\Users\\suble\\.nuget\\packages\\microsoft.bcl.asyncinterfaces\\6.0.0\\microsoft.bcl.asyncinterfaces.6.0.0.nupkg.sha512",
+    "C:\\Users\\suble\\.nuget\\packages\\system.runtime.compilerservices.unsafe\\6.0.0\\system.runtime.compilerservices.unsafe.6.0.0.nupkg.sha512"
   ],
   "logs": []
 }

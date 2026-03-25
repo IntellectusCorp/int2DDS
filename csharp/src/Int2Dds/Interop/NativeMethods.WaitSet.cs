@@ -1,57 +1,59 @@
+using System;
 using System.Runtime.InteropServices;
 
-namespace Int2Dds.Interop;
-
-internal static partial class NativeMethods
+namespace Int2Dds.Interop
 {
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_waitset_new(out nint waitset_out);
+    internal static partial class NativeMethods
+    {
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_waitset_new(out IntPtr waitset_out);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_waitset_wait(nint waitset, long timeout_ms);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_waitset_wait(IntPtr waitset, long timeout_ms);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_waitset_wait_ex(nint waitset, long timeout_ms, out nint conditions_out);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_waitset_wait_ex(IntPtr waitset, long timeout_ms, out IntPtr conditions_out);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_waitset_delete(nint waitset);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_waitset_delete(IntPtr waitset);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_waitset_attach_guard_condition(nint waitset, nint condition);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_waitset_attach_guard_condition(IntPtr waitset, IntPtr condition);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_waitset_detach_guard_condition(nint waitset, nint condition);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_waitset_detach_guard_condition(IntPtr waitset, IntPtr condition);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_waitset_attach_condition(nint waitset, nint condition);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_waitset_attach_condition(IntPtr waitset, IntPtr condition);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_waitset_detach_condition(nint waitset, nint condition);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_waitset_detach_condition(IntPtr waitset, IntPtr condition);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_waitset_attach_datareader(nint waitset, nint reader);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_waitset_attach_datareader(IntPtr waitset, IntPtr reader);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_waitset_detach_datareader(nint waitset, nint reader);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_waitset_detach_datareader(IntPtr waitset, IntPtr reader);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_waitset_attach_datawriter(nint waitset, nint writer);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_waitset_attach_datawriter(IntPtr waitset, IntPtr writer);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_waitset_detach_datawriter(nint waitset, nint writer);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_waitset_detach_datawriter(IntPtr waitset, IntPtr writer);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_condition_seq_length(nint seq, out nuint count_out);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_condition_seq_length(IntPtr seq, out UIntPtr count_out);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_condition_seq_get(nint seq, nuint index, out nint condition_out);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_condition_seq_get(IntPtr seq, UIntPtr index, out IntPtr condition_out);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_condition_seq_delete(nint seq);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_condition_seq_delete(IntPtr seq);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_condition_get_trigger_value(nint condition, [MarshalAs(UnmanagedType.U1)] out bool triggered_out);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_condition_get_trigger_value(IntPtr condition, [MarshalAs(UnmanagedType.U1)] out bool triggered_out);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_condition_delete(nint condition);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_condition_delete(IntPtr condition);
+    }
 }
