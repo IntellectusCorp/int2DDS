@@ -22,15 +22,18 @@ namespace Int2Dds.Core
 
         private readonly IntPtr _handle;
         private readonly Topic<T> _topic;
+        private readonly bool _xcdr2;
+        private IntPtr _listenerContextHandle;
         private bool _disposed;
 
         /// <summary>
         /// Creates a new DataWriter. Normally called via Publisher.CreateDataWriter.
         /// </summary>
-        internal DataWriter(Publisher publisher, Topic<T> topic, DataWriterQos? qos = null,
-            IDataWriterListener? listener = null, uint statusMask = 0)
+        internal DataWriter(Publisher publisher, Topic<T> topic, DataWriterQos qos = null,
+            IDataWriterListener listener = null, uint statusMask = 0)
         {
             _topic = topic;
+            _xcdr2 = qos?.DataRepresentation?.Kind != Qos.DataRepresentationKind.Xcdr1;
 
             // Create QoS handle if provided
             IntPtr qosHandle = IntPtr.Zero;
@@ -52,8 +55,23 @@ namespace Int2Dds.Core
             {
                 if (listener != null)
                 {
-                    // Listener support will be implemented separately
-                    throw new NotImplementedException("DataWriter listener support is not yet implemented.");
+                    unsafe
+                    {
+                        var (nativeListener, contextHandle) = ListenerRegistry.CreateWriterListener(listener, this);
+                        _listenerContextHandle = contextHandle;
+                        try
+                        {
+                            ReturnCodeHelper.CheckReturn(
+                                NativeMethods.int2dds_create_datawriter_with_listener(
+                                    publisher.Handle, topic.Handle, qosHandle, &nativeListener, statusMask, out _handle));
+                        }
+                        catch
+                        {
+                            ListenerRegistry.FreeListener(_listenerContextHandle);
+                            _listenerContextHandle = IntPtr.Zero;
+                            throw;
+                        }
+                    }
                 }
                 else
                 {
@@ -99,7 +117,7 @@ namespace Int2Dds.Core
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
 
-            var data = sample.SerializeCdr();
+            var data = sample.SerializeCdr(_xcdr2);
             var key = s_hasKey ? sample.SerializeKey() : null;
 
             unsafe
@@ -125,7 +143,7 @@ namespace Int2Dds.Core
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
 
-            var data = sample.SerializeCdr();
+            var data = sample.SerializeCdr(_xcdr2);
             var key = s_hasKey ? sample.SerializeKey() : null;
 
             var epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
@@ -151,8 +169,6 @@ namespace Int2Dds.Core
         /// <summary>
         /// Register an instance and return its handle.
         /// </summary>
-        /// <param name="sample">A data sample with key fields set.</param>
-        /// <returns>An InstanceHandle for use in subsequent write/dispose/unregister calls.</returns>
         public InstanceHandle RegisterInstance(T sample)
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
@@ -179,10 +195,7 @@ namespace Int2Dds.Core
 
         /// <summary>
         /// Unregister a previously registered instance.
-        /// Informs readers that this writer will no longer modify the instance.
         /// </summary>
-        /// <param name="sample">A data sample with key fields set.</param>
-        /// <param name="handle">The InstanceHandle from RegisterInstance.</param>
         public void UnregisterInstance(T sample, InstanceHandle handle)
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
@@ -207,10 +220,7 @@ namespace Int2Dds.Core
 
         /// <summary>
         /// Dispose an instance, marking it as no longer valid.
-        /// Readers will see the instance state change to NOT_ALIVE_DISPOSED.
         /// </summary>
-        /// <param name="sample">A data sample with key fields set.</param>
-        /// <param name="handle">The InstanceHandle from RegisterInstance.</param>
         public void DisposeInstance(T sample, InstanceHandle handle)
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
@@ -235,10 +245,7 @@ namespace Int2Dds.Core
 
         /// <summary>
         /// Look up the handle of a previously registered instance.
-        /// Does NOT register the instance.
         /// </summary>
-        /// <param name="sample">A data sample with key fields set.</param>
-        /// <returns>The InstanceHandle, or InstanceHandle.Nil if not found.</returns>
         public InstanceHandle LookupInstance(T sample)
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
@@ -266,8 +273,6 @@ namespace Int2Dds.Core
         /// <summary>
         /// Gets the serialized key value for a given instance handle.
         /// </summary>
-        /// <param name="handle">The instance handle.</param>
-        /// <returns>The serialized key bytes.</returns>
         public byte[] GetKeyValue(InstanceHandle handle)
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
@@ -278,32 +283,51 @@ namespace Int2Dds.Core
             unsafe
             {
                 fixed (byte* pHandle = handleBytes)
-                fixed (byte* pKey = keyBuffer)
                 {
-                    ReturnCodeHelper.CheckReturn(
-                        NativeMethods.int2dds_datawriter_get_key_value(
-                            _handle, pHandle, pKey, (UIntPtr)keyBuffer.Length, out var keySize));
+                    UIntPtr keySize;
+                    fixed (byte* pKey = keyBuffer)
+                    {
+                        var ret = NativeMethods.int2dds_datawriter_get_key_value(
+                            _handle, pHandle, pKey, (UIntPtr)keyBuffer.Length, out keySize);
 
-                    var result = new byte[(int)keySize];
-                    Array.Copy(keyBuffer, result, (int)keySize);
-                    return result;
+                        if (ret == ReturnCode.Ok)
+                        {
+                            var result = new byte[(int)keySize];
+                            Array.Copy(keyBuffer, result, (int)keySize);
+                            return result;
+                        }
+
+                        // Buffer too small — retry with required size
+                        if ((int)keySize > keyBuffer.Length)
+                        {
+                            keyBuffer = new byte[(int)keySize];
+                        }
+                        else
+                        {
+                            ReturnCodeHelper.CheckReturn(ret);
+                        }
+                    }
+
+                    fixed (byte* pKey = keyBuffer)
+                    {
+                        ReturnCodeHelper.CheckReturn(
+                            NativeMethods.int2dds_datawriter_get_key_value(
+                                _handle, pHandle, pKey, (UIntPtr)keyBuffer.Length, out keySize));
+
+                        var result = new byte[(int)keySize];
+                        Array.Copy(keyBuffer, result, (int)keySize);
+                        return result;
+                    }
                 }
             }
         }
 
-        /// <summary>
-        /// Assert liveliness for MANUAL_BY_TOPIC liveliness.
-        /// </summary>
         public void AssertLiveliness()
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
             ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_assert_liveliness(_handle));
         }
 
-        /// <summary>
-        /// Waits until all written data has been acknowledged by matched readers.
-        /// </summary>
-        /// <param name="timeout">Maximum time to wait.</param>
         public void WaitForAcknowledgments(TimeSpan timeout)
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
@@ -311,10 +335,6 @@ namespace Int2Dds.Core
                 NativeMethods.int2dds_datawriter_wait_for_acknowledgments(_handle, (long)timeout.TotalMilliseconds));
         }
 
-        /// <summary>
-        /// Gets the publication matched status.
-        /// </summary>
-        /// <returns>A tuple of (totalCount, currentCount) indicating matched readers.</returns>
         public (int totalCount, int currentCount) GetPublicationMatchedStatus()
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
@@ -323,13 +343,9 @@ namespace Int2Dds.Core
             return (total, current);
         }
 
-        /// <summary>
-        /// Gets the liveliness lost status.
-        /// </summary>
         public LivelinessLostStatus GetLivelinessLostStatus()
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
-
             unsafe
             {
                 NativeLivelinessLostStatus native;
@@ -339,60 +355,111 @@ namespace Int2Dds.Core
             }
         }
 
-        /// <summary>
-        /// Gets the offered deadline missed status.
-        /// </summary>
         public OfferedDeadlineMissedStatus GetOfferedDeadlineMissedStatus()
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
-
             unsafe
             {
                 NativeOfferedDeadlineMissedStatus native;
                 ReturnCodeHelper.CheckReturn(
                     NativeMethods.int2dds_datawriter_get_offered_deadline_missed_status(_handle, &native));
-
-                return new OfferedDeadlineMissedStatus(
-                    native.TotalCount,
-                    native.TotalCountChange);
+                return new OfferedDeadlineMissedStatus(native.TotalCount, native.TotalCountChange);
             }
         }
 
-        /// <summary>
-        /// Gets the offered incompatible QoS status.
-        /// </summary>
         public OfferedIncompatibleQosStatus GetOfferedIncompatibleQosStatus()
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
-
             unsafe
             {
                 NativeOfferedIncompatibleQosStatus native;
                 ReturnCodeHelper.CheckReturn(
                     NativeMethods.int2dds_datawriter_get_offered_incompatible_qos_status(_handle, &native));
                 return new OfferedIncompatibleQosStatus(
-                    native.TotalCount,
-                    native.TotalCountChange,
-                    (int)native.LastPolicyId);
+                    native.TotalCount, native.TotalCountChange, (int)native.LastPolicyId);
+            }
+        }
+
+        /// <summary>
+        /// Gets the current QoS policies of this DataWriter.
+        /// </summary>
+        public DataWriterQos GetQos()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+
+            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_get_qos(_handle, out var qosHandle));
+            try
+            {
+                return ReadWriterQos(qosHandle);
+            }
+            finally
+            {
+                NativeMethods.int2dds_datawriter_qos_destroy(qosHandle);
+            }
+        }
+
+        /// <summary>
+        /// Sets new QoS policies on this DataWriter.
+        /// </summary>
+        public void SetQos(DataWriterQos qos)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+
+            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_get_qos(_handle, out var qosHandle));
+            try
+            {
+                ApplyWriterQos(qosHandle, qos);
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_set_qos(_handle, qosHandle));
+            }
+            finally
+            {
+                NativeMethods.int2dds_datawriter_qos_destroy(qosHandle);
             }
         }
 
         /// <summary>
         /// Sets or replaces the listener for this DataWriter.
         /// </summary>
-        /// <param name="listener">The listener to set, or null to remove.</param>
-        /// <param name="statusMask">Bitmask of statuses to listen for.</param>
-        public void SetListener(IDataWriterListener? listener, uint statusMask)
+        public void SetListener(IDataWriterListener listener, uint statusMask)
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
-            // Listener infrastructure will be implemented separately
-            throw new NotImplementedException("DataWriter listener support is not yet implemented.");
+
+            // Free old listener if any
+            if (_listenerContextHandle != IntPtr.Zero)
+            {
+                ListenerRegistry.FreeListener(_listenerContextHandle);
+                _listenerContextHandle = IntPtr.Zero;
+            }
+
+            unsafe
+            {
+                if (listener != null)
+                {
+                    var (nativeListener, contextHandle) = ListenerRegistry.CreateWriterListener(listener, this);
+                    _listenerContextHandle = contextHandle;
+                    try
+                    {
+                        ReturnCodeHelper.CheckReturn(
+                            NativeMethods.int2dds_datawriter_set_listener(_handle, &nativeListener, statusMask));
+                    }
+                    catch
+                    {
+                        ListenerRegistry.FreeListener(_listenerContextHandle);
+                        _listenerContextHandle = IntPtr.Zero;
+                        throw;
+                    }
+                }
+                else
+                {
+                    ReturnCodeHelper.CheckReturn(
+                        NativeMethods.int2dds_datawriter_set_listener(_handle, null, 0));
+                }
+            }
         }
 
         /// <summary>
         /// Gets the StatusCondition associated with this DataWriter.
         /// </summary>
-        /// <returns>A StatusCondition for use with WaitSets.</returns>
         public StatusCondition GetStatusCondition()
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
@@ -473,6 +540,42 @@ namespace Int2Dds.Core
                     qosHandle, (int)qos.Liveliness.Kind, qos.Liveliness.LeaseDurationNs));
         }
 
+        private static DataWriterQos ReadWriterQos(IntPtr h)
+        {
+            NativeMethods.int2dds_datawriter_qos_get_reliability(h, out var relKind, out var relTime);
+            NativeMethods.int2dds_datawriter_qos_get_durability(h, out var durKind);
+            NativeMethods.int2dds_datawriter_qos_get_history(h, out var histKind, out var histDepth);
+            NativeMethods.int2dds_datawriter_qos_get_ownership(h, out var ownKind);
+            NativeMethods.int2dds_datawriter_qos_get_ownership_strength(h, out var ownStr);
+            NativeMethods.int2dds_datawriter_qos_get_resource_limits(h, out var maxS, out var maxI, out var maxPI);
+            NativeMethods.int2dds_datawriter_qos_get_lifespan(h, out var lifespanNs);
+            NativeMethods.int2dds_datawriter_qos_get_destination_order(h, out var destKind);
+            NativeMethods.int2dds_datawriter_qos_get_deadline(h, out var deadlineNs);
+            NativeMethods.int2dds_datawriter_qos_get_liveliness(h, out var liveKind, out var liveNs);
+            NativeMethods.int2dds_datawriter_qos_get_data_representation(h, out var reprKind);
+            NativeMethods.int2dds_datawriter_qos_get_transport_priority(h, out var transPri);
+            NativeMethods.int2dds_datawriter_qos_get_latency_budget(h, out var latNs);
+            NativeMethods.int2dds_datawriter_qos_get_writer_data_lifecycle(h, out var autoDispose);
+
+            return new DataWriterQos
+            {
+                Reliability = new Reliability((ReliabilityKind)relKind, TimeSpan.FromTicks(relTime / 100)),
+                Durability = new Durability((DurabilityKind)durKind),
+                History = new History((HistoryKind)histKind, histDepth),
+                Ownership = new Ownership((OwnershipKind)ownKind),
+                OwnershipStrength = new OwnershipStrength(ownStr),
+                ResourceLimits = new ResourceLimits(maxS, maxI, maxPI),
+                Lifespan = new Lifespan(TimeSpan.FromTicks(lifespanNs / 100)),
+                DestinationOrder = new DestinationOrder((DestinationOrderKind)destKind),
+                Deadline = new Deadline(TimeSpan.FromTicks(deadlineNs / 100)),
+                Liveliness = new Liveliness((LivelinessKind)liveKind, TimeSpan.FromTicks(liveNs / 100)),
+                DataRepresentation = new DataRepresentation((DataRepresentationKind)reprKind),
+                TransportPriority = new TransportPriority(transPri),
+                LatencyBudget = new LatencyBudget(TimeSpan.FromTicks(latNs / 100)),
+                WriterDataLifecycle = new WriterDataLifecycle(autoDispose),
+            };
+        }
+
         /// <summary>
         /// Releases all resources used by the DataWriter.
         /// </summary>
@@ -480,6 +583,14 @@ namespace Int2Dds.Core
         {
             if (_disposed) return;
             _disposed = true;
+            GC.SuppressFinalize(this);
+
+            if (_listenerContextHandle != IntPtr.Zero)
+            {
+                ListenerRegistry.FreeListener(_listenerContextHandle);
+                _listenerContextHandle = IntPtr.Zero;
+            }
+
             NativeMethods.int2dds_delete_datawriter(_handle);
         }
 

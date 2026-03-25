@@ -47,18 +47,20 @@ namespace Int2Dds.Listeners
     internal static unsafe class ListenerRegistry
     {
         /// <summary>
-        /// Holds the managed listener reference, a GCHandle to prevent GC collection,
+        /// Holds the managed listener reference, entity reference, a GCHandle to prevent GC collection,
         /// and the delegate instances that must be kept alive.
         /// </summary>
         private sealed class ListenerContext
         {
             public object Listener { get; }
+            public object Entity { get; }
             public GCHandle GcHandle { get; }
             public Delegate[] DelegateRefs { get; set; } = Array.Empty<Delegate>();
 
-            public ListenerContext(object listener)
+            public ListenerContext(object listener, object entity)
             {
                 Listener = listener;
+                Entity = entity;
                 GcHandle = GCHandle.Alloc(this);
             }
 
@@ -87,7 +89,7 @@ namespace Int2Dds.Listeners
                 var status = new PublicationMatchedStatus(
                     statusPtr->TotalCount, statusPtr->TotalCountChange,
                     statusPtr->CurrentCount, statusPtr->CurrentCountChange);
-                listener.OnPublicationMatched(writerHandle, status);
+                listener.OnPublicationMatched(ctx.Entity, status);
             }
             catch
             {
@@ -103,7 +105,7 @@ namespace Int2Dds.Listeners
                 var listener = (IDataWriterListener)ctx.Listener;
                 var status = new OfferedDeadlineMissedStatus(
                     statusPtr->TotalCount, statusPtr->TotalCountChange);
-                listener.OnOfferedDeadlineMissed(writerHandle, status);
+                listener.OnOfferedDeadlineMissed(ctx.Entity, status);
             }
             catch
             {
@@ -120,7 +122,7 @@ namespace Int2Dds.Listeners
                 var status = new OfferedIncompatibleQosStatus(
                     statusPtr->TotalCount, statusPtr->TotalCountChange,
                     (int)statusPtr->LastPolicyId);
-                listener.OnOfferedIncompatibleQos(writerHandle, status);
+                listener.OnOfferedIncompatibleQos(ctx.Entity, status);
             }
             catch
             {
@@ -136,7 +138,7 @@ namespace Int2Dds.Listeners
                 var listener = (IDataWriterListener)ctx.Listener;
                 var status = new LivelinessLostStatus(
                     statusPtr->TotalCount, statusPtr->TotalCountChange);
-                listener.OnLivelinessLost(writerHandle, status);
+                listener.OnLivelinessLost(ctx.Entity, status);
             }
             catch
             {
@@ -154,7 +156,7 @@ namespace Int2Dds.Listeners
             {
                 if (!s_contexts.TryGetValue(userContext, out var ctx)) return;
                 var listener = (IDataReaderListener)ctx.Listener;
-                listener.OnDataAvailable(readerHandle);
+                listener.OnDataAvailable(ctx.Entity);
             }
             catch
             {
@@ -171,7 +173,7 @@ namespace Int2Dds.Listeners
                 var status = new SubscriptionMatchedStatus(
                     statusPtr->TotalCount, statusPtr->TotalCountChange,
                     statusPtr->CurrentCount, statusPtr->CurrentCountChange);
-                listener.OnSubscriptionMatched(readerHandle, status);
+                listener.OnSubscriptionMatched(ctx.Entity, status);
             }
             catch
             {
@@ -188,7 +190,7 @@ namespace Int2Dds.Listeners
                 var status = new SampleRejectedStatus(
                     statusPtr->TotalCount, statusPtr->TotalCountChange,
                     (int)statusPtr->LastReason);
-                listener.OnSampleRejected(readerHandle, status);
+                listener.OnSampleRejected(ctx.Entity, status);
             }
             catch
             {
@@ -205,7 +207,7 @@ namespace Int2Dds.Listeners
                 var status = new LivelinessChangedStatus(
                     statusPtr->AliveCount, statusPtr->NotAliveCount,
                     statusPtr->AliveCountChange, statusPtr->NotAliveCountChange);
-                listener.OnLivelinessChanged(readerHandle, status);
+                listener.OnLivelinessChanged(ctx.Entity, status);
             }
             catch
             {
@@ -221,7 +223,7 @@ namespace Int2Dds.Listeners
                 var listener = (IDataReaderListener)ctx.Listener;
                 var status = new RequestedDeadlineMissedStatus(
                     statusPtr->TotalCount, statusPtr->TotalCountChange);
-                listener.OnRequestedDeadlineMissed(readerHandle, status);
+                listener.OnRequestedDeadlineMissed(ctx.Entity, status);
             }
             catch
             {
@@ -238,7 +240,7 @@ namespace Int2Dds.Listeners
                 var status = new RequestedIncompatibleQosStatus(
                     statusPtr->TotalCount, statusPtr->TotalCountChange,
                     (int)statusPtr->LastPolicyId);
-                listener.OnRequestedIncompatibleQos(readerHandle, status);
+                listener.OnRequestedIncompatibleQos(ctx.Entity, status);
             }
             catch
             {
@@ -254,7 +256,7 @@ namespace Int2Dds.Listeners
                 var listener = (IDataReaderListener)ctx.Listener;
                 var status = new SampleLostStatus(
                     statusPtr->TotalCount, statusPtr->TotalCountChange);
-                listener.OnSampleLost(readerHandle, status);
+                listener.OnSampleLost(ctx.Entity, status);
             }
             catch
             {
@@ -269,12 +271,14 @@ namespace Int2Dds.Listeners
         /// <summary>
         /// Creates a native DataWriter listener struct backed by a managed <see cref="IDataWriterListener"/>.
         /// </summary>
+        /// <param name="listener">The managed listener implementation.</param>
+        /// <param name="entity">The DataWriter entity to pass to callbacks.</param>
         /// <returns>
         /// A tuple of the native listener struct and the context handle (to pass to <see cref="FreeListener"/>).
         /// </returns>
-        public static (NativeDataWriterListener nativeListener, IntPtr contextHandle) CreateWriterListener(IDataWriterListener listener)
+        public static (NativeDataWriterListener nativeListener, IntPtr contextHandle) CreateWriterListener(IDataWriterListener listener, object entity)
         {
-            var ctx = new ListenerContext(listener);
+            var ctx = new ListenerContext(listener, entity);
             s_contexts[ctx.ContextHandle] = ctx;
 
             var d1 = new PublicationMatchedCallback(OnPublicationMatchedCallback);
@@ -300,12 +304,14 @@ namespace Int2Dds.Listeners
         /// <summary>
         /// Creates a native DataReader listener struct backed by a managed <see cref="IDataReaderListener"/>.
         /// </summary>
+        /// <param name="listener">The managed listener implementation.</param>
+        /// <param name="entity">The DataReader entity to pass to callbacks.</param>
         /// <returns>
         /// A tuple of the native listener struct and the context handle (to pass to <see cref="FreeListener"/>).
         /// </returns>
-        public static (NativeDataReaderListener nativeListener, IntPtr contextHandle) CreateReaderListener(IDataReaderListener listener)
+        public static (NativeDataReaderListener nativeListener, IntPtr contextHandle) CreateReaderListener(IDataReaderListener listener, object entity)
         {
-            var ctx = new ListenerContext(listener);
+            var ctx = new ListenerContext(listener, entity);
             s_contexts[ctx.ContextHandle] = ctx;
 
             var d1 = new DataAvailableCallback(OnDataAvailableCallback);

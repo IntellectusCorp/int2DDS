@@ -23,8 +23,10 @@ namespace HelloWorldPublisher
 
             // Wait for subscriber to connect
             Console.WriteLine("Waiting for subscriber...");
+            using var statusCondition = writer.GetStatusCondition();
+            statusCondition.EnabledStatuses = StatusMask.PublicationMatched;
             using var waitset = new WaitSet();
-            waitset.AttachDataWriter(writer.Handle);
+            waitset.Attach(statusCondition);
 
             while (writer.MatchedReaders == 0)
             {
@@ -35,15 +37,15 @@ namespace HelloWorldPublisher
             Console.WriteLine($"Matched {writer.MatchedReaders} reader(s)");
 
             // Publish samples
-            for (uint i = 0; i < 10; i++)
+            uint i = 0;
+            while (true)
             {
                 var sample = new HelloWorld(i, $"Hello from C#! ({i})");
                 writer.Write(sample);
                 Console.WriteLine($"Published: index={sample.Index}, message='{sample.Message}'");
                 Thread.Sleep(500);
+                i++;
             }
-
-            Console.WriteLine("Done publishing");
         }
     }
 }

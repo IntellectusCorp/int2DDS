@@ -27,28 +27,18 @@ pub fn generate(model: &IdlModel, opts: &RpcOptions) -> String {
 
     gen.line("#![allow(non_camel_case_types)]");
     gen.line("");
-    gen.line(&format!("use {}::prelude::*;", opts.crate_path));
-    gen.line(&format!("use {}_derive::DdsType;", opts.crate_path));
+    gen.line(&format!("use {}::DdsType;", opts.crate_path));
     gen.line(&format!(
         "use {}_rpc::types::{{UnusedMember, UnknownOperation, UnknownException, RequestHeader, ReplyHeader, RemoteExceptionCode}};",
         opts.crate_path
     ));
-    gen.line(&format!(
-        "use {}_rpc::client::{{Client, ClientParams}};",
-        opts.crate_path
-    ));
+    gen.line(&format!("use {}_rpc::client::{{Client, ClientParams}};", opts.crate_path));
     gen.line(&format!(
         "use {}_rpc::service::{{Service, ServiceParams, RequestHandler}};",
         opts.crate_path
     ));
-    gen.line(&format!(
-        "use {}_rpc::error::{{DdsRpcError, DdsRpcResult}};",
-        opts.crate_path
-    ));
-    gen.line(&format!(
-        "use {}_rpc::types::SampleIdentity;",
-        opts.crate_path
-    ));
+    gen.line(&format!("use {}_rpc::error::{{DdsRpcError, DdsRpcResult}};", opts.crate_path));
+    gen.line(&format!("use {}_rpc::types::SampleIdentity;", opts.crate_path));
     gen.line("use std::time::Duration;");
     gen.line("");
 
@@ -167,7 +157,9 @@ impl<'a> RpcGen<'a> {
         let in_params: Vec<&ResolvedParam> = op
             .params
             .iter()
-            .filter(|p| matches!(p.direction, ResolvedParamDirection::In | ResolvedParamDirection::Inout))
+            .filter(|p| {
+                matches!(p.direction, ResolvedParamDirection::In | ResolvedParamDirection::Inout)
+            })
             .collect();
 
         self.line("#[derive(DdsType)]");
@@ -194,7 +186,9 @@ impl<'a> RpcGen<'a> {
         let out_params: Vec<&ResolvedParam> = op
             .params
             .iter()
-            .filter(|p| matches!(p.direction, ResolvedParamDirection::Out | ResolvedParamDirection::Inout))
+            .filter(|p| {
+                matches!(p.direction, ResolvedParamDirection::Out | ResolvedParamDirection::Inout)
+            })
             .collect();
 
         let has_return = op.return_type.is_some();
@@ -249,10 +243,7 @@ impl<'a> RpcGen<'a> {
             let simple = exc_name.rsplit("::").next().unwrap_or(exc_name);
             let hash_const_name = format!("{}_EX_HASH", naming::to_screaming_snake(simple));
             let hash_value = rpc_hash(exc_name);
-            self.line(&format!(
-                "pub const {}: i32 = {};",
-                hash_const_name, hash_value
-            ));
+            self.line(&format!("pub const {}: i32 = {};", hash_const_name, hash_value));
         }
         if !op.raises.is_empty() {
             self.line("");
@@ -270,10 +261,7 @@ impl<'a> RpcGen<'a> {
             let hash_const_name = format!("{}_EX_HASH", naming::to_screaming_snake(simple));
             let member_name = format!("{}_ex", naming::to_pascal_case(simple));
             let exc_type = naming::to_pascal_case(simple);
-            self.line(&format!(
-                "{}({}) = {},",
-                member_name, exc_type, hash_const_name
-            ));
+            self.line(&format!("{}({}) = {},", member_name, exc_type, hash_const_name));
         }
 
         self.indent -= 1;
@@ -432,18 +420,14 @@ impl<'a> RpcGen<'a> {
         let return_type = format!("{}_Return", iface_name);
 
         // Wrapper struct
-        self.line(&format!(
-            "pub struct {0}Dispatcher<T: {0}> {{", iface_name
-        ));
+        self.line(&format!("pub struct {0}Dispatcher<T: {0}> {{", iface_name));
         self.indent += 1;
         self.line("inner: T,");
         self.indent -= 1;
         self.line("}");
         self.line("");
 
-        self.line(&format!(
-            "impl<T: {0}> {0}Dispatcher<T> {{", iface_name
-        ));
+        self.line(&format!("impl<T: {0}> {0}Dispatcher<T> {{", iface_name));
         self.indent += 1;
         self.line(&format!("pub fn new(inner: T) -> Self {{"));
         self.indent += 1;
@@ -460,7 +444,10 @@ impl<'a> RpcGen<'a> {
             iface = iface_name, call = call_type, ret = return_type
         ));
         self.indent += 1;
-        self.line(&format!("fn handle_request(&self, request: &{}) -> {} {{", call_type, return_type));
+        self.line(&format!(
+            "fn handle_request(&self, request: &{}) -> {} {{",
+            call_type, return_type
+        ));
         self.indent += 1;
         self.line("match request {");
         self.indent += 1;
@@ -473,23 +460,39 @@ impl<'a> RpcGen<'a> {
             let method_name = to_snake_case(&op.name);
 
             // Build parameter destructure and call args
-            let in_params: Vec<&ResolvedParam> = op.params.iter()
-                .filter(|p| matches!(p.direction, ResolvedParamDirection::In | ResolvedParamDirection::Inout))
+            let in_params: Vec<&ResolvedParam> = op
+                .params
+                .iter()
+                .filter(|p| {
+                    matches!(
+                        p.direction,
+                        ResolvedParamDirection::In | ResolvedParamDirection::Inout
+                    )
+                })
                 .collect();
 
-            let out_params: Vec<&ResolvedParam> = op.params.iter()
-                .filter(|p| matches!(p.direction, ResolvedParamDirection::Out | ResolvedParamDirection::Inout))
+            let out_params: Vec<&ResolvedParam> = op
+                .params
+                .iter()
+                .filter(|p| {
+                    matches!(
+                        p.direction,
+                        ResolvedParamDirection::Out | ResolvedParamDirection::Inout
+                    )
+                })
                 .collect();
 
             if in_params.is_empty() {
                 self.line(&format!("{}::{}(_) => {{", call_type, variant));
             } else {
-                let fields: Vec<String> = in_params.iter()
-                    .map(|p| p.name.clone())
-                    .collect();
-                self.line(&format!("{}::{}({} {{ {} }}) => {{",
-                    call_type, variant, in_type,
-                    fields.join(", ")));
+                let fields: Vec<String> = in_params.iter().map(|p| p.name.clone()).collect();
+                self.line(&format!(
+                    "{}::{}({} {{ {} }}) => {{",
+                    call_type,
+                    variant,
+                    in_type,
+                    fields.join(", ")
+                ));
             }
             self.indent += 1;
 
@@ -507,8 +510,10 @@ impl<'a> RpcGen<'a> {
                     }
                     ResolvedParamDirection::Out => {
                         // Out params: initialize default, pass as &mut
-                        self.line(&format!("let mut {} = Default::default();",
-                            to_snake_case(&p.name)));
+                        self.line(&format!(
+                            "let mut {} = Default::default();",
+                            to_snake_case(&p.name)
+                        ));
                         call_args.push(format!("&mut {}", to_snake_case(&p.name)));
                     }
                     ResolvedParamDirection::Inout => {
@@ -541,9 +546,8 @@ impl<'a> RpcGen<'a> {
                 }
             }
             if op.return_type.is_some() {
-                let return_name = Self::resolve_return_name(
-                    &out_params.iter().map(|p| *p).collect::<Vec<_>>()
-                );
+                let return_name =
+                    Self::resolve_return_name(&out_params.iter().map(|p| *p).collect::<Vec<_>>());
                 out_fields.push(format!("{}: return_", return_name));
             }
 
@@ -551,12 +555,17 @@ impl<'a> RpcGen<'a> {
                 // void with no out params → dummy
                 self.line(&format!(
                     "{}::{}({}::Result({} {{ dummy: UnusedMember }}))",
-                    return_type, variant, result_type, out_type));
+                    return_type, variant, result_type, out_type
+                ));
             } else {
                 self.line(&format!(
                     "{}::{}({}::Result({} {{ {} }}))",
-                    return_type, variant, result_type, out_type,
-                    out_fields.join(", ")));
+                    return_type,
+                    variant,
+                    result_type,
+                    out_type,
+                    out_fields.join(", ")
+                ));
             }
 
             self.indent -= 1;
@@ -566,7 +575,8 @@ impl<'a> RpcGen<'a> {
         // Default case for unknown operations
         self.line(&format!(
             "{}::UnknownOp(_) => {}::UnknownOp(UnknownOperation),",
-            call_type, return_type));
+            call_type, return_type
+        ));
 
         self.indent -= 1;
         self.line("}");
@@ -613,12 +623,26 @@ impl<'a> RpcGen<'a> {
 
             // Build method signature params
             let mut sig_params = String::from("&self");
-            let in_params: Vec<&ResolvedParam> = op.params.iter()
-                .filter(|p| matches!(p.direction, ResolvedParamDirection::In | ResolvedParamDirection::Inout))
+            let in_params: Vec<&ResolvedParam> = op
+                .params
+                .iter()
+                .filter(|p| {
+                    matches!(
+                        p.direction,
+                        ResolvedParamDirection::In | ResolvedParamDirection::Inout
+                    )
+                })
                 .collect();
 
-            let out_params: Vec<&ResolvedParam> = op.params.iter()
-                .filter(|p| matches!(p.direction, ResolvedParamDirection::Out | ResolvedParamDirection::Inout))
+            let out_params: Vec<&ResolvedParam> = op
+                .params
+                .iter()
+                .filter(|p| {
+                    matches!(
+                        p.direction,
+                        ResolvedParamDirection::Out | ResolvedParamDirection::Inout
+                    )
+                })
                 .collect();
 
             for p in &in_params {
@@ -656,14 +680,20 @@ impl<'a> RpcGen<'a> {
 
             // Build In struct
             if in_params.is_empty() {
-                self.line(&format!("let call = {}::{}({} {{ dummy: UnusedMember }});",
-                    call_type, variant, in_type));
+                self.line(&format!(
+                    "let call = {}::{}({} {{ dummy: UnusedMember }});",
+                    call_type, variant, in_type
+                ));
             } else {
-                let fields: Vec<String> = in_params.iter()
-                    .map(|p| to_snake_case(&p.name))
-                    .collect();
-                self.line(&format!("let call = {}::{}({} {{ {} }});",
-                    call_type, variant, in_type, fields.join(", ")));
+                let fields: Vec<String> =
+                    in_params.iter().map(|p| to_snake_case(&p.name)).collect();
+                self.line(&format!(
+                    "let call = {}::{}({} {{ {} }});",
+                    call_type,
+                    variant,
+                    in_type,
+                    fields.join(", ")
+                ));
             }
 
             // Send and receive
@@ -699,7 +729,7 @@ impl<'a> RpcGen<'a> {
                 }
                 if has_return {
                     let return_name = Self::resolve_return_name(
-                        &out_params.iter().map(|p| *p).collect::<Vec<_>>()
+                        &out_params.iter().map(|p| *p).collect::<Vec<_>>(),
                     );
                     fields.push(format!("out.{}.clone()", return_name));
                 }
@@ -730,12 +760,21 @@ impl<'a> RpcGen<'a> {
     }
 
     fn is_copy_type(ty: &ResolvedType) -> bool {
-        matches!(ty,
-            ResolvedType::Bool | ResolvedType::U8 | ResolvedType::I8 |
-            ResolvedType::I16 | ResolvedType::U16 | ResolvedType::I32 |
-            ResolvedType::U32 | ResolvedType::I64 | ResolvedType::U64 |
-            ResolvedType::F32 | ResolvedType::F64 | ResolvedType::Char |
-            ResolvedType::WChar
+        matches!(
+            ty,
+            ResolvedType::Bool
+                | ResolvedType::U8
+                | ResolvedType::I8
+                | ResolvedType::I16
+                | ResolvedType::U16
+                | ResolvedType::I32
+                | ResolvedType::U32
+                | ResolvedType::I64
+                | ResolvedType::U64
+                | ResolvedType::F32
+                | ResolvedType::F64
+                | ResolvedType::Char
+                | ResolvedType::WChar
         )
     }
 
@@ -789,7 +828,8 @@ mod tests {
 
     /// Extract the body (between `{` and `}`) of a named struct/enum from generated code.
     fn extract_body<'a>(code: &'a str, header: &str) -> &'a str {
-        let start = code.find(header).unwrap_or_else(|| panic!("'{}' not found in:\n{}", header, code));
+        let start =
+            code.find(header).unwrap_or_else(|| panic!("'{}' not found in:\n{}", header, code));
         let body_start = start + header.len();
         let end = body_start + code[body_start..].find('}').unwrap();
         &code[body_start..end]
@@ -1033,8 +1073,12 @@ mod tests {
         // Hash constants
         let set_hash = rpc_hash("setSpeed");
         let get_hash = rpc_hash("getSpeed");
-        assert!(code.contains(&format!("pub const ROBOT_CONTROL_SET_SPEED_HASH: i32 = {};", set_hash)));
-        assert!(code.contains(&format!("pub const ROBOT_CONTROL_GET_SPEED_HASH: i32 = {};", get_hash)));
+        assert!(
+            code.contains(&format!("pub const ROBOT_CONTROL_SET_SPEED_HASH: i32 = {};", set_hash))
+        );
+        assert!(
+            code.contains(&format!("pub const ROBOT_CONTROL_GET_SPEED_HASH: i32 = {};", get_hash))
+        );
 
         // Call union
         let body = extract_body(&code, "pub enum RobotControl_Call {");
@@ -1059,8 +1103,12 @@ mod tests {
 
         let body = extract_body(&code, "pub enum RobotControl_Return {");
         assert!(body.contains("UnknownOp(UnknownOperation) = -1,"));
-        assert!(body.contains("SetSpeed(RobotControl_setSpeed_Result) = ROBOT_CONTROL_SET_SPEED_HASH,"));
-        assert!(body.contains("GetSpeed(RobotControl_getSpeed_Result) = ROBOT_CONTROL_GET_SPEED_HASH,"));
+        assert!(
+            body.contains("SetSpeed(RobotControl_setSpeed_Result) = ROBOT_CONTROL_SET_SPEED_HASH,")
+        );
+        assert!(
+            body.contains("GetSpeed(RobotControl_getSpeed_Result) = ROBOT_CONTROL_GET_SPEED_HASH,")
+        );
     }
 
     #[test]
@@ -1274,15 +1322,22 @@ mod tests {
         assert!(call.contains("Command(RobotControl_command_In) = ROBOT_CONTROL_COMMAND_HASH,"));
         assert!(call.contains("SetSpeed(RobotControl_setSpeed_In) = ROBOT_CONTROL_SET_SPEED_HASH,"));
         assert!(call.contains("GetSpeed(RobotControl_getSpeed_In) = ROBOT_CONTROL_GET_SPEED_HASH,"));
-        assert!(call.contains("GetStatus(RobotControl_getStatus_In) = ROBOT_CONTROL_GET_STATUS_HASH,"));
+        assert!(
+            call.contains("GetStatus(RobotControl_getStatus_In) = ROBOT_CONTROL_GET_STATUS_HASH,")
+        );
 
         // Return union (7.5.1.1.7)
         let ret = extract_body(&code, "pub enum RobotControl_Return {");
         assert!(ret.contains("UnknownOp(UnknownOperation) = -1,"));
         assert!(ret.contains("Command(RobotControl_command_Result) = ROBOT_CONTROL_COMMAND_HASH,"));
-        assert!(ret.contains("SetSpeed(RobotControl_setSpeed_Result) = ROBOT_CONTROL_SET_SPEED_HASH,"));
-        assert!(ret.contains("GetSpeed(RobotControl_getSpeed_Result) = ROBOT_CONTROL_GET_SPEED_HASH,"));
-        assert!(ret.contains("GetStatus(RobotControl_getStatus_Result) = ROBOT_CONTROL_GET_STATUS_HASH,"));
+        assert!(
+            ret.contains("SetSpeed(RobotControl_setSpeed_Result) = ROBOT_CONTROL_SET_SPEED_HASH,")
+        );
+        assert!(
+            ret.contains("GetSpeed(RobotControl_getSpeed_Result) = ROBOT_CONTROL_GET_SPEED_HASH,")
+        );
+        assert!(ret
+            .contains("GetStatus(RobotControl_getStatus_Result) = ROBOT_CONTROL_GET_STATUS_HASH,"));
 
         // Request / Reply (7.5.1.1.6, 7.5.1.1.7)
         let req = extract_body(&code, "pub struct RobotControl_Request {");
@@ -1372,14 +1427,10 @@ mod tests {
         assert!(!calc_return.contains("Sub("));
 
         // Hash constants
-        assert!(code.contains(&format!(
-            "pub const CALCULATOR_ON_HASH: i32 = {};",
-            rpc_hash("on")
-        )));
-        assert!(code.contains(&format!(
-            "pub const CALCULATOR_OFF_HASH: i32 = {};",
-            rpc_hash("off")
-        )));
+        assert!(code.contains(&format!("pub const CALCULATOR_ON_HASH: i32 = {};", rpc_hash("on"))));
+        assert!(
+            code.contains(&format!("pub const CALCULATOR_OFF_HASH: i32 = {};", rpc_hash("off")))
+        );
 
         assert!(code.contains("pub struct Calculator_Request {"));
         assert!(code.contains("pub struct Calculator_Reply {"));
@@ -1436,7 +1487,9 @@ mod tests {
 
         assert!(code.contains("pub struct RobotControlDispatcher<T: RobotControl>"));
         assert!(code.contains("impl<T: RobotControl + Send + 'static> RequestHandler<RobotControl_Call, RobotControl_Return> for RobotControlDispatcher<T>"));
-        assert!(code.contains("fn handle_request(&self, request: &RobotControl_Call) -> RobotControl_Return"));
+        assert!(code.contains(
+            "fn handle_request(&self, request: &RobotControl_Call) -> RobotControl_Return"
+        ));
     }
 
     #[test]
@@ -1491,7 +1544,9 @@ mod tests {
         assert!(code.contains("pub struct RobotControlClient {"));
         assert!(code.contains("client: Client<RobotControl_Call, RobotControl_Return>,"));
         assert!(code.contains("pub fn new(params: ClientParams) -> DdsRpcResult<Self>"));
-        assert!(code.contains("pub fn set_speed(&self, speed: f32, timeout: Duration) -> DdsRpcResult<()>"));
+        assert!(code.contains(
+            "pub fn set_speed(&self, speed: f32, timeout: Duration) -> DdsRpcResult<()>"
+        ));
         assert!(code.contains("pub fn get_speed(&self, timeout: Duration) -> DdsRpcResult<f32>"));
     }
 
@@ -1509,7 +1564,9 @@ mod tests {
         let code = generate(&model, &RpcOptions::default());
 
         // out param + return → tuple return
-        assert!(code.contains("pub fn compute(&self, x: i32, timeout: Duration) -> DdsRpcResult<(f64, i32)>"));
+        assert!(code.contains(
+            "pub fn compute(&self, x: i32, timeout: Duration) -> DdsRpcResult<(f64, i32)>"
+        ));
     }
 
     /// Full RobotControl example: verify trait + dispatcher + client are all generated
@@ -1547,8 +1604,12 @@ mod tests {
 
         // Client
         assert!(code.contains("pub struct RobotControlClient {"));
-        assert!(code.contains("pub fn command(&self, com: Command, timeout: Duration) -> DdsRpcResult<()>"));
-        assert!(code.contains("pub fn set_speed(&self, speed: f32, timeout: Duration) -> DdsRpcResult<()>"));
+        assert!(code.contains(
+            "pub fn command(&self, com: Command, timeout: Duration) -> DdsRpcResult<()>"
+        ));
+        assert!(code.contains(
+            "pub fn set_speed(&self, speed: f32, timeout: Duration) -> DdsRpcResult<()>"
+        ));
         assert!(code.contains("pub fn get_speed(&self, timeout: Duration) -> DdsRpcResult<f32>"));
         assert!(code.contains("pub fn get_status(&self, timeout: Duration) -> DdsRpcResult<i32>"));
     }

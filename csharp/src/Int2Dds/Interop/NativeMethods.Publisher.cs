@@ -12,6 +12,12 @@ namespace Int2Dds.Interop
         internal static extern int int2dds_create_publisher_with_qos(IntPtr participant, IntPtr qos, out IntPtr publisher_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_publisher_set_qos(IntPtr publisher, IntPtr qos);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_publisher_get_qos(IntPtr publisher, out IntPtr qos_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_delete_publisher(IntPtr publisher);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
@@ -31,6 +37,12 @@ namespace Int2Dds.Interop
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static unsafe extern int int2dds_datawriter_get_listener(IntPtr writer, NativeDataWriterListener* listener_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datawriter_set_qos(IntPtr writer, IntPtr qos);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datawriter_get_qos(IntPtr writer, out IntPtr qos_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_delete_datawriter(IntPtr writer);

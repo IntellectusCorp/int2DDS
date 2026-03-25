@@ -1,31 +1,31 @@
-using System;
-
 namespace Int2Dds.Listeners
 {
     /// <summary>
     /// Interface for DataReader listener callbacks.
+    /// The reader parameter is the DataReader instance that triggered the event.
+    /// Cast to DataReader&lt;T&gt; to access typed operations (e.g., Take, Read).
     /// </summary>
     public interface IDataReaderListener
     {
         /// <summary>Called when new data is available to read.</summary>
-        void OnDataAvailable(IntPtr readerHandle);
+        void OnDataAvailable(object reader);
 
         /// <summary>Called when subscription matching status changes.</summary>
-        void OnSubscriptionMatched(IntPtr readerHandle, SubscriptionMatchedStatus status);
+        void OnSubscriptionMatched(object reader, SubscriptionMatchedStatus status);
 
         /// <summary>Called when liveliness of matched writers changes.</summary>
-        void OnLivelinessChanged(IntPtr readerHandle, LivelinessChangedStatus status);
+        void OnLivelinessChanged(object reader, LivelinessChangedStatus status);
 
         /// <summary>Called when the requested deadline is missed.</summary>
-        void OnRequestedDeadlineMissed(IntPtr readerHandle, RequestedDeadlineMissedStatus status);
+        void OnRequestedDeadlineMissed(object reader, RequestedDeadlineMissedStatus status);
 
         /// <summary>Called when samples are lost.</summary>
-        void OnSampleLost(IntPtr readerHandle, SampleLostStatus status);
+        void OnSampleLost(object reader, SampleLostStatus status);
 
         /// <summary>Called when a sample is rejected.</summary>
-        void OnSampleRejected(IntPtr readerHandle, SampleRejectedStatus status);
+        void OnSampleRejected(object reader, SampleRejectedStatus status);
 
         /// <summary>Called when incompatible QoS is detected.</summary>
-        void OnRequestedIncompatibleQos(IntPtr readerHandle, RequestedIncompatibleQosStatus status);
+        void OnRequestedIncompatibleQos(object reader, RequestedIncompatibleQosStatus status);
     }
 }

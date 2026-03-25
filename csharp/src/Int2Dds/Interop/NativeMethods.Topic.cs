@@ -15,6 +15,12 @@ namespace Int2Dds.Interop
         internal static unsafe extern int int2dds_create_topic_with_type_info(IntPtr participant, byte* topic_name, IntPtr type_info, IntPtr qos, out IntPtr topic_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_topic_set_qos(IntPtr topic, IntPtr qos);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_topic_get_qos(IntPtr topic, out IntPtr qos_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_delete_topic(IntPtr topic);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]

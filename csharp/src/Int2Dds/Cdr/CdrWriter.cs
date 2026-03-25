@@ -287,6 +287,7 @@ namespace Int2Dds.Cdr
         /// </summary>
         public int DheaderBegin()
         {
+            if (!_xcdr2) return -1; // XCDR1: no DHEADER
             Align(4);
             int token = _pos;
             WriteU32(0); // placeholder
@@ -299,6 +300,7 @@ namespace Int2Dds.Cdr
         /// <param name="token">The token returned by <see cref="DheaderBegin"/>.</param>
         public void DheaderFinalize(int token)
         {
+            if (!_xcdr2) return; // XCDR1: no DHEADER
             uint objectSize = (uint)(_pos - token - 4);
             if (_littleEndian)
                 BinaryPrimitives.WriteUInt32LittleEndian(_buffer.AsSpan(token), objectSize);

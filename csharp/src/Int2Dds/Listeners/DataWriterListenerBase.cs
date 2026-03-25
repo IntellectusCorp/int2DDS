@@ -1,5 +1,3 @@
-using System;
-
 namespace Int2Dds.Listeners
 {
     /// <summary>
@@ -9,15 +7,15 @@ namespace Int2Dds.Listeners
     public class DataWriterListenerBase : IDataWriterListener
     {
         /// <inheritdoc />
-        public virtual void OnPublicationMatched(IntPtr writerHandle, PublicationMatchedStatus status) { }
+        public virtual void OnPublicationMatched(object writer, PublicationMatchedStatus status) { }
 
         /// <inheritdoc />
-        public virtual void OnOfferedDeadlineMissed(IntPtr writerHandle, OfferedDeadlineMissedStatus status) { }
+        public virtual void OnOfferedDeadlineMissed(object writer, OfferedDeadlineMissedStatus status) { }
 
         /// <inheritdoc />
-        public virtual void OnLivelinessLost(IntPtr writerHandle, LivelinessLostStatus status) { }
+        public virtual void OnLivelinessLost(object writer, LivelinessLostStatus status) { }
 
         /// <inheritdoc />
-        public virtual void OnOfferedIncompatibleQos(IntPtr writerHandle, OfferedIncompatibleQosStatus status) { }
+        public virtual void OnOfferedIncompatibleQos(object writer, OfferedIncompatibleQosStatus status) { }
     }
 }
