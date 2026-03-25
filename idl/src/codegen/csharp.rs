@@ -73,6 +73,18 @@ impl<'a> CsGen<'a> {
             self.line("");
         }
 
+        // Bitsets
+        for b in &self.model.bitsets.clone() {
+            self.emit_bitset(&b);
+            self.line("");
+        }
+
+        // Unions
+        for u in &self.model.unions.clone() {
+            self.emit_union(&u);
+            self.line("");
+        }
+
         // Structs
         for s in &self.model.structs.clone() {
             self.emit_struct(s);
@@ -97,21 +109,364 @@ impl<'a> CsGen<'a> {
 
     // ---- Bitmask ----
 
+    fn bitmask_backing_info(bit_bound: u32) -> (&'static str, &'static str, &'static str, &'static str) {
+        // Returns (cs_type, write_method, read_method, suffix)
+        if bit_bound <= 8 {
+            ("byte", "WriteU8", "ReadU8", "")
+        } else if bit_bound <= 16 {
+            ("ushort", "WriteU16", "ReadU16", "")
+        } else if bit_bound <= 32 {
+            ("uint", "WriteU32", "ReadU32", "u")
+        } else {
+            ("ulong", "WriteU64", "ReadU64", "ul")
+        }
+    }
+
     fn emit_bitmask(&mut self, b: &ResolvedBitmask) {
         let name = naming::to_pascal_case(&b.name);
+        let (cs_type, _, _, suffix) = Self::bitmask_backing_info(b.bit_bound);
         self.line("[Flags]");
-        self.line(&format!("public enum {} : uint", name));
+        self.line(&format!("public enum {} : {}", name, cs_type));
         self.line("{");
         self.indent += 1;
         for flag in &b.flags {
             let flag_name = naming::to_pascal_case(&flag.name);
-            self.line(&format!("{} = 1 << {},", flag_name, flag.position));
+            self.line(&format!("{} = 1{} << {},", flag_name, suffix, flag.position));
         }
         self.indent -= 1;
         self.line("}");
     }
 
+    // ---- Bitset ----
+
+    fn emit_bitset(&mut self, b: &ResolvedBitset) {
+        let class_name = naming::to_pascal_case(&b.name);
+
+        // Determine the backing storage type based on total_bits
+        let (storage_type, read_method, write_method) = if b.total_bits <= 8 {
+            ("byte", "ReadU8", "WriteU8")
+        } else if b.total_bits <= 16 {
+            ("ushort", "ReadU16", "WriteU16")
+        } else if b.total_bits <= 32 {
+            ("uint", "ReadU32", "WriteU32")
+        } else {
+            ("ulong", "ReadU64", "WriteU64")
+        };
+
+        self.line(&format!("public class {}", class_name));
+        self.line("{");
+        self.indent += 1;
+
+        // Properties for each bitfield
+        for f in &b.fields {
+            let prop_name = naming::to_pascal_case(&f.name);
+            let field_type = if f.bit_width <= 8 {
+                "byte"
+            } else if f.bit_width <= 16 {
+                "ushort"
+            } else {
+                "uint"
+            };
+            self.line(&format!("public {} {} {{ get; set; }}", field_type, prop_name));
+        }
+        self.line("");
+
+        self.line(&format!("public {}() {{ }}", class_name));
+        self.line("");
+
+        // SerializeCdr
+        self.line("public byte[] SerializeCdr() => SerializeCdr(true);");
+        self.line("");
+        self.line("public byte[] SerializeCdr(bool xcdr2)");
+        self.line("{");
+        self.indent += 1;
+        self.line("var w = new CdrWriter(Extensibility.Final, xcdr2: xcdr2);");
+        self.line(&format!("{} packed = 0;", storage_type));
+        let mut bit_offset = 0u32;
+        for f in &b.fields {
+            let prop_name = naming::to_pascal_case(&f.name);
+            let mask = (1u64 << f.bit_width) - 1;
+            self.line(&format!(
+                "packed |= ({})(((ulong){} & 0x{:X}) << {});",
+                storage_type, prop_name, mask, bit_offset
+            ));
+            bit_offset += f.bit_width;
+        }
+        self.line(&format!("w.{}(packed);", write_method));
+        self.line("return w.ToBytes();");
+        self.indent -= 1;
+        self.line("}");
+        self.line("");
+
+        // DeserializeCdr
+        self.line(&format!(
+            "public static {} DeserializeCdr(ReadOnlySpan<byte> data)",
+            class_name
+        ));
+        self.line("{");
+        self.indent += 1;
+        self.line("var r = new CdrReader(data);");
+        self.line(&format!("var packed = r.{}();", read_method));
+        self.line(&format!("var obj = new {}();", class_name));
+        bit_offset = 0;
+        for f in &b.fields {
+            let prop_name = naming::to_pascal_case(&f.name);
+            let mask = (1u64 << f.bit_width) - 1;
+            let field_type = if f.bit_width <= 8 {
+                "byte"
+            } else if f.bit_width <= 16 {
+                "ushort"
+            } else {
+                "uint"
+            };
+            self.line(&format!(
+                "obj.{} = ({})(((ulong)packed >> {}) & 0x{:X});",
+                prop_name, field_type, bit_offset, mask
+            ));
+            bit_offset += f.bit_width;
+        }
+        self.line("return obj;");
+        self.indent -= 1;
+        self.line("}");
+        self.line("");
+
+        self.line(&format!(
+            "public static {} DeserializeCdr(byte[] data) => DeserializeCdr(data.AsSpan());",
+            class_name
+        ));
+        self.line("");
+
+        // DeserializeCdrInline
+        self.line(&format!(
+            "internal static {} DeserializeCdrInline(CdrReader r)",
+            class_name
+        ));
+        self.line("{");
+        self.indent += 1;
+        self.line(&format!("var packed = r.{}();", read_method));
+        self.line(&format!("var obj = new {}();", class_name));
+        bit_offset = 0;
+        for f in &b.fields {
+            let prop_name = naming::to_pascal_case(&f.name);
+            let mask = (1u64 << f.bit_width) - 1;
+            let field_type = if f.bit_width <= 8 {
+                "byte"
+            } else if f.bit_width <= 16 {
+                "ushort"
+            } else {
+                "uint"
+            };
+            self.line(&format!(
+                "obj.{} = ({})(((ulong)packed >> {}) & 0x{:X});",
+                prop_name, field_type, bit_offset, mask
+            ));
+            bit_offset += f.bit_width;
+        }
+        self.line("return obj;");
+        self.indent -= 1;
+        self.line("}");
+
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    // ---- Union ----
+
+    fn discriminant_type_to_csharp(&self, ty: &ResolvedType) -> &str {
+        match ty {
+            ResolvedType::Bool => "bool",
+            ResolvedType::I16 => "short",
+            ResolvedType::U16 => "ushort",
+            ResolvedType::I32 => "int",
+            ResolvedType::U32 => "uint",
+            ResolvedType::I64 => "long",
+            ResolvedType::U64 => "ulong",
+            _ => "int",
+        }
+    }
+
+    fn discriminant_read_method(&self, ty: &ResolvedType) -> &str {
+        match ty {
+            ResolvedType::Bool => "ReadBool",
+            ResolvedType::I16 => "ReadI16",
+            ResolvedType::U16 => "ReadU16",
+            ResolvedType::I32 => "ReadI32",
+            ResolvedType::U32 => "ReadU32",
+            ResolvedType::I64 => "ReadI64",
+            ResolvedType::U64 => "ReadU64",
+            _ => "ReadI32",
+        }
+    }
+
+    fn discriminant_write_method(&self, ty: &ResolvedType) -> &str {
+        match ty {
+            ResolvedType::Bool => "WriteBool",
+            ResolvedType::I16 => "WriteI16",
+            ResolvedType::U16 => "WriteU16",
+            ResolvedType::I32 => "WriteI32",
+            ResolvedType::U32 => "WriteU32",
+            ResolvedType::I64 => "WriteI64",
+            ResolvedType::U64 => "WriteU64",
+            _ => "WriteI32",
+        }
+    }
+
+    fn label_to_csharp(&self, label: &ResolvedUnionLabel, _disc_type: &ResolvedType) -> String {
+        match label {
+            ResolvedUnionLabel::Int(v) => format!("{}", v),
+            ResolvedUnionLabel::Bool(v) => if *v { "true".to_string() } else { "false".to_string() },
+            ResolvedUnionLabel::Ident(s) => {
+                // Could be an enum variant
+                naming::to_pascal_case(s)
+            }
+        }
+    }
+
+    fn emit_union(&mut self, u: &ResolvedUnion) {
+        let class_name = naming::to_pascal_case(&u.name);
+        let disc_cs_type = self.discriminant_type_to_csharp(&u.discriminant_type).to_string();
+        let disc_read = self.discriminant_read_method(&u.discriminant_type).to_string();
+        let disc_write = self.discriminant_write_method(&u.discriminant_type).to_string();
+
+        self.line(&format!("public class {}", class_name));
+        self.line("{");
+        self.indent += 1;
+
+        // Discriminator property
+        self.line(&format!(
+            "public {} Discriminator {{ get; set; }}",
+            disc_cs_type
+        ));
+
+        // Properties for each case member
+        for case in &u.cases {
+            let prop_name = naming::to_pascal_case(&case.member.name);
+            let cs_type = self.type_to_csharp(&case.member.resolved_type);
+            if self.needs_initializer(&case.member.resolved_type) {
+                let default = self.default_value(&case.member.resolved_type);
+                self.line(&format!(
+                    "public {} {} {{ get; set; }} = {};",
+                    cs_type, prop_name, default
+                ));
+            } else {
+                self.line(&format!(
+                    "public {} {} {{ get; set; }}",
+                    cs_type, prop_name
+                ));
+            }
+        }
+        if let Some(ref def) = u.default_case {
+            let prop_name = naming::to_pascal_case(&def.name);
+            let cs_type = self.type_to_csharp(&def.resolved_type);
+            if self.needs_initializer(&def.resolved_type) {
+                let default = self.default_value(&def.resolved_type);
+                self.line(&format!(
+                    "public {} {} {{ get; set; }} = {};",
+                    cs_type, prop_name, default
+                ));
+            } else {
+                self.line(&format!(
+                    "public {} {} {{ get; set; }}",
+                    cs_type, prop_name
+                ));
+            }
+        }
+        self.line("");
+
+        self.line(&format!("public {}() {{ }}", class_name));
+        self.line("");
+
+        // SerializeCdr
+        self.line("public byte[] SerializeCdr() => SerializeCdr(true);");
+        self.line("");
+        self.line("public byte[] SerializeCdr(bool xcdr2)");
+        self.line("{");
+        self.indent += 1;
+        self.line("var w = new CdrWriter(Extensibility.Final, xcdr2: xcdr2);");
+        self.line(&format!("w.{}(Discriminator);", disc_write));
+        self.line("switch (Discriminator)");
+        self.line("{");
+        self.indent += 1;
+        for case in &u.cases {
+            for label in &case.labels {
+                let label_str = self.label_to_csharp(label, &u.discriminant_type);
+                self.line(&format!("case {}:", label_str));
+            }
+            self.indent += 1;
+            let accessor = naming::to_pascal_case(&case.member.name);
+            self.emit_write_field(&case.member.resolved_type, &accessor);
+            self.line("break;");
+            self.indent -= 1;
+        }
+        if let Some(ref def) = u.default_case {
+            self.line("default:");
+            self.indent += 1;
+            let accessor = naming::to_pascal_case(&def.name);
+            self.emit_write_field(&def.resolved_type, &accessor);
+            self.line("break;");
+            self.indent -= 1;
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.line("return w.ToBytes();");
+        self.indent -= 1;
+        self.line("}");
+        self.line("");
+
+        // DeserializeCdrInline
+        self.line(&format!(
+            "internal static {} DeserializeCdrInline(CdrReader r)",
+            class_name
+        ));
+        self.line("{");
+        self.indent += 1;
+        self.line(&format!("var obj = new {}();", class_name));
+        self.line(&format!("obj.Discriminator = r.{}();", disc_read));
+        self.line("switch (obj.Discriminator)");
+        self.line("{");
+        self.indent += 1;
+        for case in &u.cases {
+            for label in &case.labels {
+                let label_str = self.label_to_csharp(label, &u.discriminant_type);
+                self.line(&format!("case {}:", label_str));
+            }
+            self.indent += 1;
+            let prop_name = naming::to_pascal_case(&case.member.name);
+            self.emit_read_field(&case.member.resolved_type, &prop_name, "obj");
+            self.line("break;");
+            self.indent -= 1;
+        }
+        if let Some(ref def) = u.default_case {
+            self.line("default:");
+            self.indent += 1;
+            let prop_name = naming::to_pascal_case(&def.name);
+            self.emit_read_field(&def.resolved_type, &prop_name, "obj");
+            self.line("break;");
+            self.indent -= 1;
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.line("return obj;");
+        self.indent -= 1;
+        self.line("}");
+
+        self.indent -= 1;
+        self.line("}");
+    }
+
     // ---- Struct ----
+
+    /// Collect all members including inherited ones (ancestors first).
+    fn collect_all_members(&self, s: &ResolvedStruct) -> Vec<ResolvedMember> {
+        let mut all = Vec::new();
+        if let Some(ref base_name) = s.base_type {
+            if let Some(base) = self.model.structs.iter().find(|st| &st.name == base_name) {
+                all.extend(self.collect_all_members(base));
+            }
+        }
+        all.extend(s.members.clone());
+        all
+    }
 
     fn emit_struct(&mut self, s: &ResolvedStruct) {
         let class_name = naming::to_pascal_case(&s.name);
@@ -121,12 +476,27 @@ impl<'a> CsGen<'a> {
             ExtensibilityKind::Mutable => "Mutable",
         };
 
-        let has_key = s.members.iter().any(|m| m.is_key);
+        let all_members = self.collect_all_members(s);
+        let has_key = all_members.iter().any(|m| m.is_key);
+
+        let ext_int = match s.extensibility {
+            ExtensibilityKind::Final => 0,
+            ExtensibilityKind::Appendable => 1,
+            ExtensibilityKind::Mutable => 2,
+        };
+
+        // DdsType attribute for runtime reflection (Topic creation uses this)
+        self.line(&format!(
+            "[DdsType(\"{}\", {}, {})]",
+            s.qualified_name,
+            ext_int,
+            if has_key { "true" } else { "false" }
+        ));
 
         // Class declaration
         self.line(&format!(
-            "public class {} : IDdsType<{}>",
-            class_name, class_name
+            "public class {} : IDdsType",
+            class_name
         ));
         self.line("{");
         self.indent += 1;
@@ -146,8 +516,8 @@ impl<'a> CsGen<'a> {
         ));
         self.line("");
 
-        // Properties
-        for m in &s.members {
+        // Properties (all members including inherited)
+        for m in &all_members {
             let prop_name = naming::to_pascal_case(&m.name);
             let cs_type = self.type_to_csharp(&m.resolved_type);
             let default = self.default_value(&m.resolved_type);
@@ -169,20 +539,30 @@ impl<'a> CsGen<'a> {
         self.line(&format!("public {}() {{ }}", class_name));
         self.line("");
 
+        // Build a temporary struct with all_members for serialization
+        let full_struct = ResolvedStruct {
+            name: s.name.clone(),
+            qualified_name: s.qualified_name.clone(),
+            extensibility: s.extensibility,
+            autoid: s.autoid.clone(),
+            base_type: None,
+            members: all_members.clone(),
+        };
+
         // SerializeCdr method
-        self.emit_serialize_cdr(s);
+        self.emit_serialize_cdr(&full_struct);
         self.line("");
 
         // DeserializeCdr static method
-        self.emit_deserialize_cdr(s);
+        self.emit_deserialize_cdr(&full_struct);
         self.line("");
 
         // DeserializeCdrInline internal static method
-        self.emit_deserialize_cdr_inline(s);
+        self.emit_deserialize_cdr_inline(&full_struct);
         self.line("");
 
         // SerializeKey method
-        self.emit_serialize_key(s);
+        self.emit_serialize_key(&full_struct);
 
         self.indent -= 1;
         self.line("}");
@@ -288,10 +668,15 @@ impl<'a> CsGen<'a> {
     // ---- Serialization ----
 
     fn emit_serialize_cdr(&mut self, s: &ResolvedStruct) {
-        self.line("public byte[] SerializeCdr()");
+        // SerializeCdr() - default uses XCDR2
+        self.line("public byte[] SerializeCdr() => SerializeCdr(true);");
+        self.line("");
+
+        // SerializeCdr(bool xcdr2) - actual implementation
+        self.line("public byte[] SerializeCdr(bool xcdr2)");
         self.line("{");
         self.indent += 1;
-        self.line("var w = new CdrWriter(TypeExtensibility);");
+        self.line("var w = new CdrWriter(TypeExtensibility, xcdr2: xcdr2);");
 
         match s.extensibility {
             ExtensibilityKind::Final => {
@@ -354,19 +739,21 @@ impl<'a> CsGen<'a> {
                 self.line(&format!("w.WriteString({});", accessor));
             }
             ResolvedType::WString { .. } => {
-                self.line(&format!("w.WriteString({});", accessor));
+                self.line(&format!("w.WriteWString({});", accessor));
             }
             ResolvedType::Enum(_) => {
                 self.line(&format!("w.WriteEnum((int){});", accessor));
             }
-            ResolvedType::Bitmask(_) => {
-                self.line(&format!("w.WriteU32((uint){});", accessor));
+            ResolvedType::Bitmask(bitmask_name) => {
+                let bit_bound = self.find_bitmask(bitmask_name).map(|b| b.bit_bound).unwrap_or(32);
+                let (cs_type, write_method, _, _) = Self::bitmask_backing_info(bit_bound);
+                self.line(&format!("w.{}(({}){}); ", write_method, cs_type, accessor));
             }
             ResolvedType::Struct(_) => {
                 self.line("{");
                 self.indent += 1;
                 self.line(&format!(
-                    "var _nested = {}.SerializeCdr();",
+                    "var _nested = {}.SerializeCdr(w.IsXcdr2);",
                     accessor
                 ));
                 self.line("w.WriteBytes(_nested.AsSpan(4)); // Skip 4-byte encap header");
@@ -470,6 +857,13 @@ impl<'a> CsGen<'a> {
         self.line("return obj;");
         self.indent -= 1;
         self.line("}");
+        self.line("");
+
+        // byte[] overload for P/Invoke compatibility (DataReader uses reflection to find this signature)
+        self.line(&format!(
+            "public static {} DeserializeCdr(byte[] data) => DeserializeCdr(data.AsSpan());",
+            class_name
+        ));
     }
 
     fn emit_deserialize_cdr_inline(&mut self, s: &ResolvedStruct) {
@@ -585,7 +979,7 @@ impl<'a> CsGen<'a> {
                 self.line(&format!("{}.{} = r.ReadString();", obj, name));
             }
             ResolvedType::WString { .. } => {
-                self.line(&format!("{}.{} = r.ReadString();", obj, name));
+                self.line(&format!("{}.{} = r.ReadWString();", obj, name));
             }
             ResolvedType::Enum(enum_name) => {
                 let cs_name = naming::to_pascal_case(enum_name);
@@ -596,9 +990,11 @@ impl<'a> CsGen<'a> {
             }
             ResolvedType::Bitmask(bitmask_name) => {
                 let cs_name = naming::to_pascal_case(bitmask_name);
+                let bit_bound = self.find_bitmask(bitmask_name).map(|b| b.bit_bound).unwrap_or(32);
+                let (_, _, read_method, _) = Self::bitmask_backing_info(bit_bound);
                 self.line(&format!(
-                    "{}.{} = ({})r.ReadU32();",
-                    obj, name, cs_name
+                    "{}.{} = ({})r.{}();",
+                    obj, name, cs_name, read_method
                 ));
             }
             ResolvedType::Struct(struct_name) => {
@@ -705,7 +1101,7 @@ impl<'a> CsGen<'a> {
                 self.line(&format!("var {} = r.ReadString();", var_name));
             }
             ResolvedType::WString { .. } => {
-                self.line(&format!("var {} = r.ReadString();", var_name));
+                self.line(&format!("var {} = r.ReadWString();", var_name));
             }
             ResolvedType::Enum(enum_name) => {
                 let cs_name = naming::to_pascal_case(enum_name);
@@ -716,9 +1112,11 @@ impl<'a> CsGen<'a> {
             }
             ResolvedType::Bitmask(bitmask_name) => {
                 let cs_name = naming::to_pascal_case(bitmask_name);
+                let bit_bound = self.find_bitmask(bitmask_name).map(|b| b.bit_bound).unwrap_or(32);
+                let (_, _, read_method, _) = Self::bitmask_backing_info(bit_bound);
                 self.line(&format!(
-                    "var {} = ({})r.ReadU32();",
-                    var_name, cs_name
+                    "var {} = ({})r.{}();",
+                    var_name, cs_name, read_method
                 ));
             }
             ResolvedType::Struct(struct_name) => {
@@ -783,7 +1181,7 @@ impl<'a> CsGen<'a> {
         let key_fields: Vec<&ResolvedMember> = s.members.iter().filter(|m| m.is_key).collect();
 
         if key_fields.is_empty() {
-            self.line("public byte[] SerializeKey() => [];");
+            self.line("public byte[] SerializeKey() => Array.Empty<byte>();");
         } else {
             self.line("public byte[] SerializeKey()");
             self.line("{");
@@ -822,13 +1220,15 @@ impl<'a> CsGen<'a> {
                 self.line(&format!("w.WriteString({});", accessor));
             }
             ResolvedType::WString { .. } => {
-                self.line(&format!("w.WriteString({});", accessor));
+                self.line(&format!("w.WriteWString({});", accessor));
             }
             ResolvedType::Enum(_) => {
                 self.line(&format!("w.WriteEnum((int){});", accessor));
             }
-            ResolvedType::Bitmask(_) => {
-                self.line(&format!("w.WriteU32((uint){});", accessor));
+            ResolvedType::Bitmask(bitmask_name) => {
+                let bit_bound = self.find_bitmask(bitmask_name).map(|b| b.bit_bound).unwrap_or(32);
+                let (cs_type, write_method, _, _) = Self::bitmask_backing_info(bit_bound);
+                self.line(&format!("w.{}(({}){}); ", write_method, cs_type, accessor));
             }
             ResolvedType::Struct(_)
             | ResolvedType::Sequence { .. }
@@ -838,6 +1238,10 @@ impl<'a> CsGen<'a> {
                 self.line(&format!("// TODO: Complex key field {}", accessor));
             }
         }
+    }
+
+    fn find_bitmask(&self, name: &str) -> Option<&ResolvedBitmask> {
+        self.model.bitmasks.iter().find(|b| b.name == name)
     }
 
     // ---- Helpers ----

@@ -265,6 +265,27 @@ namespace Int2Dds.Cdr
             return result;
         }
 
+        /// <summary>
+        /// Read a CDR wstring (wide string): uint32 length (number of UTF-16 code units including null)
+        /// + UTF-16 code units (each 2 bytes) + null terminator.
+        /// Returns the decoded string (without null terminator).
+        /// </summary>
+        public string ReadWString()
+        {
+            uint cdrLen = ReadU32(); // number of UTF-16 code units including null
+            if (cdrLen == 0)
+                return string.Empty;
+
+            int strLen = (int)(cdrLen - 1); // exclude null terminator
+            var chars = new char[strLen];
+            for (int i = 0; i < strLen; i++)
+            {
+                chars[i] = (char)ReadU16();
+            }
+            ReadU16(); // consume null terminator
+            return new string(chars);
+        }
+
         /// <summary>Read a sequence header (uint32 element count).</summary>
         public uint ReadSeqHeader()
         {
