@@ -157,7 +157,8 @@ impl<'a> RustGen<'a> {
         for f in &b.fields {
             self.line(&format!("#[dds(bitfield = {})]", f.bit_width));
             let rust_type = bitfield_rust_type(f.bit_width);
-            self.line(&format!("pub {}: {},", f.name, rust_type));
+            let field_name = naming::escape_keyword(&f.name, naming::TargetLang::Rust);
+            self.line(&format!("pub {}: {},", field_name, rust_type));
         }
         self.indent -= 1;
         self.line("}");
@@ -338,7 +339,8 @@ impl<'a> RustGen<'a> {
             type_str
         };
 
-        self.line(&format!("pub {}: {},", m.name, final_type));
+        let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Rust);
+        self.line(&format!("pub {}: {},", field_name, final_type));
     }
 
     fn type_to_rust(&self, ty: &ResolvedType) -> String {
@@ -655,5 +657,25 @@ mod tests {
         assert!(code.contains("pub enum MyUnion {"));
         assert!(code.contains("IntVal(i32) = 0,"));
         assert!(code.contains("StrVal(String) = 1,"));
+    }
+
+    #[test]
+    fn test_keyword_escaping() {
+        let defs = parse_idl(
+            r#"
+            struct Data {
+                long type;
+                string match;
+                double value;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Data.idl", &RustOptions::default());
+
+        assert!(code.contains("pub r#type: i32,"));
+        assert!(code.contains("pub r#match: String,"));
+        assert!(code.contains("pub value: f64,"));
     }
 }

@@ -151,9 +151,10 @@ impl<'a> PyGen<'a> {
 
         // Fields
         for m in &s.members {
+            let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
             let py_type = self.type_to_python(&m.resolved_type);
             let default = self.default_value(&m.resolved_type);
-            self.line(&format!("{}: {} = {}", m.name, py_type, default));
+            self.line(&format!("{}: {} = {}", field_name, py_type, default));
         }
         self.line("");
 
@@ -246,7 +247,8 @@ impl<'a> PyGen<'a> {
             ExtensibilityKind::Final => {
                 // Final: just serialize fields
                 for m in &s.members {
-                    self.emit_write_field(&m.resolved_type, &format!("self.{}", m.name));
+                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
+                    self.emit_write_field(&m.resolved_type, &format!("self.{}", field_name));
                 }
             }
             ExtensibilityKind::Appendable => {
@@ -254,7 +256,8 @@ impl<'a> PyGen<'a> {
                 self.line("with w.dheader():");
                 self.indent += 1;
                 for m in &s.members {
-                    self.emit_write_field(&m.resolved_type, &format!("self.{}", m.name));
+                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
+                    self.emit_write_field(&m.resolved_type, &format!("self.{}", field_name));
                 }
                 self.indent -= 1;
             }
@@ -265,9 +268,10 @@ impl<'a> PyGen<'a> {
                 for (i, m) in s.members.iter().enumerate() {
                     let member_id = m.member_id.unwrap_or(i as u32);
                     let must_understand = if m.must_understand { "True" } else { "False" };
+                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
                     self.line(&format!("with w.emheader(member_id={}, must_understand={}):", member_id, must_understand));
                     self.indent += 1;
-                    self.emit_write_field(&m.resolved_type, &format!("self.{}", m.name));
+                    self.emit_write_field(&m.resolved_type, &format!("self.{}", field_name));
                     self.indent -= 1;
                 }
                 self.line("w.write_sentinel()");
@@ -339,14 +343,16 @@ impl<'a> PyGen<'a> {
             ExtensibilityKind::Final => {
                 // Final: read fields directly
                 for m in &s.members {
-                    self.emit_read_field(&m.resolved_type, &m.name);
+                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
+                    self.emit_read_field(&m.resolved_type, &field_name);
                 }
             }
             ExtensibilityKind::Appendable => {
                 // Appendable: read DHEADER, then fields
                 self.line("_dsize, _dstart = r.read_dheader()");
                 for m in &s.members {
-                    self.emit_read_field(&m.resolved_type, &m.name);
+                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
+                    self.emit_read_field(&m.resolved_type, &field_name);
                 }
                 self.line("r.read_dheader_end(_dsize, _dstart)");
             }
@@ -356,6 +362,7 @@ impl<'a> PyGen<'a> {
 
                 // Initialize all fields with defaults
                 for m in &s.members {
+                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
                     let default = self.default_value(&m.resolved_type);
                     // Handle field(default_factory=...) case
                     if default.starts_with("field(") {
@@ -364,16 +371,16 @@ impl<'a> PyGen<'a> {
                             let inner = default
                                 .trim_start_matches("field(default_factory=lambda: ")
                                 .trim_end_matches(')');
-                            self.line(&format!("{} = {}", m.name, inner));
+                            self.line(&format!("{} = {}", field_name, inner));
                         } else {
                             // It's field(default_factory=TypeName)
                             let inner = default
                                 .trim_start_matches("field(default_factory=")
                                 .trim_end_matches(')');
-                            self.line(&format!("{} = {}()", m.name, inner));
+                            self.line(&format!("{} = {}()", field_name, inner));
                         }
                     } else {
-                        self.line(&format!("{} = {}", m.name, default));
+                        self.line(&format!("{} = {}", field_name, default));
                     }
                 }
 
@@ -385,6 +392,7 @@ impl<'a> PyGen<'a> {
                 let mut first = true;
                 for (i, m) in s.members.iter().enumerate() {
                     let member_id = m.member_id.unwrap_or(i as u32);
+                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
                     if first {
                         self.line(&format!("if _mid == {}:", member_id));
                         first = false;
@@ -392,7 +400,7 @@ impl<'a> PyGen<'a> {
                         self.line(&format!("elif _mid == {}:", member_id));
                     }
                     self.indent += 1;
-                    self.emit_read_field(&m.resolved_type, &m.name);
+                    self.emit_read_field(&m.resolved_type, &field_name);
                     self.indent -= 1;
                 }
                 self.line("else:");
@@ -407,7 +415,7 @@ impl<'a> PyGen<'a> {
         }
 
         // Create and return instance
-        let field_names: Vec<&str> = s.members.iter().map(|m| m.name.as_str()).collect();
+        let field_names: Vec<String> = s.members.iter().map(|m| naming::escape_keyword(&m.name, naming::TargetLang::Python)).collect();
         self.line(&format!("return cls({})", field_names.join(", ")));
         self.indent -= 1;
     }
@@ -424,34 +432,37 @@ impl<'a> PyGen<'a> {
         match s.extensibility {
             ExtensibilityKind::Final => {
                 for m in &s.members {
-                    self.emit_read_field(&m.resolved_type, &m.name);
+                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
+                    self.emit_read_field(&m.resolved_type, &field_name);
                 }
             }
             ExtensibilityKind::Appendable => {
                 self.line("_dsize, _dstart = r.read_dheader()");
                 for m in &s.members {
-                    self.emit_read_field(&m.resolved_type, &m.name);
+                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
+                    self.emit_read_field(&m.resolved_type, &field_name);
                 }
                 self.line("r.read_dheader_end(_dsize, _dstart)");
             }
             ExtensibilityKind::Mutable => {
                 self.line("_dsize, _dstart = r.read_dheader()");
                 for m in &s.members {
+                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
                     let default = self.default_value(&m.resolved_type);
                     if default.starts_with("field(") {
                         if default.contains("lambda:") {
                             let inner = default
                                 .trim_start_matches("field(default_factory=lambda: ")
                                 .trim_end_matches(')');
-                            self.line(&format!("{} = {}", m.name, inner));
+                            self.line(&format!("{} = {}", field_name, inner));
                         } else {
                             let inner = default
                                 .trim_start_matches("field(default_factory=")
                                 .trim_end_matches(')');
-                            self.line(&format!("{} = {}()", m.name, inner));
+                            self.line(&format!("{} = {}()", field_name, inner));
                         }
                     } else {
-                        self.line(&format!("{} = {}", m.name, default));
+                        self.line(&format!("{} = {}", field_name, default));
                     }
                 }
                 self.line("while not r.is_sentinel():");
@@ -460,6 +471,7 @@ impl<'a> PyGen<'a> {
                 let mut first = true;
                 for (i, m) in s.members.iter().enumerate() {
                     let member_id = m.member_id.unwrap_or(i as u32);
+                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
                     if first {
                         self.line(&format!("if _mid == {}:", member_id));
                         first = false;
@@ -467,7 +479,7 @@ impl<'a> PyGen<'a> {
                         self.line(&format!("elif _mid == {}:", member_id));
                     }
                     self.indent += 1;
-                    self.emit_read_field(&m.resolved_type, &m.name);
+                    self.emit_read_field(&m.resolved_type, &field_name);
                     self.indent -= 1;
                 }
                 self.line("else:");
@@ -480,7 +492,7 @@ impl<'a> PyGen<'a> {
             }
         }
 
-        let field_names: Vec<&str> = s.members.iter().map(|m| m.name.as_str()).collect();
+        let field_names: Vec<String> = s.members.iter().map(|m| naming::escape_keyword(&m.name, naming::TargetLang::Python)).collect();
         self.line(&format!("return cls({})", field_names.join(", ")));
         self.indent -= 1;
     }
@@ -556,7 +568,8 @@ impl<'a> PyGen<'a> {
         } else {
             self.line("w = CdrKeyWriter()");
             for m in key_fields {
-                self.emit_write_key_field(&m.resolved_type, &format!("self.{}", m.name));
+                let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
+                self.emit_write_key_field(&m.resolved_type, &format!("self.{}", field_name));
             }
             self.line("return w.to_bytes()");
         }
