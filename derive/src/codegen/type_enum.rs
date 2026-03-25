@@ -44,7 +44,12 @@ pub fn derive_enum_impl(
     };
 
     // Generate TypeSupport trait implementation for enum/union
-    let type_support_impl = generate_enum_type_support_impl(&type_support_name, name, crate_path);
+    let type_support_impl = generate_enum_type_support_impl(
+        &type_support_name,
+        name,
+        crate_path,
+        type_config.type_name.as_deref(),
+    );
 
     // Generate CdrSerialize/CdrDeserialize and XcdrSerialize/XcdrDeserialize
     let (cdr_serialize_impl, cdr_deserialize_impl, xcdr_serialize_impl, xcdr_deserialize_impl) =
@@ -95,11 +100,17 @@ pub fn generate_enum_type_support_impl(
     type_support_name: &syn::Ident,
     name: &syn::Ident,
     crate_path: &proc_macro2::TokenStream,
+    type_name_override: Option<&str>,
 ) -> proc_macro2::TokenStream {
+    let get_type_name_body = if let Some(tn) = type_name_override {
+        quote! { #tn }
+    } else {
+        quote! { stringify!(#name) }
+    };
     quote! {
         impl #crate_path::dcps::topic::type_support::TypeSupport for #type_support_name {
             fn get_type_name(&self) -> &str {
-                stringify!(#name)
+                #get_type_name_body
             }
 
             fn type_id(&self) -> std::any::TypeId {
