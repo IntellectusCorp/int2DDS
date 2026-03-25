@@ -199,6 +199,41 @@ pub(crate) fn read_framed_message<R: Read>(stream: &mut R) -> io::Result<Vec<u8>
     Ok(data)
 }
 
+/// Classification of a TCP frame payload
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TcpFrameKind {
+    /// Rtps data message (payload starts with RTPS magic: 0x52545053)
+    RtpsData,
+    /// TCP control message (payload[0] in 0x01..=0x7F)
+    Control,
+    /// Unknown or invalid format
+    Unknown,
+}
+
+/// RTPS protocol magic bytes: "RTPS" (0x52, 0x54, 0x50, 0x53)
+const RTPS_MAGIC: [u8; 4] = [0x52, 0x54, 0x50, 0x53];
+
+/// Classify a frame payload as RTPS data or TCP control message.
+///
+/// Classification rules:
+/// - If payload starts with RTPS magic (0x52545053), it is RtpsData
+/// - If payload[0] matches a known control message type (0x01..=0x07), it is Control
+/// - Otherwise, Unknown
+///
+/// These ranges do not overlap: RTPS magic starts with 0x52 ('R'),
+/// which is outside the control message type range (0x01..=0x07).
+pub(crate) fn classify_frame(payload: &[u8]) -> TcpFrameKind {
+    if payload.len() >= 4 && payload[0..4] == RTPS_MAGIC {
+        return TcpFrameKind::RtpsData;
+    }
+
+    if !payload.is_empty() && payload[0] >= 0x01 && payload[0] <= 0x07 {
+        return TcpFrameKind::Control;
+    }
+
+    TcpFrameKind::Unknown
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,5 +332,46 @@ mod tests {
         let result = read_framed_message(&mut cursor);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn test_classify_frame_rtps() {
+        // RTPS magic: "RTPS" = [0x52, 0x54, 0x50, 0x53]
+        let rtps_payload = vec![0x52, 0x54, 0x50, 0x53, 0x02, 0x03, 0x00, 0x00];
+        assert_eq!(classify_frame(&rtps_payload), TcpFrameKind::RtpsData);
+    }
+
+    #[test]
+    fn test_classify_frame_control() {
+        // BindRequest (0x01)
+        assert_eq!(classify_frame(&[0x01, 0x49, 0x4E, 0x54, 0x32]), TcpFrameKind::Control);
+        // BindResponse (0x02)
+        assert_eq!(classify_frame(&[0x02, 0x00]), TcpFrameKind::Control);
+        // Keepalive (0x04)
+        assert_eq!(classify_frame(&[0x04]), TcpFrameKind::Control);
+        // KeepaliveAck (0x05)
+        assert_eq!(classify_frame(&[0x05]), TcpFrameKind::Control);
+        // Close (0x07)
+        assert_eq!(classify_frame(&[0x07]), TcpFrameKind::Control);
+    }
+
+    #[test]
+    fn test_classify_frame_unknown() {
+        assert_eq!(classify_frame(&[]), TcpFrameKind::Unknown);
+        assert_eq!(classify_frame(&[0x00]), TcpFrameKind::Unknown);
+        assert_eq!(classify_frame(&[0x10, 0x20]), TcpFrameKind::Unknown);
+        // 0x52 alone (without full RTPS magic) — not enough bytes for RTPS, not in control range
+        assert_eq!(classify_frame(&[0x52]), TcpFrameKind::Unknown);
+    }
+
+    #[test]
+    fn test_classify_frame_no_overlap() {
+        // Verify that RTPS magic first byte (0x52) is outside control range (0x01..=0x07)
+        // so classification is always unambiguous
+        assert!(0x52 > 0x07);
+
+        // A payload starting with 0x52 but not matching full RTPS magic
+        let non_rtps = vec![0x52, 0x00, 0x00, 0x00];
+        assert_eq!(classify_frame(&non_rtps), TcpFrameKind::Unknown);
     }
 }
