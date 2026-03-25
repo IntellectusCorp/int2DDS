@@ -24,6 +24,11 @@ namespace HelloWorldPublisher
 
         public byte[] SerializeCdr()
         {
+            return SerializeCdr(false);
+        }
+
+        public byte[] SerializeCdr(bool xcdr2)
+        {
             var w = new CdrWriter(Extensibility.Final);
             w.WriteU32(Index);
             w.WriteString(Message);
