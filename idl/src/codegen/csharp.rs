@@ -130,7 +130,7 @@ impl<'a> CsGen<'a> {
         self.line("{");
         self.indent += 1;
         for flag in &b.flags {
-            let flag_name = naming::to_pascal_case(&flag.name);
+            let flag_name = naming::escape_keyword(&naming::to_pascal_case(&flag.name), naming::TargetLang::CSharp);
             self.line(&format!("{} = 1{} << {},", flag_name, suffix, flag.position));
         }
         self.indent -= 1;
@@ -159,7 +159,7 @@ impl<'a> CsGen<'a> {
 
         // Properties for each bitfield
         for f in &b.fields {
-            let prop_name = naming::to_pascal_case(&f.name);
+            let prop_name = naming::escape_keyword(&naming::to_pascal_case(&f.name), naming::TargetLang::CSharp);
             let field_type = if f.bit_width <= 8 {
                 "byte"
             } else if f.bit_width <= 16 {
@@ -184,7 +184,7 @@ impl<'a> CsGen<'a> {
         self.line(&format!("{} packed = 0;", storage_type));
         let mut bit_offset = 0u32;
         for f in &b.fields {
-            let prop_name = naming::to_pascal_case(&f.name);
+            let prop_name = naming::escape_keyword(&naming::to_pascal_case(&f.name), naming::TargetLang::CSharp);
             let mask = (1u64 << f.bit_width) - 1;
             self.line(&format!(
                 "packed |= ({})(((ulong){} & 0x{:X}) << {});",
@@ -210,7 +210,7 @@ impl<'a> CsGen<'a> {
         self.line(&format!("var obj = new {}();", class_name));
         bit_offset = 0;
         for f in &b.fields {
-            let prop_name = naming::to_pascal_case(&f.name);
+            let prop_name = naming::escape_keyword(&naming::to_pascal_case(&f.name), naming::TargetLang::CSharp);
             let mask = (1u64 << f.bit_width) - 1;
             let field_type = if f.bit_width <= 8 {
                 "byte"
@@ -247,7 +247,7 @@ impl<'a> CsGen<'a> {
         self.line(&format!("var obj = new {}();", class_name));
         bit_offset = 0;
         for f in &b.fields {
-            let prop_name = naming::to_pascal_case(&f.name);
+            let prop_name = naming::escape_keyword(&naming::to_pascal_case(&f.name), naming::TargetLang::CSharp);
             let mask = (1u64 << f.bit_width) - 1;
             let field_type = if f.bit_width <= 8 {
                 "byte"
@@ -340,7 +340,7 @@ impl<'a> CsGen<'a> {
 
         // Properties for each case member
         for case in &u.cases {
-            let prop_name = naming::to_pascal_case(&case.member.name);
+            let prop_name = naming::escape_keyword(&naming::to_pascal_case(&case.member.name), naming::TargetLang::CSharp);
             let cs_type = self.type_to_csharp(&case.member.resolved_type);
             if self.needs_initializer(&case.member.resolved_type) {
                 let default = self.default_value(&case.member.resolved_type);
@@ -393,7 +393,7 @@ impl<'a> CsGen<'a> {
                 self.line(&format!("case {}:", label_str));
             }
             self.indent += 1;
-            let accessor = naming::to_pascal_case(&case.member.name);
+            let accessor = naming::escape_keyword(&naming::to_pascal_case(&case.member.name), naming::TargetLang::CSharp);
             self.emit_write_field(&case.member.resolved_type, &accessor);
             self.line("break;");
             self.indent -= 1;
@@ -431,7 +431,7 @@ impl<'a> CsGen<'a> {
                 self.line(&format!("case {}:", label_str));
             }
             self.indent += 1;
-            let prop_name = naming::to_pascal_case(&case.member.name);
+            let prop_name = naming::escape_keyword(&naming::to_pascal_case(&case.member.name), naming::TargetLang::CSharp);
             self.emit_read_field(&case.member.resolved_type, &prop_name, "obj");
             self.line("break;");
             self.indent -= 1;
@@ -518,7 +518,7 @@ impl<'a> CsGen<'a> {
 
         // Properties (all members including inherited)
         for m in &all_members {
-            let prop_name = naming::to_pascal_case(&m.name);
+            let prop_name = naming::escape_keyword(&naming::to_pascal_case(&m.name), naming::TargetLang::CSharp);
             let cs_type = self.type_to_csharp(&m.resolved_type);
             let default = self.default_value(&m.resolved_type);
             if self.needs_initializer(&m.resolved_type) {
@@ -681,14 +681,14 @@ impl<'a> CsGen<'a> {
         match s.extensibility {
             ExtensibilityKind::Final => {
                 for m in &s.members {
-                    let accessor = naming::to_pascal_case(&m.name);
+                    let accessor = naming::escape_keyword(&naming::to_pascal_case(&m.name), naming::TargetLang::CSharp);
                     self.emit_write_field(&m.resolved_type, &accessor);
                 }
             }
             ExtensibilityKind::Appendable => {
                 self.line("var _dt = w.DheaderBegin();");
                 for m in &s.members {
-                    let accessor = naming::to_pascal_case(&m.name);
+                    let accessor = naming::escape_keyword(&naming::to_pascal_case(&m.name), naming::TargetLang::CSharp);
                     self.emit_write_field(&m.resolved_type, &accessor);
                 }
                 self.line("w.DheaderFinalize(_dt);");
@@ -702,7 +702,7 @@ impl<'a> CsGen<'a> {
                         "var _et{} = w.EmheaderBegin({}, {});",
                         i, member_id, must_understand
                     ));
-                    let accessor = naming::to_pascal_case(&m.name);
+                    let accessor = naming::escape_keyword(&naming::to_pascal_case(&m.name), naming::TargetLang::CSharp);
                     self.emit_write_field(&m.resolved_type, &accessor);
                     self.line(&format!("w.EmheaderFinalize(_et{});", i));
                 }
@@ -805,14 +805,14 @@ impl<'a> CsGen<'a> {
         match s.extensibility {
             ExtensibilityKind::Final => {
                 for m in &s.members {
-                    let prop_name = naming::to_pascal_case(&m.name);
+                    let prop_name = naming::escape_keyword(&naming::to_pascal_case(&m.name), naming::TargetLang::CSharp);
                     self.emit_read_field(&m.resolved_type, &prop_name, "obj");
                 }
             }
             ExtensibilityKind::Appendable => {
                 self.line("var (_dSize, _dStart) = r.ReadDheader();");
                 for m in &s.members {
-                    let prop_name = naming::to_pascal_case(&m.name);
+                    let prop_name = naming::escape_keyword(&naming::to_pascal_case(&m.name), naming::TargetLang::CSharp);
                     self.emit_read_field(&m.resolved_type, &prop_name, "obj");
                 }
                 self.line("r.ReadDheaderEnd(_dSize, _dStart);");
@@ -827,7 +827,7 @@ impl<'a> CsGen<'a> {
                 let mut first = true;
                 for (i, m) in s.members.iter().enumerate() {
                     let member_id = m.member_id.unwrap_or(i as u32);
-                    let prop_name = naming::to_pascal_case(&m.name);
+                    let prop_name = naming::escape_keyword(&naming::to_pascal_case(&m.name), naming::TargetLang::CSharp);
                     if first {
                         self.line(&format!("if (_mid == {})", member_id));
                         first = false;
@@ -880,14 +880,14 @@ impl<'a> CsGen<'a> {
         match s.extensibility {
             ExtensibilityKind::Final => {
                 for m in &s.members {
-                    let prop_name = naming::to_pascal_case(&m.name);
+                    let prop_name = naming::escape_keyword(&naming::to_pascal_case(&m.name), naming::TargetLang::CSharp);
                     self.emit_read_field(&m.resolved_type, &prop_name, "obj");
                 }
             }
             ExtensibilityKind::Appendable => {
                 self.line("var (_dSize, _dStart) = r.ReadDheader();");
                 for m in &s.members {
-                    let prop_name = naming::to_pascal_case(&m.name);
+                    let prop_name = naming::escape_keyword(&naming::to_pascal_case(&m.name), naming::TargetLang::CSharp);
                     self.emit_read_field(&m.resolved_type, &prop_name, "obj");
                 }
                 self.line("r.ReadDheaderEnd(_dSize, _dStart);");
@@ -902,7 +902,7 @@ impl<'a> CsGen<'a> {
                 let mut first = true;
                 for (i, m) in s.members.iter().enumerate() {
                     let member_id = m.member_id.unwrap_or(i as u32);
-                    let prop_name = naming::to_pascal_case(&m.name);
+                    let prop_name = naming::escape_keyword(&naming::to_pascal_case(&m.name), naming::TargetLang::CSharp);
                     if first {
                         self.line(&format!("if (_mid == {})", member_id));
                         first = false;
@@ -1188,7 +1188,7 @@ impl<'a> CsGen<'a> {
             self.indent += 1;
             self.line("var w = new CdrKeyWriter();");
             for m in key_fields {
-                let accessor = naming::to_pascal_case(&m.name);
+                let accessor = naming::escape_keyword(&naming::to_pascal_case(&m.name), naming::TargetLang::CSharp);
                 self.emit_write_key_field(&m.resolved_type, &accessor);
             }
             self.line("return w.ToBytes();");

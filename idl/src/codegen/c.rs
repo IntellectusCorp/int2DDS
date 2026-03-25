@@ -121,7 +121,8 @@ impl<'a> CGen<'a> {
         self.raw(&format!("typedef struct {} {{\n", b.name));
         for f in &b.fields {
             let field_type = bitfield_c_type(f.bit_width);
-            self.raw(&format!("    {} {};\n", field_type, f.name));
+            let field_name = naming::escape_keyword(&f.name, naming::TargetLang::C);
+            self.raw(&format!("    {} {};\n", field_type, field_name));
         }
         self.raw(&format!("}} {};\n\n", b.name));
 
@@ -134,9 +135,10 @@ impl<'a> CGen<'a> {
         let mut bit_offset = 0u32;
         for f in &b.fields {
             let mask = (1u64 << f.bit_width) - 1;
+            let field_name = naming::escape_keyword(&f.name, naming::TargetLang::C);
             self.raw(&format!(
                 "    packed |= (({})val->{} & 0x{:X}) << {};\n",
-                wire_type, f.name, mask, bit_offset
+                wire_type, field_name, mask, bit_offset
             ));
             bit_offset += f.bit_width;
         }
@@ -151,9 +153,10 @@ impl<'a> CGen<'a> {
         for f in &b.fields {
             let mask = (1u64 << f.bit_width) - 1;
             let field_type = bitfield_c_type(f.bit_width);
+            let field_name = naming::escape_keyword(&f.name, naming::TargetLang::C);
             self.raw(&format!(
                 "    val->{} = ({})((packed >> {}) & 0x{:X});\n",
-                f.name, field_type, bit_offset, mask
+                field_name, field_type, bit_offset, mask
             ));
             bit_offset += f.bit_width;
         }
@@ -169,11 +172,13 @@ impl<'a> CGen<'a> {
         self.raw(&format!("    {} _d;\n", disc_c));
         self.raw("    union {\n");
         for case in &u.cases {
-            let field_decl = self.type_to_c_declaration(&case.member.resolved_type, &case.member.name);
+            let field_name = naming::escape_keyword(&case.member.name, naming::TargetLang::C);
+            let field_decl = self.type_to_c_declaration(&case.member.resolved_type, &field_name);
             self.raw(&format!("        {};\n", field_decl));
         }
         if let Some(dc) = &u.default_case {
-            let field_decl = self.type_to_c_declaration(&dc.resolved_type, &dc.name);
+            let field_name = naming::escape_keyword(&dc.name, naming::TargetLang::C);
+            let field_decl = self.type_to_c_declaration(&dc.resolved_type, &field_name);
             self.raw(&format!("        {};\n", field_decl));
         }
         self.raw("    } _u;\n");
@@ -193,13 +198,15 @@ impl<'a> CGen<'a> {
             for label in &case.labels {
                 self.raw(&format!("    case {}:\n", self.union_label_c(label)));
             }
-            let accessor = format!("val->_u.{}", case.member.name);
+            let field_name = naming::escape_keyword(&case.member.name, naming::TargetLang::C);
+            let accessor = format!("val->_u.{}", field_name);
             self.emit_write_field_indented(&case.member.resolved_type, &accessor, "        ");
             self.raw("        break;\n");
         }
         if let Some(dc) = &u.default_case {
             self.raw("    default:\n");
-            let accessor = format!("val->_u.{}", dc.name);
+            let field_name = naming::escape_keyword(&dc.name, naming::TargetLang::C);
+            let accessor = format!("val->_u.{}", field_name);
             self.emit_write_field_indented(&dc.resolved_type, &accessor, "        ");
             self.raw("        break;\n");
         }
@@ -219,13 +226,15 @@ impl<'a> CGen<'a> {
             for label in &case.labels {
                 self.raw(&format!("    case {}:\n", self.union_label_c(label)));
             }
-            let accessor = format!("val_out->_u.{}", case.member.name);
+            let field_name = naming::escape_keyword(&case.member.name, naming::TargetLang::C);
+            let accessor = format!("val_out->_u.{}", field_name);
             self.emit_read_field_indented(&case.member.resolved_type, &accessor, "        ");
             self.raw("        break;\n");
         }
         if let Some(dc) = &u.default_case {
             self.raw("    default:\n");
-            let accessor = format!("val_out->_u.{}", dc.name);
+            let field_name = naming::escape_keyword(&dc.name, naming::TargetLang::C);
+            let accessor = format!("val_out->_u.{}", field_name);
             self.emit_read_field_indented(&dc.resolved_type, &accessor, "        ");
             self.raw("        break;\n");
         }
@@ -308,12 +317,13 @@ impl<'a> CGen<'a> {
     }
 
     fn field_declaration(&self, m: &ResolvedMember) -> String {
+        let field_name = naming::escape_keyword(&m.name, naming::TargetLang::C);
         if m.is_external {
             // External fields are pointers in C
             let base = self.type_to_c_base(&m.resolved_type);
-            format!("{}* {}", base, m.name)
+            format!("{}* {}", base, field_name)
         } else {
-            self.type_to_c_declaration(&m.resolved_type, &m.name)
+            self.type_to_c_declaration(&m.resolved_type, &field_name)
         }
     }
 
@@ -550,7 +560,8 @@ impl<'a> CGen<'a> {
             self.raw(&format!("    {}_serialize_fields(&w, (const {}*)&{}->parent);\n", simple, simple, prefix));
         }
         for m in &s.members {
-            let accessor = format!("{}->{}", prefix, m.name);
+            let field_name = naming::escape_keyword(&m.name, naming::TargetLang::C);
+            let accessor = format!("{}->{}", prefix, field_name);
             self.emit_write_field(&m.resolved_type, &accessor);
         }
     }
@@ -558,7 +569,8 @@ impl<'a> CGen<'a> {
     fn emit_serialize_fields_mutable(&mut self, s: &ResolvedStruct, prefix: &str) {
         for (i, m) in s.members.iter().enumerate() {
             let id = m.member_id.unwrap_or(i as u32);
-            let accessor = format!("{}->{}", prefix, m.name);
+            let field_name = naming::escape_keyword(&m.name, naming::TargetLang::C);
+            let accessor = format!("{}->{}", prefix, field_name);
             self.raw("    {\n");
             self.raw("        size_t em;\n");
             self.raw(&format!(
@@ -749,7 +761,8 @@ impl<'a> CGen<'a> {
             self.raw(&format!("    {}_deserialize_fields(&r, ({}*)&{}->parent);\n", simple, simple, prefix));
         }
         for m in &s.members {
-            let accessor = format!("{}->{}", prefix, m.name);
+            let field_name = naming::escape_keyword(&m.name, naming::TargetLang::C);
+            let accessor = format!("{}->{}", prefix, field_name);
             self.emit_read_field(&m.resolved_type, &accessor);
         }
     }
@@ -764,7 +777,8 @@ impl<'a> CGen<'a> {
 
         for (i, m) in s.members.iter().enumerate() {
             let id = m.member_id.unwrap_or(i as u32);
-            let accessor = format!("{}->{}", prefix, m.name);
+            let field_name = naming::escape_keyword(&m.name, naming::TargetLang::C);
+            let accessor = format!("{}->{}", prefix, field_name);
             self.raw(&format!("        case {}:\n", id));
             self.emit_read_field_indented(&m.resolved_type, &accessor, "            ");
             self.raw("            break;\n");
@@ -984,7 +998,8 @@ impl<'a> CGen<'a> {
             sorted_keys.sort_by_key(|m| m.member_id.unwrap_or(u32::MAX));
 
             for m in &sorted_keys {
-                let accessor = format!("val->{}", m.name);
+                let field_name = naming::escape_keyword(&m.name, naming::TargetLang::C);
+                let accessor = format!("val->{}", field_name);
                 self.emit_write_field_indented(&m.resolved_type, &accessor, "    ");
             }
 
@@ -1155,7 +1170,8 @@ impl<'a> CGen<'a> {
         self.raw(&format!("static inline void {}_cleanup({} *val) {{\n", s.name, s.name));
 
         for m in &s.members {
-            let accessor = format!("val->{}", m.name);
+            let field_name = naming::escape_keyword(&m.name, naming::TargetLang::C);
+            let accessor = format!("val->{}", field_name);
             self.emit_cleanup_field(&m.resolved_type, &accessor, "    ");
         }
 
