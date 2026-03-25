@@ -1,75 +1,77 @@
+using System;
 using System.Runtime.InteropServices;
 
-namespace Int2Dds.Interop;
-
-internal static partial class NativeMethods
+namespace Int2Dds.Interop
 {
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_create_publisher(nint participant, out nint publisher_out);
+    internal static partial class NativeMethods
+    {
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_create_publisher(IntPtr participant, out IntPtr publisher_out);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_create_publisher_with_qos(nint participant, nint qos, out nint publisher_out);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_create_publisher_with_qos(IntPtr participant, IntPtr qos, out IntPtr publisher_out);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_delete_publisher(nint publisher);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_delete_publisher(IntPtr publisher);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_publisher_delete_contained_entities(nint publisher);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_publisher_delete_contained_entities(IntPtr publisher);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_publisher_wait_for_acknowledgments(nint publisher, long timeout_ms);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_publisher_wait_for_acknowledgments(IntPtr publisher, long timeout_ms);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_create_datawriter(nint publisher, nint topic, nint qos, out nint writer_out);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_create_datawriter(IntPtr publisher, IntPtr topic, IntPtr qos, out IntPtr writer_out);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static unsafe partial int int2dds_create_datawriter_with_listener(nint publisher, nint topic, nint qos, NativeDataWriterListener* listener, uint mask, out nint writer_out);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_create_datawriter_with_listener(IntPtr publisher, IntPtr topic, IntPtr qos, NativeDataWriterListener* listener, uint mask, out IntPtr writer_out);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static unsafe partial int int2dds_datawriter_set_listener(nint writer, NativeDataWriterListener* listener, uint mask);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_datawriter_set_listener(IntPtr writer, NativeDataWriterListener* listener, uint mask);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static unsafe partial int int2dds_datawriter_get_listener(nint writer, NativeDataWriterListener* listener_out);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_datawriter_get_listener(IntPtr writer, NativeDataWriterListener* listener_out);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_delete_datawriter(nint writer);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_delete_datawriter(IntPtr writer);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static unsafe partial int int2dds_write_serialized(nint writer, byte* data, nuint data_len, byte* key, nuint key_len);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_write_serialized(IntPtr writer, byte* data, UIntPtr data_len, byte* key, UIntPtr key_len);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static unsafe partial int int2dds_write_serialized_w_timestamp(nint writer, byte* data, nuint data_len, byte* key, nuint key_len, int timestamp_sec, uint timestamp_nanosec);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_write_serialized_w_timestamp(IntPtr writer, byte* data, UIntPtr data_len, byte* key, UIntPtr key_len, int timestamp_sec, uint timestamp_nanosec);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_datawriter_wait_for_acknowledgments(nint writer, long timeout_ms);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datawriter_wait_for_acknowledgments(IntPtr writer, long timeout_ms);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static unsafe partial int int2dds_datawriter_register_instance(nint writer, byte* key, nuint key_len, byte* handle_out);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_datawriter_register_instance(IntPtr writer, byte* key, UIntPtr key_len, byte* handle_out);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static unsafe partial int int2dds_datawriter_dispose(nint writer, byte* key, nuint key_len, byte* handle);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_datawriter_dispose(IntPtr writer, byte* key, UIntPtr key_len, byte* handle);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static unsafe partial int int2dds_datawriter_unregister_instance(nint writer, byte* key, nuint key_len, byte* handle);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_datawriter_unregister_instance(IntPtr writer, byte* key, UIntPtr key_len, byte* handle);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static unsafe partial int int2dds_datawriter_lookup_instance(nint writer, byte* key, nuint key_len, byte* handle_out);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_datawriter_lookup_instance(IntPtr writer, byte* key, UIntPtr key_len, byte* handle_out);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static unsafe partial int int2dds_datawriter_get_key_value(nint writer, byte* handle, byte* key_buf, nuint key_capacity, out nuint key_size_out);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_datawriter_get_key_value(IntPtr writer, byte* handle, byte* key_buf, UIntPtr key_capacity, out UIntPtr key_size_out);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_datawriter_assert_liveliness(nint writer);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_datawriter_assert_liveliness(IntPtr writer);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_get_publication_matched_status(nint writer, out int total_count_out, out int current_count_out);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_get_publication_matched_status(IntPtr writer, out int total_count_out, out int current_count_out);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static unsafe partial int int2dds_datawriter_get_liveliness_lost_status(nint writer, NativeLivelinessLostStatus* status_out);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_datawriter_get_liveliness_lost_status(IntPtr writer, NativeLivelinessLostStatus* status_out);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static unsafe partial int int2dds_datawriter_get_offered_deadline_missed_status(nint writer, NativeOfferedDeadlineMissedStatus* status_out);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_datawriter_get_offered_deadline_missed_status(IntPtr writer, NativeOfferedDeadlineMissedStatus* status_out);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static unsafe partial int int2dds_datawriter_get_offered_incompatible_qos_status(nint writer, NativeOfferedIncompatibleQosStatus* status_out);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_datawriter_get_offered_incompatible_qos_status(IntPtr writer, NativeOfferedIncompatibleQosStatus* status_out);
+    }
 }

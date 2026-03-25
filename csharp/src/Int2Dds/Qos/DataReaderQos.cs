@@ -1,18 +1,21 @@
-namespace Int2Dds.Qos;
-
-public record DataReaderQos
+namespace Int2Dds.Qos
 {
-    public Reliability? Reliability { get; init; }
-    public Durability? Durability { get; init; }
-    public History? History { get; init; }
-    public Ownership? Ownership { get; init; }
-    public ResourceLimits? ResourceLimits { get; init; }
-    public DestinationOrder? DestinationOrder { get; init; }
-    public TimeBasedFilter? TimeBasedFilter { get; init; }
-    public LatencyBudget? LatencyBudget { get; init; }
-    public UserData? UserData { get; init; }
-    public ReaderDataLifecycle? ReaderDataLifecycle { get; init; }
-    public DataRepresentation? DataRepresentation { get; init; }
-    public Deadline? Deadline { get; init; }
-    public Liveliness? Liveliness { get; init; }
+    public class DataReaderQos
+    {
+        public Reliability? Reliability { get; set; }
+        public Durability? Durability { get; set; }
+        public History? History { get; set; }
+        public Ownership? Ownership { get; set; }
+        public ResourceLimits? ResourceLimits { get; set; }
+        public DestinationOrder? DestinationOrder { get; set; }
+        public TimeBasedFilter? TimeBasedFilter { get; set; }
+        public LatencyBudget? LatencyBudget { get; set; }
+        public UserData? UserData { get; set; }
+        public ReaderDataLifecycle? ReaderDataLifecycle { get; set; }
+        public DataRepresentation? DataRepresentation { get; set; }
+        public Deadline? Deadline { get; set; }
+        public Liveliness? Liveliness { get; set; }
+
+        public DataReaderQos() { }
+    }
 }

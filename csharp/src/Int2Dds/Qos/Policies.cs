@@ -1,80 +1,246 @@
-namespace Int2Dds.Qos;
+using System;
 
-public record Reliability(ReliabilityKind Kind = ReliabilityKind.Reliable, TimeSpan? MaxBlockingTime = null)
+namespace Int2Dds.Qos
 {
-    internal long MaxBlockingTimeNs => MaxBlockingTime.HasValue
-        ? (long)(MaxBlockingTime.Value.TotalMilliseconds * 1_000_000)
-        : 100_000_000L; // 100ms default
-}
+    public class Reliability
+    {
+        public ReliabilityKind Kind { get; set; } = ReliabilityKind.Reliable;
+        public TimeSpan? MaxBlockingTime { get; set; }
 
-public record Durability(DurabilityKind Kind = DurabilityKind.Volatile);
-public record History(HistoryKind Kind = HistoryKind.KeepLast, int Depth = 1);
-public record Ownership(OwnershipKind Kind = OwnershipKind.Shared);
-public record OwnershipStrength(int Value = 0);
-public record ResourceLimits(int MaxSamples = -1, int MaxInstances = -1, int MaxSamplesPerInstance = -1);
+        public Reliability() { }
+        public Reliability(ReliabilityKind kind = ReliabilityKind.Reliable, TimeSpan? maxBlockingTime = null)
+        {
+            Kind = kind;
+            MaxBlockingTime = maxBlockingTime;
+        }
 
-public record Lifespan(TimeSpan? Duration = null)
-{
-    internal long DurationNs => Duration.HasValue
-        ? (long)(Duration.Value.TotalMilliseconds * 1_000_000)
-        : long.MaxValue;
-}
+        internal long MaxBlockingTimeNs => MaxBlockingTime.HasValue
+            ? (long)(MaxBlockingTime.Value.TotalMilliseconds * 1_000_000)
+            : 100_000_000L; // 100ms default
+    }
 
-public record DestinationOrder(DestinationOrderKind Kind = DestinationOrderKind.ByReception);
+    public class Durability
+    {
+        public DurabilityKind Kind { get; set; } = DurabilityKind.Volatile;
 
-public record LatencyBudget(TimeSpan? Duration = null)
-{
-    internal long DurationNs => Duration.HasValue
-        ? (long)(Duration.Value.TotalMilliseconds * 1_000_000)
-        : 0;
-}
+        public Durability() { }
+        public Durability(DurabilityKind kind = DurabilityKind.Volatile)
+        {
+            Kind = kind;
+        }
+    }
 
-public record TransportPriority(int Value = 0);
+    public class History
+    {
+        public HistoryKind Kind { get; set; } = HistoryKind.KeepLast;
+        public int Depth { get; set; } = 1;
 
-public record UserData(byte[] Data)
-{
-    public UserData() : this(Array.Empty<byte>()) { }
-}
+        public History() { }
+        public History(HistoryKind kind = HistoryKind.KeepLast, int depth = 1)
+        {
+            Kind = kind;
+            Depth = depth;
+        }
+    }
 
-public record WriterDataLifecycle(bool AutodisposeUnregisteredInstances = true);
+    public class Ownership
+    {
+        public OwnershipKind Kind { get; set; } = OwnershipKind.Shared;
 
-public record ReaderDataLifecycle(
-    TimeSpan? AutopurgeNowriterSamplesDelay = null,
-    TimeSpan? AutopurgeDisposedSamplesDelay = null)
-{
-    internal long AutopurgeNowriterNs => AutopurgeNowriterSamplesDelay.HasValue
-        ? (long)(AutopurgeNowriterSamplesDelay.Value.TotalMilliseconds * 1_000_000)
-        : long.MaxValue;
+        public Ownership() { }
+        public Ownership(OwnershipKind kind = OwnershipKind.Shared)
+        {
+            Kind = kind;
+        }
+    }
 
-    internal long AutopurgeDisposedNs => AutopurgeDisposedSamplesDelay.HasValue
-        ? (long)(AutopurgeDisposedSamplesDelay.Value.TotalMilliseconds * 1_000_000)
-        : long.MaxValue;
-}
+    public class OwnershipStrength
+    {
+        public int Value { get; set; }
 
-public record DataRepresentation(DataRepresentationKind Kind = DataRepresentationKind.Xcdr2);
+        public OwnershipStrength() { }
+        public OwnershipStrength(int value = 0)
+        {
+            Value = value;
+        }
+    }
 
-public record TimeBasedFilter(TimeSpan? MinimumSeparation = null)
-{
-    internal long MinimumSeparationNs => MinimumSeparation.HasValue
-        ? (long)(MinimumSeparation.Value.TotalMilliseconds * 1_000_000)
-        : 0;
-}
+    public class ResourceLimits
+    {
+        public int MaxSamples { get; set; } = -1;
+        public int MaxInstances { get; set; } = -1;
+        public int MaxSamplesPerInstance { get; set; } = -1;
 
-public record Deadline(TimeSpan? Period = null)
-{
-    internal long PeriodNs => Period.HasValue
-        ? (long)(Period.Value.TotalMilliseconds * 1_000_000)
-        : long.MaxValue;
-}
+        public ResourceLimits() { }
+        public ResourceLimits(int maxSamples = -1, int maxInstances = -1, int maxSamplesPerInstance = -1)
+        {
+            MaxSamples = maxSamples;
+            MaxInstances = maxInstances;
+            MaxSamplesPerInstance = maxSamplesPerInstance;
+        }
+    }
 
-public record Liveliness(LivelinessKind Kind = LivelinessKind.Automatic, TimeSpan? LeaseDuration = null)
-{
-    internal long LeaseDurationNs => LeaseDuration.HasValue
-        ? (long)(LeaseDuration.Value.TotalMilliseconds * 1_000_000)
-        : long.MaxValue;
-}
+    public class Lifespan
+    {
+        public TimeSpan? Duration { get; set; }
 
-public record Partition(string[] Names)
-{
-    public Partition() : this(Array.Empty<string>()) { }
+        public Lifespan() { }
+        public Lifespan(TimeSpan? duration = null)
+        {
+            Duration = duration;
+        }
+
+        internal long DurationNs => Duration.HasValue
+            ? (long)(Duration.Value.TotalMilliseconds * 1_000_000)
+            : long.MaxValue;
+    }
+
+    public class DestinationOrder
+    {
+        public DestinationOrderKind Kind { get; set; } = DestinationOrderKind.ByReception;
+
+        public DestinationOrder() { }
+        public DestinationOrder(DestinationOrderKind kind = DestinationOrderKind.ByReception)
+        {
+            Kind = kind;
+        }
+    }
+
+    public class LatencyBudget
+    {
+        public TimeSpan? Duration { get; set; }
+
+        public LatencyBudget() { }
+        public LatencyBudget(TimeSpan? duration = null)
+        {
+            Duration = duration;
+        }
+
+        internal long DurationNs => Duration.HasValue
+            ? (long)(Duration.Value.TotalMilliseconds * 1_000_000)
+            : 0;
+    }
+
+    public class TransportPriority
+    {
+        public int Value { get; set; }
+
+        public TransportPriority() { }
+        public TransportPriority(int value = 0)
+        {
+            Value = value;
+        }
+    }
+
+    public class UserData
+    {
+        public byte[] Data { get; set; } = Array.Empty<byte>();
+
+        public UserData() { }
+        public UserData(byte[] data)
+        {
+            Data = data;
+        }
+    }
+
+    public class WriterDataLifecycle
+    {
+        public bool AutodisposeUnregisteredInstances { get; set; } = true;
+
+        public WriterDataLifecycle() { }
+        public WriterDataLifecycle(bool autodisposeUnregisteredInstances = true)
+        {
+            AutodisposeUnregisteredInstances = autodisposeUnregisteredInstances;
+        }
+    }
+
+    public class ReaderDataLifecycle
+    {
+        public TimeSpan? AutopurgeNowriterSamplesDelay { get; set; }
+        public TimeSpan? AutopurgeDisposedSamplesDelay { get; set; }
+
+        public ReaderDataLifecycle() { }
+        public ReaderDataLifecycle(TimeSpan? autopurgeNowriterSamplesDelay = null, TimeSpan? autopurgeDisposedSamplesDelay = null)
+        {
+            AutopurgeNowriterSamplesDelay = autopurgeNowriterSamplesDelay;
+            AutopurgeDisposedSamplesDelay = autopurgeDisposedSamplesDelay;
+        }
+
+        internal long AutopurgeNowriterNs => AutopurgeNowriterSamplesDelay.HasValue
+            ? (long)(AutopurgeNowriterSamplesDelay.Value.TotalMilliseconds * 1_000_000)
+            : long.MaxValue;
+
+        internal long AutopurgeDisposedNs => AutopurgeDisposedSamplesDelay.HasValue
+            ? (long)(AutopurgeDisposedSamplesDelay.Value.TotalMilliseconds * 1_000_000)
+            : long.MaxValue;
+    }
+
+    public class DataRepresentation
+    {
+        public DataRepresentationKind Kind { get; set; } = DataRepresentationKind.Xcdr2;
+
+        public DataRepresentation() { }
+        public DataRepresentation(DataRepresentationKind kind = DataRepresentationKind.Xcdr2)
+        {
+            Kind = kind;
+        }
+    }
+
+    public class TimeBasedFilter
+    {
+        public TimeSpan? MinimumSeparation { get; set; }
+
+        public TimeBasedFilter() { }
+        public TimeBasedFilter(TimeSpan? minimumSeparation = null)
+        {
+            MinimumSeparation = minimumSeparation;
+        }
+
+        internal long MinimumSeparationNs => MinimumSeparation.HasValue
+            ? (long)(MinimumSeparation.Value.TotalMilliseconds * 1_000_000)
+            : 0;
+    }
+
+    public class Deadline
+    {
+        public TimeSpan? Period { get; set; }
+
+        public Deadline() { }
+        public Deadline(TimeSpan? period = null)
+        {
+            Period = period;
+        }
+
+        internal long PeriodNs => Period.HasValue
+            ? (long)(Period.Value.TotalMilliseconds * 1_000_000)
+            : long.MaxValue;
+    }
+
+    public class Liveliness
+    {
+        public LivelinessKind Kind { get; set; } = LivelinessKind.Automatic;
+        public TimeSpan? LeaseDuration { get; set; }
+
+        public Liveliness() { }
+        public Liveliness(LivelinessKind kind = LivelinessKind.Automatic, TimeSpan? leaseDuration = null)
+        {
+            Kind = kind;
+            LeaseDuration = leaseDuration;
+        }
+
+        internal long LeaseDurationNs => LeaseDuration.HasValue
+            ? (long)(LeaseDuration.Value.TotalMilliseconds * 1_000_000)
+            : long.MaxValue;
+    }
+
+    public class Partition
+    {
+        public string[] Names { get; set; } = Array.Empty<string>();
+
+        public Partition() { }
+        public Partition(string[] names)
+        {
+            Names = names;
+        }
+    }
 }

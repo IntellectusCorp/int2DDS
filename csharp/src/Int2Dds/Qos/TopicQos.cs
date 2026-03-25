@@ -1,16 +1,19 @@
-namespace Int2Dds.Qos;
-
-public record TopicQos
+namespace Int2Dds.Qos
 {
-    public Reliability? Reliability { get; init; }
-    public Durability? Durability { get; init; }
-    public History? History { get; init; }
-    public Deadline? Deadline { get; init; }
-    public Liveliness? Liveliness { get; init; }
-    public DestinationOrder? DestinationOrder { get; init; }
-    public ResourceLimits? ResourceLimits { get; init; }
-    public TransportPriority? TransportPriority { get; init; }
-    public Lifespan? Lifespan { get; init; }
-    public Ownership? Ownership { get; init; }
-    public DataRepresentation? DataRepresentation { get; init; }
+    public class TopicQos
+    {
+        public Reliability? Reliability { get; set; }
+        public Durability? Durability { get; set; }
+        public History? History { get; set; }
+        public Deadline? Deadline { get; set; }
+        public Liveliness? Liveliness { get; set; }
+        public DestinationOrder? DestinationOrder { get; set; }
+        public ResourceLimits? ResourceLimits { get; set; }
+        public TransportPriority? TransportPriority { get; set; }
+        public Lifespan? Lifespan { get; set; }
+        public Ownership? Ownership { get; set; }
+        public DataRepresentation? DataRepresentation { get; set; }
+
+        public TopicQos() { }
+    }
 }

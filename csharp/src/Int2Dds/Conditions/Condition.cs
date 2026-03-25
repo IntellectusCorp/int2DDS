@@ -1,57 +1,59 @@
+using System;
 using Int2Dds.Exceptions;
 using Int2Dds.Interop;
 
-namespace Int2Dds.Conditions;
-
-/// <summary>
-/// A read-only condition returned from <see cref="WaitSet.WaitEx"/>.
-/// Represents a triggered condition from the WaitSet.
-/// </summary>
-public sealed class Condition : IDisposable
+namespace Int2Dds.Conditions
 {
-    private nint _handle;
-    private bool _disposed;
-
-    internal Condition(nint handle)
-    {
-        _handle = handle;
-    }
-
     /// <summary>
-    /// Gets the native handle for this condition.
+    /// A read-only condition returned from <see cref="WaitSet.WaitEx"/>.
+    /// Represents a triggered condition from the WaitSet.
     /// </summary>
-    internal nint Handle
+    public sealed class Condition : IDisposable
     {
-        get
+        private IntPtr _handle;
+        private bool _disposed;
+
+        internal Condition(IntPtr handle)
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            return _handle;
+            _handle = handle;
         }
-    }
 
-    /// <summary>
-    /// Gets the current trigger value of this condition.
-    /// </summary>
-    public bool TriggerValue
-    {
-        get
+        /// <summary>
+        /// Gets the native handle for this condition.
+        /// </summary>
+        internal IntPtr Handle
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            ReturnCodeHelper.CheckReturn(
-                NativeMethods.int2dds_condition_get_trigger_value(_handle, out bool triggered));
-            return triggered;
+            get
+            {
+                if (_disposed) throw new ObjectDisposedException(GetType().Name);
+                return _handle;
+            }
         }
-    }
 
-    public void Dispose()
-    {
-        if (_disposed) return;
-        _disposed = true;
-
-        if (_handle != 0)
+        /// <summary>
+        /// Gets the current trigger value of this condition.
+        /// </summary>
+        public bool TriggerValue
         {
-            NativeMethods.int2dds_condition_delete(_handle);
-            _handle = 0;
+            get
+            {
+                if (_disposed) throw new ObjectDisposedException(GetType().Name);
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_condition_get_trigger_value(_handle, out bool triggered));
+                return triggered;
+            }
+        }
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+
+            if (_handle != IntPtr.Zero)
+            {
+                NativeMethods.int2dds_condition_delete(_handle);
+                _handle = IntPtr.Zero;
+            }
         }
     }
 }

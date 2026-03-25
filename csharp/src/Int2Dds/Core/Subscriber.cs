@@ -1,3 +1,6 @@
+using System;
+using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text;
 using Int2Dds.Exceptions;
 using Int2Dds.Interop;
@@ -5,120 +8,121 @@ using Int2Dds.Listeners;
 using Int2Dds.Qos;
 using Int2Dds.Types;
 
-namespace Int2Dds.Core;
-
-/// <summary>
-/// Subscriber - groups DataReaders for coherent subscription.
-///
-/// Subscribers are created through DomainParticipant.CreateSubscriber().
-/// </summary>
-public sealed class Subscriber : IDisposable
+namespace Int2Dds.Core
 {
-    private readonly nint _handle;
-    private bool _disposed;
-
     /// <summary>
-    /// Creates a new Subscriber. Normally called via DomainParticipant.CreateSubscriber.
+    /// Subscriber - groups DataReaders for coherent subscription.
+    ///
+    /// Subscribers are created through DomainParticipant.CreateSubscriber().
     /// </summary>
-    internal Subscriber(DomainParticipant participant, SubscriberQos? qos = null)
+    public sealed class Subscriber : IDisposable
     {
-        if (qos?.Partition is { Names.Length: > 0 } partition)
-        {
-            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_subscriber_qos_create_default(out var qosHandle));
-            try
-            {
-                unsafe
-                {
-                    var partitionByteArrays = partition.Names
-                        .Select(n => Encoding.UTF8.GetBytes(n + '\0'))
-                        .ToArray();
-                    var pinnedArrays = new System.Runtime.InteropServices.GCHandle[partitionByteArrays.Length];
-                    for (int i = 0; i < partitionByteArrays.Length; i++)
-                        pinnedArrays[i] = System.Runtime.InteropServices.GCHandle.Alloc(
-                            partitionByteArrays[i], System.Runtime.InteropServices.GCHandleType.Pinned);
+        private readonly IntPtr _handle;
+        private bool _disposed;
 
-                    try
+        /// <summary>
+        /// Creates a new Subscriber. Normally called via DomainParticipant.CreateSubscriber.
+        /// </summary>
+        internal Subscriber(DomainParticipant participant, SubscriberQos? qos = null)
+        {
+            if (qos?.Partition is { Names: { Length: var len } } partition && len > 0)
+            {
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_subscriber_qos_create_default(out var qosHandle));
+                try
+                {
+                    unsafe
                     {
-                        var ptrs = new byte*[partitionByteArrays.Length];
-                        for (int i = 0; i < ptrs.Length; i++)
-                            ptrs[i] = (byte*)pinnedArrays[i].AddrOfPinnedObject();
-                        fixed (byte** pPartitions = ptrs)
+                        var partitionByteArrays = partition.Names
+                            .Select(n => Encoding.UTF8.GetBytes(n + '\0'))
+                            .ToArray();
+                        var pinnedArrays = new GCHandle[partitionByteArrays.Length];
+                        for (int i = 0; i < partitionByteArrays.Length; i++)
+                            pinnedArrays[i] = GCHandle.Alloc(
+                                partitionByteArrays[i], GCHandleType.Pinned);
+
+                        try
                         {
-                            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_subscriber_qos_set_partition(
-                                qosHandle, pPartitions, (nuint)partition.Names.Length));
+                            var ptrs = new byte*[partitionByteArrays.Length];
+                            for (int i = 0; i < ptrs.Length; i++)
+                                ptrs[i] = (byte*)pinnedArrays[i].AddrOfPinnedObject();
+                            fixed (byte** pPartitions = ptrs)
+                            {
+                                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_subscriber_qos_set_partition(
+                                    qosHandle, pPartitions, (UIntPtr)partition.Names.Length));
+                            }
+                        }
+                        finally
+                        {
+                            foreach (var pin in pinnedArrays)
+                                pin.Free();
                         }
                     }
-                    finally
-                    {
-                        foreach (var pin in pinnedArrays)
-                            pin.Free();
-                    }
+
+                    ReturnCodeHelper.CheckReturn(
+                        NativeMethods.int2dds_create_subscriber_with_qos(participant.Handle, qosHandle, out _handle));
                 }
-
-                ReturnCodeHelper.CheckReturn(
-                    NativeMethods.int2dds_create_subscriber_with_qos(participant.Handle, qosHandle, out _handle));
+                finally
+                {
+                    NativeMethods.int2dds_subscriber_qos_destroy(qosHandle);
+                }
             }
-            finally
+            else
             {
-                NativeMethods.int2dds_subscriber_qos_destroy(qosHandle);
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_create_subscriber(participant.Handle, out _handle));
             }
         }
-        else
+
+        /// <summary>
+        /// Gets the native handle. For internal use by other Core types.
+        /// </summary>
+        internal IntPtr Handle => _handle;
+
+        /// <summary>
+        /// Creates a DataReader for the given topic.
+        /// </summary>
+        /// <typeparam name="T">The DDS data type.</typeparam>
+        /// <param name="topic">The topic to read from.</param>
+        /// <param name="qos">Optional QoS settings.</param>
+        /// <param name="listener">Optional listener for event callbacks.</param>
+        /// <param name="statusMask">Bitmask of statuses to listen for.</param>
+        /// <returns>A new DataReader instance.</returns>
+        public DataReader<T> CreateDataReader<T>(Topic<T> topic, DataReaderQos? qos = null,
+            IDataReaderListener? listener = null, uint statusMask = 0)
+            where T : class, IDdsType, new()
         {
-            ReturnCodeHelper.CheckReturn(
-                NativeMethods.int2dds_create_subscriber(participant.Handle, out _handle));
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            return new DataReader<T>(this, topic, qos, listener, statusMask);
         }
-    }
 
-    /// <summary>
-    /// Gets the native handle. For internal use by other Core types.
-    /// </summary>
-    internal nint Handle => _handle;
-
-    /// <summary>
-    /// Creates a DataReader for the given topic.
-    /// </summary>
-    /// <typeparam name="T">The DDS data type.</typeparam>
-    /// <param name="topic">The topic to read from.</param>
-    /// <param name="qos">Optional QoS settings.</param>
-    /// <param name="listener">Optional listener for event callbacks.</param>
-    /// <param name="statusMask">Bitmask of statuses to listen for.</param>
-    /// <returns>A new DataReader instance.</returns>
-    public DataReader<T> CreateDataReader<T>(Topic<T> topic, DataReaderQos? qos = null,
-        IDataReaderListener? listener = null, uint statusMask = 0)
-        where T : IDdsType<T>
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        return new DataReader<T>(this, topic, qos, listener, statusMask);
-    }
-
-    /// <summary>
-    /// Deletes all DataReaders created by this subscriber.
-    /// </summary>
-    public void DeleteContainedEntities()
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_subscriber_delete_contained_entities(_handle));
-    }
-
-    /// <summary>
-    /// Releases all resources used by the Subscriber.
-    /// </summary>
-    public void Dispose()
-    {
-        if (_disposed) return;
-        _disposed = true;
-
-        NativeMethods.int2dds_subscriber_delete_contained_entities(_handle);
-        NativeMethods.int2dds_delete_subscriber(_handle);
-    }
-
-    ~Subscriber()
-    {
-        if (!_disposed)
+        /// <summary>
+        /// Deletes all DataReaders created by this subscriber.
+        /// </summary>
+        public void DeleteContainedEntities()
         {
-            try { Dispose(); }
-            catch { /* suppress errors during finalization */ }
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_subscriber_delete_contained_entities(_handle));
+        }
+
+        /// <summary>
+        /// Releases all resources used by the Subscriber.
+        /// </summary>
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+
+            NativeMethods.int2dds_subscriber_delete_contained_entities(_handle);
+            NativeMethods.int2dds_delete_subscriber(_handle);
+        }
+
+        ~Subscriber()
+        {
+            if (!_disposed)
+            {
+                try { Dispose(); }
+                catch { /* suppress errors during finalization */ }
+            }
         }
     }
 }

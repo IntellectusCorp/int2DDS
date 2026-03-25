@@ -1,24 +1,26 @@
+using System;
 using System.Runtime.InteropServices;
 
-namespace Int2Dds.Interop;
-
-internal static partial class NativeMethods
+namespace Int2Dds.Interop
 {
-    [LibraryImport("int2dds_ffi")]
-    internal static unsafe partial int int2dds_create_topic(nint participant, byte* topic_name, byte* dds_type_name, int extensibility, nint qos, out nint topic_out);
+    internal static partial class NativeMethods
+    {
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_create_topic(IntPtr participant, byte* topic_name, byte* dds_type_name, int extensibility, IntPtr qos, out IntPtr topic_out);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static unsafe partial int int2dds_create_topic_keyed(nint participant, byte* topic_name, byte* dds_type_name, int extensibility, [MarshalAs(UnmanagedType.U1)] bool has_key, nint qos, out nint topic_out);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_create_topic_keyed(IntPtr participant, byte* topic_name, byte* dds_type_name, int extensibility, [MarshalAs(UnmanagedType.U1)] bool has_key, IntPtr qos, out IntPtr topic_out);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static unsafe partial int int2dds_create_topic_with_type_info(nint participant, byte* topic_name, nint type_info, nint qos, out nint topic_out);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_create_topic_with_type_info(IntPtr participant, byte* topic_name, IntPtr type_info, IntPtr qos, out IntPtr topic_out);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static partial int int2dds_delete_topic(nint topic);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_delete_topic(IntPtr topic);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static unsafe partial int int2dds_topic_get_name(nint topic, byte* name_out, nuint name_size);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_topic_get_name(IntPtr topic, byte* name_out, UIntPtr name_size);
 
-    [LibraryImport("int2dds_ffi")]
-    internal static unsafe partial int int2dds_topic_get_type_name(nint topic, byte* type_name_out, nuint type_name_size);
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_topic_get_type_name(IntPtr topic, byte* type_name_out, UIntPtr type_name_size);
+    }
 }

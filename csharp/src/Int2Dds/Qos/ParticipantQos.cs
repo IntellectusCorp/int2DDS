@@ -1,6 +1,9 @@
-namespace Int2Dds.Qos;
-
-public record ParticipantQos
+namespace Int2Dds.Qos
 {
-    public UserData? UserData { get; init; }
+    public class ParticipantQos
+    {
+        public UserData? UserData { get; set; }
+
+        public ParticipantQos() { }
+    }
 }

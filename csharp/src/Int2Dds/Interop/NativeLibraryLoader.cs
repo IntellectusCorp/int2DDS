@@ -1,64 +1,56 @@
+using System;
+using System.IO;
 using System.Reflection;
-using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
-namespace Int2Dds.Interop;
-
-internal static class NativeLibraryLoader
+namespace Int2Dds.Interop
 {
-    internal const string LibraryName = "int2dds_ffi";
-
-    [ModuleInitializer]
-    internal static void Initialize()
+    internal static class NativeLibraryLoader
     {
-        NativeLibrary.SetDllImportResolver(
-            typeof(NativeLibraryLoader).Assembly,
-            ResolveLibrary);
-    }
+        internal const string LibraryName = "int2dds_ffi";
 
-    private static nint ResolveLibrary(string libraryName, Assembly assembly, DllImportSearchPath? searchPath)
-    {
-        if (libraryName != LibraryName)
-            return nint.Zero;
-
-        // Platform-specific library file name
-        string libFileName;
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            libFileName = "int2dds_ffi.dll";
-        else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
-            libFileName = "libint2dds_ffi.dylib";
-        else
-            libFileName = "libint2dds_ffi.so";
-
-        // 1. Environment variable
-        var envPath = Environment.GetEnvironmentVariable("INT2DDS_FFI_PATH");
-        if (!string.IsNullOrEmpty(envPath))
+        /// <summary>
+        /// On netstandard2.1, we rely on the OS's native library search.
+        /// Users should ensure the native library is on PATH (Windows)
+        /// or LD_LIBRARY_PATH (Linux), or in the application directory.
+        ///
+        /// The INT2DDS_FFI_PATH environment variable can be used by setting
+        /// the directory on the platform search path before loading the assembly.
+        /// </summary>
+        static NativeLibraryLoader()
         {
-            if (NativeLibrary.TryLoad(envPath, out var handle))
-                return handle;
+            Initialize();
         }
 
-        // 2. Relative to assembly location
-        var assemblyDir = Path.GetDirectoryName(assembly.Location) ?? ".";
-        string[] relativePaths =
-        [
-            Path.Combine(assemblyDir, libFileName),
-            Path.Combine(assemblyDir, "..", "..", "..", "..", "..", "target", "release", libFileName),
-            Path.Combine(assemblyDir, "..", "..", "..", "..", "..", "target", "debug", libFileName),
-            Path.Combine(assemblyDir, "..", "..", "..", "..", "..", "ffi", "target", "release", libFileName),
-            Path.Combine(assemblyDir, "..", "..", "..", "..", "..", "ffi", "target", "debug", libFileName),
-        ];
-
-        foreach (var path in relativePaths)
+        internal static void Initialize()
         {
-            if (NativeLibrary.TryLoad(path, out var handle))
-                return handle;
+            // Try to add INT2DDS_FFI_PATH to the DLL search path if set.
+            var envPath = Environment.GetEnvironmentVariable("INT2DDS_FFI_PATH");
+            if (!string.IsNullOrEmpty(envPath))
+            {
+                try
+                {
+                    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                    {
+                        // On Windows, use SetDllDirectory or prepend to PATH
+                        var currentPath = Environment.GetEnvironmentVariable("PATH") ?? "";
+                        Environment.SetEnvironmentVariable("PATH", envPath + ";" + currentPath);
+                    }
+                    else
+                    {
+                        // On Linux/macOS, prepend to LD_LIBRARY_PATH / DYLD_LIBRARY_PATH
+                        var varName = RuntimeInformation.IsOSPlatform(OSPlatform.OSX)
+                            ? "DYLD_LIBRARY_PATH"
+                            : "LD_LIBRARY_PATH";
+                        var currentPath = Environment.GetEnvironmentVariable(varName) ?? "";
+                        Environment.SetEnvironmentVariable(varName, envPath + ":" + currentPath);
+                    }
+                }
+                catch
+                {
+                    // Best effort - if we can't set the path, the user can set it manually
+                }
+            }
         }
-
-        // 3. System default search
-        if (NativeLibrary.TryLoad(libFileName, assembly, searchPath, out var systemHandle))
-            return systemHandle;
-
-        return nint.Zero;
     }
 }

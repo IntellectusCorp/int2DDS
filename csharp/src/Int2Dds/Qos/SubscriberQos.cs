@@ -1,6 +1,9 @@
-namespace Int2Dds.Qos;
-
-public record SubscriberQos
+namespace Int2Dds.Qos
 {
-    public Partition? Partition { get; init; }
+    public class SubscriberQos
+    {
+        public Partition? Partition { get; set; }
+
+        public SubscriberQos() { }
+    }
 }
