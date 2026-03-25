@@ -1,17 +1,19 @@
-//! Function-call style Server — container for Services (7.11.1.5.3)
+//! Server — a container that manages one or more Services.
+//!
+//! Runs an event loop that polls registered services for incoming requests
+//! and dispatches them to their respective handlers.
 
 use std::time::{Duration, Instant};
 
 use crate::entity::RpcEntity;
 use crate::error::DdsRpcResult;
-use crate::service::{ServiceParams, ServiceStatus};
+use crate::service::ServiceParams;
 
 /// Type-erased dispatch trait for heterogeneous Service storage.
 /// Service<TReq, TRep, H> implements this trait, allowing Server
 /// to hold services with different type parameters in a single Vec.
 pub trait Dispatchable: RpcEntity + Send {
     fn try_dispatch_one(&self) -> DdsRpcResult<bool>;
-    fn status(&self) -> ServiceStatus;
 }
 
 pub struct ServerParams {
@@ -35,7 +37,7 @@ impl Default for ServerParams {
     }
 }
 
-/// Container of one or more Services (7.11.1.5.3).
+/// Container of one or more Services.
 /// Provides blocking and time-limited dispatch loops that poll
 /// all registered services for incoming requests.
 pub struct Server {
