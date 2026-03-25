@@ -13,9 +13,7 @@ use mio::{Interest, Registry, Token};
 
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::transport::tcp::framing::{classify_frame, FramedReader, TcpFrameKind};
-use crate::rtps::transport::tcp::protocol::{
-    BindRequest, BindResponse, BindStatus, BindType, ControlMsg,
-};
+use crate::rtps::transport::tcp::protocol::{BindResponse, BindStatus, BindType, ControlMsg};
 
 /// Token for the listener socket itself
 const LISTENER_TOKEN: Token = Token(0);
