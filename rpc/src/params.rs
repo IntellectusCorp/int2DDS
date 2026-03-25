@@ -1,4 +1,7 @@
-//! Configuration parameters for Requester and Replier (7.11.1.4.11, 7.11.1.4.12)
+//! Configuration parameters for Requester, Replier, Client, and Service.
+//!
+//! Bundles a DomainParticipant with optional QoS, Publisher/Subscriber, and
+//! topic name overrides needed to create RPC endpoints.
 
 use int2dds::dcps::domain::domain_participant::DomainParticipant;
 use int2dds::dcps::publication::publisher::Publisher;
@@ -8,12 +11,13 @@ use int2dds::dcps::subscription::qos::DataReaderQos;
 use int2dds::dcps::subscription::qos::SubscriberQos;
 use int2dds::dcps::subscription::subscriber::Subscriber;
 
-/// Configuration for constructing a Requester (7.11.1.4.11)
+/// Configuration for constructing a Requester
 pub struct RequesterParams {
     pub(crate) participant: DomainParticipant, // not Arc, already Arc-wrapped internally
     pub(crate) publisher: Option<Publisher>,
     pub(crate) subscriber: Option<Subscriber>,
     pub(crate) service_name: Option<String>,
+    pub(crate) interface_name: Option<String>,
     pub(crate) request_topic_name: Option<String>,
     pub(crate) reply_topic_name: Option<String>,
     pub(crate) datawriter_qos: Option<DataWriterQos>,
@@ -27,6 +31,7 @@ impl RequesterParams {
         Self {
             participant,
             service_name: None,
+            interface_name: None,
             request_topic_name: None,
             reply_topic_name: None,
             datawriter_qos: None,
@@ -40,6 +45,11 @@ impl RequesterParams {
 
     pub fn service_name(mut self, name: impl Into<String>) -> Self {
         self.service_name = Some(name.into());
+        self
+    }
+
+    pub fn interface_name(mut self, name: impl Into<String>) -> Self {
+        self.interface_name = Some(name.into());
         self
     }
 
@@ -84,12 +94,13 @@ impl RequesterParams {
     }
 }
 
-/// Configuration for constructing a Replier (7.11.1.4.12)
+/// Configuration for constructing a Replier
 pub struct ReplierParams {
     pub(crate) participant: DomainParticipant,
     pub(crate) publisher: Option<Publisher>,
     pub(crate) subscriber: Option<Subscriber>,
     pub(crate) service_name: Option<String>,
+    pub(crate) interface_name: Option<String>,
     pub(crate) instance_name: Option<String>,
     pub(crate) request_topic_name: Option<String>,
     pub(crate) reply_topic_name: Option<String>,
@@ -106,6 +117,7 @@ impl ReplierParams {
             publisher: None,
             subscriber: None,
             service_name: None,
+            interface_name: None,
             instance_name: None,
             request_topic_name: None,
             reply_topic_name: None,
@@ -118,6 +130,11 @@ impl ReplierParams {
 
     pub fn service_name(mut self, name: impl Into<String>) -> Self {
         self.service_name = Some(name.into());
+        self
+    }
+
+    pub fn interface_name(mut self, name: impl Into<String>) -> Self {
+        self.interface_name = Some(name.into());
         self
     }
 

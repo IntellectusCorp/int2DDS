@@ -17,6 +17,7 @@ struct Args {
     csharp_namespace: String,
     default_string_bound: u32,
     string_pointer: bool,
+    rpc_output: Option<String>,
 }
 
 fn parse_args() -> Args {
@@ -33,6 +34,7 @@ fn parse_args() -> Args {
     let mut csharp_namespace = "GeneratedTypes".to_string();
     let mut default_string_bound = 256u32;
     let mut string_pointer = false;
+    let mut rpc_output = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -71,13 +73,14 @@ fn parse_args() -> Args {
             }
             "--string-bound" => {
                 i += 1;
-                default_string_bound = args
-                    .get(i)
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(256);
+                default_string_bound = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(256);
             }
             "--string-pointer" => {
                 string_pointer = true;
+            }
+            "--rpc" => {
+                i += 1;
+                rpc_output = Some(args.get(i).cloned().unwrap_or_default());
             }
             "-h" | "--help" => {
                 print_usage();
@@ -119,6 +122,7 @@ fn parse_args() -> Args {
         csharp_namespace,
         default_string_bound,
         string_pointer,
+        rpc_output,
     }
 }
 
@@ -139,6 +143,7 @@ OPTIONS:
     --csharp-namespace <NS>   C# namespace (default: GeneratedTypes)
     --string-bound <N>        Default unbounded string size in C (default: 256)
     --string-pointer          Use char* pointers for strings (OMG standard)
+    --rpc <PATH>            Generate RPC types (includes base types + RPC infrastructure)
     -h, --help                Print help
     -V, --version             Print version"
     );
@@ -174,53 +179,39 @@ fn main() {
         }
     };
 
-    let idl_filename = args
-        .input_file
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(&args.input_file);
+    let idl_filename = args.input_file.rsplit(['/', '\\']).next().unwrap_or(&args.input_file);
     let base_name = naming::idl_to_output_name(idl_filename);
 
     // Determine output paths
-    let rust_path = args.rust_output.or_else(|| {
-        args.output_dir
-            .as_ref()
-            .map(|dir| format!("{}/{}.rs", dir, base_name))
-    });
-    let c_path = args.c_output.or_else(|| {
-        args.output_dir
-            .as_ref()
-            .map(|dir| format!("{}/{}.h", dir, base_name))
-    });
-    let python_path = args.python_output.or_else(|| {
-        args.output_dir
-            .as_ref()
-            .map(|dir| format!("{}/{}.py", dir, base_name))
-    });
+    let rust_path = args
+        .rust_output
+        .or_else(|| args.output_dir.as_ref().map(|dir| format!("{}/{}.rs", dir, base_name)));
+    let c_path = args
+        .c_output
+        .or_else(|| args.output_dir.as_ref().map(|dir| format!("{}/{}.h", dir, base_name)));
+    let python_path = args
+        .python_output
+        .or_else(|| args.output_dir.as_ref().map(|dir| format!("{}/{}.py", dir, base_name)));
+    let rpc_path = args
+        .rpc_output
+        .or_else(|| args.output_dir.as_ref().map(|dir| format!("{}/{}_rpc.rs", dir, base_name)));
     let csharp_path = args.csharp_output.or_else(|| {
         args.output_dir
             .as_ref()
             .map(|dir| format!("{}/{}.cs", dir, naming::to_pascal_case(&base_name)))
     });
 
-    // If neither -r, -c, -p, -s, nor -o specified, default to generating Rust and C
-    let (rust_path, c_path, python_path, csharp_path) =
-        if rust_path.is_none() && c_path.is_none() && python_path.is_none() && csharp_path.is_none() {
-            (
-                Some(format!("{}.rs", base_name)),
-                Some(format!("{}.h", base_name)),
-                None, // Don't generate Python by default for backward compatibility
-                None, // Don't generate C# by default
-            )
+    // If neither -r, -c, -p, nor -o specified, default to generating Rust and C
+    let (rust_path, c_path, python_path, rpc_path, csharp_path) =
+        if rust_path.is_none() && c_path.is_none() && python_path.is_none() {
+            (Some(format!("{}.rs", base_name)), Some(format!("{}.h", base_name)), None, None, None)
         } else {
-            (rust_path, c_path, python_path, csharp_path)
+            (rust_path, c_path, python_path, rpc_path, csharp_path)
         };
 
     // Generate Rust
     if let Some(path) = &rust_path {
-        let rust_opts = codegen::rust::RustOptions {
-            crate_path: args.crate_path.clone(),
-        };
+        let rust_opts = codegen::rust::RustOptions { crate_path: args.crate_path.clone() };
         let code = codegen::rust::generate(&model, idl_filename, &rust_opts);
         if let Err(e) = write_file(path, &code) {
             eprintln!("error: cannot write '{}': {}", path, e);
@@ -249,10 +240,24 @@ fn main() {
 
     // Generate Python
     if let Some(path) = &python_path {
-        let python_opts = codegen::python::PythonOptions {
-            int2dds_module: args.python_module.clone(),
-        };
+        let python_opts =
+            codegen::python::PythonOptions { int2dds_module: args.python_module.clone() };
         let code = codegen::python::generate(&model, idl_filename, &python_opts);
+        if let Err(e) = write_file(path, &code) {
+            eprintln!("error: cannot write '{}': {}", path, e);
+            process::exit(1);
+        }
+        eprintln!("generated: {}", path);
+    }
+
+    // Generate RPC (base types + RPC infrastructure)
+    if let Some(path) = &rpc_path {
+        let rust_opts = codegen::rust::RustOptions { crate_path: args.crate_path.clone() };
+        let rpc_opts = codegen::rpc::RpcOptions { crate_path: args.crate_path.clone() };
+        let mut code = String::from("#![allow(non_camel_case_types, dead_code, unused_imports, unreachable_patterns, unused_variables)]\n\n");
+        code.push_str(&codegen::rust::generate(&model, idl_filename, &rust_opts));
+        code.push('\n');
+        code.push_str(&codegen::rpc::generate(&model, &rpc_opts));
         if let Err(e) = write_file(path, &code) {
             eprintln!("error: cannot write '{}': {}", path, e);
             process::exit(1);
@@ -262,9 +267,8 @@ fn main() {
 
     // Generate C#
     if let Some(path) = &csharp_path {
-        let csharp_opts = codegen::csharp::CSharpOptions {
-            namespace: args.csharp_namespace.clone(),
-        };
+        let csharp_opts =
+            codegen::csharp::CSharpOptions { namespace: args.csharp_namespace.clone() };
         let code = codegen::csharp::generate(&model, idl_filename, &csharp_opts);
         if let Err(e) = write_file(path, &code) {
             eprintln!("error: cannot write '{}': {}", path, e);

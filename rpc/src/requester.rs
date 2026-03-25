@@ -1,4 +1,7 @@
-//! Requester<TReq, TRep> — sends requests and receives replies (7.11.1.4.3)
+//! Requester — the request-reply style component that sends requests and receives replies.
+//!
+//! Owns a DDS DataWriter (for requests) and DataReader (for replies), correlating
+//! replies back to their originating request via SampleIdentity.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,6 +32,9 @@ use crate::sample::Sample;
 use crate::topic_name::TopicNameConfig;
 use crate::types::{DdsRpcType, InstanceName, Request, SampleIdentity};
 
+/// Low-level request-reply endpoint on the client side.
+/// Sends requests via a DDS DataWriter and receives correlated replies
+/// through a DDS DataReader, using SampleIdentity for correlation.
 pub struct Requester<TReq, TRep> {
     request_writer: Option<Arc<DataWriter<Request<TReq>>>>,
     reply_reader: Option<Arc<DataReader<crate::types::Reply<TRep>>>>,
@@ -39,18 +45,25 @@ pub struct Requester<TReq, TRep> {
 impl<TReq: DdsRpcType, TRep: DdsRpcType> Requester<TReq, TRep> {
     pub fn new(params: RequesterParams) -> DdsRpcResult<Self> {
         let topic_config = TopicNameConfig {
-            interface_name: None, // request-reply style: no interface name (7.4.1)
+            interface_name: params.interface_name.clone(),
             service_name: params.service_name.clone(),
             request_topic_override: params.request_topic_name.clone(),
             reply_topic_override: params.reply_topic_name.clone(),
+            request_type_override: None,
+            reply_type_override: None,
         };
 
         let request_topic_name = topic_config.request_topic();
         let reply_topic_name = topic_config.reply_topic();
+        let request_type_name =
+            topic_config.request_type().unwrap_or_else(|| Request::<TReq>::get_type_name());
+        let reply_type_name = topic_config
+            .reply_type()
+            .unwrap_or_else(|| crate::types::Reply::<TRep>::get_type_name());
 
         let request_topic = params.participant.create_topic::<Request<TReq>>(
             &request_topic_name,
-            &Request::<TReq>::get_type_name(),
+            &request_type_name,
             TopicQos::default(),
             None,
             StatusMask::default(),
@@ -58,7 +71,7 @@ impl<TReq: DdsRpcType, TRep: DdsRpcType> Requester<TReq, TRep> {
 
         let reply_topic = params.participant.create_topic::<crate::types::Reply<TRep>>(
             &reply_topic_name,
-            &crate::types::Reply::<TRep>::get_type_name(),
+            &reply_type_name,
             TopicQos::default(),
             None,
             StatusMask::default(),
@@ -115,7 +128,7 @@ impl<TReq: DdsRpcType, TRep: DdsRpcType> Requester<TReq, TRep> {
     }
 
     /// Send a request. The middleware fills in `RequestHeader.requestId`
-    /// before writing, and returns it for reply correlation. (7.8.1)
+    /// before writing, and returns it for reply correlation.
     pub fn send_request(&self, data: &TReq) -> DdsRpcResult<SampleIdentity> {
         let mut request =
             Request { header: crate::types::RequestHeader::default(), data: data.clone() };
@@ -223,7 +236,6 @@ impl<TReq: DdsRpcType, TRep: DdsRpcType> Requester<TReq, TRep> {
     }
 
     /// Send a request and return a Future for the correlated reply.
-    /// No manual correlation needed — the Future handles it internally. (7.11.1.4.3)
     pub fn send_request_async(&self, data: &TReq) -> DdsRpcResult<Future<TRep>> {
         let identity = self.send_request(data)?;
         let condition = self.create_correlation_condition(&identity)?;
@@ -232,7 +244,7 @@ impl<TReq: DdsRpcType, TRep: DdsRpcType> Requester<TReq, TRep> {
     }
 
     /// Install a SimpleRequesterListener. The middleware takes each arriving reply
-    /// and dispatches it to `process_reply`. (7.11.1.4.9)
+    /// and dispatches it to `process_reply`.
     /// Pass `None` to remove an existing listener.
     pub fn set_simple_requester_listener(
         &self,
@@ -253,7 +265,7 @@ impl<TReq: DdsRpcType, TRep: DdsRpcType> Requester<TReq, TRep> {
     }
 
     /// Install a RequesterListener. The middleware calls `on_reply_available`
-    /// when replies arrive; the user must call `take_reply` manually. (7.11.1.4.10)
+    /// when replies arrive; the user must call `take_reply` manually.
     /// Pass `None` to remove an existing listener.
     pub fn set_requester_listener(
         &self,
@@ -331,22 +343,36 @@ impl<TReq: DdsRpcType, TRep: DdsRpcType> ServiceProxy for Requester<TReq, TRep> 
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition)?;
         wait_set.wait(int2dds::dcps::core::time::Duration::infinite())?;
+
+        let mut condition = self.reader()?.get_statuscondition()?;
+        condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED)?;
+        let wait_set = WaitSet::new();
+        wait_set.attach_condition(condition)?;
+        wait_set.wait(int2dds::dcps::core::time::Duration::infinite())?;
+
         Ok(())
     }
 
     fn wait_for_service_timeout(&self, timeout: Duration) -> DdsRpcResult<()> {
+        let dds_timeout = int2dds::dcps::core::time::Duration::try_from(timeout)?;
+
         let mut condition = self.writer()?.get_statuscondition()?;
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED)?;
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition)?;
-        let dds_timeout = int2dds::dcps::core::time::Duration::try_from(timeout)?;
+        wait_set.wait(dds_timeout)?;
+
+        let mut condition = self.reader()?.get_statuscondition()?;
+        condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED)?;
+        let wait_set = WaitSet::new();
+        wait_set.attach_condition(condition)?;
         wait_set.wait(dds_timeout)?;
         Ok(())
     }
 }
 
 /// Future-based reply reception.
-/// Wraps a WaitSet + QueryCondition to wait only for the correlated reply. (7.11.1.4.3)
+/// Wraps a WaitSet + QueryCondition to wait only for the correlated reply.
 pub struct Future<TRep: DdsRpcType> {
     reader: DataReader<crate::types::Reply<TRep>>,
     condition: QueryCondition,
@@ -375,13 +401,9 @@ impl<TRep: DdsRpcType> Future<TRep> {
 
 /// DDS DataReaderListener adapter for SimpleRequesterListener.
 /// Takes all available replies and dispatches each to `process_reply`.
-struct SimpleRequesterDdsAdapter<TRep> {
+struct SimpleRequesterDdsAdapter<TRep: Send + Sync> {
     listener: Arc<dyn SimpleRequesterListener<TRep>>,
 }
-
-// Safety: listener is Send + Sync (trait bound), no other mutable state.
-unsafe impl<TRep> Send for SimpleRequesterDdsAdapter<TRep> {}
-unsafe impl<TRep> Sync for SimpleRequesterDdsAdapter<TRep> {}
 
 impl<TRep: DdsRpcType> DataReaderListener for SimpleRequesterDdsAdapter<TRep> {
     type Foo = crate::types::Reply<TRep>;
@@ -404,13 +426,10 @@ impl<TRep: DdsRpcType> DataReaderListener for SimpleRequesterDdsAdapter<TRep> {
 
 /// DDS DataReaderListener adapter for RequesterListener.
 /// Notifies `on_reply_available` with a proxy that shares the same DDS entities via Arc.
-struct RequesterDdsAdapter<TReq, TRep> {
+struct RequesterDdsAdapter<TReq: Send + Sync, TRep: Send + Sync> {
     listener: Arc<dyn RequesterListener<TReq, TRep>>,
     proxy: Requester<TReq, TRep>,
 }
-
-unsafe impl<TReq, TRep> Send for RequesterDdsAdapter<TReq, TRep> {}
-unsafe impl<TReq, TRep> Sync for RequesterDdsAdapter<TReq, TRep> {}
 
 impl<TReq: DdsRpcType, TRep: DdsRpcType> DataReaderListener for RequesterDdsAdapter<TReq, TRep> {
     type Foo = crate::types::Reply<TRep>;
@@ -420,7 +439,7 @@ impl<TReq: DdsRpcType, TRep: DdsRpcType> DataReaderListener for RequesterDdsAdap
     }
 }
 
-// RPC default QoS (7.10.2): RELIABLE, KEEP_ALL, VOLATILE
+// RPC default QoS: RELIABLE, KEEP_ALL, VOLATILE
 fn rpc_datawriter_qos() -> DataWriterQos {
     let mut qos = DATAWRITER_QOS_DEFAULT;
     qos.reliability =

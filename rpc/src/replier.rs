@@ -1,4 +1,7 @@
-//! Replier<TReq, TRep> — receives requests and sends replies (7.11.1.4.5)
+//! Replier — the request-reply style component that receives requests and sends replies.
+//!
+//! Owns a DDS DataReader (for requests) and DataWriter (for replies), correlating
+//! each reply to its original request via SampleIdentity.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,6 +30,9 @@ use crate::sample::Sample;
 use crate::topic_name::TopicNameConfig;
 use crate::types::{DdsRpcType, RemoteExceptionCode, Reply, ReplyHeader, Request, SampleIdentity};
 
+/// Low-level request-reply endpoint on the service side.
+/// Receives incoming requests via a DDS DataReader and sends correlated
+/// replies through a DDS DataWriter, using SampleIdentity for correlation.
 pub struct Replier<TReq, TRep> {
     request_reader: Option<Arc<DataReader<Request<TReq>>>>,
     reply_writer: Option<Arc<DataWriter<Reply<TRep>>>>,
@@ -36,18 +42,24 @@ pub struct Replier<TReq, TRep> {
 impl<TReq: DdsRpcType, TRep: DdsRpcType> Replier<TReq, TRep> {
     pub fn new(params: ReplierParams) -> DdsRpcResult<Self> {
         let topic_config = TopicNameConfig {
-            interface_name: None,
+            interface_name: params.interface_name.clone(),
             service_name: params.service_name.clone(),
             request_topic_override: params.request_topic_name.clone(),
             reply_topic_override: params.reply_topic_name.clone(),
+            request_type_override: None,
+            reply_type_override: None,
         };
 
         let request_topic_name = topic_config.request_topic();
         let reply_topic_name = topic_config.reply_topic();
+        let request_type_name =
+            topic_config.request_type().unwrap_or_else(|| Request::<TReq>::get_type_name());
+        let reply_type_name =
+            topic_config.reply_type().unwrap_or_else(|| Reply::<TRep>::get_type_name());
 
         let request_topic = params.participant.create_topic::<Request<TReq>>(
             &request_topic_name,
-            &Request::<TReq>::get_type_name(),
+            &request_type_name,
             TopicQos::default(),
             None,
             StatusMask::default(),
@@ -55,7 +67,7 @@ impl<TReq: DdsRpcType, TRep: DdsRpcType> Replier<TReq, TRep> {
 
         let reply_topic = params.participant.create_topic::<Reply<TRep>>(
             &reply_topic_name,
-            &Reply::<TRep>::get_type_name(),
+            &reply_type_name,
             TopicQos::default(),
             None,
             StatusMask::default(),
@@ -110,17 +122,24 @@ impl<TReq: DdsRpcType, TRep: DdsRpcType> Replier<TReq, TRep> {
         self.reply_writer.as_deref().ok_or(DdsError::AlreadyDeleted.into())
     }
 
-    /// Send a reply correlated with the given request identity. (7.8.1)
-    pub fn send_reply(&self, data: &TRep, related_request_id: &SampleIdentity) -> DdsRpcResult<()> {
+    /// Send a reply with explicit RemoteExceptionCode.
+    pub fn send_reply_with_exception_code(
+        &self,
+        data: &TRep,
+        related_request_id: &SampleIdentity,
+        remote_ex: RemoteExceptionCode,
+    ) -> DdsRpcResult<()> {
         let mut reply = Reply {
-            header: ReplyHeader {
-                related_request_id: *related_request_id,
-                remote_ex: RemoteExceptionCode::Ok,
-            },
+            header: ReplyHeader { related_request_id: *related_request_id, remote_ex },
             data: data.clone(),
         };
         self.writer()?.write(&mut reply, InstanceHandle::NIL)?;
         Ok(())
+    }
+
+    /// Send a reply correlated with the given request identity.
+    pub fn send_reply(&self, data: &TRep, related_request_id: &SampleIdentity) -> DdsRpcResult<()> {
+        self.send_reply_with_exception_code(data, related_request_id, RemoteExceptionCode::Ok)
     }
 
     /// Take a single pending request (non-blocking).
@@ -180,7 +199,7 @@ impl<TReq: DdsRpcType, TRep: DdsRpcType> Replier<TReq, TRep> {
     }
 
     /// Install a SimpleReplierListener. The middleware takes each arriving request,
-    /// calls `process_request`, and automatically sends the returned reply. (7.11.1.4.7)
+    /// calls `process_request`, and automatically sends the returned reply.
     /// Pass `None` to remove an existing listener.
     pub fn set_simple_replier_listener(
         &self,
@@ -205,7 +224,7 @@ impl<TReq: DdsRpcType, TRep: DdsRpcType> Replier<TReq, TRep> {
 
     /// Install a ReplierListener. The middleware calls `on_request_available`
     /// when requests arrive; the user must call `take_request` / `send_reply`
-    /// manually. (7.11.1.4.8)
+    /// manually.
     /// Pass `None` to remove an existing listener.
     pub fn set_replier_listener(
         &self,
@@ -264,13 +283,10 @@ impl<TReq: DdsRpcType, TRep: DdsRpcType> RpcEntity for Replier<TReq, TRep> {
 /// DDS DataReaderListener adapter for SimpleReplierListener.
 /// Takes all available requests, dispatches each to `process_request`,
 /// and sends the returned reply automatically.
-struct SimpleReplierDdsAdapter<TReq, TRep> {
+struct SimpleReplierDdsAdapter<TReq: Send + Sync, TRep: Send + Sync> {
     listener: Arc<dyn SimpleReplierListener<TReq, TRep>>,
     reply_writer: Arc<DataWriter<Reply<TRep>>>,
 }
-
-unsafe impl<TReq, TRep> Send for SimpleReplierDdsAdapter<TReq, TRep> {}
-unsafe impl<TReq, TRep> Sync for SimpleReplierDdsAdapter<TReq, TRep> {}
 
 impl<TReq: DdsRpcType, TRep: DdsRpcType> DataReaderListener
     for SimpleReplierDdsAdapter<TReq, TRep>
@@ -305,13 +321,10 @@ impl<TReq: DdsRpcType, TRep: DdsRpcType> DataReaderListener
 
 /// DDS DataReaderListener adapter for ReplierListener.
 /// Notifies `on_request_available` with a proxy that shares the same DDS entities via Arc.
-struct ReplierDdsAdapter<TReq, TRep> {
+struct ReplierDdsAdapter<TReq: Send + Sync, TRep: Send + Sync> {
     listener: Arc<dyn ReplierListener<TReq, TRep>>,
     proxy: Replier<TReq, TRep>,
 }
-
-unsafe impl<TReq, TRep> Send for ReplierDdsAdapter<TReq, TRep> {}
-unsafe impl<TReq, TRep> Sync for ReplierDdsAdapter<TReq, TRep> {}
 
 impl<TReq: DdsRpcType, TRep: DdsRpcType> DataReaderListener for ReplierDdsAdapter<TReq, TRep> {
     type Foo = Request<TReq>;
@@ -321,7 +334,7 @@ impl<TReq: DdsRpcType, TRep: DdsRpcType> DataReaderListener for ReplierDdsAdapte
     }
 }
 
-// RPC default QoS (7.10.2): RELIABLE, KEEP_ALL, VOLATILE
+// RPC default QoS: RELIABLE, KEEP_ALL, VOLATILE
 fn rpc_datawriter_qos() -> DataWriterQos {
     let mut qos = DATAWRITER_QOS_DEFAULT;
     qos.reliability =
