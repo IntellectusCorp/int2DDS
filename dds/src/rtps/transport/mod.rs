@@ -127,6 +127,28 @@ pub(crate) trait Transport: Send + Sync {
     /// Number of bytes sent or an IO error
     fn send_multicast(&self, domain_id: u32, data: &[u8]) -> io::Result<usize>;
 
+    /// Send data to a specific logical port on a remote TCP endpoint.
+    ///
+    /// In TCP single-port mode, the physical address is the remote's single listening port
+    /// (e.g., 7400), and the logical_port identifies which RTPS channel (discovery or user data)
+    /// the data should be routed to one the remote participant.
+    ///
+    /// Default implementation falls back to `send()`, ignoring the logical port.
+    /// TCP transport overrides this with BIND-based connection routing.
+    ///
+    /// # Arguments
+    /// * `addr` - The remote physical address (single TCP listening port)
+    /// * `logical_port` - The RTPS logical port number (e.g., 7410 for discovery, 7411 for user data)
+    /// * `data` - The data buffer to send
+    fn send_to_logical_port(
+        &self,
+        addr: &SocketAddr,
+        logical_port: u16,
+        data: &[u8],
+    ) -> io::Result<usize> {
+        self.send(addr, data)
+    }
+
     /// Get the local port number used by this transport
     fn port(&self) -> u16;
 
@@ -204,6 +226,19 @@ impl Transport for TransportSender {
             TransportSender::Udp(sender) => sender.send_multicast(domain_id, data),
             TransportSender::Tcp(sender) => sender.send_multicast(domain_id, data),
             TransportSender::Shm(sender) => sender.send_multicast(domain_id, data),
+        }
+    }
+
+    fn send_to_logical_port(
+        &self,
+        addr: &SocketAddr,
+        logical_port: u16,
+        data: &[u8],
+    ) -> io::Result<usize> {
+        match self {
+            TransportSender::Udp(sender) => sender.send(addr, data), // UDP ignores logical port
+            TransportSender::Tcp(sender) => sender.send_to_logical_port(addr, logical_port, data),
+            TransportSender::Shm(sender) => sender.send(addr, data), // SHM ignores logical port
         }
     }
 
