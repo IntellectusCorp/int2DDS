@@ -571,14 +571,16 @@ impl Socket {
             return self.working_ips.ips[0].clone();
         }
 
-        // Check if OS can resolve a default route (gateway exists)
-        let has_default_route = std::net::UdpSocket::bind("0.0.0.0:0")
+        // Probe the OS routing table by connecting to a public address.
+        // Resolve the default outgoing IP via 0.0.0.0 bind & connect
+        if let Ok(addr) = std::net::UdpSocket::bind("0.0.0.0:0")
             .and_then(|s| s.connect("8.8.8.8:80").map(|_| s))
-            .is_ok();
-
-        // If default route exists, use 0.0.0.0 to let OS choose NIC via routing table
-        if has_default_route {
-            return "0.0.0.0".to_string();
+            .and_then(|s| s.local_addr())
+        {
+            let ip = addr.ip().to_string();
+            if ip != "127.0.0.1" && ip != "0.0.0.0" {
+                return ip;
+            }
         }
 
         // No default route (e.g. direct Ethernet without gateway):
