@@ -118,6 +118,10 @@ impl<'a> RustGen<'a> {
     fn emit_enum(&mut self, e: &ResolvedEnum) {
         let rust_name = naming::to_pascal_case(&e.name);
         self.line("#[derive(DdsType)]");
+        // Preserve original IDL type name when it differs from PascalCase Rust name
+        if e.name != rust_name {
+            self.line(&format!("#[dds_type(type_name = \"{}\")]", e.qualified_name));
+        }
         self.line("#[repr(i32)]");
         self.line(&format!("pub enum {} {{", rust_name));
         self.indent += 1;
@@ -224,6 +228,10 @@ impl<'a> RustGen<'a> {
         let mut type_attrs = Vec::new();
         if self.opts.crate_path != "int2dds" {
             type_attrs.push(format!("crate_path = \"{}\"", self.opts.crate_path));
+        }
+        // Preserve original IDL type name when it differs from PascalCase Rust name
+        if s.name != rust_name {
+            type_attrs.push(format!("type_name = \"{}\"", s.qualified_name));
         }
         match s.extensibility {
             ExtensibilityKind::Final => {} // default, no annotation needed
