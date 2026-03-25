@@ -202,12 +202,16 @@ fn main() {
     });
 
     // If neither -r, -c, -p, nor -o specified, default to generating Rust and C
-    let (rust_path, c_path, python_path, rpc_path, csharp_path) =
-        if rust_path.is_none() && c_path.is_none() && python_path.is_none() {
-            (Some(format!("{}.rs", base_name)), Some(format!("{}.h", base_name)), None, None, None)
-        } else {
-            (rust_path, c_path, python_path, rpc_path, csharp_path)
-        };
+    let (rust_path, c_path, python_path, rpc_path, csharp_path) = if rust_path.is_none()
+        && c_path.is_none()
+        && python_path.is_none()
+        && rpc_path.is_none()
+        && csharp_path.is_none()
+    {
+        (Some(format!("{}.rs", base_name)), Some(format!("{}.h", base_name)), None, None, None)
+    } else {
+        (rust_path, c_path, python_path, rpc_path, csharp_path)
+    };
 
     // Generate Rust
     if let Some(path) = &rust_path {
