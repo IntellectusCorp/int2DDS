@@ -833,7 +833,7 @@ mod tests {
         domain_id: DomainId,
         participant_id: ParticipantId,
     ) -> Arc<Participant> {
-        Arc::new(Participant::new(domain_id, participant_id, vec!["127.0.0.1".to_string()]))
+        Arc::new(Participant::new(domain_id, participant_id, vec!["127.0.0.1".to_string()], None))
     }
 
     #[test]

@@ -86,16 +86,25 @@ impl DcpsBridge {
             | crate::rtps::transport::TransportType::Hybrid => {
                 // Create a temporary participant to get guid_prefix
                 // Socket will determine actual participant_id during port binding
-                let temp_participant =
-                    Participant::new(domain_id, socket.participant_id(), socket.working_ips());
+                let temp_participant = Participant::new(
+                    domain_id,
+                    socket.participant_id(),
+                    socket.working_ips(),
+                    None,
+                );
                 let guid_prefix = temp_participant.guid().prefix();
 
                 // Create socket with guid_prefix (TCP/Hybrid sender + mux listener)
                 socket.create_socket_with_guid(guid_prefix);
 
-                // Re-create participant with final participant_id (may have changed during port binding)
-                let participant =
-                    Participant::new(domain_id, socket.participant_id(), socket.working_ips());
+                // Re-create participant with final participant_id and actual TCP listener port
+                let tcp_port = socket.tcp_mux_listener_port();
+                let participant = Participant::new(
+                    domain_id,
+                    socket.participant_id(),
+                    socket.working_ips(),
+                    tcp_port,
+                );
                 let guid_prefix = participant.guid().prefix();
                 let participant = Arc::new(participant);
 
@@ -128,8 +137,12 @@ impl DcpsBridge {
                 // UDP/SHM: original flow
                 socket.create_socket();
 
-                let participant =
-                    Participant::new(domain_id, socket.participant_id(), socket.working_ips());
+                let participant = Participant::new(
+                    domain_id,
+                    socket.participant_id(),
+                    socket.working_ips(),
+                    None,
+                );
                 let guid_prefix = participant.guid().prefix();
                 let participant = Arc::new(participant);
 
