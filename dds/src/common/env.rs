@@ -35,8 +35,15 @@ pub fn init_from_env() {
     // - INT2DDS_TCP_CONNECT_TIMEOUT: Set TCP connection timeout (milliseconds) - Default: 5000
     // - INT2DDS_TCP_WRITE_TIMEOUT: Set TCP write timeout (milliseconds) - Default: 10000
     // - INT2DDS_TCP_NODELAY: Enable TCP Nodelay (disable Nagle algorithm) (true, false) - Default: true
+    // - INT2DDS_TCP_CONNECT_TIMEOUT: Set TCP connection timeout (milliseconds) - Default: 5000
+    // - INT2DDS_TCP_WRITE_TIMEOUT: Set TCP write timeout (milliseconds) - Default: 10000
+    // - INT2DDS_TCP_NODELAY: Enable TCP Nodelay (disable Nagle algorithm) (true, false) - Default: true
+    // - INT2DDS_TCP_BIND_TIMEOUT: Set TCP BIND handshake response timeout (milliseconds) - Default: 5000
+    // - INT2DDS_TCP_KEEPALIVE_INTERVAL: Set TCP control keepalive send interval (milliseconds) - Default: 30000
+    // - INT2DDS_TCP_KEEPALIVE_TIMEOUT: Set TCP keepalive response timeout (milliseconds) - Default: 10000
+    // - INT2DDS_TCP_KEEPALIVE_MAX_MISSES: Set TCP keepalive max consecutive misses before disconnect - Default: 3
 
-    // - INT2DDS_INITIAL_PEERS: Set initial peers for SPDP unicast discovery (comma-separated, e.g., "192.168.1.10:7410,192.168.1.11:7410") - Default: none
+    // - INT2DDS_INITIAL_PEERS: Set initial peers for SPDP unicast discovery (comma-separated, e.g., "192.168.1.10:7400,192.168.1.11:7400") - Default: none
 
     apply_cli_args_to_env();
 
@@ -180,10 +187,42 @@ fn apply_cli_args_to_env() {
                     .action(ArgAction::SetTrue),
             )
             .arg(
+                Arg::new("int2dds_tcp_bind_timeout")
+                    .long("int2dds-tcp-bind-timeout")
+                    .value_name("MILLISECONDS")
+                    .help("TCP BIND handshake response timeout (milliseconds)")
+                    .num_args(1)
+                    .value_hint(ValueHint::Other),
+            )
+            .arg(
+                Arg::new("int2dds_tcp_keepalive_interval")
+                    .long("int2dds-tcp-keepalive-interval")
+                    .value_name("MILLISECONDS")
+                    .help("TCP control keepalive send interval (milliseconds)")
+                    .num_args(1)
+                    .value_hint(ValueHint::Other),
+            )
+            .arg(
+                Arg::new("int2dds_tcp_keepalive_timeout")
+                    .long("int2dds-tcp-keepalive-timeout")
+                    .value_name("MILLISECONDS")
+                    .help("TCP keepalive response timeout (milliseconds)")
+                    .num_args(1)
+                    .value_hint(ValueHint::Other),
+            )
+            .arg(
+                Arg::new("int2dds_tcp_keepalive_max_misses")
+                    .long("int2dds-tcp-keepalive-max-misses")
+                    .value_name("COUNT")
+                    .help("TCP keepalive max consecutive misses before disconnect")
+                    .num_args(1)
+                    .value_hint(ValueHint::Other),
+            )
+            .arg(
                 Arg::new("int2dds_initial_peers")
                     .long("int2dds-initial-peers")
                     .value_name("PEERS")
-                    .help("Initial peers for SPDP unicast discovery (comma-separated, e.g., \"192.168.1.10:7410,192.168.1.11:7410\")")
+                    .help("Initial peers for SPDP unicast discovery (comma-separated, e.g., \"192.168.1.10:7400,192.168.1.11:7400\")")
                     .num_args(1)
                     .value_hint(ValueHint::Other),
             )
@@ -264,6 +303,22 @@ fn apply_cli_args_to_env() {
     if matches.get_flag("int2dds_tcp_nodelay") {
         log::info!("Environment variable set: INT2DDS_TCP_NODELAY = true");
         unsafe { std::env::set_var("INT2DDS_TCP_NODELAY", "true") };
+    }
+    if let Some(v) = matches.get_one::<String>("int2dds_tcp_bind_timeout") {
+        log::info!("Environment variable set: INT2DDS_TCP_BIND_TIMEOUT = {}", v);
+        unsafe { std::env::set_var("INT2DDS_TCP_BIND_TIMEOUT", v) };
+    }
+    if let Some(v) = matches.get_one::<String>("int2dds_tcp_keepalive_interval") {
+        log::info!("Environment variable set: INT2DDS_TCP_KEEPALIVE_INTERVAL = {}", v);
+        unsafe { std::env::set_var("INT2DDS_TCP_KEEPALIVE_INTERVAL", v) };
+    }
+    if let Some(v) = matches.get_one::<String>("int2dds_tcp_keepalive_timeout") {
+        log::info!("Environment variable set: INT2DDS_TCP_KEEPALIVE_TIMEOUT = {}", v);
+        unsafe { std::env::set_var("INT2DDS_TCP_KEEPALIVE_TIMEOUT", v) };
+    }
+    if let Some(v) = matches.get_one::<String>("int2dds_tcp_keepalive_max_misses") {
+        log::info!("Environment variable set: INT2DDS_TCP_KEEPALIVE_MAX_MISSES = {}", v);
+        unsafe { std::env::set_var("INT2DDS_TCP_KEEPALIVE_MAX_MISSES", v) };
     }
     if let Some(v) = matches.get_one::<String>("int2dds_initial_peers") {
         log::info!("Environment variable set: INT2DDS_INITIAL_PEERS = {}", v);
@@ -468,15 +523,18 @@ pub fn set_discovery_mode(mode: DiscoveryMode) {
 /// When set, SPDP messages are sent via unicast to these peers instead of multicast.
 ///
 /// Reads INT2DDS_INITIAL_PEERS environment variable.
-/// Format: "ip:port,ip:port,..." (comma-separated socket addresses, port must be metatraffic unicast port)
+/// Format: "ip:port,ip:port,..." or "ip,ip,..." (port-less entries default to TCP physical port 7400)
 ///
 /// # Examples
 ///
 /// ```no_run
 /// use int2dds::common::env::get_initial_peers;
 ///
-/// // Set environment variable:
+/// // With explicit ports:
 /// // INT2DDS_INITIAL_PEERS="192.168.1.10:7400,192.168.1.11:7400"
+///
+/// // Without ports (defaults to 7400):
+/// // INT2DDS_INITIAL_PEERS="192.168.1.10,192.168.1.11"
 ///
 /// let peers = get_initial_peers();
 /// for peer in peers {
@@ -484,6 +542,22 @@ pub fn set_discovery_mode(mode: DiscoveryMode) {
 /// }
 /// ```
 pub fn get_initial_peers() -> Vec<std::net::SocketAddr> {
+    use crate::rtps::transport::get_transport_type;
+    use crate::rtps::transport::port_manager::PortManager;
+    use crate::rtps::transport::TransportType;
+
+    let default_port = match get_transport_type() {
+        TransportType::TCP | TransportType::Hybrid => {
+            // TCP/Hybrid: user domain 0 physical port as default
+            // (domain_id is not available here, so use domain 0 base port)
+            PortManager::get_tcp_physical_port(0)
+        }
+        _ => {
+            // UDP: use domain 0 discovery multicast port as default
+            PortManager::get_discovery_traffic_multicast_port(0)
+        }
+    };
+
     std::env::var("INT2DDS_INITIAL_PEERS")
         .ok()
         .map(|peers_str| {
@@ -491,11 +565,26 @@ pub fn get_initial_peers() -> Vec<std::net::SocketAddr> {
                 .split(',')
                 .filter_map(|s| {
                     let trimmed = s.trim();
+                    // Try parsing as full SocketAddr first (ip:port)
                     match trimmed.parse::<std::net::SocketAddr>() {
                         Ok(addr) => Some(addr),
-                        Err(e) => {
-                            log::warn!("Failed to parse initial peer '{}': {}", trimmed, e);
-                            None
+                        Err(_) => {
+                            // Try parsing as IP only, append default port
+                            match trimmed.parse::<std::net::IpAddr>() {
+                                Ok(ip) => {
+                                    let addr = std::net::SocketAddr::new(ip, default_port);
+                                    log::info!(
+                                        "[ENV] Initial peer '{}' has no port, using default: {}",
+                                        trimmed,
+                                        addr
+                                    );
+                                    Some(addr)
+                                }
+                                Err(e) => {
+                                    log::warn!("Failed to parse initial peer '{}': {}", trimmed, e);
+                                    None
+                                }
+                            }
                         }
                     }
                 })
@@ -514,4 +603,58 @@ pub fn set_initial_peers(peers: &[std::net::SocketAddr]) {
 
     log::info!("Environment variable set: INT2DDS_INITIAL_PEERS = {}", peers_str);
     unsafe { std::env::set_var("INT2DDS_INITIAL_PEERS", peers_str) };
+}
+
+/// Get the TCP BIND handshake timeout in milliseconds
+/// Default: 5000ms
+pub fn get_tcp_bind_timeout_ms() -> u64 {
+    std::env::var("INT2DDS_TCP_BIND_TIMEOUT").ok().and_then(|v| v.parse().ok()).unwrap_or(5000)
+}
+
+/// Set the TCP BIND handshake timeout via environment variable
+pub fn set_tcp_bind_timeout(timeout_ms: u64) {
+    log::info!("Environment variable set: INT2DDS_TCP_BIND_TIMEOUT = {}", timeout_ms);
+    unsafe { std::env::set_var("INT2DDS_TCP_BIND_TIMEOUT", timeout_ms.to_string()) };
+}
+
+/// Get the TCP keepalive send interval in milliseconds
+/// Default: 30000ms (30 seconds)
+pub fn get_tcp_keepalive_interval_ms() -> u64 {
+    std::env::var("INT2DDS_TCP_KEEPALIVE_INTERVAL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30000)
+}
+
+/// Set the TCP keepalive send interval via environment variable
+pub fn set_tcp_keepalive_interval(interval_ms: u64) {
+    log::info!("Environment variable set: INT2DDS_TCP_KEEPALIVE_INTERVAL = {}", interval_ms);
+    unsafe { std::env::set_var("INT2DDS_TCP_KEEPALIVE_INTERVAL", interval_ms.to_string()) };
+}
+
+/// Get the TCP keepalive response timeout in milliseconds
+/// Default: 10000ms (10 seconds)
+pub fn get_tcp_keepalive_timeout_ms() -> u64 {
+    std::env::var("INT2DDS_TCP_KEEPALIVE_TIMEOUT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10000)
+}
+
+/// Set the TCP keepalive response timeout via environment variable
+pub fn set_tcp_keepalive_timeout(timeout_ms: u64) {
+    log::info!("Environment variable set: INT2DDS_TCP_KEEPALIVE_TIMEOUT = {}", timeout_ms);
+    unsafe { std::env::set_var("INT2DDS_TCP_KEEPALIVE_TIMEOUT", timeout_ms.to_string()) };
+}
+
+/// Get the TCP keepalive max consecutive misses before disconnecting
+/// Default: 3
+pub fn get_tcp_keepalive_max_misses() -> u32 {
+    std::env::var("INT2DDS_TCP_KEEPALIVE_MAX_MISSES").ok().and_then(|v| v.parse().ok()).unwrap_or(3)
+}
+
+/// Set the TCP keepalive max misses via environment variable
+pub fn set_tcp_keepalive_max_misses(max_misses: u32) {
+    log::info!("Environment variable set: INT2DDS_TCP_KEEPALIVE_MAX_MISSES = {}", max_misses);
+    unsafe { std::env::set_var("INT2DDS_TCP_KEEPALIVE_MAX_MISSES", max_misses.to_string()) };
 }
