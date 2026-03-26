@@ -74,48 +74,131 @@ pub(crate) static PARTICIPANTS: RwLock<Vec<Weak<Participant>>> = RwLock::new(Vec
 impl DcpsBridge {
     pub(crate) fn new(domain_id: DomainId) -> Self {
         let mut socket = Socket::new(domain_id);
-        socket.create_socket();
 
-        let participant =
-            Participant::new(domain_id, socket.participant_id(), socket.working_ips());
-        let guid_prefix = participant.guid().prefix();
-        let participant = Arc::new(participant);
+        // Determine transport type to decide socket creation path
+        let transport_type = crate::rtps::transport::get_transport_type();
 
-        // Initialize all logics in Participant first (SendingHandler needs them)
-        participant.init_logics(socket.sender(), socket.tcp_sender(), socket.shm_sender());
+        // For TCP/Hybrid, we need guid_prefix before creating socket.
+        // Create participant first with a temporary participant_id,
+        // then create socket with guid_prefix.
+        match transport_type {
+            crate::rtps::transport::TransportType::TCP
+            | crate::rtps::transport::TransportType::Hybrid => {
+                // Create a temporary participant to get guid_prefix
+                // Socket will determine actual participant_id during port binding
+                let temp_participant =
+                    Participant::new(domain_id, socket.participant_id(), socket.working_ips());
+                let guid_prefix = temp_participant.guid().prefix();
 
-        // Get logics from participant
-        let (spdp_logic, sedp_logic, user_logic) = participant.get_logics();
+                // Create socket with guid_prefix (TCP/Hybrid sender + mux listener)
+                socket.create_socket_with_guid(guid_prefix);
 
-        // Initialize SendingHandler (uses logics internally)
-        let _ = SendingHandler::get_instance(
-            participant.clone(),
-            Some(socket.sender()),
-            socket.tcp_sender(),
-        );
+                // Re-create participant with final participant_id (may have changed during port binding)
+                let participant =
+                    Participant::new(domain_id, socket.participant_id(), socket.working_ips());
+                let guid_prefix = participant.guid().prefix();
+                let participant = Arc::new(participant);
 
-        if let Ok(mut participants) = PARTICIPANTS.write() {
-            participants.push(Arc::downgrade(&participant));
-        }
-        Self {
-            guid_prefix,
-            domain_id,
-            participant,
-            socket,
-            spdp_logic,
-            sedp_logic,
-            user_logic,
-            thread_monitor: None,
+                participant.init_logics(socket.sender(), socket.tcp_sender(), socket.shm_sender());
+
+                let (spdp_logic, sedp_logic, user_logic) = participant.get_logics();
+
+                let _ = SendingHandler::get_instance(
+                    participant.clone(),
+                    Some(socket.sender()),
+                    socket.tcp_sender(),
+                );
+
+                if let Ok(mut participants) = PARTICIPANTS.write() {
+                    participants.push(Arc::downgrade(&participant));
+                }
+
+                Self {
+                    guid_prefix,
+                    domain_id,
+                    participant,
+                    socket,
+                    spdp_logic,
+                    sedp_logic,
+                    user_logic,
+                    thread_monitor: None,
+                }
+            }
+            _ => {
+                // UDP/SHM: original flow
+                socket.create_socket();
+
+                let participant =
+                    Participant::new(domain_id, socket.participant_id(), socket.working_ips());
+                let guid_prefix = participant.guid().prefix();
+                let participant = Arc::new(participant);
+
+                participant.init_logics(socket.sender(), socket.tcp_sender(), socket.shm_sender());
+
+                let (spdp_logic, sedp_logic, user_logic) = participant.get_logics();
+
+                let _ = SendingHandler::get_instance(
+                    participant.clone(),
+                    Some(socket.sender()),
+                    socket.tcp_sender(),
+                );
+
+                if let Ok(mut participants) = PARTICIPANTS.write() {
+                    participants.push(Arc::downgrade(&participant));
+                }
+
+                Self {
+                    guid_prefix,
+                    domain_id,
+                    participant,
+                    socket,
+                    spdp_logic,
+                    sedp_logic,
+                    user_logic,
+                    thread_monitor: None,
+                }
+            }
         }
     }
 
     pub(crate) fn init(&mut self) -> RtpsResult<()> {
+        let transport_type = crate::rtps::transport::get_transport_type();
+
+        // Spawn TcpMuxListeningTask thread if TCP/Hybrid
+        match transport_type {
+            crate::rtps::transport::TransportType::TCP
+            | crate::rtps::transport::TransportType::Hybrid => {
+                if let Some(mux_listener) = self.socket.tcp_mux_listener() {
+                    use crate::rtps::task::tcp_mux_listening_task::TcpMuxListeningTask;
+                    use std::thread;
+
+                    let participant = self.participant.clone();
+                    let mut task = TcpMuxListeningTask::new(mux_listener, participant);
+
+                    let guid_prefix = self.guid_prefix;
+                    thread::Builder::new()
+                        .name("tcp_mux_listening".to_string())
+                        .spawn(move || {
+                            ThreadMonitor::register_current_thread_name_with_guid_prefix(
+                                "tcp_mux_listening",
+                                guid_prefix,
+                            );
+                            let _ = task.run();
+                            ThreadMonitor::remove_map_guard();
+                            debug!("tcp_mux_listening thread finished");
+                        })
+                        .expect("Failed to create tcp_mux_listening thread");
+                }
+            }
+            _ => {}
+        }
+
         // Start SEDP threads
         if let Some(sedp_logic) = self.sedp_logic.as_ref() {
             sedp_logic.start_sedp(
                 self.socket.discovery_multicast_listener(),
                 self.socket.discovery_unicast_listener(),
-                self.socket.discovery_tcp_listener(),
+                self.socket.tcp_discovery_rx(),
             )?;
         } else {
             log::error!("sedp_logic is not set");
@@ -134,7 +217,7 @@ impl DcpsBridge {
                 self.domain_id,
                 self.socket.user_traffic_multicast_listener(),
                 self.socket.user_traffic_unicast_listener(),
-                self.socket.user_traffic_tcp_listener(),
+                self.socket.tcp_user_data_rx(),
                 self.socket.shm_listener(),
                 self.socket.sender(),
             )?;
@@ -159,14 +242,6 @@ impl DcpsBridge {
                 log::error!("thread_monitor is not set");
             }
         }
-
-        // self.background_logic = Some(BackgroundLogic::new(self.participant.clone()));
-        // match self.background_logic.as_ref() {
-        //     Some(background_logic) => background_logic.start_background_thread(),
-        //     None => {
-        //         log::error!("background_logic is not set");
-        //     }
-        // };
 
         Ok(())
     }
