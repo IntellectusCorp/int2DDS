@@ -184,7 +184,21 @@ impl SpdpLogic {
             TransportType::TCP | TransportType::Hybrid => {
                 if let Some(ref tcp_sender) = self.tcp_sender {
                     for peer_addr in &self.initial_peers {
-                        let _ = tcp_sender.send(peer_addr, data);
+                        match tcp_sender.send_to_discovery(peer_addr, data) {
+                            Ok(_) => {
+                                log::debug!(
+                                    "[SPDP] Sent discovery message to initial peer {}",
+                                    peer_addr
+                                );
+                            }
+                            Err(e) => {
+                                log::warn!(
+                                    "[SPDP] Failed to send to initial peer {}: {}",
+                                    peer_addr,
+                                    e
+                                );
+                            }
+                        }
                     }
                 } else {
                     log::error!("[SPDP] TCP sender not available for initial peers");
