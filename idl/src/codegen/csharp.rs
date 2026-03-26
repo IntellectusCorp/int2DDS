@@ -55,11 +55,13 @@ impl<'a> CsGen<'a> {
         ));
         self.line("// DO NOT EDIT");
         self.line("");
+        self.line("using System;");
         self.line("using Int2Dds.Cdr;");
         self.line("using Int2Dds.Types;");
         self.line("");
-        self.line(&format!("namespace {};", self.opts.namespace));
-        self.line("");
+        self.line(&format!("namespace {}", self.opts.namespace));
+        self.line("{");
+        self.indent += 1;
 
         // Enums first (may be referenced by structs)
         for e in &self.model.enums.clone() {
@@ -90,6 +92,9 @@ impl<'a> CsGen<'a> {
             self.emit_struct(s);
             self.line("");
         }
+
+        self.indent -= 1;
+        self.line("}");
     }
 
     // ---- Enum ----
