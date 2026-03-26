@@ -208,6 +208,7 @@ impl Participant {
             PortManager::get_discovery_traffic_unicast_port(domain_id, participant_id) as u32;
         let user_port =
             PortManager::get_user_traffic_unicast_port(domain_id, participant_id) as u32;
+        let tcp_physical_port = PortManager::get_tcp_physical_port(domain_id) as u32;
 
         for working_ip in working_ips {
             let Ok(ip) = Ipv4Addr::from_str(working_ip) else {
@@ -224,25 +225,27 @@ impl Participant {
                     );
                 }
                 TransportType::TCP => {
+                    // Single physical port for both metatraffic and user data
                     local_participant_proxy_data.add_metatraffic_unicast_locator(
-                        Locator::from_tcp_v4(ip, metatraffic_port),
+                        Locator::from_tcp_v4(ip, tcp_physical_port),
                     );
                     local_participant_proxy_data
-                        .add_default_unicast_locator(Locator::from_tcp_v4(ip, user_port));
+                        .add_default_unicast_locator(Locator::from_tcp_v4(ip, tcp_physical_port));
                 }
                 TransportType::Hybrid => {
-                    // Add both UDP and TCP locators
+                    // UDP locators use standard per-participant ports
                     local_participant_proxy_data.add_metatraffic_unicast_locator(
                         Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port),
                     );
                     local_participant_proxy_data.add_default_unicast_locator(
                         Locator::from_ip_v4_addr_and_port(&ip, user_port),
                     );
+                    // TCP locators use single physical port
                     local_participant_proxy_data.add_metatraffic_unicast_locator(
-                        Locator::from_tcp_v4(ip, metatraffic_port),
+                        Locator::from_tcp_v4(ip, tcp_physical_port),
                     );
                     local_participant_proxy_data
-                        .add_default_unicast_locator(Locator::from_tcp_v4(ip, user_port));
+                        .add_default_unicast_locator(Locator::from_tcp_v4(ip, tcp_physical_port));
                 }
                 TransportType::SHM => {
                     // metatraffic uses UDP, default uses SHM
