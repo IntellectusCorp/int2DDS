@@ -46,7 +46,6 @@ use crate::rtps::messages::submessages::nack_frag::NackFrag;
 use crate::rtps::task::sending_handler::{MessageType, SendingHandler};
 use crate::rtps::task::user_traffic::user_unicast_listening_task::UserUnicastListeningTask;
 use crate::rtps::transport::shm::ShmListener;
-use crate::rtps::transport::tcp::TcpListener;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 use crate::rtps::transport::{Transport, TransportSender};
 use crate::rtps::{
@@ -54,6 +53,7 @@ use crate::rtps::{
 };
 use crate::serialize::pl_cdr::InlineQosParameters;
 use crate::utils::timer::{timer_handler::TimerHandler, timer_id::TimerId};
+use crossbeam_channel::Receiver;
 use dashmap::DashMap;
 
 use std::net::{SocketAddr, SocketAddrV4};
@@ -95,7 +95,7 @@ impl UserLogic {
         domain_id: DomainId,
         user_multicast_listener: Option<UdpListener>,
         user_unicast_listener: Option<UdpListener>,
-        tcp_listener: Option<TcpListener>,
+        tcp_rx: Option<Receiver<(Vec<u8>, std::net::SocketAddr)>>,
         shm_listener: Option<ShmListener>,
         sender: Arc<TransportSender>,
     ) -> RtpsResult<()> {
@@ -103,11 +103,10 @@ impl UserLogic {
 
         let mut user_unicast_listening_task = UserUnicastListeningTask::new(
             user_unicast_listener,
-            tcp_listener,
+            tcp_rx,
             shm_listener,
             participant.clone(),
         );
-
         let participant_guid = participant.guid();
 
         // unicast listening
@@ -1211,16 +1210,18 @@ impl UserLogic {
             }
             // Check if this is a TCP locator
             else if locator.is_tcp() {
-                // Use TCP sender if available
                 if let Some(tcp_sender) = &self.tcp_sender {
                     let socket_addr = SocketAddr::V4(SocketAddrV4::new(
                         locator.to_ip_v4_addr(),
                         locator.port() as u16,
                     ));
-                    match tcp_sender.send(&socket_addr, buffer) {
+                    match tcp_sender.send_to_user_data(&socket_addr, buffer) {
                         Ok(_) => {
                             is_sent = true;
-                            debug!("[UserLogic] Sent message via TCP to {:?}", socket_addr);
+                            debug!(
+                                "[UserLogic] Sent message via TCP to {:?} (user_data)",
+                                socket_addr
+                            );
                         }
                         Err(e) => {
                             warn!(

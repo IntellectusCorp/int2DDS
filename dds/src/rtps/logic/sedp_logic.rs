@@ -1887,7 +1887,7 @@ impl SedpLogic {
                 ));
 
                 if let Some(ref sender) = self.sender {
-                    sender.send(&socket_addr, buffer).map_err(|e| {
+                    sender.send_to_discovery(&socket_addr, buffer).map_err(|e| {
                         RtpsError::new(
                             RtpsErrorCode::NotSent,
                             format!(
@@ -1897,7 +1897,7 @@ impl SedpLogic {
                         )
                     })?;
                     debug!(
-                        "[{}] SEDP Logic: {} message sent to {} (transport: TCP)",
+                        "[{}] SEDP Logic: {} message sent to {} (transport: TCP/discovery)",
                         message_type, message_type, socket_addr,
                     );
                 } else {
