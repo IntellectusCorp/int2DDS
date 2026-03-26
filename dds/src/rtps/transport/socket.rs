@@ -120,7 +120,14 @@ impl Socket {
                 };
             }
             TransportType::TCP => {
-                let tcp_sender_arc = match TcpSender::new(self.get_sender_bind_addr()) {
+                let tcp_physical_port = PortManager::get_tcp_physical_port(self.domain_id);
+                let tcp_sender_arc = match TcpSender::new(
+                    self.get_sender_bind_addr(),
+                    [0u8; 12], // TODO: pass real guid_prefix from Participant in Phase 4
+                    self.domain_id,
+                    self.participant_id,
+                    tcp_physical_port,
+                ) {
                     Ok(tcp_sender) => {
                         let transport_sender = TransportSender::Tcp(tcp_sender);
                         log::info!("[socket] TCP sender created");
@@ -154,7 +161,14 @@ impl Socket {
                 };
 
                 // Create TCP sender as secondary
-                self.tcp_sender = match TcpSender::new(self.get_sender_bind_addr()) {
+                let tcp_physical_port = PortManager::get_tcp_physical_port(self.domain_id);
+                self.tcp_sender = match TcpSender::new(
+                    self.get_sender_bind_addr(),
+                    [0u8; 12], // TODO: pass real guid_prefix from Participant in Phase 4
+                    self.domain_id,
+                    self.participant_id,
+                    tcp_physical_port,
+                ) {
                     Ok(tcp_sender) => {
                         log::info!("[socket] Hybrid mode: TCP sender created");
                         Some(Arc::new(TransportSender::Tcp(tcp_sender)))
