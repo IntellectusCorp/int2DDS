@@ -256,6 +256,22 @@ impl Transport for TransportSender {
         }
     }
 
+    fn send_to_discovery(&self, addr: &SocketAddr, data: &[u8]) -> io::Result<usize> {
+        match self {
+            TransportSender::Udp(sender) => sender.send_to_discovery(addr, data),
+            TransportSender::Tcp(sender) => sender.send_to_discovery(addr, data),
+            TransportSender::Shm(sender) => sender.send_to_discovery(addr, data),
+        }
+    }
+
+    fn send_to_user_data(&self, addr: &SocketAddr, data: &[u8]) -> io::Result<usize> {
+        match self {
+            TransportSender::Udp(sender) => sender.send_to_user_data(addr, data),
+            TransportSender::Tcp(sender) => sender.send_to_user_data(addr, data),
+            TransportSender::Shm(sender) => sender.send_to_user_data(addr, data),
+        }
+    }
+
     fn port(&self) -> u16 {
         match self {
             TransportSender::Udp(sender) => sender.port(),
