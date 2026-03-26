@@ -12,6 +12,7 @@ use mio::net::{TcpListener as MioTcpListener, TcpStream as MioTcpStream};
 use mio::{Interest, Registry, Token};
 
 use crate::rtps::common::guid::GuidPrefix;
+use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::tcp::framing::{classify_frame, FramedReader, TcpFrameKind};
 use crate::rtps::transport::tcp::protocol::{BindResponse, BindStatus, BindType, ControlMsg};
 
@@ -315,8 +316,8 @@ impl TcpMuxListener {
 
         // Validate logical port for RTPS_DATA binds
         if req.bind_type == BindType::RtpsData {
-            if !is_discovery_port(self.domain_id, req.logical_port)
-                && !is_user_port(self.domain_id, req.logical_port)
+            if !PortManager::is_discovery_unicast_port(self.domain_id, req.logical_port)
+                && !PortManager::is_user_unicast_port(self.domain_id, req.logical_port)
             {
                 warn!("TcpMuxListener: Invalid logical port {} from {:?}", req.logical_port, token);
                 self.send_bind_response(token, BindStatus::InvalidRequest);
@@ -352,7 +353,7 @@ impl TcpMuxListener {
                 );
             }
             BindType::RtpsData => {
-                if is_discovery_port(self.domain_id, req.logical_port) {
+                if PortManager::is_discovery_unicast_port(self.domain_id, req.logical_port) {
                     group.discovery_token = Some(token);
                     debug!(
                         "TcpMuxListener: Discovery connection bound (token={:?}, logical_port={}, peer={:?})",
@@ -466,11 +467,11 @@ impl TcpMuxListener {
             None => return,
         };
 
-        if is_discovery_port(self.domain_id, logical_port) {
+        if PortManager::is_discovery_unicast_port(self.domain_id, logical_port) {
             if let Err(e) = self.discovery_tx.try_send((payload.to_vec(), remote_addr)) {
                 warn!("TcpMuxListener: Failed to route discovery data: {:?}", e);
             }
-        } else if is_user_port(self.domain_id, logical_port) {
+        } else if PortManager::is_user_unicast_port(self.domain_id, logical_port) {
             if let Err(e) = self.user_data_tx.try_send((payload.to_vec(), remote_addr)) {
                 warn!("TcpMuxListener: Failed to route user data: {:?}", e);
             }
@@ -618,84 +619,9 @@ impl Drop for TcpMuxListener {
     }
 }
 
-// --- Logical port classification ---
-
-/// Check if a logical port is a discovery port for the given domain.
-///
-/// Discovery ports follow: PB + DG*domain + D1 + PG*participant
-/// where D1=10, PG=2 → offsets from base are 10, 12, 14, ... (even offsets >= 10)
-fn is_discovery_port(domain_id: u32, logical_port: u16) -> bool {
-    let base = (7400 + 250 * domain_id) as u16;
-    if logical_port < base {
-        return false;
-    }
-    let offset = logical_port - base;
-    offset >= 10 && offset % 2 == 0
-}
-
-/// Check if a logical port is a user data port for the given domain.
-///
-/// User ports follow: PB + DG*domain + D3 + PG*participant
-/// where D3=11, PG=2 → offsets from base are 11, 13, 15, ... (odd offsets >= 11)
-fn is_user_port(domain_id: u32, logical_port: u16) -> bool {
-    let base = (7400 + 250 * domain_id) as u16;
-    if logical_port < base {
-        return false;
-    }
-    let offset = logical_port - base;
-    offset >= 11 && offset % 2 == 1
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_is_discovery_port_domain0() {
-        // domain=0, base=7400
-        // pid=0 → 7400+10+0 = 7410
-        // pid=1 → 7400+10+2 = 7412
-        // pid=2 → 7400+10+4 = 7414
-        assert!(is_discovery_port(0, 7410));
-        assert!(is_discovery_port(0, 7412));
-        assert!(is_discovery_port(0, 7414));
-
-        assert!(!is_discovery_port(0, 7400)); // base port
-        assert!(!is_discovery_port(0, 7409)); // below D1 offset
-        assert!(!is_discovery_port(0, 7411)); // user port (odd)
-    }
-
-    #[test]
-    fn test_is_user_port_domain0() {
-        // domain=0, base=7400
-        // pid=0 → 7400+11+0 = 7411
-        // pid=1 → 7400+11+2 = 7413
-        // pid=2 → 7400+11+4 = 7415
-        assert!(is_user_port(0, 7411));
-        assert!(is_user_port(0, 7413));
-        assert!(is_user_port(0, 7415));
-
-        assert!(!is_user_port(0, 7400)); // base port
-        assert!(!is_user_port(0, 7410)); // discovery port (even)
-        assert!(!is_user_port(0, 7409)); // below D3 offset
-    }
-
-    #[test]
-    fn test_is_discovery_port_domain1() {
-        // domain=1, base=7650
-        // pid=0 → 7650+10 = 7660
-        assert!(is_discovery_port(1, 7660));
-        assert!(!is_discovery_port(1, 7661)); // user port
-        assert!(!is_discovery_port(1, 7410)); // domain 0 port
-    }
-
-    #[test]
-    fn test_is_user_port_domain1() {
-        // domain=1, base=7650
-        // pid=0 → 7650+11 = 7661
-        assert!(is_user_port(1, 7661));
-        assert!(!is_user_port(1, 7660)); // discovery port
-    }
 
     #[test]
     fn test_peer_connection_group_all_tokens() {
