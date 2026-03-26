@@ -6,9 +6,9 @@ use crate::rtps::logic::message_processor::unicast_message_processor::UnicastMes
 use crate::rtps::logic::sedp_logic::SedpLogic;
 use crate::rtps::messages::message_receiver::MessageReceiver;
 use crate::rtps::transport::socket::MAX_EVENTS;
-use crate::rtps::transport::tcp::tcp_listener::TcpListener;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
-use log::{debug, error, info, warn};
+use crossbeam_channel::Receiver;
+use log::{debug, info, warn};
 use mio::{Events, Interest, Poll, Token};
 use std::net::SocketAddr;
 use std::sync::{Arc, Weak};
@@ -17,7 +17,7 @@ use std::time::Duration;
 pub(crate) struct DiscoveryUnicastListeningTask {
     guid_prefix: GuidPrefix,
     discovery_unicast_listener: Option<UdpListener>,
-    tcp_listener: Option<TcpListener>,
+    tcp_rx: Option<Receiver<(Vec<u8>, SocketAddr)>>,
     participant: Weak<Participant>,
     sedp_logic: Arc<Option<SedpLogic>>,
 }
@@ -25,7 +25,7 @@ pub(crate) struct DiscoveryUnicastListeningTask {
 impl DiscoveryUnicastListeningTask {
     pub(crate) fn new(
         discovery_unicast_listener: Option<UdpListener>,
-        tcp_listener: Option<TcpListener>,
+        tcp_rx: Option<Receiver<(Vec<u8>, SocketAddr)>>,
         participant: Arc<Participant>,
     ) -> Self {
         let (_, sedp_logic, _) = participant.get_logics();
@@ -33,7 +33,7 @@ impl DiscoveryUnicastListeningTask {
         Self {
             guid_prefix,
             discovery_unicast_listener,
-            tcp_listener,
+            tcp_rx,
             participant: Arc::downgrade(&participant),
             sedp_logic,
         }
@@ -57,24 +57,13 @@ impl DiscoveryUnicastListeningTask {
             None
         };
 
-        // Register TCP listener if present
-        let tcp_token = if let Some(tcp_listener) = &mut self.tcp_listener {
-            let port = tcp_listener.port();
-            if let Some(socket) = tcp_listener.socket_mut() {
-                // Use a different token range for TCP (add 10000 to avoid collision)
-                let token = Token(port as usize + 10000);
-                poll.registry().register(socket, token, Interest::READABLE)?;
-                info!("[DiscoveryUnicast] TCP listener registered on port {}", port);
-                Some(token)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let has_tcp_rx = self.tcp_rx.is_some();
+        if has_tcp_rx {
+            info!("[DiscoveryUnicast] TCP channel receiver enabled");
+        }
 
-        if udp_token.is_none() && tcp_token.is_none() {
-            return Err(std::io::Error::other("No listener (UDP or TCP) is set"));
+        if udp_token.is_none() && !has_tcp_rx {
+            return Err(std::io::Error::other("No listener (UDP or TCP channel) is set"));
         }
 
         let participant = self
@@ -97,14 +86,8 @@ impl DiscoveryUnicastListeningTask {
 
             if participant.is_terminated() {
                 debug!("Detected global termination flag, discovery unicast listening loop is terminating...");
-                // deregister before return
                 if let Some(listener) = &mut self.discovery_unicast_listener {
                     let _ = poll.registry().deregister(listener.socket());
-                }
-                if let Some(tcp_listener) = &mut self.tcp_listener {
-                    if let Some(socket) = tcp_listener.socket_mut() {
-                        let _ = poll.registry().deregister(socket);
-                    }
                 }
                 return Ok(());
             }
@@ -126,14 +109,8 @@ impl DiscoveryUnicastListeningTask {
                         while let Some((buffer, from_addr)) = listener.get_message() {
                             if participant.is_terminated() {
                                 debug!("Detected global termination flag during UDP processing");
-                                // deregister before return
                                 if let Some(listener) = &mut self.discovery_unicast_listener {
                                     let _ = poll.registry().deregister(listener.socket());
-                                }
-                                if let Some(tcp_listener) = &mut self.tcp_listener {
-                                    if let Some(socket) = tcp_listener.socket_mut() {
-                                        let _ = poll.registry().deregister(socket);
-                                    }
                                 }
                                 return Ok(());
                             }
@@ -142,71 +119,15 @@ impl DiscoveryUnicastListeningTask {
                         }
                     }
                 }
+            }
 
-                // Handle TCP listener events (new connections)
-                if Some(event.token()) == tcp_token && event.is_readable() {
-                    if let Some(tcp_listener) = &mut self.tcp_listener {
-                        // Accept new connections and register them with poll
-                        while let Ok(Some(addr)) = tcp_listener.accept(Some(poll.registry())) {
-                            info!("[DiscoveryUnicast] Accepted and registered TCP connection from {:?}", addr);
-                        }
+            // Drain TCP channel (non-blocking)
+            if let Some(tcp_rx) = &self.tcp_rx {
+                while let Ok((buffer, from_addr)) = tcp_rx.try_recv() {
+                    if participant.is_terminated() {
+                        return Ok(());
                     }
-                }
-
-                // Handle TCP connection events (data ready to read)
-                // Check if this token belongs to a TCP connection using token_to_addr map
-                let is_tcp_connection = self
-                    .tcp_listener
-                    .as_ref()
-                    .map(|l| l.is_connection_token(event.token()))
-                    .unwrap_or(false);
-
-                if is_tcp_connection && event.is_readable() {
-                    if let Some(tcp_listener) = &mut self.tcp_listener {
-                        // Get the address for this token
-                        if let Some(addr) = tcp_listener.get_addr_from_token(event.token()) {
-                            // Edge-triggered mode: Read ALL available data until WouldBlock
-                            loop {
-                                match tcp_listener.read_framed_message(&addr) {
-                                    Ok(Some(buffer)) => {
-                                        info!("[DiscoveryUnicast] Received TCP message from {:?}, {} bytes", addr, buffer.len());
-                                        messages_to_process.push((buffer, addr));
-                                        // Continue reading more messages
-                                    }
-                                    Ok(None) => {
-                                        // CRITICAL: In edge-triggered mode, MUST continue reading!
-                                        // Ok(None) means incomplete message in buffer, but socket might have more data.
-                                        // If we break here and socket is still readable, no new poll event will fire.
-                                        // Keep trying until we get WouldBlock to drain the socket completely.
-                                        continue;
-                                    }
-                                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                        // No more data available, break the loop
-                                        break;
-                                    }
-                                    Err(ref e)
-                                        if e.kind() == std::io::ErrorKind::UnexpectedEof
-                                            || e.kind() == std::io::ErrorKind::ConnectionReset =>
-                                    {
-                                        warn!(
-                                            "[DiscoveryUnicast] TCP connection from {:?} closed: {}",
-                                            addr, e
-                                        );
-                                        tcp_listener.remove_connection(&addr);
-                                        break;
-                                    }
-                                    Err(e) => {
-                                        error!(
-                                            "[DiscoveryUnicast] Error reading TCP from {:?}: {}",
-                                            addr, e
-                                        );
-                                        tcp_listener.remove_connection(&addr);
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    messages_to_process.push((buffer, from_addr));
                 }
             }
 
@@ -266,18 +187,14 @@ mod tests {
     #[ignore]
     fn test_discovery_unicast_receive() {
         let domain_id: DomainId = 17;
-        let mut socket = Socket::new(domain_id); //domain_id 0
+        let mut socket = Socket::new(domain_id);
         socket.create_socket();
         let participant =
             Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ips()));
 
-        //discovery multicast port : 7400
-        //discovery unicast port : 7410
-        //user traffic multicast port : 7401
-        //user traffic unicast port : 7411
         let mut discovery_unicast_listening_task = DiscoveryUnicastListeningTask::new(
             socket.discovery_unicast_listener(),
-            socket.discovery_tcp_listener(),
+            socket.tcp_discovery_rx(),
             participant,
         );
         let _ = discovery_unicast_listening_task.unicast_listening();
