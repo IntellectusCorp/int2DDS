@@ -472,105 +472,42 @@ impl Transport for TcpSender {
     }
 }
 
-#[cfg(target_os = "windows")]
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use std::net::TcpListener;
-    use std::thread;
-
-    #[test]
-    fn test_tcp_sender_creation() {
-        let sender = TcpSender::new("127.0.0.1".to_string()).unwrap();
-        assert_eq!(sender.port(), 0);
-        assert_eq!(sender.connection_count(), 0);
+    fn create_test_sender() -> TcpSender {
+        TcpSender::new(
+            "127.0.0.1".to_string(),
+            [0x01; 12],
+            0,    // domain_id
+            0,    // participant_id
+            7400, // listener_port
+        )
+        .unwrap()
     }
 
     #[test]
-    fn test_tcp_sender_mux_creation() {
-        let sender = TcpSender::new_mux("127.0.0.1".to_string(), [0x01; 12], 0, 0, 7400).unwrap();
+    fn test_tcp_sender_creation() {
+        let sender = create_test_sender();
         assert_eq!(sender.port(), 7400);
-        assert!(sender.mux_enabled);
         assert_eq!(sender.connection_count(), 0);
         assert_eq!(sender.peer_count(), 0);
     }
 
     #[test]
-    fn test_tcp_sender_connect_and_send() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let server_addr = listener.local_addr().unwrap();
+    fn test_tcp_sender_send_unsupported() {
+        let sender = create_test_sender();
+        let addr: SocketAddr = "127.0.0.1:7400".parse().unwrap();
+        let result = sender.send(&addr, b"test");
 
-        let server_handle = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-
-            use crate::rtps::transport::tcp::framing::read_framed_message;
-            let data = read_framed_message(&mut stream).unwrap();
-
-            assert_eq!(data, b"Hello, TCP!");
-        });
-
-        let sender = TcpSender::new("127.0.0.1".to_string()).unwrap();
-        let result = sender.send_msg(&server_addr, b"Hello, TCP!");
-
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 11);
-        assert_eq!(sender.connection_count(), 1);
-
-        server_handle.join().unwrap();
-    }
-
-    #[test]
-    fn test_tcp_sender_reuses_connection() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let server_addr = listener.local_addr().unwrap();
-
-        let server_handle = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-
-            use crate::rtps::transport::tcp::framing::read_framed_message;
-
-            let msg1 = read_framed_message(&mut stream).unwrap();
-            let msg2 = read_framed_message(&mut stream).unwrap();
-
-            assert_eq!(msg1, b"First");
-            assert_eq!(msg2, b"Second");
-        });
-
-        let sender = TcpSender::new("127.0.0.1".to_string()).unwrap();
-
-        sender.send_msg(&server_addr, b"First").unwrap();
-        assert_eq!(sender.connection_count(), 1);
-
-        sender.send_msg(&server_addr, b"Second").unwrap();
-        assert_eq!(sender.connection_count(), 1);
-
-        server_handle.join().unwrap();
-    }
-
-    #[test]
-    fn test_tcp_sender_disconnect() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let server_addr = listener.local_addr().unwrap();
-
-        let _server_handle = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-
-            use crate::rtps::transport::tcp::framing::read_framed_message;
-            let _ = read_framed_message(&mut stream);
-        });
-
-        let sender = TcpSender::new("127.0.0.1".to_string()).unwrap();
-        sender.send_msg(&server_addr, b"Test").unwrap();
-        assert_eq!(sender.connection_count(), 1);
-
-        sender.disconnect(&server_addr);
-        assert_eq!(sender.connection_count(), 0);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::Unsupported);
     }
 
     #[test]
     fn test_tcp_sender_multicast_unsupported() {
-        let sender = TcpSender::new("127.0.0.1".to_string()).unwrap();
+        let sender = create_test_sender();
         let result = sender.send_multicast(0, b"test");
 
         assert!(result.is_err());
@@ -579,7 +516,27 @@ mod tests {
 
     #[test]
     fn test_tcp_sender_transport_type() {
-        let sender = TcpSender::new("127.0.0.1".to_string()).unwrap();
+        let sender = create_test_sender();
         assert_eq!(sender.transport_type(), TransportType::TCP);
+    }
+
+    #[test]
+    fn test_get_peer_port_without_control_connection() {
+        let sender = create_test_sender();
+        let addr: SocketAddr = "192.168.1.10:7400".parse().unwrap();
+
+        // No control connection → should fail
+        assert!(sender.get_peer_discovery_port(&addr).is_err());
+        assert!(sender.get_peer_user_port(&addr).is_err());
+    }
+
+    #[test]
+    fn test_disconnect_nonexistent_peer() {
+        let sender = create_test_sender();
+        let addr: SocketAddr = "192.168.1.10:7400".parse().unwrap();
+
+        // Should not panic
+        sender.disconnect_peer(&addr);
+        assert_eq!(sender.connection_count(), 0);
     }
 }
