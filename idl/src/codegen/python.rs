@@ -52,8 +52,8 @@ impl<'a> PyGen<'a> {
         self.line("");
         self.line("from __future__ import annotations");
         self.line("");
-        self.line("from dataclasses import dataclass");
-        self.line("from enum import IntEnum");
+        self.line("from dataclasses import dataclass, field");
+        self.line("from enum import IntEnum, IntFlag");
         self.line("from typing import ClassVar");
         self.line("");
         self.line(&format!(
@@ -70,6 +70,13 @@ impl<'a> PyGen<'a> {
         // Enums first (may be referenced by structs)
         for e in &self.model.enums {
             self.emit_enum(e);
+            self.line("");
+            self.line("");
+        }
+
+        // Bitmasks
+        for b in &self.model.bitmasks {
+            self.emit_bitmask(b);
             self.line("");
             self.line("");
         }
@@ -92,6 +99,23 @@ impl<'a> PyGen<'a> {
         for v in &e.variants {
             let variant_name = naming::to_screaming_snake(&v.name);
             self.line(&format!("{} = {}", variant_name, v.value));
+        }
+        self.indent -= 1;
+    }
+
+    // ---- Bitmask ----
+
+    fn emit_bitmask(&mut self, b: &ResolvedBitmask) {
+        self.line(&format!("class {}(IntFlag):", b.name));
+        self.indent += 1;
+        self.line(&format!("\"\"\"IDL bitmask: {} (bit_bound={})\"\"\"", b.qualified_name, b.bit_bound));
+        self.line("");
+        for flag in &b.flags {
+            let flag_name = naming::to_screaming_snake(&flag.name);
+            self.line(&format!("{} = 1 << {}", flag_name, flag.position));
+        }
+        if b.flags.is_empty() {
+            self.line("pass");
         }
         self.indent -= 1;
     }
@@ -139,6 +163,10 @@ impl<'a> PyGen<'a> {
 
         // _deserialize_cdr class method
         self.emit_deserialize_cdr(s);
+        self.line("");
+
+        // _deserialize_cdr_inline class method (for nested struct deserialization)
+        self.emit_deserialize_cdr_inline(s);
         self.line("");
 
         // _serialize_key method
@@ -384,6 +412,79 @@ impl<'a> PyGen<'a> {
         self.indent -= 1;
     }
 
+    fn emit_deserialize_cdr_inline(&mut self, s: &ResolvedStruct) {
+        self.line("@classmethod");
+        self.line(&format!(
+            "def _deserialize_cdr_inline(cls, r: CdrReader) -> \"{}\":",
+            s.name
+        ));
+        self.indent += 1;
+        self.line("\"\"\"Deserialize from an existing CdrReader (no encapsulation header).\"\"\"");
+
+        match s.extensibility {
+            ExtensibilityKind::Final => {
+                for m in &s.members {
+                    self.emit_read_field(&m.resolved_type, &m.name);
+                }
+            }
+            ExtensibilityKind::Appendable => {
+                self.line("_dsize, _dstart = r.read_dheader()");
+                for m in &s.members {
+                    self.emit_read_field(&m.resolved_type, &m.name);
+                }
+                self.line("r.read_dheader_end(_dsize, _dstart)");
+            }
+            ExtensibilityKind::Mutable => {
+                self.line("_dsize, _dstart = r.read_dheader()");
+                for m in &s.members {
+                    let default = self.default_value(&m.resolved_type);
+                    if default.starts_with("field(") {
+                        if default.contains("lambda:") {
+                            let inner = default
+                                .trim_start_matches("field(default_factory=lambda: ")
+                                .trim_end_matches(')');
+                            self.line(&format!("{} = {}", m.name, inner));
+                        } else {
+                            let inner = default
+                                .trim_start_matches("field(default_factory=")
+                                .trim_end_matches(')');
+                            self.line(&format!("{} = {}()", m.name, inner));
+                        }
+                    } else {
+                        self.line(&format!("{} = {}", m.name, default));
+                    }
+                }
+                self.line("while not r.is_sentinel():");
+                self.indent += 1;
+                self.line("_mid, _mlen, _mu = r.read_emheader()");
+                let mut first = true;
+                for (i, m) in s.members.iter().enumerate() {
+                    let member_id = m.member_id.unwrap_or(i as u32);
+                    if first {
+                        self.line(&format!("if _mid == {}:", member_id));
+                        first = false;
+                    } else {
+                        self.line(&format!("elif _mid == {}:", member_id));
+                    }
+                    self.indent += 1;
+                    self.emit_read_field(&m.resolved_type, &m.name);
+                    self.indent -= 1;
+                }
+                self.line("else:");
+                self.indent += 1;
+                self.line("r.skip(_mlen)  # Unknown field");
+                self.indent -= 1;
+                self.indent -= 1;
+                self.line("r.skip_sentinel()");
+                self.line("r.read_dheader_end(_dsize, _dstart)");
+            }
+        }
+
+        let field_names: Vec<&str> = s.members.iter().map(|m| m.name.as_str()).collect();
+        self.line(&format!("return cls({})", field_names.join(", ")));
+        self.indent -= 1;
+    }
+
     fn emit_read_field(&mut self, ty: &ResolvedType, name: &str) {
         match ty {
             ResolvedType::Bool => self.line(&format!("{} = r.read_bool()", name)),
@@ -403,10 +504,8 @@ impl<'a> PyGen<'a> {
                 self.line(&format!("{} = {}(r.read_enum())", name, enum_name));
             }
             ResolvedType::Struct(struct_name) => {
-                // Nested struct: need to read its bytes and deserialize
-                // For simplicity, we read as sub-reader
-                self.line(&format!("# TODO: Nested struct {} deserialization", struct_name));
-                self.line(&format!("{} = {}()  # Placeholder", name, struct_name));
+                // Nested struct: read inline from the existing reader
+                self.line(&format!("{} = {}._deserialize_cdr_inline(r)", name, struct_name));
             }
             ResolvedType::Sequence { element, .. } => {
                 self.line(&format!("_{}_count = r.read_seq_header()", name));
@@ -480,8 +579,12 @@ impl<'a> PyGen<'a> {
             ResolvedType::F64 => self.line(&format!("w.write_f64({})", accessor)),
             ResolvedType::String { .. } => self.line(&format!("w.write_string({})", accessor)),
             ResolvedType::Enum(_) => self.line(&format!("w.write_enum(int({}))", accessor)),
+            ResolvedType::Char => self.line(&format!("w.write_char({})", accessor)),
+            ResolvedType::WChar => self.line(&format!("w.write_wchar({})", accessor)),
+            ResolvedType::WString { .. } => self.line(&format!("w.write_wstring({})", accessor)),
+            ResolvedType::Bitmask(_) => self.line(&format!("w.write_u32(int({}))", accessor)),
             _ => {
-                // Complex types in keys are not common
+                // Complex types (Struct, Sequence, Array, Map) in keys are not common
                 self.line(&format!("# TODO: Complex key field {}", accessor));
             }
         }
