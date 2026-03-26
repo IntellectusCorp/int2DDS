@@ -86,10 +86,7 @@ use crate::{
             },
             sending_handler::{MessageType, SendingHandler},
         },
-        transport::{
-            tcp::tcp_listener::TcpListener, udp::udp_listener::UdpListener, Transport,
-            TransportSender,
-        },
+        transport::{udp::udp_listener::UdpListener, Transport, TransportSender},
     },
     serialize::pl_cdr::InlineQosParameters,
     utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
@@ -363,7 +360,7 @@ impl SedpLogic {
         &self,
         discovery_multicast_listener: Option<UdpListener>,
         discovery_unicast_listener: Option<UdpListener>,
-        discovery_tcp_listener: Option<TcpListener>,
+        tcp_discovery_rx: Option<crossbeam_channel::Receiver<(Vec<u8>, std::net::SocketAddr)>>,
     ) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
 
@@ -402,7 +399,7 @@ impl SedpLogic {
 
         let mut discovery_unicast_listening_task = DiscoveryUnicastListeningTask::new(
             discovery_unicast_listener,
-            discovery_tcp_listener,
+            tcp_discovery_rx,
             participant.clone(),
         );
 
@@ -1856,8 +1853,7 @@ impl SedpLogic {
         message_type: &str,
     ) -> RtpsResult<()> {
         match locator.kind() {
-            // Both UDP and TCP use IPv4 addressing
-            LOCATOR_KIND_UDP_V4 | LOCATOR_KIND_TCP_V4 => {
+            LOCATOR_KIND_UDP_V4 => {
                 let socket_addr = SocketAddr::V4(SocketAddrV4::new(
                     locator.to_ip_v4_addr(),
                     locator.port() as u16,
@@ -1874,14 +1870,38 @@ impl SedpLogic {
                         )
                     })?;
                     debug!(
-                        "[{}] SEDP Logic: {} message sent to {} (transport: {})",
-                        message_type,
-                        message_type,
-                        socket_addr,
-                        if locator.kind() == LOCATOR_KIND_TCP_V4 { "TCP" } else { "UDP" }
+                        "[{}] SEDP Logic: {} message sent to {} (transport: UDP)",
+                        message_type, message_type, socket_addr,
                     );
                 } else {
                     debug!("UDP sender not available, skipping SEDP message");
+                }
+            }
+            LOCATOR_KIND_TCP_V4 => {
+                // TCP locator port is the physical port (e.g. 7400).
+                // send_to_logical_port is handled internally by TcpSender
+                // which uses the discovery logical port for this peer.
+                let socket_addr = SocketAddr::V4(SocketAddrV4::new(
+                    locator.to_ip_v4_addr(),
+                    locator.port() as u16,
+                ));
+
+                if let Some(ref sender) = self.sender {
+                    sender.send(&socket_addr, buffer).map_err(|e| {
+                        RtpsError::new(
+                            RtpsErrorCode::NotSent,
+                            format!(
+                                "[{}] SEDP Logic: Failed to send TCP message to {}: {}",
+                                message_type, socket_addr, e
+                            ),
+                        )
+                    })?;
+                    debug!(
+                        "[{}] SEDP Logic: {} message sent to {} (transport: TCP)",
+                        message_type, message_type, socket_addr,
+                    );
+                } else {
+                    debug!("TCP sender not available, skipping SEDP message");
                 }
             }
             _ => {
@@ -2610,7 +2630,7 @@ mod tests {
 
         let mut discovery_unicast_listening_task = DiscoveryUnicastListeningTask::new(
             socket.discovery_unicast_listener(),
-            socket.discovery_tcp_listener(),
+            socket.tcp_discovery_rx(),
             participant.clone(),
         );
 
