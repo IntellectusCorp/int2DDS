@@ -305,7 +305,11 @@ impl TcpSender {
 
         match socket2.connect(&SockAddr::from(*addr)) {
             Ok(_) => {}
-            Err(e) if e.raw_os_error() == Some(10035) || e.kind() == ErrorKind::WouldBlock => {
+            Err(e)
+                if e.raw_os_error() == Some(10035)       // Windows: WSAEWOULDBLOCK
+                   || e.raw_os_error() == Some(115)         // Linux: EINPROGRESS
+                   || e.kind() == ErrorKind::WouldBlock =>
+            {
                 use std::time::Instant;
                 let start = Instant::now();
 
