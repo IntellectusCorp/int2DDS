@@ -1,16 +1,24 @@
 use std::sync::Arc;
 use std::vec;
 
+use crossbeam_channel::{bounded, Receiver};
+
 use crate::common::env::{get_network_interface, get_network_ip};
+use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::types::{DomainId, ParticipantId};
 use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::shm::shm_listener::ShmListener;
 use crate::rtps::transport::shm::shm_sender::ShmSender;
-use crate::rtps::transport::tcp::tcp_listener::TcpListener;
+use crate::rtps::transport::tcp::tcp_mux_listener::TcpMuxListener;
 use crate::rtps::transport::tcp::tcp_sender::TcpSender;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 use crate::rtps::transport::udp::udp_sender::UdpSender;
 use crate::rtps::transport::{get_transport_type, Transport, TransportSender, TransportType};
+
+use std::net::SocketAddr;
+
+/// Channel capacity for TCP mux routing
+const TCP_MUX_CHANNEL_CAPACITY: usize = 4096;
 
 #[derive(Debug)]
 pub(crate) struct Socket {
@@ -32,9 +40,12 @@ pub(crate) struct Socket {
     user_traffic_multicast_listener: Option<UdpListener>,
     user_traffic_unicast_listener: Option<UdpListener>,
 
-    //TCP listeners (used when transport = TCP or Hybrid)
-    discovery_tcp_listener: Option<TcpListener>,
-    user_traffic_tcp_listener: Option<TcpListener>,
+    //TCP MuxListener (used when transport = TCP or Hybrid)
+    tcp_mux_listener: Option<TcpMuxListener>,
+
+    //TCP mux channel receivers (routed from MuxListener)
+    tcp_discovery_rx: Option<Receiver<(Vec<u8>, SocketAddr)>>,
+    tcp_user_data_rx: Option<Receiver<(Vec<u8>, SocketAddr)>>,
 
     //SHM listener (used when transport = SHM for user data)
     shm_listener: Option<ShmListener>,
@@ -65,21 +76,15 @@ impl Socket {
             shm_sender: None,
 
             //UDP listeners
-            //discovery listener(spdp + sedp)
-            //discodery extended discovery
             discovery_traffic_multicast_listener: None,
-            //spdp + sedp
             discovery_traffic_unicast_listener: None,
-
-            //user_traffic(data)
-            //extended discovery data
-            user_traffic_multicast_listener: None, // Haven't seen a case where this is used
-            //data
+            user_traffic_multicast_listener: None,
             user_traffic_unicast_listener: None,
 
-            //TCP listeners
-            discovery_tcp_listener: None,
-            user_traffic_tcp_listener: None,
+            //TCP mux listener + channel receivers
+            tcp_mux_listener: None,
+            tcp_discovery_rx: None,
+            tcp_user_data_rx: None,
 
             //SHM listener
             shm_listener: None,
@@ -97,6 +102,13 @@ impl Socket {
     pub(crate) fn create_socket(&mut self) {
         self.create_sender();
         self.create_listener();
+    }
+
+    /// Create socket with guid_prefix for TCP mux mode.
+    /// Must be called instead of create_socket() when TCP/Hybrid transport is used.
+    pub(crate) fn create_socket_with_guid(&mut self, guid_prefix: GuidPrefix) {
+        self.create_sender_with_guid(guid_prefix);
+        self.create_listener_with_guid(guid_prefix);
     }
 
     //sender
@@ -119,65 +131,12 @@ impl Socket {
                     }
                 };
             }
-            TransportType::TCP => {
-                let tcp_physical_port = PortManager::get_tcp_physical_port(self.domain_id);
-                let tcp_sender_arc = match TcpSender::new(
-                    self.get_sender_bind_addr(),
-                    [0u8; 12], // TODO: pass real guid_prefix from Participant in Phase 4
-                    self.domain_id,
-                    self.participant_id,
-                    tcp_physical_port,
-                ) {
-                    Ok(tcp_sender) => {
-                        let transport_sender = TransportSender::Tcp(tcp_sender);
-                        log::info!("[socket] TCP sender created");
-                        Arc::new(transport_sender)
-                    }
-                    Err(e) => {
-                        log::error!("TCP sender creation failed: {}", e);
-                        panic!("TCP sender is not created");
-                    }
-                };
-
-                // Set both sender (primary) and tcp_sender (for TCP availability checks)
-                self.sender = Some(tcp_sender_arc.clone());
-                self.tcp_sender = Some(tcp_sender_arc);
-            }
-            TransportType::Hybrid => {
-                // Create UDP sender as primary
-                self.sender = match UdpSender::new(
-                    self.get_sender_bind_addr(),
-                    self.get_sender_multicast_if_addr(),
-                ) {
-                    Ok(udp_sender) => {
-                        let transport_sender = TransportSender::Udp(udp_sender);
-                        log::info!("[socket] Hybrid mode: UDP sender created");
-                        Some(Arc::new(transport_sender))
-                    }
-                    Err(e) => {
-                        log::error!("Hybrid mode: UDP sender creation failed: {}", e);
-                        panic!("UDP sender is not created");
-                    }
-                };
-
-                // Create TCP sender as secondary
-                let tcp_physical_port = PortManager::get_tcp_physical_port(self.domain_id);
-                self.tcp_sender = match TcpSender::new(
-                    self.get_sender_bind_addr(),
-                    [0u8; 12], // TODO: pass real guid_prefix from Participant in Phase 4
-                    self.domain_id,
-                    self.participant_id,
-                    tcp_physical_port,
-                ) {
-                    Ok(tcp_sender) => {
-                        log::info!("[socket] Hybrid mode: TCP sender created");
-                        Some(Arc::new(TransportSender::Tcp(tcp_sender)))
-                    }
-                    Err(e) => {
-                        log::error!("Hybrid mode: TCP sender creation failed: {}", e);
-                        panic!("TCP sender is not created");
-                    }
-                };
+            TransportType::TCP | TransportType::Hybrid => {
+                // TCP/Hybrid sender requires guid_prefix — use create_socket_with_guid()
+                log::warn!(
+                    "[socket] TCP/Hybrid sender requires guid_prefix. \
+                     Call create_socket_with_guid() instead of create_socket()."
+                );
             }
             TransportType::SHM => {
                 // SHM mode uses UDP for discovery (SPDP, SEDP)
@@ -214,6 +173,78 @@ impl Socket {
             }
         }
     }
+
+    /// Create sender with guid_prefix for TCP mux mode
+    fn create_sender_with_guid(&mut self, guid_prefix: GuidPrefix) {
+        let transport_type = get_transport_type();
+
+        match transport_type {
+            TransportType::TCP => {
+                let tcp_physical_port = PortManager::get_tcp_physical_port(self.domain_id);
+                let tcp_sender_arc = match TcpSender::new(
+                    self.get_sender_bind_addr(),
+                    guid_prefix,
+                    self.domain_id,
+                    self.participant_id,
+                    tcp_physical_port,
+                ) {
+                    Ok(tcp_sender) => {
+                        let transport_sender = TransportSender::Tcp(tcp_sender);
+                        log::info!("[socket] TCP sender created");
+                        Arc::new(transport_sender)
+                    }
+                    Err(e) => {
+                        log::error!("TCP sender creation failed: {}", e);
+                        panic!("TCP sender is not created");
+                    }
+                };
+
+                self.sender = Some(tcp_sender_arc.clone());
+                self.tcp_sender = Some(tcp_sender_arc);
+            }
+            TransportType::Hybrid => {
+                // Create UDP sender as primary
+                self.sender = match UdpSender::new(
+                    self.get_sender_bind_addr(),
+                    self.get_sender_multicast_if_addr(),
+                ) {
+                    Ok(udp_sender) => {
+                        let transport_sender = TransportSender::Udp(udp_sender);
+                        log::info!("[socket] Hybrid mode: UDP sender created");
+                        Some(Arc::new(transport_sender))
+                    }
+                    Err(e) => {
+                        log::error!("Hybrid mode: UDP sender creation failed: {}", e);
+                        panic!("UDP sender is not created");
+                    }
+                };
+
+                // Create TCP sender as secondary
+                let tcp_physical_port = PortManager::get_tcp_physical_port(self.domain_id);
+                self.tcp_sender = match TcpSender::new(
+                    self.get_sender_bind_addr(),
+                    guid_prefix,
+                    self.domain_id,
+                    self.participant_id,
+                    tcp_physical_port,
+                ) {
+                    Ok(tcp_sender) => {
+                        log::info!("[socket] Hybrid mode: TCP sender created");
+                        Some(Arc::new(TransportSender::Tcp(tcp_sender)))
+                    }
+                    Err(e) => {
+                        log::error!("Hybrid mode: TCP sender creation failed: {}", e);
+                        panic!("TCP sender is not created");
+                    }
+                };
+            }
+            _ => {
+                // UDP/SHM don't need guid_prefix — delegate to regular create_sender
+                self.create_sender();
+            }
+        }
+    }
+
     pub(crate) fn sender(&self) -> Arc<TransportSender> {
         match &self.sender {
             Some(sender) => Arc::clone(sender),
@@ -236,33 +267,48 @@ impl Socket {
     fn create_listener(&mut self) {
         let transport_type = get_transport_type();
         match transport_type {
-            TransportType::TCP => {
-                // TCP does not support multicast/extended discovery
-                // Create only TCP listeners for discovery and user traffic
-                self.create_tcp_listeners();
-                log::info!("[socket] TCP listeners created");
+            TransportType::TCP | TransportType::Hybrid => {
+                log::warn!(
+                    "[socket] TCP/Hybrid listener requires guid_prefix. \
+                     Call create_socket_with_guid() instead of create_socket()."
+                );
+                if transport_type == TransportType::Hybrid {
+                    // Hybrid still needs UDP listeners for multicast discovery
+                    self.create_multicast_listener();
+                    self.create_unicast_listener();
+                }
             }
             TransportType::UDP => {
-                // UDP supports both multicast and unicast
                 self.create_multicast_listener();
                 self.create_unicast_listener();
                 log::info!("[socket] UDP listeners created");
             }
-            TransportType::Hybrid => {
-                // Hybrid mode: create both UDP and TCP listeners
-                self.create_multicast_listener();
-                self.create_unicast_listener();
-                self.create_tcp_listeners();
-                log::info!("[socket] Hybrid mode: UDP and TCP listeners created");
-            }
             TransportType::SHM => {
-                // SHM mode uses UDP for discovery (SPDP, SEDP)
                 self.create_multicast_listener();
                 self.create_unicast_listener();
                 log::info!("[socket] SHM mode: UDP listeners created for discovery");
-
-                // Create SHM listener for user data
                 self.create_shm_listener();
+            }
+        }
+    }
+
+    /// Create listener with guid_prefix for TCP mux mode
+    fn create_listener_with_guid(&mut self, guid_prefix: GuidPrefix) {
+        let transport_type = get_transport_type();
+        match transport_type {
+            TransportType::TCP => {
+                self.create_tcp_mux_listener(guid_prefix);
+                log::info!("[socket] TCP MuxListener created");
+            }
+            TransportType::Hybrid => {
+                self.create_multicast_listener();
+                self.create_unicast_listener();
+                self.create_tcp_mux_listener(guid_prefix);
+                log::info!("[socket] Hybrid mode: UDP and TCP MuxListener created");
+            }
+            _ => {
+                // UDP/SHM don't need guid_prefix — delegate to regular create_listener
+                self.create_listener();
             }
         }
     }
@@ -280,7 +326,6 @@ impl Socket {
     }
 
     //discovery multicast listener
-    //discodery extended discovery
     fn create_discovery_multicast_listener(&mut self, domain_id: u32) {
         let udp_listener: Option<UdpListener> = UdpListener::new_multicast(
             PortManager::get_discovery_traffic_multicast_port(domain_id),
@@ -294,7 +339,6 @@ impl Socket {
     }
 
     //discovery unicast listener
-    //spdp + sedp
     fn create_discovery_unicast_listener(&mut self, domain_id: u32, participant_id: u32) {
         let udp_listener: Option<UdpListener> = UdpListener::new(
             PortManager::get_discovery_traffic_unicast_port(domain_id, participant_id),
@@ -311,7 +355,6 @@ impl Socket {
     }
 
     //user traffic multicast listener
-    //user data extended discovery
     fn create_user_traffic_multicast_listener(&mut self, domain_id: u32) {
         let udp_listener: Option<UdpListener> = UdpListener::new_multicast(
             PortManager::get_user_traffic_multicast_port(domain_id),
@@ -325,7 +368,6 @@ impl Socket {
     }
 
     //user traffic unicast listener
-    //user data
     fn create_user_traffic_unicast_listener(&mut self, domain_id: u32, participant_id: u32) {
         let udp_listener: Option<UdpListener> =
             UdpListener::new(PortManager::get_user_traffic_unicast_port(domain_id, participant_id))
@@ -346,71 +388,103 @@ impl Socket {
         self.user_traffic_unicast_listener.take()
     }
 
-    //TCP listeners
-    fn create_tcp_listeners(&mut self) {
-        loop {
-            // Try to create discovery listener
-            let discovery_port = PortManager::get_discovery_traffic_unicast_port(
-                self.domain_id,
-                self.participant_id,
-            );
-            match TcpListener::new(discovery_port) {
-                Ok(listener) => {
-                    log::info!(
-                        "[socket] Discovery TCP listener created on port {}",
-                        discovery_port
-                    );
-                    self.discovery_tcp_listener = Some(listener);
-                }
-                Err(e) => {
-                    log::warn!(
-                        "[socket] Failed to create discovery TCP listener on port {}: {}",
-                        discovery_port,
-                        e
-                    );
-                    self.participant_id += 1;
-                    continue; // Retry with next participant_id
-                }
-            }
+    // TCP MuxListener (single-port multiplexed)
+    fn create_tcp_mux_listener(&mut self, guid_prefix: GuidPrefix) {
+        let (discovery_tx, discovery_rx) = bounded(TCP_MUX_CHANNEL_CAPACITY);
+        let (user_data_tx, user_data_rx) = bounded(TCP_MUX_CHANNEL_CAPACITY);
 
-            // Try to create user traffic listener
-            let user_port =
-                PortManager::get_user_traffic_unicast_port(self.domain_id, self.participant_id);
-            match TcpListener::new(user_port) {
-                Ok(listener) => {
-                    log::info!("[socket] User traffic TCP listener created on port {}", user_port);
-                    self.user_traffic_tcp_listener = Some(listener);
-                    break; // Both listeners created successfully
-                }
-                Err(e) => {
-                    log::warn!(
-                        "[socket] Failed to create user traffic TCP listener on port {}: {}",
-                        user_port,
-                        e
-                    );
-                    // Close discovery listener and retry with next participant_id
-                    if let Some(mut listener) = self.discovery_tcp_listener.take() {
-                        listener.close();
+        let physical_port = PortManager::get_tcp_physical_port(self.domain_id);
+
+        match TcpMuxListener::new(
+            physical_port,
+            self.domain_id,
+            self.participant_id,
+            guid_prefix,
+            discovery_tx,
+            user_data_tx,
+        ) {
+            Ok(listener) => {
+                log::info!(
+                    "[socket] TCP MuxListener created on port {} (domain={}, pid={})",
+                    listener.port(),
+                    self.domain_id,
+                    self.participant_id,
+                );
+                self.tcp_mux_listener = Some(listener);
+                self.tcp_discovery_rx = Some(discovery_rx);
+                self.tcp_user_data_rx = Some(user_data_rx);
+            }
+            Err(e) => {
+                log::warn!(
+                    "[socket] Failed to create TCP MuxListener on port {}: {}. \
+                     Falling back to discovery unicast port.",
+                    physical_port,
+                    e,
+                );
+                // Fallback: try binding to discovery unicast port
+                let fallback_port = PortManager::get_discovery_traffic_unicast_port(
+                    self.domain_id,
+                    self.participant_id,
+                );
+                match TcpMuxListener::new(
+                    fallback_port,
+                    self.domain_id,
+                    self.participant_id,
+                    guid_prefix,
+                    bounded(TCP_MUX_CHANNEL_CAPACITY).0, // new channels for fallback
+                    bounded(TCP_MUX_CHANNEL_CAPACITY).0,
+                ) {
+                    Ok(listener) => {
+                        // Need to recreate channels since we can't reuse the ones above
+                        let (dtx, drx) = bounded(TCP_MUX_CHANNEL_CAPACITY);
+                        let (utx, urx) = bounded(TCP_MUX_CHANNEL_CAPACITY);
+                        // Re-create with proper channels
+                        match TcpMuxListener::new(
+                            fallback_port,
+                            self.domain_id,
+                            self.participant_id,
+                            guid_prefix,
+                            dtx,
+                            utx,
+                        ) {
+                            Ok(listener) => {
+                                log::info!(
+                                    "[socket] TCP MuxListener fallback on port {}",
+                                    listener.port()
+                                );
+                                self.tcp_mux_listener = Some(listener);
+                                self.tcp_discovery_rx = Some(drx);
+                                self.tcp_user_data_rx = Some(urx);
+                            }
+                            Err(e2) => {
+                                log::error!(
+                                    "[socket] TCP MuxListener fallback also failed: {}",
+                                    e2
+                                );
+                            }
+                        }
                     }
-                    self.participant_id += 1;
-                    continue; // Retry with next participant_id
+                    Err(e2) => {
+                        log::error!("[socket] TCP MuxListener fallback also failed: {}", e2);
+                    }
                 }
             }
         }
     }
 
-    pub(crate) fn discovery_tcp_listener(&mut self) -> Option<TcpListener> {
-        self.discovery_tcp_listener.take()
+    /// Take the TcpMuxListener (for the mux listening task thread)
+    pub(crate) fn tcp_mux_listener(&mut self) -> Option<TcpMuxListener> {
+        self.tcp_mux_listener.take()
     }
 
-    #[allow(unused_variables)]
-    fn create_user_traffic_tcp_listener(&mut self, domain_id: i32, participant_id: i32) {
-        // This function is no longer used - kept for compatibility
-        // The logic has been moved to create_tcp_listeners()
+    /// Take the discovery channel receiver (for discovery listening task)
+    pub(crate) fn tcp_discovery_rx(&mut self) -> Option<Receiver<(Vec<u8>, SocketAddr)>> {
+        self.tcp_discovery_rx.take()
     }
 
-    pub(crate) fn user_traffic_tcp_listener(&mut self) -> Option<TcpListener> {
-        self.user_traffic_tcp_listener.take()
+    /// Take the user data channel receiver (for user listening task)
+    pub(crate) fn tcp_user_data_rx(&mut self) -> Option<Receiver<(Vec<u8>, SocketAddr)>> {
+        self.tcp_user_data_rx.take()
     }
 
     //SHM listener
@@ -486,13 +560,14 @@ impl Socket {
             listener.close();
         }
 
-        // Close TCP listeners
-        if let Some(mut listener) = self.discovery_tcp_listener.take() {
+        // Close TCP MuxListener
+        if let Some(mut listener) = self.tcp_mux_listener.take() {
             listener.close();
         }
-        if let Some(mut listener) = self.user_traffic_tcp_listener.take() {
-            listener.close();
-        }
+
+        // Drop channel receivers
+        self.tcp_discovery_rx.take();
+        self.tcp_user_data_rx.take();
 
         // Close SHM listener
         if let Some(mut listener) = self.shm_listener.take() {
