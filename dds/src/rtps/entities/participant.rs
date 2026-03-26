@@ -225,12 +225,34 @@ impl Participant {
                     );
                 }
                 TransportType::TCP => {
-                    // Single physical port for both metatraffic and user data
+                    // WAN mode: advertise public address if configured
+                    let (advertised_ip, advertised_port) = if let Some(public_addr) =
+                        crate::common::env::get_tcp_public_addr()
+                    {
+                        log::info!(
+                                "[participant] WAN mode: advertising public address {} instead of {}:{}",
+                                public_addr, ip, tcp_physical_port
+                            );
+                        match public_addr.ip() {
+                            std::net::IpAddr::V4(v4) => (v4, public_addr.port() as u32),
+                            _ => {
+                                log::warn!(
+                                    "[participant] Public address is not IPv4, falling back to LAN"
+                                );
+                                (ip, tcp_physical_port)
+                            }
+                        }
+                    } else {
+                        (ip, tcp_physical_port)
+                    };
+
                     local_participant_proxy_data.add_metatraffic_unicast_locator(
-                        Locator::from_tcp_v4(ip, tcp_physical_port),
+                        Locator::from_tcp_v4(advertised_ip, advertised_port),
                     );
-                    local_participant_proxy_data
-                        .add_default_unicast_locator(Locator::from_tcp_v4(ip, tcp_physical_port));
+                    local_participant_proxy_data.add_default_unicast_locator(Locator::from_tcp_v4(
+                        advertised_ip,
+                        advertised_port,
+                    ));
                 }
                 TransportType::Hybrid => {
                     // UDP locators use standard per-participant ports

@@ -45,6 +45,12 @@ pub fn init_from_env() {
 
     // - INT2DDS_INITIAL_PEERS: Set initial peers for SPDP unicast discovery (comma-separated, e.g., "192.168.1.10:7400,192.168.1.11:7400") - Default: none
 
+    // - INT2DDS_TCP_PUBLIC_ADDR: Set public address for WAN/NAT traversal (e.g., "203.0.113.5:7400") - Default: none (LAN mode)
+    // - INT2DDS_TCP_TLS_ENABLED: Enable TLS for TCP connections (true, false) - Default: false (not yet implemented)
+    // - INT2DDS_TCP_TLS_CERT_PATH: TLS certificate file path - Default: none (not yet implemented)
+    // - INT2DDS_TCP_TLS_KEY_PATH: TLS private key file path - Default: none (not yet implemented)
+    // - INT2DDS_TCP_TLS_CA_PATH: TLS CA certificate file path - Default: none (not yet implemented)
+
     apply_cli_args_to_env();
 
     setting_log();
@@ -657,4 +663,58 @@ pub fn get_tcp_keepalive_max_misses() -> u32 {
 pub fn set_tcp_keepalive_max_misses(max_misses: u32) {
     log::info!("Environment variable set: INT2DDS_TCP_KEEPALIVE_MAX_MISSES = {}", max_misses);
     unsafe { std::env::set_var("INT2DDS_TCP_KEEPALIVE_MAX_MISSES", max_misses.to_string()) };
+}
+
+/// Get the TCP public address for WAN/NAT traversal.
+/// When set, SPDP locators advertise this address instead of the local working IP.
+///
+/// Format: "ip:port" (e.g., "203.0.113.5:7400")
+/// Default: None (LAN mode, use working IP)
+pub fn get_tcp_public_addr() -> Option<std::net::SocketAddr> {
+    std::env::var("INT2DDS_TCP_PUBLIC_ADDR").ok().and_then(|v| {
+        match v.trim().parse::<std::net::SocketAddr>() {
+            Ok(addr) => Some(addr),
+            Err(e) => {
+                log::warn!("Failed to parse INT2DDS_TCP_PUBLIC_ADDR '{}': {}", v, e);
+                None
+            }
+        }
+    })
+}
+
+/// Set the TCP public address via environment variable
+pub fn set_tcp_public_addr(addr: &std::net::SocketAddr) {
+    log::info!("Environment variable set: INT2DDS_TCP_PUBLIC_ADDR = {}", addr);
+    unsafe { std::env::set_var("INT2DDS_TCP_PUBLIC_ADDR", addr.to_string()) };
+}
+
+/// Check if TLS is enabled for TCP connections.
+/// Default: false (not yet implemented)
+pub fn is_tcp_tls_enabled() -> bool {
+    let enabled = std::env::var("INT2DDS_TCP_TLS_ENABLED")
+        .ok()
+        .and_then(|v| v.parse::<bool>().ok())
+        .unwrap_or(false);
+
+    if enabled {
+        log::warn!(
+            "INT2DDS_TCP_TLS_ENABLED=true but TLS is not yet implemented. Running plain TCP."
+        );
+    }
+    enabled
+}
+
+/// Get the TLS certificate file path (stub, not yet implemented)
+pub fn get_tcp_tls_cert_path() -> Option<String> {
+    std::env::var("INT2DDS_TCP_TLS_CERT_PATH").ok()
+}
+
+/// Get the TLS private key file path (stub, not yet implemented)
+pub fn get_tcp_tls_key_path() -> Option<String> {
+    std::env::var("INT2DDS_TCP_TLS_KEY_PATH").ok()
+}
+
+/// Get the TLS CA certificate file path (stub, not yet implemented)
+pub fn get_tcp_tls_ca_path() -> Option<String> {
+    std::env::var("INT2DDS_TCP_TLS_CA_PATH").ok()
 }
