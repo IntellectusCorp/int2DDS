@@ -268,15 +268,10 @@ impl Socket {
         let transport_type = get_transport_type();
         match transport_type {
             TransportType::TCP | TransportType::Hybrid => {
-                log::warn!(
+                panic!(
                     "[socket] TCP/Hybrid listener requires guid_prefix. \
                      Call create_socket_with_guid() instead of create_socket()."
                 );
-                if transport_type == TransportType::Hybrid {
-                    // Hybrid still needs UDP listeners for multicast discovery
-                    self.create_multicast_listener();
-                    self.create_unicast_listener();
-                }
             }
             TransportType::UDP => {
                 self.create_multicast_listener();
