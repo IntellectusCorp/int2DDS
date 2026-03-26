@@ -50,20 +50,25 @@ namespace Int2Dds.Core
             _topic = topic;
             _buffer = ArrayPool<byte>.Shared.Rent(DefaultBufferSize);
 
-            // Create QoS handle if provided
+            // Always create a QoS handle so that the native layer receives the
+            // correct DataRepresentation default (XCDR1) even when the caller
+            // does not supply an explicit QoS object.
             IntPtr qosHandle = IntPtr.Zero;
-            if (qos != null)
+            ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_qos_create_default(out qosHandle));
+            try
             {
-                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_qos_create_default(out qosHandle));
-                try
-                {
+                if (qos != null)
                     ApplyReaderQos(qosHandle, qos);
-                }
-                catch
-                {
-                    NativeMethods.int2dds_datareader_qos_destroy(qosHandle);
-                    throw;
-                }
+
+                // Ensure SEDP advertises the same encoding that C# actually uses.
+                if (qos?.DataRepresentation == null)
+                    ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datareader_qos_set_data_representation(
+                        qosHandle, (int)Qos.DataRepresentationKind.Xcdr1));
+            }
+            catch
+            {
+                NativeMethods.int2dds_datareader_qos_destroy(qosHandle);
+                throw;
             }
 
             try
@@ -96,8 +101,7 @@ namespace Int2Dds.Core
             }
             finally
             {
-                if (qosHandle != IntPtr.Zero)
-                    NativeMethods.int2dds_datareader_qos_destroy(qosHandle);
+                NativeMethods.int2dds_datareader_qos_destroy(qosHandle);
             }
         }
 
