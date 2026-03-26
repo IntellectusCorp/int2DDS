@@ -149,6 +149,20 @@ pub(crate) trait Transport: Send + Sync {
         self.send(addr, data)
     }
 
+    /// Send data to a remote endpoint's discovery channel.
+    /// For TCP, this routes to the peer's discovery logical port.
+    /// For UDP/SHM, this is equivalent to `send()`.
+    fn send_to_discovery(&self, addr: &SocketAddr, data: &[u8]) -> io::Result<usize> {
+        self.send(addr, data)
+    }
+
+    /// Send data to a remote endpoint's user data channel.
+    /// For TCP, this routes to the peer's user data logical port.
+    /// For UDP/SHM, this is equivalent to `send()`.
+    fn send_to_user_data(&self, addr: &SocketAddr, data: &[u8]) -> io::Result<usize> {
+        self.send(addr, data)
+    }
+
     /// Get the local port number used by this transport
     fn port(&self) -> u16;
 
@@ -239,6 +253,28 @@ impl Transport for TransportSender {
             TransportSender::Udp(sender) => sender.send(addr, data), // UDP ignores logical port
             TransportSender::Tcp(sender) => sender.send_to_logical_port(addr, logical_port, data),
             TransportSender::Shm(sender) => sender.send(addr, data), // SHM ignores logical port
+        }
+    }
+
+    fn send_to_discovery(&self, addr: &SocketAddr, data: &[u8]) -> io::Result<usize> {
+        match self {
+            TransportSender::Udp(sender) => sender.send(addr, data),
+            TransportSender::Tcp(sender) => {
+                let logical_port = sender.get_peer_discovery_port(addr)?;
+                sender.send_to_logical_port(addr, logical_port, data)
+            }
+            TransportSender::Shm(sender) => sender.send(addr, data),
+        }
+    }
+
+    fn send_to_user_data(&self, addr: &SocketAddr, data: &[u8]) -> io::Result<usize> {
+        match self {
+            TransportSender::Udp(sender) => sender.send(addr, data),
+            TransportSender::Tcp(sender) => {
+                let logical_port = sender.get_peer_user_port(addr)?;
+                sender.send_to_logical_port(addr, logical_port, data)
+            }
+            TransportSender::Shm(sender) => sender.send(addr, data),
         }
     }
 

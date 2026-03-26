@@ -247,15 +247,29 @@ impl TcpSender {
     }
 
     /// Get the discovery logical port for a remote peer.
+    /// Requires that a control connection has been established (peer_info cached).
     pub(crate) fn get_peer_discovery_port(&self, addr: &SocketAddr) -> io::Result<u16> {
-        let info = self.ensure_control_connection(addr)?;
-        Ok(PortManager::get_discovery_traffic_unicast_port(self.domain_id, info.participant_id))
+        let peer_info = self.peer_info.get(addr).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotConnected,
+                "No peer info (control connection not established)",
+            )
+        })?;
+        Ok(PortManager::get_discovery_traffic_unicast_port(
+            self.domain_id,
+            peer_info.participant_id,
+        ))
     }
 
     /// Get the user data logical port for a remote peer.
     pub(crate) fn get_peer_user_port(&self, addr: &SocketAddr) -> io::Result<u16> {
-        let info = self.ensure_control_connection(addr)?;
-        Ok(PortManager::get_user_traffic_unicast_port(self.domain_id, info.participant_id))
+        let peer_info = self.peer_info.get(addr).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotConnected,
+                "No peer info (control connection not established)",
+            )
+        })?;
+        Ok(PortManager::get_user_traffic_unicast_port(self.domain_id, peer_info.participant_id))
     }
 
     /// Disconnect all connections for a remote peer.
