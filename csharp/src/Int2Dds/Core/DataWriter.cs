@@ -33,10 +33,10 @@ namespace Int2Dds.Core
             IDataWriterListener listener = null, uint statusMask = 0)
         {
             _topic = topic;
-            _xcdr2 = qos?.DataRepresentation?.Kind != Qos.DataRepresentationKind.Xcdr1;
+            _xcdr2 = qos?.DataRepresentation?.Kind == Qos.DataRepresentationKind.Xcdr2;
 
             // Always create a QoS handle so that the native layer receives the
-            // correct DataRepresentation default (XCDR2) even when the caller
+            // correct DataRepresentation default (XCDR1) even when the caller
             // does not supply an explicit QoS object.
             IntPtr qosHandle = IntPtr.Zero;
             ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_qos_create_default(out qosHandle));
@@ -48,7 +48,7 @@ namespace Int2Dds.Core
                 // Ensure SEDP advertises the same encoding that C# actually uses.
                 if (qos?.DataRepresentation == null)
                     ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_datawriter_qos_set_data_representation(
-                        qosHandle, (int)Qos.DataRepresentationKind.Xcdr2));
+                        qosHandle, (int)Qos.DataRepresentationKind.Xcdr1));
             }
             catch
             {

@@ -177,10 +177,10 @@ namespace Int2Dds.Qos
 
     public class DataRepresentation
     {
-        public DataRepresentationKind Kind { get; set; } = DataRepresentationKind.Xcdr2;
+        public DataRepresentationKind Kind { get; set; } = DataRepresentationKind.Xcdr1;
 
         public DataRepresentation() { }
-        public DataRepresentation(DataRepresentationKind kind = DataRepresentationKind.Xcdr2)
+        public DataRepresentation(DataRepresentationKind kind = DataRepresentationKind.Xcdr1)
         {
             Kind = kind;
         }
