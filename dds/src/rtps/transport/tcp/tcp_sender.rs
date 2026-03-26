@@ -437,10 +437,12 @@ impl TcpSender {
 
 /// Implementation of Transport trait for TcpSender
 impl Transport for TcpSender {
+    // do not use this method in TCP transporting. Use send_to_discovery() or send_to_user_data() which accord with your purpose.
     fn send(&self, addr: &SocketAddr, data: &[u8]) -> io::Result<usize> {
-        // Default send -> user data logical port
-        let logical_port = self.get_peer_user_port(addr)?;
-        self.send_to_logical_port(addr, logical_port, data)
+        Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "TCP requires send_to_discovery() or send_to_user_data(). Direct send() is not supported.",
+    ))
     }
 
     fn send_multicast(&self, _domain_id: u32, _data: &[u8]) -> io::Result<usize> {
