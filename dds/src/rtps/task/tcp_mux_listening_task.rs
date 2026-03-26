@@ -4,8 +4,6 @@ use std::time::{Duration, Instant};
 use log::{debug, error, info, warn};
 use mio::{Events, Interest, Poll, Token};
 
-use crate::rtps::common::guid::GuidPrefix;
-use crate::rtps::entities::entity::Entity;
 use crate::rtps::entities::participant::Participant;
 use crate::rtps::transport::socket::MAX_EVENTS;
 use crate::rtps::transport::tcp::tcp_mux_listener::TcpMuxListener;
@@ -29,13 +27,11 @@ const KEEPALIVE_CHECK_INTERVAL_SECS: u64 = 10;
 pub(crate) struct TcpMuxListeningTask {
     mux_listener: TcpMuxListener,
     participant: Weak<Participant>,
-    guid_prefix: GuidPrefix,
 }
 
 impl TcpMuxListeningTask {
     pub(crate) fn new(mux_listener: TcpMuxListener, participant: Arc<Participant>) -> Self {
-        let guid_prefix = participant.guid().prefix();
-        Self { mux_listener, participant: Arc::downgrade(&participant), guid_prefix }
+        Self { mux_listener, participant: Arc::downgrade(&participant) }
     }
 
     /// Main event loop, Blocks until participant is terminated.
