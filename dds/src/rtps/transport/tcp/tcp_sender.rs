@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::DashMap;
-use log::{debug, info};
+use log::debug;
 use socket2::{Domain, Protocol, SockAddr, Socket as Socket2, Type};
 
 use crate::rtps::common::guid::GuidPrefix;
@@ -105,7 +105,7 @@ impl TcpSender {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(Self::DEFAULT_CONNECT_TIMEOUT_MS);
 
-        info!(
+        debug!(
             "TcpSender: Created (domain={}, pid={}, listener_port={})",
             domain_id, participant_id, listener_port
         );
@@ -160,7 +160,7 @@ impl TcpSender {
 
         let mut stream = self.tcp_connect(physical_addr)?;
 
-        // BIND handshake: send BindReqeust(Control)
+        // BIND handshake: send BindRequest(Control)
         let bind_req = ControlMsg::BindRequest(BindRequest {
             guid_prefix: self.local_guid_prefix,
             domain_id: self.domain_id,
@@ -183,8 +183,8 @@ impl TcpSender {
         self.peer_info.insert(*physical_addr, info.clone());
 
         debug!(
-            "TcpSender: Control connection to {:?} (remote pid={})",
-            physical_addr, info.participant_id
+            "TcpSender: Control BIND complete to {:?} (remote pid={}, remote listener_port={})",
+            physical_addr, info.participant_id, info.listener_port
         );
 
         Ok(info)
@@ -223,7 +223,10 @@ impl TcpSender {
 
         self.connections.insert(key, stream);
 
-        debug!("TcpSender: Data connection to {:?} logical_port={}", physical_addr, logical_port);
+        debug!(
+            "TcpSender: Data BIND complete to {:?} logical_port={}",
+            physical_addr, logical_port
+        );
 
         Ok(())
     }
@@ -343,6 +346,7 @@ impl TcpSender {
         }
 
         socket2.set_nonblocking(false)?;
+
         let stream: TcpStream = socket2.into();
 
         let _ = stream.set_nodelay(Self::get_nodelay());

@@ -1503,8 +1503,9 @@ impl SedpLogic {
                     match buffer {
                         Ok(buffer) => {
                             for locator in reader_proxy.unicast_locator_list() {
-                                if locator.kind() == 1 {
-                                    //UDPv4
+                                if locator.kind() == LOCATOR_KIND_UDP_V4
+                                    || locator.kind() == LOCATOR_KIND_UDP_V6
+                                {
                                     let socket_addr = SocketAddr::V4(SocketAddrV4::new(
                                         locator.to_ip_v4_addr(),
                                         locator.port() as u16,
@@ -1518,7 +1519,25 @@ impl SedpLogic {
                                     } else {
                                         debug!("UDP sender not available, skipping SEDP heartbeat");
                                     }
-                                };
+                                } else if locator.kind() == LOCATOR_KIND_TCP_V4
+                                    || locator.kind() == LOCATOR_KIND_TCP_V6
+                                {
+                                    let socket_addr = SocketAddr::V4(SocketAddrV4::new(
+                                        locator.to_ip_v4_addr(),
+                                        locator.port() as u16,
+                                    ));
+                                    if let Some(ref sender) = self.sender {
+                                        if let Err(e) =
+                                            sender.send_to_discovery(&socket_addr, &buffer)
+                                        {
+                                            warn!("Failed to send SEDP heartbeat via TCP: {:?}", e);
+                                        } else {
+                                            is_sent = true;
+                                        }
+                                    } else {
+                                        debug!("TCP sender not available, skipping SEDP heartbeat");
+                                    }
+                                }
                             }
                             writer.increase_heartbeat_count();
                             if writer.last_change_sequence_number() != SequenceNumber::ZERO {
@@ -2536,8 +2555,12 @@ mod tests {
         let domain_id = unique_domain_id() as u32;
         let mut socket = Socket::new(domain_id); //domain_id 0
         socket.create_socket();
-        let participant =
-            Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ips()));
+        let participant = Arc::new(Participant::new(
+            domain_id,
+            socket.participant_id(),
+            socket.working_ips(),
+            None,
+        ));
 
         // Socket reset required??
         // socket.close();
@@ -2588,8 +2611,12 @@ mod tests {
         let domain_id = unique_domain_id() as u32;
         let mut socket = Socket::new(domain_id); //domain_id 0
         socket.create_socket();
-        let participant =
-            Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ips()));
+        let participant = Arc::new(Participant::new(
+            domain_id,
+            socket.participant_id(),
+            socket.working_ips(),
+            None,
+        ));
 
         let _ = SendingHandler::get_instance(participant.clone(), Some(socket.sender()), None);
 
