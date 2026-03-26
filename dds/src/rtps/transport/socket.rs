@@ -411,56 +411,37 @@ impl Socket {
             }
             Err(e) => {
                 log::warn!(
-                    "[socket] Failed to create TCP MuxListener on port {}: {}. \
-                     Falling back to discovery unicast port.",
+                    "[socket] Failed to bind TCP MuxListener on port {}: {}. \
+                     Falling back to ephemeral port.",
                     physical_port,
                     e,
                 );
-                // Fallback: try binding to discovery unicast port
-                let fallback_port = PortManager::get_discovery_traffic_unicast_port(
-                    self.domain_id,
-                    self.participant_id,
-                );
+                // Fallback: bind to OS-assigned ephemeral port (port 0)
+                // Avoids collision with logical ports in the RTPS port range
+                let (dtx, drx) = bounded(TCP_MUX_CHANNEL_CAPACITY);
+                let (utx, urx) = bounded(TCP_MUX_CHANNEL_CAPACITY);
                 match TcpMuxListener::new(
-                    fallback_port,
+                    0,
                     self.domain_id,
                     self.participant_id,
                     guid_prefix,
-                    bounded(TCP_MUX_CHANNEL_CAPACITY).0, // new channels for fallback
-                    bounded(TCP_MUX_CHANNEL_CAPACITY).0,
+                    dtx,
+                    utx,
                 ) {
                     Ok(listener) => {
-                        // Need to recreate channels since we can't reuse the ones above
-                        let (dtx, drx) = bounded(TCP_MUX_CHANNEL_CAPACITY);
-                        let (utx, urx) = bounded(TCP_MUX_CHANNEL_CAPACITY);
-                        // Re-create with proper channels
-                        match TcpMuxListener::new(
-                            fallback_port,
-                            self.domain_id,
-                            self.participant_id,
-                            guid_prefix,
-                            dtx,
-                            utx,
-                        ) {
-                            Ok(listener) => {
-                                log::info!(
-                                    "[socket] TCP MuxListener fallback on port {}",
-                                    listener.port()
-                                );
-                                self.tcp_mux_listener = Some(listener);
-                                self.tcp_discovery_rx = Some(drx);
-                                self.tcp_user_data_rx = Some(urx);
-                            }
-                            Err(e2) => {
-                                log::error!(
-                                    "[socket] TCP MuxListener fallback also failed: {}",
-                                    e2
-                                );
-                            }
-                        }
+                        log::info!(
+                            "[socket] TCP MuxListener fallback on ephemeral port {}",
+                            listener.port()
+                        );
+                        self.tcp_mux_listener = Some(listener);
+                        self.tcp_discovery_rx = Some(drx);
+                        self.tcp_user_data_rx = Some(urx);
                     }
                     Err(e2) => {
-                        log::error!("[socket] TCP MuxListener fallback also failed: {}", e2);
+                        log::error!(
+                            "[socket] TCP MuxListener ephemeral fallback also failed: {}",
+                            e2
+                        );
                     }
                 }
             }

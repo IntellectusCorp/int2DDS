@@ -467,6 +467,20 @@ impl Transport for TcpSender {
         TcpSender::send_to_logical_port(self, addr, logical_port, data)
     }
 
+    fn send_to_discovery(&self, addr: &SocketAddr, data: &[u8]) -> io::Result<usize> {
+        // Ensure control connection first (populates peer_info)
+        self.ensure_control_connection(addr)?;
+        let logical_port = self.get_peer_discovery_port(addr)?;
+        self.send_to_logical_port(addr, logical_port, data)
+    }
+
+    fn send_to_user_data(&self, addr: &SocketAddr, data: &[u8]) -> io::Result<usize> {
+        // Ensure control connection first (populates peer_info)
+        self.ensure_control_connection(addr)?;
+        let logical_port = self.get_peer_user_port(addr)?;
+        self.send_to_logical_port(addr, logical_port, data)
+    }
+
     fn close(self) {
         self.close_all();
     }
