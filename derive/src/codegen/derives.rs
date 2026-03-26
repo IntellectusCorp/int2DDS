@@ -47,7 +47,6 @@ pub fn generate_default_fields(input: &DeriveInput) -> Vec<proc_macro2::TokenStr
                     let name = field.ident.as_ref().unwrap();
                     if let syn::Type::Array(arr) = &field.ty {
                         let elem = &arr.elem;
-                        let len = &arr.len;
                         quote! { #name: core::array::from_fn(|_| <#elem as Default>::default()) }
                     } else {
                         quote! { #name: Default::default() }
