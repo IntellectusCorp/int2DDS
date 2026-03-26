@@ -131,10 +131,14 @@ impl Entity for Participant {
 }
 
 impl Participant {
+    /// Create a new Participant.
+    /// `tcp_listener_port` is the actual TCP listener port (may differ from calculated physical port
+    /// if fallback to ephemeral port occurred). Pass `None` for non-TCP transport.
     pub(crate) fn new(
         domain_id: DomainId,
         participant_id: ParticipantId,
         working_ips: Vec<String>,
+        tcp_listener_port: Option<u16>,
     ) -> Self {
         let guid = Guid::new(Guid::generate_unique_guid_prefix(), EntityId::PARTICIPANT);
 
@@ -149,6 +153,7 @@ impl Participant {
             &mut local_participant_proxy_data,
             domain_id,
             participant_id,
+            tcp_listener_port,
         );
 
         let local_participant_proxy_data = Arc::new(local_participant_proxy_data);
@@ -202,13 +207,16 @@ impl Participant {
         local_participant_proxy_data: &mut SPDPDiscoveredParticipantData,
         domain_id: DomainId,
         participant_id: ParticipantId,
+        tcp_listener_port: Option<u16>,
     ) {
         let transport_type = get_transport_type();
         let metatraffic_port =
             PortManager::get_discovery_traffic_unicast_port(domain_id, participant_id) as u32;
         let user_port =
             PortManager::get_user_traffic_unicast_port(domain_id, participant_id) as u32;
-        let tcp_physical_port = PortManager::get_tcp_physical_port(domain_id) as u32;
+        let tcp_physical_port = tcp_listener_port
+            .map(|p| p as u32)
+            .unwrap_or_else(|| PortManager::get_tcp_physical_port(domain_id) as u32);
 
         for working_ip in working_ips {
             let Ok(ip) = Ipv4Addr::from_str(working_ip) else {

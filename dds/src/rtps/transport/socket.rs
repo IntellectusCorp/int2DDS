@@ -107,8 +107,9 @@ impl Socket {
     /// Create socket with guid_prefix for TCP mux mode.
     /// Must be called instead of create_socket() when TCP/Hybrid transport is used.
     pub(crate) fn create_socket_with_guid(&mut self, guid_prefix: GuidPrefix) {
-        self.create_sender_with_guid(guid_prefix);
+        // Create listener first so sender can use actual TCP listener port
         self.create_listener_with_guid(guid_prefix);
+        self.create_sender_with_guid(guid_prefix);
     }
 
     //sender
@@ -146,7 +147,7 @@ impl Socket {
                 ) {
                     Ok(udp_sender) => {
                         let transport_sender = TransportSender::Udp(udp_sender);
-                        log::info!("[socket] SHM mode: UDP sender created for discovery");
+                        log::debug!("[socket] SHM mode: UDP sender created for discovery");
                         Some(Arc::new(transport_sender))
                     }
                     Err(e) => {
@@ -180,17 +181,20 @@ impl Socket {
 
         match transport_type {
             TransportType::TCP => {
-                let tcp_physical_port = PortManager::get_tcp_physical_port(self.domain_id);
+                // Use actual listener port (may differ from calculated port if fallback occurred)
+                let listener_port = self
+                    .tcp_mux_listener_port()
+                    .unwrap_or_else(|| PortManager::get_tcp_physical_port(self.domain_id));
                 let tcp_sender_arc = match TcpSender::new(
                     self.get_sender_bind_addr(),
                     guid_prefix,
                     self.domain_id,
                     self.participant_id,
-                    tcp_physical_port,
+                    listener_port,
                 ) {
                     Ok(tcp_sender) => {
                         let transport_sender = TransportSender::Tcp(tcp_sender);
-                        log::info!("[socket] TCP sender created");
+                        log::debug!("[socket] TCP sender created");
                         Arc::new(transport_sender)
                     }
                     Err(e) => {
@@ -210,7 +214,7 @@ impl Socket {
                 ) {
                     Ok(udp_sender) => {
                         let transport_sender = TransportSender::Udp(udp_sender);
-                        log::info!("[socket] Hybrid mode: UDP sender created");
+                        log::debug!("[socket] Hybrid mode: UDP sender created");
                         Some(Arc::new(transport_sender))
                     }
                     Err(e) => {
@@ -219,17 +223,19 @@ impl Socket {
                     }
                 };
 
-                // Create TCP sender as secondary
-                let tcp_physical_port = PortManager::get_tcp_physical_port(self.domain_id);
+                // Create TCP sender as secondary - use actual listener port
+                let listener_port = self
+                    .tcp_mux_listener_port()
+                    .unwrap_or_else(|| PortManager::get_tcp_physical_port(self.domain_id));
                 self.tcp_sender = match TcpSender::new(
                     self.get_sender_bind_addr(),
                     guid_prefix,
                     self.domain_id,
                     self.participant_id,
-                    tcp_physical_port,
+                    listener_port,
                 ) {
                     Ok(tcp_sender) => {
-                        log::info!("[socket] Hybrid mode: TCP sender created");
+                        log::debug!("[socket] Hybrid mode: TCP sender created");
                         Some(Arc::new(TransportSender::Tcp(tcp_sender)))
                     }
                     Err(e) => {
@@ -276,12 +282,12 @@ impl Socket {
             TransportType::UDP => {
                 self.create_multicast_listener();
                 self.create_unicast_listener();
-                log::info!("[socket] UDP listeners created");
+                log::debug!("[socket] UDP listeners created");
             }
             TransportType::SHM => {
                 self.create_multicast_listener();
                 self.create_unicast_listener();
-                log::info!("[socket] SHM mode: UDP listeners created for discovery");
+                log::debug!("[socket] SHM mode: UDP listeners created for discovery");
                 self.create_shm_listener();
             }
         }
@@ -293,13 +299,13 @@ impl Socket {
         match transport_type {
             TransportType::TCP => {
                 self.create_tcp_mux_listener(guid_prefix);
-                log::info!("[socket] TCP MuxListener created");
+                log::debug!("[socket] TCP MuxListener created");
             }
             TransportType::Hybrid => {
                 self.create_multicast_listener();
                 self.create_unicast_listener();
                 self.create_tcp_mux_listener(guid_prefix);
-                log::info!("[socket] Hybrid mode: UDP and TCP MuxListener created");
+                log::debug!("[socket] Hybrid mode: UDP and TCP MuxListener created");
             }
             _ => {
                 // UDP/SHM don't need guid_prefix — delegate to regular create_listener
@@ -448,6 +454,11 @@ impl Socket {
         }
     }
 
+    /// Get the TCP mux listener's actual bound port (without consuming the listener)
+    pub(crate) fn tcp_mux_listener_port(&self) -> Option<u16> {
+        self.tcp_mux_listener.as_ref().map(|l| l.port())
+    }
+
     /// Take the TcpMuxListener (for the mux listening task thread)
     pub(crate) fn tcp_mux_listener(&mut self) -> Option<TcpMuxListener> {
         self.tcp_mux_listener.take()
@@ -467,7 +478,7 @@ impl Socket {
     fn create_shm_listener(&mut self) {
         match ShmListener::new(self.domain_id) {
             Ok(listener) => {
-                log::info!("[socket] SHM listener created for domain {}", self.domain_id);
+                log::debug!("[socket] SHM listener created for domain {}", self.domain_id);
                 self.shm_listener = Some(listener);
             }
             Err(e) => {

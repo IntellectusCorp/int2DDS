@@ -195,8 +195,12 @@ mod tests {
         let domain_id: DomainId = 17;
         let mut socket = Socket::new(domain_id);
         socket.create_socket();
-        let participant =
-            Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ips()));
+        let participant = Arc::new(Participant::new(
+            domain_id,
+            socket.participant_id(),
+            socket.working_ips(),
+            None,
+        ));
 
         let mut user_unicast_listening_task = UserUnicastListeningTask::new(
             socket.user_traffic_unicast_listener(),

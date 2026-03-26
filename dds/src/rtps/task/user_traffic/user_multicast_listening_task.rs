@@ -93,8 +93,12 @@ mod tests {
         let mut socket = Socket::new(domain_id); //domain_id 0
                                                  // Create both sender and listener
         socket.create_socket();
-        let participant =
-            Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ips()));
+        let participant = Arc::new(Participant::new(
+            domain_id,
+            socket.participant_id(),
+            socket.working_ips(),
+            None,
+        ));
 
         // socket.close();
         // return;

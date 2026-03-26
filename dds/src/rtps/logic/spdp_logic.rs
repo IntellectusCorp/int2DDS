@@ -304,8 +304,12 @@ mod tests {
         let domain_id = unique_domain_id() as u32;
         let mut socket = Socket::new(domain_id);
         socket.create_socket();
-        let participant =
-            Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ips()));
+        let participant = Arc::new(Participant::new(
+            domain_id,
+            socket.participant_id(),
+            socket.working_ips(),
+            None,
+        ));
 
         // socket.create_sender();
         let _ = SendingHandler::get_instance(
