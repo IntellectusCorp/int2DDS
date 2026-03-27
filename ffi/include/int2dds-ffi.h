@@ -900,6 +900,60 @@ Int2DdsRet int2dds_create_publisher_with_qos(const struct Int2DdsParticipant *pa
                                              struct Int2DdsPublisher **publisher_out);
 
 /**
+ * Set QoS on a Publisher
+ *
+ * Applies new QoS policies to an existing Publisher. Some policies can only
+ * be changed before the entity is enabled; attempting to change immutable
+ * policies on an enabled entity returns IMMUTABLE_POLICY.
+ *
+ * # Safety
+ * - `publisher` must be a valid publisher
+ * - `qos` must be a valid publisher QoS handle
+ */
+Int2DdsRet int2dds_publisher_set_qos(const struct Int2DdsPublisher *publisher,
+                                     const struct Int2DdsPublisherQos *qos);
+
+/**
+ * Get QoS from a Publisher
+ *
+ * Returns a new QoS handle containing the current QoS policies of the Publisher.
+ * The returned handle must be freed with `int2dds_publisher_qos_destroy`.
+ *
+ * # Safety
+ * - `publisher` must be a valid publisher
+ * - `qos_out` must be a valid pointer to a null pointer
+ */
+Int2DdsRet int2dds_publisher_get_qos(const struct Int2DdsPublisher *publisher,
+                                     struct Int2DdsPublisherQos **qos_out);
+
+/**
+ * Set QoS on a DataWriter
+ *
+ * Applies new QoS policies to an existing DataWriter. Some policies can only
+ * be changed before the entity is enabled; attempting to change immutable
+ * policies on an enabled entity returns IMMUTABLE_POLICY.
+ *
+ * # Safety
+ * - `writer` must be a valid datawriter
+ * - `qos` must be a valid datawriter QoS handle
+ */
+Int2DdsRet int2dds_datawriter_set_qos(const struct Int2DdsDataWriter *writer,
+                                      const struct Int2DdsDataWriterQos *qos);
+
+/**
+ * Get QoS from a DataWriter
+ *
+ * Returns a new QoS handle containing the current QoS policies of the DataWriter.
+ * The returned handle must be freed with `int2dds_datawriter_qos_destroy`.
+ *
+ * # Safety
+ * - `writer` must be a valid datawriter
+ * - `qos_out` must be a valid pointer to a null pointer
+ */
+Int2DdsRet int2dds_datawriter_get_qos(const struct Int2DdsDataWriter *writer,
+                                      struct Int2DdsDataWriterQos **qos_out);
+
+/**
  * Delete a Publisher
  *
  * # Safety
@@ -1320,6 +1374,95 @@ Int2DdsRet int2dds_datawriter_qos_set_writer_data_lifecycle(struct Int2DdsDataWr
                                                             bool autodispose);
 
 /**
+ * Get reliability QoS from DataWriter QoS handle
+ */
+Int2DdsRet int2dds_datawriter_qos_get_reliability(const struct Int2DdsDataWriterQos *qos,
+                                                  int32_t *kind_out,
+                                                  int64_t *max_blocking_time_ns_out);
+
+/**
+ * Get durability QoS from DataWriter QoS handle
+ */
+Int2DdsRet int2dds_datawriter_qos_get_durability(const struct Int2DdsDataWriterQos *qos,
+                                                 int32_t *kind_out);
+
+/**
+ * Get history QoS from DataWriter QoS handle
+ */
+Int2DdsRet int2dds_datawriter_qos_get_history(const struct Int2DdsDataWriterQos *qos,
+                                              int32_t *kind_out,
+                                              int32_t *depth_out);
+
+/**
+ * Get ownership QoS from DataWriter QoS handle
+ */
+Int2DdsRet int2dds_datawriter_qos_get_ownership(const struct Int2DdsDataWriterQos *qos,
+                                                int32_t *kind_out);
+
+/**
+ * Get ownership strength from DataWriter QoS handle
+ */
+Int2DdsRet int2dds_datawriter_qos_get_ownership_strength(const struct Int2DdsDataWriterQos *qos,
+                                                         int32_t *value_out);
+
+/**
+ * Get resource limits from DataWriter QoS handle
+ */
+Int2DdsRet int2dds_datawriter_qos_get_resource_limits(const struct Int2DdsDataWriterQos *qos,
+                                                      int32_t *max_samples_out,
+                                                      int32_t *max_instances_out,
+                                                      int32_t *max_per_instance_out);
+
+/**
+ * Get lifespan from DataWriter QoS handle
+ */
+Int2DdsRet int2dds_datawriter_qos_get_lifespan(const struct Int2DdsDataWriterQos *qos,
+                                               int64_t *duration_ns_out);
+
+/**
+ * Get destination order from DataWriter QoS handle
+ */
+Int2DdsRet int2dds_datawriter_qos_get_destination_order(const struct Int2DdsDataWriterQos *qos,
+                                                        int32_t *kind_out);
+
+/**
+ * Get deadline from DataWriter QoS handle
+ */
+Int2DdsRet int2dds_datawriter_qos_get_deadline(const struct Int2DdsDataWriterQos *qos,
+                                               int64_t *period_ns_out);
+
+/**
+ * Get liveliness from DataWriter QoS handle
+ */
+Int2DdsRet int2dds_datawriter_qos_get_liveliness(const struct Int2DdsDataWriterQos *qos,
+                                                 int32_t *kind_out,
+                                                 int64_t *lease_duration_ns_out);
+
+/**
+ * Get data representation from DataWriter QoS handle
+ */
+Int2DdsRet int2dds_datawriter_qos_get_data_representation(const struct Int2DdsDataWriterQos *qos,
+                                                          int32_t *kind_out);
+
+/**
+ * Get transport priority from DataWriter QoS handle
+ */
+Int2DdsRet int2dds_datawriter_qos_get_transport_priority(const struct Int2DdsDataWriterQos *qos,
+                                                         int32_t *value_out);
+
+/**
+ * Get latency budget from DataWriter QoS handle
+ */
+Int2DdsRet int2dds_datawriter_qos_get_latency_budget(const struct Int2DdsDataWriterQos *qos,
+                                                     int64_t *duration_ns_out);
+
+/**
+ * Get writer data lifecycle from DataWriter QoS handle
+ */
+Int2DdsRet int2dds_datawriter_qos_get_writer_data_lifecycle(const struct Int2DdsDataWriterQos *qos,
+                                                            bool *autodispose_out);
+
+/**
  * Destroy DataWriter QoS
  *
  * # Safety
@@ -1451,6 +1594,48 @@ Int2DdsRet int2dds_datareader_qos_set_user_data(struct Int2DdsDataReaderQos *qos
 Int2DdsRet int2dds_datareader_qos_set_reader_data_lifecycle(struct Int2DdsDataReaderQos *qos,
                                                             int64_t autopurge_nowriter_ns,
                                                             int64_t autopurge_disposed_ns);
+
+Int2DdsRet int2dds_datareader_qos_get_reliability(const struct Int2DdsDataReaderQos *qos,
+                                                  int32_t *kind_out,
+                                                  int64_t *max_blocking_time_ns_out);
+
+Int2DdsRet int2dds_datareader_qos_get_durability(const struct Int2DdsDataReaderQos *qos,
+                                                 int32_t *kind_out);
+
+Int2DdsRet int2dds_datareader_qos_get_history(const struct Int2DdsDataReaderQos *qos,
+                                              int32_t *kind_out,
+                                              int32_t *depth_out);
+
+Int2DdsRet int2dds_datareader_qos_get_ownership(const struct Int2DdsDataReaderQos *qos,
+                                                int32_t *kind_out);
+
+Int2DdsRet int2dds_datareader_qos_get_resource_limits(const struct Int2DdsDataReaderQos *qos,
+                                                      int32_t *max_samples_out,
+                                                      int32_t *max_instances_out,
+                                                      int32_t *max_per_instance_out);
+
+Int2DdsRet int2dds_datareader_qos_get_destination_order(const struct Int2DdsDataReaderQos *qos,
+                                                        int32_t *kind_out);
+
+Int2DdsRet int2dds_datareader_qos_get_deadline(const struct Int2DdsDataReaderQos *qos,
+                                               int64_t *period_ns_out);
+
+Int2DdsRet int2dds_datareader_qos_get_liveliness(const struct Int2DdsDataReaderQos *qos,
+                                                 int32_t *kind_out,
+                                                 int64_t *lease_duration_ns_out);
+
+Int2DdsRet int2dds_datareader_qos_get_data_representation(const struct Int2DdsDataReaderQos *qos,
+                                                          int32_t *kind_out);
+
+Int2DdsRet int2dds_datareader_qos_get_latency_budget(const struct Int2DdsDataReaderQos *qos,
+                                                     int64_t *duration_ns_out);
+
+Int2DdsRet int2dds_datareader_qos_get_time_based_filter(const struct Int2DdsDataReaderQos *qos,
+                                                        int64_t *min_separation_ns_out);
+
+Int2DdsRet int2dds_datareader_qos_get_reader_data_lifecycle(const struct Int2DdsDataReaderQos *qos,
+                                                            int64_t *autopurge_nowriter_ns_out,
+                                                            int64_t *autopurge_disposed_ns_out);
 
 /**
  * Destroy DataReader QoS
@@ -1794,6 +1979,28 @@ Int2DdsRet int2dds_create_subscriber_with_qos(const struct Int2DdsParticipant *p
                                               struct Int2DdsSubscriber **subscriber_out);
 
 /**
+ * Set QoS on a Subscriber
+ *
+ * # Safety
+ * - `subscriber` must be a valid subscriber
+ * - `qos` must be a valid subscriber QoS handle
+ */
+Int2DdsRet int2dds_subscriber_set_qos(const struct Int2DdsSubscriber *subscriber,
+                                      const struct Int2DdsSubscriberQos *qos);
+
+/**
+ * Get QoS from a Subscriber
+ *
+ * The returned handle must be freed with `int2dds_subscriber_qos_destroy`.
+ *
+ * # Safety
+ * - `subscriber` must be a valid subscriber
+ * - `qos_out` must be a valid pointer to a null pointer
+ */
+Int2DdsRet int2dds_subscriber_get_qos(const struct Int2DdsSubscriber *subscriber,
+                                      struct Int2DdsSubscriberQos **qos_out);
+
+/**
  * Delete a Subscriber
  *
  * # Safety
@@ -1861,6 +2068,28 @@ Int2DdsRet int2dds_datareader_set_listener(struct Int2DdsDataReader *reader,
  */
 Int2DdsRet int2dds_datareader_get_listener(const struct Int2DdsDataReader *reader,
                                            struct Int2DdsDataReaderListener *listener_out);
+
+/**
+ * Set QoS on a DataReader
+ *
+ * # Safety
+ * - `reader` must be a valid datareader
+ * - `qos` must be a valid datareader QoS handle
+ */
+Int2DdsRet int2dds_datareader_set_qos(const struct Int2DdsDataReader *reader,
+                                      const struct Int2DdsDataReaderQos *qos);
+
+/**
+ * Get QoS from a DataReader
+ *
+ * The returned handle must be freed with `int2dds_datareader_qos_destroy`.
+ *
+ * # Safety
+ * - `reader` must be a valid datareader
+ * - `qos_out` must be a valid pointer to a null pointer
+ */
+Int2DdsRet int2dds_datareader_get_qos(const struct Int2DdsDataReader *reader,
+                                      struct Int2DdsDataReaderQos **qos_out);
 
 /**
  * Delete a DataReader
@@ -2212,6 +2441,28 @@ Int2DdsRet int2dds_create_topic_with_type_info(const struct Int2DdsParticipant *
                                                const struct Int2DdsTypeInfo *type_info,
                                                const struct Int2DdsTopicQos *qos,
                                                struct Int2DdsTopic **topic_out);
+
+/**
+ * Set QoS on a Topic
+ *
+ * # Safety
+ * - `topic` must be a valid topic
+ * - `qos` must be a valid topic QoS handle
+ */
+Int2DdsRet int2dds_topic_set_qos(const struct Int2DdsTopic *topic,
+                                 const struct Int2DdsTopicQos *qos);
+
+/**
+ * Get QoS from a Topic
+ *
+ * The returned handle must be freed with `int2dds_topic_qos_destroy`.
+ *
+ * # Safety
+ * - `topic` must be a valid topic
+ * - `qos_out` must be a valid pointer to a null pointer
+ */
+Int2DdsRet int2dds_topic_get_qos(const struct Int2DdsTopic *topic,
+                                 struct Int2DdsTopicQos **qos_out);
 
 /**
  * Delete a Topic

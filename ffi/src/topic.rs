@@ -209,6 +209,50 @@ pub unsafe extern "C" fn int2dds_create_topic_with_type_info(
     INT2DDS_RET_OK
 }
 
+/// Set QoS on a Topic
+///
+/// # Safety
+/// - `topic` must be a valid topic
+/// - `qos` must be a valid topic QoS handle
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_topic_set_qos(
+    topic: *const Int2DdsTopic,
+    qos: *const Int2DdsTopicQos,
+) -> Int2DdsRet {
+    check_null!(topic);
+    check_null!(qos);
+
+    let topic_ref = &*topic;
+    let qos_ref = &*qos;
+
+    ffi_try!(topic_ref.inner.set_qos(qos_ref.inner.clone()));
+
+    INT2DDS_RET_OK
+}
+
+/// Get QoS from a Topic
+///
+/// The returned handle must be freed with `int2dds_topic_qos_destroy`.
+///
+/// # Safety
+/// - `topic` must be a valid topic
+/// - `qos_out` must be a valid pointer to a null pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_topic_get_qos(
+    topic: *const Int2DdsTopic,
+    qos_out: *mut *mut Int2DdsTopicQos,
+) -> Int2DdsRet {
+    check_null!(topic);
+    check_null!(qos_out);
+
+    let topic_ref = &*topic;
+    let qos = ffi_try!(topic_ref.inner.get_qos());
+    let boxed = Box::new(Int2DdsTopicQos { inner: qos });
+    *qos_out = Box::into_raw(boxed);
+
+    INT2DDS_RET_OK
+}
+
 /// Delete a Topic
 ///
 /// # Safety
