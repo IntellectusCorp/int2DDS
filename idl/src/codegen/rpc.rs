@@ -7,6 +7,11 @@ use crate::naming;
 use crate::naming::to_snake_case;
 use crate::types::*;
 
+/// Convert to snake_case and escape Rust keywords.
+fn rs_ident(name: &str) -> String {
+    naming::escape_keyword(&to_snake_case(name), naming::TargetLang::Rust)
+}
+
 /// HASH function (7.5.1.1.2)
 ///
 /// Computes a 32-bit hash from the first 4 bytes of an MD5 digest (little-endian).
@@ -87,7 +92,7 @@ impl<'a> RpcGen<'a> {
         self.line(&format!("pub struct {} {{", rust_name));
         self.indent += 1;
         for m in &exc.members {
-            let field_name = naming::escape_keyword(&naming::to_snake_case(&m.name), naming::TargetLang::Rust);
+            let field_name = rs_ident(&m.name);
             let field_type = self.type_to_rust(&m.resolved_type);
             self.line(&format!("pub {}: {},", field_name, field_type));
         }
@@ -470,19 +475,18 @@ impl<'a> RpcGen<'a> {
 
             let mut params = String::from("&self");
             for p in &op.params {
-                let param_name = naming::escape_keyword(&to_snake_case(&p.name), naming::TargetLang::Rust);
                 match p.direction {
                     ResolvedParamDirection::In => {
                         let ty = self.type_to_rust(&p.resolved_type);
-                        params.push_str(&format!(", {}: {}", param_name, ty));
+                        params.push_str(&format!(", {}: {}", rs_ident(&p.name), ty));
                     }
                     ResolvedParamDirection::Out => {
                         let ty = self.type_to_rust(&p.resolved_type);
-                        params.push_str(&format!(", {}: &mut {}", param_name, ty));
+                        params.push_str(&format!(", {}: &mut {}", rs_ident(&p.name), ty));
                     }
                     ResolvedParamDirection::Inout => {
                         let ty = self.type_to_rust(&p.resolved_type);
-                        params.push_str(&format!(", {}: &mut {}", param_name, ty));
+                        params.push_str(&format!(", {}: &mut {}", rs_ident(&p.name), ty));
                     }
                 }
             }
@@ -582,7 +586,10 @@ impl<'a> RpcGen<'a> {
             if in_params.is_empty() {
                 self.line(&format!("{}::{}(_) => {{", call_type, variant));
             } else {
-                let fields: Vec<String> = in_params.iter().map(|p| naming::escape_keyword(&p.name, naming::TargetLang::Rust)).collect();
+                let fields: Vec<String> = in_params
+                    .iter()
+                    .map(|p| naming::escape_keyword(&p.name, naming::TargetLang::Rust))
+                    .collect();
                 self.line(&format!(
                     "{}::{}({} {{ {} }}) => {{",
                     call_type,
@@ -597,7 +604,6 @@ impl<'a> RpcGen<'a> {
             let mut call_args = Vec::new();
             for p in &op.params {
                 let param_name = naming::escape_keyword(&p.name, naming::TargetLang::Rust);
-                let param_snake = naming::escape_keyword(&to_snake_case(&p.name), naming::TargetLang::Rust);
                 match p.direction {
                     ResolvedParamDirection::In => {
                         if Self::is_copy_type(&p.resolved_type) {
@@ -607,11 +613,8 @@ impl<'a> RpcGen<'a> {
                         }
                     }
                     ResolvedParamDirection::Out => {
-                        self.line(&format!(
-                            "let mut {} = Default::default();",
-                            param_snake
-                        ));
-                        call_args.push(format!("&mut {}", param_snake));
+                        self.line(&format!("let mut {} = Default::default();", rs_ident(&p.name)));
+                        call_args.push(format!("&mut {}", rs_ident(&p.name)));
                     }
                     ResolvedParamDirection::Inout => {
                         self.line(&format!("let mut {0}_mut = {0}.clone();", param_name));
@@ -862,8 +865,7 @@ impl<'a> RpcGen<'a> {
         let mut sig_params = String::from("&self");
         for p in &in_params {
             let ty = self.type_to_rust(&p.resolved_type);
-            let param_name = naming::escape_keyword(&to_snake_case(&p.name), naming::TargetLang::Rust);
-            sig_params.push_str(&format!(", {}: {}", param_name, ty));
+            sig_params.push_str(&format!(", {}: {}", rs_ident(&p.name), ty));
         }
         sig_params.push_str(", timeout: Duration");
 
@@ -888,7 +890,7 @@ impl<'a> RpcGen<'a> {
                 call_type, variant, in_type
             ));
         } else {
-            let fields: Vec<String> = in_params.iter().map(|p| naming::escape_keyword(&to_snake_case(&p.name), naming::TargetLang::Rust)).collect();
+            let fields: Vec<String> = in_params.iter().map(|p| rs_ident(&p.name)).collect();
             self.line(&format!(
                 "let call = {}::{}({} {{ {} }});",
                 call_type,
@@ -931,7 +933,7 @@ impl<'a> RpcGen<'a> {
         } else {
             let mut fields = Vec::new();
             for p in &out_params {
-                fields.push(format!("out.{}.clone()", naming::escape_keyword(&to_snake_case(&p.name), naming::TargetLang::Rust)));
+                fields.push(format!("out.{}.clone()", rs_ident(&p.name)));
             }
             if has_return {
                 let return_name =
@@ -1019,14 +1021,13 @@ impl<'a> RpcGen<'a> {
             // (7.11.1.1.2 rule 7) In/InOut params only, all as immutable references
             let mut sig_params = String::from("&self");
             for p in &op.params {
-                let param_name = naming::escape_keyword(&to_snake_case(&p.name), naming::TargetLang::Rust);
                 match p.direction {
                     ResolvedParamDirection::In | ResolvedParamDirection::Inout => {
                         let ty = self.type_to_rust(&p.resolved_type);
                         if Self::is_copy_type(&p.resolved_type) {
-                            sig_params.push_str(&format!(", {}: {}", param_name, ty));
+                            sig_params.push_str(&format!(", {}: {}", rs_ident(&p.name), ty));
                         } else {
-                            sig_params.push_str(&format!(", {}: &{}", param_name, ty));
+                            sig_params.push_str(&format!(", {}: &{}", rs_ident(&p.name), ty));
                         }
                     }
                     ResolvedParamDirection::Out => {}
@@ -1116,7 +1117,7 @@ impl<'a> RpcGen<'a> {
             } else {
                 let mut fields = Vec::new();
                 for p in &out_params {
-                    fields.push(format!("out.{}.clone()", naming::escape_keyword(&to_snake_case(&p.name), naming::TargetLang::Rust)));
+                    fields.push(format!("out.{}.clone()", rs_ident(&p.name)));
                 }
                 if has_return {
                     let return_name = Self::resolve_return_name(
@@ -1205,11 +1206,10 @@ impl<'a> RpcGen<'a> {
             let mut sig_params = String::from("&self");
             for p in &in_params {
                 let ty = self.type_to_rust(&p.resolved_type);
-                let param_name = naming::escape_keyword(&to_snake_case(&p.name), naming::TargetLang::Rust);
                 if Self::is_copy_type(&p.resolved_type) {
-                    sig_params.push_str(&format!(", {}: {}", param_name, ty));
+                    sig_params.push_str(&format!(", {}: {}", rs_ident(&p.name), ty));
                 } else {
-                    sig_params.push_str(&format!(", {}: &{}", param_name, ty));
+                    sig_params.push_str(&format!(", {}: &{}", rs_ident(&p.name), ty));
                 }
             }
 
@@ -1229,7 +1229,7 @@ impl<'a> RpcGen<'a> {
                 let fields: Vec<String> = in_params
                     .iter()
                     .map(|p| {
-                        let name = naming::escape_keyword(&to_snake_case(&p.name), naming::TargetLang::Rust);
+                        let name = rs_ident(&p.name);
                         if Self::is_copy_type(&p.resolved_type) {
                             name
                         } else {
@@ -1316,10 +1316,9 @@ impl<'a> RpcGen<'a> {
         let mut out_fields = Vec::new();
         for p in &op.params {
             let param_name = naming::escape_keyword(&p.name, naming::TargetLang::Rust);
-            let param_snake = naming::escape_keyword(&to_snake_case(&p.name), naming::TargetLang::Rust);
             match p.direction {
                 ResolvedParamDirection::Out => {
-                    out_fields.push(format!("{0}: {0}", param_snake));
+                    out_fields.push(format!("{0}: {0}", rs_ident(&p.name)));
                 }
                 ResolvedParamDirection::Inout => {
                     out_fields.push(format!("{}: {}_mut", param_name, param_name));

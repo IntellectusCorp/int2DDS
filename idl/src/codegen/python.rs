@@ -2,7 +2,6 @@
 ///
 /// Generates Python dataclasses with CDR serialization methods
 /// that use the int2dds Python CDR library.
-
 use crate::naming;
 use crate::types::*;
 
@@ -15,20 +14,13 @@ pub struct PythonOptions {
 
 impl PythonOptions {
     pub fn new() -> Self {
-        Self {
-            int2dds_module: "int2dds".to_string(),
-        }
+        Self { int2dds_module: "int2dds".to_string() }
     }
 }
 
 /// Generate Python code from the IDL model.
 pub fn generate(model: &IdlModel, idl_filename: &str, opts: &PythonOptions) -> String {
-    let mut gen = PyGen {
-        out: String::new(),
-        opts,
-        model,
-        indent: 0,
-    };
+    let mut gen = PyGen { out: String::new(), opts, model, indent: 0 };
     gen.emit_file(idl_filename);
     gen.out
 }
@@ -56,14 +48,8 @@ impl<'a> PyGen<'a> {
         self.line("from enum import IntEnum, IntFlag");
         self.line("from typing import ClassVar");
         self.line("");
-        self.line(&format!(
-            "from {}.cdr import CdrReader, CdrWriter, Extensibility",
-            module_name
-        ));
-        self.line(&format!(
-            "from {}.cdr.writer import CdrKeyWriter",
-            module_name
-        ));
+        self.line(&format!("from {}.cdr import CdrReader, CdrWriter, Extensibility", module_name));
+        self.line(&format!("from {}.cdr.writer import CdrKeyWriter", module_name));
         self.line("");
         self.line("");
 
@@ -108,7 +94,10 @@ impl<'a> PyGen<'a> {
     fn emit_bitmask(&mut self, b: &ResolvedBitmask) {
         self.line(&format!("class {}(IntFlag):", b.name));
         self.indent += 1;
-        self.line(&format!("\"\"\"IDL bitmask: {} (bit_bound={})\"\"\"", b.qualified_name, b.bit_bound));
+        self.line(&format!(
+            "\"\"\"IDL bitmask: {} (bit_bound={})\"\"\"",
+            b.qualified_name, b.bit_bound
+        ));
         self.line("");
         for flag in &b.flags {
             let flag_name = naming::to_screaming_snake(&flag.name);
@@ -146,7 +135,10 @@ impl<'a> PyGen<'a> {
         // Type metadata as class variables
         self.line(&format!("_dds_type_name: ClassVar[str] = \"{}\"", s.qualified_name));
         self.line(&format!("_extensibility: ClassVar[Extensibility] = Extensibility.{}", ext_name));
-        self.line(&format!("_has_key: ClassVar[bool] = {}", if has_key { "True" } else { "False" }));
+        self.line(&format!(
+            "_has_key: ClassVar[bool] = {}",
+            if has_key { "True" } else { "False" }
+        ));
         self.line("");
 
         // Fields
@@ -268,9 +260,12 @@ impl<'a> PyGen<'a> {
                 for (i, m) in s.members.iter().enumerate() {
                     let member_id = m.member_id.unwrap_or(i as u32);
                     let must_understand = if m.must_understand { "True" } else { "False" };
-                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
-                    self.line(&format!("with w.emheader(member_id={}, must_understand={}):", member_id, must_understand));
+                    self.line(&format!(
+                        "with w.emheader(member_id={}, must_understand={}):",
+                        member_id, must_understand
+                    ));
                     self.indent += 1;
+                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
                     self.emit_write_field(&m.resolved_type, &format!("self.{}", field_name));
                     self.indent -= 1;
                 }
@@ -312,7 +307,10 @@ impl<'a> PyGen<'a> {
                 self.indent -= 1;
             }
             ResolvedType::Array { element, size } => {
-                self.line(&format!("assert len({}) == {}, \"Array size mismatch\"", accessor, size));
+                self.line(&format!(
+                    "assert len({}) == {}, \"Array size mismatch\"",
+                    accessor, size
+                ));
                 self.line(&format!("for _item in {}:", accessor));
                 self.indent += 1;
                 self.emit_write_field(element, "_item");
@@ -415,17 +413,18 @@ impl<'a> PyGen<'a> {
         }
 
         // Create and return instance
-        let field_names: Vec<String> = s.members.iter().map(|m| naming::escape_keyword(&m.name, naming::TargetLang::Python)).collect();
+        let field_names: Vec<String> = s
+            .members
+            .iter()
+            .map(|m| naming::escape_keyword(&m.name, naming::TargetLang::Python))
+            .collect();
         self.line(&format!("return cls({})", field_names.join(", ")));
         self.indent -= 1;
     }
 
     fn emit_deserialize_cdr_inline(&mut self, s: &ResolvedStruct) {
         self.line("@classmethod");
-        self.line(&format!(
-            "def _deserialize_cdr_inline(cls, r: CdrReader) -> \"{}\":",
-            s.name
-        ));
+        self.line(&format!("def _deserialize_cdr_inline(cls, r: CdrReader) -> \"{}\":", s.name));
         self.indent += 1;
         self.line("\"\"\"Deserialize from an existing CdrReader (no encapsulation header).\"\"\"");
 
@@ -492,7 +491,11 @@ impl<'a> PyGen<'a> {
             }
         }
 
-        let field_names: Vec<String> = s.members.iter().map(|m| naming::escape_keyword(&m.name, naming::TargetLang::Python)).collect();
+        let field_names: Vec<String> = s
+            .members
+            .iter()
+            .map(|m| naming::escape_keyword(&m.name, naming::TargetLang::Python))
+            .collect();
         self.line(&format!("return cls({})", field_names.join(", ")));
         self.indent -= 1;
     }
@@ -615,9 +618,5 @@ impl<'a> PyGen<'a> {
             self.out.push_str(s);
             self.out.push('\n');
         }
-    }
-
-    fn raw(&mut self, s: &str) {
-        self.out.push_str(s);
     }
 }
