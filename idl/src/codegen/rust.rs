@@ -126,7 +126,8 @@ impl<'a> RustGen<'a> {
         self.line(&format!("pub enum {} {{", rust_name));
         self.indent += 1;
         for v in &e.variants {
-            let variant_name = naming::to_pascal_case(&v.name);
+            let variant_name =
+                naming::escape_keyword(&naming::to_pascal_case(&v.name), naming::TargetLang::Rust);
             self.line(&format!("{} = {},", variant_name, v.value));
         }
         self.indent -= 1;
@@ -140,7 +141,10 @@ impl<'a> RustGen<'a> {
         self.line(&format!("pub enum {} {{", rust_name));
         self.indent += 1;
         for flag in &b.flags {
-            let flag_name = naming::to_pascal_case(&flag.name);
+            let flag_name = naming::escape_keyword(
+                &naming::to_pascal_case(&flag.name),
+                naming::TargetLang::Rust,
+            );
             self.line(&format!("#[dds(position = {})]", flag.position));
             self.line(&format!("{},", flag_name));
         }
@@ -180,14 +184,18 @@ impl<'a> RustGen<'a> {
             // Use first label as discriminant value
             if let Some(label) = case.labels.first() {
                 let disc_val = self.label_to_string(label);
-                let variant_name = naming::to_pascal_case(&case.member.name);
+                let variant_name = naming::escape_keyword(
+                    &naming::to_pascal_case(&case.member.name),
+                    naming::TargetLang::Rust,
+                );
                 let type_str = self.type_to_rust(&case.member.resolved_type);
                 self.line(&format!("{}({}) = {},", variant_name, type_str, disc_val));
             }
         }
 
         if let Some(dc) = &u.default_case {
-            let variant_name = naming::to_pascal_case(&dc.name);
+            let variant_name =
+                naming::escape_keyword(&naming::to_pascal_case(&dc.name), naming::TargetLang::Rust);
             let type_str = self.type_to_rust(&dc.resolved_type);
             // Default case needs a discriminant value that doesn't conflict.
             // Use -1 as a convention for default.
@@ -660,22 +668,69 @@ mod tests {
     }
 
     #[test]
-    fn test_keyword_escaping() {
+    fn test_keyword_escaping_in_struct_fields() {
         let defs = parse_idl(
             r#"
-            struct Data {
+            struct KeywordTest {
                 long type;
-                string match;
-                double value;
+                long match;
+                boolean async;
+                string yield;
+                long gen;
             };
             "#,
         )
         .unwrap();
         let model = resolve(defs).unwrap();
-        let code = generate(&model, "Data.idl", &RustOptions::default());
+        let code = generate(&model, "KeywordTest.idl", &RustOptions::default());
 
-        assert!(code.contains("pub r#type: i32,"));
-        assert!(code.contains("pub r#match: String,"));
-        assert!(code.contains("pub value: f64,"));
+        assert!(code.contains("pub r#type: i32,"), "type field should be escaped: {}", code);
+        assert!(code.contains("pub r#match: i32,"), "match field should be escaped: {}", code);
+        assert!(code.contains("pub r#async: bool,"), "async field should be escaped: {}", code);
+        assert!(code.contains("pub r#yield: String,"), "yield field should be escaped: {}", code);
+        assert!(code.contains("pub r#gen: i32,"), "gen field should be escaped: {}", code);
+    }
+
+    #[test]
+    fn test_non_keyword_fields_not_escaped() {
+        let defs = parse_idl(
+            r#"
+            struct Normal {
+                long data;
+                long sensor_id;
+                string temperature;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Normal.idl", &RustOptions::default());
+
+        assert!(code.contains("pub data: i32,"));
+        assert!(code.contains("pub sensor_id: i32,"));
+        assert!(code.contains("pub temperature: String,"));
+        // Should NOT contain r#
+        assert!(!code.contains("r#data"));
+        assert!(!code.contains("r#sensor_id"));
+    }
+
+    #[test]
+    fn test_keyword_prefix_not_escaped() {
+        let defs = parse_idl(
+            r#"
+            struct PrefixTest {
+                long type_name;
+                long class_id;
+                long return_value;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "PrefixTest.idl", &RustOptions::default());
+
+        assert!(code.contains("pub type_name: i32,"));
+        assert!(code.contains("pub class_id: i32,"));
+        assert!(code.contains("pub return_value: i32,"));
     }
 }

@@ -172,13 +172,13 @@ impl<'a> CGen<'a> {
         self.raw(&format!("    {} _d;\n", disc_c));
         self.raw("    union {\n");
         for case in &u.cases {
-            let field_name = naming::escape_keyword(&case.member.name, naming::TargetLang::C);
-            let field_decl = self.type_to_c_declaration(&case.member.resolved_type, &field_name);
+            let case_name = naming::escape_keyword(&case.member.name, naming::TargetLang::C);
+            let field_decl = self.type_to_c_declaration(&case.member.resolved_type, &case_name);
             self.raw(&format!("        {};\n", field_decl));
         }
         if let Some(dc) = &u.default_case {
-            let field_name = naming::escape_keyword(&dc.name, naming::TargetLang::C);
-            let field_decl = self.type_to_c_declaration(&dc.resolved_type, &field_name);
+            let dc_name = naming::escape_keyword(&dc.name, naming::TargetLang::C);
+            let field_decl = self.type_to_c_declaration(&dc.resolved_type, &dc_name);
             self.raw(&format!("        {};\n", field_decl));
         }
         self.raw("    } _u;\n");
@@ -198,15 +198,15 @@ impl<'a> CGen<'a> {
             for label in &case.labels {
                 self.raw(&format!("    case {}:\n", self.union_label_c(label)));
             }
-            let field_name = naming::escape_keyword(&case.member.name, naming::TargetLang::C);
-            let accessor = format!("val->_u.{}", field_name);
+            let case_name = naming::escape_keyword(&case.member.name, naming::TargetLang::C);
+            let accessor = format!("val->_u.{}", case_name);
             self.emit_write_field_indented(&case.member.resolved_type, &accessor, "        ");
             self.raw("        break;\n");
         }
         if let Some(dc) = &u.default_case {
             self.raw("    default:\n");
-            let field_name = naming::escape_keyword(&dc.name, naming::TargetLang::C);
-            let accessor = format!("val->_u.{}", field_name);
+            let dc_name = naming::escape_keyword(&dc.name, naming::TargetLang::C);
+            let accessor = format!("val->_u.{}", dc_name);
             self.emit_write_field_indented(&dc.resolved_type, &accessor, "        ");
             self.raw("        break;\n");
         }
@@ -226,15 +226,15 @@ impl<'a> CGen<'a> {
             for label in &case.labels {
                 self.raw(&format!("    case {}:\n", self.union_label_c(label)));
             }
-            let field_name = naming::escape_keyword(&case.member.name, naming::TargetLang::C);
-            let accessor = format!("val_out->_u.{}", field_name);
+            let case_name = naming::escape_keyword(&case.member.name, naming::TargetLang::C);
+            let accessor = format!("val_out->_u.{}", case_name);
             self.emit_read_field_indented(&case.member.resolved_type, &accessor, "        ");
             self.raw("        break;\n");
         }
         if let Some(dc) = &u.default_case {
             self.raw("    default:\n");
-            let field_name = naming::escape_keyword(&dc.name, naming::TargetLang::C);
-            let accessor = format!("val_out->_u.{}", field_name);
+            let dc_name = naming::escape_keyword(&dc.name, naming::TargetLang::C);
+            let accessor = format!("val_out->_u.{}", dc_name);
             self.emit_read_field_indented(&dc.resolved_type, &accessor, "        ");
             self.raw("        break;\n");
         }
@@ -317,13 +317,13 @@ impl<'a> CGen<'a> {
     }
 
     fn field_declaration(&self, m: &ResolvedMember) -> String {
-        let field_name = naming::escape_keyword(&m.name, naming::TargetLang::C);
+        let escaped = naming::escape_keyword(&m.name, naming::TargetLang::C);
         if m.is_external {
             // External fields are pointers in C
             let base = self.type_to_c_base(&m.resolved_type);
-            format!("{}* {}", base, field_name)
+            format!("{}* {}", base, escaped)
         } else {
-            self.type_to_c_declaration(&m.resolved_type, &field_name)
+            self.type_to_c_declaration(&m.resolved_type, &escaped)
         }
     }
 
@@ -361,9 +361,15 @@ impl<'a> CGen<'a> {
                     if self.opts.string_mode == StringMode::FixedArray {
                         let str_size = str_bound.unwrap_or(self.opts.default_string_bound) + 1;
                         return if let Some(max) = bound {
-                            format!("struct {{ char data[{}][{}]; uint32_t length; }} {}", max, str_size, name)
+                            format!(
+                                "struct {{ char data[{}][{}]; uint32_t length; }} {}",
+                                max, str_size, name
+                            )
                         } else {
-                            format!("struct {{ char (*data)[{}]; uint32_t length; }} {}", str_size, name)
+                            format!(
+                                "struct {{ char (*data)[{}]; uint32_t length; }} {}",
+                                str_size, name
+                            )
                         };
                     }
                 }
@@ -395,7 +401,9 @@ impl<'a> CGen<'a> {
                     )
                 }
             }
-            ResolvedType::Struct(type_name) | ResolvedType::Enum(type_name) | ResolvedType::Bitmask(type_name) => {
+            ResolvedType::Struct(type_name)
+            | ResolvedType::Enum(type_name)
+            | ResolvedType::Bitmask(type_name) => {
                 let simple = type_name.rsplit("::").next().unwrap_or(type_name);
                 format!("{} {}", simple, name)
             }
@@ -557,7 +565,10 @@ impl<'a> CGen<'a> {
         // If there's a base type, serialize parent fields first
         if let Some(base) = &s.base_type {
             let simple = base.rsplit("::").next().unwrap_or(base);
-            self.raw(&format!("    {}_serialize_fields(&w, (const {}*)&{}->parent);\n", simple, simple, prefix));
+            self.raw(&format!(
+                "    {}_serialize_fields(&w, (const {}*)&{}->parent);\n",
+                simple, simple, prefix
+            ));
         }
         for m in &s.members {
             let field_name = naming::escape_keyword(&m.name, naming::TargetLang::C);
@@ -632,7 +643,10 @@ impl<'a> CGen<'a> {
                 // Write as sequence of uint16_t
                 let len = bound.unwrap_or(self.opts.default_string_bound);
                 self.raw(&format!("{}{{ uint32_t _wlen = 0;\n", indent));
-                self.raw(&format!("{}while (_wlen < {} && {}[_wlen]) _wlen++;\n", indent, len, accessor));
+                self.raw(&format!(
+                    "{}while (_wlen < {} && {}[_wlen]) _wlen++;\n",
+                    indent, len, accessor
+                ));
                 self.raw(&format!("{}int2dds_cdr_write_u32(&w, _wlen);\n", indent));
                 self.raw(&format!("{}for (uint32_t _wi = 0; _wi < _wlen; _wi++) int2dds_cdr_write_u16(&w, {}[_wi]);\n", indent, accessor));
                 self.raw(&format!("{}}}\n", indent));
@@ -758,7 +772,10 @@ impl<'a> CGen<'a> {
         // If there's a base type, deserialize parent fields first
         if let Some(base) = &s.base_type {
             let simple = base.rsplit("::").next().unwrap_or(base);
-            self.raw(&format!("    {}_deserialize_fields(&r, ({}*)&{}->parent);\n", simple, simple, prefix));
+            self.raw(&format!(
+                "    {}_deserialize_fields(&r, ({}*)&{}->parent);\n",
+                simple, simple, prefix
+            ));
         }
         for m in &s.members {
             let field_name = naming::escape_keyword(&m.name, naming::TargetLang::C);
@@ -1014,18 +1031,24 @@ impl<'a> CGen<'a> {
     fn sequence_element_needs_dheader(element: &ResolvedType) -> bool {
         matches!(
             element,
-            ResolvedType::String { .. } | ResolvedType::WString { .. } | ResolvedType::Sequence { .. }
+            ResolvedType::String { .. }
+                | ResolvedType::WString { .. }
+                | ResolvedType::Sequence { .. }
         )
     }
 
     /// Check if a type has variable-length serialized representation.
     fn type_is_variable_length(&self, ty: &ResolvedType) -> bool {
         match ty {
-            ResolvedType::String { .. } | ResolvedType::WString { .. }
-            | ResolvedType::Sequence { .. } | ResolvedType::Map { .. } => true,
+            ResolvedType::String { .. }
+            | ResolvedType::WString { .. }
+            | ResolvedType::Sequence { .. }
+            | ResolvedType::Map { .. } => true,
             ResolvedType::Array { element, .. } => self.type_is_variable_length(element),
             ResolvedType::Struct(name) => {
-                if let Some(s) = self.model.structs.iter().find(|s| s.name == *name || s.qualified_name == *name) {
+                if let Some(s) =
+                    self.model.structs.iter().find(|s| s.name == *name || s.qualified_name == *name)
+                {
                     s.members.iter().any(|m| self.type_is_variable_length(&m.resolved_type))
                 } else {
                     false
@@ -1037,7 +1060,9 @@ impl<'a> CGen<'a> {
 
     /// Check if a struct type needs a member-level DHEADER in XCDR2.
     fn struct_needs_member_dheader(&self, type_name: &str) -> bool {
-        if let Some(s) = self.model.structs.iter().find(|s| s.name == type_name || s.qualified_name == type_name) {
+        if let Some(s) =
+            self.model.structs.iter().find(|s| s.name == type_name || s.qualified_name == type_name)
+        {
             s.extensibility == ExtensibilityKind::Final
                 && s.members.iter().any(|m| self.type_is_variable_length(&m.resolved_type))
         } else {
@@ -1069,24 +1094,22 @@ impl<'a> CGen<'a> {
 
     fn emit_type_info_field(&mut self, name: &str, ty: &ResolvedType, is_key: i32) {
         match ty {
-            ResolvedType::Sequence { element, .. } => {
-                match element.as_ref() {
-                    ResolvedType::Struct(struct_name) => {
-                        self.raw(&format!(
+            ResolvedType::Sequence { element, .. } => match element.as_ref() {
+                ResolvedType::Struct(struct_name) => {
+                    self.raw(&format!(
                             "    int2dds_type_info_add_named_type_field(ti, \"{}\", \"Vec < {} >\", {});\n",
                             name, struct_name, is_key
                         ));
-                    }
-                    _ => {
-                        if let Some(elem_const) = Self::resolved_type_to_field_constant(element) {
-                            self.raw(&format!(
-                                "    int2dds_type_info_add_sequence_field(ti, \"{}\", {}, 0, {});\n",
-                                name, elem_const, is_key
-                            ));
-                        }
+                }
+                _ => {
+                    if let Some(elem_const) = Self::resolved_type_to_field_constant(element) {
+                        self.raw(&format!(
+                            "    int2dds_type_info_add_sequence_field(ti, \"{}\", {}, 0, {});\n",
+                            name, elem_const, is_key
+                        ));
                     }
                 }
-            }
+            },
             ResolvedType::Array { element, size } => {
                 if let Some(elem_const) = Self::resolved_type_to_field_constant(element) {
                     self.raw(&format!(
