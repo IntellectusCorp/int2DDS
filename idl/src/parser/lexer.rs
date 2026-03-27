@@ -216,7 +216,9 @@ pub fn tokenize(source: &str) -> Result<Vec<SpannedToken>, LexError> {
             }
 
             // Hex prefix
-            if pos + 1 < len && chars[pos] == '0' && (chars[pos + 1] == 'x' || chars[pos + 1] == 'X')
+            if pos + 1 < len
+                && chars[pos] == '0'
+                && (chars[pos + 1] == 'x' || chars[pos + 1] == 'X')
             {
                 num_str.push('0');
                 num_str.push('x');
@@ -227,12 +229,11 @@ pub fn tokenize(source: &str) -> Result<Vec<SpannedToken>, LexError> {
                     pos += 1;
                     col += 1;
                 }
-                let val =
-                    i64::from_str_radix(&num_str[2..], 16).map_err(|_| LexError {
-                        line: tok_line,
-                        col: tok_col,
-                        message: format!("invalid hex literal: {}", num_str),
-                    })?;
+                let val = i64::from_str_radix(&num_str[2..], 16).map_err(|_| LexError {
+                    line: tok_line,
+                    col: tok_col,
+                    message: format!("invalid hex literal: {}", num_str),
+                })?;
                 tokens.push(SpannedToken {
                     token: Token::IntLiteral(val),
                     line: tok_line,
@@ -357,11 +358,7 @@ pub fn tokenize(source: &str) -> Result<Vec<SpannedToken>, LexError> {
                 _ => Token::Ident(ident),
             };
 
-            tokens.push(SpannedToken {
-                token,
-                line: tok_line,
-                col: tok_col,
-            });
+            tokens.push(SpannedToken { token, line: tok_line, col: tok_col });
             continue;
         }
 
@@ -446,18 +443,10 @@ pub fn tokenize(source: &str) -> Result<Vec<SpannedToken>, LexError> {
             }
         };
 
-        tokens.push(SpannedToken {
-            token,
-            line: tok_line,
-            col: tok_col,
-        });
+        tokens.push(SpannedToken { token, line: tok_line, col: tok_col });
     }
 
-    tokens.push(SpannedToken {
-        token: Token::Eof,
-        line,
-        col,
-    });
+    tokens.push(SpannedToken { token: Token::Eof, line, col });
     Ok(tokens)
 }
 
