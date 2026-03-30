@@ -45,8 +45,7 @@ use crate::rtps::messages::submessages::heartbeat::Heartbeat;
 use crate::rtps::messages::submessages::nack_frag::NackFrag;
 use crate::rtps::task::sending_handler::{MessageType, SendingHandler};
 use crate::rtps::task::user_traffic::user_unicast_listening_task::UserUnicastListeningTask;
-use crate::rtps::transport::plugin::{SendTarget, TransportPlugin};
-use crate::rtps::transport::udp::udp_listener::UdpListener;
+use crate::rtps::transport::plugin::{MessageSource, SendTarget, TransportPlugin};
 use crate::rtps::{
     entities::participant::Participant, messages::message_receiver::MessageReceiver,
 };
@@ -81,12 +80,11 @@ impl UserLogic {
     pub(crate) fn start_user_traffic(
         &self,
         domain_id: DomainId,
-        user_multicast_listener: Option<UdpListener>,
+        user_unicast_source: MessageSource,
     ) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
 
-        let mut user_unicast_listening_task =
-            UserUnicastListeningTask::new(None, None, None, participant.clone());
+        let mut user_unicast_listening_task = UserUnicastListeningTask::new(participant.clone());
         let participant_guid = participant.guid();
 
         // unicast listening
@@ -102,7 +100,7 @@ impl UserLogic {
                     );
                 }
 
-                let _ = user_unicast_listening_task.unicast_listening();
+                let _ = user_unicast_listening_task.unicast_listening(user_unicast_source);
                 // Cleanup thread from registry before exit
                 {
                     use crate::rtps::task::thread_monitor::ThreadMonitor;
@@ -1590,7 +1588,7 @@ impl UnicastMessageProcessor for UserLogic {
                                                     current_writer_proxy.unicast_locator_list()
                                                 {
                                                     let _ = transport_clone
-                                                        .send(&buffer, &SendTarget::UserData(locator))
+                                                        .send(&buffer, &SendTarget::UserData(&locator))
                                                         .map_err(|e| {
                                                             warn!("[UserLogic] Failed to send NACK_FRAG: {:?}", e);
                                                         });

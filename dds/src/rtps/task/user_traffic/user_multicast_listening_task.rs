@@ -7,74 +7,93 @@ use crate::rtps::entities::entity::Entity;
 use crate::rtps::entities::participant::Participant;
 use crate::rtps::logic::user_logic::UserLogic;
 use crate::rtps::messages::message_receiver::MessageReceiver;
+use crate::rtps::transport::plugin::MessageSource;
 use crate::rtps::transport::socket::MAX_EVENTS;
-use crate::rtps::transport::udp::udp_listener::UdpListener;
-use crate::rtps::transport::TransportSender;
+use log::{info, warn};
 use mio::{Events, Interest, Poll, Token};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 pub(crate) struct UserMulticastListeningTask {
     guid_prefix: GuidPrefix,
     domain_id: DomainId,
-    user_multicast_listener: Option<UdpListener>,
     user_logic: Arc<Option<UserLogic>>,
 }
 
 impl UserMulticastListeningTask {
-    pub(crate) fn new(
-        user_multicast_listener: Option<UdpListener>,
-        participant: Arc<Participant>,
-        sender: Arc<TransportSender>,
-    ) -> Self {
-        let guid_prefix = { participant.guid().prefix() };
-        let domain_id = { participant.domain_id() };
+    pub(crate) fn new(participant: Arc<Participant>) -> Self {
+        let guid_prefix = participant.guid().prefix();
+        let domain_id = participant.domain_id();
         let (_, _, user_logic) = participant.get_logics();
-        Self { guid_prefix, domain_id, user_multicast_listener, user_logic }
+        Self { guid_prefix, domain_id, user_logic }
     }
 
-    pub(crate) fn multicast_listening(&mut self) -> std::io::Result<()> {
-        log::info!("start user multicast listening");
-        let mut poll = Poll::new().unwrap();
+    pub(crate) fn multicast_listening(&mut self, source: MessageSource) -> std::io::Result<()> {
+        match source {
+            MessageSource::MioPoll { mut listener } => self.listen_mio_poll(&mut listener),
+            MessageSource::Channel { rx } => self.listen_channel(&rx),
+        }
+    }
+
+    fn listen_mio_poll(
+        &mut self,
+        listener: &mut crate::rtps::transport::udp::udp_listener::UdpListener,
+    ) -> std::io::Result<()> {
+        info!("start user multicast listening (MioPoll)");
+        let mut poll = Poll::new()?;
         let mut events = Events::with_capacity(MAX_EVENTS);
 
-        let listener: &mut UdpListener = match &mut self.user_multicast_listener {
-            Some(listener) => listener,
-            None => {
-                return Err(std::io::Error::other("user multicast listener task is not set"));
-            }
-        };
-        let user_multicast_token = Token(listener.socket().local_addr().unwrap().port() as usize);
-        poll.registry().register(listener.socket(), user_multicast_token, Interest::READABLE)?;
+        let token = Token(listener.socket().local_addr().unwrap().port() as usize);
+        poll.registry().register(listener.socket(), token, Interest::READABLE)?;
 
         loop {
             match poll.poll(&mut events, Some(Duration::from_secs(1))) {
                 Ok(()) => {}
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {
-                    log::warn!(
-                        "Poll interrupted in user multicast listening task, continuing: {}",
-                        e
-                    );
+                    warn!("Poll interrupted in user multicast listening task, continuing: {}", e);
                     continue;
                 }
                 Err(e) => return Err(e),
             }
             for event in events.iter() {
-                if event.token() == user_multicast_token && event.is_readable() {
+                if event.token() == token && event.is_readable() {
                     while let Some((buffer, from_addr)) = listener.get_message() {
-                        let mut message_receiver: MessageReceiver =
-                            MessageReceiver::new(self.guid_prefix, &from_addr);
-                        let rtps_message = message_receiver.init(&buffer);
-                        if rtps_message.is_err() {
-                            println!("Failed to parse RTPS message");
-                            continue;
-                        }
-
-                        // self.user_logic.handle_rtps_message(message_receiver);
+                        self.process_rtps_message(&buffer, from_addr);
                     }
                 }
             }
         }
+    }
+
+    fn listen_channel(
+        &mut self,
+        rx: &crossbeam_channel::Receiver<crate::rtps::transport::plugin::IncomingMessage>,
+    ) -> std::io::Result<()> {
+        info!("start user multicast listening (Channel)");
+
+        loop {
+            match rx.recv() {
+                Ok(msg) => {
+                    self.process_rtps_message(&msg.data, msg.source);
+                }
+                Err(_) => {
+                    info!("[UserMulticast] Channel disconnected, stopping listener");
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    fn process_rtps_message(&mut self, buffer: &[u8], from_addr: SocketAddr) {
+        let mut message_receiver = MessageReceiver::new(self.guid_prefix, &from_addr);
+        let rtps_message = message_receiver.init(&bytes::Bytes::copy_from_slice(buffer));
+        if rtps_message.is_err() {
+            log::error!("Failed to parse RTPS message");
+            return;
+        }
+
+        // self.user_logic.handle_rtps_message(message_receiver);
     }
 }
 
@@ -84,32 +103,23 @@ mod tests {
 
     use crate::rtps::entities::participant::Participant;
     use crate::rtps::task::user_traffic::user_multicast_listening_task::UserMulticastListeningTask;
+    use crate::rtps::transport::plugin::MessageSource;
     use crate::rtps::transport::socket::Socket;
 
     #[test]
     #[ignore]
     fn test_user_multicast_receive() {
         let domain_id = 10;
-        let mut socket = Socket::new(domain_id); //domain_id 0
-                                                 // Create both sender and listener
-        socket.create_socket();
+        let _socket = Socket::new(domain_id);
         let participant = Arc::new(Participant::new(
             domain_id,
-            socket.participant_id(),
-            socket.working_ips(),
+            _socket.participant_id(),
+            _socket.working_ips(),
             None,
         ));
 
-        // socket.close();
-        // return;
-
-        //user traffic multicast port : 7401
-        //user traffic unicast port : 7411
-        let mut user_multicast_listening_task = UserMulticastListeningTask::new(
-            socket.user_traffic_multicast_listener(),
-            participant,
-            socket.sender(),
-        );
-        let _ = user_multicast_listening_task.multicast_listening();
+        // TODO: create transport and get MessageSource for user multicast
+        // let mut task = UserMulticastListeningTask::new(participant);
+        // let _ = task.multicast_listening(source);
     }
 }

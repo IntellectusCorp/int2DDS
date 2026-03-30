@@ -9,10 +9,9 @@ use crate::rtps::logic::message_processor::unicast_message_processor::UnicastMes
 use crate::rtps::logic::sedp_logic::SedpLogic;
 use crate::rtps::logic::spdp_logic::SpdpLogic;
 use crate::rtps::messages::message_receiver::MessageReceiver;
+use crate::rtps::transport::plugin::MessageSource;
 use crate::rtps::transport::socket::MAX_EVENTS;
-use crate::rtps::transport::udp::udp_listener::UdpListener;
 use crate::serialize::pl_cdr::InlineQosParameters;
-use crossbeam_channel::Receiver;
 use log::{debug, error, info, warn};
 use mio::{Events, Interest, Poll, Token};
 use std::net::SocketAddr;
@@ -22,59 +21,46 @@ use std::time::Duration;
 pub(crate) struct DiscoveryUnicastListeningTask {
     guid_prefix: GuidPrefix,
     domain_id: DomainId,
-    discovery_unicast_listener: Option<UdpListener>,
-    tcp_rx: Option<Receiver<(Vec<u8>, SocketAddr)>>,
     participant: Weak<Participant>,
     spdp_logic: Arc<Option<SpdpLogic>>,
     sedp_logic: Arc<Option<SedpLogic>>,
 }
 
 impl DiscoveryUnicastListeningTask {
-    pub(crate) fn new(
-        discovery_unicast_listener: Option<UdpListener>,
-        tcp_rx: Option<Receiver<(Vec<u8>, SocketAddr)>>,
-        participant: Arc<Participant>,
-    ) -> Self {
+    pub(crate) fn new(participant: Arc<Participant>) -> Self {
         let (spdp_logic, sedp_logic, _) = participant.get_logics();
         let guid_prefix = participant.guid().prefix();
         let domain_id = participant.domain_id();
         Self {
             guid_prefix,
             domain_id,
-            discovery_unicast_listener,
-            tcp_rx,
             participant: Arc::downgrade(&participant),
             spdp_logic,
             sedp_logic,
         }
     }
 
-    pub(crate) fn unicast_listening(&mut self) -> std::io::Result<()> {
-        info!("start discovery unicast listening");
-        let mut poll = Poll::new().unwrap();
+    pub(crate) fn unicast_listening(&mut self, source: MessageSource) -> std::io::Result<()> {
+        match source {
+            MessageSource::MioPoll { mut listener } => self.listen_mio_poll(&mut listener),
+            MessageSource::Channel { rx } => self.listen_channel(&rx),
+        }
+    }
+
+    fn listen_mio_poll(
+        &mut self,
+        listener: &mut crate::rtps::transport::udp::udp_listener::UdpListener,
+    ) -> std::io::Result<()> {
+        info!("start discovery unicast listening (MioPoll)");
+        let mut poll = Poll::new()?;
         let mut events = Events::with_capacity(MAX_EVENTS);
 
-        // Register UDP listener if present
-        let udp_token = if let Some(listener) = &mut self.discovery_unicast_listener {
-            let token = Token(listener.socket().local_addr().unwrap().port() as usize);
-            poll.registry().register(listener.socket(), token, Interest::READABLE)?;
-            info!(
-                "[DiscoveryUnicast] UDP listener registered on port {}",
-                listener.socket().local_addr().unwrap().port()
-            );
-            Some(token)
-        } else {
-            None
-        };
-
-        let has_tcp_rx = self.tcp_rx.is_some();
-        if has_tcp_rx {
-            info!("[DiscoveryUnicast] TCP channel receiver enabled");
-        }
-
-        if udp_token.is_none() && !has_tcp_rx {
-            return Err(std::io::Error::other("No listener (UDP or TCP channel) is set"));
-        }
+        let token = Token(listener.socket().local_addr().unwrap().port() as usize);
+        poll.registry().register(listener.socket(), token, Interest::READABLE)?;
+        info!(
+            "[DiscoveryUnicast] UDP listener registered on port {}",
+            listener.socket().local_addr().unwrap().port()
+        );
 
         let participant = self
             .participant
@@ -96,54 +82,55 @@ impl DiscoveryUnicastListeningTask {
 
             if participant.is_terminated() {
                 debug!("Detected global termination flag, discovery unicast listening loop is terminating...");
-                if let Some(listener) = &mut self.discovery_unicast_listener {
-                    let _ = poll.registry().deregister(listener.socket());
-                }
+                let _ = poll.registry().deregister(listener.socket());
                 return Ok(());
             }
 
-            // Collect messages first to avoid borrow checker issues
-            let mut messages_to_process: Vec<(Vec<u8>, SocketAddr)> = Vec::new();
-
             for event in events.iter() {
-                debug!(
-                    "[DiscoveryUnicast] Event: token={:?}, readable={}, writable={}",
-                    event.token(),
-                    event.is_readable(),
-                    event.is_writable()
-                );
-
-                // Handle UDP events
-                if Some(event.token()) == udp_token && event.is_readable() {
-                    if let Some(listener) = &mut self.discovery_unicast_listener {
-                        while let Some((buffer, from_addr)) = listener.get_message() {
-                            if participant.is_terminated() {
-                                debug!("Detected global termination flag during UDP processing");
-                                if let Some(listener) = &mut self.discovery_unicast_listener {
-                                    let _ = poll.registry().deregister(listener.socket());
-                                }
-                                return Ok(());
-                            }
-
-                            messages_to_process.push((buffer.to_vec(), from_addr));
+                if event.token() == token && event.is_readable() {
+                    while let Some((buffer, from_addr)) = listener.get_message() {
+                        if participant.is_terminated() {
+                            debug!("Detected global termination flag during UDP processing");
+                            let _ = poll.registry().deregister(listener.socket());
+                            return Ok(());
                         }
+                        let _ = self.process_rtps_message(&buffer, from_addr);
                     }
                 }
             }
+        }
+    }
 
-            // Drain TCP channel (non-blocking)
-            if let Some(tcp_rx) = &self.tcp_rx {
-                while let Ok((buffer, from_addr)) = tcp_rx.try_recv() {
+    fn listen_channel(
+        &mut self,
+        rx: &crossbeam_channel::Receiver<crate::rtps::transport::plugin::IncomingMessage>,
+    ) -> std::io::Result<()> {
+        info!("start discovery unicast listening (Channel)");
+
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or_else(|| std::io::Error::other("Participant already dropped"))?;
+
+        loop {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(msg) => {
                     if participant.is_terminated() {
+                        debug!("Detected global termination flag, discovery unicast channel listening terminating...");
                         return Ok(());
                     }
-                    messages_to_process.push((buffer, from_addr));
+                    let _ = self.process_rtps_message(&msg.data, msg.source);
                 }
-            }
-
-            // Process all collected messages
-            for (buffer, from_addr) in messages_to_process {
-                let _ = self.process_rtps_message(&buffer, from_addr);
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    if participant.is_terminated() {
+                        debug!("Detected global termination flag, discovery unicast channel listening terminating...");
+                        return Ok(());
+                    }
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                    info!("[DiscoveryUnicast] Channel disconnected, stopping listener");
+                    return Ok(());
+                }
             }
         }
     }
@@ -243,26 +230,24 @@ mod tests {
     use crate::rtps::common::types::DomainId;
     use crate::rtps::entities::participant::Participant;
     use crate::rtps::task::discovery_traffic::discovery_unicast_listening_task::DiscoveryUnicastListeningTask;
+    use crate::rtps::transport::plugin::MessageSource;
     use crate::rtps::transport::socket::Socket;
 
     #[test]
     #[ignore]
     fn test_discovery_unicast_receive() {
         let domain_id: DomainId = 17;
-        let mut socket = Socket::new(domain_id);
-        socket.create_socket();
+        let _socket = Socket::new(domain_id);
         let participant = Arc::new(Participant::new(
             domain_id,
-            socket.participant_id(),
-            socket.working_ips(),
+            _socket.participant_id(),
+            _socket.working_ips(),
             None,
         ));
 
-        let mut discovery_unicast_listening_task = DiscoveryUnicastListeningTask::new(
-            socket.discovery_unicast_listener(),
-            socket.tcp_discovery_rx(),
-            participant,
-        );
-        let _ = discovery_unicast_listening_task.unicast_listening();
+        // TODO: create transport and take_discovery_source() to get MessageSource
+        // let source = transport.take_discovery_source();
+        // let mut task = DiscoveryUnicastListeningTask::new(participant);
+        // let _ = task.unicast_listening(source);
     }
 }

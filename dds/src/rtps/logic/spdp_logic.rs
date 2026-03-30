@@ -250,10 +250,11 @@ mod tests {
     use std::sync::Arc;
     use std::thread;
 
+    use crate::common::env::{get_network_interface, get_network_ip};
     use crate::rtps::entities::participant::Participant;
     use crate::rtps::logic::spdp_logic::SpdpLogic;
-    use crate::rtps::task::sending_handler::SendingHandler;
-    use crate::rtps::transport::socket::Socket;
+    use crate::rtps::transport::plugin::TransportPluginFactory;
+    use crate::rtps::transport::{get_transport_type, socket::Socket};
     use crate::test_utils::unique_domain_id;
 
     #[test]
@@ -261,20 +262,23 @@ mod tests {
     fn test_send_spdp_multicast() {
         let domain_id = unique_domain_id() as u32;
         let mut socket = Socket::new(domain_id);
-        socket.create_socket();
+        let transport = TransportPluginFactory::create(
+            get_transport_type(),
+            domain_id,
+            socket.participant_id(),
+            get_network_ip().unwrap_or_default(),
+            get_network_interface().unwrap_or_default(),
+            socket.working_ips().iter().map(|ip| ip.to_string()).collect(),
+        )
+        .expect("Failed to create transport plugin");
+        socket.set_transport(Arc::from(transport));
+
         let participant = Arc::new(Participant::new(
             domain_id,
             socket.participant_id(),
             socket.working_ips(),
             None,
         ));
-
-        // socket.create_sender();
-        let _ = SendingHandler::get_instance(
-            participant.clone(),
-            Some(socket.sender()),
-            socket.tcp_sender(),
-        );
 
         let spdp_logic = SpdpLogic::new(
             participant.clone(),
