@@ -11,8 +11,8 @@ use crate::rtps::logic::sedp_logic::SedpLogic;
 use crate::rtps::logic::spdp_logic::SpdpLogic;
 use crate::rtps::logic::user_logic::UserLogic;
 use crate::rtps::task::sending_handler::MessageType;
+use crate::rtps::transport::plugin::TransportPlugin;
 use crate::rtps::transport::socket::MAX_EVENTS;
-use crate::rtps::transport::{Transport, TransportSender};
 
 pub(crate) struct SendingTask {
     participant: Weak<Participant>,
@@ -25,36 +25,9 @@ pub(crate) struct SendingTask {
 }
 
 impl SendingTask {
-    pub(crate) fn new(
-        participant: Arc<Participant>,
-        udp_sender: Option<Arc<TransportSender>>,
-        tcp_sender: Option<Arc<TransportSender>>,
-    ) -> Self {
-        // For waker token, use UDP port if available, otherwise TCP port
-        let port = if let Some(ref sender) = udp_sender {
-            sender.port()
-        } else if let Some(ref sender) = tcp_sender {
-            sender.port()
-        } else {
-            panic!("At least one sender (UDP or TCP) must be provided");
-        };
+    pub(crate) fn new(participant: Arc<Participant>, transport: Arc<dyn TransportPlugin>) -> Self {
+        let port = transport.port();
 
-        // Get initial peers from environment for TCP/Hybrid discovery
-        let initial_peers = crate::common::env::get_initial_peers();
-        if !initial_peers.is_empty() {
-            log::info!("[SendingTask] Initial peers loaded: {:?}", initial_peers);
-        }
-
-        // let (sedp_logic, spdp_logic, user_logic) = (
-        //     SedpLogic::new(participant.clone(), udp_sender.clone()),
-        //     SpdpLogic::new(
-        //         participant.clone(),
-        //         udp_sender.clone(),
-        //         tcp_sender.clone(),
-        //         initial_peers, // Pass initial peers for TCP discovery
-        //     ),
-        //     UserLogic::new(participant.clone(), udp_sender.clone(), tcp_sender.clone()),
-        // );
         let (spdp_logic, sedp_logic, user_logic) = participant.get_logics();
         let poll = Poll::new().unwrap();
         let events = Events::with_capacity(MAX_EVENTS);

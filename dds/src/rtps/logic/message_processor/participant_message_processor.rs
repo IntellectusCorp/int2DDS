@@ -218,8 +218,7 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
                 }
             };
 
-        let sending_handler =
-            SendingHandler::get_instance(self.get_upgraded_participant()?, None, None);
+        let sending_handler = SendingHandler::get_instance(self.get_upgraded_participant()?, None);
 
         sending_handler.push_message_and_wake(MessageType::PeriodicParticipantDataUnicast(
             None,

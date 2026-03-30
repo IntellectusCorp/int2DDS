@@ -776,7 +776,7 @@ impl WlpLogic {
                         if let Some(participant) = participant_weak.upgrade() {
                             if !participant.is_terminated() {
                                 let sending_handler =
-                                    SendingHandler::get_instance(participant, None, None);
+                                    SendingHandler::get_instance(participant, None);
                                 sending_handler.push_message_and_wake((*message).clone());
                             }
                         }
@@ -1007,11 +1007,7 @@ impl WlpLogic {
         );
 
         if !lease_duration.is_infinite() {
-            let handler = SendingHandler::get_instance(
-                participant.clone(),
-                self.sender.lock().ok().and_then(|g| g.clone()),
-                None,
-            );
+            let handler = SendingHandler::get_instance(participant.clone(), None);
 
             let send_period = lease_duration.to_std_duration() * 2 / 3;
             handler.push_message_and_wake(MessageType::P2pData(None, send_period, Arc::new(data)));
@@ -1024,11 +1020,7 @@ impl WlpLogic {
 
     pub(crate) fn stop_periodic_liveliness(&self) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
-        let handler = SendingHandler::get_instance(
-            participant.clone(),
-            self.sender.lock().ok().and_then(|g| g.clone()),
-            None,
-        );
+        let handler = SendingHandler::get_instance(participant.clone(), None);
 
         handler.cancel_p2p_messages();
 
@@ -1046,11 +1038,7 @@ impl WlpLogic {
             LivelinessQosPolicyKind::Automatic,
         );
 
-        let handler = SendingHandler::get_instance(
-            participant.clone(),
-            self.sender.lock().ok().and_then(|g| g.clone()),
-            None,
-        );
+        let handler = SendingHandler::get_instance(participant.clone(), None);
 
         handler.cancel_p2p_messages();
 

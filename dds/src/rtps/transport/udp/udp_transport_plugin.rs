@@ -70,7 +70,7 @@ impl UdpTransportPlugin {
     /// Multicast listening is a UDP concept — not part of TransportPlugin trait.
     /// Called once during initialization by DcpsBridge to create
     /// the DiscoveryMulticastListeningTask.
-    pub(crate) fn take_discovery_multicast_listener(&mut self) -> Option<UdpListener> {
+    pub(crate) fn take_discovery_multicast_listener(&self) -> Option<UdpListener> {
         self.discovery_multicast_listener.lock().expect("lock poisoned").take()
     }
 
@@ -78,7 +78,7 @@ impl UdpTransportPlugin {
     ///
     /// Called once during initialization by DcpsBridge to create
     /// the UserMulticastListeningTask.
-    pub(crate) fn take_user_multicast_listener(&mut self) -> Option<UdpListener> {
+    pub(crate) fn take_user_multicast_listener(&self) -> Option<UdpListener> {
         self.user_multicast_listener.lock().expect("lock poisoned").take()
     }
 }
@@ -120,7 +120,17 @@ impl TransportPlugin for UdpTransportPlugin {
         locators
     }
 
-    fn take_discovery_source(&mut self) -> MessageSource {
+    fn take_discovery_multicast_source(&self) -> MessageSource {
+        let listener = self
+            .discovery_multicast_listener
+            .lock()
+            .expect("lock poisoned")
+            .take()
+            .expect("discovery_multicast_listener already taken");
+        MessageSource::MioPoll { listener }
+    }
+
+    fn take_discovery_unicast_source(&self) -> MessageSource {
         let listener = self
             .discovery_unicast_listener
             .lock()
@@ -130,7 +140,7 @@ impl TransportPlugin for UdpTransportPlugin {
         MessageSource::MioPoll { listener }
     }
 
-    fn take_user_data_source(&mut self) -> MessageSource {
+    fn take_user_data_unicast_source(&self) -> MessageSource {
         let listener = self
             .user_unicast_listener
             .lock()

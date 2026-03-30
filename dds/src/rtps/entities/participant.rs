@@ -568,7 +568,7 @@ impl Participant {
                     Some(RtpsTime::now()),
                 );
 
-                let handler = SendingHandler::get_instance(Arc::new(self.clone()), None, None);
+                let handler = SendingHandler::get_instance(Arc::new(self.clone()), None);
                 handler.push_message_and_wake(MessageType::SedpTerminateEndpoint(
                     self.sedp_builtin_publications_writer().guid(),
                     Arc::new(a_cache_change),
@@ -648,7 +648,7 @@ impl Participant {
                     Some(RtpsTime::now()),
                 );
 
-                let handler = SendingHandler::get_instance(Arc::new(self.clone()), None, None);
+                let handler = SendingHandler::get_instance(Arc::new(self.clone()), None);
                 handler.push_message_and_wake(MessageType::SedpTerminateEndpoint(
                     self.sedp_builtin_subscriptions_writer().guid(),
                     Arc::new(a_cache_change),
@@ -901,7 +901,7 @@ impl Participant {
                 Some(RtpsTime::now()),
             );
 
-            let handler = SendingHandler::get_instance(Arc::new(self.clone()), None, None);
+            let handler = SendingHandler::get_instance(Arc::new(self.clone()), None);
             if let Some(sending_task) = handler.get_sending_task() {
                 // Send messages synchronously without using event loop
                 if let Ok(sending_task_guard) = sending_task.lock() {
@@ -940,7 +940,7 @@ impl Participant {
                 Some(RtpsTime::now()),
             );
 
-            let handler = SendingHandler::get_instance(Arc::new(self.clone()), None, None);
+            let handler = SendingHandler::get_instance(Arc::new(self.clone()), None);
             if let Some(sending_task) = handler.get_sending_task() {
                 // Send messages synchronously without using event loop
                 if let Ok(sending_task_guard) = sending_task.lock() {
@@ -964,7 +964,7 @@ impl Participant {
         }
 
         // Send Data(p[UD]) messages
-        let handler = SendingHandler::get_instance(Arc::new(self.clone()), None, None);
+        let handler = SendingHandler::get_instance(Arc::new(self.clone()), None);
         if let Some(sending_task) = handler.get_sending_task() {
             // Send messages synchronously without using event loop
             if let Ok(sending_task_guard) = sending_task.lock() {
