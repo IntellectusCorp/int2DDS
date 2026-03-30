@@ -4,10 +4,8 @@ use crate::rtps::entities::participant::Participant;
 use crate::rtps::logic::message_processor::unicast_message_processor::UnicastMessageProcessor as _;
 use crate::rtps::logic::user_logic::UserLogic;
 use crate::rtps::messages::message_receiver::MessageReceiver;
-use crate::rtps::transport::shm::ShmListener;
+use crate::rtps::transport::plugin::MessageSource;
 use crate::rtps::transport::socket::MAX_EVENTS;
-use crate::rtps::transport::udp::udp_listener::UdpListener;
-use crossbeam_channel::Receiver;
 use log::{debug, error, info, warn};
 use mio::{Events, Interest, Poll, Token};
 use std::net::SocketAddr;
@@ -16,71 +14,38 @@ use std::time::Duration;
 
 pub(crate) struct UserUnicastListeningTask {
     guid_prefix: GuidPrefix,
-    user_unicast_listener: Option<UdpListener>,
-    tcp_rx: Option<Receiver<(Vec<u8>, SocketAddr)>>,
-    shm_listener: Option<ShmListener>,
     participant: Weak<Participant>,
     user_logic: Arc<Option<UserLogic>>,
 }
 
 impl UserUnicastListeningTask {
-    pub(crate) fn new(
-        user_unicast_listener: Option<UdpListener>,
-        tcp_rx: Option<Receiver<(Vec<u8>, SocketAddr)>>,
-        shm_listener: Option<ShmListener>,
-        participant: Arc<Participant>,
-    ) -> Self {
+    pub(crate) fn new(participant: Arc<Participant>) -> Self {
         let (_, _, user_logic) = participant.get_logics();
         let guid_prefix = participant.guid().prefix();
-        Self {
-            guid_prefix,
-            user_unicast_listener,
-            tcp_rx,
-            shm_listener,
-            participant: Arc::downgrade(&participant),
-            user_logic,
+        Self { guid_prefix, participant: Arc::downgrade(&participant), user_logic }
+    }
+
+    pub(crate) fn unicast_listening(&mut self, source: MessageSource) -> std::io::Result<()> {
+        match source {
+            MessageSource::MioPoll { mut listener } => self.listen_mio_poll(&mut listener),
+            MessageSource::Channel { rx } => self.listen_channel(&rx),
         }
     }
 
-    pub(crate) fn unicast_listening(&mut self) -> std::io::Result<()> {
-        info!("start user unicast listening");
-        let mut poll = Poll::new().unwrap();
+    fn listen_mio_poll(
+        &mut self,
+        listener: &mut crate::rtps::transport::udp::udp_listener::UdpListener,
+    ) -> std::io::Result<()> {
+        info!("start user unicast listening (MioPoll)");
+        let mut poll = Poll::new()?;
         let mut events = Events::with_capacity(MAX_EVENTS);
 
-        // Register UDP listener if present
-        let udp_token = if let Some(listener) = &mut self.user_unicast_listener {
-            let token = Token(listener.socket().local_addr().unwrap().port() as usize);
-            poll.registry().register(listener.socket(), token, Interest::READABLE)?;
-            info!(
-                "[UserUnicast] UDP listener registered on port {}",
-                listener.socket().local_addr().unwrap().port()
-            );
-            Some(token)
-        } else {
-            None
-        };
-
-        let has_tcp_rx = self.tcp_rx.is_some();
-        let has_shm_listener = self.shm_listener.is_some();
-
-        if has_tcp_rx {
-            info!("[UserUnicast] TCP channel receiver enabled");
-        }
-
-        if udp_token.is_none() && !has_tcp_rx && !has_shm_listener {
-            return Err(std::io::Error::other("No listener (UDP, TCP channel, or SHM) is set"));
-        }
-
-        if has_shm_listener {
-            info!("[UserUnicast] SHM listener enabled for user data");
-        }
-
-        // Use zero timeout when SHM is enabled for immediate processing
-        let poll_timeout = if has_shm_listener {
-            Duration::from_nanos(0) // No wait for SHM - busy poll
-        } else {
-            Duration::from_millis(100)
-        };
+        let token = Token(listener.socket().local_addr().unwrap().port() as usize);
+        poll.registry().register(listener.socket(), token, Interest::READABLE)?;
+        info!(
+            "[UserUnicast] UDP listener registered on port {}",
+            listener.socket().local_addr().unwrap().port()
+        );
 
         let participant = self
             .participant
@@ -88,7 +53,7 @@ impl UserUnicastListeningTask {
             .ok_or_else(|| std::io::Error::other("Participant already dropped"))?;
 
         loop {
-            match poll.poll(&mut events, Some(poll_timeout)) {
+            match poll.poll(&mut events, Some(Duration::from_millis(100))) {
                 Ok(()) => {}
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {
                     warn!("Poll interrupted in user unicast listening task, continuing: {}", e);
@@ -99,64 +64,55 @@ impl UserUnicastListeningTask {
 
             if participant.is_terminated() {
                 debug!("Detected global termination flag, user traffic unicast listening loop is terminating...");
-                if let Some(listener) = &mut self.user_unicast_listener {
-                    let _ = poll.registry().deregister(listener.socket());
-                }
+                let _ = poll.registry().deregister(listener.socket());
                 return Ok(());
             }
 
-            // Collect messages first to avoid borrow checker issues
-            let mut messages_to_process: Vec<(Vec<u8>, SocketAddr)> = Vec::new();
-
             for event in events.iter() {
-                // Handle UDP events
-                if Some(event.token()) == udp_token && event.is_readable() {
-                    if let Some(listener) = &mut self.user_unicast_listener {
-                        while let Some((buffer, from_addr)) = listener.get_message() {
-                            if participant.is_terminated() {
-                                debug!("Detected global termination flag during UDP processing");
-                                if let Some(listener) = &mut self.user_unicast_listener {
-                                    let _ = poll.registry().deregister(listener.socket());
-                                }
-                                return Ok(());
-                            }
-
-                            messages_to_process.push((buffer.to_vec(), from_addr));
+                if event.token() == token && event.is_readable() {
+                    while let Some((buffer, from_addr)) = listener.get_message() {
+                        if participant.is_terminated() {
+                            debug!("Detected global termination flag during UDP processing");
+                            let _ = poll.registry().deregister(listener.socket());
+                            return Ok(());
                         }
+                        self.process_rtps_message(&buffer, from_addr);
                     }
                 }
             }
+        }
+    }
 
-            // Drain TCP channel (non-blocking)
-            if let Some(tcp_rx) = &self.tcp_rx {
-                while let Ok((buffer, from_addr)) = tcp_rx.try_recv() {
+    fn listen_channel(
+        &mut self,
+        rx: &crossbeam_channel::Receiver<crate::rtps::transport::plugin::IncomingMessage>,
+    ) -> std::io::Result<()> {
+        info!("start user unicast listening (Channel)");
+
+        let participant = self
+            .participant
+            .upgrade()
+            .ok_or_else(|| std::io::Error::other("Participant already dropped"))?;
+
+        loop {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(msg) => {
                     if participant.is_terminated() {
+                        debug!("Detected global termination flag, user unicast channel listening terminating...");
                         return Ok(());
                     }
-                    messages_to_process.push((buffer, from_addr));
+                    self.process_rtps_message(&msg.data, msg.source);
                 }
-            }
-
-            // Poll SHM listener for messages (SHM doesn't use mio events)
-            let mut shm_had_data = false;
-            if let Some(shm_listener) = &mut self.shm_listener {
-                while let Some((buffer, from_addr)) = shm_listener.get_message() {
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                     if participant.is_terminated() {
+                        debug!("Detected global termination flag, user unicast channel listening terminating...");
                         return Ok(());
                     }
-                    messages_to_process.push((buffer.to_vec(), from_addr));
-                    shm_had_data = true;
                 }
-            }
-
-            // Process all collected messages
-            for (buffer, from_addr) in messages_to_process {
-                self.process_rtps_message(&buffer, from_addr);
-            }
-
-            // If SHM enabled but no data, yield CPU briefly to avoid 100% usage
-            if has_shm_listener && !shm_had_data && events.is_empty() {
-                std::thread::sleep(Duration::from_micros(10));
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                    info!("[UserUnicast] Channel disconnected, stopping listener");
+                    return Ok(());
+                }
             }
         }
     }
@@ -187,27 +143,24 @@ mod tests {
     use crate::rtps::common::types::DomainId;
     use crate::rtps::entities::participant::Participant;
     use crate::rtps::task::user_traffic::user_unicast_listening_task::UserUnicastListeningTask;
+    use crate::rtps::transport::plugin::MessageSource;
     use crate::rtps::transport::socket::Socket;
 
     #[test]
     #[ignore]
     fn test_user_unicast_receive() {
         let domain_id: DomainId = 17;
-        let mut socket = Socket::new(domain_id);
-        socket.create_socket();
+        let _socket = Socket::new(domain_id);
         let participant = Arc::new(Participant::new(
             domain_id,
-            socket.participant_id(),
-            socket.working_ips(),
+            _socket.participant_id(),
+            _socket.working_ips(),
             None,
         ));
 
-        let mut user_unicast_listening_task = UserUnicastListeningTask::new(
-            socket.user_traffic_unicast_listener(),
-            socket.tcp_user_data_rx(),
-            socket.shm_listener(),
-            participant,
-        );
-        let _ = user_unicast_listening_task.unicast_listening();
+        // TODO: create transport and take_user_data_source() to get MessageSource
+        // let source = transport.take_user_data_source();
+        // let mut task = UserUnicastListeningTask::new(participant);
+        // let _ = task.unicast_listening(source);
     }
 }

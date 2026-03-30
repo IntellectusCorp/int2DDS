@@ -85,10 +85,7 @@ use crate::{
             },
             sending_handler::{MessageType, SendingHandler},
         },
-        transport::{
-            plugin::{SendTarget, TransportPlugin},
-            udp::udp_listener::UdpListener,
-        },
+        transport::plugin::{MessageSource, SendTarget, TransportPlugin},
     },
     serialize::pl_cdr::InlineQosParameters,
     utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
@@ -360,13 +357,13 @@ impl SedpLogic {
     #[allow(clippy::clone_on_copy)]
     pub(crate) fn start_sedp(
         &self,
-        discovery_multicast_listener: Option<UdpListener>,
-        discovery_unicast_listener: Option<UdpListener>,
+        discovery_multicast_source: MessageSource,
+        discovery_unicast_source: MessageSource,
     ) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
 
         let mut discovery_multicast_listening_task =
-            DiscoveryMulticastListeningTask::new(discovery_multicast_listener, participant.clone());
+            DiscoveryMulticastListeningTask::new(participant.clone());
 
         let participant_guid = participant.guid().clone();
 
@@ -383,7 +380,8 @@ impl SedpLogic {
                     );
                 }
 
-                let _ = discovery_multicast_listening_task.multicast_listening();
+                let _ = discovery_multicast_listening_task
+                    .multicast_listening(discovery_multicast_source);
                 // Cleanup thread from registry before exit
                 {
                     use crate::rtps::task::thread_monitor::ThreadMonitor;
@@ -398,11 +396,8 @@ impl SedpLogic {
             *handle_guard = Some(multicast_handle);
         }
 
-        let mut discovery_unicast_listening_task = DiscoveryUnicastListeningTask::new(
-            discovery_unicast_listener,
-            None, // TCP channel handled by TcpTransportPlugin (Phase 7)
-            participant.clone(),
-        );
+        let mut discovery_unicast_listening_task =
+            DiscoveryUnicastListeningTask::new(participant.clone());
 
         // unicast listening
         let unicast_guid = participant_guid;
@@ -418,7 +413,8 @@ impl SedpLogic {
                     );
                 }
 
-                let _ = discovery_unicast_listening_task.unicast_listening();
+                let _ =
+                    discovery_unicast_listening_task.unicast_listening(discovery_unicast_source);
                 // Cleanup thread from registry before exit
                 {
                     use crate::rtps::task::thread_monitor::ThreadMonitor;
@@ -1506,7 +1502,7 @@ impl SedpLogic {
                             for locator in reader_proxy.unicast_locator_list() {
                                 if let Err(e) = self
                                     .transport
-                                    .send(&buffer, &SendTarget::UnicastDiscovery(locator))
+                                    .send(&buffer, &SendTarget::UnicastDiscovery(&locator))
                                 {
                                     warn!("Failed to send SEDP heartbeat: {:?}", e);
                                 } else {
@@ -2445,151 +2441,7 @@ impl UnicastMessageProcessor for SedpLogic {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, thread};
-
-    use crate::rtps::{
-        entities::{entity::Entity, participant::Participant},
-        logic::spdp_logic::SpdpLogic,
-        task::{
-            discovery_traffic::{
-                discovery_multicast_listening_task::DiscoveryMulticastListeningTask,
-                discovery_unicast_listening_task::DiscoveryUnicastListeningTask,
-            },
-            sending_handler::SendingHandler,
-        },
-        transport::socket::Socket,
-    };
-    use crate::test_utils::unique_domain_id;
-
-    // Remote DDS must be running
-    // For sedp_send test, need sedp-related writer's reader locator, reader proxy
-    // And need remote_participant_proxy_datas in participant
-    // So run discovery_multicast_listening_task
-    // Automatically proceeds to send sedp message(HEARTBEAT)
-    #[test]
-    #[ignore]
-    fn test_send_sedp_message() {
-        env_logger::builder().filter_level(log::LevelFilter::Debug).init();
-
-        let domain_id = unique_domain_id() as u32;
-        let mut socket = Socket::new(domain_id); //domain_id 0
-        socket.create_socket();
-        let participant = Arc::new(Participant::new(
-            domain_id,
-            socket.participant_id(),
-            socket.working_ips(),
-            None,
-        ));
-
-        // Socket reset required??
-        // socket.close();
-        // return;
-        let _ = SendingHandler::get_instance(
-            participant.clone(),
-            Some(socket.sender()),
-            socket.tcp_sender(),
-        );
-
-        //discovery multicast port : 7400
-        //discovery unicast port :  7410
-        //user traffic multicast port : 7401
-        //user traffic unicast port : 7411
-        let mut discovery_multicast_listening_task = DiscoveryMulticastListeningTask::new(
-            socket.discovery_multicast_listener(),
-            participant.clone(),
-        );
-        //multicast listening
-        thread::Builder::new()
-            .name("discovery_traffic_multicast_listening".to_string())
-            .spawn(move || {
-                // Register thread name for monitoring
-                {
-                    use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::register_current_thread_name_with_guid_prefix(
-                        "discovery_traffic_multicast_listening",
-                        participant.guid().prefix(),
-                    );
-                }
-
-                let _ = discovery_multicast_listening_task.multicast_listening();
-                eprintln!("discovery multicast listening thread finished");
-            })
-            .expect("Failed to create discovery multicast listening thread");
-
-        // Code to verify that errors are being sent
-        thread::sleep(std::time::Duration::from_secs(100));
-    }
-
-    // Remote DDS must be running
-    // SPDP, SEDP execution test
-    #[test]
-    #[ignore]
-    fn test_process_sedp() {
-        env_logger::builder().filter_level(log::LevelFilter::Info).init();
-
-        let domain_id = unique_domain_id() as u32;
-        let mut socket = Socket::new(domain_id); //domain_id 0
-        socket.create_socket();
-        let participant = Arc::new(Participant::new(
-            domain_id,
-            socket.participant_id(),
-            socket.working_ips(),
-            None,
-        ));
-
-        let _ = SendingHandler::get_instance(participant.clone(), Some(socket.sender()), None);
-
-        //spdp multicast
-        let spdp_logic = SpdpLogic::new(
-            participant.clone(),
-            Some(socket.sender()),
-            None,
-            Vec::new(), // No initial peers for test
-        );
-        spdp_logic.trigger_send_spdp_multicast().unwrap();
-        //discovery multicast port : 7400
-        //discovery unicast port :  7410
-        //user traffic multicast port : 7401
-        //user traffic unicast port : 7411
-        let mut discovery_multicast_listening_task = DiscoveryMulticastListeningTask::new(
-            socket.discovery_multicast_listener(),
-            participant.clone(),
-        );
-        let participant_guid = participant.clone().guid();
-        //multicast listening
-        thread::Builder::new()
-            .name("discovery_traffic_multicast_listening".to_string())
-            .spawn(move || {
-                // Register thread name for monitoring
-                {
-                    use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::register_current_thread_name_with_guid_prefix(
-                        "discovery_traffic_multicast_listening",
-                        participant_guid.prefix(),
-                    );
-                }
-
-                let _ = discovery_multicast_listening_task.multicast_listening();
-                eprintln!("discovery multicast listening thread finished");
-            })
-            .expect("Failed to create discovery multicast listening thread");
-
-        let mut discovery_unicast_listening_task = DiscoveryUnicastListeningTask::new(
-            socket.discovery_unicast_listener(),
-            socket.tcp_discovery_rx(),
-            participant.clone(),
-        );
-
-        //unicast listening
-        thread::Builder::new()
-            .name("discovery_traffic_unicast_listening".to_string())
-            .spawn(move || {
-                let _ = discovery_unicast_listening_task.unicast_listening();
-                eprintln!("discovery unicast listening thread finished");
-            })
-            .expect("Failed to create discovery unicast listening thread");
-
-        // Wait for other threads
-        thread::sleep(std::time::Duration::from_secs(100));
-    }
+    // TODO: Tests need updating to use TransportPlugin + MessageSource pattern.
+    // Previous tests used removed Socket methods (create_socket, sender, discovery_multicast_listener, etc.)
+    // These will be updated when DcpsBridge migration (Phase 5+) is complete.
 }
