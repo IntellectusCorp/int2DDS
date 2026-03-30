@@ -119,6 +119,50 @@ pub unsafe extern "C" fn int2dds_create_subscriber_with_qos(
     INT2DDS_RET_OK
 }
 
+/// Set QoS on a Subscriber
+///
+/// # Safety
+/// - `subscriber` must be a valid subscriber
+/// - `qos` must be a valid subscriber QoS handle
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscriber_set_qos(
+    subscriber: *const Int2DdsSubscriber,
+    qos: *const Int2DdsSubscriberQos,
+) -> Int2DdsRet {
+    check_null!(subscriber);
+    check_null!(qos);
+
+    let subscriber_ref = &*subscriber;
+    let qos_ref = &*qos;
+
+    ffi_try!(subscriber_ref.inner.set_qos(qos_ref.inner.clone()));
+
+    INT2DDS_RET_OK
+}
+
+/// Get QoS from a Subscriber
+///
+/// The returned handle must be freed with `int2dds_subscriber_qos_destroy`.
+///
+/// # Safety
+/// - `subscriber` must be a valid subscriber
+/// - `qos_out` must be a valid pointer to a null pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscriber_get_qos(
+    subscriber: *const Int2DdsSubscriber,
+    qos_out: *mut *mut Int2DdsSubscriberQos,
+) -> Int2DdsRet {
+    check_null!(subscriber);
+    check_null!(qos_out);
+
+    let subscriber_ref = &*subscriber;
+    let qos = ffi_try!(subscriber_ref.inner.get_qos());
+    let boxed = Box::new(Int2DdsSubscriberQos { inner: qos });
+    *qos_out = Box::into_raw(boxed);
+
+    INT2DDS_RET_OK
+}
+
 /// Delete a Subscriber
 ///
 /// # Safety
@@ -361,6 +405,50 @@ pub unsafe extern "C" fn int2dds_datareader_get_listener(
         *listener_out = std::mem::zeroed();
         INT2DDS_RET_OK
     }
+}
+
+/// Set QoS on a DataReader
+///
+/// # Safety
+/// - `reader` must be a valid datareader
+/// - `qos` must be a valid datareader QoS handle
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_set_qos(
+    reader: *const Int2DdsDataReader,
+    qos: *const Int2DdsDataReaderQos,
+) -> Int2DdsRet {
+    check_null!(reader);
+    check_null!(qos);
+
+    let reader_ref = &*reader;
+    let qos_ref = &*qos;
+
+    ffi_try!(reader_ref.inner.set_qos(qos_ref.inner.clone()));
+
+    INT2DDS_RET_OK
+}
+
+/// Get QoS from a DataReader
+///
+/// The returned handle must be freed with `int2dds_datareader_qos_destroy`.
+///
+/// # Safety
+/// - `reader` must be a valid datareader
+/// - `qos_out` must be a valid pointer to a null pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_get_qos(
+    reader: *const Int2DdsDataReader,
+    qos_out: *mut *mut Int2DdsDataReaderQos,
+) -> Int2DdsRet {
+    check_null!(reader);
+    check_null!(qos_out);
+
+    let reader_ref = &*reader;
+    let qos = ffi_try!(reader_ref.inner.get_qos());
+    let boxed = Box::new(Int2DdsDataReaderQos { inner: qos });
+    *qos_out = Box::into_raw(boxed);
+
+    INT2DDS_RET_OK
 }
 
 /// Delete a DataReader

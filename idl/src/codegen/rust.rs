@@ -73,18 +73,23 @@ impl<'a> RustGen<'a> {
     }
 
     fn needs_wchar_import(&self) -> bool {
-        self.model.structs.iter().any(|s| {
-            s.members.iter().any(|m| self.type_uses_wchar(&m.resolved_type))
-        })
+        self.model
+            .structs
+            .iter()
+            .any(|s| s.members.iter().any(|m| self.type_uses_wchar(&m.resolved_type)))
     }
 
     fn needs_hashmap_import(&self) -> bool {
-        self.model.structs.iter().any(|s| {
-            s.members.iter().any(|m| self.type_uses_map(&m.resolved_type))
-        }) || self.model.unions.iter().any(|u| {
-            u.cases.iter().any(|c| self.type_uses_map(&c.member.resolved_type))
-                || u.default_case.as_ref().is_some_and(|dc| self.type_uses_map(&dc.resolved_type))
-        })
+        self.model
+            .structs
+            .iter()
+            .any(|s| s.members.iter().any(|m| self.type_uses_map(&m.resolved_type)))
+            || self.model.unions.iter().any(|u| {
+                u.cases.iter().any(|c| self.type_uses_map(&c.member.resolved_type))
+                    || u.default_case
+                        .as_ref()
+                        .is_some_and(|dc| self.type_uses_map(&dc.resolved_type))
+            })
     }
 
     fn type_uses_wchar(&self, ty: &ResolvedType) -> bool {
@@ -113,6 +118,10 @@ impl<'a> RustGen<'a> {
     fn emit_enum(&mut self, e: &ResolvedEnum) {
         let rust_name = naming::to_pascal_case(&e.name);
         self.line("#[derive(DdsType)]");
+        // Preserve original IDL type name when it differs from PascalCase Rust name
+        if e.name != rust_name {
+            self.line(&format!("#[dds_type(type_name = \"{}\")]", e.qualified_name));
+        }
         self.line("#[repr(i32)]");
         self.line(&format!("pub enum {} {{", rust_name));
         self.indent += 1;
@@ -219,6 +228,10 @@ impl<'a> RustGen<'a> {
         let mut type_attrs = Vec::new();
         if self.opts.crate_path != "int2dds" {
             type_attrs.push(format!("crate_path = \"{}\"", self.opts.crate_path));
+        }
+        // Preserve original IDL type name when it differs from PascalCase Rust name
+        if s.name != rust_name {
+            type_attrs.push(format!("type_name = \"{}\"", s.qualified_name));
         }
         match s.extensibility {
             ExtensibilityKind::Final => {} // default, no annotation needed

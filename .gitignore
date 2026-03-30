@@ -143,3 +143,15 @@ CLAUDE.md
 
 *.log
 int2DDS-shapes-demo
+
+# C# / .NET
+**/bin/
+**/obj/
+*.user
+*.suo
+*.userprefs
+*.nupkg
+*.snupkg
+project.lock.json
+project.fragment.lock.json
+artifacts/
