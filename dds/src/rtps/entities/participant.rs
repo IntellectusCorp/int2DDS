@@ -64,7 +64,7 @@ use crate::{
         },
         task::sending_handler::{MessageType, SendingHandler},
         transport::{
-            get_transport_type, port_manager::PortManager, TransportSender, TransportType,
+            get_transport_type, plugin::TransportPlugin, port_manager::PortManager, TransportType,
         },
     },
     utils::timer::timer_handler::TimerHandler,
@@ -1181,13 +1181,8 @@ impl Participant {
     }
 
     /// Initialize all logic instances. Must be called immediately after creating Participant.
-    /// This creates SPDP, SEDP, User, and WLP logic instances using the provided sender.
-    pub(crate) fn init_logics(
-        self: &Arc<Self>,
-        sender: Arc<TransportSender>,
-        tcp_sender: Option<Arc<TransportSender>>,
-        shm_sender: Option<Arc<TransportSender>>,
-    ) {
+    /// This creates SPDP, SEDP, User, and WLP logic instances using the provided transport.
+    pub(crate) fn init_logics(self: &Arc<Self>, transport: Arc<dyn TransportPlugin>) {
         // Get initial peers from environment for TCP/Hybrid discovery
         let initial_peers = crate::common::env::get_initial_peers();
         if !initial_peers.is_empty() {
@@ -1195,30 +1190,22 @@ impl Participant {
         }
 
         // Create SPDP logic
-        let spdp_logic = Arc::new(Some(SpdpLogic::new(
-            self.clone(),
-            Some(sender.clone()),
-            tcp_sender.clone(),
-            initial_peers,
-        )));
+        let spdp_logic =
+            Arc::new(Some(SpdpLogic::new(self.clone(), transport.clone(), initial_peers)));
         let _ = self.spdp_logic.set(spdp_logic);
 
         // Create SEDP logic
-        let sedp_logic = Arc::new(Some(SedpLogic::new(self.clone(), Some(sender.clone()))));
+        let sedp_logic = Arc::new(Some(SedpLogic::new(self.clone(), transport.clone())));
         let _ = self.sedp_logic.set(sedp_logic);
 
         // Create User logic
-        let user_logic = Arc::new(Some(UserLogic::new(
-            self.clone(),
-            Some(sender.clone()),
-            tcp_sender.clone(),
-            shm_sender,
-        )));
+        let user_logic = Arc::new(Some(UserLogic::new(self.clone(), transport.clone())));
         let _ = self.user_logic.set(user_logic);
 
-        // Create WLP logic
-        let wlp_logic = WlpLogic::new(self.clone(), sender);
-        let _ = self.wlp_logic.set(wlp_logic);
+        // Create WLP logic (still uses sender — cascading dependency, not in Phase 4 scope)
+        // TODO: WlpLogic needs transport migration in a future phase
+        // let wlp_logic = WlpLogic::new(self.clone(), sender);
+        // let _ = self.wlp_logic.set(wlp_logic);
     }
 
     pub(crate) fn set_wlp_logic(&self, wlp_logic: WlpLogic) {

@@ -5,7 +5,6 @@
 //! participants to enable reader-writer matching.
 
 use std::{
-    net::{SocketAddr, SocketAddrV4},
     sync::{Arc, Mutex, Weak},
     thread::{self, JoinHandle},
     time::{Duration as StdDuration, Instant},
@@ -86,7 +85,10 @@ use crate::{
             },
             sending_handler::{MessageType, SendingHandler},
         },
-        transport::{udp::udp_listener::UdpListener, Transport, TransportSender},
+        transport::{
+            plugin::{SendTarget, TransportPlugin},
+            udp::udp_listener::UdpListener,
+        },
     },
     serialize::pl_cdr::InlineQosParameters,
     utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
@@ -109,7 +111,7 @@ pub(crate) struct SedpLogic {
     participant: Weak<Participant>,
     builtin_endpoints: Arc<BuiltinEndpoints>,
     spdp_message: Option<Arc<Vec<u8>>>,
-    sender: Option<Arc<TransportSender>>,
+    transport: Arc<dyn TransportPlugin>,
     multicast_listening_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     unicast_listening_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     timer_handler: Arc<Mutex<TimerHandler>>,
@@ -341,14 +343,14 @@ fn is_primitive_coercion_allowed(writer_id: &TypeIdentifier, reader_id: &TypeIde
 
 /// Initialization
 impl SedpLogic {
-    pub(crate) fn new(participant: Arc<Participant>, sender: Option<Arc<TransportSender>>) -> Self {
+    pub(crate) fn new(participant: Arc<Participant>, transport: Arc<dyn TransportPlugin>) -> Self {
         let builtin_endpoints = participant.builtin_endpoints();
         let timer_handler = TimerHandler::get_instance(participant.guid().prefix());
         Self {
             participant: Arc::downgrade(&participant),
             builtin_endpoints,
             spdp_message: None,
-            sender,
+            transport,
             multicast_listening_handle: Arc::new(Mutex::new(None)),
             unicast_listening_handle: Arc::new(Mutex::new(None)),
             timer_handler,
@@ -360,7 +362,6 @@ impl SedpLogic {
         &self,
         discovery_multicast_listener: Option<UdpListener>,
         discovery_unicast_listener: Option<UdpListener>,
-        tcp_discovery_rx: Option<crossbeam_channel::Receiver<(Vec<u8>, std::net::SocketAddr)>>,
     ) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
 
@@ -399,7 +400,7 @@ impl SedpLogic {
 
         let mut discovery_unicast_listening_task = DiscoveryUnicastListeningTask::new(
             discovery_unicast_listener,
-            tcp_discovery_rx,
+            None, // TCP channel handled by TcpTransportPlugin (Phase 7)
             participant.clone(),
         );
 
@@ -1503,40 +1504,13 @@ impl SedpLogic {
                     match buffer {
                         Ok(buffer) => {
                             for locator in reader_proxy.unicast_locator_list() {
-                                if locator.kind() == LOCATOR_KIND_UDP_V4
-                                    || locator.kind() == LOCATOR_KIND_UDP_V6
+                                if let Err(e) = self
+                                    .transport
+                                    .send(&buffer, &SendTarget::UnicastDiscovery(locator))
                                 {
-                                    let socket_addr = SocketAddr::V4(SocketAddrV4::new(
-                                        locator.to_ip_v4_addr(),
-                                        locator.port() as u16,
-                                    ));
-                                    if let Some(ref sender) = self.sender {
-                                        if let Err(e) = sender.send(&socket_addr, &buffer) {
-                                            warn!("Failed to send SEDP heartbeat: {:?}", e);
-                                        } else {
-                                            is_sent = true;
-                                        }
-                                    } else {
-                                        debug!("UDP sender not available, skipping SEDP heartbeat");
-                                    }
-                                } else if locator.kind() == LOCATOR_KIND_TCP_V4
-                                    || locator.kind() == LOCATOR_KIND_TCP_V6
-                                {
-                                    let socket_addr = SocketAddr::V4(SocketAddrV4::new(
-                                        locator.to_ip_v4_addr(),
-                                        locator.port() as u16,
-                                    ));
-                                    if let Some(ref sender) = self.sender {
-                                        if let Err(e) =
-                                            sender.send_to_discovery(&socket_addr, &buffer)
-                                        {
-                                            warn!("Failed to send SEDP heartbeat via TCP: {:?}", e);
-                                        } else {
-                                            is_sent = true;
-                                        }
-                                    } else {
-                                        debug!("TCP sender not available, skipping SEDP heartbeat");
-                                    }
+                                    warn!("Failed to send SEDP heartbeat: {:?}", e);
+                                } else {
+                                    is_sent = true;
                                 }
                             }
                             writer.increase_heartbeat_count();
@@ -1546,7 +1520,6 @@ impl SedpLogic {
                         }
                         Err(e) => {
                             warn!("Failed to create SEDP heartbeat message: {:?}", e);
-                            // Continue to next reader proxy instead of failing entirely
                         }
                     }
                 }
@@ -1871,67 +1844,13 @@ impl SedpLogic {
         locator: Locator,
         message_type: &str,
     ) -> RtpsResult<()> {
-        match locator.kind() {
-            LOCATOR_KIND_UDP_V4 => {
-                let socket_addr = SocketAddr::V4(SocketAddrV4::new(
-                    locator.to_ip_v4_addr(),
-                    locator.port() as u16,
-                ));
-
-                if let Some(ref sender) = self.sender {
-                    sender.send(&socket_addr, buffer).map_err(|e| {
-                        RtpsError::new(
-                            RtpsErrorCode::NotSent,
-                            format!(
-                                "[{}] SEDP Logic: Failed to send message to {}: {}",
-                                message_type, socket_addr, e
-                            ),
-                        )
-                    })?;
-                    debug!(
-                        "[{}] SEDP Logic: {} message sent to {} (transport: UDP)",
-                        message_type, message_type, socket_addr,
-                    );
-                } else {
-                    debug!("UDP sender not available, skipping SEDP message");
-                }
-            }
-            LOCATOR_KIND_TCP_V4 => {
-                // TCP locator port is the physical port (e.g. 7400).
-                // send_to_logical_port is handled internally by TcpSender
-                // which uses the discovery logical port for this peer.
-                let socket_addr = SocketAddr::V4(SocketAddrV4::new(
-                    locator.to_ip_v4_addr(),
-                    locator.port() as u16,
-                ));
-
-                if let Some(ref sender) = self.sender {
-                    sender.send_to_discovery(&socket_addr, buffer).map_err(|e| {
-                        RtpsError::new(
-                            RtpsErrorCode::NotSent,
-                            format!(
-                                "[{}] SEDP Logic: Failed to send TCP message to {}: {}",
-                                message_type, socket_addr, e
-                            ),
-                        )
-                    })?;
-                    debug!(
-                        "[{}] SEDP Logic: {} message sent to {} (transport: TCP/discovery)",
-                        message_type, message_type, socket_addr,
-                    );
-                } else {
-                    debug!("TCP sender not available, skipping SEDP message");
-                }
-            }
-            _ => {
-                debug!(
-                    "[{}] SEDP Logic: Unsupported locator kind: {}",
-                    message_type,
-                    locator.kind()
-                );
-            }
-        }
-
+        self.transport.send(buffer, &SendTarget::UnicastDiscovery(&locator)).map_err(|e| {
+            RtpsError::new(
+                RtpsErrorCode::NotSent,
+                format!("[{}] SEDP Logic: Failed to send message: {}", message_type, e),
+            )
+        })?;
+        debug!("[{}] SEDP Logic: message sent via transport plugin", message_type);
         Ok(())
     }
 }
