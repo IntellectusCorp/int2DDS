@@ -1202,3 +1202,82 @@ impl<'a> CsGen<'a> {
         self.out.push_str(s);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::parse_idl;
+    use crate::resolver::resolve;
+
+    #[test]
+    fn test_keyword_escaping_struct_properties() {
+        // C# keywords are lowercase (class, event, async, etc.)
+        // After to_pascal_case, "class" → "Class" which is NOT a C# keyword → no escaping
+        // This is correct because C# is case-sensitive and "Class" is a valid identifier.
+        let defs = parse_idl(
+            r#"
+            struct KeywordTest {
+                long class;
+                long event;
+                boolean async;
+                string record;
+                long value;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "KeywordTest.idl", &CSharpOptions::default());
+
+        // PascalCase converts lowercase keywords to capitalized form → no longer a keyword
+        assert!(code.contains("Class"), "class → Class: {}", code);
+        assert!(code.contains("Event"), "event → Event: {}", code);
+        assert!(code.contains("Async"), "async → Async: {}", code);
+        assert!(code.contains("Record"), "record → Record: {}", code);
+        assert!(code.contains("Value"), "value → Value: {}", code);
+    }
+
+    #[test]
+    fn test_keyword_escaping_enum_variants() {
+        let defs = parse_idl(
+            r#"
+            enum TestEnum {
+                CLASS,
+                EVENT,
+                ASYNC
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "TestEnum.idl", &CSharpOptions::default());
+
+        // PascalCase: CLASS -> Class, EVENT -> Event, ASYNC -> Async
+        // These are NOT C# keywords (keywords are lowercase) → no @ prefix
+        assert!(code.contains("Class ="), "Class variant: {}", code);
+        assert!(code.contains("Event ="), "Event variant: {}", code);
+        assert!(code.contains("Async ="), "Async variant: {}", code);
+    }
+
+    #[test]
+    fn test_non_keyword_not_escaped_csharp() {
+        let defs = parse_idl(
+            r#"
+            struct Normal {
+                long data;
+                string sensor_id;
+                long temperature;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Normal.idl", &CSharpOptions::default());
+
+        assert!(code.contains("Data"));
+        assert!(code.contains("SensorId"));
+        assert!(code.contains("Temperature"));
+        assert!(!code.contains("@Data"));
+        assert!(!code.contains("@Temperature"));
+    }
+}
