@@ -1,0 +1,120 @@
+use std::io;
+use std::net::SocketAddr;
+
+use crate::rtps::common::locator::Locator;
+use crate::rtps::transport::udp::udp_listener::UdpListener;
+
+use super::TransportType;
+
+/// Intent-based send target.
+///
+/// RTPS logic expresses *what* it wants to do, not *how*.
+/// Each `TransportPlugin` implementation interprets these targets
+/// according to its own transport semantics.
+pub(crate) enum SendTarget<'a> {
+    /// Announce this participant's presence to the network.
+    ///
+    /// - UDP: send_multicast to discovery multicast group
+    /// - TCP: unicast to each initial_peer via discovery connection
+    /// - Hybrid: UDP multicast (discovery always uses UDP)
+    /// - SHM: UDP multicast (discovery always uses UDP)
+    MulticastDiscovery,
+
+    /// Send discovery data (SEDP) to a specific remote participant.
+    ///
+    /// - UDP: sendto(locator address)
+    /// - TCP: BIND handshake + send on discovery logical port
+    /// - Hybrid: route by locator kind (UDP or TCP)
+    /// - SHM: sendto via UDP (discovery is always UDP)
+    UnicastDiscovery(&'a Locator),
+
+    /// Send user data to a specific remote endpoint.
+    ///
+    /// - UDP: sendto(locator address)
+    /// - TCP: BIND handshake + send on user_data logical port
+    /// - Hybrid: route by locator kind (UDP or TCP)
+    /// - SHM: route by locator kind (SHM or UDP)
+    UserData(&'a Locator),
+}
+
+/// Unified message received from any transport source.
+pub(crate) struct IncomingMessage {
+    pub data: Vec<u8>,
+    pub source: SocketAddr,
+}
+
+/// Source of incoming messages for a ListeningTask.
+///
+/// The variant determines the I/O mechanism, not the transport type.
+/// ListeningTask branches on I/O mechanism (2 branches),
+/// not on transport type (which would be N branches).
+pub(crate) enum MessageSource {
+    /// Direct mio-based polling — zero channel overhead.
+    /// Used when a single listener owns the receive path (e.g., UDP-only mode).
+    MioPoll { listener: UdpListener },
+
+    /// Channel-based receiving.
+    /// Used when multiple sources must be merged (Hybrid, SHM)
+    /// or when the transport internally demuxes (TCP mux listener).
+    Channel { rx: crossbeam_channel::Receiver<IncomingMessage> },
+}
+
+/// Transport plugin trait — the only interface RTPS logic depends on.
+///
+/// Implementations encapsulate all transport-specific details:
+/// connection management, framing, multiplexing, keep-alive, etc.
+/// RTPS logic never branches on transport type.
+pub(crate) trait TransportPlugin: Send + Sync {
+    /// Send data with intent-based targeting.
+    ///
+    /// The caller expresses *what* to do (announce, discovery, user data).
+    /// The implementation decides *how* (multicast, TCP BIND, SHM write, etc.).
+    fn send(&self, data: &[u8], target: &SendTarget) -> io::Result<()>;
+
+    /// Return the locators this transport advertises to remote participants.
+    ///
+    /// Called during participant creation to build the locator list
+    /// included in SPDP announcements.
+    fn local_locators(&self, domain_id: u32, participant_id: u32) -> Vec<Locator>;
+
+    /// Take ownership of the discovery message source.
+    ///
+    /// Called once during initialization. The returned `MessageSource`
+    /// is moved into `DiscoveryUnicastListeningTask`.
+    fn take_discovery_source(&mut self) -> MessageSource;
+
+    /// Take ownership of the user data message source.
+    ///
+    /// Called once during initialization. The returned `MessageSource`
+    /// is moved into `UserUnicastListeningTask`.
+    fn take_user_data_source(&mut self) -> MessageSource;
+
+    /// Get the local port number used by this transport.
+    fn port(&self) -> u16;
+
+    /// Release all resources (sockets, connections, threads).
+    fn close(&self);
+}
+
+/// Factory for creating transport plugin instances.
+pub(crate) struct TransportPluginFactory;
+
+impl TransportPluginFactory {
+    /// Create a transport plugin based on the configured transport type.
+    ///
+    /// This is the single point where transport type branching occurs.
+    /// After this call, all code uses `dyn TransportPlugin` —
+    /// no further transport-type checks needed.
+    pub(crate) fn create(
+        _transport_type: TransportType,
+        _domain_id: u32,
+        _participant_id: u32,
+    ) -> io::Result<Box<dyn TransportPlugin>> {
+        // Phase 2+: each branch creates the appropriate plugin
+        // For now, return an error — implementations come in later phases
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("TransportPlugin for {:?} not yet implemented", _transport_type),
+        ))
+    }
+}

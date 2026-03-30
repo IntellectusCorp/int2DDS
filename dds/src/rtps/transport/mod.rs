@@ -30,6 +30,7 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
+pub(crate) mod plugin;
 pub(crate) mod port_manager;
 pub(crate) mod shm;
 pub(crate) mod socket;
