@@ -251,6 +251,7 @@ mod tests {
     use std::thread;
 
     use crate::common::env::{get_network_interface, get_network_ip};
+    use crate::rtps::common::guid::GUIDPREFIX_UNKNOWN;
     use crate::rtps::entities::participant::Participant;
     use crate::rtps::logic::spdp_logic::SpdpLogic;
     use crate::rtps::transport::plugin::TransportPluginFactory;
@@ -269,6 +270,7 @@ mod tests {
             get_network_ip().unwrap_or_default(),
             get_network_interface().unwrap_or_default(),
             socket.working_ips().iter().map(|ip| ip.to_string()).collect(),
+            GUIDPREFIX_UNKNOWN,
         )
         .expect("Failed to create transport plugin");
         socket.set_transport(Arc::from(transport));

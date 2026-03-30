@@ -166,6 +166,7 @@ mod tests {
             socket.get_sender_bind_addr(),
             socket.get_sender_multicast_if_addr(),
             socket.working_ips(),
+            [0u8; 12],
         )
         .unwrap();
         let transport: Arc<dyn TransportPlugin> = Arc::from(transport);

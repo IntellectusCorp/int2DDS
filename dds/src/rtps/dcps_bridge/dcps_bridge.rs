@@ -78,6 +78,11 @@ impl DcpsBridge {
     pub(crate) fn new(domain_id: DomainId) -> Self {
         let mut socket = Socket::new(domain_id);
 
+        // Create a temporary participant to obtain guid_prefix (needed by TCP transport)
+        let temp_participant =
+            Participant::new(domain_id, socket.participant_id(), socket.working_ips(), None);
+        let guid_prefix = temp_participant.guid().prefix();
+
         // Create transport plugin via factory — single branching point
         let transport_type = crate::rtps::transport::get_transport_type();
         let bind_ip = crate::common::env::get_network_ip().unwrap_or_default();
@@ -93,6 +98,7 @@ impl DcpsBridge {
                 bind_ip,
                 multicast_if_ip,
                 working_ips,
+                guid_prefix,
             )
             .expect("Failed to create transport plugin"),
         );
