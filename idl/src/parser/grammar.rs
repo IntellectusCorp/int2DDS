@@ -1507,4 +1507,51 @@ mod tests {
             msg
         );
     }
+
+    // --- Escaped IDL keyword tests ---
+
+    #[test]
+    fn test_escaped_keyword_as_field_name() {
+        let defs = parse_str("struct Foo { long _boolean; long _sequence; };");
+        if let Definition::Struct(s) = &defs[0] {
+            assert_eq!(s.members[0].name, "boolean");
+            assert_eq!(s.members[1].name, "sequence");
+        } else {
+            panic!("expected struct");
+        }
+    }
+
+    #[test]
+    fn test_escaped_keyword_as_struct_name() {
+        let defs = parse_str("struct _sequence { long x; };");
+        if let Definition::Struct(s) = &defs[0] {
+            assert_eq!(s.name, "sequence");
+        } else {
+            panic!("expected struct");
+        }
+    }
+
+    #[test]
+    fn test_escaped_keyword_mixed_with_normal() {
+        let defs = parse_str("struct Test { long _struct; string name; double _float; };");
+        if let Definition::Struct(s) = &defs[0] {
+            assert_eq!(s.members.len(), 3);
+            assert_eq!(s.members[0].name, "struct");
+            assert_eq!(s.members[1].name, "name");
+            assert_eq!(s.members[2].name, "float");
+        } else {
+            panic!("expected struct");
+        }
+    }
+
+    #[test]
+    fn test_unescaped_keyword_still_rejected() {
+        // Bare keywords without _ prefix should still be errors
+        let msg = parse_str_err("struct Test { long boolean; };");
+        assert!(
+            msg.contains("'boolean'") && msg.contains("IDL reserved keyword"),
+            "expected keyword error, got: {}",
+            msg
+        );
+    }
 }

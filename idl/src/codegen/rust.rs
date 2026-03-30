@@ -733,4 +733,48 @@ mod tests {
         assert!(code.contains("pub class_id: i32,"));
         assert!(code.contains("pub return_value: i32,"));
     }
+
+    #[test]
+    fn test_keyword_escaping_in_union() {
+        // Union case names go through to_pascal_case, so "type" → "Type"
+        // "Type" is NOT a Rust keyword (keywords are lowercase) → no r# prefix
+        let defs = parse_idl(
+            r#"
+            union KeywordUnion switch(long) {
+                case 0: long type;
+                case 1: string class;
+                default: boolean match;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "KeywordUnion.idl", &RustOptions::default());
+
+        assert!(code.contains("Type(i32) = 0,"), "union case 'type' → Type: {}", code);
+        assert!(code.contains("Class(String) = 1,"), "union case 'class' → Class: {}", code);
+        assert!(code.contains("Match(bool) = -1,"), "union default 'match' → Match: {}", code);
+    }
+
+    #[test]
+    fn test_keyword_escaping_in_enum_variants() {
+        // Enum variants go through to_pascal_case: TYPE → Type, MATCH → Match
+        // PascalCase forms are NOT Rust keywords → no escaping needed
+        let defs = parse_idl(
+            r#"
+            enum KeywordEnum {
+                TYPE,
+                MATCH,
+                IMPL
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "KeywordEnum.idl", &RustOptions::default());
+
+        assert!(code.contains("Type = 0,"), "Type variant: {}", code);
+        assert!(code.contains("Match = 1,"), "Match variant: {}", code);
+        assert!(code.contains("Impl = 2,"), "Impl variant: {}", code);
+    }
 }

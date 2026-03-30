@@ -620,3 +620,99 @@ impl<'a> PyGen<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::parse_idl;
+    use crate::resolver::resolve;
+
+    #[test]
+    fn test_keyword_escaping_struct_fields() {
+        let defs = parse_idl(
+            r#"
+            struct KeywordTest {
+                long type;
+                string class;
+                string list;
+                long match;
+                long lambda;
+                string tuple;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "KeywordTest.idl", &PythonOptions::new());
+
+        // Field declarations
+        assert!(code.contains("type_: int"), "type should be escaped: {}", code);
+        assert!(code.contains("class_: str"), "class should be escaped: {}", code);
+        assert!(code.contains("list_: str"), "list should be escaped: {}", code);
+        assert!(code.contains("match_: int"), "match should be escaped: {}", code);
+        assert!(code.contains("lambda_: int"), "lambda should be escaped: {}", code);
+        assert!(code.contains("tuple_: str"), "tuple should be escaped: {}", code);
+    }
+
+    #[test]
+    fn test_keyword_escaping_in_serialize() {
+        let defs = parse_idl(
+            r#"
+            struct SerTest {
+                long type;
+                string class;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "SerTest.idl", &PythonOptions::new());
+
+        // Serialization should use escaped accessor: self.type_, self.class_
+        assert!(code.contains("self.type_"), "serialize should use escaped name: {}", code);
+        assert!(code.contains("self.class_"), "serialize should use escaped name: {}", code);
+        // Deserialization return should use escaped names
+        assert!(code.contains("return cls(type_, class_)"), "return should use escaped names: {}", code);
+    }
+
+    #[test]
+    fn test_keyword_escaping_in_key_serialize() {
+        let defs = parse_idl(
+            r#"
+            struct KeyTest {
+                @key long type;
+                string class;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "KeyTest.idl", &PythonOptions::new());
+
+        // Key serialization should also use escaped name
+        assert!(code.contains("self.type_"), "key serialize should use escaped name: {}", code);
+    }
+
+    #[test]
+    fn test_non_keyword_not_escaped_python() {
+        let defs = parse_idl(
+            r#"
+            struct Normal {
+                long data;
+                string sensor_id;
+                long type_name;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Normal.idl", &PythonOptions::new());
+
+        assert!(code.contains("data: int"));
+        assert!(code.contains("sensor_id: str"));
+        assert!(code.contains("type_name: int"));
+        // Should NOT have trailing underscore
+        assert!(!code.contains("data_:"));
+        assert!(!code.contains("sensor_id_:"));
+    }
+}

@@ -1734,4 +1734,71 @@ mod tests {
         assert!(code.contains("double values[100]"));
         assert!(code.contains("uint32_t length;"));
     }
+
+    #[test]
+    fn test_keyword_escaping_struct_fields() {
+        let defs = parse_idl(
+            r#"
+            struct KeywordTest {
+                long return;
+                long goto;
+                long register;
+                long nullptr;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "KeywordTest.idl", &COptions::default());
+
+        assert!(code.contains("int32_t return_;"), "return should be escaped: {}", code);
+        assert!(code.contains("int32_t goto_;"), "goto should be escaped: {}", code);
+        assert!(code.contains("int32_t register_;"), "register should be escaped: {}", code);
+        assert!(code.contains("int32_t nullptr_;"), "nullptr should be escaped: {}", code);
+    }
+
+    #[test]
+    fn test_keyword_escaping_serialize_accessor() {
+        let defs = parse_idl(
+            r#"
+            struct KeywordSer {
+                long return;
+                boolean volatile;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "KeywordSer.idl", &COptions::default());
+
+        // Serialization should use escaped accessor: val->return_
+        assert!(code.contains("val->return_"), "serialize accessor should be escaped: {}", code);
+        assert!(code.contains("val->volatile_"), "serialize accessor should be escaped: {}", code);
+        // Deserialization should also use escaped accessor
+        assert!(
+            code.contains("val_out->return_"),
+            "deserialize accessor should be escaped: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn test_non_keyword_not_escaped_c() {
+        let defs = parse_idl(
+            r#"
+            struct Normal {
+                long data;
+                long sensor_id;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Normal.idl", &COptions::default());
+
+        assert!(code.contains("int32_t data;"));
+        assert!(code.contains("int32_t sensor_id;"));
+        assert!(!code.contains("data_"));
+        assert!(!code.contains("sensor_id_"));
+    }
 }
