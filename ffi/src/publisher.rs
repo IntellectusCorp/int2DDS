@@ -99,6 +99,104 @@ pub unsafe extern "C" fn int2dds_create_publisher_with_qos(
     INT2DDS_RET_OK
 }
 
+/// Set QoS on a Publisher
+///
+/// Applies new QoS policies to an existing Publisher. Some policies can only
+/// be changed before the entity is enabled; attempting to change immutable
+/// policies on an enabled entity returns IMMUTABLE_POLICY.
+///
+/// # Safety
+/// - `publisher` must be a valid publisher
+/// - `qos` must be a valid publisher QoS handle
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publisher_set_qos(
+    publisher: *const Int2DdsPublisher,
+    qos: *const Int2DdsPublisherQos,
+) -> Int2DdsRet {
+    check_null!(publisher);
+    check_null!(qos);
+
+    let publisher_ref = &*publisher;
+    let qos_ref = &*qos;
+
+    ffi_try!(publisher_ref.inner.set_qos(qos_ref.inner.clone()));
+
+    INT2DDS_RET_OK
+}
+
+/// Get QoS from a Publisher
+///
+/// Returns a new QoS handle containing the current QoS policies of the Publisher.
+/// The returned handle must be freed with `int2dds_publisher_qos_destroy`.
+///
+/// # Safety
+/// - `publisher` must be a valid publisher
+/// - `qos_out` must be a valid pointer to a null pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publisher_get_qos(
+    publisher: *const Int2DdsPublisher,
+    qos_out: *mut *mut Int2DdsPublisherQos,
+) -> Int2DdsRet {
+    check_null!(publisher);
+    check_null!(qos_out);
+
+    let publisher_ref = &*publisher;
+    let qos = ffi_try!(publisher_ref.inner.get_qos());
+    let boxed = Box::new(Int2DdsPublisherQos { inner: qos });
+    *qos_out = Box::into_raw(boxed);
+
+    INT2DDS_RET_OK
+}
+
+/// Set QoS on a DataWriter
+///
+/// Applies new QoS policies to an existing DataWriter. Some policies can only
+/// be changed before the entity is enabled; attempting to change immutable
+/// policies on an enabled entity returns IMMUTABLE_POLICY.
+///
+/// # Safety
+/// - `writer` must be a valid datawriter
+/// - `qos` must be a valid datawriter QoS handle
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_set_qos(
+    writer: *const Int2DdsDataWriter,
+    qos: *const Int2DdsDataWriterQos,
+) -> Int2DdsRet {
+    check_null!(writer);
+    check_null!(qos);
+
+    let writer_ref = &*writer;
+    let qos_ref = &*qos;
+
+    ffi_try!(writer_ref.inner.set_qos(qos_ref.inner.clone()));
+
+    INT2DDS_RET_OK
+}
+
+/// Get QoS from a DataWriter
+///
+/// Returns a new QoS handle containing the current QoS policies of the DataWriter.
+/// The returned handle must be freed with `int2dds_datawriter_qos_destroy`.
+///
+/// # Safety
+/// - `writer` must be a valid datawriter
+/// - `qos_out` must be a valid pointer to a null pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_get_qos(
+    writer: *const Int2DdsDataWriter,
+    qos_out: *mut *mut Int2DdsDataWriterQos,
+) -> Int2DdsRet {
+    check_null!(writer);
+    check_null!(qos_out);
+
+    let writer_ref = &*writer;
+    let qos = ffi_try!(writer_ref.inner.get_qos());
+    let boxed = Box::new(Int2DdsDataWriterQos { inner: qos });
+    *qos_out = Box::into_raw(boxed);
+
+    INT2DDS_RET_OK
+}
+
 /// Delete a Publisher
 ///
 /// # Safety
