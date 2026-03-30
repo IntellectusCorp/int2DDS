@@ -1,6 +1,7 @@
 use std::io;
 use std::net::SocketAddr;
 
+use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::locator::Locator;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 
@@ -118,6 +119,7 @@ impl TransportPluginFactory {
         bind_ip: String,
         multicast_if_ip: String,
         working_ips: Vec<String>,
+        guid_prefix: GuidPrefix,
     ) -> io::Result<Box<dyn TransportPlugin>> {
         match transport_type {
             TransportType::UDP => {
@@ -129,6 +131,12 @@ impl TransportPluginFactory {
                     multicast_if_ip,
                     working_ips,
                 )?;
+                Ok(Box::new(plugin))
+            }
+            TransportType::TCP => {
+                use crate::rtps::transport::tcp::tcp_transport_plugin::TcpTransportPlugin;
+                let plugin =
+                    TcpTransportPlugin::new(domain_id, participant_id, bind_ip, guid_prefix)?;
                 Ok(Box::new(plugin))
             }
             _ => Err(io::Error::new(

@@ -7,6 +7,8 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Instant;
 
 use crossbeam_channel::Sender;
+
+use crate::rtps::transport::plugin::IncomingMessage;
 use log::{debug, error, info, warn};
 use mio::net::{TcpListener as MioTcpListener, TcpStream as MioTcpStream};
 use mio::{Interest, Registry, Token};
@@ -61,10 +63,10 @@ pub(crate) struct TcpMuxListener {
     peer_connections: HashMap<GuidPrefix, PeerConnectionGroup>,
 
     /// Channel for routing discovery RTPS data to discovery listening task
-    discovery_tx: Sender<(Vec<u8>, SocketAddr)>,
+    discovery_tx: Sender<IncomingMessage>,
 
     /// Channel for routing user RTPS data to user listening task
-    user_data_tx: Sender<(Vec<u8>, SocketAddr)>,
+    user_data_tx: Sender<IncomingMessage>,
 }
 
 /// Tracks the 3 connections from a single remote peer
@@ -145,8 +147,8 @@ impl TcpMuxListener {
         domain_id: u32,
         participant_id: u32,
         local_guid_prefix: GuidPrefix,
-        discovery_tx: Sender<(Vec<u8>, SocketAddr)>,
-        user_data_tx: Sender<(Vec<u8>, SocketAddr)>,
+        discovery_tx: Sender<IncomingMessage>,
+        user_data_tx: Sender<IncomingMessage>,
     ) -> io::Result<Self> {
         let addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
         let listener = MioTcpListener::bind(addr)?;
@@ -468,11 +470,13 @@ impl TcpMuxListener {
         };
 
         if PortManager::is_discovery_unicast_port(self.domain_id, logical_port) {
-            if let Err(e) = self.discovery_tx.try_send((payload.to_vec(), remote_addr)) {
+            let msg = IncomingMessage { data: payload.to_vec(), source: remote_addr };
+            if let Err(e) = self.discovery_tx.try_send(msg) {
                 warn!("TcpMuxListener: Failed to route discovery data: {:?}", e);
             }
         } else if PortManager::is_user_unicast_port(self.domain_id, logical_port) {
-            if let Err(e) = self.user_data_tx.try_send((payload.to_vec(), remote_addr)) {
+            let msg = IncomingMessage { data: payload.to_vec(), source: remote_addr };
+            if let Err(e) = self.user_data_tx.try_send(msg) {
                 warn!("TcpMuxListener: Failed to route user data: {:?}", e);
             }
         }
