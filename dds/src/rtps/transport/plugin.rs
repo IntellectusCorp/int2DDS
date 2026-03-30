@@ -77,19 +77,19 @@ pub(crate) trait TransportPlugin: Send + Sync {
     /// included in SPDP announcements.
     fn local_locators(&self, domain_id: u32, participant_id: u32) -> Vec<Locator>;
 
-    /// Take ownership of the discovery message source.
+    /// Take ownership of the discovery unicast message source.
     ///
     /// Called once during initialization. The returned `MessageSource`
     /// is moved into `DiscoveryUnicastListeningTask`.
     fn take_discovery_source(&mut self) -> MessageSource;
 
-    /// Take ownership of the user data message source.
+    /// Take ownership of the user data unicast message source.
     ///
     /// Called once during initialization. The returned `MessageSource`
     /// is moved into `UserUnicastListeningTask`.
     fn take_user_data_source(&mut self) -> MessageSource;
 
-    /// Get the local port number used by this transport.
+    /// Get the local port number used by this transport's sender.
     fn port(&self) -> u16;
 
     /// Release all resources (sockets, connections, threads).
@@ -106,15 +106,29 @@ impl TransportPluginFactory {
     /// After this call, all code uses `dyn TransportPlugin` —
     /// no further transport-type checks needed.
     pub(crate) fn create(
-        _transport_type: TransportType,
-        _domain_id: u32,
-        _participant_id: u32,
+        transport_type: TransportType,
+        domain_id: u32,
+        participant_id: u32,
+        bind_ip: String,
+        multicast_if_ip: String,
+        working_ips: Vec<String>,
     ) -> io::Result<Box<dyn TransportPlugin>> {
-        // Phase 2+: each branch creates the appropriate plugin
-        // For now, return an error — implementations come in later phases
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            format!("TransportPlugin for {:?} not yet implemented", _transport_type),
-        ))
+        match transport_type {
+            TransportType::UDP => {
+                use crate::rtps::transport::udp::udp_transport_plugin::UdpTransportPlugin;
+                let plugin = UdpTransportPlugin::new(
+                    domain_id,
+                    participant_id,
+                    bind_ip,
+                    multicast_if_ip,
+                    working_ips,
+                )?;
+                Ok(Box::new(plugin))
+            }
+            _ => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("TransportPlugin for {:?} not yet implemented", transport_type),
+            )),
+        }
     }
 }
