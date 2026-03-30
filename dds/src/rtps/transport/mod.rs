@@ -30,6 +30,7 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
+pub(crate) mod hybrid_transport_plugin;
 pub(crate) mod plugin;
 pub(crate) mod port_manager;
 pub(crate) mod shm;

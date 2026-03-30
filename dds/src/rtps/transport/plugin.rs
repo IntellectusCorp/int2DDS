@@ -139,10 +139,29 @@ impl TransportPluginFactory {
                     TcpTransportPlugin::new(domain_id, participant_id, bind_ip, guid_prefix)?;
                 Ok(Box::new(plugin))
             }
-            _ => Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!("TransportPlugin for {:?} not yet implemented", transport_type),
-            )),
+            TransportType::Hybrid => {
+                use crate::rtps::transport::hybrid_transport_plugin::HybridTransportPlugin;
+                let plugin = HybridTransportPlugin::new(
+                    domain_id,
+                    participant_id,
+                    bind_ip,
+                    multicast_if_ip,
+                    working_ips,
+                    guid_prefix,
+                )?;
+                Ok(Box::new(plugin))
+            }
+            TransportType::SHM => {
+                use crate::rtps::transport::shm::shm_transport_plugin::ShmTransportPlugin;
+                let plugin = ShmTransportPlugin::new(
+                    domain_id,
+                    participant_id,
+                    bind_ip,
+                    multicast_if_ip,
+                    working_ips,
+                )?;
+                Ok(Box::new(plugin))
+            }
         }
     }
 }
