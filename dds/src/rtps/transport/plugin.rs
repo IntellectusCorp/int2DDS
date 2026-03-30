@@ -77,17 +77,23 @@ pub(crate) trait TransportPlugin: Send + Sync {
     /// included in SPDP announcements.
     fn local_locators(&self, domain_id: u32, participant_id: u32) -> Vec<Locator>;
 
+    /// Take ownership of the discovery multicast message source.
+    ///
+    /// Called once during initialization. The returned `MessageSource`
+    /// is moved into `DiscoveryMulticastListeningTask`.
+    fn take_discovery_multicast_source(&self) -> MessageSource;
+
     /// Take ownership of the discovery unicast message source.
     ///
     /// Called once during initialization. The returned `MessageSource`
     /// is moved into `DiscoveryUnicastListeningTask`.
-    fn take_discovery_source(&mut self) -> MessageSource;
+    fn take_discovery_unicast_source(&self) -> MessageSource;
 
     /// Take ownership of the user data unicast message source.
     ///
     /// Called once during initialization. The returned `MessageSource`
     /// is moved into `UserUnicastListeningTask`.
-    fn take_user_data_source(&mut self) -> MessageSource;
+    fn take_user_data_unicast_source(&self) -> MessageSource;
 
     /// Get the local port number used by this transport's sender.
     fn port(&self) -> u16;

@@ -72,7 +72,7 @@ impl SpdpLogic {
             }
         };
         // Actually request SPDP multicast transmission
-        let sending_handler = SendingHandler::get_instance(participant.clone(), None, None);
+        let sending_handler = SendingHandler::get_instance(participant.clone(), None);
         sending_handler.push_message_and_wake(MessageType::PeriodicParticipantDataMulticast(
             None,
             heartbeat_period.to_std_duration(),
@@ -132,7 +132,7 @@ impl SpdpLogic {
                         if let Some(participant) = participant_weak.upgrade() {
                             if !participant.is_terminated() {
                                 let sending_handler =
-                                    SendingHandler::get_instance(participant, None, None);
+                                    SendingHandler::get_instance(participant, None);
                                 sending_handler.push_message_and_wake(
                                     MessageType::PeriodicParticipantDataMulticast(
                                         Some(Instant::now()),

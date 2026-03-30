@@ -1609,7 +1609,7 @@ impl SedpLogic {
                         if let Some(participant) = participant_weak.upgrade() {
                             if !participant.is_terminated() {
                                 let sending_handler =
-                                    SendingHandler::get_instance(participant, None, None);
+                                    SendingHandler::get_instance(participant, None);
                                 sending_handler.push_message_and_wake((*message).clone());
                             }
                         }

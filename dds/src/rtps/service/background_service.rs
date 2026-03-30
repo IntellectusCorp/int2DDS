@@ -88,7 +88,7 @@ impl BackgroundService {
                         participant.terminate();
 
                         let sending_handler =
-                            SendingHandler::get_instance(Arc::clone(&participant), None, None);
+                            SendingHandler::get_instance(Arc::clone(&participant), None);
 
                         sending_handler.wake_event_loop();
 

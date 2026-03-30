@@ -1681,7 +1681,7 @@ impl UnicastMessageProcessor for UserLogic {
 
             if delay_duration.is_zero() {
                 // No delay - send immediately
-                let handler = SendingHandler::get_instance(participant.clone(), None, None);
+                let handler = SendingHandler::get_instance(participant.clone(), None);
                 handler.push_message_and_wake(MessageType::UserRequestedChanges(
                     acknack.writer_id,
                     remote_reader_guid,
