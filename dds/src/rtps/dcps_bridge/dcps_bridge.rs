@@ -78,15 +78,19 @@ impl DcpsBridge {
     pub(crate) fn new(domain_id: DomainId) -> Self {
         let mut socket = Socket::new(domain_id);
 
-        // Create a temporary participant to obtain guid_prefix (needed by TCP transport)
-        let temp_participant =
-            Participant::new(domain_id, socket.participant_id(), socket.working_ips(), None);
-        let guid_prefix = temp_participant.guid().prefix();
+        let transport_type = crate::rtps::transport::get_transport_type();
+
+        let participant_id = socket.participant_id();
+
+        // For TCP/Hybrid, we need guid_prefix before creating transport.
+        let guid_prefix = {
+            let temp = Participant::new(domain_id, participant_id, socket.working_ips(), None);
+            temp.guid().prefix()
+        };
 
         // Create transport plugin via factory — single branching point
-        let transport_type = crate::rtps::transport::get_transport_type();
-        let bind_ip = crate::common::env::get_network_ip().unwrap_or_default();
-        let multicast_if_ip = crate::common::env::get_network_interface().unwrap_or_default();
+        let bind_ip = socket.get_sender_bind_addr();
+        let multicast_if_ip = socket.get_sender_multicast_if_addr();
         let working_ips: Vec<String> =
             socket.working_ips().iter().map(|ip| ip.to_string()).collect();
 
@@ -94,7 +98,7 @@ impl DcpsBridge {
             TransportPluginFactory::create(
                 transport_type,
                 domain_id,
-                socket.participant_id(),
+                participant_id,
                 bind_ip,
                 multicast_if_ip,
                 working_ips,
@@ -105,8 +109,16 @@ impl DcpsBridge {
 
         socket.set_transport(transport.clone());
 
+        // TCP/Hybrid: pass the actual TCP listener port so locators are advertised correctly.
+        // UDP/SHM: returns None (no TCP listener).
+        let tcp_listener_port = transport.tcp_listener_port();
+
+        // Use the transport's final participant_id (may have been incremented
+        // due to unicast port conflicts with other participants on the same host).
+        let participant_id = transport.participant_id();
+
         let participant =
-            Participant::new(domain_id, socket.participant_id(), socket.working_ips(), None);
+            Participant::new(domain_id, participant_id, socket.working_ips(), tcp_listener_port);
         let guid_prefix = participant.guid().prefix();
         let participant = Arc::new(participant);
 

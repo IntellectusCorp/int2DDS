@@ -357,76 +357,74 @@ impl SedpLogic {
     #[allow(clippy::clone_on_copy)]
     pub(crate) fn start_sedp(
         &self,
-        discovery_multicast_source: MessageSource,
-        discovery_unicast_source: MessageSource,
+        discovery_multicast_source: Option<MessageSource>,
+        discovery_unicast_source: Option<MessageSource>,
     ) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
 
-        let mut discovery_multicast_listening_task =
-            DiscoveryMulticastListeningTask::new(participant.clone());
-
         let participant_guid = participant.guid().clone();
 
-        // multicast listening
-        let multicast_handle = thread::Builder::new()
-            .name("discovery_traffic_multicast_listening".to_string())
-            .spawn(move || {
-                // Register thread name for monitoring
-                {
-                    use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::register_current_thread_name_with_guid_prefix(
-                        "discovery_traffic_multicast_listening",
-                        participant_guid.prefix(),
-                    );
-                }
+        // multicast listening (only if transport provides a multicast source)
+        if let Some(multicast_source) = discovery_multicast_source {
+            let mut discovery_multicast_listening_task =
+                DiscoveryMulticastListeningTask::new(participant.clone());
 
-                let _ = discovery_multicast_listening_task
-                    .multicast_listening(discovery_multicast_source);
-                // Cleanup thread from registry before exit
-                {
-                    use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::remove_map_guard();
-                }
-                debug!("discovery multicast listening thread finished");
-            })
-            .expect("Failed to create discovery multicast listening thread");
+            let mc_guid = participant_guid;
+            let multicast_handle = thread::Builder::new()
+                .name("discovery_traffic_multicast_listening".to_string())
+                .spawn(move || {
+                    {
+                        use crate::rtps::task::thread_monitor::ThreadMonitor;
+                        ThreadMonitor::register_current_thread_name_with_guid_prefix(
+                            "discovery_traffic_multicast_listening",
+                            mc_guid.prefix(),
+                        );
+                    }
 
-        // Store multicast handle
-        if let Ok(mut handle_guard) = self.multicast_listening_handle.lock() {
-            *handle_guard = Some(multicast_handle);
+                    let _ =
+                        discovery_multicast_listening_task.multicast_listening(multicast_source);
+                    {
+                        use crate::rtps::task::thread_monitor::ThreadMonitor;
+                        ThreadMonitor::remove_map_guard();
+                    }
+                    debug!("discovery multicast listening thread finished");
+                })
+                .expect("Failed to create discovery multicast listening thread");
+
+            if let Ok(mut handle_guard) = self.multicast_listening_handle.lock() {
+                *handle_guard = Some(multicast_handle);
+            }
         }
 
-        let mut discovery_unicast_listening_task =
-            DiscoveryUnicastListeningTask::new(participant.clone());
+        // unicast listening (only if transport provides a unicast source)
+        if let Some(unicast_source) = discovery_unicast_source {
+            let mut discovery_unicast_listening_task =
+                DiscoveryUnicastListeningTask::new(participant.clone());
 
-        // unicast listening
-        let unicast_guid = participant_guid;
-        let unicast_handle = thread::Builder::new()
-            .name("discovery_traffic_unicast_listening".to_string())
-            .spawn(move || {
-                // Register thread name for monitoring
-                {
-                    use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::register_current_thread_name_with_guid_prefix(
-                        "discovery_traffic_unicast_listening",
-                        unicast_guid.prefix(),
-                    );
-                }
+            let unicast_guid = participant_guid;
+            let unicast_handle = thread::Builder::new()
+                .name("discovery_traffic_unicast_listening".to_string())
+                .spawn(move || {
+                    {
+                        use crate::rtps::task::thread_monitor::ThreadMonitor;
+                        ThreadMonitor::register_current_thread_name_with_guid_prefix(
+                            "discovery_traffic_unicast_listening",
+                            unicast_guid.prefix(),
+                        );
+                    }
 
-                let _ =
-                    discovery_unicast_listening_task.unicast_listening(discovery_unicast_source);
-                // Cleanup thread from registry before exit
-                {
-                    use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::remove_map_guard();
-                }
-                debug!("discovery unicast listening thread finished");
-            })
-            .expect("Failed to create discovery unicast listening thread");
+                    let _ = discovery_unicast_listening_task.unicast_listening(unicast_source);
+                    {
+                        use crate::rtps::task::thread_monitor::ThreadMonitor;
+                        ThreadMonitor::remove_map_guard();
+                    }
+                    debug!("discovery unicast listening thread finished");
+                })
+                .expect("Failed to create discovery unicast listening thread");
 
-        // Store unicast handle
-        if let Ok(mut handle_guard) = self.unicast_listening_handle.lock() {
-            *handle_guard = Some(unicast_handle);
+            if let Ok(mut handle_guard) = self.unicast_listening_handle.lock() {
+                *handle_guard = Some(unicast_handle);
+            }
         }
 
         Ok(())

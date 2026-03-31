@@ -82,8 +82,7 @@ impl HybridTransportPlugin {
                     merge_udp_and_channel(udp_listener, tcp_disc_source, disc_tx);
                 })
                 .expect("Failed to create hybrid discovery merge thread");
-        } else if let MessageSource::Channel { rx } = tcp_disc_source {
-            // No UDP listener, just forward TCP channel
+        } else if let Some(MessageSource::Channel { rx }) = tcp_disc_source {
             thread::Builder::new()
                 .name("hybrid_discovery_forward".to_string())
                 .spawn(move || {
@@ -101,7 +100,7 @@ impl HybridTransportPlugin {
                     merge_udp_and_channel(udp_listener, tcp_user_source, user_merged_tx);
                 })
                 .expect("Failed to create hybrid user merge thread");
-        } else if let MessageSource::Channel { rx } = tcp_user_source {
+        } else if let Some(MessageSource::Channel { rx }) = tcp_user_source {
             thread::Builder::new()
                 .name("hybrid_user_forward".to_string())
                 .spawn(move || {
@@ -178,38 +177,31 @@ impl TransportPlugin for HybridTransportPlugin {
         locators
     }
 
-    fn take_discovery_multicast_source(&self) -> MessageSource {
-        let listener = self
-            .discovery_multicast_listener
-            .lock()
-            .expect("lock poisoned")
-            .take()
-            .expect("discovery_multicast_listener already taken");
-        MessageSource::MioPoll { listener }
+    fn take_discovery_multicast_source(&self) -> Option<MessageSource> {
+        let listener = self.discovery_multicast_listener.lock().expect("lock poisoned").take()?;
+        Some(MessageSource::MioPoll { listener })
     }
 
-    fn take_discovery_unicast_source(&self) -> MessageSource {
-        let rx = self
-            .discovery_unicast_rx
-            .lock()
-            .expect("lock poisoned")
-            .take()
-            .expect("discovery_unicast_rx already taken");
-        MessageSource::Channel { rx }
+    fn take_discovery_unicast_source(&self) -> Option<MessageSource> {
+        let rx = self.discovery_unicast_rx.lock().expect("lock poisoned").take()?;
+        Some(MessageSource::Channel { rx })
     }
 
-    fn take_user_data_unicast_source(&self) -> MessageSource {
-        let rx = self
-            .user_data_unicast_rx
-            .lock()
-            .expect("lock poisoned")
-            .take()
-            .expect("user_data_unicast_rx already taken");
-        MessageSource::Channel { rx }
+    fn take_user_data_unicast_source(&self) -> Option<MessageSource> {
+        let rx = self.user_data_unicast_rx.lock().expect("lock poisoned").take()?;
+        Some(MessageSource::Channel { rx })
     }
 
     fn port(&self) -> u16 {
         self.udp_sender.port()
+    }
+
+    fn tcp_listener_port(&self) -> Option<u16> {
+        self.tcp_plugin.tcp_listener_port()
+    }
+
+    fn participant_id(&self) -> u32 {
+        self.participant_id
     }
 
     fn close(&self) {
@@ -229,14 +221,14 @@ impl TransportPlugin for HybridTransportPlugin {
 /// Merge UDP listener and channel source into a single output channel.
 fn merge_udp_and_channel(
     mut udp_listener: UdpListener,
-    channel_source: MessageSource,
+    channel_source: Option<MessageSource>,
     tx: crossbeam_channel::Sender<IncomingMessage>,
 ) {
     use mio::{Events, Interest, Poll, Token};
     use std::time::Duration;
 
     let channel_rx = match channel_source {
-        MessageSource::Channel { rx } => Some(rx),
+        Some(MessageSource::Channel { rx }) => Some(rx),
         _ => None,
     };
 

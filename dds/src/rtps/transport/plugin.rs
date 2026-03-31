@@ -80,24 +80,37 @@ pub(crate) trait TransportPlugin: Send + Sync {
 
     /// Take ownership of the discovery multicast message source.
     ///
+    /// Returns `None` if the transport does not support multicast (e.g., TCP).
     /// Called once during initialization. The returned `MessageSource`
     /// is moved into `DiscoveryMulticastListeningTask`.
-    fn take_discovery_multicast_source(&self) -> MessageSource;
+    fn take_discovery_multicast_source(&self) -> Option<MessageSource>;
 
     /// Take ownership of the discovery unicast message source.
     ///
+    /// Returns `None` if the transport has no discovery unicast source.
     /// Called once during initialization. The returned `MessageSource`
     /// is moved into `DiscoveryUnicastListeningTask`.
-    fn take_discovery_unicast_source(&self) -> MessageSource;
+    fn take_discovery_unicast_source(&self) -> Option<MessageSource>;
 
     /// Take ownership of the user data unicast message source.
     ///
+    /// Returns `None` if the transport has no user data unicast source.
     /// Called once during initialization. The returned `MessageSource`
     /// is moved into `UserUnicastListeningTask`.
-    fn take_user_data_unicast_source(&self) -> MessageSource;
+    fn take_user_data_unicast_source(&self) -> Option<MessageSource>;
 
     /// Get the local port number used by this transport's sender.
     fn port(&self) -> u16;
+
+    /// Get the TCP listener port for locator advertisement.
+    /// Returns Some(port) for TCP/Hybrid, None for UDP/SHM.
+    fn tcp_listener_port(&self) -> Option<u16> {
+        None
+    }
+
+    /// Get the final participant_id (may differ from the initial value
+    /// if unicast ports were already in use and participant_id was incremented).
+    fn participant_id(&self) -> u32;
 
     /// Release all resources (sockets, connections, threads).
     fn close(&self);
