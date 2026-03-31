@@ -358,3 +358,105 @@ pub unsafe extern "C" fn int2dds_topic_get_type_name(
 
     INT2DDS_RET_OK
 }
+
+/// Create a ContentFilteredTopic
+///
+/// Creates a content-filtered topic that filters data based on a SQL-like expression.
+/// The filter expression uses SQL-92 syntax with parameters referenced as %0, %1, etc.
+///
+/// # Safety
+/// - `participant` must be a valid participant
+/// - `topic_name` must be a valid null-terminated C string
+/// - `related_topic` must be a valid topic created on the same participant
+/// - `filter_expression` must be a valid null-terminated C string (e.g., "color = %0")
+/// - `expression_parameters` must be a valid array of null-terminated C strings, or null if count is 0
+/// - `expression_parameters_count` is the number of parameters
+/// - `cft_out` must be a valid pointer to a null pointer
+/// - The returned ContentFilteredTopic must be freed with `int2dds_delete_contentfilteredtopic`
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_create_contentfilteredtopic(
+    participant: *const Int2DdsParticipant,
+    topic_name: *const std::os::raw::c_char,
+    related_topic: *const Int2DdsTopic,
+    filter_expression: *const std::os::raw::c_char,
+    expression_parameters: *const *const std::os::raw::c_char,
+    expression_parameters_count: usize,
+    cft_out: *mut *mut Int2DdsContentFilteredTopic,
+) -> Int2DdsRet {
+    check_null!(participant);
+    check_null!(topic_name);
+    check_null!(related_topic);
+    check_null!(filter_expression);
+    check_null!(cft_out);
+
+    let participant_ref = &*participant;
+    let related_topic_ref = &*related_topic;
+
+    let topic_name_str = match CStr::from_ptr(topic_name).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    let filter_expression_str = match CStr::from_ptr(filter_expression).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    // Convert C string array to Vec<String>
+    let mut params = Vec::new();
+    if expression_parameters_count > 0 {
+        if expression_parameters.is_null() {
+            return INT2DDS_RET_INVALID_ARGUMENT;
+        }
+        for i in 0..expression_parameters_count {
+            let param_ptr = *expression_parameters.add(i);
+            if param_ptr.is_null() {
+                return INT2DDS_RET_INVALID_ARGUMENT;
+            }
+            match CStr::from_ptr(param_ptr).to_str() {
+                Ok(s) => params.push(s.to_string()),
+                Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+            }
+        }
+    }
+
+    let cft = ffi_try!(participant_ref.inner.create_contentfilteredtopic::<Int2DdsData>(
+        topic_name_str,
+        &*related_topic_ref.inner,
+        filter_expression_str,
+        params,
+    ));
+
+    let type_name = related_topic_ref.type_name.clone();
+    let cft_handle = Box::new(Int2DdsContentFilteredTopic { inner: cft, type_name });
+    *cft_out = Box::into_raw(cft_handle);
+
+    INT2DDS_RET_OK
+}
+
+/// Delete a ContentFilteredTopic
+///
+/// # Safety
+/// - `cft` must be a valid ContentFilteredTopic created by `int2dds_create_contentfilteredtopic`
+/// - `cft` must not be used after this call
+/// - All DataReaders using this ContentFilteredTopic must be deleted first
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_delete_contentfilteredtopic(
+    cft: *mut Int2DdsContentFilteredTopic,
+) -> Int2DdsRet {
+    if cft.is_null() {
+        return INT2DDS_RET_NULL_POINTER;
+    }
+
+    let Int2DdsContentFilteredTopic { inner: cft_obj, type_name: _tn } = *Box::from_raw(cft);
+
+    let participant = match cft_obj.get_participant() {
+        Ok(p) => p,
+        Err(e) => return dds_error_to_code(&e),
+    };
+
+    match participant.delete_contentfilteredtopic(cft_obj) {
+        Ok(()) => INT2DDS_RET_OK,
+        Err(e) => dds_error_to_code(&e),
+    }
+}
