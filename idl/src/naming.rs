@@ -78,11 +78,41 @@ pub fn idl_to_output_name(filename: &str) -> String {
 /// Generate C include guard from filename.
 /// "hello_world.h" -> "HELLO_WORLD_H"
 pub fn to_include_guard(filename: &str) -> String {
-    let stem = filename
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(filename);
+    let stem = filename.rsplit(['/', '\\']).next().unwrap_or(filename);
     stem.replace('.', "_").to_uppercase()
+}
+
+use crate::keywords;
+
+/// Target language for keyword escaping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetLang {
+    Rust,
+    C,
+    CSharp,
+    Python,
+}
+
+/// Escape an identifier if it collides with a reserved keyword in the target language.
+/// Returns the escaped name, or the original name unchanged if no escaping is needed.
+pub fn escape_keyword(name: &str, lang: TargetLang) -> String {
+    let kw_list = match lang {
+        TargetLang::Rust => keywords::RUST,
+        TargetLang::C => keywords::C,
+        TargetLang::CSharp => keywords::CSHARP,
+        TargetLang::Python => keywords::PYTHON,
+    };
+
+    if kw_list.contains(&name) {
+        match lang {
+            TargetLang::Rust => format!("r#{}", name),
+            TargetLang::C => format!("{}_", name),
+            TargetLang::CSharp => format!("@{}", name),
+            TargetLang::Python => format!("{}_", name),
+        }
+    } else {
+        name.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -119,5 +149,82 @@ mod tests {
     #[test]
     fn test_include_guard() {
         assert_eq!(to_include_guard("hello_world.h"), "HELLO_WORLD_H");
+    }
+
+    // ---- Keyword escaping tests ----
+
+    #[test]
+    fn test_escape_rust_keywords() {
+        assert_eq!(escape_keyword("type", TargetLang::Rust), "r#type");
+        assert_eq!(escape_keyword("match", TargetLang::Rust), "r#match");
+        assert_eq!(escape_keyword("struct", TargetLang::Rust), "r#struct");
+        assert_eq!(escape_keyword("async", TargetLang::Rust), "r#async");
+        assert_eq!(escape_keyword("gen", TargetLang::Rust), "r#gen");
+        assert_eq!(escape_keyword("index", TargetLang::Rust), "index");
+    }
+
+    #[test]
+    fn test_escape_c_keywords() {
+        assert_eq!(escape_keyword("int", TargetLang::C), "int_");
+        assert_eq!(escape_keyword("return", TargetLang::C), "return_");
+        assert_eq!(escape_keyword("struct", TargetLang::C), "struct_");
+        // C23 keywords
+        assert_eq!(escape_keyword("nullptr", TargetLang::C), "nullptr_");
+        assert_eq!(escape_keyword("alignas", TargetLang::C), "alignas_");
+        assert_eq!(escape_keyword("constexpr", TargetLang::C), "constexpr_");
+        // Macros
+        assert_eq!(escape_keyword("NULL", TargetLang::C), "NULL_");
+        assert_eq!(escape_keyword("EOF", TargetLang::C), "EOF_");
+        // Non-keyword
+        assert_eq!(escape_keyword("data", TargetLang::C), "data");
+    }
+
+    #[test]
+    fn test_escape_csharp_keywords() {
+        assert_eq!(escape_keyword("class", TargetLang::CSharp), "@class");
+        assert_eq!(escape_keyword("event", TargetLang::CSharp), "@event");
+        assert_eq!(escape_keyword("string", TargetLang::CSharp), "@string");
+        // Contextual keywords
+        assert_eq!(escape_keyword("async", TargetLang::CSharp), "@async");
+        assert_eq!(escape_keyword("record", TargetLang::CSharp), "@record");
+        assert_eq!(escape_keyword("var", TargetLang::CSharp), "@var");
+        assert_eq!(escape_keyword("yield", TargetLang::CSharp), "@yield");
+        assert_eq!(escape_keyword("value", TargetLang::CSharp), "@value");
+        // Non-keyword
+        assert_eq!(escape_keyword("data", TargetLang::CSharp), "data");
+    }
+
+    #[test]
+    fn test_escape_python_keywords() {
+        assert_eq!(escape_keyword("class", TargetLang::Python), "class_");
+        assert_eq!(escape_keyword("type", TargetLang::Python), "type_");
+        assert_eq!(escape_keyword("def", TargetLang::Python), "def_");
+        assert_eq!(escape_keyword("list", TargetLang::Python), "list_");
+        // Soft keywords (3.10+)
+        assert_eq!(escape_keyword("match", TargetLang::Python), "match_");
+        assert_eq!(escape_keyword("case", TargetLang::Python), "case_");
+        // Builtins
+        assert_eq!(escape_keyword("tuple", TargetLang::Python), "tuple_");
+        assert_eq!(escape_keyword("len", TargetLang::Python), "len_");
+        assert_eq!(escape_keyword("enumerate", TargetLang::Python), "enumerate_");
+        // Non-keyword
+        assert_eq!(escape_keyword("data", TargetLang::Python), "data");
+    }
+
+    #[test]
+    fn test_escape_non_keywords() {
+        assert_eq!(escape_keyword("hello", TargetLang::Rust), "hello");
+        assert_eq!(escape_keyword("world", TargetLang::C), "world");
+        assert_eq!(escape_keyword("foo", TargetLang::CSharp), "foo");
+        assert_eq!(escape_keyword("bar", TargetLang::Python), "bar");
+    }
+
+    #[test]
+    fn test_keyword_prefix_not_escaped() {
+        // Identifiers that start with a keyword but are not exact matches
+        assert_eq!(escape_keyword("type_name", TargetLang::Rust), "type_name");
+        assert_eq!(escape_keyword("class_id", TargetLang::Python), "class_id");
+        assert_eq!(escape_keyword("return_value", TargetLang::C), "return_value");
+        assert_eq!(escape_keyword("interface_impl", TargetLang::CSharp), "interface_impl");
     }
 }

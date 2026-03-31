@@ -88,7 +88,7 @@ struct Args {
 }
 
 #[derive(DdsType)]
-#[dds_type(crate_path = "int2dds")]
+#[dds_type(crate_path = "int2dds", extensibility = "final")]
 struct HelloWorldType {
     index: u32,
     message: String,
