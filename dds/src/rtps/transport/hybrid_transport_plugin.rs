@@ -13,7 +13,6 @@ use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::tcp::tcp_transport_plugin::TcpTransportPlugin;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 use crate::rtps::transport::udp::udp_sender::UdpSender;
-use crate::rtps::transport::Transport;
 
 /// Channel buffer size for merged sources.
 const CHANNEL_BUFFER_SIZE: usize = 256;

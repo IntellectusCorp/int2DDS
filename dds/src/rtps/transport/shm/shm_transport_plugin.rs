@@ -13,7 +13,6 @@ use crate::rtps::transport::shm::shm_listener::ShmListener;
 use crate::rtps::transport::shm::shm_sender::ShmSender;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 use crate::rtps::transport::udp::udp_sender::UdpSender;
-use crate::rtps::transport::Transport;
 
 /// Channel buffer size for merged sources.
 const CHANNEL_BUFFER_SIZE: usize = 256;

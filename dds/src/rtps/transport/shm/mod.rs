@@ -21,6 +21,3 @@ pub(crate) mod ring_buffer;
 pub(crate) mod shm_listener;
 pub(crate) mod shm_sender;
 pub(crate) mod shm_transport_plugin;
-
-pub(crate) use shm_listener::ShmListener;
-pub(crate) use shm_sender::ShmSender;

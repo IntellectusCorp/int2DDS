@@ -85,8 +85,6 @@ impl UdpTransportPlugin {
 
 impl TransportPlugin for UdpTransportPlugin {
     fn send(&self, data: &[u8], target: &SendTarget) -> io::Result<()> {
-        use crate::rtps::transport::Transport;
-
         match target {
             SendTarget::MulticastDiscovery => {
                 self.sender.send_multicast(self.domain_id, data)?;

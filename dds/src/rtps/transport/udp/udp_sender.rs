@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
-use crate::rtps::transport::{Transport, TransportType};
 use crate::rtps::{common::locator::MULTICAST_IP, transport::port_manager::PortManager};
 use log::debug;
 use socket2::{Domain, Protocol, SockAddr, Socket as Socket2, Type};
@@ -62,14 +61,8 @@ impl UdpSender {
             }
         }
     }
-}
 
-/// Implementation of Transport trait for UdpSender
-///
-/// This allows UdpSender to be used through the generic Transport interface,
-/// enabling transport-agnostic code throughout the DDS stack.
-impl Transport for UdpSender {
-    fn send(&self, addr: &SocketAddr, data: &[u8]) -> io::Result<usize> {
+    pub(crate) fn send(&self, addr: &SocketAddr, data: &[u8]) -> io::Result<usize> {
         let guard = self.socket.lock().map_err(|_| io::Error::other("Mutex poisoned"))?;
         let socket = guard
             .as_ref()
@@ -80,7 +73,7 @@ impl Transport for UdpSender {
         result
     }
 
-    fn send_multicast(&self, domain_id: u32, data: &[u8]) -> io::Result<usize> {
+    pub(crate) fn send_multicast(&self, domain_id: u32, data: &[u8]) -> io::Result<usize> {
         let guard = self.socket.lock().map_err(|_| io::Error::other("Mutex poisoned"))?;
         let socket = guard
             .as_ref()
@@ -99,31 +92,5 @@ impl Transport for UdpSender {
         }
 
         result
-    }
-
-    fn port(&self) -> u16 {
-        self.socket
-            .lock()
-            .ok()
-            .and_then(|guard| {
-                guard
-                    .as_ref()
-                    .and_then(|s| s.local_addr().ok())
-                    .and_then(|addr| addr.as_socket_ipv4().map(|v4| v4.port()))
-            })
-            .unwrap_or(0)
-    }
-
-    fn transport_type(&self) -> TransportType {
-        TransportType::UDP
-    }
-
-    fn close(self) {
-        if let Ok(mut guard) = self.socket.lock() {
-            if let Some(socket) = guard.take() {
-                log::info!("[UdpSender] Socket closed, port released");
-                drop(socket);
-            }
-        }
     }
 }
