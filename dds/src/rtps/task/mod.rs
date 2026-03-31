@@ -19,6 +19,5 @@
 pub(crate) mod discovery_traffic;
 pub(crate) mod sending_handler;
 pub(crate) mod sending_task;
-pub(crate) mod tcp_mux_listening_task;
 pub(crate) mod thread_monitor;
 pub(crate) mod user_traffic;
