@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <RootNamespace>Int2Dds</RootNamespace>
+    <AssemblyName>Int2Dds</AssemblyName>
+
+    <!-- Package metadata -->
+    <PackageId>Int2Dds</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>IntellectusCorp</Authors>
+    <Description>C# binding for int2DDS - a high-performance DDS implementation</Description>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Int2Dds.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="6.0.0" />
+    <PackageReference Include="System.Runtime.CompilerServices.Unsafe" Version="6.0.0" />
+  </ItemGroup>
+
+</Project>

@@ -1,5 +1,4 @@
 /// Recursive descent parser for OMG IDL subset.
-
 use super::ast::*;
 use super::lexer::{SpannedToken, Token};
 
@@ -28,10 +27,55 @@ impl Parser {
 
     pub fn parse(&mut self) -> Result<Vec<Definition>, ParseError> {
         let mut defs = Vec::new();
+        let mut errors = Vec::new();
+
         while !self.at_eof() {
-            defs.push(self.parse_definition()?);
+            match self.parse_definition() {
+                Ok(def) => defs.push(def),
+                Err(e) => {
+                    errors.push(e);
+                    // Skip to next definition boundary (after '};' or eof)
+                    self.skip_to_next_definition();
+                }
+            }
         }
-        Ok(defs)
+
+        if errors.is_empty() {
+            Ok(defs)
+        } else {
+            // Combine all error messages
+            let combined = errors
+                .iter()
+                .map(|e| format!("  {}:{}: {}", e.line, e.col, e.message))
+                .collect::<Vec<_>>()
+                .join("\n");
+            Err(ParseError {
+                line: errors[0].line,
+                col: errors[0].col,
+                message: format!("found {} error(s):\n{}", errors.len(), combined),
+            })
+        }
+    }
+
+    /// Skip tokens until we reach a likely definition boundary (after `};` or at EOF).
+    fn skip_to_next_definition(&mut self) {
+        loop {
+            if self.at_eof() {
+                break;
+            }
+            let token = self.peek().clone();
+            match token {
+                Token::RightBrace => {
+                    self.advance(); // consume '}'
+                                    // consume trailing semicolons
+                    self.eat_semicolons();
+                    break;
+                }
+                _ => {
+                    self.advance();
+                }
+            }
+        }
     }
 
     // ---- Helpers ----
@@ -75,11 +119,99 @@ impl Parser {
             Ok(name)
         } else {
             let cur = self.current();
-            Err(ParseError {
-                line: cur.line,
-                col: cur.col,
-                message: format!("expected identifier, found {:?}", cur.token),
-            })
+            if let Some(kw) = Self::token_to_keyword_name(&cur.token) {
+                Err(ParseError {
+                    line: cur.line,
+                    col: cur.col,
+                    message: format!(
+                        "'{}' is an IDL reserved keyword ({}) and cannot be used as an identifier",
+                        kw,
+                        Self::keyword_category(&cur.token),
+                    ),
+                })
+            } else {
+                Err(ParseError {
+                    line: cur.line,
+                    col: cur.col,
+                    message: format!("expected identifier, found {:?}", cur.token),
+                })
+            }
+        }
+    }
+
+    fn token_to_keyword_name(token: &Token) -> Option<&'static str> {
+        match token {
+            Token::Struct => Some("struct"),
+            Token::Enum => Some("enum"),
+            Token::Module => Some("module"),
+            Token::Typedef => Some("typedef"),
+            Token::Sequence => Some("sequence"),
+            Token::StringKw => Some("string"),
+            Token::WStringKw => Some("wstring"),
+            Token::Boolean => Some("boolean"),
+            Token::Octet => Some("octet"),
+            Token::Char => Some("char"),
+            Token::WCharKw => Some("wchar"),
+            Token::Short => Some("short"),
+            Token::Long => Some("long"),
+            Token::Float => Some("float"),
+            Token::Double => Some("double"),
+            Token::Unsigned => Some("unsigned"),
+            Token::True => Some("true"),
+            Token::False => Some("false"),
+            Token::Map => Some("map"),
+            Token::Bitmask => Some("bitmask"),
+            Token::Bitset => Some("bitset"),
+            Token::Bitfield => Some("bitfield"),
+            Token::Union => Some("union"),
+            Token::Switch => Some("switch"),
+            Token::Case => Some("case"),
+            Token::Default => Some("default"),
+            Token::Interface => Some("interface"),
+            Token::In => Some("in"),
+            Token::Out => Some("out"),
+            Token::Inout => Some("inout"),
+            Token::Void => Some("void"),
+            Token::Raises => Some("raises"),
+            Token::Attribute => Some("attribute"),
+            Token::Readonly => Some("readonly"),
+            Token::Exception => Some("exception"),
+            Token::Const => Some("const"),
+            _ => None,
+        }
+    }
+
+    fn keyword_category(token: &Token) -> &'static str {
+        match token {
+            Token::Struct
+            | Token::Enum
+            | Token::Union
+            | Token::Bitmask
+            | Token::Bitset
+            | Token::Exception => "type definition keyword",
+            Token::Module => "module declaration keyword",
+            Token::Typedef => "type alias keyword",
+            Token::Sequence | Token::Map => "collection type keyword",
+            Token::StringKw | Token::WStringKw => "string type keyword",
+            Token::Boolean
+            | Token::Octet
+            | Token::Char
+            | Token::WCharKw
+            | Token::Short
+            | Token::Long
+            | Token::Float
+            | Token::Double
+            | Token::Unsigned => "primitive type keyword",
+            Token::True | Token::False => "boolean literal",
+            Token::Switch | Token::Case | Token::Default => "union discriminator keyword",
+            Token::Interface => "interface declaration keyword",
+            Token::In | Token::Out | Token::Inout => "parameter direction keyword",
+            Token::Void => "return type keyword",
+            Token::Raises => "exception specification keyword",
+            Token::Attribute | Token::Readonly => "attribute keyword",
+            Token::Const => "constant declaration keyword",
+            Token::Bitfield => "bitset field keyword",
+            _ => "keyword",
         }
     }
 
@@ -185,10 +317,7 @@ impl Parser {
                 Err(ParseError {
                     line: cur.line,
                     col: cur.col,
-                    message: format!(
-                        "expected definition keyword, found {:?}",
-                        cur.token
-                    ),
+                    message: format!("expected definition keyword, found {:?}", cur.token),
                 })
             }
         }
@@ -339,12 +468,7 @@ impl Parser {
         self.expect(&Token::RightBrace)?;
         self.eat_semicolons();
 
-        Ok(StructDef {
-            name,
-            base_type,
-            members,
-            annotations,
-        })
+        Ok(StructDef { name, base_type, members, annotations })
     }
 
     fn parse_struct_member(&mut self) -> Result<StructMember, ParseError> {
@@ -353,11 +477,7 @@ impl Parser {
         let (name, type_spec) = self.parse_declarator(type_spec)?;
         self.expect(&Token::Semicolon)?;
 
-        Ok(StructMember {
-            name,
-            type_spec,
-            annotations,
-        })
+        Ok(StructMember { name, type_spec, annotations })
     }
 
     fn parse_enum(&mut self, annotations: Vec<Annotation>) -> Result<EnumDef, ParseError> {
@@ -380,11 +500,7 @@ impl Parser {
         self.expect(&Token::RightBrace)?;
         self.eat_semicolons();
 
-        Ok(EnumDef {
-            name,
-            variants,
-            annotations,
-        })
+        Ok(EnumDef { name, variants, annotations })
     }
 
     fn parse_enum_variant(&mut self) -> Result<EnumVariant, ParseError> {
@@ -515,7 +631,10 @@ impl Parser {
     }
 
     /// (7) interface_header + body
-    fn parse_interface(&mut self, annotations: Vec<Annotation>) -> Result<InterfaceDef, ParseError> {
+    fn parse_interface(
+        &mut self,
+        annotations: Vec<Annotation>,
+    ) -> Result<InterfaceDef, ParseError> {
         self.expect(&Token::Interface)?;
         let name = self.expect_ident()?;
 
@@ -555,17 +674,14 @@ impl Parser {
         self.expect(&Token::RightBrace)?;
         self.eat_semicolons();
 
-        Ok(InterfaceDef {
-            name,
-            base_interfaces,
-            operations,
-            attributes,
-            annotations,
-        })
+        Ok(InterfaceDef { name, base_interfaces, operations, attributes, annotations })
     }
 
     /// (87) op_dcl
-    fn parse_operation(&mut self, annotations: Vec<Annotation>) -> Result<OperationDef, ParseError> {
+    fn parse_operation(
+        &mut self,
+        annotations: Vec<Annotation>,
+    ) -> Result<OperationDef, ParseError> {
         // (88) op_type_spec: void | type_spec
         let return_type = if matches!(self.peek(), Token::Void) {
             self.advance();
@@ -598,13 +714,7 @@ impl Parser {
 
         self.expect(&Token::Semicolon)?;
 
-        Ok(OperationDef {
-            name,
-            return_type,
-            params,
-            raises,
-            annotations,
-        })
+        Ok(OperationDef { name, return_type, params, raises, annotations })
     }
 
     /// (91) param_dcl
@@ -613,9 +723,18 @@ impl Parser {
 
         // (92) param_attribute
         let direction = match self.peek() {
-            Token::In => { self.advance(); ParamDirection::In }
-            Token::Out => { self.advance(); ParamDirection::Out }
-            Token::Inout => { self.advance(); ParamDirection::Inout }
+            Token::In => {
+                self.advance();
+                ParamDirection::In
+            }
+            Token::Out => {
+                self.advance();
+                ParamDirection::Out
+            }
+            Token::Inout => {
+                self.advance();
+                ParamDirection::Inout
+            }
             _ => {
                 let cur = self.current();
                 return Err(ParseError {
@@ -633,7 +752,10 @@ impl Parser {
     }
 
     /// (104) readonly_attr_spec
-    fn parse_readonly_attr(&mut self, annotations: Vec<Annotation>) -> Result<AttributeDef, ParseError> {
+    fn parse_readonly_attr(
+        &mut self,
+        annotations: Vec<Annotation>,
+    ) -> Result<AttributeDef, ParseError> {
         self.expect(&Token::Readonly)?;
         self.expect(&Token::Attribute)?;
         let type_spec = self.parse_type_spec()?;
@@ -940,10 +1062,7 @@ mod tests {
         if let Definition::Struct(s) = &defs[0] {
             assert_eq!(s.members[0].annotations.len(), 1);
             assert_eq!(s.members[0].annotations[0].name, "key");
-            assert!(matches!(
-                s.members[2].type_spec,
-                TypeSpec::String(Some(128))
-            ));
+            assert!(matches!(s.members[2].type_spec, TypeSpec::String(Some(128))));
         } else {
             panic!("expected struct");
         }
@@ -1319,5 +1438,120 @@ mod tests {
         } else {
             panic!("expected interface");
         }
+    }
+
+    // ---- IDL keyword error message tests ----
+
+    fn parse_str_err(input: &str) -> String {
+        let tokens = tokenize(input).expect("lex error");
+        let mut parser = Parser::new(tokens);
+        parser.parse().unwrap_err().message
+    }
+
+    #[test]
+    fn test_idl_keyword_struct_as_field_name() {
+        let msg = parse_str_err("struct Test { long struct; };");
+        assert!(
+            msg.contains("'struct'") && msg.contains("type definition keyword"),
+            "expected keyword error for 'struct', got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_idl_keyword_boolean_as_type_name() {
+        let msg = parse_str_err("struct boolean { long x; };");
+        assert!(
+            msg.contains("'boolean'") && msg.contains("primitive type keyword"),
+            "expected keyword error for 'boolean', got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_idl_keyword_sequence_as_field_name() {
+        let msg = parse_str_err("struct Test { long sequence; };");
+        assert!(
+            msg.contains("'sequence'") && msg.contains("collection type keyword"),
+            "expected keyword error for 'sequence', got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_idl_keyword_in_as_field_name() {
+        let msg = parse_str_err("struct Test { long in; };");
+        assert!(
+            msg.contains("'in'") && msg.contains("parameter direction keyword"),
+            "expected keyword error for 'in', got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_idl_keyword_true_as_field_name() {
+        let msg = parse_str_err("struct Test { boolean true; };");
+        assert!(
+            msg.contains("'true'") && msg.contains("boolean literal"),
+            "expected keyword error for 'true', got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_idl_keyword_void_as_field_name() {
+        let msg = parse_str_err("struct Test { long void; };");
+        assert!(
+            msg.contains("'void'") && msg.contains("return type keyword"),
+            "expected keyword error for 'void', got: {}",
+            msg
+        );
+    }
+
+    // --- Escaped IDL keyword tests ---
+
+    #[test]
+    fn test_escaped_keyword_as_field_name() {
+        let defs = parse_str("struct Foo { long _boolean; long _sequence; };");
+        if let Definition::Struct(s) = &defs[0] {
+            assert_eq!(s.members[0].name, "boolean");
+            assert_eq!(s.members[1].name, "sequence");
+        } else {
+            panic!("expected struct");
+        }
+    }
+
+    #[test]
+    fn test_escaped_keyword_as_struct_name() {
+        let defs = parse_str("struct _sequence { long x; };");
+        if let Definition::Struct(s) = &defs[0] {
+            assert_eq!(s.name, "sequence");
+        } else {
+            panic!("expected struct");
+        }
+    }
+
+    #[test]
+    fn test_escaped_keyword_mixed_with_normal() {
+        let defs = parse_str("struct Test { long _struct; string name; double _float; };");
+        if let Definition::Struct(s) = &defs[0] {
+            assert_eq!(s.members.len(), 3);
+            assert_eq!(s.members[0].name, "struct");
+            assert_eq!(s.members[1].name, "name");
+            assert_eq!(s.members[2].name, "float");
+        } else {
+            panic!("expected struct");
+        }
+    }
+
+    #[test]
+    fn test_unescaped_keyword_still_rejected() {
+        // Bare keywords without _ prefix should still be errors
+        let msg = parse_str_err("struct Test { long boolean; };");
+        assert!(
+            msg.contains("'boolean'") && msg.contains("IDL reserved keyword"),
+            "expected keyword error, got: {}",
+            msg
+        );
     }
 }

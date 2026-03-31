@@ -173,6 +173,7 @@ pub fn derive_struct_impl(
         &compute_key_impl,
         crate_path,
         type_config.extensibility,
+        type_config.type_name.as_deref(),
         &gc,
     );
 
@@ -490,6 +491,7 @@ fn generate_unified_type_support_impl(
     compute_key_impl: &proc_macro2::TokenStream,
     crate_path: &proc_macro2::TokenStream,
     extensibility: Option<ExtensibilityKind>,
+    type_name_override: Option<&str>,
     gc: &GenCtx,
 ) -> proc_macro2::TokenStream {
     let serialize_impl = quote_serialize_impl(
@@ -520,7 +522,13 @@ fn generate_unified_type_support_impl(
     let full_ts_type = &gc.full_ts_type;
     let full_type = &gc.full_type;
 
-    let get_type_name_impl = if gc.has_type_params {
+    let get_type_name_impl = if let Some(tn) = type_name_override {
+        quote! {
+            fn get_type_name(&self) -> &str {
+                #tn
+            }
+        }
+    } else if gc.has_type_params {
         quote! {
             fn get_type_name(&self) -> &str {
                 // std::any::type_name returns &'static str, unique per concrete type
