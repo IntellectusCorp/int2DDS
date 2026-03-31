@@ -74,6 +74,7 @@ ffi.cdef("""
     typedef struct Int2DdsDataWriter Int2DdsDataWriter;
     typedef struct Int2DdsDataReader Int2DdsDataReader;
     typedef struct Int2DdsTopic Int2DdsTopic;
+    typedef struct Int2DdsContentFilteredTopic Int2DdsContentFilteredTopic;
     typedef struct Int2DdsWaitSet Int2DdsWaitSet;
     typedef struct Int2DdsGuardCondition Int2DdsGuardCondition;
     typedef struct Int2DdsStatusCondition Int2DdsStatusCondition;
@@ -173,6 +174,28 @@ ffi.cdef("""
         const Int2DdsTopic *topic,
         char *type_name_out,
         size_t type_name_size
+    );
+
+    /* ContentFilteredTopic */
+    Int2DdsRet int2dds_create_contentfilteredtopic(
+        const Int2DdsParticipant *participant,
+        const char *topic_name,
+        const Int2DdsTopic *related_topic,
+        const char *filter_expression,
+        const char **expression_parameters,
+        size_t expression_parameters_count,
+        Int2DdsContentFilteredTopic **cft_out
+    );
+    Int2DdsRet int2dds_delete_contentfilteredtopic(
+        Int2DdsContentFilteredTopic *cft
+    );
+
+    /* DataReader with ContentFilteredTopic */
+    Int2DdsRet int2dds_create_datareader_cft(
+        const Int2DdsSubscriber *subscriber,
+        const Int2DdsContentFilteredTopic *cft,
+        const Int2DdsDataReaderQos *qos,
+        Int2DdsDataReader **reader_out
     );
 
     /* DataWriter */
@@ -814,6 +837,16 @@ ffi.cdef("""
         Int2DdsDataReader *reader,
         const Int2DdsDataReaderListener *listener,
         uint32_t mask
+    );
+
+    /* DataReader with ContentFilteredTopic and Listener */
+    Int2DdsRet int2dds_create_datareader_cft_with_listener(
+        const Int2DdsSubscriber *subscriber,
+        const Int2DdsContentFilteredTopic *cft,
+        const Int2DdsDataReaderQos *qos,
+        const Int2DdsDataReaderListener *listener,
+        uint32_t mask,
+        Int2DdsDataReader **reader_out
     );
 """)
 

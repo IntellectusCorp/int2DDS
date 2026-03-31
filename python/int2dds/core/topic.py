@@ -151,3 +151,96 @@ class Topic(Generic[T]):
                 self.close()
             except Exception:
                 pass  # Suppress errors during cleanup
+
+
+class ContentFilteredTopic(Generic[T]):
+    """
+    ContentFilteredTopic - filters data based on a SQL-like expression.
+
+    Created through DomainParticipant.create_contentfilteredtopic().
+
+    Attributes:
+        name: The filtered topic name
+        type_class: The Python type class for deserialization
+        filter_expression: The SQL-92 filter expression
+    """
+
+    __slots__ = (
+        "_handle", "_participant", "_related_topic", "_name",
+        "_type_class", "_filter_expression", "_closed",
+    )
+
+    def __init__(
+        self,
+        participant: DomainParticipant,
+        topic_name: str,
+        related_topic: Topic[T],
+        filter_expression: str,
+        expression_parameters: list[str] | None = None,
+    ) -> None:
+        self._participant = participant
+        self._related_topic = related_topic
+        self._name = topic_name
+        self._type_class = related_topic.type_class
+        self._filter_expression = filter_expression
+        self._closed = False
+
+        if expression_parameters is None:
+            expression_parameters = []
+
+        topic_name_c = ffi.new("char[]", topic_name.encode())
+        filter_expr_c = ffi.new("char[]", filter_expression.encode())
+
+        # Build C string array for parameters
+        param_ptrs = []
+        param_bufs = []
+        for p in expression_parameters:
+            buf = ffi.new("char[]", p.encode())
+            param_bufs.append(buf)
+            param_ptrs.append(buf)
+
+        if param_ptrs:
+            params_arr = ffi.new("char *[]", param_ptrs)
+        else:
+            params_arr = ffi.NULL
+
+        cft_ptr = ffi.new("Int2DdsContentFilteredTopic **")
+        check_ret(
+            lib.int2dds_create_contentfilteredtopic(
+                participant._handle,
+                topic_name_c,
+                related_topic._handle,
+                filter_expr_c,
+                params_arr,
+                len(expression_parameters),
+                cft_ptr,
+            )
+        )
+        self._handle = cft_ptr[0]
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def type_class(self) -> type[T]:
+        return self._type_class
+
+    def close(self) -> None:
+        if not self._closed and self._handle is not None:
+            check_ret(lib.int2dds_delete_contentfilteredtopic(self._handle))
+            self._handle = None
+            self._closed = True
+
+    def __enter__(self) -> ContentFilteredTopic[T]:
+        return self
+
+    def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        if not getattr(self, "_closed", True):
+            try:
+                self.close()
+            except Exception:
+                pass
