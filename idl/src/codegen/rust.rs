@@ -126,7 +126,8 @@ impl<'a> RustGen<'a> {
         self.line(&format!("pub enum {} {{", rust_name));
         self.indent += 1;
         for v in &e.variants {
-            let variant_name = naming::to_pascal_case(&v.name);
+            let variant_name =
+                naming::escape_keyword(&naming::to_pascal_case(&v.name), naming::TargetLang::Rust);
             self.line(&format!("{} = {},", variant_name, v.value));
         }
         self.indent -= 1;
@@ -140,7 +141,10 @@ impl<'a> RustGen<'a> {
         self.line(&format!("pub enum {} {{", rust_name));
         self.indent += 1;
         for flag in &b.flags {
-            let flag_name = naming::to_pascal_case(&flag.name);
+            let flag_name = naming::escape_keyword(
+                &naming::to_pascal_case(&flag.name),
+                naming::TargetLang::Rust,
+            );
             self.line(&format!("#[dds(position = {})]", flag.position));
             self.line(&format!("{},", flag_name));
         }
@@ -157,7 +161,8 @@ impl<'a> RustGen<'a> {
         for f in &b.fields {
             self.line(&format!("#[dds(bitfield = {})]", f.bit_width));
             let rust_type = bitfield_rust_type(f.bit_width);
-            self.line(&format!("pub {}: {},", f.name, rust_type));
+            let field_name = naming::escape_keyword(&f.name, naming::TargetLang::Rust);
+            self.line(&format!("pub {}: {},", field_name, rust_type));
         }
         self.indent -= 1;
         self.line("}");
@@ -179,14 +184,18 @@ impl<'a> RustGen<'a> {
             // Use first label as discriminant value
             if let Some(label) = case.labels.first() {
                 let disc_val = self.label_to_string(label);
-                let variant_name = naming::to_pascal_case(&case.member.name);
+                let variant_name = naming::escape_keyword(
+                    &naming::to_pascal_case(&case.member.name),
+                    naming::TargetLang::Rust,
+                );
                 let type_str = self.type_to_rust(&case.member.resolved_type);
                 self.line(&format!("{}({}) = {},", variant_name, type_str, disc_val));
             }
         }
 
         if let Some(dc) = &u.default_case {
-            let variant_name = naming::to_pascal_case(&dc.name);
+            let variant_name =
+                naming::escape_keyword(&naming::to_pascal_case(&dc.name), naming::TargetLang::Rust);
             let type_str = self.type_to_rust(&dc.resolved_type);
             // Default case needs a discriminant value that doesn't conflict.
             // Use -1 as a convention for default.
@@ -338,7 +347,8 @@ impl<'a> RustGen<'a> {
             type_str
         };
 
-        self.line(&format!("pub {}: {},", m.name, final_type));
+        let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Rust);
+        self.line(&format!("pub {}: {},", field_name, final_type));
     }
 
     fn type_to_rust(&self, ty: &ResolvedType) -> String {
@@ -655,5 +665,116 @@ mod tests {
         assert!(code.contains("pub enum MyUnion {"));
         assert!(code.contains("IntVal(i32) = 0,"));
         assert!(code.contains("StrVal(String) = 1,"));
+    }
+
+    #[test]
+    fn test_keyword_escaping_in_struct_fields() {
+        let defs = parse_idl(
+            r#"
+            struct KeywordTest {
+                long type;
+                long match;
+                boolean async;
+                string yield;
+                long gen;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "KeywordTest.idl", &RustOptions::default());
+
+        assert!(code.contains("pub r#type: i32,"), "type field should be escaped: {}", code);
+        assert!(code.contains("pub r#match: i32,"), "match field should be escaped: {}", code);
+        assert!(code.contains("pub r#async: bool,"), "async field should be escaped: {}", code);
+        assert!(code.contains("pub r#yield: String,"), "yield field should be escaped: {}", code);
+        assert!(code.contains("pub r#gen: i32,"), "gen field should be escaped: {}", code);
+    }
+
+    #[test]
+    fn test_non_keyword_fields_not_escaped() {
+        let defs = parse_idl(
+            r#"
+            struct Normal {
+                long data;
+                long sensor_id;
+                string temperature;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "Normal.idl", &RustOptions::default());
+
+        assert!(code.contains("pub data: i32,"));
+        assert!(code.contains("pub sensor_id: i32,"));
+        assert!(code.contains("pub temperature: String,"));
+        // Should NOT contain r#
+        assert!(!code.contains("r#data"));
+        assert!(!code.contains("r#sensor_id"));
+    }
+
+    #[test]
+    fn test_keyword_prefix_not_escaped() {
+        let defs = parse_idl(
+            r#"
+            struct PrefixTest {
+                long type_name;
+                long class_id;
+                long return_value;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "PrefixTest.idl", &RustOptions::default());
+
+        assert!(code.contains("pub type_name: i32,"));
+        assert!(code.contains("pub class_id: i32,"));
+        assert!(code.contains("pub return_value: i32,"));
+    }
+
+    #[test]
+    fn test_keyword_escaping_in_union() {
+        // Union case names go through to_pascal_case, so "type" → "Type"
+        // "Type" is NOT a Rust keyword (keywords are lowercase) → no r# prefix
+        let defs = parse_idl(
+            r#"
+            union KeywordUnion switch(long) {
+                case 0: long type;
+                case 1: string class;
+                default: boolean match;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "KeywordUnion.idl", &RustOptions::default());
+
+        assert!(code.contains("Type(i32) = 0,"), "union case 'type' → Type: {}", code);
+        assert!(code.contains("Class(String) = 1,"), "union case 'class' → Class: {}", code);
+        assert!(code.contains("Match(bool) = -1,"), "union default 'match' → Match: {}", code);
+    }
+
+    #[test]
+    fn test_keyword_escaping_in_enum_variants() {
+        // Enum variants go through to_pascal_case: TYPE → Type, MATCH → Match
+        // PascalCase forms are NOT Rust keywords → no escaping needed
+        let defs = parse_idl(
+            r#"
+            enum KeywordEnum {
+                TYPE,
+                MATCH,
+                IMPL
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "KeywordEnum.idl", &RustOptions::default());
+
+        assert!(code.contains("Type = 0,"), "Type variant: {}", code);
+        assert!(code.contains("Match = 1,"), "Match variant: {}", code);
+        assert!(code.contains("Impl = 2,"), "Impl variant: {}", code);
     }
 }

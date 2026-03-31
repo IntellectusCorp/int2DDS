@@ -216,7 +216,9 @@ pub fn tokenize(source: &str) -> Result<Vec<SpannedToken>, LexError> {
             }
 
             // Hex prefix
-            if pos + 1 < len && chars[pos] == '0' && (chars[pos + 1] == 'x' || chars[pos + 1] == 'X')
+            if pos + 1 < len
+                && chars[pos] == '0'
+                && (chars[pos + 1] == 'x' || chars[pos + 1] == 'X')
             {
                 num_str.push('0');
                 num_str.push('x');
@@ -227,12 +229,11 @@ pub fn tokenize(source: &str) -> Result<Vec<SpannedToken>, LexError> {
                     pos += 1;
                     col += 1;
                 }
-                let val =
-                    i64::from_str_radix(&num_str[2..], 16).map_err(|_| LexError {
-                        line: tok_line,
-                        col: tok_col,
-                        message: format!("invalid hex literal: {}", num_str),
-                    })?;
+                let val = i64::from_str_radix(&num_str[2..], 16).map_err(|_| LexError {
+                    line: tok_line,
+                    col: tok_col,
+                    message: format!("invalid hex literal: {}", num_str),
+                })?;
                 tokens.push(SpannedToken {
                     token: Token::IntLiteral(val),
                     line: tok_line,
@@ -310,6 +311,64 @@ pub fn tokenize(source: &str) -> Result<Vec<SpannedToken>, LexError> {
                 col += 1;
             }
 
+            // OMG IDL4 escaped identifier: _keyword → Ident("keyword")
+            // A leading underscore followed by an IDL reserved keyword
+            // allows the keyword to be used as a plain identifier.
+            if ident.starts_with('_') && ident.len() > 1 {
+                let stripped = &ident[1..];
+                let is_escaped_keyword = matches!(
+                    stripped,
+                    "struct"
+                        | "enum"
+                        | "module"
+                        | "typedef"
+                        | "sequence"
+                        | "string"
+                        | "wstring"
+                        | "boolean"
+                        | "octet"
+                        | "uint8"
+                        | "int8"
+                        | "char"
+                        | "wchar"
+                        | "short"
+                        | "long"
+                        | "float"
+                        | "double"
+                        | "unsigned"
+                        | "TRUE"
+                        | "true"
+                        | "FALSE"
+                        | "false"
+                        | "map"
+                        | "bitmask"
+                        | "bitset"
+                        | "bitfield"
+                        | "union"
+                        | "switch"
+                        | "case"
+                        | "default"
+                        | "interface"
+                        | "in"
+                        | "out"
+                        | "inout"
+                        | "void"
+                        | "raises"
+                        | "attribute"
+                        | "readonly"
+                        | "exception"
+                        | "const"
+                );
+                if is_escaped_keyword {
+                    tokens.push(SpannedToken {
+                        token: Token::Ident(stripped.to_string()),
+                        line: tok_line,
+                        col: tok_col,
+                    });
+                    continue;
+                }
+            }
+
             let token = match ident.as_str() {
                 "struct" => Token::Struct,
                 "enum" => Token::Enum,
@@ -357,11 +416,7 @@ pub fn tokenize(source: &str) -> Result<Vec<SpannedToken>, LexError> {
                 _ => Token::Ident(ident),
             };
 
-            tokens.push(SpannedToken {
-                token,
-                line: tok_line,
-                col: tok_col,
-            });
+            tokens.push(SpannedToken { token, line: tok_line, col: tok_col });
             continue;
         }
 
@@ -446,18 +501,10 @@ pub fn tokenize(source: &str) -> Result<Vec<SpannedToken>, LexError> {
             }
         };
 
-        tokens.push(SpannedToken {
-            token,
-            line: tok_line,
-            col: tok_col,
-        });
+        tokens.push(SpannedToken { token, line: tok_line, col: tok_col });
     }
 
-    tokens.push(SpannedToken {
-        token: Token::Eof,
-        line,
-        col,
-    });
+    tokens.push(SpannedToken { token: Token::Eof, line, col });
     Ok(tokens)
 }
 
@@ -538,5 +585,47 @@ mod tests {
         assert!(matches!(tokens[5].token, Token::Switch));
         assert!(matches!(tokens[6].token, Token::Case));
         assert!(matches!(tokens[7].token, Token::Default));
+    }
+
+    #[test]
+    fn test_escaped_keyword_becomes_ident() {
+        // _keyword should produce Token::Ident("keyword")
+        let tokens = tokenize("_boolean _struct _enum _sequence _const").unwrap();
+        assert!(matches!(&tokens[0].token, Token::Ident(n) if n == "boolean"));
+        assert!(matches!(&tokens[1].token, Token::Ident(n) if n == "struct"));
+        assert!(matches!(&tokens[2].token, Token::Ident(n) if n == "enum"));
+        assert!(matches!(&tokens[3].token, Token::Ident(n) if n == "sequence"));
+        assert!(matches!(&tokens[4].token, Token::Ident(n) if n == "const"));
+    }
+
+    #[test]
+    fn test_escaped_keyword_all_types() {
+        // Verify various categories of IDL keywords can be escaped
+        let tokens = tokenize("_switch _case _default _union _void _in _out _inout").unwrap();
+        assert!(matches!(&tokens[0].token, Token::Ident(n) if n == "switch"));
+        assert!(matches!(&tokens[1].token, Token::Ident(n) if n == "case"));
+        assert!(matches!(&tokens[2].token, Token::Ident(n) if n == "default"));
+        assert!(matches!(&tokens[3].token, Token::Ident(n) if n == "union"));
+        assert!(matches!(&tokens[4].token, Token::Ident(n) if n == "void"));
+        assert!(matches!(&tokens[5].token, Token::Ident(n) if n == "in"));
+        assert!(matches!(&tokens[6].token, Token::Ident(n) if n == "out"));
+        assert!(matches!(&tokens[7].token, Token::Ident(n) if n == "inout"));
+    }
+
+    #[test]
+    fn test_non_keyword_underscore_prefix_unchanged() {
+        // _my_field is NOT a keyword escape, should stay as "_my_field"
+        let tokens = tokenize("_my_field _foo _bar123").unwrap();
+        assert!(matches!(&tokens[0].token, Token::Ident(n) if n == "_my_field"));
+        assert!(matches!(&tokens[1].token, Token::Ident(n) if n == "_foo"));
+        assert!(matches!(&tokens[2].token, Token::Ident(n) if n == "_bar123"));
+    }
+
+    #[test]
+    fn test_double_underscore_not_escaped() {
+        // __struct should NOT be treated as escape, stays as "__struct"
+        let tokens = tokenize("__struct __boolean").unwrap();
+        assert!(matches!(&tokens[0].token, Token::Ident(n) if n == "__struct"));
+        assert!(matches!(&tokens[1].token, Token::Ident(n) if n == "__boolean"));
     }
 }
