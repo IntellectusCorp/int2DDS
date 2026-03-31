@@ -54,21 +54,39 @@ impl TcpTransportPlugin {
         guid_prefix: GuidPrefix,
     ) -> io::Result<Self> {
         // Calculate physical port for TCP listener
-        let base_port = PortManager::get_discovery_traffic_multicast_port(domain_id);
+        let physical_port = PortManager::get_tcp_physical_port(domain_id);
 
         // Create channels for routing incoming data
         let (discovery_tx, discovery_rx) = bounded::<IncomingMessage>(CHANNEL_BUFFER_SIZE);
         let (user_data_tx, user_data_rx) = bounded::<IncomingMessage>(CHANNEL_BUFFER_SIZE);
 
-        // Create MuxListener (binds the TCP listener socket)
-        let mux_listener = TcpMuxListener::new(
-            base_port,
+        // Create MuxListener — try physical port first, fall back to ephemeral port (0)
+        let mux_listener = match TcpMuxListener::new(
+            physical_port,
             domain_id,
             participant_id,
             guid_prefix,
-            discovery_tx,
-            user_data_tx,
-        )?;
+            discovery_tx.clone(),
+            user_data_tx.clone(),
+        ) {
+            Ok(listener) => listener,
+            Err(e) => {
+                log::warn!(
+                    "[TcpTransportPlugin] Failed to bind on port {}: {}. \
+                     Falling back to ephemeral port.",
+                    physical_port,
+                    e,
+                );
+                TcpMuxListener::new(
+                    0, // OS-assigned ephemeral port
+                    domain_id,
+                    participant_id,
+                    guid_prefix,
+                    discovery_tx,
+                    user_data_tx,
+                )?
+            }
+        };
         let listener_port = mux_listener.port();
 
         // Create TcpSender
