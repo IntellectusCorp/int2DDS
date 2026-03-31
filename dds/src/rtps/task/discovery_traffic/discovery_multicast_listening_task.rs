@@ -192,7 +192,7 @@ mod tests {
     fn test_discovery_multicast_receive() {
         let domain_id = 10;
         let _socket = Socket::new(domain_id);
-        let participant = Arc::new(Participant::new(
+        let _participant = Arc::new(Participant::new(
             domain_id,
             _socket.participant_id(),
             _socket.working_ips(),

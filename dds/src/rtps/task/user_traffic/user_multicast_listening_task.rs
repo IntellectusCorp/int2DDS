@@ -102,8 +102,6 @@ mod tests {
     use std::sync::Arc;
 
     use crate::rtps::entities::participant::Participant;
-    use crate::rtps::task::user_traffic::user_multicast_listening_task::UserMulticastListeningTask;
-    use crate::rtps::transport::plugin::MessageSource;
     use crate::rtps::transport::socket::Socket;
 
     #[test]

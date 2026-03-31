@@ -1,3 +1,6 @@
+#![allow(dead_code)]
+#![allow(unused_variables)]
+
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
