@@ -1202,10 +1202,9 @@ impl Participant {
         let user_logic = Arc::new(Some(UserLogic::new(self.clone(), transport.clone())));
         let _ = self.user_logic.set(user_logic);
 
-        // Create WLP logic (still uses sender — cascading dependency, not in Phase 4 scope)
-        // TODO: WlpLogic needs transport migration in a future phase
-        // let wlp_logic = WlpLogic::new(self.clone(), sender);
-        // let _ = self.wlp_logic.set(wlp_logic);
+        // Create WLP logic
+        let wlp_logic = WlpLogic::new(self.clone(), transport);
+        let _ = self.wlp_logic.set(wlp_logic);
     }
 
     pub(crate) fn set_wlp_logic(&self, wlp_logic: WlpLogic) {

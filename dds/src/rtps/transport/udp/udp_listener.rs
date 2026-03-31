@@ -10,7 +10,6 @@ use std::env;
 use std::net::UdpSocket as StdUdpSocket;
 
 use crate::rtps::common::locator::{Locator, MULTICAST_IP};
-use crate::rtps::transport::Listener;
 
 const MAX_MESSAGE_SIZE: usize = 64 * 1024; // This is max we can get from UDP.
 
@@ -231,29 +230,5 @@ impl UdpListener {
             }
             drop(socket);
         }
-    }
-}
-
-/// Implementation of Listener trait for UdpListener
-///
-/// This allows UdpListener to be used through the generic Listener interface,
-/// enabling transport-agnostic listener management.
-impl Listener for UdpListener {
-    fn socket_udp(&mut self) -> Option<&mut mio::net::UdpSocket> {
-        self.socket.as_mut()
-    }
-
-    fn socket_tcp(&mut self) -> Option<&mut mio::net::TcpListener> {
-        // UDP listener doesn't have a TCP socket
-        None
-    }
-
-    fn port(&self) -> u16 {
-        self.port
-    }
-
-    fn close(&mut self) {
-        // Call the UdpListener's own close method
-        UdpListener::close(self)
     }
 }

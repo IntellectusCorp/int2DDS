@@ -14,7 +14,6 @@ use crate::rtps::transport::shm::platform::{shm_segment_name, SharedMemory};
 use crate::rtps::transport::shm::ring_buffer::{
     get_buffer_size, RingBufferHeader, RingBufferWriter, DEFAULT_MAX_MESSAGE_SIZE,
 };
-use crate::rtps::transport::{Transport, TransportType};
 use log::{debug, info, warn};
 
 /// Shared Memory Sender for user data transmission
@@ -86,10 +85,8 @@ impl ShmSender {
             *guard = None;
         }
     }
-}
 
-impl Transport for ShmSender {
-    fn send(&self, addr: &SocketAddr, data: &[u8]) -> io::Result<usize> {
+    pub(crate) fn send(&self, _addr: &SocketAddr, data: &[u8]) -> io::Result<usize> {
         let mut guard = self.writer.lock().map_err(|_| io::Error::other("Mutex poisoned"))?;
 
         let writer = guard
@@ -106,26 +103,5 @@ impl Transport for ShmSender {
                 Err(io::Error::other(e.to_string()))
             }
         }
-    }
-
-    fn send_multicast(&self, domain_id: u32, data: &[u8]) -> io::Result<usize> {
-        // SHM doesn't support multicast in the traditional sense
-        // Discovery should use UDP, so this shouldn't be called for SHM
-        warn!("[ShmSender] send_multicast called on SHM - not supported");
-        Err(io::Error::new(io::ErrorKind::Unsupported, "SHM does not support multicast"))
-    }
-
-    fn port(&self) -> u16 {
-        // SHM doesn't use ports
-        0
-    }
-
-    fn transport_type(&self) -> TransportType {
-        TransportType::SHM
-    }
-
-    fn close(self) {
-        info!("[ShmSender] Closing SHM sender for domain {}", self.domain_id);
-        // SharedMemory will be dropped automatically
     }
 }

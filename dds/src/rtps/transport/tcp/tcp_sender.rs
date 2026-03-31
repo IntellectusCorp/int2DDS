@@ -17,7 +17,6 @@ use crate::rtps::transport::tcp::framing::write_framed_message;
 use crate::rtps::transport::tcp::protocol::{
     BindRequest, BindResponse, BindStatus, BindType, ControlMsg,
 };
-use crate::rtps::transport::{Transport, TransportType};
 
 /// Connection key: (physical address, connection type)
 /// logical_port = 0 means Control connection, otherwise RTPS_DATA connection
@@ -440,57 +439,6 @@ impl TcpSender {
         self.connections.clear();
         self.peer_info.clear();
         debug!("TcpSender: All connections closed");
-    }
-}
-
-/// Implementation of Transport trait for TcpSender
-impl Transport for TcpSender {
-    // do not use this method in TCP transporting. Use send_to_discovery() or send_to_user_data() which accord with your purpose.
-    fn send(&self, addr: &SocketAddr, data: &[u8]) -> io::Result<usize> {
-        Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "TCP requires send_to_discovery() or send_to_user_data(). Direct send() is not supported.",
-    ))
-    }
-
-    fn send_multicast(&self, _domain_id: u32, _data: &[u8]) -> io::Result<usize> {
-        // TCP does not support multicast
-        Err(io::Error::new(ErrorKind::Unsupported, "TCP transport does not support multicast"))
-    }
-
-    fn port(&self) -> u16 {
-        self.port()
-    }
-
-    fn transport_type(&self) -> TransportType {
-        TransportType::TCP
-    }
-
-    fn send_to_logical_port(
-        &self,
-        addr: &SocketAddr,
-        logical_port: u16,
-        data: &[u8],
-    ) -> io::Result<usize> {
-        TcpSender::send_to_logical_port(self, addr, logical_port, data)
-    }
-
-    fn send_to_discovery(&self, addr: &SocketAddr, data: &[u8]) -> io::Result<usize> {
-        // Ensure control connection first (populates peer_info)
-        self.ensure_control_connection(addr)?;
-        let logical_port = self.get_peer_discovery_port(addr)?;
-        self.send_to_logical_port(addr, logical_port, data)
-    }
-
-    fn send_to_user_data(&self, addr: &SocketAddr, data: &[u8]) -> io::Result<usize> {
-        // Ensure control connection first (populates peer_info)
-        self.ensure_control_connection(addr)?;
-        let logical_port = self.get_peer_user_port(addr)?;
-        self.send_to_logical_port(addr, logical_port, data)
-    }
-
-    fn close(self) {
-        self.close_all();
     }
 }
 
