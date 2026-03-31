@@ -142,8 +142,6 @@ mod tests {
 
     use crate::rtps::common::types::DomainId;
     use crate::rtps::entities::participant::Participant;
-    use crate::rtps::task::user_traffic::user_unicast_listening_task::UserUnicastListeningTask;
-    use crate::rtps::transport::plugin::MessageSource;
     use crate::rtps::transport::socket::Socket;
 
     #[test]
@@ -151,7 +149,7 @@ mod tests {
     fn test_user_unicast_receive() {
         let domain_id: DomainId = 17;
         let _socket = Socket::new(domain_id);
-        let participant = Arc::new(Participant::new(
+        let _participant = Arc::new(Participant::new(
             domain_id,
             _socket.participant_id(),
             _socket.working_ips(),
