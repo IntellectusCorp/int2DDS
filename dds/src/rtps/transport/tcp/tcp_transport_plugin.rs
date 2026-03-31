@@ -133,18 +133,10 @@ impl TransportPlugin for TcpTransportPlugin {
         match target {
             SendTarget::MulticastDiscovery => {
                 // TCP has no multicast. Send to each initial peer as unicast.
+                // Establishes control connection (BIND handshake) → resolves discovery port → sends.
                 let initial_peers = crate::common::env::get_initial_peers();
                 for peer_addr in &initial_peers {
-                    let discovery_port =
-                        self.sender.get_peer_discovery_port(peer_addr).unwrap_or_else(|_| {
-                            // Peer not yet connected — use the peer's physical port as fallback
-                            // The control connection will be established by send_to_logical_port
-                            PortManager::get_discovery_traffic_unicast_port(
-                                self.domain_id,
-                                0, // Unknown participant_id — will be resolved via BIND
-                            )
-                        });
-                    let _ = self.sender.send_to_logical_port(peer_addr, discovery_port, data);
+                    let _ = self.sender.send_to_discovery(peer_addr, data);
                 }
                 Ok(())
             }
@@ -152,18 +144,14 @@ impl TransportPlugin for TcpTransportPlugin {
                 let ip = locator.to_ip_v4_addr();
                 let port = locator.port() as u16;
                 let addr = SocketAddr::new(std::net::IpAddr::V4(ip), port);
-                // For TCP, the locator port is the physical port.
-                // We need to resolve the logical discovery port via BIND.
-                let logical_port = self.sender.get_peer_discovery_port(&addr).unwrap_or(port);
-                self.sender.send_to_logical_port(&addr, logical_port, data)?;
+                self.sender.send_to_discovery(&addr, data)?;
                 Ok(())
             }
             SendTarget::UserData(locator) => {
                 let ip = locator.to_ip_v4_addr();
                 let port = locator.port() as u16;
                 let addr = SocketAddr::new(std::net::IpAddr::V4(ip), port);
-                let logical_port = self.sender.get_peer_user_port(&addr).unwrap_or(port);
-                self.sender.send_to_logical_port(&addr, logical_port, data)?;
+                self.sender.send_to_user_data(&addr, data)?;
                 Ok(())
             }
         }
@@ -180,36 +168,31 @@ impl TransportPlugin for TcpTransportPlugin {
         locators
     }
 
-    fn take_discovery_multicast_source(&self) -> MessageSource {
-        // TCP has no multicast. Discovery multicast listening is not applicable.
-        // Return a channel source that will never receive (dummy).
-        // In practice, TCP discovery happens via unicast to initial peers.
-        let (_tx, rx) = bounded::<IncomingMessage>(1);
-        MessageSource::Channel { rx }
+    fn take_discovery_multicast_source(&self) -> Option<MessageSource> {
+        // TCP has no multicast — discovery happens via unicast to initial peers.
+        None
     }
 
-    fn take_discovery_unicast_source(&self) -> MessageSource {
-        let rx = self
-            .discovery_rx
-            .lock()
-            .expect("lock poisoned")
-            .take()
-            .expect("discovery_rx already taken");
-        MessageSource::Channel { rx }
+    fn take_discovery_unicast_source(&self) -> Option<MessageSource> {
+        let rx = self.discovery_rx.lock().expect("lock poisoned").take()?;
+        Some(MessageSource::Channel { rx })
     }
 
-    fn take_user_data_unicast_source(&self) -> MessageSource {
-        let rx = self
-            .user_data_rx
-            .lock()
-            .expect("lock poisoned")
-            .take()
-            .expect("user_data_rx already taken");
-        MessageSource::Channel { rx }
+    fn take_user_data_unicast_source(&self) -> Option<MessageSource> {
+        let rx = self.user_data_rx.lock().expect("lock poisoned").take()?;
+        Some(MessageSource::Channel { rx })
     }
 
     fn port(&self) -> u16 {
         self.listener_port
+    }
+
+    fn tcp_listener_port(&self) -> Option<u16> {
+        Some(self.listener_port)
+    }
+
+    fn participant_id(&self) -> u32 {
+        self.participant_id
     }
 
     fn close(&self) {

@@ -150,38 +150,27 @@ impl TransportPlugin for ShmTransportPlugin {
         locators
     }
 
-    fn take_discovery_multicast_source(&self) -> MessageSource {
-        let listener = self
-            .discovery_multicast_listener
-            .lock()
-            .expect("lock poisoned")
-            .take()
-            .expect("discovery_multicast_listener already taken");
-        MessageSource::MioPoll { listener }
+    fn take_discovery_multicast_source(&self) -> Option<MessageSource> {
+        let listener = self.discovery_multicast_listener.lock().expect("lock poisoned").take()?;
+        Some(MessageSource::MioPoll { listener })
     }
 
-    fn take_discovery_unicast_source(&self) -> MessageSource {
-        let listener = self
-            .discovery_unicast_listener
-            .lock()
-            .expect("lock poisoned")
-            .take()
-            .expect("discovery_unicast_listener already taken");
-        MessageSource::MioPoll { listener }
+    fn take_discovery_unicast_source(&self) -> Option<MessageSource> {
+        let listener = self.discovery_unicast_listener.lock().expect("lock poisoned").take()?;
+        Some(MessageSource::MioPoll { listener })
     }
 
-    fn take_user_data_unicast_source(&self) -> MessageSource {
-        let rx = self
-            .user_data_unicast_rx
-            .lock()
-            .expect("lock poisoned")
-            .take()
-            .expect("user_data_unicast_rx already taken");
-        MessageSource::Channel { rx }
+    fn take_user_data_unicast_source(&self) -> Option<MessageSource> {
+        let rx = self.user_data_unicast_rx.lock().expect("lock poisoned").take()?;
+        Some(MessageSource::Channel { rx })
     }
 
     fn port(&self) -> u16 {
         self.udp_sender.port()
+    }
+
+    fn participant_id(&self) -> u32 {
+        self.participant_id
     }
 
     fn close(&self) {

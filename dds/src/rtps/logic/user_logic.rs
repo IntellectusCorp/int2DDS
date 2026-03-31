@@ -80,39 +80,38 @@ impl UserLogic {
     pub(crate) fn start_user_traffic(
         &self,
         domain_id: DomainId,
-        user_unicast_source: MessageSource,
+        user_unicast_source: Option<MessageSource>,
     ) -> RtpsResult<()> {
-        let participant = self.get_upgraded_participant()?;
+        if let Some(unicast_source) = user_unicast_source {
+            let participant = self.get_upgraded_participant()?;
 
-        let mut user_unicast_listening_task = UserUnicastListeningTask::new(participant.clone());
-        let participant_guid = participant.guid();
+            let mut user_unicast_listening_task =
+                UserUnicastListeningTask::new(participant.clone());
+            let participant_guid = participant.guid();
 
-        // unicast listening
-        let unicast_handle = thread::Builder::new()
-            .name("user_traffic_unicast_listening".to_string())
-            .spawn(move || {
-                // Register thread name for monitoring
-                {
-                    use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::register_current_thread_name_with_guid_prefix(
-                        "user_traffic_unicast_listening",
-                        participant_guid.prefix(),
-                    );
-                }
+            let unicast_handle = thread::Builder::new()
+                .name("user_traffic_unicast_listening".to_string())
+                .spawn(move || {
+                    {
+                        use crate::rtps::task::thread_monitor::ThreadMonitor;
+                        ThreadMonitor::register_current_thread_name_with_guid_prefix(
+                            "user_traffic_unicast_listening",
+                            participant_guid.prefix(),
+                        );
+                    }
 
-                let _ = user_unicast_listening_task.unicast_listening(user_unicast_source);
-                // Cleanup thread from registry before exit
-                {
-                    use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::remove_map_guard();
-                }
-                debug!("user unicast listening thread finished");
-            })
-            .expect("Failed to create user unicast listening thread");
+                    let _ = user_unicast_listening_task.unicast_listening(unicast_source);
+                    {
+                        use crate::rtps::task::thread_monitor::ThreadMonitor;
+                        ThreadMonitor::remove_map_guard();
+                    }
+                    debug!("user unicast listening thread finished");
+                })
+                .expect("Failed to create user unicast listening thread");
 
-        // Store unicast handle
-        if let Ok(mut handle_guard) = self.unicast_listening_handle.lock() {
-            *handle_guard = Some(unicast_handle);
+            if let Ok(mut handle_guard) = self.unicast_listening_handle.lock() {
+                *handle_guard = Some(unicast_handle);
+            }
         }
 
         Ok(())

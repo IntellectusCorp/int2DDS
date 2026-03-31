@@ -34,24 +34,41 @@ impl UdpTransportPlugin {
     /// Listeners are created with ports calculated from domain_id and participant_id.
     pub(crate) fn new(
         domain_id: u32,
-        participant_id: u32,
+        mut participant_id: u32,
         bind_ip: String,
         multicast_if_ip: String,
         working_ips: Vec<String>,
     ) -> io::Result<Self> {
         let sender = UdpSender::new(bind_ip, multicast_if_ip)?;
 
-        // Create all four listeners
+        // Create multicast listeners (shared ports, no conflict)
         let discovery_mc_port = PortManager::get_discovery_traffic_multicast_port(domain_id);
-        let discovery_uc_port =
-            PortManager::get_discovery_traffic_unicast_port(domain_id, participant_id);
         let user_mc_port = PortManager::get_user_traffic_multicast_port(domain_id);
-        let user_uc_port = PortManager::get_user_traffic_unicast_port(domain_id, participant_id);
-
         let discovery_mc = UdpListener::new_multicast(discovery_mc_port, &working_ips).ok();
-        let discovery_uc = UdpListener::new(discovery_uc_port).ok();
         let user_mc = UdpListener::new_multicast(user_mc_port, &working_ips).ok();
-        let user_uc = UdpListener::new(user_uc_port).ok();
+
+        // Create unicast listeners — if port is in use, increment participant_id and retry.
+        // Listener stays bound (no probe-and-release race). Matches old Socket behavior.
+        let (discovery_uc, user_uc) = loop {
+            let disc_port =
+                PortManager::get_discovery_traffic_unicast_port(domain_id, participant_id);
+            let user_port = PortManager::get_user_traffic_unicast_port(domain_id, participant_id);
+
+            match UdpListener::new(disc_port) {
+                Ok(disc_listener) => {
+                    let user_listener = UdpListener::new(user_port).ok();
+                    break (Some(disc_listener), user_listener);
+                }
+                Err(_) => {
+                    log::info!(
+                        "[UdpTransportPlugin] Port {} in use, trying participant_id {}",
+                        disc_port,
+                        participant_id + 1
+                    );
+                    participant_id += 1;
+                }
+            }
+        };
 
         Ok(Self {
             sender,
@@ -118,38 +135,27 @@ impl TransportPlugin for UdpTransportPlugin {
         locators
     }
 
-    fn take_discovery_multicast_source(&self) -> MessageSource {
-        let listener = self
-            .discovery_multicast_listener
-            .lock()
-            .expect("lock poisoned")
-            .take()
-            .expect("discovery_multicast_listener already taken");
-        MessageSource::MioPoll { listener }
+    fn take_discovery_multicast_source(&self) -> Option<MessageSource> {
+        let listener = self.discovery_multicast_listener.lock().expect("lock poisoned").take()?;
+        Some(MessageSource::MioPoll { listener })
     }
 
-    fn take_discovery_unicast_source(&self) -> MessageSource {
-        let listener = self
-            .discovery_unicast_listener
-            .lock()
-            .expect("lock poisoned")
-            .take()
-            .expect("discovery_unicast_listener already taken");
-        MessageSource::MioPoll { listener }
+    fn take_discovery_unicast_source(&self) -> Option<MessageSource> {
+        let listener = self.discovery_unicast_listener.lock().expect("lock poisoned").take()?;
+        Some(MessageSource::MioPoll { listener })
     }
 
-    fn take_user_data_unicast_source(&self) -> MessageSource {
-        let listener = self
-            .user_unicast_listener
-            .lock()
-            .expect("lock poisoned")
-            .take()
-            .expect("user_unicast_listener already taken");
-        MessageSource::MioPoll { listener }
+    fn take_user_data_unicast_source(&self) -> Option<MessageSource> {
+        let listener = self.user_unicast_listener.lock().expect("lock poisoned").take()?;
+        Some(MessageSource::MioPoll { listener })
     }
 
     fn port(&self) -> u16 {
         self.sender.port()
+    }
+
+    fn participant_id(&self) -> u32 {
+        self.participant_id
     }
 
     fn close(&self) {

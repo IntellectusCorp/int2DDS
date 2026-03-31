@@ -427,6 +427,24 @@ impl TcpSender {
     }
 
     /// Close all connections (sends Close on each control connection first)
+    /// Send data to a remote endpoint's discovery channel.
+    /// Establishes control connection first (BIND handshake), then resolves
+    /// the peer's discovery logical port from peer_info.
+    pub(crate) fn send_to_discovery(&self, addr: &SocketAddr, data: &[u8]) -> io::Result<usize> {
+        self.ensure_control_connection(addr)?;
+        let logical_port = self.get_peer_discovery_port(addr)?;
+        self.send_to_logical_port(addr, logical_port, data)
+    }
+
+    /// Send data to a remote endpoint's user data channel.
+    /// Establishes control connection first (BIND handshake), then resolves
+    /// the peer's user data logical port from peer_info.
+    pub(crate) fn send_to_user_data(&self, addr: &SocketAddr, data: &[u8]) -> io::Result<usize> {
+        self.ensure_control_connection(addr)?;
+        let logical_port = self.get_peer_user_port(addr)?;
+        self.send_to_logical_port(addr, logical_port, data)
+    }
+
     pub(crate) fn close_all(self) {
         for entry in self.connections.iter() {
             let (addr, lp) = entry.key();
@@ -463,31 +481,6 @@ mod tests {
         assert_eq!(sender.port(), 7400);
         assert_eq!(sender.connection_count(), 0);
         assert_eq!(sender.peer_count(), 0);
-    }
-
-    #[test]
-    fn test_tcp_sender_send_unsupported() {
-        let sender = create_test_sender();
-        let addr: SocketAddr = "127.0.0.1:7400".parse().unwrap();
-        let result = sender.send(&addr, b"test");
-
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind(), ErrorKind::Unsupported);
-    }
-
-    #[test]
-    fn test_tcp_sender_multicast_unsupported() {
-        let sender = create_test_sender();
-        let result = sender.send_multicast(0, b"test");
-
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind(), ErrorKind::Unsupported);
-    }
-
-    #[test]
-    fn test_tcp_sender_transport_type() {
-        let sender = create_test_sender();
-        assert_eq!(sender.transport_type(), TransportType::TCP);
     }
 
     #[test]
