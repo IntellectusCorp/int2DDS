@@ -179,6 +179,20 @@ ffi.cdef("""
         size_t field_count,
         Int2DdsTopic **topic_out
     );
+    /* Topic with full field descriptors for CFT reader-side filtering */
+    Int2DdsRet int2dds_create_topic_with_field_descriptors(
+        const Int2DdsParticipant *participant,
+        const char *topic_name,
+        const char *dds_type_name,
+        int32_t extensibility,
+        bool has_key,
+        const Int2DdsTopicQos *qos,
+        const char **field_names,
+        const uint32_t *field_types,
+        const bool *field_is_key,
+        size_t field_count,
+        Int2DdsTopic **topic_out
+    );
     Int2DdsRet int2dds_topic_get_name(
         const Int2DdsTopic *topic,
         char *name_out,
