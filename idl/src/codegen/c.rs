@@ -73,16 +73,83 @@ impl<'a> CGen<'a> {
             self.raw("\n");
         }
 
-        // Unions
+        // Phase 1: All type definitions (structs and unions may reference each other)
+        // Forward-declare all structs and unions
+        for s in &self.model.structs {
+            self.raw(&format!("typedef struct {} {};\n", s.name, s.name));
+        }
         for u in &self.model.unions {
-            self.emit_union_section(u);
-            self.raw("\n");
+            self.raw(&format!("typedef struct {} {};\n", u.name, u.name));
+        }
+        self.raw("\n");
+
+        // Struct and union full definitions, interleaved so that structs containing
+        // union members by value have the union defined first, and vice-versa.
+        {
+            let union_names: Vec<&str> = self.model.unions.iter().map(|u| u.name.as_str()).collect();
+            let mut union_emitted = vec![false; self.model.unions.len()];
+
+            for s in &self.model.structs {
+                // Before emitting this struct, emit any unions it references by value
+                for m in &s.members {
+                    if let ResolvedType::Struct(ref name) = m.resolved_type {
+                        if let Some(idx) = union_names.iter().position(|u| *u == name.as_str()) {
+                            if !union_emitted[idx] {
+                                self.emit_union_typedef(&self.model.unions[idx]);
+                                union_emitted[idx] = true;
+                            }
+                        }
+                    }
+                }
+                self.emit_struct_header(s);
+                self.emit_struct_typedef(s);
+                self.raw("\n");
+            }
+
+            // Emit remaining unions not yet emitted
+            for (idx, u) in self.model.unions.iter().enumerate() {
+                if !union_emitted[idx] {
+                    self.emit_union_typedef(u);
+                }
+            }
         }
 
-        // Structs with their serialize/deserialize functions
-        for s in &self.model.structs {
-            self.emit_struct_section(s);
-            self.raw("\n");
+        // Phase 2: All functions in dependency order
+        // Use the original definition order from the model, interleaving structs and unions
+        {
+            let mut struct_idx = 0;
+            let mut union_idx = 0;
+            // Emit functions following the combined order:
+            // unions before the structs that reference them, structs before the unions that reference them.
+            // Since the IDL resolver outputs types in dependency order within each category,
+            // we interleave: for each struct, emit any pending union functions first if the struct references them.
+            for s in &self.model.structs {
+                // Emit union functions for unions that this struct may reference
+                while union_idx < self.model.unions.len() {
+                    // Check if any struct member references this union
+                    let u_name = &self.model.unions[union_idx].name;
+                    let struct_needs_union = s.members.iter().any(|m| {
+                        matches!(&m.resolved_type, ResolvedType::Struct(n) if n == u_name)
+                    });
+                    if struct_needs_union {
+                        self.emit_union_functions(&self.model.unions[union_idx]);
+                        self.raw("\n");
+                        union_idx += 1;
+                    } else {
+                        break;
+                    }
+                }
+                self.emit_struct_functions(s);
+                self.raw("\n");
+                struct_idx += 1;
+            }
+            let _ = struct_idx;
+            // Emit remaining union functions
+            while union_idx < self.model.unions.len() {
+                self.emit_union_functions(&self.model.unions[union_idx]);
+                self.raw("\n");
+                union_idx += 1;
+            }
         }
 
         self.raw(&format!("#endif /* {} */\n", guard));
@@ -165,10 +232,9 @@ impl<'a> CGen<'a> {
 
     // ---- Union ----
 
-    fn emit_union_section(&mut self, u: &ResolvedUnion) {
+    fn emit_union_typedef(&mut self, u: &ResolvedUnion) {
         let disc_c = self.type_to_c_base(&u.discriminant_type);
-
-        self.raw(&format!("typedef struct {} {{\n", u.name));
+        self.raw(&format!("struct {} {{\n", u.name));
         self.raw(&format!("    {} _d;\n", disc_c));
         self.raw("    union {\n");
         for case in &u.cases {
@@ -182,7 +248,63 @@ impl<'a> CGen<'a> {
             self.raw(&format!("        {};\n", field_decl));
         }
         self.raw("    } _u;\n");
-        self.raw(&format!("}} {};\n\n", u.name));
+        self.raw("};\n\n");
+    }
+
+    fn emit_union_functions(&mut self, u: &ResolvedUnion) {
+        // serialize_fields (for nested union support - no encapsulation)
+        self.raw(&format!(
+            "static inline void {}_serialize_fields(\n    Int2DdsCdrWriter *_w,\n    const {} *val)\n{{\n",
+            u.name, u.name
+        ));
+        self.raw("    Int2DdsCdrWriter w = *_w;\n");
+        self.emit_write_field_indented(&u.discriminant_type, "val->_d", "    ");
+        self.raw("    switch (val->_d) {\n");
+        for case in &u.cases {
+            for label in &case.labels {
+                self.raw(&format!("    case {}:\n", self.union_label_c(label)));
+            }
+            let case_name = naming::escape_keyword(&case.member.name, naming::TargetLang::C);
+            let accessor = format!("val->_u.{}", case_name);
+            self.emit_write_field_indented(&case.member.resolved_type, &accessor, "        ");
+            self.raw("        break;\n");
+        }
+        if let Some(dc) = &u.default_case {
+            self.raw("    default:\n");
+            let dc_name = naming::escape_keyword(&dc.name, naming::TargetLang::C);
+            let accessor = format!("val->_u.{}", dc_name);
+            self.emit_write_field_indented(&dc.resolved_type, &accessor, "        ");
+            self.raw("        break;\n");
+        }
+        self.raw("    }\n");
+        self.raw("    *_w = w;\n}\n\n");
+
+        // deserialize_fields (for nested union support - no encapsulation)
+        self.raw(&format!(
+            "static inline void {}_deserialize_fields(\n    Int2DdsCdrReader *_r,\n    {} *val_out)\n{{\n",
+            u.name, u.name
+        ));
+        self.raw("    Int2DdsCdrReader r = *_r;\n");
+        self.emit_read_field_indented(&u.discriminant_type, "val_out->_d", "    ");
+        self.raw("    switch (val_out->_d) {\n");
+        for case in &u.cases {
+            for label in &case.labels {
+                self.raw(&format!("    case {}:\n", self.union_label_c(label)));
+            }
+            let case_name = naming::escape_keyword(&case.member.name, naming::TargetLang::C);
+            let accessor = format!("val_out->_u.{}", case_name);
+            self.emit_read_field_indented(&case.member.resolved_type, &accessor, "        ");
+            self.raw("        break;\n");
+        }
+        if let Some(dc) = &u.default_case {
+            self.raw("    default:\n");
+            let dc_name = naming::escape_keyword(&dc.name, naming::TargetLang::C);
+            let accessor = format!("val_out->_u.{}", dc_name);
+            self.emit_read_field_indented(&dc.resolved_type, &accessor, "        ");
+            self.raw("        break;\n");
+        }
+        self.raw("    }\n");
+        self.raw("    *_r = r;\n}\n\n");
 
         // Serialize function
         self.raw(&format!(
@@ -258,6 +380,13 @@ impl<'a> CGen<'a> {
     // ---- Struct ----
 
     fn emit_struct_section(&mut self, s: &ResolvedStruct) {
+        self.emit_struct_header(s);
+        self.emit_struct_typedef(s);
+        self.raw("\n");
+        self.emit_struct_functions(s);
+    }
+
+    fn emit_struct_header(&mut self, s: &ResolvedStruct) {
         let ext_str = match s.extensibility {
             ExtensibilityKind::Final => "FINAL",
             ExtensibilityKind::Appendable => "APPENDABLE",
@@ -267,11 +396,9 @@ impl<'a> CGen<'a> {
             "/* ========================================================================\n * Type: {}\n * Extensibility: {}\n * ======================================================================== */\n\n",
             s.name, ext_str
         ));
+    }
 
-        // Struct definition
-        self.emit_struct_typedef(s);
-        self.raw("\n");
-
+    fn emit_struct_functions(&mut self, s: &ResolvedStruct) {
         // Memory management functions (only for Pointer mode)
         if self.opts.string_mode == StringMode::Pointer {
             self.emit_struct_init(s);
@@ -308,7 +435,7 @@ impl<'a> CGen<'a> {
     }
 
     fn emit_struct_typedef(&mut self, s: &ResolvedStruct) {
-        self.raw(&format!("typedef struct {} {{\n", s.name));
+        self.raw(&format!("struct {} {{\n", s.name));
         // If there's a base type, insert parent as first member
         if let Some(base) = &s.base_type {
             let simple = base.rsplit("::").next().unwrap_or(base);
@@ -318,15 +445,26 @@ impl<'a> CGen<'a> {
             let field_decl = self.field_declaration(m);
             self.raw(&format!("    {};\n", field_decl));
         }
-        self.raw(&format!("}} {};\n", s.name));
+        self.raw("};\n");
     }
 
     fn field_declaration(&self, m: &ResolvedMember) -> String {
         let escaped = naming::escape_keyword(&m.name, naming::TargetLang::C);
         if m.is_external {
-            // External fields are pointers in C
-            let base = self.type_to_c_base(&m.resolved_type);
-            format!("{}* {}", base, escaped)
+            // External fields are pointers in C.
+            // For aggregate types (Sequence, Map) we need to generate a pointer
+            // to the anonymous struct rather than void*.
+            match &m.resolved_type {
+                ResolvedType::Sequence { .. } | ResolvedType::Map { .. } => {
+                    // Reuse the normal declaration with a pointer-prefixed name
+                    // e.g. "struct { int32_t* data; uint32_t length; } *field_name"
+                    self.type_to_c_declaration(&m.resolved_type, &format!("*{}", escaped))
+                }
+                _ => {
+                    let base = self.type_to_c_base(&m.resolved_type);
+                    format!("{}* {}", base, escaped)
+                }
+            }
         } else {
             self.type_to_c_declaration(&m.resolved_type, &escaped)
         }
@@ -566,6 +704,22 @@ impl<'a> CGen<'a> {
         self.raw("    return w.error == INT2DDS_CDR_OK ? int2dds_cdr_writer_size(&w) : 0;\n}\n");
     }
 
+    fn make_field_accessor(&self, m: &ResolvedMember, prefix: &str, field_name: &str) -> String {
+        if m.is_external {
+            let pass_through = matches!(
+                &m.resolved_type,
+                ResolvedType::String { .. } if self.opts.string_mode == StringMode::FixedArray
+            ) || matches!(&m.resolved_type, ResolvedType::WString { .. });
+            if pass_through {
+                format!("{}->{}", prefix, field_name)
+            } else {
+                format!("(*{}->{})", prefix, field_name)
+            }
+        } else {
+            format!("{}->{}", prefix, field_name)
+        }
+    }
+
     fn emit_serialize_fields(&mut self, s: &ResolvedStruct, prefix: &str) {
         // If there's a base type, serialize parent fields first
         if let Some(base) = &s.base_type {
@@ -577,7 +731,7 @@ impl<'a> CGen<'a> {
         }
         for m in &s.members {
             let field_name = naming::escape_keyword(&m.name, naming::TargetLang::C);
-            let accessor = format!("{}->{}", prefix, field_name);
+            let accessor = self.make_field_accessor(m, prefix, &field_name);
             self.emit_write_field(&m.resolved_type, &accessor);
         }
     }
@@ -586,7 +740,7 @@ impl<'a> CGen<'a> {
         for (i, m) in s.members.iter().enumerate() {
             let id = m.member_id.unwrap_or(i as u32);
             let field_name = naming::escape_keyword(&m.name, naming::TargetLang::C);
-            let accessor = format!("{}->{}", prefix, field_name);
+            let accessor = self.make_field_accessor(m, prefix, &field_name);
             self.raw("    {\n");
             self.raw("        size_t em;\n");
             self.raw(&format!(
@@ -714,21 +868,36 @@ impl<'a> CGen<'a> {
             }
             ResolvedType::Struct(type_name) => {
                 let simple = type_name.rsplit("::").next().unwrap_or(type_name);
-                let needs_dh = self.struct_needs_member_dheader(type_name);
-                if needs_dh {
-                    self.raw(&format!("{}{{ size_t _mbr_dh = 0;\n", indent));
+                // Check if this is actually a bitset type
+                if let Some(bitset) = self.find_bitset(type_name).cloned() {
+                    let wire_type = bitset_wire_c_type(bitset.total_bits);
+                    let write_fn = match bitset.total_bits {
+                        0..=8 => "int2dds_cdr_write_u8",
+                        9..=16 => "int2dds_cdr_write_u16",
+                        17..=32 => "int2dds_cdr_write_u32",
+                        _ => "int2dds_cdr_write_u64",
+                    };
                     self.raw(&format!(
-                        "{}if (w.xcdr2) {{ int2dds_cdr_write_dheader_begin(&w, &_mbr_dh); }}\n",
-                        indent
+                        "{}{}(&w, ({})({}_pack(&{})));\n",
+                        indent, write_fn, wire_type, simple, accessor
                     ));
-                }
-                self.raw(&format!("{}{}_serialize_fields(&w, &{});\n", indent, simple, accessor));
-                if needs_dh {
-                    self.raw(&format!(
-                        "{}if (w.xcdr2) {{ int2dds_cdr_write_dheader_finalize(&w, _mbr_dh); }}\n",
-                        indent
-                    ));
-                    self.raw(&format!("{}}}\n", indent));
+                } else {
+                    let needs_dh = self.struct_needs_member_dheader(type_name);
+                    if needs_dh {
+                        self.raw(&format!("{}{{ size_t _mbr_dh = 0;\n", indent));
+                        self.raw(&format!(
+                            "{}if (w.xcdr2) {{ int2dds_cdr_write_dheader_begin(&w, &_mbr_dh); }}\n",
+                            indent
+                        ));
+                    }
+                    self.raw(&format!("{}{}_serialize_fields(&w, &{});\n", indent, simple, accessor));
+                    if needs_dh {
+                        self.raw(&format!(
+                            "{}if (w.xcdr2) {{ int2dds_cdr_write_dheader_finalize(&w, _mbr_dh); }}\n",
+                            indent
+                        ));
+                        self.raw(&format!("{}}}\n", indent));
+                    }
                 }
             }
         }
@@ -784,7 +953,7 @@ impl<'a> CGen<'a> {
         }
         for m in &s.members {
             let field_name = naming::escape_keyword(&m.name, naming::TargetLang::C);
-            let accessor = format!("{}->{}", prefix, field_name);
+            let accessor = self.make_field_accessor(m, prefix, &field_name);
             self.emit_read_field(&m.resolved_type, &accessor);
         }
     }
@@ -800,7 +969,7 @@ impl<'a> CGen<'a> {
         for (i, m) in s.members.iter().enumerate() {
             let id = m.member_id.unwrap_or(i as u32);
             let field_name = naming::escape_keyword(&m.name, naming::TargetLang::C);
-            let accessor = format!("{}->{}", prefix, field_name);
+            let accessor = self.make_field_accessor(m, prefix, &field_name);
             self.raw(&format!("        case {}:\n", id));
             self.emit_read_field_indented(&m.resolved_type, &accessor, "            ");
             self.raw("            break;\n");
@@ -976,21 +1145,35 @@ impl<'a> CGen<'a> {
             }
             ResolvedType::Struct(type_name) => {
                 let simple = type_name.rsplit("::").next().unwrap_or(type_name);
-                let needs_dh = self.struct_needs_member_dheader(type_name);
-                if needs_dh {
-                    self.raw(&format!("{}{{ uint32_t _mbr_sz = 0; size_t _mbr_sp = 0;\n", indent));
-                    self.raw(&format!(
-                        "{}if (r.xcdr2) {{ int2dds_cdr_read_dheader(&r, &_mbr_sz, &_mbr_sp); }}\n",
-                        indent
-                    ));
-                }
-                self.raw(&format!("{}{}_deserialize_fields(&r, &{});\n", indent, simple, accessor));
-                if needs_dh {
-                    self.raw(&format!(
-                        "{}if (r.xcdr2) {{ int2dds_cdr_read_dheader_end(&r, _mbr_sz, _mbr_sp); }}\n",
-                        indent
-                    ));
-                    self.raw(&format!("{}}}\n", indent));
+                // Check if this is actually a bitset type
+                if let Some(bitset) = self.find_bitset(type_name).cloned() {
+                    let wire_type = bitset_wire_c_type(bitset.total_bits);
+                    let read_fn = match bitset.total_bits {
+                        0..=8 => "int2dds_cdr_read_u8",
+                        9..=16 => "int2dds_cdr_read_u16",
+                        17..=32 => "int2dds_cdr_read_u32",
+                        _ => "int2dds_cdr_read_u64",
+                    };
+                    self.raw(&format!("{}{{ {} _packed;\n", indent, wire_type));
+                    self.raw(&format!("{}{}(&r, &_packed);\n", indent, read_fn));
+                    self.raw(&format!("{}{}_unpack(_packed, &{}); }}\n", indent, simple, accessor));
+                } else {
+                    let needs_dh = self.struct_needs_member_dheader(type_name);
+                    if needs_dh {
+                        self.raw(&format!("{}{{ uint32_t _mbr_sz = 0; size_t _mbr_sp = 0;\n", indent));
+                        self.raw(&format!(
+                            "{}if (r.xcdr2) {{ int2dds_cdr_read_dheader(&r, &_mbr_sz, &_mbr_sp); }}\n",
+                            indent
+                        ));
+                    }
+                    self.raw(&format!("{}{}_deserialize_fields(&r, &{});\n", indent, simple, accessor));
+                    if needs_dh {
+                        self.raw(&format!(
+                            "{}if (r.xcdr2) {{ int2dds_cdr_read_dheader_end(&r, _mbr_sz, _mbr_sp); }}\n",
+                            indent
+                        ));
+                        self.raw(&format!("{}}}\n", indent));
+                    }
                 }
             }
         }
@@ -1021,7 +1204,7 @@ impl<'a> CGen<'a> {
 
             for m in &sorted_keys {
                 let field_name = naming::escape_keyword(&m.name, naming::TargetLang::C);
-                let accessor = format!("val->{}", field_name);
+                let accessor = self.make_field_accessor(m, "val", &field_name);
                 self.emit_write_field_indented(&m.resolved_type, &accessor, "    ");
             }
 
@@ -1040,6 +1223,12 @@ impl<'a> CGen<'a> {
                 | ResolvedType::WString { .. }
                 | ResolvedType::Sequence { .. }
         )
+    }
+
+    /// Look up a bitset by name, returning it if found.
+    fn find_bitset(&self, name: &str) -> Option<&ResolvedBitset> {
+        let simple = name.rsplit("::").next().unwrap_or(name);
+        self.model.bitsets.iter().find(|b| b.name == simple)
     }
 
     /// Check if a type has variable-length serialized representation.
@@ -1335,7 +1524,7 @@ mod tests {
         let model = resolve(defs).unwrap();
         let code = generate(&model, "HelloWorld.idl", &COptions::default());
 
-        assert!(code.contains("typedef struct HelloWorld {"));
+        assert!(code.contains("struct HelloWorld {"));
         assert!(code.contains("uint32_t index;"));
         assert!(code.contains("char message[257];")); // 256 + 1
         assert!(code.contains("HelloWorld_serialize_cdr("));
@@ -1674,7 +1863,7 @@ mod tests {
         let model = resolve(defs).unwrap();
         let code = generate(&model, "MyUnion.idl", &COptions::default());
 
-        assert!(code.contains("typedef struct MyUnion {"));
+        assert!(code.contains("struct MyUnion {"));
         assert!(code.contains("int32_t _d;"));
         assert!(code.contains("union {"));
         assert!(code.contains("int32_t int_val;"));

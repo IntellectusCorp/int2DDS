@@ -121,6 +121,8 @@
 
 #define INT2DDS_FIELD_ENUM 14
 
+#define INT2DDS_FIELD_WSTRING 15
+
 /**
  * C-compatible QoS policy ID enum
  */
