@@ -87,7 +87,10 @@ impl SPDPbuiltinParticipantWriter {
             heartbeat_period,
             data_max_size_serialized,
             reader_locators: Arc::new(Mutex::new(Vec::new())),
-            writer_cache: Arc::new(Mutex::new(WriterHistoryCache::new(guid, endpoint_id))),
+            writer_cache: Arc::new(Mutex::new(WriterHistoryCache::new(
+                std::sync::Weak::new(),
+                endpoint_id,
+            ))),
         }
     }
 
