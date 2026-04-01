@@ -2,7 +2,7 @@
 #![allow(unused_variables)]
 
 use std::env;
-use std::io::{self, ErrorKind, Read, Write};
+use std::io::{self, ErrorKind};
 use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,7 +13,7 @@ use socket2::{Domain, Protocol, SockAddr, Socket as Socket2, Type};
 
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::transport::port_manager::PortManager;
-use crate::rtps::transport::tcp::framing::write_framed_message;
+use crate::rtps::transport::tcp::framing::{read_framed_message, write_framed_message};
 use crate::rtps::transport::tcp::protocol::{
     BindRequest, BindResponse, BindStatus, BindType, ControlMsg,
 };
@@ -375,31 +375,14 @@ impl TcpSender {
         }
     }
 
-    /// Send a control message on a stream.
+    /// Send a control message on a stream (with INT2 magic framing).
     fn send_control_msg(&self, stream: &mut TcpStream, msg: &ControlMsg) -> io::Result<()> {
-        let payload = msg.to_bytes();
-        let len = payload.len() as u32;
-        stream.write_all(&len.to_be_bytes())?;
-        stream.write_all(&payload)?;
-        stream.flush()?;
-        Ok(())
+        write_framed_message(stream, &msg.to_bytes())
     }
 
-    /// Read a BindResponse from a stream.
+    /// Read a BindResponse from a stream (with INT2 magic framing).
     fn read_bind_response(&self, stream: &mut TcpStream) -> io::Result<BindResponse> {
-        let mut len_buf = [0u8; 4];
-        stream.read_exact(&mut len_buf)?;
-        let len = u32::from_be_bytes(len_buf) as usize;
-
-        if len == 0 || len > 1024 {
-            return Err(io::Error::new(
-                ErrorKind::InvalidData,
-                format!("Invalid BindResponse frame length: {}", len),
-            ));
-        }
-
-        let mut payload = vec![0u8; len];
-        stream.read_exact(&mut payload)?;
+        let payload = read_framed_message(stream)?;
 
         match ControlMsg::from_bytes(&payload)? {
             ControlMsg::BindResponse(resp) => {
