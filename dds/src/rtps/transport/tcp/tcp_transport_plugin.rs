@@ -56,8 +56,9 @@ impl TcpTransportPlugin {
         working_ip: String,
         guid_prefix: GuidPrefix,
     ) -> io::Result<Self> {
-        // Calculate physical port for TCP listener
-        let physical_port = PortManager::get_tcp_physical_port(domain_id);
+        // Physical port: use INT2DDS_TCP_PORT if set, otherwise calculate from domain_id
+        let physical_port = crate::common::env::get_tcp_port()
+            .unwrap_or_else(|| PortManager::get_tcp_physical_port(domain_id));
 
         // Create channels for routing incoming data
         let (discovery_tx, discovery_rx) = bounded::<IncomingMessage>(CHANNEL_BUFFER_SIZE);
