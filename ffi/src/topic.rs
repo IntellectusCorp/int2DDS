@@ -209,50 +209,6 @@ pub unsafe extern "C" fn int2dds_create_topic_with_type_info(
     INT2DDS_RET_OK
 }
 
-/// Set QoS on a Topic
-///
-/// # Safety
-/// - `topic` must be a valid topic
-/// - `qos` must be a valid topic QoS handle
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_topic_set_qos(
-    topic: *const Int2DdsTopic,
-    qos: *const Int2DdsTopicQos,
-) -> Int2DdsRet {
-    check_null!(topic);
-    check_null!(qos);
-
-    let topic_ref = &*topic;
-    let qos_ref = &*qos;
-
-    ffi_try!(topic_ref.inner.set_qos(qos_ref.inner.clone()));
-
-    INT2DDS_RET_OK
-}
-
-/// Get QoS from a Topic
-///
-/// The returned handle must be freed with `int2dds_topic_qos_destroy`.
-///
-/// # Safety
-/// - `topic` must be a valid topic
-/// - `qos_out` must be a valid pointer to a null pointer
-#[no_mangle]
-pub unsafe extern "C" fn int2dds_topic_get_qos(
-    topic: *const Int2DdsTopic,
-    qos_out: *mut *mut Int2DdsTopicQos,
-) -> Int2DdsRet {
-    check_null!(topic);
-    check_null!(qos_out);
-
-    let topic_ref = &*topic;
-    let qos = ffi_try!(topic_ref.inner.get_qos());
-    let boxed = Box::new(Int2DdsTopicQos { inner: qos });
-    *qos_out = Box::into_raw(boxed);
-
-    INT2DDS_RET_OK
-}
-
 /// Delete a Topic
 ///
 /// # Safety
@@ -459,4 +415,102 @@ pub unsafe extern "C" fn int2dds_delete_contentfilteredtopic(
         Ok(()) => INT2DDS_RET_OK,
         Err(e) => dds_error_to_code(&e),
     }
+}
+
+/// Create a Topic with key field metadata for compute_key() support.
+///
+/// Same as int2dds_create_topic_keyed but additionally accepts key field
+/// descriptors that enable instance handle computation from CDR data.
+/// This is needed when the remote publisher does not include KEY_HASH
+/// in inline QoS (e.g., CoreDX).
+///
+/// # Safety
+/// - Same as int2dds_create_topic_keyed
+/// - field_indices/field_types must point to field_count elements, or be null if field_count is 0
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_create_topic_keyed_with_key_fields(
+    participant: *const Int2DdsParticipant,
+    topic_name: *const std::os::raw::c_char,
+    dds_type_name: *const std::os::raw::c_char,
+    extensibility: i32,
+    has_key: bool,
+    qos: *const Int2DdsTopicQos,
+    field_indices: *const u32,
+    field_types: *const u32,
+    field_count: usize,
+    topic_out: *mut *mut Int2DdsTopic,
+) -> Int2DdsRet {
+    check_null!(participant);
+    check_null!(topic_name);
+    check_null!(dds_type_name);
+    check_null!(topic_out);
+
+    let participant_ref = &*participant;
+
+    let topic_name_str = match CStr::from_ptr(topic_name).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    let dds_type_name_str = match CStr::from_ptr(dds_type_name).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    let ext_kind = match extensibility {
+        0 => ExtensibilityKind::Final,
+        1 => ExtensibilityKind::Appendable,
+        2 => ExtensibilityKind::Mutable,
+        _ => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    // Build key field metadata
+    use crate::raw_type_support::{KeyFieldInfo, KeyFieldType};
+    let mut key_fields = Vec::new();
+    if field_count > 0 && !field_indices.is_null() && !field_types.is_null() {
+        for i in 0..field_count {
+            let field_type = match *field_types.add(i) {
+                0 => KeyFieldType::String,
+                1 => KeyFieldType::Int32,
+                2 => KeyFieldType::UInt32,
+                3 => KeyFieldType::Int16,
+                4 => KeyFieldType::UInt16,
+                5 => KeyFieldType::Int64,
+                6 => KeyFieldType::UInt64,
+                7 => KeyFieldType::Int8,
+                8 => KeyFieldType::UInt8,
+                9 => KeyFieldType::Bool,
+                _ => return INT2DDS_RET_INVALID_ARGUMENT,
+            };
+            key_fields
+                .push(KeyFieldInfo { field_index: *field_indices.add(i) as usize, field_type });
+        }
+    }
+
+    // Create RawTypeSupport with key fields
+    let mut type_support =
+        RawTypeSupport::new_with_key(dds_type_name_str.to_string(), ext_kind, has_key);
+    type_support.set_key_fields(key_fields);
+
+    // Register the RawTypeSupport with the participant
+    ffi_try!(participant_ref
+        .inner
+        .register_type_support(Arc::new(type_support) as Arc<dyn TypeSupport>, dds_type_name_str));
+
+    let topic_qos = if qos.is_null() { TopicQos::default() } else { (*qos).inner.clone() };
+
+    let topic = ffi_try!(participant_ref.inner.create_topic::<Int2DdsData>(
+        topic_name_str,
+        dds_type_name_str,
+        topic_qos,
+        None,
+        StatusMask::default()
+    ));
+
+    let topic_handle =
+        Box::new(Int2DdsTopic { inner: Arc::new(topic), type_name: dds_type_name_str.to_string() });
+
+    *topic_out = Box::into_raw(topic_handle);
+
+    INT2DDS_RET_OK
 }

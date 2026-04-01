@@ -19,6 +19,28 @@ use int2dds::{
     xtypes::{TypeIdentifier, TypeObject},
 };
 
+/// CDR field type for key extraction
+#[derive(Clone, Debug)]
+pub enum KeyFieldType {
+    String,
+    Int32,
+    UInt32,
+    Int16,
+    UInt16,
+    Int64,
+    UInt64,
+    Int8,
+    UInt8,
+    Bool,
+}
+
+/// Key field descriptor
+#[derive(Clone, Debug)]
+pub struct KeyFieldInfo {
+    pub field_index: usize,
+    pub field_type: KeyFieldType,
+}
+
 /// Lightweight TypeSupport for raw bytes FFI path.
 ///
 /// Serialize/deserialize methods return errors since they are never called
@@ -29,11 +51,19 @@ pub struct RawTypeSupport {
     has_key: bool,
     type_identifier: Option<TypeIdentifier>,
     type_object: Option<TypeObject>,
+    key_fields: Vec<KeyFieldInfo>,
 }
 
 impl RawTypeSupport {
     pub fn new(type_name: String, extensibility: ExtensibilityKind) -> Self {
-        Self { type_name, extensibility, has_key: false, type_identifier: None, type_object: None }
+        Self {
+            type_name,
+            extensibility,
+            has_key: false,
+            type_identifier: None,
+            type_object: None,
+            key_fields: Vec::new(),
+        }
     }
 
     pub fn new_with_key(
@@ -41,7 +71,14 @@ impl RawTypeSupport {
         extensibility: ExtensibilityKind,
         has_key: bool,
     ) -> Self {
-        Self { type_name, extensibility, has_key, type_identifier: None, type_object: None }
+        Self {
+            type_name,
+            extensibility,
+            has_key,
+            type_identifier: None,
+            type_object: None,
+            key_fields: Vec::new(),
+        }
     }
 
     /// Create a RawTypeSupport with pre-built TypeIdentifier and TypeObject.
@@ -61,7 +98,77 @@ impl RawTypeSupport {
             has_key,
             type_identifier: Some(type_identifier),
             type_object: Some(type_object),
+            key_fields: Vec::new(),
         }
+    }
+
+    /// Set key field metadata for compute_key() support.
+    /// Called from FFI when Python binding provides key field info.
+    pub fn set_key_fields(&mut self, fields: Vec<KeyFieldInfo>) {
+        self.key_fields = fields;
+    }
+
+    /// Extract key bytes from CDR-serialized data using key field metadata.
+    /// Parses CDR fields sequentially, collecting only key field values.
+    fn extract_key_from_cdr(&self, cdr_bytes: &[u8]) -> Vec<u8> {
+        if cdr_bytes.len() < 4 {
+            return Vec::new();
+        }
+
+        // Skip 4-byte CDR encapsulation header
+        let encoding_id = u16::from_be_bytes([cdr_bytes[0], cdr_bytes[1]]);
+        let is_xcdr2 = matches!(encoding_id, 0x0006 | 0x0007 | 0x0008 | 0x0009 | 0x000A | 0x000B);
+        let mut pos = 4;
+
+        // Skip DHEADER (4 bytes) for Appendable/Mutable XCDR2
+        if is_xcdr2
+            && matches!(
+                self.extensibility,
+                ExtensibilityKind::Appendable | ExtensibilityKind::Mutable
+            )
+        {
+            if pos + 4 <= cdr_bytes.len() {
+                pos += 4;
+            }
+        }
+
+        let mut key_bytes = Vec::new();
+        let data = cdr_bytes;
+
+        // Parse fields sequentially, collecting key field values
+        for (idx, field_info) in self.key_fields.iter().enumerate() {
+            // Skip non-key fields up to this field index
+            // For now, we only support the first field being a key (common case: color)
+            // A full implementation would need all field types to skip correctly
+            if field_info.field_index == 0 && idx == 0 {
+                match &field_info.field_type {
+                    KeyFieldType::String => {
+                        if pos + 4 <= data.len() {
+                            let str_len = u32::from_le_bytes([
+                                data[pos],
+                                data[pos + 1],
+                                data[pos + 2],
+                                data[pos + 3],
+                            ]) as usize;
+                            pos += 4;
+                            if pos + str_len <= data.len() {
+                                // Include length + string bytes (with null terminator) for key hash
+                                key_bytes.extend_from_slice(&(str_len as u32).to_be_bytes());
+                                key_bytes.extend_from_slice(&data[pos..pos + str_len]);
+                            }
+                        }
+                    }
+                    KeyFieldType::Int32 | KeyFieldType::UInt32 => {
+                        if pos + 4 <= data.len() {
+                            key_bytes.extend_from_slice(&data[pos..pos + 4]);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        key_bytes
     }
 }
 
@@ -96,13 +203,14 @@ impl TypeSupport for RawTypeSupport {
 
     fn deserialize(
         &self,
-        _data: &[u8],
+        data: &[u8],
         _format: Option<&SerializationFormat>,
     ) -> DdsResult<Box<dyn Any>> {
-        // Return a dummy Int2DdsData so that the DDS internal key extraction
-        // (update_instance_state) succeeds and data is stored in the cache.
-        // Actual deserialization is done by C users via take_serialized().
-        Ok(Box::new(crate::data::Int2DdsData))
+        // Store CDR bytes for compute_key() fallback when key fields are configured.
+        // Otherwise return empty Int2DdsData (existing behavior for C/C# bindings).
+        Ok(Box::new(crate::data::Int2DdsData {
+            cdr_bytes: if self.key_fields.is_empty() { None } else { Some(data.to_vec()) },
+        }))
     }
 
     fn serialize_key(&self, _data: &dyn Any) -> DdsResult<SerializedData> {
@@ -113,8 +221,29 @@ impl TypeSupport for RawTypeSupport {
         Err(DdsError::Error("RawTypeSupport: use take_serialized() for key access".to_string()))
     }
 
-    fn compute_key(&self, _data: &dyn Any) -> InstanceHandle {
-        InstanceHandle::NIL
+    fn compute_key(&self, data: &dyn Any) -> InstanceHandle {
+        // No key fields configured — preserve existing behavior (C/C# bindings)
+        if self.key_fields.is_empty() {
+            return InstanceHandle::NIL;
+        }
+
+        let int2dds_data = match data.downcast_ref::<crate::data::Int2DdsData>() {
+            Some(d) => d,
+            None => return InstanceHandle::NIL,
+        };
+
+        let cdr_bytes = match &int2dds_data.cdr_bytes {
+            Some(b) => b,
+            None => return InstanceHandle::NIL,
+        };
+
+        let key_bytes = self.extract_key_from_cdr(cdr_bytes);
+        if key_bytes.is_empty() {
+            return InstanceHandle::NIL;
+        }
+
+        let hash = md5::compute(&key_bytes);
+        InstanceHandle::new(hash.0)
     }
 
     fn is_compute_key_provided(&self) -> bool {
