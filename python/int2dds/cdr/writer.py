@@ -53,7 +53,7 @@ class CdrWriter:
 
     def __init__(
         self,
-        extensibility: Extensibility = Extensibility.FINAL,
+        extensibility: Extensibility = Extensibility.APPENDABLE,
         little_endian: bool = True,
         xcdr2: bool = True,
     ) -> None:
