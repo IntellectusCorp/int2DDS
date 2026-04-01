@@ -7,71 +7,43 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Instant;
 
 use crossbeam_channel::Sender;
-
-use crate::rtps::transport::plugin::IncomingMessage;
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use mio::net::{TcpListener as MioTcpListener, TcpStream as MioTcpStream};
 use mio::{Interest, Registry, Token};
 
 use crate::rtps::common::guid::GuidPrefix;
+use crate::rtps::transport::plugin::IncomingMessage;
 use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::tcp::framing::{
     classify_frame, write_framed_message, FramedReader, TcpFrameKind,
 };
-use crate::rtps::transport::tcp::protocol::{BindResponse, BindStatus, BindType, ControlMsg};
+use crate::rtps::transport::tcp::protocol::{generate_cookie, ControlMsg};
 
-/// Token for the listener socket itself
 const LISTENER_TOKEN: Token = Token(0);
-
-/// Starting token index for accepted connections
 const CONNECTION_TOKEN_START: usize = 65536;
-
-/// Default keepalive interval in seconds
 const DEFAULT_KEEPALIVE_INTERVAL_SECS: u64 = 30;
-
-/// Maximum missed keepalive acks before closing peer connections
 const MAX_MISSED_KEEPALIVES: u32 = 3;
 
-/// TCP muliplexed listener for single-port DDS/RTPS communication.
-///
-/// Accepts all TCP connections on a single physical port (7400 + 250 * domain_id).
-/// Each connection goes through a BIND handshake to determine its type
-/// (Control, Discovery, UserData), then frames are routed to the
-/// appropriate channel.
+/// TCP multiplexed listener with 3-step handshake:
+/// PEER_HELLO → PORT_RESERVE (repeatable) → PORT_BIND (separate connection)
 #[derive(Debug)]
 pub(crate) struct TcpMuxListener {
-    /// Physical port (7400 + 250 * domain_id)
     port: u16,
-
-    /// DDS domain ID
     domain_id: u32,
-
-    /// Local participant ID
     participant_id: u32,
-
-    /// Local GUID prefix
     local_guid_prefix: GuidPrefix,
-
-    /// The mio TCP listener socket
     listener: Option<MioTcpListener>,
-
-    /// All accepted connections indexed by token
     connections: HashMap<Token, MuxConnection>,
-
-    /// Token counter
     next_token: usize,
-
-    /// Peer connection groups indexed by remote guid_prefix
     peer_connections: HashMap<GuidPrefix, PeerConnectionGroup>,
-
-    /// Channel for routing discovery RTPS data to discovery listening task
     discovery_tx: Sender<IncomingMessage>,
-
-    /// Channel for routing user RTPS data to user listening task
     user_data_tx: Sender<IncomingMessage>,
+    /// Cookie counter for PORT_RESERVE responses (0x31, 0x32, ...)
+    next_cookie: u8,
+    /// Maps cookie → logical_port for PORT_BIND verification
+    cookie_to_port: HashMap<[u8; 16], u16>,
 }
 
-/// Tracks the 3 connections from a single remote peer
 #[derive(Debug)]
 struct PeerConnectionGroup {
     control_token: Option<Token>,
@@ -95,55 +67,38 @@ impl PeerConnectionGroup {
         }
     }
 
-    /// Collect all active tokens for this peer
     fn all_tokens(&self) -> Vec<Token> {
-        let mut tokens = Vec::with_capacity(3);
-        if let Some(t) = self.control_token {
-            tokens.push(t);
-        }
-        if let Some(t) = self.discovery_token {
-            tokens.push(t);
-        }
-        if let Some(t) = self.user_data_token {
-            tokens.push(t);
-        }
-        tokens
+        [self.control_token, self.discovery_token, self.user_data_token]
+            .iter()
+            .flatten()
+            .copied()
+            .collect()
     }
 }
 
-/// State of a single multiplexed connection
+/// Connection state machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectionState {
+    /// Waiting for first message (PEER_HELLO or PORT_BIND)
+    AwaitingFirstMessage,
+    /// PEER_HELLO done — control connection, accepts PORT_RESERVE + KEEPALIVE
+    Control,
+    /// PORT_BIND done — data connection, accepts RTPS data
+    Active,
+    Closing,
+}
+
 #[derive(Debug)]
 struct MuxConnection {
     stream: MioTcpStream,
     framed_reader: FramedReader,
     state: ConnectionState,
-    bind_type: Option<BindType>,
-    bound_logical_port: Option<u16>,
     remote_addr: SocketAddr,
+    bound_logical_port: Option<u16>,
     remote_guid_prefix: Option<GuidPrefix>,
 }
 
-/// Connection lifecycle state
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConnectionState {
-    /// Connection accepted, waiting for BindRequest
-    AwaitingBind,
-    /// BIND completed, ready for data
-    Active,
-    /// Connection being closed
-    Closing,
-}
-
 impl TcpMuxListener {
-    /// Create a new TcpMuxListener bound to the physical port.
-    ///
-    /// # Arguments
-    /// * `port` - The physical port to bind (typically 7400 + 250 * domain_id)
-    /// * `domain_id` - DDS domain ID
-    /// * `participant_id` - Local participant ID
-    /// * `local_guid_prefix` - Local participant's GUID prefix
-    /// * `discovery_tx` - Channel sender for discovery RTPS data
-    /// * `user_data_tx` - Channel sender for user RTPS data
     pub(crate) fn new(
         port: u16,
         domain_id: u32,
@@ -155,7 +110,6 @@ impl TcpMuxListener {
         let addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
         let listener = MioTcpListener::bind(addr)?;
         let actual_port = listener.local_addr()?.port();
-
         info!("TcpMuxListener: Listening on port {} (domain={})", actual_port, domain_id);
 
         Ok(Self {
@@ -169,268 +123,175 @@ impl TcpMuxListener {
             peer_connections: HashMap::new(),
             discovery_tx,
             user_data_tx,
+            next_cookie: 0x31,
+            cookie_to_port: HashMap::new(),
         })
     }
 
-    /// Get a mutable reference to the mio TcpListener for poll registration
     pub(crate) fn listener_mut(&mut self) -> Option<&mut MioTcpListener> {
         self.listener.as_mut()
     }
 
-    /// Get the listening port
     pub(crate) fn port(&self) -> u16 {
         self.port
     }
 
-    /// Accept a new incoming connection and register with the poll registry.
-    ///
-    /// The connection starts in 'AwaitingBind' state - it must send a BindRequest
-    /// before any RTPS data is accepted.
     pub(crate) fn accept(&mut self, registry: &Registry) -> io::Result<Option<Token>> {
         let listener = match &self.listener {
             Some(l) => l,
-            None => {
-                return Err(io::Error::new(ErrorKind::NotConnected, "MuxListener not initialized"))
-            }
+            None => return Err(io::Error::new(ErrorKind::NotConnected, "Not initialized")),
         };
 
         match listener.accept() {
             Ok((mut stream, addr)) => {
                 let token = Token(self.next_token);
                 self.next_token += 1;
-
-                if let Err(e) = stream.set_nodelay(true) {
-                    warn!("TcpMuxListener: Failed to set nodelay for {:?}: {:?}", addr, e);
-                }
-
+                let _ = stream.set_nodelay(true);
                 registry.register(&mut stream, token, Interest::READABLE)?;
 
-                debug!("TcpMuxListener: Accepted connection from {:?} (token={:?})", addr, token);
+                debug!("TcpMuxListener: Accepted from {:?} (token={:?})", addr, token);
 
-                let conn = MuxConnection {
-                    stream,
-                    framed_reader: FramedReader::new(),
-                    state: ConnectionState::AwaitingBind,
-                    bind_type: None,
-                    bound_logical_port: None,
-                    remote_addr: addr,
-                    remote_guid_prefix: None,
-                };
-                self.connections.insert(token, conn);
-
+                self.connections.insert(
+                    token,
+                    MuxConnection {
+                        stream,
+                        framed_reader: FramedReader::new(),
+                        state: ConnectionState::AwaitingFirstMessage,
+                        remote_addr: addr,
+                        bound_logical_port: None,
+                        remote_guid_prefix: None,
+                    },
+                );
                 Ok(Some(token))
             }
             Err(ref e) if e.kind() == ErrorKind::WouldBlock => Ok(None),
-            Err(e) => {
-                error!("TcpMuxListener: Accept failed: {:?}", e);
-                Err(e)
-            }
+            Err(e) => Err(e),
         }
     }
 
-    /// Process a readable event for a connection token
-    ///
-    /// Reads framed data, handles BIND handshake for new connections,
-    /// routes RTPS data to the appropriate channel, and handles control messages.
     pub(crate) fn on_readable(&mut self, token: Token, registry: &Registry) {
-        // Read all available frames from this connection
         loop {
-            let frame = {
+            let payload = {
                 let conn = match self.connections.get_mut(&token) {
-                    Some(c) => c,
-                    None => return,
+                    Some(c) if c.state != ConnectionState::Closing => c,
+                    _ => return,
                 };
 
-                if conn.state == ConnectionState::Closing {
-                    return;
-                }
-
                 match conn.framed_reader.read_message(&mut conn.stream) {
-                    Ok(Some(payload)) => payload,
-                    Ok(None) => continue, // partial read, try again
+                    Ok(Some(msg)) => msg,
+                    Ok(None) => continue,
                     Err(ref e) if e.kind() == ErrorKind::WouldBlock => return,
                     Err(e) => {
-                        debug!("TcpMuxListener: Read error on token {:?}: {:?}", token, e);
+                        debug!("TcpMuxListener: Read error on {:?}: {:?}", token, e);
                         self.remove_connection(token, registry);
                         return;
                     }
                 }
             };
 
-            // Dispatch based on connection state
             let state = self.connections.get(&token).map(|c| c.state);
+
             match state {
-                Some(ConnectionState::AwaitingBind) => {
-                    self.handle_bind(token, &frame, registry);
+                Some(ConnectionState::AwaitingFirstMessage) => {
+                    self.handle_first_message(token, &payload, registry);
+                }
+                Some(ConnectionState::Control) => {
+                    self.handle_control_frame(token, &payload, registry);
                 }
                 Some(ConnectionState::Active) => {
-                    self.handle_active_frame(token, &frame, registry);
+                    self.handle_active_frame(token, &payload, registry);
                 }
                 _ => {}
             }
         }
     }
 
-    /// Handle the BIND handshake for a newly accepted connection.
-    fn handle_bind(&mut self, token: Token, payload: &[u8], registry: &Registry) {
-        let kind = classify_frame(payload);
-        if kind != TcpFrameKind::Control {
-            warn!(
-                "TcpMuxListener: Expected BindRequest on token {:?}, got {:?}. Closing.",
-                token, kind
-            );
-            self.remove_connection(token, registry);
-            return;
-        }
+    // ── First message: PEER_HELLO or PORT_BIND ──────────────────────────────
 
+    fn handle_first_message(&mut self, token: Token, payload: &[u8], registry: &Registry) {
         let msg = match ControlMsg::from_bytes(payload) {
             Ok(m) => m,
             Err(e) => {
-                warn!(
-                    "TcpMuxListener: Failed to parse control message on token {:?}: {:?}",
-                    token, e
-                );
+                warn!("TcpMuxListener: Bad first message on {:?}: {:?}", token, e);
                 self.remove_connection(token, registry);
-                return;
-            }
-        };
-
-        let req = match msg {
-            ControlMsg::BindRequest(req) => req,
-            other => {
-                warn!(
-                    "TcpMuxListener: Expected BindRequest on token {:?}, got {:?}. Closing.",
-                    token, other
-                );
-                self.remove_connection(token, registry);
-                return;
-            }
-        };
-
-        // Validate domain
-        if req.domain_id != self.domain_id {
-            warn!(
-                "TcpMuxListener: Domain mismatch from {:?}: expected {}, got {}",
-                token, self.domain_id, req.domain_id
-            );
-            self.send_bind_response(token, BindStatus::DomainMismatch);
-            self.remove_connection(token, registry);
-            return;
-        }
-
-        // Validate logical port for RTPS_DATA binds
-        if req.bind_type == BindType::RtpsData {
-            if !PortManager::is_discovery_unicast_port(self.domain_id, req.logical_port)
-                && !PortManager::is_user_unicast_port(self.domain_id, req.logical_port)
-            {
-                warn!("TcpMuxListener: Invalid logical port {} from {:?}", req.logical_port, token);
-                self.send_bind_response(token, BindStatus::InvalidRequest);
-                self.remove_connection(token, registry);
-                return;
-            }
-        }
-
-        // Send BindResponse with our info
-        self.send_bind_response(token, BindStatus::Ok);
-
-        // Update connection state
-        if let Some(conn) = self.connections.get_mut(&token) {
-            conn.state = ConnectionState::Active;
-            conn.bind_type = Some(req.bind_type);
-            conn.remote_guid_prefix = Some(req.guid_prefix);
-            conn.bound_logical_port = match req.bind_type {
-                BindType::Control => None,
-                BindType::RtpsData => Some(req.logical_port),
-            };
-        }
-
-        // Register in peer connection group
-        let group =
-            self.peer_connections.entry(req.guid_prefix).or_insert_with(PeerConnectionGroup::new);
-
-        match req.bind_type {
-            BindType::Control => {
-                group.control_token = Some(token);
-                debug!(
-                    "TcpMuxListener: Control connection bound (token={:?}, peer={:?})",
-                    token, req.guid_prefix
-                );
-            }
-            BindType::RtpsData => {
-                if PortManager::is_discovery_unicast_port(self.domain_id, req.logical_port) {
-                    group.discovery_token = Some(token);
-                    debug!(
-                        "TcpMuxListener: Discovery connection bound (token={:?}, logical_port={}, peer={:?})",
-                        token, req.logical_port, req.guid_prefix
-                    );
-                } else {
-                    group.user_data_token = Some(token);
-                    debug!(
-                        "TcpMuxListener: UserData connection bound (token={:?}, logical_port={}, peer={:?})",
-                        token, req.logical_port, req.guid_prefix
-                    );
-                }
-            }
-        }
-    }
-
-    /// Handle a frame on an Active connection.
-    fn handle_active_frame(&mut self, token: Token, payload: &[u8], registry: &Registry) {
-        let (bind_type, remote_addr) = match self.connections.get(&token) {
-            Some(conn) => (conn.bind_type, conn.remote_addr),
-            None => return,
-        };
-
-        match bind_type {
-            Some(BindType::Control) => {
-                self.handle_control_frame(token, payload, registry);
-            }
-            Some(BindType::RtpsData) => {
-                let kind = classify_frame(payload);
-                match kind {
-                    TcpFrameKind::RtpsData => {
-                        self.route_rtps_data(token, payload, remote_addr);
-                    }
-                    TcpFrameKind::Control => {
-                        // Control message on RTPS_DATA connection — only Close is valid
-                        if let Ok(ControlMsg::Close) = ControlMsg::from_bytes(payload) {
-                            debug!("TcpMuxListener: Close received on data connection {:?}", token);
-                            self.remove_connection(token, registry);
-                        } else {
-                            warn!(
-                                "TcpMuxListener: Unexpected control message on data connection {:?}",
-                                token
-                            );
-                        }
-                    }
-                    TcpFrameKind::Unknown => {
-                        warn!("TcpMuxListener: Unknown frame on data connection {:?}", token);
-                    }
-                }
-            }
-            None => {
-                warn!("TcpMuxListener: Frame on unbound connection {:?}", token);
-            }
-        }
-    }
-
-    /// Handle a control message on a Control connection
-    fn handle_control_frame(&mut self, token: Token, payload: &[u8], registry: &Registry) {
-        let msg = match ControlMsg::from_bytes(payload) {
-            Ok(m) => m,
-            Err(e) => {
-                warn!("TcpMuxListener: Invalid control frame on {:?}: {:?}", token, e);
                 return;
             }
         };
 
         match msg {
-            ControlMsg::Keepalive => {
-                // Respond with KeepaliveAck
-                self.send_control_message(token, &ControlMsg::KeepaliveAck);
+            ControlMsg::PeerHello { locator } => {
+                // Send PEER_HELLO_ACK
+                let ack = ControlMsg::PeerHelloAck;
+                self.send_control(token, &ack);
+
+                if let Some(conn) = self.connections.get_mut(&token) {
+                    conn.state = ConnectionState::Control;
+                }
+
+                debug!("TcpMuxListener: PEER_HELLO ok (token={:?})", token);
             }
+
+            ControlMsg::PortBind { cookie } => {
+                self.handle_port_bind(token, &cookie, registry);
+            }
+
+            other => {
+                warn!(
+                    "TcpMuxListener: Expected PEER_HELLO or PORT_BIND, got {} on {:?}",
+                    other.type_name(),
+                    token
+                );
+                self.remove_connection(token, registry);
+            }
+        }
+    }
+
+    // ── Control connection: PORT_RESERVE + KEEPALIVE ────────────────────────
+
+    fn handle_control_frame(&mut self, token: Token, payload: &[u8], registry: &Registry) {
+        let msg = match ControlMsg::from_bytes(payload) {
+            Ok(m) => m,
+            Err(e) => {
+                warn!("TcpMuxListener: Bad control msg on {:?}: {:?}", token, e);
+                return;
+            }
+        };
+
+        match msg {
+            ControlMsg::PortReserve { logical_port } => {
+                let my_disc = PortManager::get_discovery_traffic_unicast_port(
+                    self.domain_id,
+                    self.participant_id,
+                );
+                let my_user =
+                    PortManager::get_user_traffic_unicast_port(self.domain_id, self.participant_id);
+
+                if logical_port != my_disc && logical_port != my_user {
+                    warn!("TcpMuxListener: Invalid port {} on {:?}", logical_port, token);
+                    let err =
+                        ControlMsg::Error { code: 1, message: "no matching port".to_string() };
+                    self.send_control(token, &err);
+                    return;
+                }
+
+                // Issue cookie and store mapping
+                let cookie = generate_cookie(&mut self.next_cookie);
+                self.cookie_to_port.insert(cookie, logical_port);
+
+                let ack = ControlMsg::PortReserveAck { cookie };
+                self.send_control(token, &ack);
+
+                debug!(
+                    "TcpMuxListener: PORT_RESERVE ok (port={}, cookie=0x{:02x})",
+                    logical_port, cookie[0]
+                );
+            }
+
+            ControlMsg::Keepalive => {
+                self.send_control(token, &ControlMsg::KeepaliveAck);
+            }
+
             ControlMsg::KeepaliveAck => {
-                // Update peer's keepalive ack timestamp
                 if let Some(conn) = self.connections.get(&token) {
                     if let Some(guid) = conn.remote_guid_prefix {
                         if let Some(group) = self.peer_connections.get_mut(&guid) {
@@ -440,83 +301,132 @@ impl TcpMuxListener {
                     }
                 }
             }
-            ControlMsg::Close => {
-                debug!("TcpMuxListener: Close received on control connection {:?}", token);
-                // Close all connections for this peer
-                let guid = self.connections.get(&token).and_then(|c| c.remote_guid_prefix);
-                if let Some(guid) = guid {
-                    self.remove_peer(guid, registry);
-                } else {
-                    self.remove_connection(token, registry);
-                }
-            }
+
             other => {
-                warn!(
-                    "TcpMuxListener: Unexpected message {:?} on control connection {:?}",
-                    other, token
-                );
+                debug!("TcpMuxListener: Ignoring {} on control {:?}", other.type_name(), token);
             }
         }
     }
 
-    /// Route RTPS data payload to the appropriate channel based on connection type.
-    fn route_rtps_data(&self, token: Token, payload: &[u8], remote_addr: SocketAddr) {
-        let conn = match self.connections.get(&token) {
-            Some(c) => c,
-            None => return,
+    // ── PORT_BIND handler (from first message or control) ───────────────────
+
+    fn handle_port_bind(&mut self, token: Token, cookie: &[u8; 16], registry: &Registry) {
+        // Look up logical port from cookie
+        let logical_port = match self.cookie_to_port.remove(cookie) {
+            Some(port) => port,
+            None => {
+                warn!("TcpMuxListener: Unknown cookie on {:?}", token);
+                let err = ControlMsg::Error { code: 2, message: "invalid cookie".to_string() };
+                self.send_control(token, &err);
+                self.remove_connection(token, registry);
+                return;
+            }
         };
 
-        let logical_port = match conn.bound_logical_port {
+        // Send PORT_BIND_ACK
+        self.send_control(token, &ControlMsg::PortBindAck);
+
+        if let Some(conn) = self.connections.get_mut(&token) {
+            conn.bound_logical_port = Some(logical_port);
+            conn.state = ConnectionState::Active;
+        }
+
+        // Register in peer connection group (synthetic guid from addr)
+        let remote_addr = self.connections.get(&token).map(|c| c.remote_addr);
+        if let Some(addr) = remote_addr {
+            let mut synthetic_guid = [0u8; 12];
+            if let SocketAddr::V4(v4) = addr {
+                synthetic_guid[0..4].copy_from_slice(&v4.ip().octets());
+                synthetic_guid[4..6].copy_from_slice(&v4.port().to_be_bytes());
+            }
+
+            let group = self
+                .peer_connections
+                .entry(synthetic_guid)
+                .or_insert_with(PeerConnectionGroup::new);
+
+            if PortManager::is_discovery_unicast_port(self.domain_id, logical_port) {
+                group.discovery_token = Some(token);
+            } else {
+                group.user_data_token = Some(token);
+            }
+
+            if let Some(conn) = self.connections.get_mut(&token) {
+                conn.remote_guid_prefix = Some(synthetic_guid);
+            }
+        }
+
+        debug!(
+            "TcpMuxListener: PORT_BIND ok (token={:?}, port={}, cookie=0x{:02x})",
+            token, logical_port, cookie[0]
+        );
+    }
+
+    // ── Active data connection: RTPS data + keepalive ───────────────────────
+
+    fn handle_active_frame(&mut self, token: Token, payload: &[u8], registry: &Registry) {
+        let kind = classify_frame(payload);
+
+        match kind {
+            TcpFrameKind::RtpsData => {
+                let remote_addr = self.connections.get(&token).map(|c| c.remote_addr).unwrap();
+                self.route_rtps_data(token, payload, remote_addr);
+            }
+            TcpFrameKind::Control => {
+                // Handle keepalive on data connections
+                if let Ok(msg) = ControlMsg::from_bytes(payload) {
+                    match msg {
+                        ControlMsg::Keepalive => {
+                            self.send_control(token, &ControlMsg::KeepaliveAck);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn route_rtps_data(&self, token: Token, payload: &[u8], remote_addr: SocketAddr) {
+        let logical_port = match self.connections.get(&token).and_then(|c| c.bound_logical_port) {
             Some(p) => p,
             None => return,
         };
 
+        let msg = IncomingMessage { data: payload.to_vec(), source: remote_addr };
+
         if PortManager::is_discovery_unicast_port(self.domain_id, logical_port) {
-            let msg = IncomingMessage { data: payload.to_vec(), source: remote_addr };
             if let Err(e) = self.discovery_tx.try_send(msg) {
-                warn!("TcpMuxListener: Failed to route discovery data: {:?}", e);
+                warn!("TcpMuxListener: Failed to route discovery: {:?}", e);
             }
         } else if PortManager::is_user_unicast_port(self.domain_id, logical_port) {
-            let msg = IncomingMessage { data: payload.to_vec(), source: remote_addr };
             if let Err(e) = self.user_data_tx.try_send(msg) {
                 warn!("TcpMuxListener: Failed to route user data: {:?}", e);
             }
         }
     }
 
-    /// Send a BindResponse to a connection.
-    fn send_bind_response(&mut self, token: Token, status: BindStatus) {
-        let resp = ControlMsg::BindResponse(BindResponse {
-            status,
-            guid_prefix: self.local_guid_prefix,
-            domain_id: self.domain_id,
-            participant_id: self.participant_id,
-            listener_port: self.port,
-        });
-        self.send_control_message(token, &resp);
-    }
+    // ── Control sending ─────────────────────────────────────────────────────
 
-    /// Write a control message to a connection's stream (with INT2 magic framing).
-    fn send_control_message(&mut self, token: Token, msg: &ControlMsg) {
+    fn send_control(&mut self, token: Token, msg: &ControlMsg) {
         let conn = match self.connections.get_mut(&token) {
             Some(c) => c,
             None => return,
         };
 
         if let Err(e) = write_framed_message(&mut conn.stream, &msg.to_bytes()) {
-            warn!("TcpMuxListener: Failed to send control message to {:?}: {:?}", token, e);
+            warn!("TcpMuxListener: Failed to send {} to {:?}: {:?}", msg.type_name(), token, e);
         }
     }
 
-    /// Send keepalive on all peer control connections.
-    /// Returns list of peers whose keepalive was missed too many times.
+    // ── Keepalive ───────────────────────────────────────────────────────────
+
     pub(crate) fn send_keepalives(&mut self) -> Vec<GuidPrefix> {
         let now = Instant::now();
         let interval = std::time::Duration::from_secs(DEFAULT_KEEPALIVE_INTERVAL_SECS);
         let mut dead_peers = Vec::new();
 
         let guids: Vec<GuidPrefix> = self.peer_connections.keys().copied().collect();
-
         for guid in guids {
             let group = match self.peer_connections.get_mut(&guid) {
                 Some(g) => g,
@@ -529,7 +439,7 @@ impl TcpMuxListener {
 
             if group.missed_keepalives >= MAX_MISSED_KEEPALIVES {
                 warn!(
-                    "TcpMuxListener: Peer {:?} missed {} keepalives, marking dead",
+                    "TcpMuxListener: Peer {:?} missed {} keepalives",
                     guid, group.missed_keepalives
                 );
                 dead_peers.push(guid);
@@ -539,26 +449,25 @@ impl TcpMuxListener {
             if let Some(control_token) = group.control_token {
                 group.last_keepalive_sent = now;
                 group.missed_keepalives += 1;
-                self.send_control_message(control_token, &ControlMsg::Keepalive);
+                self.send_control(control_token, &ControlMsg::Keepalive);
             }
         }
 
         dead_peers
     }
 
-    /// Remove all connections for a peer.
+    // ── Connection cleanup ──────────────────────────────────────────────────
+
     pub(crate) fn remove_peer(&mut self, guid: GuidPrefix, registry: &Registry) {
         if let Some(group) = self.peer_connections.remove(&guid) {
             for token in group.all_tokens() {
                 self.remove_connection_inner(token, registry);
             }
-            debug!("TcpMuxListener: Removed all connections for peer {:?}", guid);
+            debug!("TcpMuxListener: Removed peer {:?}", guid);
         }
     }
 
-    /// Remove a single connection by token.
     pub(crate) fn remove_connection(&mut self, token: Token, registry: &Registry) {
-        // Also remove from peer_connections if applicable
         if let Some(conn) = self.connections.get(&token) {
             if let Some(guid) = conn.remote_guid_prefix {
                 if let Some(group) = self.peer_connections.get_mut(&guid) {
@@ -571,7 +480,6 @@ impl TcpMuxListener {
                     if group.user_data_token == Some(token) {
                         group.user_data_token = None;
                     }
-                    // Remove group if all connections are gone
                     if group.all_tokens().is_empty() {
                         self.peer_connections.remove(&guid);
                     }
@@ -581,30 +489,24 @@ impl TcpMuxListener {
         self.remove_connection_inner(token, registry);
     }
 
-    /// Inner connection removal (deregister + drop)
     fn remove_connection_inner(&mut self, token: Token, registry: &Registry) {
         if let Some(mut conn) = self.connections.remove(&token) {
-            if let Err(e) = registry.deregister(&mut conn.stream) {
-                debug!("TcpMuxListener: Failed to deregister token {:?}: {:?}", token, e);
-            }
-            debug!("TcpMuxListener: Removed connection {:?} from {:?}", token, conn.remote_addr);
+            let _ = registry.deregister(&mut conn.stream);
+            debug!("TcpMuxListener: Removed {:?} from {:?}", token, conn.remote_addr);
         }
     }
 
-    /// Get the number of active connections
     pub(crate) fn connection_count(&self) -> usize {
         self.connections.len()
     }
-
-    /// Get the number of connected peers
     pub(crate) fn peer_count(&self) -> usize {
         self.peer_connections.len()
     }
 
-    /// Close the listener and all connections
     pub(crate) fn close(&mut self) {
         self.connections.clear();
         self.peer_connections.clear();
+        self.cookie_to_port.clear();
         self.listener.take();
         info!("TcpMuxListener: Closed (port {})", self.port);
     }

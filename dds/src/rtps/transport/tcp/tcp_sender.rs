@@ -15,83 +15,40 @@ use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::tcp::framing::{read_framed_message, write_framed_message};
 use crate::rtps::transport::tcp::protocol::{
-    BindRequest, BindResponse, BindStatus, BindType, ControlMsg,
+    encode_locator, ControlMsg, MSG_PEER_HELLO_ACK, MSG_PORT_BIND_ACK,
 };
 
-/// Connection key: (physical address, connection type)
-/// logical_port = 0 means Control connection, otherwise RTPS_DATA connection
+/// Connection key: (physical address, logical_port)
 type ConnectionKey = (SocketAddr, u16);
 
-/// Logical port value representing a control connection
+/// Logical port 0 = control connection
 const CONTROL_LOGICAL_PORT: u16 = 0;
 
-/// Cached remote peer information obtained from Control BIND handshake
+/// Cached peer info from PEER_HELLO handshake
 #[derive(Debug, Clone)]
 struct PeerInfo {
-    guid_prefix: GuidPrefix,
-    participant_id: u32,
-    listener_port: u16,
+    /// Physical address of the control connection
+    control_addr: SocketAddr,
 }
 
-/// TCP sender for DDS/RTPS communication
-///
-/// Manages TCP connections to remote endpoints and sends framed messages.
-/// In single-port mode, each peer has up to 3 connections:
-/// - Control (bind_type=Control, logical_port=0): keepalive, liveliness
-/// - Discovery (bind_type=RtpsData, logical_port=discovery_port): SPDP/SEDP
-/// - UserData (bind_type=RtpsData, logical_port=user_port): application data
+/// TCP sender with 3-step handshake: PEER_HELLO → PORT_RESERVE → PORT_BIND
 #[derive(Debug, Clone)]
 pub(crate) struct TcpSender {
-    /// Working IP address for binding
     working_ip: String,
-
-    /// Connection pool: (SocketAddr, logical_port) -> TcpStream
-    /// logical_port=0 is reserved for Control connections
-    /// Uses DashMap for lock-free concurrent access
     connections: Arc<DashMap<ConnectionKey, TcpStream>>,
-
-    /// Remote peer info cache: physical_addr -> PeerInfo
-    /// Populated during Control BIND handshake
     peer_info: Arc<DashMap<SocketAddr, PeerInfo>>,
-
-    /// Connection timeout duration
     connect_timeout: Duration,
-
-    /// Local GUID prefix
     local_guid_prefix: GuidPrefix,
-
-    /// DDS domain ID
     domain_id: u32,
-
-    /// Local participant ID
     participant_id: u32,
-
-    /// Local listener port (physical port, 7400 + 250 * domainId)
     listener_port: u16,
 }
 
 impl TcpSender {
-    /// Default connection timeout (5 seconds)
     const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 5000;
-
-    /// Default write timeout (10 seconds)
     const DEFAULT_WRITE_TIMEOUT_MS: u64 = 10000;
-
-    /// Default nodelay setting (true - disable Nagle's algorithm)
     const DEFAULT_NODELAY: bool = true;
 
-    /// Create a new TcpSender
-    ///
-    /// Reads configuration from environment variables:
-    /// - INT2DDS_TCP_CONNECT_TIMEOUT: Connection timeout in milliseconds (default: 5000)
-    /// - INT2DDS_TCP_WRITE_TIMEOUT: Write timeout in milliseconds (default: 10000)
-    /// - INT2DDS_TCP_NODELAY: Enable TCP nodelay (default: true)
-    ///
-    /// # Arguments
-    /// * `working_ip` - The local IP address to bind to
-    ///
-    /// # Returns
-    /// A new TcpSender instance
     pub(crate) fn new(
         working_ip: String,
         local_guid_prefix: GuidPrefix,
@@ -105,7 +62,7 @@ impl TcpSender {
             .unwrap_or(Self::DEFAULT_CONNECT_TIMEOUT_MS);
 
         debug!(
-            "TcpSender: Created (domain={}, pid={}, listener_port={})",
+            "TcpSender: Created (domain={}, pid={}, port={})",
             domain_id, participant_id, listener_port
         );
 
@@ -121,20 +78,19 @@ impl TcpSender {
         })
     }
 
-    /// Get the write timeout from environment variable or default
     fn get_write_timeout() -> Duration {
-        let timeout_ms = env::var("INT2DDS_TCP_WRITE_TIMEOUT")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(Self::DEFAULT_WRITE_TIMEOUT_MS);
-        Duration::from_millis(timeout_ms)
+        Duration::from_millis(
+            env::var("INT2DDS_TCP_WRITE_TIMEOUT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(Self::DEFAULT_WRITE_TIMEOUT_MS),
+        )
     }
 
-    /// Get the nodelay setting from environment variable or default
     fn get_nodelay() -> bool {
         env::var("INT2DDS_TCP_NODELAY")
             .ok()
-            .and_then(|v| v.parse::<bool>().ok())
+            .and_then(|v| v.parse().ok())
             .unwrap_or(Self::DEFAULT_NODELAY)
     }
 
@@ -143,90 +99,106 @@ impl TcpSender {
     }
 
     // ========================================================================
-    // Connection management
+    // 3-Step Handshake
     // ========================================================================
 
-    /// Ensure a Control connection to the remote physical address.
-    /// Performs BIND handshake and caches remote PeerInfo (guid_prefix, pid).
-    fn ensure_control_connection(&self, physical_addr: &SocketAddr) -> io::Result<PeerInfo> {
-        // Check cache first
-        if let Some(info) = self.peer_info.get(physical_addr) {
-            let key = (*physical_addr, CONTROL_LOGICAL_PORT);
-            if self.connections.contains_key(&key) {
-                return Ok(info.clone());
-            }
+    /// Step 1: PEER_HELLO — establish control connection, exchange locators.
+    fn ensure_control(&self, physical_addr: &SocketAddr) -> io::Result<()> {
+        let key = (*physical_addr, CONTROL_LOGICAL_PORT);
+        if self.connections.contains_key(&key) {
+            return Ok(());
         }
 
         let mut stream = self.tcp_connect(physical_addr)?;
 
-        // BIND handshake: send BindRequest(Control)
-        let bind_req = ControlMsg::BindRequest(BindRequest {
-            guid_prefix: self.local_guid_prefix,
-            domain_id: self.domain_id,
-            participant_id: self.participant_id,
-            listener_port: self.listener_port,
-            bind_type: BindType::Control,
-            logical_port: 0,
-        });
-        self.send_control_msg(&mut stream, &bind_req)?;
-        let resp = self.read_bind_response(&mut stream)?;
+        let local_ip: std::net::Ipv4Addr =
+            self.working_ip.parse().unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
+        let locator = encode_locator(local_ip, self.listener_port);
 
-        let info = PeerInfo {
-            guid_prefix: resp.guid_prefix,
-            participant_id: resp.participant_id,
-            listener_port: resp.listener_port,
-        };
+        // Send PEER_HELLO
+        let hello = ControlMsg::PeerHello { locator };
+        write_framed_message(&mut stream, &hello.to_bytes())?;
 
-        let key = (*physical_addr, CONTROL_LOGICAL_PORT);
+        // Read PEER_HELLO_ACK
+        let resp = self.read_control_response(&mut stream)?;
+        if resp.to_bytes()[0] != MSG_PEER_HELLO_ACK {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                format!("Expected PEER_HELLO_ACK, got {}", resp.type_name()),
+            ));
+        }
+
+        debug!("TcpSender: PEER_HELLO complete to {:?}", physical_addr);
+
         self.connections.insert(key, stream);
-        self.peer_info.insert(*physical_addr, info.clone());
+        self.peer_info.insert(*physical_addr, PeerInfo { control_addr: *physical_addr });
 
-        debug!(
-            "TcpSender: Control BIND complete to {:?} (remote pid={}, remote listener_port={})",
-            physical_addr, info.participant_id, info.listener_port
-        );
-
-        Ok(info)
+        Ok(())
     }
 
-    /// Ensure an RTPS_DATA connection for a specific logical port.
-    /// Control connection is established first if needed.
-    fn ensure_data_connection(
-        &self,
-        physical_addr: &SocketAddr,
-        logical_port: u16,
-    ) -> io::Result<()> {
+    /// Steps 2+3: PORT_RESERVE on control connection, then PORT_BIND on new connection.
+    fn ensure_data(&self, physical_addr: &SocketAddr, logical_port: u16) -> io::Result<()> {
         let key = (*physical_addr, logical_port);
         if self.connections.contains_key(&key) {
             return Ok(());
         }
 
-        // Control must exist first (provides remote pid)
-        if !self.peer_info.contains_key(physical_addr) {
-            self.ensure_control_connection(physical_addr)?;
-        }
+        // Ensure control connection exists
+        self.ensure_control(physical_addr)?;
 
-        let mut stream = self.tcp_connect(physical_addr)?;
+        // Step 2: PORT_RESERVE on the control connection
+        let control_key = (*physical_addr, CONTROL_LOGICAL_PORT);
+        let cookie = {
+            let mut control_stream = self
+                .connections
+                .get(&control_key)
+                .ok_or_else(|| io::Error::new(ErrorKind::NotConnected, "Control connection lost"))?
+                .value()
+                .try_clone()?;
 
-        // BIND handshake: send BindRequest(RtpsData)
-        let bind_req = ControlMsg::BindRequest(BindRequest {
-            guid_prefix: self.local_guid_prefix,
-            domain_id: self.domain_id,
-            participant_id: self.participant_id,
-            listener_port: self.listener_port,
-            bind_type: BindType::RtpsData,
-            logical_port,
-        });
-        self.send_control_msg(&mut stream, &bind_req)?;
-        let _resp = self.read_bind_response(&mut stream)?;
+            let reserve = ControlMsg::PortReserve { logical_port };
+            write_framed_message(&mut control_stream, &reserve.to_bytes())?;
 
-        self.connections.insert(key, stream);
+            let resp = self.read_control_response(&mut control_stream)?;
+            match resp {
+                ControlMsg::PortReserveAck { cookie } => cookie,
+                ControlMsg::Error { code, message } => {
+                    return Err(io::Error::new(
+                        ErrorKind::ConnectionRefused,
+                        format!("PORT_RESERVE rejected (code={}): {}", code, message),
+                    ));
+                }
+                other => {
+                    return Err(io::Error::new(
+                        ErrorKind::InvalidData,
+                        format!("Expected PORT_RESERVE_ACK, got {}", other.type_name()),
+                    ));
+                }
+            }
+        };
 
         debug!(
-            "TcpSender: Data BIND complete to {:?} logical_port={}",
-            physical_addr, logical_port
+            "TcpSender: PORT_RESERVE complete (port={}, cookie=0x{:02x})",
+            logical_port, cookie[0]
         );
 
+        // Step 3: PORT_BIND on a NEW TCP connection
+        let mut data_stream = self.tcp_connect(physical_addr)?;
+
+        let bind = ControlMsg::PortBind { cookie };
+        write_framed_message(&mut data_stream, &bind.to_bytes())?;
+
+        let resp = self.read_control_response(&mut data_stream)?;
+        if resp.to_bytes()[0] != MSG_PORT_BIND_ACK {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                format!("Expected PORT_BIND_ACK, got {}", resp.type_name()),
+            ));
+        }
+
+        debug!("TcpSender: PORT_BIND complete (port={}, cookie=0x{:02x})", logical_port, cookie[0]);
+
+        self.connections.insert(key, data_stream);
         Ok(())
     }
 
@@ -234,171 +206,60 @@ impl TcpSender {
     // Sending
     // ========================================================================
 
-    /// Send RTPS data to a specific logical port on a remote peer.
-    /// Automatically establishes Control + Data connections if needed.
+    /// Send RTPS data to a logical port. Performs handshake if needed.
     pub(crate) fn send_to_logical_port(
         &self,
         addr: &SocketAddr,
         logical_port: u16,
         data: &[u8],
     ) -> io::Result<usize> {
-        self.ensure_data_connection(addr, logical_port)?;
+        self.ensure_data(addr, logical_port)?;
 
         let key = (*addr, logical_port);
-        self.write_to_connection(&key, data)
-    }
-
-    /// Get the discovery logical port for a remote peer.
-    /// Requires that a control connection has been established (peer_info cached).
-    pub(crate) fn get_peer_discovery_port(&self, addr: &SocketAddr) -> io::Result<u16> {
-        let peer_info = self.peer_info.get(addr).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotConnected,
-                "No peer info (control connection not established)",
-            )
-        })?;
-        Ok(PortManager::get_discovery_traffic_unicast_port(
-            self.domain_id,
-            peer_info.participant_id,
-        ))
-    }
-
-    /// Get the user data logical port for a remote peer.
-    pub(crate) fn get_peer_user_port(&self, addr: &SocketAddr) -> io::Result<u16> {
-        let peer_info = self.peer_info.get(addr).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotConnected,
-                "No peer info (control connection not established)",
-            )
-        })?;
-        Ok(PortManager::get_user_traffic_unicast_port(self.domain_id, peer_info.participant_id))
-    }
-
-    /// Disconnect all connections for a remote peer.
-    /// Sends Close on the control connection before dropping.
-    pub(crate) fn disconnect_peer(&self, addr: &SocketAddr) {
-        let control_key = (*addr, CONTROL_LOGICAL_PORT);
-        if let Some(mut entry) = self.connections.get_mut(&control_key) {
-            let _ = self.send_control_msg(entry.value_mut(), &ControlMsg::Close);
-        }
-
-        self.connections.retain(|key, _| key.0 != *addr);
-        self.peer_info.remove(addr);
-
-        debug!("TcpSender: Disconnected peer {:?}", addr);
-    }
-
-    // ========================================================================
-    // Internal helpers
-    // ========================================================================
-
-    /// Establish a raw TCP connection to an address.
-    /// Set port = 0 to be allocated ephemeral port by os later.
-    fn tcp_connect(&self, addr: &SocketAddr) -> io::Result<TcpStream> {
-        let socket2 = Socket2::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
-
-        let local_ip: IpAddr = self.working_ip.parse().map_err(|e| {
-            io::Error::new(ErrorKind::InvalidInput, format!("Invalid working_ip: {}", e))
-        })?;
-        let local_addr = SocketAddr::new(local_ip, 0);
-        socket2.bind(&SockAddr::from(local_addr))?;
-
-        socket2.set_nonblocking(true)?;
-
-        match socket2.connect(&SockAddr::from(*addr)) {
-            Ok(_) => {}
-            Err(e)
-                if e.raw_os_error() == Some(10035)       // Windows: WSAEWOULDBLOCK
-                   || e.raw_os_error() == Some(115)         // Linux: EINPROGRESS
-                   || e.kind() == ErrorKind::WouldBlock =>
-            {
-                use std::time::Instant;
-                let start = Instant::now();
-
-                loop {
-                    if start.elapsed() >= self.connect_timeout {
-                        return Err(io::Error::new(
-                            ErrorKind::TimedOut,
-                            format!("Connection timeout to {:?}", addr),
-                        ));
-                    }
-
-                    match socket2.take_error() {
-                        Ok(Some(err)) => {
-                            return Err(io::Error::new(
-                                ErrorKind::ConnectionRefused,
-                                format!("Connection failed to {:?}: {:?}", addr, err),
-                            ));
-                        }
-                        Ok(None) => {
-                            if socket2.peer_addr().is_ok() {
-                                break;
-                            }
-                        }
-                        Err(e) => return Err(e),
-                    }
-
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            }
-            Err(e) => return Err(e),
-        }
-
-        socket2.set_nonblocking(false)?;
-
-        let stream: TcpStream = socket2.into();
-
-        let _ = stream.set_nodelay(Self::get_nodelay());
-        let _ = stream.set_write_timeout(Some(Self::get_write_timeout()));
-
-        Ok(stream)
-    }
-
-    /// Write framed data to a cached connection.
-    fn write_to_connection(&self, key: &ConnectionKey, buffer: &[u8]) -> io::Result<usize> {
         let mut stream = self
             .connections
-            .get(key)
+            .get(&key)
             .ok_or_else(|| io::Error::new(ErrorKind::NotConnected, "Connection not found"))?
             .value()
             .try_clone()?;
 
-        match write_framed_message(&mut stream, buffer) {
+        match write_framed_message(&mut stream, data) {
             Ok(()) => {
-                debug!("TcpSender: Sent {} bytes to {:?}", buffer.len(), key);
-                Ok(buffer.len())
+                debug!("TcpSender: Sent {} bytes to {:?}", data.len(), key);
+                Ok(data.len())
             }
             Err(e) => {
-                self.connections.remove(key);
+                self.connections.remove(&key);
                 Err(e)
             }
         }
     }
 
-    /// Send a control message on a stream (with INT2 magic framing).
-    fn send_control_msg(&self, stream: &mut TcpStream, msg: &ControlMsg) -> io::Result<()> {
-        write_framed_message(stream, &msg.to_bytes())
+    /// Send to discovery channel.
+    pub(crate) fn send_to_discovery(&self, addr: &SocketAddr, data: &[u8]) -> io::Result<usize> {
+        let port =
+            PortManager::get_discovery_traffic_unicast_port(self.domain_id, self.participant_id);
+        self.send_to_logical_port(addr, port, data)
     }
 
-    /// Read a BindResponse from a stream (with INT2 magic framing).
-    fn read_bind_response(&self, stream: &mut TcpStream) -> io::Result<BindResponse> {
-        let payload = read_framed_message(stream)?;
+    /// Send to user data channel.
+    pub(crate) fn send_to_user_data(&self, addr: &SocketAddr, data: &[u8]) -> io::Result<usize> {
+        let port = PortManager::get_user_traffic_unicast_port(self.domain_id, self.participant_id);
+        self.send_to_logical_port(addr, port, data)
+    }
 
-        match ControlMsg::from_bytes(&payload)? {
-            ControlMsg::BindResponse(resp) => {
-                if resp.status != BindStatus::Ok {
-                    return Err(io::Error::new(
-                        ErrorKind::ConnectionRefused,
-                        format!("BIND rejected: {:?}", resp.status),
-                    ));
-                }
-                Ok(resp)
-            }
-            other => Err(io::Error::new(
-                ErrorKind::InvalidData,
-                format!("Expected BindResponse, got {:?}", other),
-            )),
-        }
+    pub(crate) fn get_peer_discovery_port(&self, addr: &SocketAddr) -> io::Result<u16> {
+        Ok(PortManager::get_discovery_traffic_unicast_port(self.domain_id, self.participant_id))
+    }
+
+    pub(crate) fn get_peer_user_port(&self, addr: &SocketAddr) -> io::Result<u16> {
+        Ok(PortManager::get_user_traffic_unicast_port(self.domain_id, self.participant_id))
+    }
+
+    pub(crate) fn disconnect_peer(&self, addr: &SocketAddr) {
+        self.connections.retain(|key, _| key.0 != *addr);
+        self.peer_info.remove(addr);
+        debug!("TcpSender: Disconnected peer {:?}", addr);
     }
 
     pub(crate) fn connection_count(&self) -> usize {
@@ -409,37 +270,67 @@ impl TcpSender {
         self.peer_info.len()
     }
 
-    /// Close all connections (sends Close on each control connection first)
-    /// Send data to a remote endpoint's discovery channel.
-    /// Establishes control connection first (BIND handshake), then resolves
-    /// the peer's discovery logical port from peer_info.
-    pub(crate) fn send_to_discovery(&self, addr: &SocketAddr, data: &[u8]) -> io::Result<usize> {
-        self.ensure_control_connection(addr)?;
-        let logical_port = self.get_peer_discovery_port(addr)?;
-        self.send_to_logical_port(addr, logical_port, data)
-    }
-
-    /// Send data to a remote endpoint's user data channel.
-    /// Establishes control connection first (BIND handshake), then resolves
-    /// the peer's user data logical port from peer_info.
-    pub(crate) fn send_to_user_data(&self, addr: &SocketAddr, data: &[u8]) -> io::Result<usize> {
-        self.ensure_control_connection(addr)?;
-        let logical_port = self.get_peer_user_port(addr)?;
-        self.send_to_logical_port(addr, logical_port, data)
-    }
-
     pub(crate) fn close_all(self) {
-        for entry in self.connections.iter() {
-            let (addr, lp) = entry.key();
-            if *lp == CONTROL_LOGICAL_PORT {
-                if let Ok(mut stream) = entry.value().try_clone() {
-                    let _ = self.send_control_msg(&mut stream, &ControlMsg::Close);
-                }
-            }
-        }
         self.connections.clear();
         self.peer_info.clear();
         debug!("TcpSender: All connections closed");
+    }
+
+    // ========================================================================
+    // Internal helpers
+    // ========================================================================
+
+    fn tcp_connect(&self, addr: &SocketAddr) -> io::Result<TcpStream> {
+        let socket2 = Socket2::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+
+        let local_ip: IpAddr = self.working_ip.parse().map_err(|e| {
+            io::Error::new(ErrorKind::InvalidInput, format!("Invalid working_ip: {}", e))
+        })?;
+        socket2.bind(&SockAddr::from(SocketAddr::new(local_ip, 0)))?;
+        socket2.set_nonblocking(true)?;
+
+        match socket2.connect(&SockAddr::from(*addr)) {
+            Ok(_) => {}
+            Err(e)
+                if e.raw_os_error() == Some(10035)
+                    || e.raw_os_error() == Some(115)
+                    || e.kind() == ErrorKind::WouldBlock =>
+            {
+                let start = std::time::Instant::now();
+                loop {
+                    if start.elapsed() >= self.connect_timeout {
+                        return Err(io::Error::new(
+                            ErrorKind::TimedOut,
+                            format!("Connection timeout to {:?}", addr),
+                        ));
+                    }
+                    match socket2.take_error() {
+                        Ok(Some(err)) => {
+                            return Err(io::Error::new(
+                                ErrorKind::ConnectionRefused,
+                                format!("Connection failed to {:?}: {:?}", addr, err),
+                            ));
+                        }
+                        Ok(None) if socket2.peer_addr().is_ok() => break,
+                        Ok(None) => {}
+                        Err(e) => return Err(e),
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+            Err(e) => return Err(e),
+        }
+
+        socket2.set_nonblocking(false)?;
+        let stream: TcpStream = socket2.into();
+        let _ = stream.set_nodelay(Self::get_nodelay());
+        let _ = stream.set_write_timeout(Some(Self::get_write_timeout()));
+        Ok(stream)
+    }
+
+    fn read_control_response(&self, stream: &mut TcpStream) -> io::Result<ControlMsg> {
+        let payload = read_framed_message(stream)?;
+        ControlMsg::from_bytes(&payload)
     }
 }
 
@@ -448,14 +339,7 @@ mod tests {
     use super::*;
 
     fn create_test_sender() -> TcpSender {
-        TcpSender::new(
-            "127.0.0.1".to_string(),
-            [0x01; 12],
-            0,    // domain_id
-            0,    // participant_id
-            7400, // listener_port
-        )
-        .unwrap()
+        TcpSender::new("127.0.0.1".to_string(), [0x01; 12], 0, 0, 7400).unwrap()
     }
 
     #[test]
@@ -467,21 +351,9 @@ mod tests {
     }
 
     #[test]
-    fn test_get_peer_port_without_control_connection() {
-        let sender = create_test_sender();
-        let addr: SocketAddr = "192.168.1.10:7400".parse().unwrap();
-
-        // No control connection → should fail
-        assert!(sender.get_peer_discovery_port(&addr).is_err());
-        assert!(sender.get_peer_user_port(&addr).is_err());
-    }
-
-    #[test]
     fn test_disconnect_nonexistent_peer() {
         let sender = create_test_sender();
         let addr: SocketAddr = "192.168.1.10:7400".parse().unwrap();
-
-        // Should not panic
         sender.disconnect_peer(&addr);
         assert_eq!(sender.connection_count(), 0);
     }
