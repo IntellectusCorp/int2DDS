@@ -30,7 +30,7 @@ namespace Int2Dds.Core
             _name = topicName;
             var attr = typeof(T).GetCustomAttribute<DdsTypeAttribute>();
             _typeName = attr?.TypeName ?? typeof(T).Name;
-            var extensibility = attr?.Extensibility ?? 0;
+            var extensibility = attr?.Extensibility ?? 1;
             var hasKey = attr?.HasKey ?? false;
 
             // Create Topic QoS if provided
