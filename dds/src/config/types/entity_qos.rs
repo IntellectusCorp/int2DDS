@@ -6,7 +6,8 @@ use crate::{
         DurabilityServiceQosPolicy, GroupDataQosPolicy, HistoryQosPolicy, LivelinessQosPolicy,
         OwnershipQosPolicy, PartitionQosPolicy, PresentationQosPolicy,
         ReaderReliabilityExtensionQosPolicy, ReliabilityQosPolicy, TopicDataQosPolicy,
-        UserDataQosPolicy, WriterReliabilityExtensionQosPolicy, DEFAULT_MAX_BLOCKING_TIME,
+        TypeConsistencyEnforcementQosPolicy, UserDataQosPolicy,
+        WriterReliabilityExtensionQosPolicy, DEFAULT_MAX_BLOCKING_TIME,
     },
     domain,
     infrastructure::qos_policy as internal_qos_policy,
@@ -248,6 +249,10 @@ pub(crate) struct DataReaderQos {
     pub(crate) reader_data_lifecycle: Option<ReaderDataLifecycleQosPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reader_reliability_extension: Option<ReaderReliabilityExtensionQosPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) data_representation: Option<DataRepresentationQosPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) type_consistency_enforcement: Option<TypeConsistencyEnforcementQosPolicy>,
 }
 
 impl MergeQos for DataReaderQos {
@@ -270,6 +275,14 @@ impl MergeQos for DataReaderQos {
                 .reader_reliability_extension
                 .clone()
                 .or(base.reader_reliability_extension.clone()),
+            data_representation: self
+                .data_representation
+                .clone()
+                .or(base.data_representation.clone()),
+            type_consistency_enforcement: self
+                .type_consistency_enforcement
+                .clone()
+                .or(base.type_consistency_enforcement.clone()),
         }
     }
 }
@@ -352,6 +365,14 @@ impl From<DataReaderQos> for subscription::qos::DataReaderQos {
             qos.reader_reliability_extension = reader_reliability_extension.into();
         }
 
+        if let Some(data_representation) = external.data_representation {
+            qos.data_representation = data_representation.into();
+        }
+
+        if let Some(type_consistency_enforcement) = external.type_consistency_enforcement {
+            qos.type_consistency_enforcement = type_consistency_enforcement.into();
+        }
+
         qos
     }
 }
@@ -373,6 +394,8 @@ impl From<subscription::qos::DataReaderQos> for DataReaderQos {
             time_based_filter: Some(internal.time_based_filter),
             reader_data_lifecycle: Some(internal.reader_data_lifecycle),
             reader_reliability_extension: Some(internal.reader_reliability_extension.into()),
+            data_representation: Some(internal.data_representation.into()),
+            type_consistency_enforcement: Some(internal.type_consistency_enforcement.into()),
         }
     }
 }
@@ -408,6 +431,8 @@ pub(crate) struct TopicQos {
     pub(crate) lifespan: Option<LifespanQosPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) ownership: Option<OwnershipQosPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) data_representation: Option<DataRepresentationQosPolicy>,
 }
 
 impl MergeQos for TopicQos {
@@ -427,6 +452,10 @@ impl MergeQos for TopicQos {
             transport_priority: self.transport_priority.or(base.transport_priority),
             lifespan: self.lifespan.or(base.lifespan),
             ownership: self.ownership.clone().or(base.ownership.clone()),
+            data_representation: self
+                .data_representation
+                .clone()
+                .or(base.data_representation.clone()),
         }
     }
 }
@@ -509,6 +538,10 @@ impl From<TopicQos> for topic::qos::TopicQos {
             qos.ownership = ownership.into();
         }
 
+        if let Some(data_representation) = external.data_representation {
+            qos.data_representation = data_representation.into();
+        }
+
         qos
     }
 }
@@ -530,6 +563,7 @@ impl From<topic::qos::TopicQos> for TopicQos {
             transport_priority: Some(internal.transport_priority),
             lifespan: Some(internal.lifespan),
             ownership: Some(internal.ownership.into()),
+            data_representation: Some(internal.data_representation.into()),
         }
     }
 }
