@@ -514,3 +514,146 @@ pub unsafe extern "C" fn int2dds_create_topic_keyed_with_key_fields(
 
     INT2DDS_RET_OK
 }
+
+/// Create a Topic with full field descriptors for reader-side CFT filtering.
+///
+/// Extends int2dds_create_topic_keyed_with_key_fields by also providing
+/// all field metadata (name, type) needed for get_field_value() support.
+/// This enables ContentFilteredTopic reader-side filtering in the serialized path.
+///
+/// # Safety
+/// - Same as int2dds_create_topic_keyed
+/// - field_names: array of null-terminated C strings (field_count elements)
+/// - field_types: array of u32 type IDs (field_count elements)
+/// - field_is_key: array of bool (field_count elements)
+/// - field_count: number of fields
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_create_topic_with_field_descriptors(
+    participant: *const Int2DdsParticipant,
+    topic_name: *const std::os::raw::c_char,
+    dds_type_name: *const std::os::raw::c_char,
+    extensibility: i32,
+    has_key: bool,
+    qos: *const Int2DdsTopicQos,
+    field_names: *const *const std::os::raw::c_char,
+    field_types: *const u32,
+    field_is_key: *const bool,
+    field_count: usize,
+    topic_out: *mut *mut Int2DdsTopic,
+) -> Int2DdsRet {
+    check_null!(participant);
+    check_null!(topic_name);
+    check_null!(dds_type_name);
+    check_null!(topic_out);
+
+    let participant_ref = &*participant;
+
+    let topic_name_str = match CStr::from_ptr(topic_name).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    let dds_type_name_str = match CStr::from_ptr(dds_type_name).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    let ext_kind = match extensibility {
+        0 => ExtensibilityKind::Final,
+        1 => ExtensibilityKind::Appendable,
+        2 => ExtensibilityKind::Mutable,
+        _ => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    // Build field descriptors and key fields
+    use crate::data::{CdrFieldDescriptor, CdrFieldType};
+    use crate::raw_type_support::{KeyFieldInfo, KeyFieldType};
+
+    let mut all_fields = Vec::new();
+    let mut key_fields = Vec::new();
+
+    if field_count > 0 {
+        check_null!(field_names);
+        check_null!(field_types);
+        check_null!(field_is_key);
+
+        for i in 0..field_count {
+            let name_ptr = *field_names.add(i);
+            if name_ptr.is_null() {
+                return INT2DDS_RET_INVALID_ARGUMENT;
+            }
+            let name = match CStr::from_ptr(name_ptr).to_str() {
+                Ok(s) => s.to_string(),
+                Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+            };
+
+            let type_id = *field_types.add(i);
+            let is_key = *field_is_key.add(i);
+
+            let cdr_type = match type_id {
+                0 => CdrFieldType::String,
+                1 => CdrFieldType::Int32,
+                2 => CdrFieldType::UInt32,
+                3 => CdrFieldType::Int16,
+                4 => CdrFieldType::UInt16,
+                5 => CdrFieldType::Int64,
+                6 => CdrFieldType::UInt64,
+                7 => CdrFieldType::Int8,
+                8 => CdrFieldType::UInt8,
+                9 => CdrFieldType::Bool,
+                _ => return INT2DDS_RET_INVALID_ARGUMENT,
+            };
+
+            all_fields.push(CdrFieldDescriptor {
+                name: name.clone(),
+                field_type: cdr_type,
+                is_key,
+            });
+
+            if is_key {
+                let key_type = match type_id {
+                    0 => KeyFieldType::String,
+                    1 => KeyFieldType::Int32,
+                    2 => KeyFieldType::UInt32,
+                    3 => KeyFieldType::Int16,
+                    4 => KeyFieldType::UInt16,
+                    5 => KeyFieldType::Int64,
+                    6 => KeyFieldType::UInt64,
+                    7 => KeyFieldType::Int8,
+                    8 => KeyFieldType::UInt8,
+                    9 => KeyFieldType::Bool,
+                    _ => return INT2DDS_RET_INVALID_ARGUMENT,
+                };
+                key_fields.push(KeyFieldInfo { field_index: i, field_type: key_type });
+            }
+        }
+    }
+
+    // Create RawTypeSupport with both key fields and all fields
+    let mut type_support =
+        RawTypeSupport::new_with_key(dds_type_name_str.to_string(), ext_kind, has_key);
+    type_support.set_key_fields(key_fields);
+    type_support.set_all_fields(all_fields);
+
+    // Register the RawTypeSupport with the participant
+    ffi_try!(participant_ref
+        .inner
+        .register_type_support(Arc::new(type_support) as Arc<dyn TypeSupport>, dds_type_name_str));
+
+    let topic_qos = if qos.is_null() { TopicQos::default() } else { (*qos).inner.clone() };
+
+    let topic = ffi_try!(participant_ref.inner.create_topic::<Int2DdsData>(
+        topic_name_str,
+        dds_type_name_str,
+        topic_qos,
+        None,
+        StatusMask::default()
+    ));
+
+    let topic_handle =
+        Box::new(Int2DdsTopic { inner: Arc::new(topic), type_name: dds_type_name_str.to_string() });
+
+    *topic_out = Box::into_raw(topic_handle);
+
+    INT2DDS_RET_OK
+}

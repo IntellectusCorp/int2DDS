@@ -52,6 +52,7 @@ pub struct RawTypeSupport {
     type_identifier: Option<TypeIdentifier>,
     type_object: Option<TypeObject>,
     key_fields: Vec<KeyFieldInfo>,
+    all_fields: Option<Arc<Vec<crate::data::CdrFieldDescriptor>>>,
 }
 
 impl RawTypeSupport {
@@ -63,6 +64,7 @@ impl RawTypeSupport {
             type_identifier: None,
             type_object: None,
             key_fields: Vec::new(),
+            all_fields: None,
         }
     }
 
@@ -78,6 +80,7 @@ impl RawTypeSupport {
             type_identifier: None,
             type_object: None,
             key_fields: Vec::new(),
+            all_fields: None,
         }
     }
 
@@ -99,6 +102,7 @@ impl RawTypeSupport {
             type_identifier: Some(type_identifier),
             type_object: Some(type_object),
             key_fields: Vec::new(),
+            all_fields: None,
         }
     }
 
@@ -106,6 +110,11 @@ impl RawTypeSupport {
     /// Called from FFI when Python binding provides key field info.
     pub fn set_key_fields(&mut self, fields: Vec<KeyFieldInfo>) {
         self.key_fields = fields;
+    }
+
+    /// Set all field descriptors for get_field_value() / has_field() support.
+    pub fn set_all_fields(&mut self, fields: Vec<crate::data::CdrFieldDescriptor>) {
+        self.all_fields = Some(Arc::new(fields));
     }
 
     /// Extract key bytes from CDR-serialized data using key field metadata.
@@ -206,10 +215,13 @@ impl TypeSupport for RawTypeSupport {
         data: &[u8],
         _format: Option<&SerializationFormat>,
     ) -> DdsResult<Box<dyn Any>> {
-        // Store CDR bytes for compute_key() fallback when key fields are configured.
+        // Store CDR bytes and field metadata when configured (Python binding).
         // Otherwise return empty Int2DdsData (existing behavior for C/C# bindings).
+        let need_bytes = !self.key_fields.is_empty() || self.all_fields.is_some();
         Ok(Box::new(crate::data::Int2DdsData {
-            cdr_bytes: if self.key_fields.is_empty() { None } else { Some(data.to_vec()) },
+            cdr_bytes: if need_bytes { Some(data.to_vec()) } else { None },
+            field_descriptors: self.all_fields.clone(),
+            extensibility: self.extensibility,
         }))
     }
 

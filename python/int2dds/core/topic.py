@@ -127,7 +127,49 @@ class Topic(Generic[T]):
                         key_field_types.append(_KEY_TYPE_MAP.get(field_type_str, 0))
                         break
 
-        if key_field_indices:
+        # Check for full field descriptors (enables CFT reader-side filtering + compute_key)
+        all_fields = getattr(type_class, "_all_fields", None)
+        if all_fields:
+            import dataclasses
+            dc_fields = dataclasses.fields(type_class)
+
+            name_bufs = []
+            name_ptrs = []
+            field_type_list = []
+            is_key_list = []
+
+            # Build key field names set from _key_fields
+            key_names = set()
+            if hasattr(type_class, "_key_fields"):
+                key_names = {kf[0] for kf in type_class._key_fields}
+
+            for field_name, field_type_str in all_fields:
+                buf = ffi.new("char[]", field_name.encode())
+                name_bufs.append(buf)
+                name_ptrs.append(buf)
+                field_type_list.append(_KEY_TYPE_MAP.get(field_type_str, 0))
+                is_key_list.append(field_name in key_names)
+
+            names_c = ffi.new("char *[]", name_ptrs)
+            types_c = ffi.new("uint32_t[]", field_type_list)
+            is_key_c = ffi.new("bool[]", is_key_list)
+
+            check_ret(
+                lib.int2dds_create_topic_with_field_descriptors(
+                    participant._handle,
+                    topic_name_c,
+                    type_name_c,
+                    int(extensibility),
+                    has_key,
+                    qos_ptr,
+                    names_c,
+                    types_c,
+                    is_key_c,
+                    len(all_fields),
+                    topic_ptr,
+                )
+            )
+        elif key_field_indices:
             indices_c = ffi.new("uint32_t[]", key_field_indices)
             types_c = ffi.new("uint32_t[]", key_field_types)
             check_ret(
