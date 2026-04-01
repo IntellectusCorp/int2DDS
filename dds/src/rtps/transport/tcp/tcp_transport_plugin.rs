@@ -63,33 +63,28 @@ impl TcpTransportPlugin {
         let (discovery_tx, discovery_rx) = bounded::<IncomingMessage>(CHANNEL_BUFFER_SIZE);
         let (user_data_tx, user_data_rx) = bounded::<IncomingMessage>(CHANNEL_BUFFER_SIZE);
 
-        // Create MuxListener — try physical port first, fall back to ephemeral port (0)
-        let mux_listener = match TcpMuxListener::new(
-            physical_port,
-            domain_id,
-            participant_id,
-            guid_prefix,
-            discovery_tx.clone(),
-            user_data_tx.clone(),
-        ) {
-            Ok(listener) => listener,
-            Err(e) => {
-                log::warn!(
-                    "[TcpTransportPlugin] Failed to bind on port {}: {}. \
-                     Falling back to ephemeral port.",
-                    physical_port,
-                    e,
+        // Create MuxListener on the fixed physical port.
+        // No ephemeral fallback — in TCP mode, the physical port must be predictable
+        // for initial_peers. If the port is already in use, participant creation fails.
+        let mux_listener =
+            match TcpMuxListener::new(
+                physical_port,
+                domain_id,
+                participant_id,
+                guid_prefix,
+                discovery_tx,
+                user_data_tx,
+            ) {
+                Ok(listener) => listener,
+                Err(e) => {
+                    log::error!(
+                    "[TcpTransportPlugin] Failed to bind TCP listener on port {} (domain={}): {}. \
+                     Another participant may already be using this port on the same host.",
+                    physical_port, domain_id, e
                 );
-                TcpMuxListener::new(
-                    0, // OS-assigned ephemeral port
-                    domain_id,
-                    participant_id,
-                    guid_prefix,
-                    discovery_tx,
-                    user_data_tx,
-                )?
-            }
-        };
+                    return Err(e);
+                }
+            };
         let listener_port = mux_listener.port();
 
         // Create TcpSender
