@@ -174,7 +174,17 @@ impl SpdpLogic {
                         log::debug!("[SPDP] Sent discovery message to initial peer {}", peer_addr);
                     }
                     Err(e) => {
-                        log::warn!("[SPDP] Failed to send to initial peer {}: {}", peer_addr, e);
+                        if e.kind() == std::io::ErrorKind::BrokenPipe
+                            || e.kind() == std::io::ErrorKind::ConnectionReset
+                        {
+                            log::debug!("[SPDP] Peer {} disconnected: {}", peer_addr, e);
+                        } else {
+                            log::warn!(
+                                "[SPDP] Failed to send to initial peer {}: {}",
+                                peer_addr,
+                                e
+                            );
+                        }
                     }
                 }
             }

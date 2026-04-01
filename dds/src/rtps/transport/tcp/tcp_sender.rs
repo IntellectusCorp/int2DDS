@@ -229,7 +229,16 @@ impl TcpSender {
                 Ok(data.len())
             }
             Err(e) => {
-                self.connections.remove(&key);
+                // BrokenPipe / ConnectionReset → peer is dead, clean up everything
+                if e.kind() == ErrorKind::BrokenPipe
+                    || e.kind() == ErrorKind::ConnectionReset
+                    || e.kind() == ErrorKind::ConnectionAborted
+                {
+                    debug!("TcpSender: Peer {:?} disconnected, cleaning up", addr);
+                    self.disconnect_peer(addr);
+                } else {
+                    self.connections.remove(&key);
+                }
                 Err(e)
             }
         }
