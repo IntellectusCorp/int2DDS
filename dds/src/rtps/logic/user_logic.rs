@@ -147,24 +147,15 @@ impl UserLogic {
 impl UserLogic {
     pub(crate) fn send_unsent_changes(
         &self,
-        entity_id: EntityId,
+        writer: &(dyn Writer + Send + Sync),
         cache: &WriterHistoryCache,
     ) -> RtpsResult<()> {
-        let participant = self.get_upgraded_participant()?;
-
-        let writer = participant.find_writer_from_entity_id(entity_id);
-
-        if let Some(writer) = writer {
-            if let Some(writer) = writer.as_any().downcast_ref::<StatefulWriter>() {
-                self.send_unsent_changes_of_stateful_writer(writer, cache)?;
-            } else if let Some(writer) = writer.as_any().downcast_ref::<StatelessWriter>() {
-                self.send_unsent_changes_of_stateless_writer(writer, cache)?;
-            } else {
-                return Err(RtpsError::new(
-                    RtpsErrorCode::DowncastError,
-                    "Failed to downcast writer",
-                ));
-            }
+        if let Some(writer) = writer.as_any().downcast_ref::<StatefulWriter>() {
+            self.send_unsent_changes_of_stateful_writer(writer, cache)?;
+        } else if let Some(writer) = writer.as_any().downcast_ref::<StatelessWriter>() {
+            self.send_unsent_changes_of_stateless_writer(writer, cache)?;
+        } else {
+            return Err(RtpsError::new(RtpsErrorCode::DowncastError, "Failed to downcast writer"));
         }
         Ok(())
     }

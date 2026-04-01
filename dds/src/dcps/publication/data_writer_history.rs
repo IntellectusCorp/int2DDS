@@ -553,7 +553,7 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
             let rtps_writer_cache = rtps_writer.writer_cache();
             let cache_binding = rtps_writer_cache.lock();
             if let Ok(mut cache_guard) = cache_binding {
-                let res = cache_guard.add_change(a_change);
+                let res = cache_guard.add_change(a_change, Some(&*rtps_writer));
                 if res.is_ok() {
                     Ok(())
                 } else {
