@@ -13,7 +13,7 @@
 
 /* ========================================================================
  * Type: HelloWorld
- * Extensibility: FINAL
+ * Extensibility: APPENDABLE
  * ======================================================================== */
 
 typedef struct HelloWorld {
@@ -28,9 +28,12 @@ static inline size_t HelloWorld_serialize_cdr(
 {
     Int2DdsCdrWriter w;
     int2dds_cdr_writer_init(&w, buf, capacity, true, true);
-    int2dds_cdr_write_encapsulation(&w, INT2DDS_CDR_FINAL);
+    int2dds_cdr_write_encapsulation(&w, INT2DDS_CDR_APPENDABLE);
+    size_t dh = 0;
+    int2dds_cdr_write_dheader_begin(&w, &dh);
     int2dds_cdr_write_u32(&w, val->index);
     int2dds_cdr_write_string(&w, val->message);
+    int2dds_cdr_write_dheader_finalize(&w, dh);
     return w.error == INT2DDS_CDR_OK ? int2dds_cdr_writer_size(&w) : 0;
 }
 
@@ -42,8 +45,12 @@ static inline bool HelloWorld_deserialize_cdr(
     Int2DdsCdrReader r;
     if (int2dds_cdr_reader_init(&r, buf, len) != INT2DDS_CDR_OK)
         return false;
+    uint32_t obj_size = 0;
+    size_t start_pos = 0;
+    int2dds_cdr_read_dheader(&r, &obj_size, &start_pos);
     int2dds_cdr_read_u32(&r, &val_out->index);
     int2dds_cdr_read_string_copy(&r, val_out->message, 257, NULL);
+    int2dds_cdr_read_dheader_end(&r, obj_size, start_pos);
     return int2dds_cdr_reader_error(&r) == INT2DDS_CDR_OK;
 }
 

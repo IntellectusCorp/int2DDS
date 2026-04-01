@@ -374,7 +374,12 @@ impl<'a> CsGen<'a> {
         self.line("public byte[] SerializeCdr(bool xcdr2)");
         self.line("{");
         self.indent += 1;
-        self.line("var w = new CdrWriter(Extensibility.Final, xcdr2: xcdr2);");
+        let union_ext = match u.extensibility {
+            ExtensibilityKind::Final => "Final",
+            ExtensibilityKind::Appendable => "Appendable",
+            ExtensibilityKind::Mutable => "Mutable",
+        };
+        self.line(&format!("var w = new CdrWriter(Extensibility.{}, xcdr2: xcdr2);", union_ext));
         self.line(&format!("w.{}(Discriminator);", disc_write));
         self.line("switch (Discriminator)");
         self.line("{");

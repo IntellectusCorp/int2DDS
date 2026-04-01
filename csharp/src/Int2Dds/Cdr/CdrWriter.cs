@@ -78,7 +78,7 @@ namespace Int2Dds.Cdr
                     Extensibility.Final => _littleEndian ? EncapCdr2Le : EncapCdr2Be,
                     Extensibility.Appendable => _littleEndian ? EncapDcdr2Le : EncapDcdr2Be,
                     Extensibility.Mutable => _littleEndian ? EncapPlCdr2Le : EncapPlCdr2Be,
-                    _ => _littleEndian ? EncapCdr2Le : EncapCdr2Be,
+                    _ => _littleEndian ? EncapDcdr2Le : EncapDcdr2Be,
                 };
             }
             else

@@ -43,7 +43,7 @@ class CdrWriter:
     XCDR2 extensions for appendable and mutable types.
 
     Example:
-        >>> writer = CdrWriter(extensibility=Extensibility.FINAL)
+        >>> writer = CdrWriter(extensibility=Extensibility.APPENDABLE)
         >>> writer.write_u32(42)
         >>> writer.write_string("hello")
         >>> data = writer.to_bytes()
