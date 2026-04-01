@@ -344,35 +344,29 @@ fn quote_deserialize_impl(
 ) -> proc_macro2::TokenStream {
     let full_type = &gc.full_type;
     // Generate format resolution for None case
-    let none_format_resolution = if let Some(ext_kind) = extensibility {
-        let extensibility_tokens = quote_extensibility_tokens(ext_kind, crate_path);
-
-        quote! {
-            if data.len() >= 2 {
-                let encoding_id = u16::from_be_bytes([data[0], data[1]]);
-                match encoding_id {
-                    0x0000 | 0x0001 => #crate_path::dcps::topic::type_support::SerializationFormat::Cdr,
-                    0x0006 | 0x0007 => {
-                        #crate_path::dcps::topic::type_support::SerializationFormat::Xcdr {
-                            extensibility_kind: #extensibility_tokens,
-                            use_delimiters: false,
-                        }
-                    },
-                    0x0008..=0x000B => {
-                        #crate_path::dcps::topic::type_support::SerializationFormat::Xcdr {
-                            extensibility_kind: #extensibility_tokens,
-                            use_delimiters: true,
-                        }
-                    },
-                    _ => #crate_path::dcps::topic::type_support::SerializationFormat::Cdr,
-                }
-            } else {
-                return Err(#crate_path::dcps::core::error::DdsError::Error("Invalid data length".to_string()));
+    let ext_kind = extensibility.unwrap_or(ExtensibilityKind::Appendable);
+    let extensibility_tokens = quote_extensibility_tokens(ext_kind, crate_path);
+    let none_format_resolution = quote! {
+        if data.len() >= 2 {
+            let encoding_id = u16::from_be_bytes([data[0], data[1]]);
+            match encoding_id {
+                0x0000 | 0x0001 => #crate_path::dcps::topic::type_support::SerializationFormat::Cdr,
+                0x0006 | 0x0007 => {
+                    #crate_path::dcps::topic::type_support::SerializationFormat::Xcdr {
+                        extensibility_kind: #extensibility_tokens,
+                        use_delimiters: false,
+                    }
+                },
+                0x0008..=0x000B => {
+                    #crate_path::dcps::topic::type_support::SerializationFormat::Xcdr {
+                        extensibility_kind: #extensibility_tokens,
+                        use_delimiters: true,
+                    }
+                },
+                _ => #crate_path::dcps::topic::type_support::SerializationFormat::Cdr,
             }
-        }
-    } else {
-        quote! {
-            #crate_path::dcps::topic::type_support::SerializationFormat::Cdr
+        } else {
+            return Err(#crate_path::dcps::core::error::DdsError::Error("Invalid data length".to_string()));
         }
     };
 
@@ -511,11 +505,10 @@ fn generate_unified_type_support_impl(
         gc,
     );
 
-    let extensibility_tokens = if let Some(ext_kind) = extensibility {
-        quote_extensibility_tokens(ext_kind, crate_path)
-    } else {
-        quote! { #crate_path::serialize::xcdr::ExtensibilityKind::Appendable }
-    };
+    let extensibility_tokens = quote_extensibility_tokens(
+        extensibility.unwrap_or(ExtensibilityKind::Appendable),
+        crate_path,
+    );
 
     let impl_generics = &gc.impl_generics;
     let where_clause = &gc.where_clause;
@@ -1745,11 +1738,10 @@ fn generate_tuple_type_support_impl(
         &tuple_gc,
     );
 
-    let extensibility_tokens = if let Some(ext_kind) = extensibility {
-        quote_extensibility_tokens(ext_kind, crate_path)
-    } else {
-        quote! { #crate_path::serialize::xcdr::ExtensibilityKind::Appendable }
-    };
+    let extensibility_tokens = quote_extensibility_tokens(
+        extensibility.unwrap_or(ExtensibilityKind::Appendable),
+        crate_path,
+    );
 
     quote! {
         impl #crate_path::dcps::topic::type_support::TypeSupport for #type_support_name {

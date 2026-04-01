@@ -744,8 +744,8 @@ impl TryConstructKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(u8)]
 pub enum ExtensibilityKind {
-    #[default]
     Final = 0,
+    #[default]
     Appendable = 1,
     Mutable = 2,
 }
