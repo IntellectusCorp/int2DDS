@@ -1,163 +1,207 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
-use std::io::{self, Read, Write};
+//! int2DDS TCP Control Protocol (v2)
+//!
+//! ## Control Messages
+//!
+//! All control messages start with a 1-byte msg_type after the frame magic.
+//! The msg_type ranges (0x01~0x0A) do not overlap with RTPS magic (0x52='R').
+//!
+//! | Type | Name             | Direction        | Payload                    |
+//! |------|------------------|------------------|----------------------------|
+//! | 0x01 | PEER_HELLO       | Client → Server  | 16B server_locator         |
+//! | 0x02 | PEER_HELLO_ACK   | Server → Client  | (empty)                    |
+//! | 0x03 | PORT_RESERVE     | Client → Server  | 2B logical_port (BE)       |
+//! | 0x04 | PORT_RESERVE_ACK | Server → Client  | 16B connection_cookie      |
+//! | 0x05 | PORT_BIND        | Client → Server  | 16B connection_cookie      |
+//! | 0x06 | PORT_BIND_ACK    | Server → Client  | (empty)                    |
+//! | 0x08 | KEEPALIVE        | Either           | (empty)                    |
+//! | 0x09 | KEEPALIVE_ACK    | Either           | (empty)                    |
+//! | 0x0A | ERROR            | Server → Client  | 2B code + 2B len + string  |
 
-use crate::rtps::common::guid::GuidPrefix;
+use std::io;
+use std::net::Ipv4Addr;
 
-/// TCP control protocol magic bytes: "INT2"
-const PROTOCOL_MAGIC: [u8; 4] = [b'I', b'N', b'T', b'2'];
+// ─── Message Types ──────────────────────────────────────────────────────────
 
-/// Protocol version
-const PROTOCOL_VERSION_MAJOR: u8 = 1;
-const PROTOCOL_VERSION_MINOR: u8 = 0;
+pub(crate) const MSG_PEER_HELLO: u8 = 0x01;
+pub(crate) const MSG_PEER_HELLO_ACK: u8 = 0x02;
+pub(crate) const MSG_PORT_RESERVE: u8 = 0x03;
+pub(crate) const MSG_PORT_RESERVE_ACK: u8 = 0x04;
+pub(crate) const MSG_PORT_BIND: u8 = 0x05;
+pub(crate) const MSG_PORT_BIND_ACK: u8 = 0x06;
+pub(crate) const MSG_KEEPALIVE: u8 = 0x08;
+pub(crate) const MSG_KEEPALIVE_ACK: u8 = 0x09;
+pub(crate) const MSG_ERROR: u8 = 0x0A;
 
-/// Control message type identifiers
-/// These values (0x01~0x07) do not overlap with RTPS magic (0x52='R'),
-/// allowing safe classification of TCP frame payloads.
-const MSG_TYPE_BIND_REQUEST: u8 = 0x01;
-const MSG_TYPE_BIND_RESPONSE: u8 = 0x02;
-const MSG_TYPE_KEEPALIVE: u8 = 0x04;
-const MSG_TYPE_KEEPALIVE_ACK: u8 = 0x05;
-const MSG_TYPE_CLOSE: u8 = 0x07;
+// ─── Locator Encoding ───────────────────────────────────────────────────────
 
-/// BindRequest body size (excluding msg_type byte)
-/// [4B magic][1B major][1B minor][12B guid_prefix][4B domain_id][4B participant_id]
-/// [2B listener_port][1B bind_type][2B logical_port] = 31 bytes
-const BIND_REQUEST_BODY_SIZE: usize = 31;
-
-/// BindResponse body size (excluding msg_type byte)
-/// [1B status][12B guid_prefix][4B domain_id][4B participant_id][2B listener_port] = 23 bytes
-const BIND_RESPONSE_BODY_SIZE: usize = 23;
-
-/// Bind type: what kind of TCP connection this is
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BindType {
-    /// Control channel (keepalive, liveliness, connectino management)
-    Control = 0x00,
-    /// RTPS data channel (discovery or user data, identified by logical_port)
-    RtpsData = 0x01,
+/// Encode an IPv4 address + port into a 16-byte locator.
+///
+/// Format: `[4B zeros][4B zeros][0xFF 0xFF][2B port BE][4B IPv4]`
+pub(crate) fn encode_locator(ip: Ipv4Addr, port: u16) -> [u8; 16] {
+    let mut loc = [0u8; 16];
+    loc[8] = 0xFF;
+    loc[9] = 0xFF;
+    loc[10..12].copy_from_slice(&port.to_be_bytes());
+    loc[12..16].copy_from_slice(&ip.octets());
+    loc
 }
 
-impl BindType {
-    fn from_u8(value: u8) -> io::Result<Self> {
-        match value {
-            0x00 => Ok(BindType::Control),
-            0x01 => Ok(BindType::RtpsData),
-            _ => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Unknown bind type: 0x{:02X}", value),
-            )),
-        }
-    }
+/// Decode an IPv4 address + port from a 16-byte locator.
+pub(crate) fn decode_locator(loc: &[u8; 16]) -> (Ipv4Addr, u16) {
+    let port = u16::from_be_bytes([loc[10], loc[11]]);
+    let ip = Ipv4Addr::new(loc[12], loc[13], loc[14], loc[15]);
+    (ip, port)
 }
 
-/// Bind response status
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BindStatus {
-    Ok = 0x00,
-    DomainMismatch = 0x01,
-    InvalidRequest = 0x02,
-    Rejected = 0x03,
-}
+// ─── Control Message ────────────────────────────────────────────────────────
 
-impl BindStatus {
-    fn from_u8(value: u8) -> io::Result<Self> {
-        match value {
-            0x00 => Ok(BindStatus::Ok),
-            0x01 => Ok(BindStatus::DomainMismatch),
-            0x02 => Ok(BindStatus::InvalidRequest),
-            0x03 => Ok(BindStatus::Rejected),
-            _ => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Unknown bind status: 0x{:02X}", value),
-            )),
-        }
-    }
-}
-
-/// Tcp control message types
+/// A parsed control message (payload after frame magic).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ControlMsg {
-    BindRequest(BindRequest),
-    BindResponse(BindResponse),
+    /// Client announces its listener address.
+    PeerHello { locator: [u8; 16] },
+
+    /// Server acknowledges peer hello.
+    PeerHelloAck,
+
+    /// Client requests reservation of a logical port.
+    PortReserve { logical_port: u16 },
+
+    /// Server confirms reservation with a cookie.
+    PortReserveAck { cookie: [u8; 16] },
+
+    /// Client binds a data connection using a previously issued cookie.
+    PortBind { cookie: [u8; 16] },
+
+    /// Server confirms the data connection is bound.
+    PortBindAck,
+
+    /// Connection keepalive ping.
     Keepalive,
+
+    /// Keepalive acknowledgment.
     KeepaliveAck,
-    Close,
-}
 
-/// Connection initiator -> acceptor
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct BindRequest {
-    pub(crate) guid_prefix: GuidPrefix,
-    pub(crate) domain_id: u32,
-    pub(crate) participant_id: u32,
-    pub(crate) listener_port: u16,
-    pub(crate) bind_type: BindType,
-    pub(crate) logical_port: u16,
-}
-
-/// Acceptor -> connection initiator
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct BindResponse {
-    pub(crate) status: BindStatus,
-    pub(crate) guid_prefix: GuidPrefix,
-    pub(crate) domain_id: u32,
-    pub(crate) participant_id: u32,
-    pub(crate) listener_port: u16,
+    /// Error response with code and message.
+    Error { code: u16, message: String },
 }
 
 impl ControlMsg {
-    /// Serialize a control message into a byte payload.
-    /// The first byte is the message type identifier.
+    /// Serialize to bytes (the payload portion, after frame magic).
     pub(crate) fn to_bytes(&self) -> Vec<u8> {
         match self {
-            ControlMsg::BindRequest(req) => {
-                let mut buf = Vec::with_capacity(1 + BIND_REQUEST_BODY_SIZE);
-                buf.push(MSG_TYPE_BIND_REQUEST);
-                buf.extend_from_slice(&PROTOCOL_MAGIC);
-                buf.push(PROTOCOL_VERSION_MAJOR);
-                buf.push(PROTOCOL_VERSION_MINOR);
-                buf.extend_from_slice(&req.guid_prefix);
-                buf.extend_from_slice(&req.domain_id.to_be_bytes());
-                buf.extend_from_slice(&req.participant_id.to_be_bytes());
-                buf.extend_from_slice(&req.listener_port.to_be_bytes());
-                buf.push(req.bind_type as u8);
-                buf.extend_from_slice(&req.logical_port.to_be_bytes());
+            ControlMsg::PeerHello { locator } => {
+                let mut buf = Vec::with_capacity(17);
+                buf.push(MSG_PEER_HELLO);
+                buf.extend_from_slice(locator);
                 buf
             }
-            ControlMsg::BindResponse(resp) => {
-                let mut buf = Vec::with_capacity(1 + BIND_RESPONSE_BODY_SIZE);
-                buf.push(MSG_TYPE_BIND_RESPONSE);
-                buf.push(resp.status as u8);
-                buf.extend_from_slice(&resp.guid_prefix);
-                buf.extend_from_slice(&resp.domain_id.to_be_bytes());
-                buf.extend_from_slice(&resp.participant_id.to_be_bytes());
-                buf.extend_from_slice(&resp.listener_port.to_be_bytes());
+            ControlMsg::PeerHelloAck => vec![MSG_PEER_HELLO_ACK],
+
+            ControlMsg::PortReserve { logical_port } => {
+                let mut buf = Vec::with_capacity(3);
+                buf.push(MSG_PORT_RESERVE);
+                buf.extend_from_slice(&logical_port.to_be_bytes());
                 buf
             }
-            ControlMsg::Keepalive => vec![MSG_TYPE_KEEPALIVE],
-            ControlMsg::KeepaliveAck => vec![MSG_TYPE_KEEPALIVE_ACK],
-            ControlMsg::Close => vec![MSG_TYPE_CLOSE],
+            ControlMsg::PortReserveAck { cookie } => {
+                let mut buf = Vec::with_capacity(17);
+                buf.push(MSG_PORT_RESERVE_ACK);
+                buf.extend_from_slice(cookie);
+                buf
+            }
+
+            ControlMsg::PortBind { cookie } => {
+                let mut buf = Vec::with_capacity(17);
+                buf.push(MSG_PORT_BIND);
+                buf.extend_from_slice(cookie);
+                buf
+            }
+            ControlMsg::PortBindAck => vec![MSG_PORT_BIND_ACK],
+
+            ControlMsg::Keepalive => vec![MSG_KEEPALIVE],
+            ControlMsg::KeepaliveAck => vec![MSG_KEEPALIVE_ACK],
+
+            ControlMsg::Error { code, message } => {
+                let mut buf = Vec::with_capacity(5 + message.len());
+                buf.push(MSG_ERROR);
+                buf.extend_from_slice(&code.to_be_bytes());
+                buf.extend_from_slice(&(message.len() as u16).to_be_bytes());
+                buf.extend_from_slice(message.as_bytes());
+                buf
+            }
         }
     }
 
-    /// Deserialize a control message from a payload buffer.
-    /// The first byte must be the message type identifier.
+    /// Deserialize from bytes (payload after frame magic).
     pub(crate) fn from_bytes(payload: &[u8]) -> io::Result<Self> {
         if payload.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Empty control message payload",
-            ));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "Empty control payload"));
         }
 
         match payload[0] {
-            MSG_TYPE_BIND_REQUEST => Self::parse_bind_request(&payload[1..]),
-            MSG_TYPE_BIND_RESPONSE => Self::parse_bind_response(&payload[1..]),
-            MSG_TYPE_KEEPALIVE => Ok(ControlMsg::Keepalive),
-            MSG_TYPE_KEEPALIVE_ACK => Ok(ControlMsg::KeepaliveAck),
-            MSG_TYPE_CLOSE => Ok(ControlMsg::Close),
+            MSG_PEER_HELLO => {
+                if payload.len() < 17 {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "PeerHello too short"));
+                }
+                let mut locator = [0u8; 16];
+                locator.copy_from_slice(&payload[1..17]);
+                Ok(ControlMsg::PeerHello { locator })
+            }
+            MSG_PEER_HELLO_ACK => Ok(ControlMsg::PeerHelloAck),
+
+            MSG_PORT_RESERVE => {
+                if payload.len() < 3 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "PortReserve too short",
+                    ));
+                }
+                let logical_port = u16::from_be_bytes([payload[1], payload[2]]);
+                Ok(ControlMsg::PortReserve { logical_port })
+            }
+            MSG_PORT_RESERVE_ACK => {
+                if payload.len() < 17 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "PortReserveAck too short",
+                    ));
+                }
+                let mut cookie = [0u8; 16];
+                cookie.copy_from_slice(&payload[1..17]);
+                Ok(ControlMsg::PortReserveAck { cookie })
+            }
+
+            MSG_PORT_BIND => {
+                if payload.len() < 17 {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "PortBind too short"));
+                }
+                let mut cookie = [0u8; 16];
+                cookie.copy_from_slice(&payload[1..17]);
+                Ok(ControlMsg::PortBind { cookie })
+            }
+            MSG_PORT_BIND_ACK => Ok(ControlMsg::PortBindAck),
+
+            MSG_KEEPALIVE => Ok(ControlMsg::Keepalive),
+            MSG_KEEPALIVE_ACK => Ok(ControlMsg::KeepaliveAck),
+
+            MSG_ERROR => {
+                if payload.len() < 5 {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "Error too short"));
+                }
+                let code = u16::from_be_bytes([payload[1], payload[2]]);
+                let msg_len = u16::from_be_bytes([payload[3], payload[4]]) as usize;
+                let message = if payload.len() >= 5 + msg_len {
+                    String::from_utf8_lossy(&payload[5..5 + msg_len]).to_string()
+                } else {
+                    String::new()
+                };
+                Ok(ControlMsg::Error { code, message })
+            }
+
             other => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Unknown control message type: 0x{:02X}", other),
@@ -165,169 +209,80 @@ impl ControlMsg {
         }
     }
 
-    fn parse_bind_request(body: &[u8]) -> io::Result<Self> {
-        if body.len() < BIND_REQUEST_BODY_SIZE {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "BindRequest too short: {} bytes (expected {})",
-                    body.len(),
-                    BIND_REQUEST_BODY_SIZE
-                ),
-            ));
+    /// Get the message type name for logging.
+    pub(crate) fn type_name(&self) -> &'static str {
+        match self {
+            ControlMsg::PeerHello { .. } => "PEER_HELLO",
+            ControlMsg::PeerHelloAck => "PEER_HELLO_ACK",
+            ControlMsg::PortReserve { .. } => "PORT_RESERVE",
+            ControlMsg::PortReserveAck { .. } => "PORT_RESERVE_ACK",
+            ControlMsg::PortBind { .. } => "PORT_BIND",
+            ControlMsg::PortBindAck => "PORT_BIND_ACK",
+            ControlMsg::Keepalive => "KEEPALIVE",
+            ControlMsg::KeepaliveAck => "KEEPALIVE_ACK",
+            ControlMsg::Error { .. } => "ERROR",
         }
-
-        // Validate magic
-        if body[0..4] != PROTOCOL_MAGIC {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Invalid protocol magic: {:?}", &body[0..4]),
-            ));
-        }
-
-        // Version (bytes 4,5) — log but accept any version for forward compatibility
-        let _major = body[4];
-        let _minor = body[5];
-
-        let mut guid_prefix: GuidPrefix = [0u8; 12];
-        guid_prefix.copy_from_slice(&body[6..18]);
-
-        let domain_id = u32::from_be_bytes(body[18..22].try_into().unwrap());
-        let participant_id = u32::from_be_bytes(body[22..26].try_into().unwrap());
-        let listener_port = u16::from_be_bytes(body[26..28].try_into().unwrap());
-        let bind_type = BindType::from_u8(body[28])?;
-        let logical_port = u16::from_be_bytes(body[29..31].try_into().unwrap());
-
-        Ok(ControlMsg::BindRequest(BindRequest {
-            guid_prefix,
-            domain_id,
-            participant_id,
-            listener_port,
-            bind_type,
-            logical_port,
-        }))
-    }
-
-    fn parse_bind_response(body: &[u8]) -> io::Result<Self> {
-        if body.len() < BIND_RESPONSE_BODY_SIZE {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "BindResponse too short: {} bytes (expected {})",
-                    body.len(),
-                    BIND_RESPONSE_BODY_SIZE
-                ),
-            ));
-        }
-
-        let status = BindStatus::from_u8(body[0])?;
-
-        let mut guid_prefix: GuidPrefix = [0u8; 12];
-        guid_prefix.copy_from_slice(&body[1..13]);
-
-        let domain_id = u32::from_be_bytes(body[13..17].try_into().unwrap());
-        let participant_id = u32::from_be_bytes(body[17..21].try_into().unwrap());
-        let listener_port = u16::from_be_bytes(body[21..23].try_into().unwrap());
-
-        Ok(ControlMsg::BindResponse(BindResponse {
-            status,
-            guid_prefix,
-            domain_id,
-            participant_id,
-            listener_port,
-        }))
     }
 }
 
-/// Write a control message to a TCP stream using the same framing as RTPS data.
-/// Format: [4B length (big-endian)][control message payload]
-pub(crate) fn write_control_message<W: Write>(stream: &mut W, msg: &ControlMsg) -> io::Result<()> {
-    let payload = msg.to_bytes();
-    let len = payload.len() as u32;
-    stream.write_all(&len.to_be_bytes())?;
-    stream.write_all(&payload)?;
-    stream.flush()?;
-    Ok(())
+// ─── Cookie Generator ───────────────────────────────────────────────────────
+
+/// Generate a connection cookie with a monotonically increasing first byte.
+/// Returns a 16-byte cookie: [counter, 0, 0, ...]
+pub(crate) fn generate_cookie(counter: &mut u8) -> [u8; 16] {
+    let mut cookie = [0u8; 16];
+    cookie[0] = *counter;
+    *counter = counter.wrapping_add(1);
+    cookie
 }
 
-/// Read a control message from a TCP stream using the same framing as RTPS data.
-/// Format: [4B length (big-endian)][control message payload]
-pub(crate) fn read_control_message<R: Read>(stream: &mut R) -> io::Result<ControlMsg> {
-    let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf)?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-
-    if len == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Invalid control message length: 0",
-        ));
-    }
-
-    let mut payload = vec![0u8; len];
-    stream.read_exact(&mut payload)?;
-
-    ControlMsg::from_bytes(&payload)
-}
-
-/// Check if a payload is a control message (vs RTPS data).
-/// Control messages have first byte in range 0x01..=0x07.
-/// RTPS messages start with magic 0x52545053 ('RTPS'), first byte 0x52.
-pub(crate) fn is_control_message(payload: &[u8]) -> bool {
-    if payload.is_empty() {
-        return false;
-    }
-    matches!(
-        payload[0],
-        MSG_TYPE_BIND_REQUEST
-            | MSG_TYPE_BIND_RESPONSE
-            | MSG_TYPE_KEEPALIVE
-            | MSG_TYPE_KEEPALIVE_ACK
-            | MSG_TYPE_CLOSE
-    )
-}
+// ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
 
     #[test]
-    fn test_bind_request_roundtrip() {
-        let guid_prefix: GuidPrefix =
-            [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C];
-        let msg = ControlMsg::BindRequest(BindRequest {
-            guid_prefix,
-            domain_id: 0,
-            participant_id: 3,
-            listener_port: 7400,
-            bind_type: BindType::RtpsData,
-            logical_port: 7416,
-        });
-
+    fn test_peer_hello_roundtrip() {
+        let loc = encode_locator(Ipv4Addr::new(172, 19, 117, 172), 7400);
+        let msg = ControlMsg::PeerHello { locator: loc };
         let bytes = msg.to_bytes();
-        assert_eq!(bytes.len(), 1 + BIND_REQUEST_BODY_SIZE); // 32 bytes
-        assert_eq!(bytes[0], MSG_TYPE_BIND_REQUEST);
+        assert_eq!(bytes[0], MSG_PEER_HELLO);
+        assert_eq!(bytes.len(), 17);
 
         let parsed = ControlMsg::from_bytes(&bytes).unwrap();
         assert_eq!(parsed, msg);
     }
 
     #[test]
-    fn test_bind_response_roundtrip() {
-        let guid_prefix: GuidPrefix = [0xAA; 12];
-        let msg = ControlMsg::BindResponse(BindResponse {
-            status: BindStatus::Ok,
-            guid_prefix,
-            domain_id: 0,
-            participant_id: 2,
-            listener_port: 7400,
-        });
-
+    fn test_port_reserve_roundtrip() {
+        let msg = ControlMsg::PortReserve { logical_port: 7410 };
         let bytes = msg.to_bytes();
-        assert_eq!(bytes.len(), 1 + BIND_RESPONSE_BODY_SIZE); // 24 bytes
-        assert_eq!(bytes[0], MSG_TYPE_BIND_RESPONSE);
+        assert_eq!(bytes, vec![0x03, 0x1C, 0xF2]);
 
+        let parsed = ControlMsg::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn test_port_reserve_ack_roundtrip() {
+        let mut counter = 0x31u8;
+        let cookie = generate_cookie(&mut counter);
+        assert_eq!(cookie[0], 0x31);
+        assert_eq!(counter, 0x32);
+
+        let msg = ControlMsg::PortReserveAck { cookie };
+        let bytes = msg.to_bytes();
+        let parsed = ControlMsg::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn test_port_bind_roundtrip() {
+        let mut cookie = [0u8; 16];
+        cookie[0] = 0x31;
+        let msg = ControlMsg::PortBind { cookie };
+        let bytes = msg.to_bytes();
         let parsed = ControlMsg::from_bytes(&bytes).unwrap();
         assert_eq!(parsed, msg);
     }
@@ -336,173 +291,40 @@ mod tests {
     fn test_keepalive_roundtrip() {
         let msg = ControlMsg::Keepalive;
         let bytes = msg.to_bytes();
-        assert_eq!(bytes, vec![MSG_TYPE_KEEPALIVE]);
-
+        assert_eq!(bytes, vec![MSG_KEEPALIVE]);
         let parsed = ControlMsg::from_bytes(&bytes).unwrap();
-        assert_eq!(parsed, ControlMsg::Keepalive);
+        assert_eq!(parsed, msg);
     }
 
     #[test]
-    fn test_keepalive_ack_roundtrip() {
-        let msg = ControlMsg::KeepaliveAck;
+    fn test_error_roundtrip() {
+        let msg = ControlMsg::Error { code: 0x0001, message: "no matching port".to_string() };
         let bytes = msg.to_bytes();
         let parsed = ControlMsg::from_bytes(&bytes).unwrap();
-        assert_eq!(parsed, ControlMsg::KeepaliveAck);
+        assert_eq!(parsed, msg);
     }
 
     #[test]
-    fn test_close_roundtrip() {
-        let msg = ControlMsg::Close;
-        let bytes = msg.to_bytes();
-        let parsed = ControlMsg::from_bytes(&bytes).unwrap();
-        assert_eq!(parsed, ControlMsg::Close);
+    fn test_locator_encoding() {
+        let loc = encode_locator(Ipv4Addr::new(172, 19, 117, 172), 7401);
+        assert_eq!(loc, [0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 0x1C, 0xE9, 0xAC, 0x13, 0x75, 0xAC]);
+        let (ip, port) = decode_locator(&loc);
+        assert_eq!(ip, Ipv4Addr::new(172, 19, 117, 172));
+        assert_eq!(port, 7401);
     }
 
     #[test]
-    fn test_write_and_read_control_message() {
-        let guid_prefix: GuidPrefix = [0x11; 12];
-        let msg = ControlMsg::BindRequest(BindRequest {
-            guid_prefix,
-            domain_id: 1,
-            participant_id: 0,
-            listener_port: 7650,
-            bind_type: BindType::Control,
-            logical_port: 0,
-        });
-
-        let mut buffer = Vec::new();
-        write_control_message(&mut buffer, &msg).unwrap();
-
-        let mut cursor = Cursor::new(buffer);
-        let read_msg = read_control_message(&mut cursor).unwrap();
-
-        assert_eq!(read_msg, msg);
-    }
-
-    #[test]
-    fn test_bind_type_control_logical_port_ignored() {
-        let msg = ControlMsg::BindRequest(BindRequest {
-            guid_prefix: [0; 12],
-            domain_id: 0,
-            participant_id: 0,
-            listener_port: 7400,
-            bind_type: BindType::Control,
-            logical_port: 0, // ignored for Control
-        });
-
-        let bytes = msg.to_bytes();
-        let parsed = ControlMsg::from_bytes(&bytes).unwrap();
-
-        if let ControlMsg::BindRequest(req) = parsed {
-            assert_eq!(req.bind_type, BindType::Control);
-        } else {
-            panic!("Expected BindRequest");
-        }
-    }
-
-    #[test]
-    fn test_bind_response_domain_mismatch() {
-        let msg = ControlMsg::BindResponse(BindResponse {
-            status: BindStatus::DomainMismatch,
-            guid_prefix: [0; 12],
-            domain_id: 0,
-            participant_id: 0,
-            listener_port: 7400,
-        });
-
-        let bytes = msg.to_bytes();
-        let parsed = ControlMsg::from_bytes(&bytes).unwrap();
-
-        if let ControlMsg::BindResponse(resp) = parsed {
-            assert_eq!(resp.status, BindStatus::DomainMismatch);
-        } else {
-            panic!("Expected BindResponse");
-        }
-    }
-
-    #[test]
-    fn test_is_control_message() {
-        // Control messages
-        assert!(is_control_message(&[MSG_TYPE_BIND_REQUEST]));
-        assert!(is_control_message(&[MSG_TYPE_BIND_RESPONSE]));
-        assert!(is_control_message(&[MSG_TYPE_KEEPALIVE]));
-        assert!(is_control_message(&[MSG_TYPE_KEEPALIVE_ACK]));
-        assert!(is_control_message(&[MSG_TYPE_CLOSE]));
-
-        // RTPS magic starts with 0x52 ('R')
-        assert!(!is_control_message(&[0x52, 0x54, 0x50, 0x53]));
-
-        // Empty
-        assert!(!is_control_message(&[]));
-
-        // Unknown type
-        assert!(!is_control_message(&[0x10]));
-    }
-
-    #[test]
-    fn test_invalid_magic() {
-        let mut bytes = ControlMsg::BindRequest(BindRequest {
-            guid_prefix: [0; 12],
-            domain_id: 0,
-            participant_id: 0,
-            listener_port: 7400,
-            bind_type: BindType::Control,
-            logical_port: 0,
-        })
-        .to_bytes();
-
-        // Corrupt magic
-        bytes[1] = 0xFF;
-        let result = ControlMsg::from_bytes(&bytes);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_truncated_bind_request() {
-        let bytes = vec![MSG_TYPE_BIND_REQUEST, 0x01, 0x02]; // Too short
-        let result = ControlMsg::from_bytes(&bytes);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_truncated_bind_response() {
-        let bytes = vec![MSG_TYPE_BIND_RESPONSE, 0x00, 0x01]; // Too short
-        let result = ControlMsg::from_bytes(&bytes);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_multiple_control_messages_stream() {
-        let messages = vec![
-            ControlMsg::BindRequest(BindRequest {
-                guid_prefix: [0xAA; 12],
-                domain_id: 0,
-                participant_id: 1,
-                listener_port: 7400,
-                bind_type: BindType::RtpsData,
-                logical_port: 7412,
-            }),
-            ControlMsg::BindResponse(BindResponse {
-                status: BindStatus::Ok,
-                guid_prefix: [0xBB; 12],
-                domain_id: 0,
-                participant_id: 2,
-                listener_port: 7400,
-            }),
+    fn test_all_simple_types() {
+        for msg in [
+            ControlMsg::PeerHelloAck,
+            ControlMsg::PortBindAck,
             ControlMsg::Keepalive,
             ControlMsg::KeepaliveAck,
-            ControlMsg::Close,
-        ];
-
-        let mut buffer = Vec::new();
-        for msg in &messages {
-            write_control_message(&mut buffer, msg).unwrap();
-        }
-
-        let mut cursor = Cursor::new(buffer);
-        for expected in &messages {
-            let read_msg = read_control_message(&mut cursor).unwrap();
-            assert_eq!(&read_msg, expected);
+        ] {
+            let bytes = msg.to_bytes();
+            assert_eq!(bytes.len(), 1);
+            let parsed = ControlMsg::from_bytes(&bytes).unwrap();
+            assert_eq!(parsed, msg);
         }
     }
 }
