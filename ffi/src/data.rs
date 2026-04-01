@@ -25,8 +25,17 @@ use int2dds::{
 /// This type exists solely to satisfy the `DdsType` trait bound on
 /// `DataWriter<T>` and `DataReader<T>`. All actual data flows through
 /// raw serialized bytes via `int2dds_write_serialized` / `int2dds_take_serialized`.
-#[derive(Debug, Clone, Default)]
-pub struct Int2DdsData;
+#[derive(Debug, Clone)]
+pub struct Int2DdsData {
+    /// Raw CDR bytes stored during deserialize() for compute_key() fallback
+    pub(crate) cdr_bytes: Option<Vec<u8>>,
+}
+
+impl Default for Int2DdsData {
+    fn default() -> Self {
+        Self { cdr_bytes: None }
+    }
+}
 
 unsafe impl Send for Int2DdsData {}
 unsafe impl Sync for Int2DdsData {}

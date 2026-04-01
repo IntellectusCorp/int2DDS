@@ -18,6 +18,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
 int2dds = { path = "../dds" }
+md5 = "0.7"
 log = "0.4.11"
 env_logger = "0.11"
 

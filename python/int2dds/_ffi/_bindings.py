@@ -165,6 +165,20 @@ ffi.cdef("""
         Int2DdsTopic **topic_out
     );
     Int2DdsRet int2dds_delete_topic(Int2DdsTopic *topic);
+
+    /* Topic with key field metadata */
+    Int2DdsRet int2dds_create_topic_keyed_with_key_fields(
+        const Int2DdsParticipant *participant,
+        const char *topic_name,
+        const char *dds_type_name,
+        int32_t extensibility,
+        bool has_key,
+        const Int2DdsTopicQos *qos,
+        const uint32_t *field_indices,
+        const uint32_t *field_types,
+        size_t field_count,
+        Int2DdsTopic **topic_out
+    );
     Int2DdsRet int2dds_topic_get_name(
         const Int2DdsTopic *topic,
         char *name_out,

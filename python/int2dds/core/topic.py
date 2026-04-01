@@ -100,17 +100,62 @@ class Topic(Generic[T]):
             qos_ptr = qos_handle
 
         topic_ptr = ffi.new("Int2DdsTopic **")
-        check_ret(
-            lib.int2dds_create_topic_keyed(
-                participant._handle,
-                topic_name_c,
-                type_name_c,
-                int(extensibility),
-                has_key,
-                qos_ptr,
-                topic_ptr,
+
+        # Extract key field metadata from type class for compute_key() support
+        key_field_indices = []
+        key_field_types = []
+        _KEY_TYPE_MAP = {
+            "str": 0, "string": 0,
+            "int": 1, "i32": 1, "int32": 1,
+            "uint": 2, "u32": 2, "uint32": 2,
+            "i16": 3, "int16": 3,
+            "u16": 4, "uint16": 4,
+            "i64": 5, "int64": 5,
+            "u64": 6, "uint64": 6,
+            "i8": 7, "int8": 7,
+            "u8": 8, "uint8": 8,
+            "bool": 9,
+        }
+        if has_key and hasattr(type_class, "_key_fields"):
+            for field_name, field_type_str in type_class._key_fields:
+                # Find field index from dataclass fields
+                import dataclasses
+                dc_fields = dataclasses.fields(type_class)
+                for idx, f in enumerate(dc_fields):
+                    if f.name == field_name:
+                        key_field_indices.append(idx)
+                        key_field_types.append(_KEY_TYPE_MAP.get(field_type_str, 0))
+                        break
+
+        if key_field_indices:
+            indices_c = ffi.new("uint32_t[]", key_field_indices)
+            types_c = ffi.new("uint32_t[]", key_field_types)
+            check_ret(
+                lib.int2dds_create_topic_keyed_with_key_fields(
+                    participant._handle,
+                    topic_name_c,
+                    type_name_c,
+                    int(extensibility),
+                    has_key,
+                    qos_ptr,
+                    indices_c,
+                    types_c,
+                    len(key_field_indices),
+                    topic_ptr,
+                )
             )
-        )
+        else:
+            check_ret(
+                lib.int2dds_create_topic_keyed(
+                    participant._handle,
+                    topic_name_c,
+                    type_name_c,
+                    int(extensibility),
+                    has_key,
+                    qos_ptr,
+                    topic_ptr,
+                )
+            )
         self._handle = topic_ptr[0]
 
         # Clean up QoS handle after use
