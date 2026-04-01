@@ -191,7 +191,12 @@ impl<'a> CGen<'a> {
         ));
         self.raw("    Int2DdsCdrWriter w;\n");
         self.raw("    int2dds_cdr_writer_init(&w, buf, capacity, true, xcdr2);\n");
-        self.raw("    int2dds_cdr_write_encapsulation(&w, INT2DDS_CDR_FINAL);\n");
+        let union_ext = match u.extensibility {
+            ExtensibilityKind::Final => "INT2DDS_CDR_FINAL",
+            ExtensibilityKind::Appendable => "INT2DDS_CDR_APPENDABLE",
+            ExtensibilityKind::Mutable => "INT2DDS_CDR_MUTABLE",
+        };
+        self.raw(&format!("    int2dds_cdr_write_encapsulation(&w, {});\n", union_ext));
         self.emit_write_field_indented(&u.discriminant_type, "val->_d", "    ");
         self.raw("    switch (val->_d) {\n");
         for case in &u.cases {
