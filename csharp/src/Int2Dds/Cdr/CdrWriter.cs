@@ -37,7 +37,7 @@ namespace Int2Dds.Cdr
         /// <param name="extensibility">Extensibility kind (Final, Appendable, Mutable).</param>
         /// <param name="littleEndian">True for little-endian data encoding.</param>
         /// <param name="xcdr2">True for XCDR2 (max alignment capped at 4).</param>
-        public CdrWriter(Extensibility extensibility = Extensibility.Final, bool littleEndian = true, bool xcdr2 = true)
+        public CdrWriter(Extensibility extensibility = Extensibility.Appendable, bool littleEndian = true, bool xcdr2 = true)
         {
             _littleEndian = littleEndian;
             _xcdr2 = xcdr2;
