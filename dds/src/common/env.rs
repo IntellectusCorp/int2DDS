@@ -32,6 +32,7 @@ pub fn init_from_env() {
     // - INT2DDS_UDP_SOCKET_BUFFER: Set UDP socket buffer size (bytes) - Default: OS default
     // - INT2DDS_SHM_BUFFER_SIZE: Set shared memory buffer size (bytes) - Default: 1048576 (1MB)
 
+    // - INT2DDS_TCP_PORT: set TCP listening port - Default: 7400 + 250 * domain_id
     // - INT2DDS_TCP_CONNECT_TIMEOUT: Set TCP connection timeout (milliseconds) - Default: 5000
     // - INT2DDS_TCP_WRITE_TIMEOUT: Set TCP write timeout (milliseconds) - Default: 10000
     // - INT2DDS_TCP_NODELAY: Enable TCP Nodelay (disable Nagle algorithm) (true, false) - Default: true
@@ -168,6 +169,14 @@ fn apply_cli_args_to_env() {
                     .value_hint(ValueHint::Other),
             )
             .arg(
+                Arg::new("int2dds_tcp_port")
+                    .long("int2dds-tcp-port")
+                    .value_name("PORT")
+                    .help("TCP listening port")
+                    .num_args(1)
+                    .value_hint(ValueHint::Other),
+            )
+            .arg(
                 Arg::new("int2dds_tcp_connect_timeout")
                     .long("int2dds-tcp-connect-timeout")
                     .value_name("MILLISECONDS")
@@ -294,6 +303,10 @@ fn apply_cli_args_to_env() {
     if let Some(v) = matches.get_one::<String>("int2dds_shm_buffer_size") {
         log::info!("Environment variable set: INT2DDS_SHM_BUFFER_SIZE = {}", v);
         unsafe { std::env::set_var("INT2DDS_SHM_BUFFER_SIZE", v) };
+    }
+    if let Some(v) = matches.get_one::<String>("int2dds_tcp_port") {
+        log::info!("Environment variable set: INT2DDS_TCP_PORT = {}", v);
+        unsafe { std::env::set_var("INT2DDS_TCP_PORT", v) };
     }
     if let Some(v) = matches.get_one::<String>("int2dds_tcp_connect_timeout") {
         log::info!("Environment variable set: INT2DDS_TCP_CONNECT_TIMEOUT = {}", v);
@@ -683,6 +696,21 @@ pub fn get_tcp_public_addr() -> Option<std::net::SocketAddr> {
 pub fn set_tcp_public_addr(addr: &std::net::SocketAddr) {
     log::info!("Environment variable set: INT2DDS_TCP_PUBLIC_ADDR = {}", addr);
     unsafe { std::env::set_var("INT2DDS_TCP_PUBLIC_ADDR", addr.to_string()) };
+}
+
+/// Get the custom TCP physical port.
+/// When set, overrides the default port calculation (7400 + 250 * domain_id).
+///
+/// Environment variable: INT2DDS_TCP_PORT
+/// Default: None (use calculated port)
+pub fn get_tcp_port() -> Option<u16> {
+    std::env::var("INT2DDS_TCP_PORT").ok().and_then(|v| v.parse::<u16>().ok())
+}
+
+/// Set the TCP physical port via environment variable.
+pub fn set_tcp_port(port: u16) {
+    log::info!("Environment variable set: INT2DDS_TCP_PORT = {}", port);
+    unsafe { std::env::set_var("INT2DDS_TCP_PORT", port.to_string()) };
 }
 
 /// Check if TLS is enabled for TCP connections.
