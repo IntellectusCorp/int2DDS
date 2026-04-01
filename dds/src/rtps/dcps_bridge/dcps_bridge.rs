@@ -220,7 +220,7 @@ impl DcpsBridge {
                 65000,
                 f,
                 publication_builtin_topic_data.clone(),
-                self.participant.guid(),
+                Arc::downgrade(&self.participant),
             );
             writer = Some(Arc::new(_writer));
         } else {
@@ -236,7 +236,7 @@ impl DcpsBridge {
                 65000,
                 f,
                 publication_builtin_topic_data.clone(),
-                self.participant.guid(),
+                Arc::downgrade(&self.participant),
             );
             writer = Some(Arc::new(_writer));
         }

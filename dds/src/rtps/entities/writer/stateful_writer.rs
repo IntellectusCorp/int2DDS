@@ -5,7 +5,7 @@ use std::{
     fmt::Debug,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, Weak,
     },
     thread,
 };
@@ -54,6 +54,8 @@ use crate::{
     utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
 };
 
+use crate::rtps::entities::participant::Participant;
+
 use super::{reader_proxy::ReaderProxy, Writer};
 
 #[allow(dead_code)]
@@ -93,7 +95,7 @@ impl StatefulWriter {
         data_max_size_serialized: i32,
         callback: Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>,
         publication_builtin_topic_data: PublicationBuiltinTopicData,
-        participant_guid: Guid,
+        participant: Weak<Participant>,
     ) -> Self {
         let writer_reliability_extension =
             *publication_builtin_topic_data.writer_reliability_extension();
@@ -109,10 +111,7 @@ impl StatefulWriter {
             periodic_heartbeat_timer_id: TimerId::PeriodicHeartbeat { entity_id: guid.entity_id() },
             data_max_size_serialized,
             matched_readers: Arc::new(Mutex::new(Vec::new())),
-            writer_cache: Arc::new(Mutex::new(WriterHistoryCache::new(
-                participant_guid,
-                endpoint_id,
-            ))),
+            writer_cache: Arc::new(Mutex::new(WriterHistoryCache::new(participant, endpoint_id))),
             heartbeat_count: Arc::new(Mutex::new(1)),
             callback: Arc::new(Mutex::new(callback)),
             publication_builtin_topic_data: Arc::new(Mutex::new(publication_builtin_topic_data)),
@@ -818,7 +817,7 @@ mod tests {
             65000,
             None,
             PublicationBuiltinTopicData::default(),
-            Guid::new([0; 12], EntityId::PARTICIPANT),
+            Weak::new(),
         );
 
         let remote_reader_guid =
@@ -889,7 +888,7 @@ mod tests {
             65000,
             None,
             PublicationBuiltinTopicData::default(),
-            Guid::new([0; 12], EntityId::PARTICIPANT),
+            Weak::new(),
         );
 
         let remote_reader_guid =

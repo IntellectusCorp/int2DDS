@@ -3,7 +3,7 @@
 
 use std::{
     fmt::Debug,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
 };
 
 use log::{debug, error};
@@ -41,6 +41,8 @@ use crate::{
         },
     },
 };
+
+use crate::rtps::entities::participant::Participant;
 
 use super::{reader_locator::ReaderLocator, Writer};
 
@@ -83,7 +85,7 @@ impl StatelessWriter {
         data_max_size_serialized: i32,
         callback: Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>,
         publication_builtin_topic_data: PublicationBuiltinTopicData,
-        participant_guid: Guid,
+        participant: Weak<Participant>,
     ) -> Self {
         // in:attribute_values
         // 8.4.7.1.1 & 8.4.7.1.2 & 8.4.7.2.1
@@ -105,10 +107,7 @@ impl StatelessWriter {
             heartbeat_period,
             data_max_size_serialized,
             reader_locators: Arc::new(Mutex::new(Vec::new())),
-            writer_cache: Arc::new(Mutex::new(WriterHistoryCache::new(
-                participant_guid,
-                endpoint_id,
-            ))),
+            writer_cache: Arc::new(Mutex::new(WriterHistoryCache::new(participant, endpoint_id))),
             callback: Arc::new(Mutex::new(callback)),
             publication_builtin_topic_data: Arc::new(Mutex::new(publication_builtin_topic_data)),
             publication_matched_status: Arc::new(Mutex::new(PublicationMatchedStatus::default())),

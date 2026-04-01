@@ -23,6 +23,7 @@ use crate::rtps::entities::endpoint::Endpoint;
 use crate::rtps::entities::entity::Entity;
 use crate::rtps::entities::history::cache_change::CacheChange;
 use crate::rtps::entities::history::history_cache::HistoryCache;
+use crate::rtps::entities::history::writer_history::WriterHistoryCache;
 use crate::rtps::entities::reader::{
     FragmentInfo, Reader, StatefulReader, StatelessReader, WriterProxy,
 };
@@ -144,16 +145,20 @@ impl UserLogic {
 
 // Writer Message Sending (Local Writer -> Remote Reader)
 impl UserLogic {
-    pub(crate) fn send_unsent_changes(&self, entity_id: EntityId) -> RtpsResult<()> {
+    pub(crate) fn send_unsent_changes(
+        &self,
+        entity_id: EntityId,
+        cache: &WriterHistoryCache,
+    ) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
 
         let writer = participant.find_writer_from_entity_id(entity_id);
 
         if let Some(writer) = writer {
             if let Some(writer) = writer.as_any().downcast_ref::<StatefulWriter>() {
-                self.send_unsent_changes_of_stateful_writer(writer)?;
+                self.send_unsent_changes_of_stateful_writer(writer, cache)?;
             } else if let Some(writer) = writer.as_any().downcast_ref::<StatelessWriter>() {
-                self.send_unsent_changes_of_stateless_writer(writer)?;
+                self.send_unsent_changes_of_stateless_writer(writer, cache)?;
             } else {
                 return Err(RtpsError::new(
                     RtpsErrorCode::DowncastError,
@@ -298,7 +303,11 @@ impl UserLogic {
         Ok(())
     }
 
-    fn send_unsent_changes_of_stateful_writer(&self, writer: &StatefulWriter) -> RtpsResult<()> {
+    fn send_unsent_changes_of_stateful_writer(
+        &self,
+        writer: &StatefulWriter,
+        history_cache: &WriterHistoryCache,
+    ) -> RtpsResult<()> {
         let reader_proxies_lock = writer.reader_proxies();
         let mut reader_proxies = reader_proxies_lock.lock().map_err(|_| {
             RtpsError::new(RtpsErrorCode::LockError, "[Data] Failed to acquire reader proxies lock")
@@ -308,17 +317,6 @@ impl UserLogic {
 
         // Send unsent CacheChanges to matched readers
         for reader_proxy in reader_proxies.iter_mut() {
-            let writer_cache_lock = writer.writer_cache();
-            let history_cache_guard = match writer_cache_lock.lock() {
-                Ok(guard) => guard,
-                Err(e) => {
-                    warn!("[Data] Failed to acquire writer cache lock for reader_proxy: {:?}", e);
-                    continue;
-                }
-            };
-
-            let history_cache = &*history_cache_guard;
-
             loop {
                 let a_change_seq_num = reader_proxy.next_unsent_change(history_cache);
 
@@ -442,7 +440,11 @@ impl UserLogic {
         Ok(())
     }
 
-    fn send_unsent_changes_of_stateless_writer(&self, writer: &StatelessWriter) -> RtpsResult<()> {
+    fn send_unsent_changes_of_stateless_writer(
+        &self,
+        writer: &StatelessWriter,
+        cache: &WriterHistoryCache,
+    ) -> RtpsResult<()> {
         let reader_tasks: Vec<(ReaderLocator, Vec<Arc<CacheChange>>)> = {
             let reader_locators = writer.reader_locator();
             let reader_locators_guard = reader_locators.lock().map_err(|e| {
@@ -452,21 +454,13 @@ impl UserLogic {
                 )
             })?;
 
-            let writer_cache = writer.writer_cache();
-            let cache_guard = writer_cache.lock().map_err(|e| {
-                RtpsError::new(
-                    RtpsErrorCode::LockError,
-                    format!("Failed to acquire writer_cache lock: {}", e),
-                )
-            })?;
-
             let mut tasks = Vec::new();
             for reader_locator in reader_locators_guard.iter() {
                 let mut changes_to_send = Vec::new();
                 let mut current_sn = reader_locator.highest_sent_change_sn();
 
                 // Collect cache changes not yet sent to the Remote Reader (Arc clone occurs)
-                while let Some(change) = cache_guard.next_change_after(current_sn) {
+                while let Some(change) = cache.next_change_after(current_sn) {
                     current_sn = change.sequence_number();
                     changes_to_send.push(change);
                 }
