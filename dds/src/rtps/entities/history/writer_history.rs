@@ -10,6 +10,7 @@ use crate::{
         entities::entity::Entity,
         entities::history::{cache_change::CacheChange, history_cache::HistoryCache},
         entities::participant::Participant,
+        entities::writer::Writer,
         task::sending_handler::{MessageType, SendingHandler},
     },
 };
@@ -83,7 +84,11 @@ impl WriterHistoryCache {
         self.changes.get(&seq_num).cloned()
     }
 
-    pub(crate) fn add_change(&mut self, a_change: Arc<CacheChange>) -> RtpsResult<()> {
+    pub(crate) fn add_change(
+        &mut self,
+        a_change: Arc<CacheChange>,
+        writer: Option<&(dyn Writer + Send + Sync)>,
+    ) -> RtpsResult<()> {
         let sn = a_change.sequence_number();
 
         if !self.is_builtin() {
@@ -93,11 +98,10 @@ impl WriterHistoryCache {
                 self.highest_sn = sn;
             }
 
-            if let Some(participant) = self.participant.upgrade() {
+            if let (Some(writer), Some(participant)) = (writer, self.participant.upgrade()) {
                 let (_, _, user_logic_arc) = participant.get_logics();
                 if let Some(user_logic) = user_logic_arc.as_ref() {
-                    let writer_entity_id = a_change.writer_guid().entity_id();
-                    user_logic.send_unsent_changes(writer_entity_id, self)?
+                    user_logic.send_unsent_changes(writer, self)?
                 }
             }
         } else {
