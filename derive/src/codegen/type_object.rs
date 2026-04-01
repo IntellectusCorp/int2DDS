@@ -203,18 +203,17 @@ pub fn generate_has_type_object_impl(
         })
         .collect();
 
-    // Determine extensibility kind
-    let ext_kind = match &type_config.extensibility {
-        Some(crate::codegen::type_config::ExtensibilityKind::Final) => {
+    // Determine extensibility kind (default: Appendable)
+    let ext_kind = match type_config.extensibility.unwrap_or_default() {
+        crate::codegen::type_config::ExtensibilityKind::Final => {
             quote! { #crate_path::xtypes::ExtensibilityKind::Final }
         }
-        Some(crate::codegen::type_config::ExtensibilityKind::Appendable) => {
+        crate::codegen::type_config::ExtensibilityKind::Appendable => {
             quote! { #crate_path::xtypes::ExtensibilityKind::Appendable }
         }
-        Some(crate::codegen::type_config::ExtensibilityKind::Mutable) => {
+        crate::codegen::type_config::ExtensibilityKind::Mutable => {
             quote! { #crate_path::xtypes::ExtensibilityKind::Mutable }
         }
-        None => quote! { #crate_path::xtypes::ExtensibilityKind::Final },
     };
 
     let impl_generics = &gc.impl_generics;
