@@ -15,7 +15,9 @@ use mio::{Interest, Registry, Token};
 
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::transport::port_manager::PortManager;
-use crate::rtps::transport::tcp::framing::{classify_frame, FramedReader, TcpFrameKind};
+use crate::rtps::transport::tcp::framing::{
+    classify_frame, write_framed_message, FramedReader, TcpFrameKind,
+};
 use crate::rtps::transport::tcp::protocol::{BindResponse, BindStatus, BindType, ControlMsg};
 
 /// Token for the listener socket itself
@@ -494,23 +496,14 @@ impl TcpMuxListener {
         self.send_control_message(token, &resp);
     }
 
-    /// Wrtie a control message to a connection's stream.
+    /// Write a control message to a connection's stream (with INT2 magic framing).
     fn send_control_message(&mut self, token: Token, msg: &ControlMsg) {
         let conn = match self.connections.get_mut(&token) {
             Some(c) => c,
             None => return,
         };
 
-        let payload = msg.to_bytes();
-        let len = payload.len() as u32;
-
-        use std::io::Write;
-        if let Err(e) = conn
-            .stream
-            .write_all(&len.to_be_bytes())
-            .and_then(|_| conn.stream.write_all(&payload))
-            .and_then(|_| conn.stream.flush())
-        {
+        if let Err(e) = write_framed_message(&mut conn.stream, &msg.to_bytes()) {
             warn!("TcpMuxListener: Failed to send control message to {:?}: {:?}", token, e);
         }
     }
