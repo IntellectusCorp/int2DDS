@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::sync::{Arc, Weak};
 
+use crate::rtps::common::rtps_error_code::{RtpsError, RtpsErrorCode};
 use crate::{
     common::instance_handle::InstanceHandle,
     rtps::{
@@ -87,31 +88,52 @@ impl WriterHistoryCache {
     pub(crate) fn add_change(
         &mut self,
         a_change: Arc<CacheChange>,
-        writer: Option<&(dyn Writer + Send + Sync)>,
+        writer: &(dyn Writer + Send + Sync),
     ) -> RtpsResult<()> {
+        if self.is_builtin() {
+            return Err(RtpsError::new(
+                RtpsErrorCode::InvalidEntityKind,
+                "add_change must not be called on a built-in writer history",
+            ));
+        }
+
+        let sn = a_change.sequence_number();
+        self.changes.insert(sn, a_change.clone());
+
+        if sn > self.highest_sn {
+            self.highest_sn = sn;
+        }
+
+        if let Some(participant) = self.participant.upgrade() {
+            let (_, _, user_logic_arc) = participant.get_logics();
+            if let Some(user_logic) = user_logic_arc.as_ref() {
+                user_logic.send_unsent_changes(writer, self)?
+            }
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn add_change_builtin(&mut self, a_change: Arc<CacheChange>) -> RtpsResult<()> {
+        if !self.is_builtin() {
+            return Err(RtpsError::new(
+                RtpsErrorCode::InvalidEntityKind,
+                "add_change_builtin must not be called on a non-built-in writer history",
+            ));
+        }
+
         let sn = a_change.sequence_number();
 
-        if !self.is_builtin() {
-            self.changes.insert(sn, a_change.clone());
+        // Built-in endpoint not connected to DDS entity, Resource limits & History QoS not applied
+        // Therefore arbitrarily limit size
+        if self.changes.len() >= BUILTIN_ENDPOINT_HISTORYCACHE_CAPACITY {
+            self.changes.pop_first();
+        }
 
-            if sn > self.highest_sn {
-                self.highest_sn = sn;
-            }
+        self.changes.insert(sn, a_change.clone());
 
-            if let (Some(writer), Some(participant)) = (writer, self.participant.upgrade()) {
-                let (_, _, user_logic_arc) = participant.get_logics();
-                if let Some(user_logic) = user_logic_arc.as_ref() {
-                    user_logic.send_unsent_changes(writer, self)?
-                }
-            }
-        } else {
-            // Built-in endpoint not connected to DDS entity, Resource limits & History QoS not applied
-            // Therefore arbitrarily limit size
-            if self.changes.len() >= BUILTIN_ENDPOINT_HISTORYCACHE_CAPACITY {
-                self.changes.pop_first();
-            }
-
-            self.changes.insert(sn, a_change.clone());
+        if sn > self.highest_sn {
+            self.highest_sn = sn;
         }
 
         Ok(())

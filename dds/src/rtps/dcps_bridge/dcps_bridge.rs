@@ -260,7 +260,7 @@ impl DcpsBridge {
             .writer_cache()
             .lock()
             .unwrap()
-            .add_change(cache_change.clone(), None);
+            .add_change_builtin(cache_change.clone());
 
         self.participant
             .remote_publications()
@@ -414,7 +414,7 @@ impl DcpsBridge {
             .writer_cache()
             .lock()
             .unwrap()
-            .add_change(cache_change.clone(), None);
+            .add_change_builtin(cache_change.clone());
 
         self.participant
             .remote_subscriptions()
@@ -636,7 +636,7 @@ impl DcpsBridge {
                     format!("Failed to lock history cache: {}", e),
                 )
             })?
-            .add_change(cache_change.clone(), None);
+            .add_change_builtin(cache_change.clone());
 
         self.send_sedp_message_and_match(
             cache_change,
@@ -708,7 +708,7 @@ impl DcpsBridge {
                     format!("Failed to lock history cache: {}", e),
                 )
             })?
-            .add_change(cache_change.clone(), None);
+            .add_change_builtin(cache_change.clone());
 
         self.send_sedp_message_and_match(
             cache_change,
@@ -994,7 +994,7 @@ mod tests {
                 );
                 match writer.writer_cache().lock() {
                     Ok(mut writer_cache) => {
-                        let _ = writer_cache.add_change(Arc::new(change), None);
+                        let _ = writer_cache.add_change_builtin(Arc::new(change));
                     }
                     Err(e) => {
                         log::error!("writer_cache lock error: {:?}", e);
