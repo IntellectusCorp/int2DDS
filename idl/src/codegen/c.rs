@@ -530,19 +530,12 @@ impl<'a> CGen<'a> {
                 format!("{} {}[{}]", elem_c, name, size)
             }
             ResolvedType::Map { key, value, bound } => {
-                let key_c = self.type_to_c_base(key);
-                let val_c = self.type_to_c_base(value);
-                if let Some(max) = bound {
-                    format!(
-                        "struct {{ {} keys[{}]; {} values[{}]; uint32_t length; }} {}",
-                        key_c, max, val_c, max, name
-                    )
-                } else {
-                    format!(
-                        "struct {{ {}* keys; {}* values; uint32_t length; }} {}",
-                        key_c, val_c, name
-                    )
-                }
+                let key_decl = self.map_member_decl(key, "keys", bound);
+                let val_decl = self.map_member_decl(value, "values", bound);
+                format!(
+                    "struct {{ {}; {}; uint32_t length; }} {}",
+                    key_decl, val_decl, name
+                )
             }
             ResolvedType::Struct(type_name)
             | ResolvedType::Enum(type_name)
@@ -810,10 +803,18 @@ impl<'a> CGen<'a> {
                 self.raw(&format!("{}for (uint32_t _wi = 0; _wi < _wlen; _wi++) int2dds_cdr_write_u16(&w, {}[_wi]);\n", indent, accessor));
                 self.raw(&format!("{}}}\n", indent));
             }
-            ResolvedType::Enum(_) | ResolvedType::Bitmask(_) => {
+            ResolvedType::Enum(_) => {
                 self.raw(&format!(
                     "{}int2dds_cdr_write_enum(&w, (int32_t){});\n",
                     indent, accessor
+                ));
+            }
+            ResolvedType::Bitmask(bitmask_name) => {
+                let bit_bound = self.find_bitmask(bitmask_name).map(|b| b.bit_bound).unwrap_or(32);
+                let (write_fn, cast_type) = bitmask_cdr_write_info(bit_bound);
+                self.raw(&format!(
+                    "{}{}(&w, ({}){});\n",
+                    indent, write_fn, cast_type, accessor
                 ));
             }
             ResolvedType::Sequence { element, .. } => {
@@ -1057,10 +1058,18 @@ impl<'a> CGen<'a> {
                 self.raw(&format!("{}{}[_wlen] = 0;\n", indent, accessor));
                 self.raw(&format!("{}}}\n", indent));
             }
-            ResolvedType::Enum(_) | ResolvedType::Bitmask(_) => {
+            ResolvedType::Enum(_) => {
                 self.raw(&format!(
                     "{}int2dds_cdr_read_enum(&r, (int32_t*)&{});\n",
                     indent, accessor
+                ));
+            }
+            ResolvedType::Bitmask(bitmask_name) => {
+                let bit_bound = self.find_bitmask(bitmask_name).map(|b| b.bit_bound).unwrap_or(32);
+                let (read_fn, cast_type) = bitmask_cdr_read_info(bit_bound);
+                self.raw(&format!(
+                    "{}{}(&r, ({}*)&{});\n",
+                    indent, read_fn, cast_type, accessor
                 ));
             }
             ResolvedType::Sequence { element, bound } => {
@@ -1229,6 +1238,44 @@ impl<'a> CGen<'a> {
     fn find_bitset(&self, name: &str) -> Option<&ResolvedBitset> {
         let simple = name.rsplit("::").next().unwrap_or(name);
         self.model.bitsets.iter().find(|b| b.name == simple)
+    }
+
+    /// Look up a bitmask by name, returning it if found.
+    fn find_bitmask(&self, name: &str) -> Option<&ResolvedBitmask> {
+        let simple = name.rsplit("::").next().unwrap_or(name);
+        self.model.bitmasks.iter().find(|b| b.name == simple)
+    }
+
+    /// Generate a C struct member declaration for a map key or value field.
+    /// Handles string/wstring types specially (like sequence<string>).
+    fn map_member_decl(&self, ty: &ResolvedType, field_name: &str, bound: &Option<u32>) -> String {
+        // String in FixedArray mode needs 2D array or pointer-to-array
+        if let ResolvedType::String { bound: str_bound } = ty {
+            if self.opts.string_mode == StringMode::FixedArray {
+                let str_size = str_bound.unwrap_or(self.opts.default_string_bound) + 1;
+                return if let Some(max) = bound {
+                    format!("char {}[{}][{}]", field_name, max, str_size)
+                } else {
+                    format!("char (*{})[{}]", field_name, str_size)
+                };
+            }
+        }
+        // WString needs 2D array or pointer-to-array
+        if let ResolvedType::WString { bound: ws_bound } = ty {
+            let ws_size = ws_bound.unwrap_or(self.opts.default_string_bound) + 1;
+            return if let Some(max) = bound {
+                format!("uint16_t {}[{}][{}]", field_name, max, ws_size)
+            } else {
+                format!("uint16_t (*{})[{}]", field_name, ws_size)
+            };
+        }
+        // Default: use base type
+        let base_c = self.type_to_c_base(ty);
+        if let Some(max) = bound {
+            format!("{} {}[{}]", base_c, field_name, max)
+        } else {
+            format!("{}* {}", base_c, field_name)
+        }
     }
 
     /// Check if a type has variable-length serialized representation.
@@ -1470,6 +1517,26 @@ impl<'a> CGen<'a> {
 
     fn raw(&mut self, text: &str) {
         self.out.push_str(text);
+    }
+}
+
+/// Map bitmask bit_bound to CDR write function name and cast type.
+fn bitmask_cdr_write_info(bit_bound: u32) -> (&'static str, &'static str) {
+    match bit_bound {
+        0..=8 => ("int2dds_cdr_write_u8", "uint8_t"),
+        9..=16 => ("int2dds_cdr_write_u16", "uint16_t"),
+        17..=32 => ("int2dds_cdr_write_u32", "uint32_t"),
+        _ => ("int2dds_cdr_write_u64", "uint64_t"),
+    }
+}
+
+/// Map bitmask bit_bound to CDR read function name and cast type.
+fn bitmask_cdr_read_info(bit_bound: u32) -> (&'static str, &'static str) {
+    match bit_bound {
+        0..=8 => ("int2dds_cdr_read_u8", "uint8_t"),
+        9..=16 => ("int2dds_cdr_read_u16", "uint16_t"),
+        17..=32 => ("int2dds_cdr_read_u32", "uint32_t"),
+        _ => ("int2dds_cdr_read_u64", "uint64_t"),
     }
 }
 

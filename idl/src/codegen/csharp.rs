@@ -260,6 +260,26 @@ impl<'a> CsGen<'a> {
         self.line("return obj;");
         self.indent -= 1;
         self.line("}");
+        self.line("");
+
+        // SerializeCdrInline - writes packed value directly using parent writer
+        self.line("internal void SerializeCdrInline(CdrWriter w)");
+        self.line("{");
+        self.indent += 1;
+        self.line(&format!("{} packed = 0;", storage_type));
+        bit_offset = 0;
+        for f in &b.fields {
+            let prop_name = cs_ident(&f.name);
+            let mask = (1u64 << f.bit_width) - 1;
+            self.line(&format!(
+                "packed |= ({})(((ulong){} & 0x{:X}) << {});",
+                storage_type, prop_name, mask, bit_offset
+            ));
+            bit_offset += f.bit_width;
+        }
+        self.line(&format!("w.{}(packed);", write_method));
+        self.indent -= 1;
+        self.line("}");
 
         self.indent -= 1;
         self.line("}");
@@ -443,6 +463,39 @@ impl<'a> CsGen<'a> {
         self.line("return obj;");
         self.indent -= 1;
         self.line("}");
+        self.line("");
+
+        // SerializeCdrInline
+        self.line("internal void SerializeCdrInline(CdrWriter w)");
+        self.line("{");
+        self.indent += 1;
+        self.line(&format!("w.{}(Discriminator);", disc_write));
+        self.line("switch (Discriminator)");
+        self.line("{");
+        self.indent += 1;
+        for case in &u.cases {
+            for label in &case.labels {
+                let label_str = self.label_to_csharp(label, &u.discriminant_type);
+                self.line(&format!("case {}:", label_str));
+            }
+            self.indent += 1;
+            let accessor = cs_ident(&case.member.name);
+            self.emit_write_field(&case.member.resolved_type, &accessor);
+            self.line("break;");
+            self.indent -= 1;
+        }
+        if let Some(ref def) = u.default_case {
+            self.line("default:");
+            self.indent += 1;
+            let accessor = cs_ident(&def.name);
+            self.emit_write_field(&def.resolved_type, &accessor);
+            self.line("break;");
+            self.indent -= 1;
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
 
         self.indent -= 1;
         self.line("}");
@@ -544,6 +597,10 @@ impl<'a> CsGen<'a> {
 
         // DeserializeCdrInline internal static method
         self.emit_deserialize_cdr_inline(&full_struct);
+        self.line("");
+
+        // SerializeCdrInline internal method
+        self.emit_serialize_cdr_inline(&full_struct);
         self.line("");
 
         // SerializeKey method
@@ -727,12 +784,7 @@ impl<'a> CsGen<'a> {
                 self.line(&format!("w.{}(({}){}); ", write_method, cs_type, accessor));
             }
             ResolvedType::Struct(_) => {
-                self.line("{");
-                self.indent += 1;
-                self.line(&format!("var _nested = {}.SerializeCdr(w.IsXcdr2);", accessor));
-                self.line("w.WriteBytes(_nested.AsSpan(4)); // Skip 4-byte encap header");
-                self.indent -= 1;
-                self.line("}");
+                self.line(&format!("{}.SerializeCdrInline(w);", accessor));
             }
             ResolvedType::Sequence { element, .. } => {
                 self.line(&format!("w.WriteSeqHeader((uint){}.Count);", accessor));
@@ -898,6 +950,48 @@ impl<'a> CsGen<'a> {
         }
 
         self.line("return obj;");
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    fn emit_serialize_cdr_inline(&mut self, s: &ResolvedStruct) {
+        self.line("internal void SerializeCdrInline(CdrWriter w)");
+        self.line("{");
+        self.indent += 1;
+
+        match s.extensibility {
+            ExtensibilityKind::Final => {
+                for m in &s.members {
+                    let accessor = cs_ident(&m.name);
+                    self.emit_write_field(&m.resolved_type, &accessor);
+                }
+            }
+            ExtensibilityKind::Appendable => {
+                self.line("var _dt = w.DheaderBegin();");
+                for m in &s.members {
+                    let accessor = cs_ident(&m.name);
+                    self.emit_write_field(&m.resolved_type, &accessor);
+                }
+                self.line("w.DheaderFinalize(_dt);");
+            }
+            ExtensibilityKind::Mutable => {
+                self.line("var _dt = w.DheaderBegin();");
+                for (i, m) in s.members.iter().enumerate() {
+                    let member_id = m.member_id.unwrap_or(i as u32);
+                    let must_understand = if m.must_understand { "true" } else { "false" };
+                    self.line(&format!(
+                        "var _et{} = w.EmheaderBegin({}, {});",
+                        i, member_id, must_understand
+                    ));
+                    let accessor = cs_ident(&m.name);
+                    self.emit_write_field(&m.resolved_type, &accessor);
+                    self.line(&format!("w.EmheaderFinalize(_et{});", i));
+                }
+                self.line("w.WriteSentinel();");
+                self.line("w.DheaderFinalize(_dt);");
+            }
+        }
+
         self.indent -= 1;
         self.line("}");
     }
