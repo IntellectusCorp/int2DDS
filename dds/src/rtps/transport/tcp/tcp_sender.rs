@@ -162,10 +162,10 @@ impl TcpSender {
             let resp = self.read_control_response(&mut control_stream)?;
             match resp {
                 ControlMsg::PortReserveAck { cookie } => cookie,
-                ControlMsg::Error { code, message } => {
+                ControlMsg::Error { operation, code, message } => {
                     return Err(io::Error::new(
                         ErrorKind::ConnectionRefused,
-                        format!("PORT_RESERVE rejected (code={}): {}", code, message),
+                        format!("PORT_RESERVE rejected (op=0x{:02x}, code={}): {}", operation, code, message),
                     ));
                 }
                 other => {

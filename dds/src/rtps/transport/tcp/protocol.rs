@@ -18,7 +18,16 @@
 //! | 0x06 | PORT_BIND_ACK    | Server → Client  | (empty)                    |
 //! | 0x08 | KEEPALIVE        | Either           | (empty)                    |
 //! | 0x09 | KEEPALIVE_ACK    | Either           | (empty)                    |
-//! | 0x0A | ERROR            | Server → Client  | 2B code + 2B len + string  |
+//! | 0x0A | ERROR            | Server → Client  | 1B operation + 2B code + 2B len + string  |
+//!
+//! ## ERROR Operation Field
+//!
+//! The `operation` byte in ERROR identifies which handshake step failed:
+//!
+//! | Value | Name         | Meaning                              |
+//! |-------|--------------|--------------------------------------|
+//! | 0x03  | PORT_RESERVE | Logical port not recognized (code=1) |
+//! | 0x05  | PORT_BIND    | Cookie is invalid or expired (code=2) |
 
 use std::io;
 use std::net::Ipv4Addr;
@@ -85,8 +94,9 @@ pub(crate) enum ControlMsg {
     /// Keepalive acknowledgment.
     KeepaliveAck,
 
-    /// Error response with code and message.
-    Error { code: u16, message: String },
+    /// Error response with operation context, code, and message.
+    /// `operation` identifies which handshake step failed (uses MSG_* constants).
+    Error { operation: u8, code: u16, message: String },
 }
 
 impl ControlMsg {
@@ -125,9 +135,10 @@ impl ControlMsg {
             ControlMsg::Keepalive => vec![MSG_KEEPALIVE],
             ControlMsg::KeepaliveAck => vec![MSG_KEEPALIVE_ACK],
 
-            ControlMsg::Error { code, message } => {
-                let mut buf = Vec::with_capacity(5 + message.len());
+            ControlMsg::Error { operation, code, message } => {
+                let mut buf = Vec::with_capacity(6 + message.len());
                 buf.push(MSG_ERROR);
+                buf.push(*operation);
                 buf.extend_from_slice(&code.to_be_bytes());
                 buf.extend_from_slice(&(message.len() as u16).to_be_bytes());
                 buf.extend_from_slice(message.as_bytes());
@@ -189,17 +200,18 @@ impl ControlMsg {
             MSG_KEEPALIVE_ACK => Ok(ControlMsg::KeepaliveAck),
 
             MSG_ERROR => {
-                if payload.len() < 5 {
+                if payload.len() < 6 {
                     return Err(io::Error::new(io::ErrorKind::InvalidData, "Error too short"));
                 }
-                let code = u16::from_be_bytes([payload[1], payload[2]]);
-                let msg_len = u16::from_be_bytes([payload[3], payload[4]]) as usize;
-                let message = if payload.len() >= 5 + msg_len {
-                    String::from_utf8_lossy(&payload[5..5 + msg_len]).to_string()
+                let operation = payload[1];
+                let code = u16::from_be_bytes([payload[2], payload[3]]);
+                let msg_len = u16::from_be_bytes([payload[4], payload[5]]) as usize;
+                let message = if payload.len() >= 6 + msg_len {
+                    String::from_utf8_lossy(&payload[6..6 + msg_len]).to_string()
                 } else {
                     String::new()
                 };
-                Ok(ControlMsg::Error { code, message })
+                Ok(ControlMsg::Error { operation, code, message })
             }
 
             other => Err(io::Error::new(
@@ -298,7 +310,7 @@ mod tests {
 
     #[test]
     fn test_error_roundtrip() {
-        let msg = ControlMsg::Error { code: 0x0001, message: "no matching port".to_string() };
+        let msg = ControlMsg::Error { operation: MSG_PORT_RESERVE, code: 0x0001, message: "no matching port".to_string() };
         let bytes = msg.to_bytes();
         let parsed = ControlMsg::from_bytes(&bytes).unwrap();
         assert_eq!(parsed, msg);

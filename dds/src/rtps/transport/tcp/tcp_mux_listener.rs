@@ -17,7 +17,7 @@ use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::tcp::framing::{
     classify_frame, write_framed_message, FramedReader, TcpFrameKind,
 };
-use crate::rtps::transport::tcp::protocol::{generate_cookie, ControlMsg};
+use crate::rtps::transport::tcp::protocol::{generate_cookie, ControlMsg, MSG_PORT_BIND, MSG_PORT_RESERVE};
 
 const LISTENER_TOKEN: Token = Token(0);
 const CONNECTION_TOKEN_START: usize = 65536;
@@ -269,7 +269,7 @@ impl TcpMuxListener {
                 if logical_port != my_disc && logical_port != my_user {
                     warn!("TcpMuxListener: Invalid port {} on {:?}", logical_port, token);
                     let err =
-                        ControlMsg::Error { code: 1, message: "no matching port".to_string() };
+                        ControlMsg::Error { operation: MSG_PORT_RESERVE, code: 1, message: "no matching port".to_string() };
                     self.send_control(token, &err);
                     return;
                 }
@@ -315,8 +315,9 @@ impl TcpMuxListener {
         let logical_port = match self.cookie_to_port.remove(cookie) {
             Some(port) => port,
             None => {
-                warn!("TcpMuxListener: Unknown cookie on {:?}", token);
-                let err = ControlMsg::Error { code: 2, message: "invalid cookie".to_string() };
+                let cookie_hex: String = cookie.iter().map(|b| format!("{:02x}", b)).collect();
+                warn!("TcpMuxListener: Unknown cookie [{}] on {:?}", cookie_hex, token);
+                let err = ControlMsg::Error { operation: MSG_PORT_BIND, code: 2, message: format!("invalid cookie [{}]", cookie_hex) };
                 self.send_control(token, &err);
                 self.remove_connection(token, registry);
                 return;
