@@ -1804,9 +1804,17 @@ impl SedpLogic {
             );
             return Ok(false);
         };
-
         for locator in remote_participant_data.metatraffic_unicast_locator_list() {
-            self.send_to_single_locator(buffer, locator.clone(), message_type)?;
+            match self.send_to_single_locator(buffer, locator.clone(), message_type) {
+                Ok(()) => (),
+                Err(e) if e.code == RtpsErrorCode::PeerDisconnected => {
+                    participant.unmatch_with_remote_participant(
+                        &remote_participant_data.participant_guid(),
+                    );
+                    return Ok(false);
+                }
+                Err(_) => (),
+            }
         }
         Ok(true)
     }
@@ -1823,10 +1831,23 @@ impl SedpLogic {
             .lock()
             .map_err(|_| RtpsError::new(RtpsErrorCode::LockError, None))?;
 
+        let mut disconnected_participants: Vec<Guid> = Vec::new();
         for remote_participant_data in remote_participant_datas_guard.iter() {
             for locator in remote_participant_data.metatraffic_unicast_locator_list() {
-                self.send_to_single_locator(buffer, locator.clone(), message_type)?;
+                match self.send_to_single_locator(buffer, locator.clone(), message_type) {
+                    Ok(()) => (),
+                    Err(e) if e.code == RtpsErrorCode::PeerDisconnected => {
+                        disconnected_participants
+                            .push(remote_participant_data.participant_guid());
+                        break;
+                    }
+                    Err(_) => (),
+                }
             }
+        }
+        drop(remote_participant_datas_guard);
+        for guid in disconnected_participants {
+            participant.unmatch_with_remote_participant(&guid);
         }
 
         Ok(())
@@ -1839,8 +1860,13 @@ impl SedpLogic {
         message_type: &str,
     ) -> RtpsResult<()> {
         self.transport.send(buffer, &SendTarget::UnicastDiscovery(&locator)).map_err(|e| {
+            let code = match e.kind() {
+                std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::ConnectionReset => RtpsErrorCode::PeerDisconnected,
+                _ => RtpsErrorCode::NotSent,
+            };
             RtpsError::new(
-                RtpsErrorCode::NotSent,
+                code,
                 format!("[{}] SEDP Logic: Failed to send message: {}", message_type, e),
             )
         })?;

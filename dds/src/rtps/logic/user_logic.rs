@@ -281,6 +281,7 @@ impl UserLogic {
         })?;
 
         let participant = self.get_upgraded_participant()?;
+        let mut disconnected_peer: Option<GuidPrefix> = None;
 
         // Send unsent CacheChanges to matched readers
         for reader_proxy in reader_proxies.iter_mut() {
@@ -350,7 +351,7 @@ impl UserLogic {
                                 ));
                             }
 
-                            if self.send_data_frag_to_reader_proxy(
+                            match self.send_data_frag_to_reader_proxy(
                                 &a_change,
                                 reader_proxy,
                                 writer.endpoint_id(),
@@ -358,10 +359,21 @@ impl UserLogic {
                                 heartbeat_info,
                                 timestamp,
                             ) {
-                                writer.increase_heartbeat_count();
-                                if !reader_proxy.is_first_hb_sent() {
-                                    reader_proxy.set_first_hb_sent();
+                                Ok(true) => {
+                                    writer.increase_heartbeat_count();
+                                    if !reader_proxy.is_first_hb_sent() {
+                                        reader_proxy.set_first_hb_sent();
+                                    }
                                 }
+                                Err(e) if e.code == RtpsErrorCode::PeerDisconnected => {
+                                    warn!(
+                                        "[DataFrag] Peer disconnected for reader {:?}",
+                                        reader_proxy.remote_reader_guid()
+                                    );
+                                    disconnected_peer = Some(reader_proxy.remote_reader_guid().prefix());
+                                    break;
+                                }
+                                _ => {}
                             }
                         }
                     } else {
@@ -384,17 +396,25 @@ impl UserLogic {
                         )
                         .map_err(|e| RtpsError::new(RtpsErrorCode::Io, e.to_string()))?;
 
-                        if self
-                            .send_rtps_message_to_locators(
-                                reader_proxy.unicast_locator_list(),
-                                &buffer,
-                            )
-                            .is_ok()
-                        {
-                            writer.increase_heartbeat_count();
-                            if !reader_proxy.is_first_hb_sent() {
-                                reader_proxy.set_first_hb_sent();
+                        match self.send_rtps_message_to_locators(
+                            reader_proxy.unicast_locator_list(),
+                            &buffer,
+                        ) {
+                            Ok(()) => {
+                                writer.increase_heartbeat_count();
+                                if !reader_proxy.is_first_hb_sent() {
+                                    reader_proxy.set_first_hb_sent();
+                                }
                             }
+                            Err(e) if e.code == RtpsErrorCode::PeerDisconnected => {
+                                warn!(
+                                    "[Data] Peer disconnected for reader {:?}",
+                                    reader_proxy.remote_reader_guid()
+                                );
+                                disconnected_peer = Some(reader_proxy.remote_reader_guid().prefix());
+                                break;
+                            }
+                            Err(_) => {}
                         }
                     }
                 } else {
@@ -409,6 +429,11 @@ impl UserLogic {
         }
 
         drop(reader_proxies);
+
+        if let Some(prefix) = disconnected_peer {
+            let guid = Guid::new(prefix, EntityId::PARTICIPANT);
+            participant.unmatch_with_remote_participant(&guid);
+        }
 
         // Periodic heartbeat timer resuming when new changes are sent
         if !writer.heartbeat_timer_running() {
@@ -541,6 +566,7 @@ impl UserLogic {
         Ok(())
     }
 
+    /// Returns Ok(true) if sent, Ok(false) if skipped, Err(PeerDisconnected) if peer is gone.
     fn send_data_frag_to_reader_proxy(
         &self,
         change: &CacheChange,
@@ -549,7 +575,7 @@ impl UserLogic {
         fragment_num: u32,
         heartbeat_info: Option<(u32, SequenceNumber, SequenceNumber, bool, bool)>,
         timestamp: DateTime<Utc>,
-    ) -> bool {
+    ) -> RtpsResult<bool> {
         if let Some(fragment_data) = change.get_fragment_data(fragment_num) {
             let buffer = MessageCreator::create_data_frag_msg(
                 Arc::new(change.clone()),
@@ -566,15 +592,17 @@ impl UserLogic {
             );
 
             if let Ok(buffer) = buffer {
-                return self
-                    .send_rtps_message_to_locators(
-                        reader_proxy.unicast_locator_list(),
-                        buffer.as_slice(),
-                    )
-                    .is_ok();
+                match self.send_rtps_message_to_locators(
+                    reader_proxy.unicast_locator_list(),
+                    buffer.as_slice(),
+                ) {
+                    Ok(()) => return Ok(true),
+                    Err(e) if e.code == RtpsErrorCode::PeerDisconnected => return Err(e),
+                    Err(_) => return Ok(false),
+                }
             }
         }
-        false
+        Ok(false)
     }
 
     // Sending heartbeat message to all matched reader proxies of the given writer
@@ -1168,8 +1196,22 @@ impl UserLogic {
                 }
                 Err(e) => {
                     warn!("[UserLogic] Failed to send to locator {:?}: {:?}", locator, e);
-                    last_error = Some(e);
-                    continue;
+                    match e.kind() {
+                        std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::ConnectionReset => {
+                            return Err(RtpsError::new(
+                                RtpsErrorCode::PeerDisconnected,
+                                format!(
+                                    "[UserLogic] Peer disconnected at locator {:?}: {}",
+                                    locator, e
+                                ),
+                            ));
+                        }
+                        _ => {
+                            last_error = Some(e);
+                            continue;
+                        }
+                    }
                 }
             }
         }
@@ -1972,14 +2014,22 @@ impl UnicastMessageProcessor for UserLogic {
         let timestamp = Utc::now();
         for fragment_num in requested_fragments {
             if fragment_num >= 1 && fragment_num <= total_frags {
-                self.send_data_frag_to_reader_proxy(
+                if let Err(e) = self.send_data_frag_to_reader_proxy(
                     &change,
                     reader_proxy,
                     writer_id,
                     fragment_num,
                     heartbeat_info,
                     timestamp,
-                );
+                ) {
+                    if e.code == RtpsErrorCode::PeerDisconnected {
+                        warn!(
+                            "[NackFrag] Peer disconnected during retransmit for reader {:?}",
+                            reader_proxy.remote_reader_guid()
+                        );
+                        break;
+                    }
+                }
             }
         }
 
