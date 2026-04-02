@@ -1198,7 +1198,8 @@ impl UserLogic {
                     warn!("[UserLogic] Failed to send to locator {:?}: {:?}", locator, e);
                     match e.kind() {
                         std::io::ErrorKind::BrokenPipe
-                        | std::io::ErrorKind::ConnectionReset => {
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionRefused => {
                             return Err(RtpsError::new(
                                 RtpsErrorCode::PeerDisconnected,
                                 format!(
