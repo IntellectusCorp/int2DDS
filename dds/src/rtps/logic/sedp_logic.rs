@@ -1469,6 +1469,7 @@ impl SedpLogic {
 
         let mut is_sent = false;
         let mut retry: bool = false;
+        let mut peer_disconnected = false;
 
         let participant_guid = {
             let local_participant_data = participant.local_participant_proxy_data();
@@ -1477,7 +1478,7 @@ impl SedpLogic {
 
         match writer.reader_proxies().lock() {
             Ok(reader_proxies) => {
-                for reader_proxy in reader_proxies.iter() {
+                'outer: for reader_proxy in reader_proxies.iter() {
                     if reader_proxy.remote_reader_guid().prefix() != *guid_prefix {
                         continue;
                     }
@@ -1498,13 +1499,26 @@ impl SedpLogic {
                     match buffer {
                         Ok(buffer) => {
                             for locator in reader_proxy.unicast_locator_list() {
-                                if let Err(e) = self
+                                match self
                                     .transport
                                     .send(&buffer, &SendTarget::UnicastDiscovery(&locator))
                                 {
-                                    warn!("Failed to send SEDP heartbeat: {:?}", e);
-                                } else {
-                                    is_sent = true;
+                                    Ok(_) => {
+                                        is_sent = true;
+                                    }
+                                    Err(e) => {
+                                        let disconnected = matches!(
+                                            e.kind(),
+                                            std::io::ErrorKind::BrokenPipe
+                                                | std::io::ErrorKind::ConnectionReset
+                                                | std::io::ErrorKind::ConnectionRefused
+                                        );
+                                        if disconnected {
+                                            peer_disconnected = true;
+                                            break 'outer;
+                                        }
+                                        warn!("Failed to send SEDP heartbeat: {:?}", e);
+                                    }
                                 }
                             }
                             writer.increase_heartbeat_count();
@@ -1524,6 +1538,11 @@ impl SedpLogic {
                     format!("Failed to get reader proxies: {}", e),
                 ));
             }
+        }
+
+        if peer_disconnected {
+            let peer_guid = Guid::new(*guid_prefix, EntityId::PARTICIPANT);
+            participant.unmatch_with_remote_participant(&peer_guid);
         }
 
         if retry {
@@ -1862,7 +1881,8 @@ impl SedpLogic {
         self.transport.send(buffer, &SendTarget::UnicastDiscovery(&locator)).map_err(|e| {
             let code = match e.kind() {
                 std::io::ErrorKind::BrokenPipe
-                | std::io::ErrorKind::ConnectionReset => RtpsErrorCode::PeerDisconnected,
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionRefused => RtpsErrorCode::PeerDisconnected,
                 _ => RtpsErrorCode::NotSent,
             };
             RtpsError::new(
