@@ -391,7 +391,7 @@ cargo run --example hello_world -- --int2dds-tcp-nodelay
 
 ### INT2DDS_INITIAL_PEERS
 
-Sets the initial peer list for SPDP unicast discovery. When set, SPDP messages are sent via unicast to these peers instead of multicast. Works with all transport modes. Format is comma-separated socket addresses.
+Sets the initial peer list for SPDP unicast discovery. When set, SPDP messages are sent via unicast to these peers in addition to the default multicast. Works with all transport modes. Format is comma-separated socket addresses.
 
 - Format: `ip:port,ip:port,...`
 - The port must be the remote participant's **metatraffic unicast port** (discovery unicast port)
