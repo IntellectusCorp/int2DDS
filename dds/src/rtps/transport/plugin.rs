@@ -102,6 +102,15 @@ pub(crate) trait TransportPlugin: Send + Sync {
     /// is moved into `UserUnicastListeningTask`.
     fn take_user_data_unicast_source(&self) -> Option<MessageSource>;
 
+    /// Take ownership of the dead peer event receiver.
+    ///
+    /// Returns `None` if the transport does not support connection-level peer monitoring (e.g., UDP).
+    /// TCP transports return a channel that emits GuidPrefix of peers whose connections are lost
+    /// (detected via keepalive timeout). Called once during initialization.
+    fn take_dead_peer_receiver(&self) -> Option<crossbeam_channel::Receiver<GuidPrefix>> {
+        None
+    }
+
     /// Get the local port number used by this transport's sender.
     fn port(&self) -> u16;
 

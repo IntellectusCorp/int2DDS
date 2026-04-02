@@ -38,6 +38,9 @@ pub(crate) struct TcpTransportPlugin {
     discovery_rx: Mutex<Option<Receiver<IncomingMessage>>>,
     user_data_rx: Mutex<Option<Receiver<IncomingMessage>>>,
 
+    /// Dead peer event receiver — taken once via `take_dead_peer_receiver()`.
+    dead_peer_rx: Mutex<Option<Receiver<GuidPrefix>>>,
+
     /// Termination flag for the mux listening thread.
     terminated: Arc<AtomicBool>,
 
@@ -92,6 +95,9 @@ impl TcpTransportPlugin {
         let sender =
             TcpSender::new(working_ip, guid_prefix, domain_id, participant_id, listener_port)?;
 
+        // Dead peer event channel
+        let (dead_peer_tx, dead_peer_rx) = bounded::<GuidPrefix>(CHANNEL_BUFFER_SIZE);
+
         // Spawn mux listening thread
         let terminated = Arc::new(AtomicBool::new(false));
         let terminated_clone = terminated.clone();
@@ -99,8 +105,11 @@ impl TcpTransportPlugin {
         let handle = thread::Builder::new()
             .name("tcp_mux_listening".to_string())
             .spawn(move || {
-                let mut task =
-                    TcpMuxListeningLoopTask { mux_listener, terminated: terminated_clone };
+                let mut task = TcpMuxListeningLoopTask {
+                    mux_listener,
+                    terminated: terminated_clone,
+                    dead_peer_tx,
+                };
                 if let Err(e) = task.run() {
                     log::error!("[TcpTransportPlugin] Mux listening loop error: {:?}", e);
                 }
@@ -121,6 +130,7 @@ impl TcpTransportPlugin {
             listener_port,
             discovery_rx: Mutex::new(Some(discovery_rx)),
             user_data_rx: Mutex::new(Some(user_data_rx)),
+            dead_peer_rx: Mutex::new(Some(dead_peer_rx)),
             terminated,
             mux_thread_handle: Mutex::new(Some(handle)),
         })
@@ -182,6 +192,10 @@ impl TransportPlugin for TcpTransportPlugin {
         Some(MessageSource::Channel { rx })
     }
 
+    fn take_dead_peer_receiver(&self) -> Option<crossbeam_channel::Receiver<GuidPrefix>> {
+        self.dead_peer_rx.lock().expect("lock poisoned").take()
+    }
+
     fn port(&self) -> u16 {
         self.listener_port
     }
@@ -214,6 +228,7 @@ impl TransportPlugin for TcpTransportPlugin {
 struct TcpMuxListeningLoopTask {
     mux_listener: TcpMuxListener,
     terminated: Arc<AtomicBool>,
+    dead_peer_tx: crossbeam_channel::Sender<GuidPrefix>,
 }
 
 impl TcpMuxListeningLoopTask {
@@ -281,6 +296,7 @@ impl TcpMuxListeningLoopTask {
                 for guid in dead_peers {
                     log::warn!("[TcpMuxListeningLoopTask] Removing dead peer {:?}", guid);
                     self.mux_listener.remove_peer(guid, poll.registry());
+                    let _ = self.dead_peer_tx.try_send(guid);
                 }
             }
         }
