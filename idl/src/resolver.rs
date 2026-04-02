@@ -192,7 +192,11 @@ impl Resolver {
         Ok(ResolvedEnum { name: edef.name.clone(), qualified_name: qname.to_string(), variants })
     }
 
-    fn resolve_bitmask(&self, qname: &str, bdef: &BitmaskDef) -> Result<ResolvedBitmask, ResolveError> {
+    fn resolve_bitmask(
+        &self,
+        qname: &str,
+        bdef: &BitmaskDef,
+    ) -> Result<ResolvedBitmask, ResolveError> {
         // Extract @bit_bound from annotations (default 32)
         let bit_bound = self.extract_bit_bound(&bdef.annotations)?.unwrap_or(32);
 
@@ -224,16 +228,17 @@ impl Resolver {
         })
     }
 
-    fn resolve_bitset(&self, qname: &str, bdef: &BitsetDef) -> Result<ResolvedBitset, ResolveError> {
+    fn resolve_bitset(
+        &self,
+        qname: &str,
+        bdef: &BitsetDef,
+    ) -> Result<ResolvedBitset, ResolveError> {
         let mut fields = Vec::new();
         let mut total_bits: u32 = 0;
 
         for f in &bdef.fields {
             total_bits += f.bit_width;
-            fields.push(ResolvedBitsetField {
-                name: f.name.clone(),
-                bit_width: f.bit_width,
-            });
+            fields.push(ResolvedBitsetField { name: f.name.clone(), bit_width: f.bit_width });
         }
 
         if total_bits > 64 {
@@ -266,19 +271,13 @@ impl Resolver {
             let resolved_type = self.resolve_type_spec(&c.member.type_spec)?;
             cases.push(ResolvedUnionCase {
                 labels,
-                member: ResolvedUnionCaseMember {
-                    name: c.member.name.clone(),
-                    resolved_type,
-                },
+                member: ResolvedUnionCaseMember { name: c.member.name.clone(), resolved_type },
             });
         }
 
         let default_case = if let Some(dc) = &udef.default_case {
             let resolved_type = self.resolve_type_spec(&dc.type_spec)?;
-            Some(ResolvedUnionCaseMember {
-                name: dc.name.clone(),
-                resolved_type,
-            })
+            Some(ResolvedUnionCaseMember { name: dc.name.clone(), resolved_type })
         } else {
             None
         };
@@ -298,9 +297,7 @@ impl Resolver {
             ConstExpr::Int(v) => Ok(ResolvedUnionLabel::Int(*v)),
             ConstExpr::Bool(v) => Ok(ResolvedUnionLabel::Bool(*v)),
             ConstExpr::Ident(name) => Ok(ResolvedUnionLabel::Ident(name.clone())),
-            _ => Err(ResolveError {
-                message: "unsupported union case label type".to_string(),
-            }),
+            _ => Err(ResolveError { message: "unsupported union case label type".to_string() }),
         }
     }
 
@@ -315,9 +312,7 @@ impl Resolver {
         // Validate base_type exists if specified
         if let Some(base) = &sdef.base_type {
             if !self.known_types.contains(base) {
-                return Err(ResolveError {
-                    message: format!("unresolved base type: '{}'", base),
-                });
+                return Err(ResolveError { message: format!("unresolved base type: '{}'", base) });
             }
         }
 
@@ -418,9 +413,17 @@ impl Resolver {
                 }
                 // Check known struct/enum/bitmask
                 if self.known_types.contains(name) {
-                    if self.enum_defs.iter().any(|(q, _)| q == name || q.ends_with(&format!("::{}", name))) {
+                    if self
+                        .enum_defs
+                        .iter()
+                        .any(|(q, _)| q == name || q.ends_with(&format!("::{}", name)))
+                    {
                         Ok(ResolvedType::Enum(name.clone()))
-                    } else if self.bitmask_defs.iter().any(|(q, _)| q == name || q.ends_with(&format!("::{}", name))) {
+                    } else if self
+                        .bitmask_defs
+                        .iter()
+                        .any(|(q, _)| q == name || q.ends_with(&format!("::{}", name)))
+                    {
                         Ok(ResolvedType::Bitmask(name.clone()))
                     } else {
                         Ok(ResolvedType::Struct(name.clone()))
@@ -469,7 +472,10 @@ impl Resolver {
         Ok(ExtensibilityKind::default())
     }
 
-    fn extract_autoid(&self, annotations: &[Annotation]) -> Result<Option<AutoIdKind>, ResolveError> {
+    fn extract_autoid(
+        &self,
+        annotations: &[Annotation],
+    ) -> Result<Option<AutoIdKind>, ResolveError> {
         for ann in annotations {
             if ann.name == "autoid" {
                 if let Some(param) = ann.params.first() {
@@ -536,10 +542,18 @@ impl Resolver {
                 if let Some(param) = ann.params.first() {
                     return match param {
                         AnnotationParam::Positional(ConstExpr::Int(v)) => Some(ConstValue::Int(*v)),
-                        AnnotationParam::Positional(ConstExpr::Float(v)) => Some(ConstValue::Float(*v)),
-                        AnnotationParam::Positional(ConstExpr::String(v)) => Some(ConstValue::Str(v.clone())),
-                        AnnotationParam::Positional(ConstExpr::Bool(v)) => Some(ConstValue::Bool(*v)),
-                        AnnotationParam::Positional(ConstExpr::Ident(v)) => Some(ConstValue::Ident(v.clone())),
+                        AnnotationParam::Positional(ConstExpr::Float(v)) => {
+                            Some(ConstValue::Float(*v))
+                        }
+                        AnnotationParam::Positional(ConstExpr::String(v)) => {
+                            Some(ConstValue::Str(v.clone()))
+                        }
+                        AnnotationParam::Positional(ConstExpr::Bool(v)) => {
+                            Some(ConstValue::Bool(*v))
+                        }
+                        AnnotationParam::Positional(ConstExpr::Ident(v)) => {
+                            Some(ConstValue::Ident(v.clone()))
+                        }
                         _ => None,
                     };
                 }
@@ -551,7 +565,9 @@ impl Resolver {
     fn extract_hashid(&self, annotations: &[Annotation]) -> Option<Option<String>> {
         for ann in annotations {
             if ann.name == "hashid" {
-                return if let Some(AnnotationParam::Positional(ConstExpr::String(name))) = ann.params.first() {
+                return if let Some(AnnotationParam::Positional(ConstExpr::String(name))) =
+                    ann.params.first()
+                {
                     Some(Some(name.clone()))
                 } else {
                     Some(None) // bare @hashid -> hash field name
@@ -767,9 +783,9 @@ mod tests {
         let model = resolve(defs).unwrap();
         assert_eq!(model.enums.len(), 1);
         let e = &model.enums[0];
-        assert_eq!(e.variants[0].value, 0);   // LOW (auto)
-        assert_eq!(e.variants[1].value, 5);   // @value(5)
-        assert_eq!(e.variants[2].value, 10);  // @value(10)
+        assert_eq!(e.variants[0].value, 0); // LOW (auto)
+        assert_eq!(e.variants[1].value, 5); // @value(5)
+        assert_eq!(e.variants[2].value, 10); // @value(10)
         assert_eq!(e.variants[3].value, 100); // @value(100)
     }
 
@@ -922,8 +938,10 @@ mod tests {
         .unwrap();
         let model = resolve(defs).unwrap();
         let s = &model.structs[0];
-        assert!(matches!(&s.members[0].resolved_type, ResolvedType::Map { key, value, bound: None }
-            if matches!(key.as_ref(), ResolvedType::I32) && matches!(value.as_ref(), ResolvedType::String { bound: None })));
+        assert!(
+            matches!(&s.members[0].resolved_type, ResolvedType::Map { key, value, bound: None }
+            if matches!(key.as_ref(), ResolvedType::I32) && matches!(value.as_ref(), ResolvedType::String { bound: None }))
+        );
         assert!(matches!(&s.members[1].resolved_type, ResolvedType::Map { bound: Some(100), .. }));
     }
 
