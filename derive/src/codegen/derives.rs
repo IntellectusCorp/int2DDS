@@ -45,7 +45,12 @@ pub fn generate_default_fields(input: &DeriveInput) -> Vec<proc_macro2::TokenStr
                 .iter()
                 .map(|field| {
                     let name = field.ident.as_ref().unwrap();
-                    quote! { #name: Default::default() }
+                    if let syn::Type::Array(arr) = &field.ty {
+                        let elem = &arr.elem;
+                        quote! { #name: core::array::from_fn(|_| <#elem as Default>::default()) }
+                    } else {
+                        quote! { #name: Default::default() }
+                    }
                 })
                 .collect();
         }
