@@ -70,6 +70,8 @@ jobs:
       - name: Run pytest
         run: pytest -v --tb=short
         working-directory: python
+        env:
+          INT2DDS_UDP_SOCKET_BUFFER: 5242880
 
       - name: Run type check with mypy
         run: mypy int2dds --ignore-missing-imports
