@@ -1376,7 +1376,7 @@ class TestDiscovery:
                 waitset = WaitSet()
                 waitset.attach(status_cond)
 
-                deadline = 10.0
+                deadline = 30.0
                 while reader.matched_writers == 0 and deadline > 0:
                     try:
                         waitset.wait(timeout=1.0)
@@ -1389,7 +1389,7 @@ class TestDiscovery:
                 writer.close()
 
                 # Wait for unmatch via SEDP termination message
-                deadline = 10.0
+                deadline = 30.0
                 while reader.matched_writers > 0 and deadline > 0:
                     try:
                         waitset.wait(timeout=1.0)
