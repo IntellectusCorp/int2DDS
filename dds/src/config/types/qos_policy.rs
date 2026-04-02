@@ -686,3 +686,66 @@ impl From<qos_policy::DataRepresentationId> for DataRepresentationId {
         }
     }
 }
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub(crate) enum TypeConsistencyKind {
+    DisallowTypeCoercion,
+    #[default]
+    AllowTypeCoercion,
+}
+
+impl From<TypeConsistencyKind> for qos_policy::TypeConsistencyKind {
+    fn from(external: TypeConsistencyKind) -> Self {
+        match external {
+            TypeConsistencyKind::DisallowTypeCoercion => Self::DisallowTypeCoercion,
+            TypeConsistencyKind::AllowTypeCoercion => Self::AllowTypeCoercion,
+        }
+    }
+}
+
+impl From<qos_policy::TypeConsistencyKind> for TypeConsistencyKind {
+    fn from(internal: qos_policy::TypeConsistencyKind) -> Self {
+        match internal {
+            qos_policy::TypeConsistencyKind::DisallowTypeCoercion => Self::DisallowTypeCoercion,
+            qos_policy::TypeConsistencyKind::AllowTypeCoercion => Self::AllowTypeCoercion,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct TypeConsistencyEnforcementQosPolicy {
+    pub(crate) kind: TypeConsistencyKind,
+    pub(crate) ignore_sequence_bounds: bool,
+    pub(crate) ignore_string_bounds: bool,
+    pub(crate) ignore_member_names: bool,
+    pub(crate) prevent_type_widening: bool,
+    pub(crate) force_type_validation: bool,
+}
+
+impl From<TypeConsistencyEnforcementQosPolicy> for qos_policy::TypeConsistencyEnforcementQosPolicy {
+    fn from(external: TypeConsistencyEnforcementQosPolicy) -> Self {
+        Self {
+            kind: external.kind.into(),
+            ignore_sequence_bounds: external.ignore_sequence_bounds,
+            ignore_string_bounds: external.ignore_string_bounds,
+            ignore_member_names: external.ignore_member_names,
+            prevent_type_widening: external.prevent_type_widening,
+            force_type_validation: external.force_type_validation,
+        }
+    }
+}
+
+impl From<qos_policy::TypeConsistencyEnforcementQosPolicy> for TypeConsistencyEnforcementQosPolicy {
+    fn from(internal: qos_policy::TypeConsistencyEnforcementQosPolicy) -> Self {
+        Self {
+            kind: internal.kind.into(),
+            ignore_sequence_bounds: internal.ignore_sequence_bounds,
+            ignore_string_bounds: internal.ignore_string_bounds,
+            ignore_member_names: internal.ignore_member_names,
+            prevent_type_widening: internal.prevent_type_widening,
+            force_type_validation: internal.force_type_validation,
+        }
+    }
+}

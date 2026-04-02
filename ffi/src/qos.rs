@@ -399,6 +399,240 @@ pub unsafe extern "C" fn int2dds_datawriter_qos_set_writer_data_lifecycle(
     INT2DDS_RET_OK
 }
 
+// ============================================================================
+// DataWriter QoS Getters
+// ============================================================================
+
+/// Get reliability QoS from DataWriter QoS handle
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_qos_get_reliability(
+    qos: *const Int2DdsDataWriterQos,
+    kind_out: *mut i32,
+    max_blocking_time_ns_out: *mut i64,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(kind_out);
+    check_null!(max_blocking_time_ns_out);
+    let q = &*qos;
+    *kind_out = match q.inner.reliability.kind {
+        ReliabilityQosPolicyKind::BestEffort => INT2DDS_QOS_RELIABILITY_BEST_EFFORT,
+        ReliabilityQosPolicyKind::Reliable => INT2DDS_QOS_RELIABILITY_RELIABLE,
+    };
+    let d = &q.inner.reliability.max_blocking_time;
+    *max_blocking_time_ns_out = d.sec as i64 * 1_000_000_000 + d.nanosec as i64;
+    INT2DDS_RET_OK
+}
+
+/// Get durability QoS from DataWriter QoS handle
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_qos_get_durability(
+    qos: *const Int2DdsDataWriterQos,
+    kind_out: *mut i32,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(kind_out);
+    let q = &*qos;
+    *kind_out = match q.inner.durability.kind {
+        DurabilityQosPolicyKind::Volatile => INT2DDS_QOS_DURABILITY_VOLATILE,
+        DurabilityQosPolicyKind::TransientLocal => INT2DDS_QOS_DURABILITY_TRANSIENT_LOCAL,
+        DurabilityQosPolicyKind::Transient => INT2DDS_QOS_DURABILITY_TRANSIENT,
+        DurabilityQosPolicyKind::Persistent => INT2DDS_QOS_DURABILITY_PERSISTENT,
+    };
+    INT2DDS_RET_OK
+}
+
+/// Get history QoS from DataWriter QoS handle
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_qos_get_history(
+    qos: *const Int2DdsDataWriterQos,
+    kind_out: *mut i32,
+    depth_out: *mut i32,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(kind_out);
+    check_null!(depth_out);
+    let q = &*qos;
+    match q.inner.history.kind {
+        HistoryQosPolicyKind::KeepLast(d) => {
+            *kind_out = INT2DDS_QOS_HISTORY_KEEP_LAST;
+            *depth_out = d;
+        }
+        HistoryQosPolicyKind::KeepAll => {
+            *kind_out = INT2DDS_QOS_HISTORY_KEEP_ALL;
+            *depth_out = 0;
+        }
+    };
+    INT2DDS_RET_OK
+}
+
+/// Get ownership QoS from DataWriter QoS handle
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_qos_get_ownership(
+    qos: *const Int2DdsDataWriterQos,
+    kind_out: *mut i32,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(kind_out);
+    let q = &*qos;
+    *kind_out = match q.inner.ownership.kind {
+        OwnershipQosPolicyKind::Shared => INT2DDS_QOS_OWNERSHIP_SHARED,
+        OwnershipQosPolicyKind::Exclusive => INT2DDS_QOS_OWNERSHIP_EXCLUSIVE,
+    };
+    INT2DDS_RET_OK
+}
+
+/// Get ownership strength from DataWriter QoS handle
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_qos_get_ownership_strength(
+    qos: *const Int2DdsDataWriterQos,
+    value_out: *mut i32,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(value_out);
+    *value_out = (*qos).inner.ownership_strength.value;
+    INT2DDS_RET_OK
+}
+
+/// Get resource limits from DataWriter QoS handle
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_qos_get_resource_limits(
+    qos: *const Int2DdsDataWriterQos,
+    max_samples_out: *mut i32,
+    max_instances_out: *mut i32,
+    max_per_instance_out: *mut i32,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(max_samples_out);
+    check_null!(max_instances_out);
+    check_null!(max_per_instance_out);
+    let q = &*qos;
+    *max_samples_out = q.inner.resource_limits.max_samples;
+    *max_instances_out = q.inner.resource_limits.max_instances;
+    *max_per_instance_out = q.inner.resource_limits.max_samples_per_instance;
+    INT2DDS_RET_OK
+}
+
+/// Get lifespan from DataWriter QoS handle
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_qos_get_lifespan(
+    qos: *const Int2DdsDataWriterQos,
+    duration_ns_out: *mut i64,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(duration_ns_out);
+    let d = &(*qos).inner.lifespan.duration;
+    *duration_ns_out = d.sec as i64 * 1_000_000_000 + d.nanosec as i64;
+    INT2DDS_RET_OK
+}
+
+/// Get destination order from DataWriter QoS handle
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_qos_get_destination_order(
+    qos: *const Int2DdsDataWriterQos,
+    kind_out: *mut i32,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(kind_out);
+    *kind_out = match (*qos).inner.destination_order.kind {
+        DestinationOrderQosPolicyKind::ByReceptionTimestamp => INT2DDS_QOS_DEST_ORDER_BY_RECEPTION,
+        DestinationOrderQosPolicyKind::BySourceTimestamp => INT2DDS_QOS_DEST_ORDER_BY_SOURCE,
+    };
+    INT2DDS_RET_OK
+}
+
+/// Get deadline from DataWriter QoS handle
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_qos_get_deadline(
+    qos: *const Int2DdsDataWriterQos,
+    period_ns_out: *mut i64,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(period_ns_out);
+    let d = &(*qos).inner.deadline.period;
+    *period_ns_out = d.sec as i64 * 1_000_000_000 + d.nanosec as i64;
+    INT2DDS_RET_OK
+}
+
+/// Get liveliness from DataWriter QoS handle
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_qos_get_liveliness(
+    qos: *const Int2DdsDataWriterQos,
+    kind_out: *mut i32,
+    lease_duration_ns_out: *mut i64,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(kind_out);
+    check_null!(lease_duration_ns_out);
+    let q = &*qos;
+    *kind_out = match q.inner.liveliness.kind {
+        LivelinessQosPolicyKind::Automatic => INT2DDS_QOS_LIVELINESS_AUTOMATIC,
+        LivelinessQosPolicyKind::ManualByParticipant => {
+            INT2DDS_QOS_LIVELINESS_MANUAL_BY_PARTICIPANT
+        }
+        LivelinessQosPolicyKind::ManualByTopic => INT2DDS_QOS_LIVELINESS_MANUAL_BY_TOPIC,
+    };
+    let d = &q.inner.liveliness.lease_duration;
+    *lease_duration_ns_out = d.sec as i64 * 1_000_000_000 + d.nanosec as i64;
+    INT2DDS_RET_OK
+}
+
+/// Get data representation from DataWriter QoS handle
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_qos_get_data_representation(
+    qos: *const Int2DdsDataWriterQos,
+    kind_out: *mut i32,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(kind_out);
+    let q = &*qos;
+    *kind_out = q.inner.data_representation.value.first().map_or(
+        INT2DDS_QOS_DATA_REPR_XCDR2,
+        |v| match v {
+            DataRepresentationId::XcdrDataRepresentation => INT2DDS_QOS_DATA_REPR_XCDR1,
+            DataRepresentationId::Xcdr2DataRepresentation => INT2DDS_QOS_DATA_REPR_XCDR2,
+            _ => INT2DDS_QOS_DATA_REPR_XCDR2,
+        },
+    );
+    INT2DDS_RET_OK
+}
+
+/// Get transport priority from DataWriter QoS handle
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_qos_get_transport_priority(
+    qos: *const Int2DdsDataWriterQos,
+    value_out: *mut i32,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(value_out);
+    *value_out = (*qos).inner.transport_priority.value;
+    INT2DDS_RET_OK
+}
+
+/// Get latency budget from DataWriter QoS handle
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_qos_get_latency_budget(
+    qos: *const Int2DdsDataWriterQos,
+    duration_ns_out: *mut i64,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(duration_ns_out);
+    let d = &(*qos).inner.latency_budget.duration;
+    *duration_ns_out = d.sec as i64 * 1_000_000_000 + d.nanosec as i64;
+    INT2DDS_RET_OK
+}
+
+/// Get writer data lifecycle from DataWriter QoS handle
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_qos_get_writer_data_lifecycle(
+    qos: *const Int2DdsDataWriterQos,
+    autodispose_out: *mut bool,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(autodispose_out);
+    *autodispose_out = (*qos).inner.writer_data_lifecycle.autodispose_unregistered_instances;
+    INT2DDS_RET_OK
+}
+
 /// Destroy DataWriter QoS
 ///
 /// # Safety
@@ -707,6 +941,206 @@ pub unsafe extern "C" fn int2dds_datareader_qos_set_reader_data_lifecycle(
         nanosec: (autopurge_disposed_ns % 1_000_000_000) as u32,
     };
 
+    INT2DDS_RET_OK
+}
+
+// ============================================================================
+// DataReader QoS Getters
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_qos_get_reliability(
+    qos: *const Int2DdsDataReaderQos,
+    kind_out: *mut i32,
+    max_blocking_time_ns_out: *mut i64,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(kind_out);
+    check_null!(max_blocking_time_ns_out);
+    let q = &*qos;
+    *kind_out = match q.inner.reliability.kind {
+        ReliabilityQosPolicyKind::BestEffort => INT2DDS_QOS_RELIABILITY_BEST_EFFORT,
+        ReliabilityQosPolicyKind::Reliable => INT2DDS_QOS_RELIABILITY_RELIABLE,
+    };
+    let d = &q.inner.reliability.max_blocking_time;
+    *max_blocking_time_ns_out = d.sec as i64 * 1_000_000_000 + d.nanosec as i64;
+    INT2DDS_RET_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_qos_get_durability(
+    qos: *const Int2DdsDataReaderQos,
+    kind_out: *mut i32,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(kind_out);
+    *kind_out = match (*qos).inner.durability.kind {
+        DurabilityQosPolicyKind::Volatile => INT2DDS_QOS_DURABILITY_VOLATILE,
+        DurabilityQosPolicyKind::TransientLocal => INT2DDS_QOS_DURABILITY_TRANSIENT_LOCAL,
+        DurabilityQosPolicyKind::Transient => INT2DDS_QOS_DURABILITY_TRANSIENT,
+        DurabilityQosPolicyKind::Persistent => INT2DDS_QOS_DURABILITY_PERSISTENT,
+    };
+    INT2DDS_RET_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_qos_get_history(
+    qos: *const Int2DdsDataReaderQos,
+    kind_out: *mut i32,
+    depth_out: *mut i32,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(kind_out);
+    check_null!(depth_out);
+    match (*qos).inner.history.kind {
+        HistoryQosPolicyKind::KeepLast(d) => {
+            *kind_out = INT2DDS_QOS_HISTORY_KEEP_LAST;
+            *depth_out = d;
+        }
+        HistoryQosPolicyKind::KeepAll => {
+            *kind_out = INT2DDS_QOS_HISTORY_KEEP_ALL;
+            *depth_out = 0;
+        }
+    };
+    INT2DDS_RET_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_qos_get_ownership(
+    qos: *const Int2DdsDataReaderQos,
+    kind_out: *mut i32,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(kind_out);
+    *kind_out = match (*qos).inner.ownership.kind {
+        OwnershipQosPolicyKind::Shared => INT2DDS_QOS_OWNERSHIP_SHARED,
+        OwnershipQosPolicyKind::Exclusive => INT2DDS_QOS_OWNERSHIP_EXCLUSIVE,
+    };
+    INT2DDS_RET_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_qos_get_resource_limits(
+    qos: *const Int2DdsDataReaderQos,
+    max_samples_out: *mut i32,
+    max_instances_out: *mut i32,
+    max_per_instance_out: *mut i32,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(max_samples_out);
+    check_null!(max_instances_out);
+    check_null!(max_per_instance_out);
+    let q = &*qos;
+    *max_samples_out = q.inner.resource_limits.max_samples;
+    *max_instances_out = q.inner.resource_limits.max_instances;
+    *max_per_instance_out = q.inner.resource_limits.max_samples_per_instance;
+    INT2DDS_RET_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_qos_get_destination_order(
+    qos: *const Int2DdsDataReaderQos,
+    kind_out: *mut i32,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(kind_out);
+    *kind_out = match (*qos).inner.destination_order.kind {
+        DestinationOrderQosPolicyKind::ByReceptionTimestamp => INT2DDS_QOS_DEST_ORDER_BY_RECEPTION,
+        DestinationOrderQosPolicyKind::BySourceTimestamp => INT2DDS_QOS_DEST_ORDER_BY_SOURCE,
+    };
+    INT2DDS_RET_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_qos_get_deadline(
+    qos: *const Int2DdsDataReaderQos,
+    period_ns_out: *mut i64,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(period_ns_out);
+    let d = &(*qos).inner.deadline.period;
+    *period_ns_out = d.sec as i64 * 1_000_000_000 + d.nanosec as i64;
+    INT2DDS_RET_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_qos_get_liveliness(
+    qos: *const Int2DdsDataReaderQos,
+    kind_out: *mut i32,
+    lease_duration_ns_out: *mut i64,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(kind_out);
+    check_null!(lease_duration_ns_out);
+    let q = &*qos;
+    *kind_out = match q.inner.liveliness.kind {
+        LivelinessQosPolicyKind::Automatic => INT2DDS_QOS_LIVELINESS_AUTOMATIC,
+        LivelinessQosPolicyKind::ManualByParticipant => {
+            INT2DDS_QOS_LIVELINESS_MANUAL_BY_PARTICIPANT
+        }
+        LivelinessQosPolicyKind::ManualByTopic => INT2DDS_QOS_LIVELINESS_MANUAL_BY_TOPIC,
+    };
+    let d = &q.inner.liveliness.lease_duration;
+    *lease_duration_ns_out = d.sec as i64 * 1_000_000_000 + d.nanosec as i64;
+    INT2DDS_RET_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_qos_get_data_representation(
+    qos: *const Int2DdsDataReaderQos,
+    kind_out: *mut i32,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(kind_out);
+    *kind_out =
+        (*qos).inner.data_representation.value.first().map_or(INT2DDS_QOS_DATA_REPR_XCDR2, |v| {
+            match v {
+                DataRepresentationId::XcdrDataRepresentation => INT2DDS_QOS_DATA_REPR_XCDR1,
+                DataRepresentationId::Xcdr2DataRepresentation => INT2DDS_QOS_DATA_REPR_XCDR2,
+                _ => INT2DDS_QOS_DATA_REPR_XCDR2,
+            }
+        });
+    INT2DDS_RET_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_qos_get_latency_budget(
+    qos: *const Int2DdsDataReaderQos,
+    duration_ns_out: *mut i64,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(duration_ns_out);
+    let d = &(*qos).inner.latency_budget.duration;
+    *duration_ns_out = d.sec as i64 * 1_000_000_000 + d.nanosec as i64;
+    INT2DDS_RET_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_qos_get_time_based_filter(
+    qos: *const Int2DdsDataReaderQos,
+    min_separation_ns_out: *mut i64,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(min_separation_ns_out);
+    let d = &(*qos).inner.time_based_filter.minimum_separation;
+    *min_separation_ns_out = d.sec as i64 * 1_000_000_000 + d.nanosec as i64;
+    INT2DDS_RET_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_qos_get_reader_data_lifecycle(
+    qos: *const Int2DdsDataReaderQos,
+    autopurge_nowriter_ns_out: *mut i64,
+    autopurge_disposed_ns_out: *mut i64,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(autopurge_nowriter_ns_out);
+    check_null!(autopurge_disposed_ns_out);
+    let q = &*qos;
+    let d1 = &q.inner.reader_data_lifecycle.autopurge_nowriter_samples_delay;
+    *autopurge_nowriter_ns_out = d1.sec as i64 * 1_000_000_000 + d1.nanosec as i64;
+    let d2 = &q.inner.reader_data_lifecycle.autopurge_disposed_samples_delay;
+    *autopurge_disposed_ns_out = d2.sec as i64 * 1_000_000_000 + d2.nanosec as i64;
     INT2DDS_RET_OK
 }
 
