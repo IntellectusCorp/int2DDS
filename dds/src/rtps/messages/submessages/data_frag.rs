@@ -56,7 +56,7 @@ impl DataFrag {
             fragment_size,
             sample_size,
             inline_qos: None,
-            serialized_data: Arc::from(vec![]),
+            serialized_data: Arc::<[u8]>::from([]),
         }
     }
 

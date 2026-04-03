@@ -145,7 +145,7 @@ impl MessageReceiver {
         if let Some(true) = info_reply_header.multicast_flag() {
             self.multicast_reply_locator_list = info_reply.multicast_locator_list();
         } else {
-            self.multicast_reply_locator_list = Vec::new();
+            self.multicast_reply_locator_list.clear();
         }
     }
 
@@ -157,9 +157,10 @@ impl MessageReceiver {
         info_reply_ip4: &InfoReplyIp4,
     ) {
         if let Some(endianness) = info_reply_ip4_header.endianness_flag() {
-            self.unicast_reply_locator_list =
-                vec![info_reply_ip4.unicast_locator().to_locator(endianness)];
-            self.multicast_reply_locator_list = Vec::new();
+            self.unicast_reply_locator_list.clear();
+            self.unicast_reply_locator_list
+                .push(info_reply_ip4.unicast_locator().to_locator(endianness));
+            self.multicast_reply_locator_list.clear();
             if let Some(locator) = info_reply_ip4.multicast_locator() {
                 self.multicast_reply_locator_list.push(locator.to_locator(endianness));
             }
@@ -172,8 +173,10 @@ impl MessageReceiver {
         self.source_guid_prefix = info_source.guid_prefix();
         self.source_version = info_source.protocol_version();
         self.source_vendor_id = info_source.vendor_id();
-        self.unicast_reply_locator_list = vec![LOCATOR_INVALID];
-        self.multicast_reply_locator_list = vec![LOCATOR_INVALID];
+        self.unicast_reply_locator_list.clear();
+        self.unicast_reply_locator_list.push(LOCATOR_INVALID);
+        self.multicast_reply_locator_list.clear();
+        self.multicast_reply_locator_list.push(LOCATOR_INVALID);
         self.have_timestamp = false
     }
 
@@ -629,7 +632,11 @@ impl MessageReceiver {
     }
 
     pub(crate) fn parse_submessages(&self) -> Vec<TypedSubmessage<'_>> {
-        let mut submessages: Vec<TypedSubmessage> = Vec::new();
+        let mut submessages: Vec<TypedSubmessage> = if let Some(rtps_message) = &self.rtps_message {
+            Vec::with_capacity(rtps_message.submessages.len())
+        } else {
+            Vec::new()
+        };
         if let Some(rtps_message) = &self.rtps_message {
             for submessage in &rtps_message.submessages {
                 match &submessage.body {

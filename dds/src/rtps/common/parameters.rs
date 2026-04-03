@@ -4,6 +4,7 @@
 //! for encoding QoS policies, discovery information, and inline QoS in DATA messages.
 //! Parameters use a type-length-value (TLV) encoding scheme.
 
+use smallvec::SmallVec;
 use speedy::{Context, Readable, Reader, Writable, Writer};
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
@@ -149,11 +150,15 @@ pub struct Parameter {
     // Multiple of 4
     length: i16,
     // [u8, length]
-    value: Vec<u8>,
+    value: SmallVec<[u8; 16]>,
 }
 
 impl Parameter {
-    pub fn new(parameter_id: ParameterId, value: Vec<u8>) -> Self {
+    pub fn new<V>(parameter_id: ParameterId, value: V) -> Self
+    where
+        V: Into<SmallVec<[u8; 16]>>,
+    {
+        let value = value.into();
         Self { parameter_id, length: value.len() as i16, value }
     }
     pub fn parameter_id(&self) -> ParameterId {
@@ -174,6 +179,7 @@ impl<'a, C: Context> Readable<'a, C> for Parameter {
         let length = reader.read_u16()? as i16;
         let mut value: Vec<u8> = vec![0u8; length as usize];
         reader.read_bytes(&mut value)?;
+        let value = SmallVec::from_vec(value);
 
         for pid in ParameterId::iter() {
             if pid as u16 == parameter_id {
@@ -206,11 +212,11 @@ impl<C: Context> Writable<C> for Parameter {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ParameterList {
-    parameter: Vec<Parameter>,
+    parameter: SmallVec<[Parameter; 4]>,
 }
 impl ParameterList {
-    pub fn parameters(&self) -> Vec<Parameter> {
-        self.parameter.clone()
+    pub fn parameters(&self) -> &[Parameter] {
+        &self.parameter
     }
 
     pub fn add_parameter(&mut self, param: Parameter) {
@@ -254,7 +260,7 @@ impl ParameterList {
 impl<'a, C: Context> Readable<'a, C> for ParameterList {
     #[allow(clippy::needless_maybe_sized)]
     fn read_from<T: ?Sized + Reader<'a, C>>(reader: &mut T) -> Result<Self, C::Error> {
-        let mut parameter = Vec::new();
+        let mut parameter: SmallVec<[Parameter; 4]> = SmallVec::new();
         loop {
             let param = Parameter::read_from(reader)?;
 

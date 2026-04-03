@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use log::{debug, info};
+use smallvec::SmallVec;
 use speedy::{Endianness, Writable};
 
 use crate::rtps::{
@@ -353,7 +354,7 @@ impl MessageCreator {
         writer_entity_id: EntityId,
         gap_list: &mut Vec<SequenceNumber>,
     ) -> Result<Vec<Arc<Vec<u8>>>, Box<dyn std::error::Error>> {
-        let mut gap_rtps_messages = Vec::new();
+        let mut gap_rtps_messages = Vec::with_capacity(gap_list.len());
         gap_list.sort();
 
         while !gap_list.is_empty() {
@@ -425,11 +426,11 @@ impl MessageCreator {
 
     /// Create KeyHash inline QoS parameter
     pub(crate) fn create_key_hash_parameter(key_hash: &[u8; 16]) -> Parameter {
-        Parameter::new(ParameterId::PidKeyHash, key_hash.to_vec())
+        Parameter::new(ParameterId::PidKeyHash, SmallVec::from_slice(key_hash))
     }
 
     /// Create StatusInfo inline QoS parameter
     pub(crate) fn create_status_info_parameter(flags: &[u8; 4]) -> Parameter {
-        Parameter::new(ParameterId::PidStatusInfo, flags.to_vec())
+        Parameter::new(ParameterId::PidStatusInfo, SmallVec::from_slice(flags))
     }
 }
