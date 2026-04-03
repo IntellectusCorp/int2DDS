@@ -8,14 +8,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::DashMap;
-use log::debug;
+use log::{debug, warn};
 use socket2::{Domain, Protocol, SockAddr, Socket as Socket2, Type};
 
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::tcp::framing::{read_framed_message, write_framed_message};
 use crate::rtps::transport::tcp::protocol::{
-    encode_locator, ControlMsg, MSG_PEER_HELLO_ACK, MSG_PORT_BIND_ACK,
+    encode_locator, ControlMsg, MSG_KEEPALIVE_ACK, MSG_PEER_HELLO_ACK, MSG_PORT_BIND_ACK,
 };
 
 /// Connection key: (physical address, logical_port)
@@ -23,6 +23,8 @@ type ConnectionKey = (SocketAddr, u16);
 
 /// Logical port 0 = control connection
 const CONTROL_LOGICAL_PORT: u16 = 0;
+const DEFAULT_MAX_MISSED_KEEPALIVES: u32 = 3;
+const DEFAULT_KEEPALIVE_ACK_TIMEOUT_MS: u64 = 1000;
 
 /// Cached peer info from PEER_HELLO handshake
 #[derive(Debug, Clone)]
@@ -37,6 +39,8 @@ pub(crate) struct TcpSender {
     working_ip: String,
     connections: Arc<DashMap<ConnectionKey, TcpStream>>,
     peer_info: Arc<DashMap<SocketAddr, PeerInfo>>,
+    /// Missed keepalive count per peer (physical addr)
+    keepalive_missed: Arc<DashMap<SocketAddr, u32>>,
     connect_timeout: Duration,
     local_guid_prefix: GuidPrefix,
     domain_id: u32,
@@ -55,6 +59,7 @@ impl TcpSender {
         domain_id: u32,
         participant_id: u32,
         listener_port: u16,
+        keepalive_missed: Arc<DashMap<SocketAddr, u32>>,
     ) -> io::Result<Self> {
         let connect_timeout_ms = env::var("INT2DDS_TCP_CONNECT_TIMEOUT")
             .ok()
@@ -70,6 +75,7 @@ impl TcpSender {
             working_ip,
             connections: Arc::new(DashMap::new()),
             peer_info: Arc::new(DashMap::new()),
+            keepalive_missed,
             connect_timeout: Duration::from_millis(connect_timeout_ms),
             local_guid_prefix,
             domain_id,
@@ -165,7 +171,10 @@ impl TcpSender {
                 ControlMsg::Error { operation, code, message } => {
                     return Err(io::Error::new(
                         ErrorKind::ConnectionRefused,
-                        format!("PORT_RESERVE rejected (op=0x{:02x}, code={}): {}", operation, code, message),
+                        format!(
+                            "PORT_RESERVE rejected (op=0x{:02x}, code={}): {}",
+                            operation, code, message
+                        ),
                     ));
                 }
                 other => {
@@ -268,7 +277,84 @@ impl TcpSender {
     pub(crate) fn disconnect_peer(&self, addr: &SocketAddr) {
         self.connections.retain(|key, _| key.0 != *addr);
         self.peer_info.remove(addr);
+        self.keepalive_missed.remove(addr);
         debug!("TcpSender: Disconnected peer {:?}", addr);
+    }
+
+    /// Send keepalive on each outgoing control connection.
+    /// ACK waiting is offloaded to a spawned thread so the mux loop is never blocked.
+    /// Returns list of peer addresses that have exceeded max missed keepalives.
+    pub(crate) fn send_keepalives(&self) -> Vec<SocketAddr> {
+        let max_missed: u32 = env::var("INT2DDS_TCP_MAX_MISSES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_MAX_MISSED_KEEPALIVES);
+
+        let ack_timeout = Duration::from_millis(
+            env::var("INT2DDS_TCP_KEEPALIVE_ACK_TIMEOUT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(DEFAULT_KEEPALIVE_ACK_TIMEOUT_MS),
+        );
+
+        let mut dead_peers = Vec::new();
+        let control_peers: Vec<SocketAddr> = self
+            .connections
+            .iter()
+            .filter(|e| e.key().1 == CONTROL_LOGICAL_PORT)
+            .map(|e| e.key().0)
+            .collect();
+
+        for peer_addr in control_peers {
+            let missed = self.keepalive_missed.get(&peer_addr).map(|v| *v).unwrap_or(0);
+
+            if missed >= max_missed {
+                warn!("TcpSender: Peer {:?} missed {} keepalives", peer_addr, missed);
+                dead_peers.push(peer_addr);
+                continue;
+            }
+
+            let key = (peer_addr, CONTROL_LOGICAL_PORT);
+            let mut stream = match self.connections.get(&key).and_then(|s| s.try_clone().ok()) {
+                Some(s) => s,
+                None => continue,
+            };
+
+            if let Err(e) = write_framed_message(&mut stream, &ControlMsg::Keepalive.to_bytes()) {
+                warn!("TcpSender: Keepalive send failed to {:?}: {:?}", peer_addr, e);
+                self.disconnect_peer(&peer_addr);
+                dead_peers.push(peer_addr);
+                continue;
+            }
+
+            // Spawn a thread to wait for ACK — prevents blocking the mux loop.
+            // This avoids deadlock in self-connection where the mux thread must
+            // both send the ACK (via on_readable) and receive it (via read here).
+            let keepalive_missed = self.keepalive_missed.clone();
+            std::thread::Builder::new()
+                .name(format!("keepalive_ack_{}", peer_addr))
+                .spawn(move || {
+                    stream.set_read_timeout(Some(ack_timeout)).ok();
+                    match read_framed_message(&mut stream) {
+                        Ok(payload) if payload.first() == Some(&MSG_KEEPALIVE_ACK) => {
+                            keepalive_missed.insert(peer_addr, 0);
+                            debug!("TcpSender: KeepaliveAck from {:?}", peer_addr);
+                        }
+                        Ok(_) | Err(_) => {
+                            let prev = keepalive_missed.get(&peer_addr).map(|v| *v).unwrap_or(0);
+                            let new_missed = prev + 1;
+                            warn!(
+                                "TcpSender: No KeepaliveAck from {:?} (missed={}/{})",
+                                peer_addr, new_missed, max_missed
+                            );
+                            keepalive_missed.insert(peer_addr, new_missed);
+                        }
+                    }
+                })
+                .ok();
+        }
+
+        dead_peers
     }
 
     pub(crate) fn connection_count(&self) -> usize {
@@ -348,7 +434,8 @@ mod tests {
     use super::*;
 
     fn create_test_sender() -> TcpSender {
-        TcpSender::new("127.0.0.1".to_string(), [0x01; 12], 0, 0, 7400).unwrap()
+        let keepalive_missed = Arc::new(DashMap::new());
+        TcpSender::new("127.0.0.1".to_string(), [0x01; 12], 0, 0, 7400, keepalive_missed).unwrap()
     }
 
     #[test]

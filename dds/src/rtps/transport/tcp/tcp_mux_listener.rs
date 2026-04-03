@@ -4,7 +4,6 @@
 use std::collections::HashMap;
 use std::io::{self, ErrorKind};
 use std::net::{Ipv4Addr, SocketAddr};
-use std::time::Instant;
 
 use crossbeam_channel::Sender;
 use log::{debug, info, warn};
@@ -17,12 +16,12 @@ use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::tcp::framing::{
     classify_frame, write_framed_message, FramedReader, TcpFrameKind,
 };
-use crate::rtps::transport::tcp::protocol::{generate_cookie, ControlMsg, MSG_PORT_BIND, MSG_PORT_RESERVE};
+use crate::rtps::transport::tcp::protocol::{
+    generate_cookie, ControlMsg, MSG_PORT_BIND, MSG_PORT_RESERVE,
+};
 
 const LISTENER_TOKEN: Token = Token(0);
 const CONNECTION_TOKEN_START: usize = 65536;
-const DEFAULT_KEEPALIVE_INTERVAL_SECS: u64 = 30;
-const MAX_MISSED_KEEPALIVES: u32 = 3;
 
 /// TCP multiplexed listener with 3-step handshake:
 /// PEER_HELLO → PORT_RESERVE (repeatable) → PORT_BIND (separate connection)
@@ -49,22 +48,11 @@ struct PeerConnectionGroup {
     control_token: Option<Token>,
     discovery_token: Option<Token>,
     user_data_token: Option<Token>,
-    last_keepalive_sent: Instant,
-    last_keepalive_ack: Instant,
-    missed_keepalives: u32,
 }
 
 impl PeerConnectionGroup {
     fn new() -> Self {
-        let now = Instant::now();
-        Self {
-            control_token: None,
-            discovery_token: None,
-            user_data_token: None,
-            last_keepalive_sent: now,
-            last_keepalive_ack: now,
-            missed_keepalives: 0,
-        }
+        Self { control_token: None, discovery_token: None, user_data_token: None }
     }
 
     fn all_tokens(&self) -> Vec<Token> {
@@ -228,6 +216,27 @@ impl TcpMuxListener {
                     conn.state = ConnectionState::Control;
                 }
 
+                // Register in peer connection group (synthetic guid from addr)
+                let remote_addr = self.connections.get(&token).map(|c| c.remote_addr);
+                if let Some(addr) = remote_addr {
+                    let mut synthetic_guid = [0u8; 12];
+                    if let SocketAddr::V4(v4) = addr {
+                        synthetic_guid[0..4].copy_from_slice(&v4.ip().octets());
+                        synthetic_guid[4..6].copy_from_slice(&v4.port().to_be_bytes());
+                    }
+
+                    let group = self
+                        .peer_connections
+                        .entry(synthetic_guid)
+                        .or_insert_with(PeerConnectionGroup::new);
+
+                    group.control_token = Some(token);
+
+                    if let Some(conn) = self.connections.get_mut(&token) {
+                        conn.remote_guid_prefix = Some(synthetic_guid);
+                    }
+                }
+
                 debug!("TcpMuxListener: PEER_HELLO ok (token={:?})", token);
             }
 
@@ -268,8 +277,11 @@ impl TcpMuxListener {
 
                 if logical_port != my_disc && logical_port != my_user {
                     warn!("TcpMuxListener: Invalid port {} on {:?}", logical_port, token);
-                    let err =
-                        ControlMsg::Error { operation: MSG_PORT_RESERVE, code: 1, message: "no matching port".to_string() };
+                    let err = ControlMsg::Error {
+                        operation: MSG_PORT_RESERVE,
+                        code: 1,
+                        message: "no matching port".to_string(),
+                    };
                     self.send_control(token, &err);
                     return;
                 }
@@ -291,17 +303,6 @@ impl TcpMuxListener {
                 self.send_control(token, &ControlMsg::KeepaliveAck);
             }
 
-            ControlMsg::KeepaliveAck => {
-                if let Some(conn) = self.connections.get(&token) {
-                    if let Some(guid) = conn.remote_guid_prefix {
-                        if let Some(group) = self.peer_connections.get_mut(&guid) {
-                            group.last_keepalive_ack = Instant::now();
-                            group.missed_keepalives = 0;
-                        }
-                    }
-                }
-            }
-
             other => {
                 debug!("TcpMuxListener: Ignoring {} on control {:?}", other.type_name(), token);
             }
@@ -317,7 +318,11 @@ impl TcpMuxListener {
             None => {
                 let cookie_hex: String = cookie.iter().map(|b| format!("{:02x}", b)).collect();
                 warn!("TcpMuxListener: Unknown cookie [{}] on {:?}", cookie_hex, token);
-                let err = ControlMsg::Error { operation: MSG_PORT_BIND, code: 2, message: format!("invalid cookie [{}]", cookie_hex) };
+                let err = ControlMsg::Error {
+                    operation: MSG_PORT_BIND,
+                    code: 2,
+                    message: format!("invalid cookie [{}]", cookie_hex),
+                };
                 self.send_control(token, &err);
                 self.remove_connection(token, registry);
                 return;
@@ -363,7 +368,7 @@ impl TcpMuxListener {
         );
     }
 
-    // ── Active data connection: RTPS data + keepalive ───────────────────────
+    // ── Active data connection: RTPS data ───────────────────────
 
     fn handle_active_frame(&mut self, token: Token, payload: &[u8], registry: &Registry) {
         let kind = classify_frame(payload);
@@ -372,17 +377,6 @@ impl TcpMuxListener {
             TcpFrameKind::RtpsData => {
                 let remote_addr = self.connections.get(&token).map(|c| c.remote_addr).unwrap();
                 self.route_rtps_data(token, payload, remote_addr);
-            }
-            TcpFrameKind::Control => {
-                // Handle keepalive on data connections
-                if let Ok(msg) = ControlMsg::from_bytes(payload) {
-                    match msg {
-                        ControlMsg::Keepalive => {
-                            self.send_control(token, &ControlMsg::KeepaliveAck);
-                        }
-                        _ => {}
-                    }
-                }
             }
             _ => {}
         }
@@ -418,43 +412,6 @@ impl TcpMuxListener {
         if let Err(e) = write_framed_message(&mut conn.stream, &msg.to_bytes()) {
             warn!("TcpMuxListener: Failed to send {} to {:?}: {:?}", msg.type_name(), token, e);
         }
-    }
-
-    // ── Keepalive ───────────────────────────────────────────────────────────
-
-    pub(crate) fn send_keepalives(&mut self) -> Vec<GuidPrefix> {
-        let now = Instant::now();
-        let interval = std::time::Duration::from_secs(DEFAULT_KEEPALIVE_INTERVAL_SECS);
-        let mut dead_peers = Vec::new();
-
-        let guids: Vec<GuidPrefix> = self.peer_connections.keys().copied().collect();
-        for guid in guids {
-            let group = match self.peer_connections.get_mut(&guid) {
-                Some(g) => g,
-                None => continue,
-            };
-
-            if now.duration_since(group.last_keepalive_sent) < interval {
-                continue;
-            }
-
-            if group.missed_keepalives >= MAX_MISSED_KEEPALIVES {
-                warn!(
-                    "TcpMuxListener: Peer {:?} missed {} keepalives",
-                    guid, group.missed_keepalives
-                );
-                dead_peers.push(guid);
-                continue;
-            }
-
-            if let Some(control_token) = group.control_token {
-                group.last_keepalive_sent = now;
-                group.missed_keepalives += 1;
-                self.send_control(control_token, &ControlMsg::Keepalive);
-            }
-        }
-
-        dead_peers
     }
 
     // ── Connection cleanup ──────────────────────────────────────────────────
