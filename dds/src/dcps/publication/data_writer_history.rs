@@ -37,7 +37,8 @@ use crate::{
         common::guid::Guid,
         entities::{
             history::{
-                cache_change::CacheChange, history_cache::HistoryCache as rtps_history_cache,
+                cache_change::CacheChange, cache_change_pool::CacheChangePool,
+                history_cache::HistoryCache as rtps_history_cache,
             },
             writer::{StatefulWriter, Writer},
         },
@@ -59,6 +60,7 @@ pub(crate) struct DataWriterHistoryCache<Foo> {
     max_blocking_time: Duration,
     has_key: bool,
     lifespan_timers: Arc<Mutex<HashMap<Guid, TimerId>>>, // writer_guid -> timer_id
+    pool: CacheChangePool,
 }
 
 impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
@@ -139,6 +141,11 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
         // end lifespan
 
         let removed = self.ensure_capacity(a_change.instance_handle())?;
+
+        // Release evicted change back to pool for buffer reuse
+        if let Some(evicted) = &removed {
+            self.try_release_evicted(evicted.clone());
+        }
 
         if lifespan_duration.is_some() {
             self.insert_change_sorted(a_change.clone());
@@ -301,6 +308,33 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
             max_blocking_time: reliability_qos.max_blocking_time,
             has_key,
             lifespan_timers: Arc::new(Mutex::new(HashMap::new())),
+            pool: {
+                let pool_size = match history_qos.kind {
+                    HistoryQosPolicyKind::KeepLast(depth) => {
+                        if has_key {
+                            // Instance count unknown at creation — pre-allocate for 1 instance
+                            depth as usize
+                        } else {
+                            depth as usize
+                        }
+                    }
+                    HistoryQosPolicyKind::KeepAll => 32,
+                };
+                CacheChangePool::with_capacity(pool_size)
+            },
+        }
+    }
+
+    /// Acquire a CacheChange from the pool (capacity preserved from previous use).
+    pub(crate) fn acquire_change(&mut self) -> CacheChange {
+        self.pool.acquire()
+    }
+
+    /// Try to release an evicted Arc<CacheChange> back to the pool.
+    /// Returns the change to the pool only if Arc refcount is 1.
+    fn try_release_evicted(&mut self, evicted: Arc<CacheChange>) {
+        if let Ok(change) = Arc::try_unwrap(evicted) {
+            self.pool.release(change);
         }
     }
 
@@ -622,7 +656,7 @@ mod tests {
             Guid::UNKNOWN,
             handle,
             SequenceNumber::from_i64(seq),
-            Arc::from(vec![]),
+            vec![],
             None,
         ))
     }
@@ -1295,6 +1329,7 @@ mod tests {
             max_blocking_time: Duration::from_millis(100),
             has_key: true,
             lifespan_timers: Arc::new(Mutex::new(HashMap::new())),
+            pool: CacheChangePool::new(),
         };
 
         // Act
@@ -1336,6 +1371,7 @@ mod tests {
             max_blocking_time: Duration::from_millis(100),
             has_key: true,
             lifespan_timers: Arc::new(Mutex::new(HashMap::new())),
+            pool: CacheChangePool::new(),
         };
 
         // Act
