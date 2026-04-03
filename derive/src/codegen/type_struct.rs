@@ -332,6 +332,79 @@ fn quote_serialize_impl(
     }
 }
 
+/// Generate serialize_into method implementation (buffer-reusing variant)
+fn quote_serialize_into_impl(
+    _name: &syn::Ident,
+    cdr_field_serialization: &proc_macro2::TokenStream,
+    xcdr_field_serialization: &proc_macro2::TokenStream,
+    crate_path: &proc_macro2::TokenStream,
+    gc: &GenCtx,
+) -> proc_macro2::TokenStream {
+    let full_type = &gc.full_type;
+    quote! {
+        fn serialize_into(&self, data: &dyn std::any::Any, buffer: &mut Vec<u8>, format: Option<&#crate_path::dcps::topic::type_support::SerializationFormat>) -> #crate_path::dcps::core::error::DdsResult<()> {
+            let default_format = #crate_path::dcps::topic::type_support::SerializationFormat::Cdr;
+            let format = format.unwrap_or(&default_format);
+            if let Some(typed_data) = data.downcast_ref::<#full_type>() {
+                match format {
+                    #crate_path::dcps::topic::type_support::SerializationFormat::Cdr => {
+                        use #crate_path::serialize::{cdr::CdrSerializer, BufferManager};
+                        use #crate_path::serialize::cdr::{PrimitiveSerialize, StringSerialize, ArraySerialize, SequenceSerialize};
+
+                        let buf = std::mem::take(buffer);
+                        let mut serializer = CdrSerializer::reuse_buffer(true, buf);
+                        serializer.write_encapsulation_header()
+                            .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+
+                        #cdr_field_serialization
+
+                        *buffer = serializer.into_buffer();
+                        Ok(())
+                    },
+                    #crate_path::dcps::topic::type_support::SerializationFormat::Xcdr { extensibility_kind, use_delimiters } => {
+                        use #crate_path::serialize::{xcdr::Xcdr2Serializer, BufferManager};
+                        use #crate_path::serialize::cdr::{PrimitiveSerialize, StringSerialize, ArraySerialize, SequenceSerialize};
+
+                        let effective_extensibility = *extensibility_kind;
+                        let use_delimiters = *use_delimiters;
+                        let buf = std::mem::take(buffer);
+                        let mut serializer = Xcdr2Serializer::reuse_buffer(true, effective_extensibility, buf);
+                        serializer.write_encapsulation_header()
+                            .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+
+                        let size_pos = if use_delimiters {
+                            Some(
+                                serializer
+                                    .begin_struct()
+                                    .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(
+                                        e.to_string(),
+                                    ))?,
+                            )
+                        } else {
+                            None
+                        };
+
+                        #xcdr_field_serialization
+
+                        if let Some(size_pos) = size_pos {
+                            serializer
+                                .end_struct(size_pos)
+                                .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(
+                                    e.to_string(),
+                                ))?;
+                        }
+
+                        *buffer = serializer.into_buffer();
+                        Ok(())
+                    }
+                }
+            } else {
+                Err(#crate_path::dcps::core::error::DdsError::BadParameter)
+            }
+        }
+    }
+}
+
 /// Generate deserialize method implementation (unified: handles both None and Some format)
 fn quote_deserialize_impl(
     _name: &syn::Ident,
@@ -501,6 +574,13 @@ fn generate_unified_type_support_impl(
         crate_path,
         gc,
     );
+    let serialize_into_impl = quote_serialize_into_impl(
+        name,
+        cdr_field_serialization,
+        xcdr_field_serialization,
+        crate_path,
+        gc,
+    );
     let deserialize_impl = quote_deserialize_impl(
         name,
         extensibility,
@@ -560,6 +640,8 @@ fn generate_unified_type_support_impl(
             }
 
             #serialize_impl
+
+            #serialize_into_impl
 
             #deserialize_impl
 
@@ -1735,6 +1817,13 @@ fn generate_tuple_type_support_impl(
         crate_path,
         &tuple_gc,
     );
+    let serialize_into_impl = quote_serialize_into_impl(
+        name,
+        cdr_field_serialization,
+        xcdr_field_serialization,
+        crate_path,
+        &tuple_gc,
+    );
     let deserialize_impl = quote_deserialize_impl(
         name,
         extensibility,
@@ -1770,6 +1859,8 @@ fn generate_tuple_type_support_impl(
             }
 
             #serialize_impl
+
+            #serialize_into_impl
 
             #deserialize_impl
 
