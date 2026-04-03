@@ -97,8 +97,8 @@ impl ReaderLocator {
             .unwrap_or(SequenceNumber::UNKNOWN)
     }
 
-    pub(crate) fn requested_changes(&self) -> Vec<SequenceNumber> {
-        self.requested_changes.clone()
+    pub(crate) fn requested_changes(&self) -> &[SequenceNumber] {
+        &self.requested_changes
     }
 
     pub(crate) fn requested_changes_set(&mut self, req_seq_num_set: Vec<SequenceNumber>) {

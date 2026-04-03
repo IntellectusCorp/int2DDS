@@ -141,9 +141,9 @@ impl MessageReceiver {
         info_reply_header: &SubmessageHeader,
         info_reply: &InfoReply,
     ) {
-        self.unicast_reply_locator_list = info_reply.unicast_locator_list();
+        self.unicast_reply_locator_list = info_reply.unicast_locator_list().to_vec();
         if let Some(true) = info_reply_header.multicast_flag() {
-            self.multicast_reply_locator_list = info_reply.multicast_locator_list();
+            self.multicast_reply_locator_list = info_reply.multicast_locator_list().to_vec();
         } else {
             self.multicast_reply_locator_list.clear();
         }
