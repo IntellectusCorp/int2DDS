@@ -765,10 +765,10 @@ mod tests {
             Guid::new([1; 12], EntityId::new([0, 0, 1], EntityKind::USER_DEFINED_WRITER_WITH_KEY)),
             handle,
             SequenceNumber::from_i64(seq),
-            Arc::from(vec![
+            vec![
                 0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0, 20,
                 0, 0, 0, 0, 0, 0, 0,
-            ]),
+            ],
             Some(RtpsTime::now()),
         )))
     }
@@ -780,10 +780,10 @@ mod tests {
             Guid::new([1; 12], EntityId::new([0, 0, 1], EntityKind::USER_DEFINED_WRITER_NO_KEY)),
             handle,
             SequenceNumber::from_i64(seq),
-            Arc::from(vec![
+            vec![
                 0, 1, 0, 0, 92, 0, 0, 0, 12, 0, 0, 0, 72, 101, 108, 108, 111, 32, 119, 111, 114,
                 108, 100, 0,
-            ]),
+            ],
             Some(RtpsTime::now()),
         )))
     }
@@ -1148,10 +1148,10 @@ mod tests {
                 writer_1.clone(),
                 instance_a, // different instance
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 Some(RtpsTime::now()),
             );
 
@@ -1160,10 +1160,10 @@ mod tests {
                 writer_1.clone(),
                 instance_b, // different instance
                 SequenceNumber::from_i64(2),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 Some(RtpsTime::now()),
             );
 
@@ -1179,10 +1179,10 @@ mod tests {
                 writer_1.clone(),
                 instance_c, // different instance
                 SequenceNumber::from_i64(3),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 Some(RtpsTime::now()),
             );
 
@@ -1197,10 +1197,10 @@ mod tests {
                 writer_1.clone(),
                 instance_a,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 Some(RtpsTime::now()),
             );
 
@@ -1338,10 +1338,10 @@ mod tests {
                 writer_1.clone(),
                 instance_a, // different instance
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 None,
             );
 
@@ -1350,10 +1350,10 @@ mod tests {
                 writer_1.clone(),
                 instance_b, // different instance
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 None,
             );
 
@@ -1411,10 +1411,10 @@ mod tests {
                 writer_a.clone(), // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 None,
             );
 
@@ -1423,10 +1423,10 @@ mod tests {
                 writer_b.clone(), // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 None,
             );
 
@@ -1480,10 +1480,10 @@ mod tests {
                 writer_a.clone(), // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 Some(RtpsTime::now()),
             );
 
@@ -1492,10 +1492,10 @@ mod tests {
                 writer_b.clone(), // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 Some(RtpsTime::now()),
             );
 
@@ -1557,11 +1557,11 @@ mod tests {
                 writer_a.clone(), // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 0, 0, 0, 0, 52, 0, 0, 0, 72, 101, 108, 108, 111, 87, 111, 114, 108,
                     100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 Some(RtpsTime::now()),
             );
 
@@ -1570,11 +1570,11 @@ mod tests {
                 writer_b.clone(), // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 0, 0, 0, 0, 52, 0, 0, 0, 72, 101, 108, 108, 111, 87, 111, 114, 108,
                     100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 Some(RtpsTime::now()),
             );
 
@@ -1636,7 +1636,7 @@ mod tests {
                 writer_a.clone(), // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![1, 2, 3]),
+                vec![1, 2, 3],
                 None,
             );
 
@@ -1645,7 +1645,7 @@ mod tests {
                 writer_b.clone(), // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![1, 2, 3]),
+                vec![1, 2, 3],
                 None,
             );
 
@@ -1678,7 +1678,7 @@ mod tests {
                 writer_a.clone(), // different writer
                 instance_handle,
                 SequenceNumber::from_i64(2),
-                Arc::from(vec![]),
+                vec![],
                 None,
             );
             change_a_2.set_ownership_strength(Some(20));
@@ -1715,7 +1715,7 @@ mod tests {
                 writer_a.clone(), // different writer
                 InstanceHandle::NIL,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![1, 2, 3]),
+                vec![1, 2, 3],
                 None,
             );
 
@@ -1724,7 +1724,7 @@ mod tests {
                 writer_b.clone(), // different writer
                 InstanceHandle::NIL,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![1, 2, 3]),
+                vec![1, 2, 3],
                 None,
             );
 
@@ -1757,7 +1757,7 @@ mod tests {
                 writer_a.clone(), // different writer
                 instance_handle,
                 SequenceNumber::from_i64(2),
-                Arc::from(vec![]),
+                vec![],
                 None,
             );
             change_a_2.set_ownership_strength(Some(20));
@@ -1790,10 +1790,10 @@ mod tests {
                 writer_guid.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 None,
             );
 
@@ -1811,7 +1811,7 @@ mod tests {
                 writer_guid.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![]),
+                vec![],
                 None,
             );
 
@@ -1853,10 +1853,10 @@ mod tests {
                 writer_a.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 None,
             );
 
@@ -1865,10 +1865,10 @@ mod tests {
                 writer_b.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 None,
             );
 
@@ -1899,7 +1899,7 @@ mod tests {
                 writer_a.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![]),
+                vec![],
                 None,
             );
             change_disposed.set_ownership_strength(Some(20));
@@ -1939,10 +1939,10 @@ mod tests {
                 writer_guid.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 None,
             );
 
@@ -1960,7 +1960,7 @@ mod tests {
                 writer_guid.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(2),
-                Arc::from(vec![]),
+                vec![],
                 None,
             );
 
@@ -1979,10 +1979,10 @@ mod tests {
                 writer_guid.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(3),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 None,
             );
 
@@ -2021,10 +2021,10 @@ mod tests {
                 writer_guid.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 None,
             );
 
@@ -2042,7 +2042,7 @@ mod tests {
                 writer_guid.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(2),
-                Arc::from(vec![]),
+                vec![],
                 None,
             );
 
@@ -2067,10 +2067,10 @@ mod tests {
                 writer_b.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 None,
             );
 
@@ -2109,10 +2109,10 @@ mod tests {
                 writer_guid.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 None,
             );
 
@@ -2130,7 +2130,7 @@ mod tests {
                 writer_guid.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(2),
-                Arc::from(vec![]),
+                vec![],
                 None,
             );
 
@@ -2155,10 +2155,10 @@ mod tests {
                 writer_b.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 None,
             );
 
@@ -2200,10 +2200,10 @@ mod tests {
                 writer_a.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 None,
             );
 
@@ -2212,10 +2212,10 @@ mod tests {
                 writer_b.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 None,
             );
 
@@ -2246,7 +2246,7 @@ mod tests {
                 writer_b.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(2),
-                Arc::from(vec![]),
+                vec![],
                 None,
             );
             change_unregistered.set_ownership_strength(Some(30));
@@ -2294,10 +2294,10 @@ mod tests {
                 writer_a.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 None,
             );
 
@@ -2306,10 +2306,10 @@ mod tests {
                 writer_b.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 None,
             );
 
@@ -2340,7 +2340,7 @@ mod tests {
                 writer_a.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(2),
-                Arc::from(vec![]),
+                vec![],
                 None,
             );
 
@@ -2349,7 +2349,7 @@ mod tests {
                 writer_b.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(2),
-                Arc::from(vec![]),
+                vec![],
                 None,
             );
             change_unregistered_a.set_ownership_strength(Some(20));

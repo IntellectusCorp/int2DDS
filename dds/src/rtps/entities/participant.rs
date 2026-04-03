@@ -530,7 +530,7 @@ impl Participant {
                 let payload = publication_builtin_topic_data.to_serialized_data();
                 let a_cache_change = self.sedp_builtin_publications_writer().new_change(
                     ChangeKind::NotAliveDisposedUnregistered,
-                    payload,
+                    payload.to_vec(),
                     InstanceHandle::from_guid(&writer_guid),
                     Some(RtpsTime::now()),
                 );
@@ -549,7 +549,7 @@ impl Participant {
                         for cache in writer_cache.get_changes() {
                             if let Ok(publication_builtin_topic_data) =
                                 PublicationBuiltinTopicData::from_serialized_data(
-                                    cache.data_value_arc(),
+                                    cache.data_value(),
                                 )
                             {
                                 if publication_builtin_topic_data.endpoint_guid() == writer_guid {
@@ -610,7 +610,7 @@ impl Participant {
                 let payload = subscription_builtin_topic_data.to_serialized_data();
                 let a_cache_change = self.sedp_builtin_subscriptions_writer().new_change(
                     ChangeKind::NotAliveDisposedUnregistered,
-                    payload,
+                    payload.to_vec(),
                     InstanceHandle::from_guid(&reader_guid),
                     Some(RtpsTime::now()),
                 );
@@ -628,7 +628,7 @@ impl Participant {
                         for cache in writer_cache.get_changes() {
                             if let Ok(subscription_builtin_topic_data) =
                                 SubscriptionBuiltinTopicData::from_serialized_data(
-                                    cache.data_value_arc(),
+                                    cache.data_value(),
                                 )
                             {
                                 if subscription_builtin_topic_data.endpoint_guid() == reader_guid {
@@ -863,7 +863,7 @@ impl Participant {
             let payload = subscription_builtin_topic_data.unwrap().to_serialized_data();
             let a_cache_change = self.sedp_builtin_subscriptions_writer().new_change(
                 ChangeKind::NotAliveDisposedUnregistered,
-                payload,
+                payload.to_vec(),
                 InstanceHandle::from_guid(&reader.guid()),
                 Some(RtpsTime::now()),
             );
@@ -902,7 +902,7 @@ impl Participant {
             let payload = publication_builtin_topic_data.unwrap().to_serialized_data();
             let a_cache_change = self.sedp_builtin_publications_writer().new_change(
                 ChangeKind::NotAliveDisposedUnregistered,
-                payload,
+                payload.to_vec(),
                 InstanceHandle::from_guid(&writer.guid()),
                 Some(RtpsTime::now()),
             );

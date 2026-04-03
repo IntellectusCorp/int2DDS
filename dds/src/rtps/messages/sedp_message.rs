@@ -56,7 +56,7 @@ impl SEDPMessage<DiscoveredWriterData> {
 
         // Parse PublicationBuiltinTopicData from payload
         let publication_builtin_topic_data =
-            PublicationBuiltinTopicData::from_serialized_data(Arc::from(payload))?;
+            PublicationBuiltinTopicData::from_serialized_data(payload)?;
 
         Ok(DiscoveredWriterData { publication_builtin_topic_data })
     }
@@ -115,7 +115,7 @@ impl SEDPMessage<DiscoveredReaderData> {
 
         // Parse SubscriptionBuiltinTopicData from payload
         let subscription_builtin_topic_data =
-            SubscriptionBuiltinTopicData::from_serialized_data(Arc::from(payload))?;
+            SubscriptionBuiltinTopicData::from_serialized_data(payload)?;
 
         // Find ContentFilterProperty from parsed parameters
         let content_filter = parameters.iter().find_map(|param| {

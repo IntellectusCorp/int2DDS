@@ -2131,7 +2131,7 @@ impl UnicastMessageProcessor for SedpLogic {
                         writer_guid,
                         InstanceHandle::NIL,
                         data.writer_sn,
-                        serialized_data,
+                        serialized_data.to_vec(),
                         message_receiver.get_source_timestamp(),
                     );
 
@@ -2165,7 +2165,7 @@ impl UnicastMessageProcessor for SedpLogic {
                         writer_guid,
                         InstanceHandle::NIL,
                         data.writer_sn,
-                        serialized_data,
+                        serialized_data.to_vec(),
                         message_receiver.get_source_timestamp(),
                     );
 

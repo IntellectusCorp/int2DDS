@@ -17,8 +17,8 @@ use crate::rtps::common::locator::Locator;
 use crate::rtps::common::parameters::ParameterList;
 use crate::rtps::common::rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult};
 use crate::rtps::common::sequence::SequenceNumber;
+use crate::rtps::common::types::ChangeKind;
 use crate::rtps::common::types::DomainId;
-use crate::rtps::common::types::{ChangeKind, SerializedData};
 use crate::rtps::entities::endpoint::Endpoint;
 use crate::rtps::entities::entity::Entity;
 use crate::rtps::entities::history::cache_change::CacheChange;
@@ -1414,7 +1414,7 @@ impl UnicastMessageProcessor for UserLogic {
                 remote_writer_guid,
                 InstanceHandle::NIL,
                 data.writer_sn,
-                data.serialized_data(),
+                data.serialized_data().to_vec(),
                 // inline_qos,
                 message_receiver.get_source_timestamp(),
             );
@@ -1930,7 +1930,7 @@ impl UnicastMessageProcessor for UserLogic {
                 }
                 let (_, mut buffer) = removed.unwrap();
                 let assembled_payload = std::mem::take(&mut buffer.payload);
-                let serialized_data: SerializedData = Arc::<[u8]>::from(assembled_payload);
+                let serialized_data = assembled_payload;
                 // Use timestamp from first fragment, fallback to current message
                 let assembled_timestamp = buffer.source_timestamp.or(source_timestamp);
                 if assembled_timestamp.is_none() {

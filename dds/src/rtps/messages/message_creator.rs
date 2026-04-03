@@ -19,7 +19,7 @@ use crate::rtps::{
         parameters::{Parameter, ParameterId, ParameterList, StatusInfo},
         rtps_error_code::RtpsResult,
         sequence::{FragmentNumberSet, SequenceNumber},
-        types::{ChangeKind, SerializedData},
+        types::ChangeKind,
     },
     entities::{entity::Entity, history::cache_change::CacheChange, participant::Participant},
     messages::{
@@ -217,7 +217,7 @@ impl MessageCreator {
             }
         }
 
-        data.add_serialized_data(cache_change.data_value_arc());
+        data.add_serialized_data(Arc::from(cache_change.data_value()));
         let data_submessage = Submessage {
             header: SubmessageHeader::new(
                 SubmessageId::DATA,
@@ -262,7 +262,7 @@ impl MessageCreator {
         fragments_in_submessage: u16,
         fragment_size: u16,
         sample_size: u32,
-        fragment_data: SerializedData,
+        fragment_data: &[u8],
         heartbeat_info: Option<(u32, SequenceNumber, SequenceNumber, bool, bool)>,
         timestamp: DateTime<Utc>,
     ) -> Result<Arc<Vec<u8>>, Box<dyn std::error::Error>> {
@@ -286,8 +286,7 @@ impl MessageCreator {
             sample_size,
         );
 
-        // Zero-copy: directly use the Arc<[u8]> fragment data
-        data_frag.add_serialized_data(fragment_data);
+        data_frag.add_serialized_data(Arc::from(fragment_data));
 
         let data_frag_submessage = Submessage {
             header: SubmessageHeader::new(

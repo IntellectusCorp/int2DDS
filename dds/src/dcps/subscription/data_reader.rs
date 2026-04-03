@@ -1604,12 +1604,14 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                     log::debug!("Setting instance state to NOT_ALIVE_DISPOSED");
                     info.instance_state = InstanceStateKind::NOT_ALIVE_DISPOSED_INSTANCE_STATE;
                     if info.key.is_empty() && cache_change.is_some() {
-                        info.key = cache_change
-                            .as_ref()
-                            .ok_or(DdsError::Error(
-                                "CacheChange is not properly initialized".to_string(),
-                            ))?
-                            .data_value_arc();
+                        info.key = Arc::from(
+                            cache_change
+                                .as_ref()
+                                .ok_or(DdsError::Error(
+                                    "CacheChange is not properly initialized".to_string(),
+                                ))?
+                                .data_value(),
+                        );
                     }
 
                     let monitor_guard =
@@ -1642,12 +1644,14 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                     log::debug!("Setting instance state to NOT_ALIVE_NO_WRITERS");
                     info.instance_state = InstanceStateKind::NOT_ALIVE_NO_WRITERS_INSTANCE_STATE;
                     if info.key.is_empty() && cache_change.is_some() {
-                        info.key = cache_change
-                            .as_ref()
-                            .ok_or(DdsError::Error(
-                                "CacheChange is not properly initialized".to_string(),
-                            ))?
-                            .data_value_arc();
+                        info.key = Arc::from(
+                            cache_change
+                                .as_ref()
+                                .ok_or(DdsError::Error(
+                                    "CacheChange is not properly initialized".to_string(),
+                                ))?
+                                .data_value(),
+                        );
                     }
 
                     let monitor_guard =
@@ -2286,7 +2290,7 @@ impl<Foo: DdsType> DataReader<Foo> {
                 | ChangeKind::NotAliveDisposedUnregistered => false,
             };
 
-            let serialized_data = change.data_value_arc();
+            let serialized_data = Arc::from(change.data_value());
 
             let sample_info = SampleInfo {
                 sample_state,
@@ -2673,7 +2677,7 @@ impl<Foo: DdsType> DataReader<Foo> {
         };
 
         // Deserialize the data
-        let data = if has_valid_data { Some(change.data_value_arc()) } else { None };
+        let data = if has_valid_data { Some(Arc::from(change.data_value())) } else { None };
 
         // Use cached instance_infos if provided, otherwise fetch
         let owned_instance_infos;
