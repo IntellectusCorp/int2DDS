@@ -111,6 +111,10 @@ impl DynamicType {
             CompleteTypeObject::Enum(enum_type) => {
                 Self::from_enum_type(enum_type, type_identifier, type_object.clone())
             }
+            _ => Err(DynamicTypeError::UnsupportedType(format!(
+                "TypeObject kind 0x{:02X} not yet supported for DynamicType",
+                type_object.discriminator()
+            ))),
         }
     }
 
