@@ -491,9 +491,10 @@ impl UserLogic {
 
                             if let Ok(buf) = buffer {
                                 // Send fragmented message immediately
-                                if let Err(e) = self
-                                    .send_rtps_message_to_locators([reader_locator.locator()], &buf)
-                                {
+                                if let Err(e) = self.send_rtps_message_to_locators(
+                                    &[reader_locator.locator()],
+                                    &buf,
+                                ) {
                                     warn!("Failed to send DATA_FRAG message: {:?}", e);
                                 }
                             }
@@ -513,7 +514,7 @@ impl UserLogic {
                     .map_err(|e| RtpsError::new(RtpsErrorCode::Io, e.to_string()))?;
 
                     if let Err(e) =
-                        self.send_rtps_message_to_locators([reader_locator.locator()], &buffer)
+                        self.send_rtps_message_to_locators(&[reader_locator.locator()], &buffer)
                     {
                         warn!("Failed to send DATA message: {:?}", e);
                         // Continue sending other messages instead of aborting
@@ -656,7 +657,7 @@ impl UserLogic {
             );
 
             if let Ok(buf) = buffer {
-                self.send_rtps_message_to_locators(locators.clone(), &buf)?;
+                self.send_rtps_message_to_locators(locators, &buf)?;
             }
         }
 
@@ -1163,9 +1164,9 @@ impl UserLogic {
         }
     }
 
-    fn send_rtps_message_to_locators<T>(&self, locators: T, buffer: &[u8]) -> RtpsResult<()>
+    fn send_rtps_message_to_locators<'a, T>(&self, locators: T, buffer: &[u8]) -> RtpsResult<()>
     where
-        T: IntoIterator<Item = Locator>,
+        T: IntoIterator<Item = &'a Locator>,
     {
         let mut is_sent = false;
         let mut last_error = None;

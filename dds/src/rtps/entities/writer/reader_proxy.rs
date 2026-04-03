@@ -128,8 +128,8 @@ impl ReaderProxy {
             .unwrap_or(SequenceNumber::UNKNOWN)
     }
 
-    pub(crate) fn requested_changes(&self) -> Vec<SequenceNumber> {
-        self.requested_changes.clone()
+    pub(crate) fn requested_changes(&self) -> &[SequenceNumber] {
+        &self.requested_changes
     }
 
     pub(crate) fn requested_changes_set(&mut self, req_seq_num_set: Vec<SequenceNumber>) {
@@ -155,16 +155,16 @@ impl ReaderProxy {
         history_cache.get_seq_num_max().map_or(false, |max_sn| max_sn > self.max_acked_sn)
     }
 
-    pub(crate) fn unicast_locator_list(&self) -> Vec<Locator> {
-        self.unicast_locator_list.clone()
+    pub(crate) fn unicast_locator_list(&self) -> &[Locator] {
+        &self.unicast_locator_list
     }
 
     pub(crate) fn unicast_locator_list_mut(&mut self) -> &mut Vec<Locator> {
         &mut self.unicast_locator_list
     }
 
-    pub(crate) fn multicast_locator_list(&self) -> Vec<Locator> {
-        self.multicast_locator_list.clone()
+    pub(crate) fn multicast_locator_list(&self) -> &[Locator] {
+        &self.multicast_locator_list
     }
 
     pub(crate) fn multicast_locator_list_mut(&mut self) -> &mut Vec<Locator> {

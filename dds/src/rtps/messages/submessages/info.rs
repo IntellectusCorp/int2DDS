@@ -84,12 +84,12 @@ pub(crate) struct InfoReply {
 }
 
 impl InfoReply {
-    pub(crate) fn unicast_locator_list(&self) -> Vec<Locator> {
-        self.unicast_locator_list.clone()
+    pub(crate) fn unicast_locator_list(&self) -> &[Locator] {
+        &self.unicast_locator_list
     }
 
-    pub(crate) fn multicast_locator_list(&self) -> Vec<Locator> {
-        self.multicast_locator_list.clone()
+    pub(crate) fn multicast_locator_list(&self) -> &[Locator] {
+        &self.multicast_locator_list
     }
 
     pub(crate) fn deserialize(
