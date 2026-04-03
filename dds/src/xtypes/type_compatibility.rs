@@ -332,14 +332,10 @@ fn check_type_object_compatibility(
             check_minimal_type_object_compatibility(w, r, tce_policy)
         }
         (TypeObject::Complete(w), TypeObject::Complete(r)) => {
-            // Complete types have more information - convert to minimal for comparison
-            // For now, treat as compatible if they reached this point
-            // Full complete-to-complete comparison would need more complex logic
-            let _ = (w, r);
-            Ok(())
+            check_complete_type_object_compatibility(w, r, tce_policy)
         }
         _ => {
-            // Mixed minimal/complete - compare what we can
+            // Mixed minimal/complete: insufficient info for full comparison, allow
             Ok(())
         }
     }
@@ -358,9 +354,7 @@ fn check_minimal_type_object_compatibility(
             check_minimal_struct_compatibility(w_struct, r_struct, tce_policy)
         }
         (MinimalTypeObject::Enum(w_enum), MinimalTypeObject::Enum(r_enum)) => {
-            // Enum compatibility: check if reader literals are subset of writer
-            let _ = (w_enum, r_enum);
-            Ok(())
+            check_minimal_enum_compatibility(w_enum, r_enum)
         }
         _ => Err(TypeCompatibilityError::IncompatibleKind {
             writer: format!("{:?}", std::mem::discriminant(writer_obj)),
@@ -469,6 +463,241 @@ fn get_member_key(member: &MinimalStructMember, ignore_member_names: bool) -> u3
     } else {
         member.name_hash
     }
+}
+
+// ============================================================================
+// Member Type Compatibility
+// ============================================================================
+// Complete TypeObject Compatibility
+// ============================================================================
+
+fn check_complete_type_object_compatibility(
+    writer_obj: &crate::xtypes::CompleteTypeObject,
+    reader_obj: &crate::xtypes::CompleteTypeObject,
+    tce_policy: &TypeConsistencyEnforcementQosPolicy,
+) -> TypeCompatibilityResult {
+    use crate::xtypes::CompleteTypeObject;
+
+    match (writer_obj, reader_obj) {
+        (CompleteTypeObject::Struct(w), CompleteTypeObject::Struct(r)) => {
+            check_complete_struct_compatibility(w, r, tce_policy)
+        }
+        (CompleteTypeObject::Enum(w), CompleteTypeObject::Enum(r)) => {
+            check_complete_enum_compatibility(w, r)
+        }
+        (CompleteTypeObject::Union(w), CompleteTypeObject::Union(r)) => {
+            check_complete_union_compatibility(w, r, tce_policy)
+        }
+        _ => Err(TypeCompatibilityError::IncompatibleKind {
+            writer: format!("{:?}", std::mem::discriminant(writer_obj)),
+            reader: format!("{:?}", std::mem::discriminant(reader_obj)),
+        }),
+    }
+}
+
+fn check_complete_struct_compatibility(
+    writer: &crate::xtypes::CompleteStructType,
+    reader: &crate::xtypes::CompleteStructType,
+    tce_policy: &TypeConsistencyEnforcementQosPolicy,
+) -> TypeCompatibilityResult {
+    let w_ext = writer.struct_flags.extensibility();
+    let r_ext = reader.struct_flags.extensibility();
+
+    if w_ext == ExtensibilityKind::Final || r_ext == ExtensibilityKind::Final {
+        if w_ext != r_ext {
+            return Err(TypeCompatibilityError::ExtensibilityMismatch {
+                writer: format!("{:?}", w_ext),
+                reader: format!("{:?}", r_ext),
+            });
+        }
+    }
+
+    let writer_members: HashMap<String, &crate::xtypes::CompleteStructMember> = writer
+        .member_seq
+        .iter()
+        .map(|m| {
+            let key = if tce_policy.ignore_member_names {
+                m.common.member_id.to_string()
+            } else {
+                m.detail.name.clone()
+            };
+            (key, m)
+        })
+        .collect();
+
+    for r_member in &reader.member_seq {
+        let key = if tce_policy.ignore_member_names {
+            r_member.common.member_id.to_string()
+        } else {
+            r_member.detail.name.clone()
+        };
+
+        match writer_members.get(&key) {
+            Some(w_member) => {
+                check_member_type_compatibility(
+                    &w_member.common.member_type_id,
+                    &r_member.common.member_type_id,
+                    &r_member.detail.name,
+                    tce_policy,
+                )?;
+
+                if w_member.common.member_flags.is_key() != r_member.common.member_flags.is_key() {
+                    return Err(TypeCompatibilityError::KeyMemberMismatch {
+                        member_name: r_member.detail.name.clone(),
+                    });
+                }
+            }
+            None => {
+                if !r_member.common.member_flags.is_optional() {
+                    return Err(TypeCompatibilityError::MissingRequiredMember {
+                        member_name: r_member.detail.name.clone(),
+                        member_id: r_member.common.member_id,
+                    });
+                }
+            }
+        }
+    }
+
+    if tce_policy.prevent_type_widening {
+        let reader_members: HashMap<String, &crate::xtypes::CompleteStructMember> = reader
+            .member_seq
+            .iter()
+            .map(|m| {
+                let key = if tce_policy.ignore_member_names {
+                    m.common.member_id.to_string()
+                } else {
+                    m.detail.name.clone()
+                };
+                (key, m)
+            })
+            .collect();
+
+        let extra_members: Vec<String> = writer
+            .member_seq
+            .iter()
+            .filter(|w_m| {
+                let key = if tce_policy.ignore_member_names {
+                    w_m.common.member_id.to_string()
+                } else {
+                    w_m.detail.name.clone()
+                };
+                !reader_members.contains_key(&key)
+            })
+            .map(|m| m.detail.name.clone())
+            .collect();
+
+        if !extra_members.is_empty() {
+            return Err(TypeCompatibilityError::TypeWideningNotAllowed { extra_members });
+        }
+    }
+
+    Ok(())
+}
+
+fn check_complete_enum_compatibility(
+    writer: &crate::xtypes::CompleteEnumeratedType,
+    reader: &crate::xtypes::CompleteEnumeratedType,
+) -> TypeCompatibilityResult {
+    let writer_literals: HashMap<&str, i32> =
+        writer.literal_seq.iter().map(|l| (l.detail.name.as_str(), l.common.value)).collect();
+
+    for r_literal in &reader.literal_seq {
+        if r_literal.common.flags.is_default() {
+            continue;
+        }
+        match writer_literals.get(r_literal.detail.name.as_str()) {
+            Some(&w_value) => {
+                if w_value != r_literal.common.value {
+                    return Err(TypeCompatibilityError::MemberTypeMismatch {
+                        member_name: r_literal.detail.name.clone(),
+                        writer_type: format!("enum value {}", w_value),
+                        reader_type: format!("enum value {}", r_literal.common.value),
+                    });
+                }
+            }
+            None => {
+                return Err(TypeCompatibilityError::MissingRequiredMember {
+                    member_name: r_literal.detail.name.clone(),
+                    member_id: r_literal.common.value as u32,
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn check_minimal_enum_compatibility(
+    writer: &crate::xtypes::MinimalEnumeratedType,
+    reader: &crate::xtypes::MinimalEnumeratedType,
+) -> TypeCompatibilityResult {
+    let writer_literals: HashMap<u32, i32> =
+        writer.literal_seq.iter().map(|l| (l.name_hash, l.common.value)).collect();
+
+    for r_literal in &reader.literal_seq {
+        if r_literal.common.flags.is_default() {
+            continue;
+        }
+        match writer_literals.get(&r_literal.name_hash) {
+            Some(&w_value) => {
+                if w_value != r_literal.common.value {
+                    return Err(TypeCompatibilityError::MemberTypeMismatch {
+                        member_name: format!("hash:{:08x}", r_literal.name_hash),
+                        writer_type: format!("enum value {}", w_value),
+                        reader_type: format!("enum value {}", r_literal.common.value),
+                    });
+                }
+            }
+            None => {
+                return Err(TypeCompatibilityError::MissingRequiredMember {
+                    member_name: format!("hash:{:08x}", r_literal.name_hash),
+                    member_id: r_literal.common.value as u32,
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn check_complete_union_compatibility(
+    writer: &crate::xtypes::CompleteUnionType,
+    reader: &crate::xtypes::CompleteUnionType,
+    tce_policy: &TypeConsistencyEnforcementQosPolicy,
+) -> TypeCompatibilityResult {
+    check_member_type_compatibility(
+        &writer.discriminator.type_id,
+        &reader.discriminator.type_id,
+        "__discriminator",
+        tce_policy,
+    )?;
+
+    let writer_members: HashMap<&str, &crate::xtypes::CompleteUnionMember> =
+        writer.member_seq.iter().map(|m| (m.detail.name.as_str(), m)).collect();
+
+    for r_member in &reader.member_seq {
+        if r_member.common.member_flags.is_default() {
+            continue;
+        }
+        match writer_members.get(r_member.detail.name.as_str()) {
+            Some(w_member) => {
+                check_member_type_compatibility(
+                    &w_member.common.member_type_id,
+                    &r_member.common.member_type_id,
+                    &r_member.detail.name,
+                    tce_policy,
+                )?;
+            }
+            None => {
+                return Err(TypeCompatibilityError::MissingRequiredMember {
+                    member_name: r_member.detail.name.clone(),
+                    member_id: r_member.common.member_id,
+                });
+            }
+        }
+    }
+
+    Ok(())
 }
 
 // ============================================================================
