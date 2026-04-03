@@ -2101,14 +2101,7 @@ impl UnicastMessageProcessor for SedpLogic {
                 data.writer_sn,
             )?;
 
-            let payload = message_receiver
-                .payload_from_data(data.reader_id, data.writer_id)
-                .ok_or_else(|| {
-                    RtpsError::new(
-                        RtpsErrorCode::SerializationError,
-                        "SEDP Logic: No payload found",
-                    )
-                })?;
+            let payload = data.serialized_data();
 
             if data.writer_id == EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER {
                 let writer_data = SEDPMessage::<DiscoveredWriterData>::from_serialized_payload(

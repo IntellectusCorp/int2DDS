@@ -95,12 +95,10 @@ impl SpdpLogic {
         let start = Instant::now();
         match data {
             Some(ref data) => {
-                if self.initial_peers.is_empty() {
-                    let _ = self.transport.send(data, &SendTarget::MulticastDiscovery);
-                    log::debug!("discovery multicast packet send");
-                } else {
-                    self.send_spdp_to_initial_peers(data);
-                }
+                let _ = self.transport.send(data, &SendTarget::MulticastDiscovery);
+                log::debug!("discovery multicast packet send");
+                // This will send to initial peers if configured
+                self.send_spdp_to_initial_peers(data);
             }
             None => {
                 log::error!("spdp message is not set");
@@ -200,12 +198,9 @@ impl SpdpLogic {
         {
             let buffer = rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian);
             if let Ok(buffer) = buffer {
-                if self.initial_peers.is_empty() {
-                    let _ = self.transport.send(&buffer, &SendTarget::MulticastDiscovery);
-                    log::debug!("discovery multicast packet send");
-                } else {
-                    self.send_spdp_to_initial_peers(&buffer);
-                }
+                let _ = self.transport.send(&buffer, &SendTarget::MulticastDiscovery);
+                // This will send to initial peers if configured
+                self.send_spdp_to_initial_peers(&buffer);
             } else {
                 log::error!("Failed to serialize SPDP message with inline qos");
             }
