@@ -12,7 +12,6 @@ use crate::{
         guid::Guid,
         locator::Locator,
         parameters::{ParameterId, ParameterValue, PlCdrParameter},
-        types::SerializedData,
     },
     xtypes::{TypeIdentifier, TypeObject},
 };
@@ -72,9 +71,9 @@ pub struct ParsedBuiltinTopicData {
 }
 
 impl ParsedBuiltinTopicData {
-    pub fn from_serialized_data(data: SerializedData) -> Result<Self, String> {
+    pub fn from_serialized_data(data: &[u8]) -> Result<Self, String> {
         let parser = PlCdrParser::new(false); // default little endian
-        let parameters = parser.parse(&data)?;
+        let parameters = parser.parse(data)?;
 
         let mut parsed = Self::default();
 

@@ -249,7 +249,7 @@ impl DcpsBridge {
 
         let change = self.participant.sedp_builtin_publications_writer().new_change(
             ChangeKind::Alive,
-            Arc::from(payload.to_vec()),
+            payload.to_vec(),
             InstanceHandle::NIL,
             Some(RtpsTime::now()),
         );
@@ -403,7 +403,7 @@ impl DcpsBridge {
 
         let change = self.participant.sedp_builtin_subscriptions_writer().new_change(
             ChangeKind::Alive,
-            payload,
+            payload.to_vec(),
             InstanceHandle::NIL,
             Some(RtpsTime::now()),
         );
@@ -620,7 +620,7 @@ impl DcpsBridge {
 
         let change = self.participant.sedp_builtin_subscriptions_writer().new_change(
             ChangeKind::Alive,
-            payload,
+            payload.to_vec(),
             InstanceHandle::NIL,
             Some(RtpsTime::now()),
         );
@@ -692,7 +692,7 @@ impl DcpsBridge {
 
         let change = self.participant.sedp_builtin_publications_writer().new_change(
             ChangeKind::Alive,
-            Arc::from(payload.to_vec()),
+            payload.to_vec(),
             InstanceHandle::NIL,
             Some(RtpsTime::now()),
         );
@@ -985,10 +985,10 @@ mod tests {
             debug!("writer: {:?}", writer);
             for i in 0..1000 {
                 let hello_world = HelloWorld { index: i, message: "p Hello, world!".to_string() };
-                let payload = hello_world.serialize().unwrap();
+                let payload = hello_world.serialize().unwrap().to_vec();
                 let change = writer.new_change(
                     ChangeKind::Alive,
-                    Arc::from(payload),
+                    payload,
                     InstanceHandle::NIL,
                     Some(RtpsTime::now()),
                 );

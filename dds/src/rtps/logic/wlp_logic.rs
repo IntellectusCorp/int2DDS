@@ -572,7 +572,7 @@ impl WlpLogic {
 
         let cache_change = Arc::new(writer.new_change(
             ChangeKind::Alive,
-            Arc::from(payload.to_vec()),
+            payload.to_vec(),
             InstanceHandle::NIL,
             Some(RtpsTime::now()),
         ));
@@ -1351,7 +1351,7 @@ impl UnicastMessageProcessor for WlpLogic {
             let payload = message_receiver.payload_from_data(data.reader_id, data.writer_id);
 
             match payload {
-                Some(payload) => match ParticipantMessageData::from_serialized_data(payload) {
+                Some(payload) => match ParticipantMessageData::from_serialized_data(&payload) {
                     Ok(pmd) => {
                         return self.handle_liveliness_message(
                             pmd,
