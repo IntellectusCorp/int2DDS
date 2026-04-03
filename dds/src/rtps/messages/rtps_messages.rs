@@ -1,3 +1,4 @@
+use smallvec::SmallVec;
 use speedy::{Context, Writable, Writer};
 
 use crate::rtps::messages::{header::Header, submessage::Submessage};
@@ -14,12 +15,12 @@ use crate::rtps::messages::{header::Header, submessage::Submessage};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RtpsMessage {
     pub header: Header,
-    pub submessages: Vec<Submessage>,
+    pub submessages: SmallVec<[Submessage; 4]>,
 }
 
 impl RtpsMessage {
     pub(crate) fn new(header: Header) -> Self {
-        Self { header, submessages: vec![] }
+        Self { header, submessages: SmallVec::new() }
     }
 
     pub(crate) fn add_submessage(&mut self, submessage: Submessage) {

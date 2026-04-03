@@ -105,7 +105,10 @@ impl SpdpMessage {
         let entity_name = Some(local_participant_proxy_data.entity_name().to_string());
 
         // Use pre-computed locators from local_participant_proxy_data
-        let mut locators = Vec::new();
+        let mut locators = Vec::with_capacity(
+            local_participant_proxy_data.metatraffic_unicast_locator_list().len()
+                + local_participant_proxy_data.default_unicast_locator_list().len(),
+        );
 
         for locator in local_participant_proxy_data.metatraffic_unicast_locator_list() {
             locators.push((

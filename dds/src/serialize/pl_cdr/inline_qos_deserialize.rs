@@ -1,4 +1,5 @@
 use log::{debug, warn};
+use smallvec::SmallVec;
 use speedy::Endianness;
 
 use crate::rtps::{
@@ -54,7 +55,8 @@ impl InlineQosParser {
             if param_id == ParameterId::PidSentinel as u16 {
                 let _ = reader.read_u16();
                 if let Some(ref mut parameters) = parameters {
-                    parameters.add_parameter(Parameter::new(ParameterId::PidSentinel, vec![]));
+                    parameters
+                        .add_parameter(Parameter::new(ParameterId::PidSentinel, SmallVec::new()));
                 }
                 break;
             }

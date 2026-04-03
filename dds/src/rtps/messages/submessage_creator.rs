@@ -224,7 +224,8 @@ impl SubmessageCreator {
     ) -> (SequenceNumber, SequenceNumberSet) {
         let gap_start = gap_list[0];
         let mut bitmap_base = gap_start + 1;
-        let mut sn_after_base: Vec<SequenceNumber> = Vec::new();
+        let mut sn_after_base: Vec<SequenceNumber> =
+            Vec::with_capacity(gap_list.len().saturating_sub(1).min(256));
         let mut processed = 0;
 
         for (i, sn) in gap_list.iter().enumerate().skip(1) {

@@ -40,7 +40,7 @@ impl Data {
             writer_id,
             writer_sn,
             inline_qos: None,
-            serialized_data: Arc::from(vec![]),
+            serialized_data: Arc::<[u8]>::from([]),
             octets_to_inline_qos: 16,
         }
     }
