@@ -8,9 +8,9 @@ use crate::codegen::{
     generate_additional_derives, generate_enum_cdr_deserialize_impl,
     generate_enum_cdr_serialize_impl, generate_enum_xcdr_deserialize_impl,
     generate_enum_xcdr_serialize_impl, generate_has_type_object_enum_impl,
-    generate_union_cdr_deserialize_impl, generate_union_cdr_serialize_impl,
-    generate_union_xcdr_deserialize_impl, generate_union_xcdr_serialize_impl, is_c_style_enum,
-    parse_repr_attribute,
+    generate_has_type_object_union_impl, generate_union_cdr_deserialize_impl,
+    generate_union_cdr_serialize_impl, generate_union_xcdr_deserialize_impl,
+    generate_union_xcdr_serialize_impl, is_c_style_enum, parse_repr_attribute,
 };
 
 /// Generate DdsType implementation for enum types (DDS enum or union)
@@ -74,12 +74,11 @@ pub fn derive_enum_impl(
     // Generate additional derives (Default, Debug, Clone, PartialEq, speedy traits)
     let additional_derives = generate_additional_derives(input, name, type_config);
 
-    // Generate HasTypeObject implementation (only for C-style enums, not unions)
+    // Generate HasTypeObject implementation
     let has_type_object_impl = if is_enum {
         generate_has_type_object_enum_impl(name, variants, type_config)
     } else {
-        // Unions are not yet supported for HasTypeObject
-        quote! {}
+        generate_has_type_object_union_impl(name, variants, type_config, disc_type)
     };
 
     quote! {

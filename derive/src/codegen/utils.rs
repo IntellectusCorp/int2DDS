@@ -390,6 +390,28 @@ pub fn get_discriminant_value(variant: &syn::Variant, index: usize) -> i64 {
     index as i64 // default: use index
 }
 
+/// Get bitmask position from variant attributes (#[dds(position = N)]).
+/// Falls back to variant index if not specified.
+pub fn get_bitmask_position(variant: &syn::Variant, index: usize) -> u8 {
+    for attr in &variant.attrs {
+        if attr.path().is_ident("dds") {
+            let mut position = None;
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("position") {
+                    let value = meta.value()?;
+                    let lit: syn::LitInt = value.parse()?;
+                    position = Some(lit.base10_parse::<u8>()?);
+                }
+                Ok(())
+            });
+            if let Some(pos) = position {
+                return pos;
+            }
+        }
+    }
+    index as u8
+}
+
 /// AutoId kind for struct-level auto ID assignment
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutoIdKind {
