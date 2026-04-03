@@ -4,8 +4,7 @@
 //! stored in reader or writer history caches. Changes include the sequence number,
 //! data payload, instance handle, and metadata.
 
-use std::{collections::HashSet, sync::Arc};
-use uuid::Uuid;
+use std::collections::HashSet;
 
 use crate::{
     common::instance_handle::InstanceHandle,
@@ -15,19 +14,18 @@ use crate::{
         // parameters::ParameterList,
         sequence::SequenceNumber,
         time::RtpsTime,
-        types::{ChangeKind, SerializedData},
+        types::ChangeKind,
     },
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CacheChange {
-    uuid: Uuid,
     kind: ChangeKind,
     // From writer perspective: created local writer guid
     // From reader perspective: created remote writer guid
     writer_guid: Guid,
     pub(crate) sequence_number: SequenceNumber,
-    data_value: SerializedData,
+    pub(crate) data_value: Vec<u8>,
     // inline_qos is RTPS version 2.5
     // inline_qos: ParameterList
     instance_handle: InstanceHandle,
@@ -60,12 +58,10 @@ impl CacheChange {
         writer_guid: Guid,
         instance_handle: InstanceHandle,
         sequence_number: SequenceNumber,
-        data_value: SerializedData,
-        // inline_qos: ParameterList,
+        data_value: Vec<u8>,
         source_timestamp: Option<RtpsTime>,
     ) -> Self {
         Self {
-            uuid: Uuid::new_v4(),
             kind,
             writer_guid,
             writer_ownership_strength: None,
@@ -80,6 +76,49 @@ impl CacheChange {
             fragment_size: 0,
             lifespan_duration: None,
         }
+    }
+
+    /// Create an empty CacheChange (for pool pre-allocation)
+    pub(crate) fn empty() -> Self {
+        Self {
+            kind: ChangeKind::Alive,
+            writer_guid: Guid::UNKNOWN,
+            writer_ownership_strength: None,
+            instance_handle: InstanceHandle::default(),
+            data_value: Vec::new(),
+            sequence_number: SequenceNumber::UNKNOWN,
+            source_timestamp: None,
+            reception_timestamp: None,
+            fragmented: false,
+            fragment_set: HashSet::new(),
+            total_fragments: 0,
+            fragment_size: 0,
+            lifespan_duration: None,
+        }
+    }
+
+    /// Reset metadata for reuse, preserving data_value capacity.
+    pub(crate) fn reset(
+        &mut self,
+        kind: ChangeKind,
+        writer_guid: Guid,
+        instance_handle: InstanceHandle,
+        sequence_number: SequenceNumber,
+        source_timestamp: Option<RtpsTime>,
+    ) {
+        self.kind = kind;
+        self.writer_guid = writer_guid;
+        self.writer_ownership_strength = None;
+        self.instance_handle = instance_handle;
+        self.data_value.clear();
+        self.sequence_number = sequence_number;
+        self.source_timestamp = source_timestamp;
+        self.reception_timestamp = None;
+        self.fragmented = false;
+        self.fragment_set.clear();
+        self.total_fragments = 0;
+        self.fragment_size = 0;
+        self.lifespan_duration = None;
     }
 
     pub(crate) fn kind(&self) -> ChangeKind {
@@ -116,9 +155,6 @@ impl CacheChange {
     pub(crate) fn data_value(&self) -> &[u8] {
         &self.data_value
     }
-    pub(crate) fn data_value_arc(&self) -> Arc<[u8]> {
-        Arc::clone(&self.data_value)
-    }
 
     pub(crate) fn source_timestamp(&self) -> Option<RtpsTime> {
         self.source_timestamp
@@ -152,7 +188,7 @@ impl CacheChange {
         self.fragment_size
     }
 
-    pub(crate) fn get_fragment_data(&self, fragment_num: u32) -> Option<SerializedData> {
+    pub(crate) fn get_fragment_data(&self, fragment_num: u32) -> Option<&[u8]> {
         if !self.fragmented || fragment_num == 0 || fragment_num > self.total_fragments {
             return None;
         }
@@ -160,9 +196,7 @@ impl CacheChange {
         let start = (fragment_num - 1) * self.fragment_size;
         let end = std::cmp::min(start + self.fragment_size, self.data_value.len() as u32);
 
-        // Convert slice directly to Arc<[u8]> (SerializedData)
-        // This still requires one copy (to_vec), but avoids intermediate Vec wrapper
-        Some(Arc::from(&self.data_value[start as usize..end as usize]))
+        Some(&self.data_value[start as usize..end as usize])
     }
 
     // Create fragmented cache change from payload
@@ -180,7 +214,7 @@ impl CacheChange {
             writer_guid,
             instance_handle,
             sequence_number,
-            Arc::from(payload),
+            payload.to_vec(),
             source_timestamp,
         );
 

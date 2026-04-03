@@ -39,7 +39,7 @@ use crate::{
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
             sequence::SequenceNumber,
             time::{RtpsDuration, RtpsTime},
-            types::{ChangeKind, SerializedData, TopicKind},
+            types::{ChangeKind, TopicKind},
         },
         entities::{
             endpoint::Endpoint,
@@ -511,7 +511,7 @@ impl Writer for StatefulWriter {
     fn new_change(
         &self,
         kind: ChangeKind,
-        data: SerializedData,
+        data: Vec<u8>,
         // inline_qos: ParameterList,
         handle: InstanceHandle,
         source_timestamp: Option<RtpsTime>,
@@ -556,7 +556,7 @@ impl Writer for StatefulWriter {
         kind: ChangeKind,
         handle: InstanceHandle,
         source_timestamp: Option<RtpsTime>,
-        data_fn: Box<dyn FnOnce(Guid, SequenceNumber) -> SerializedData + '_>,
+        data_fn: Box<dyn FnOnce(Guid, SequenceNumber) -> Vec<u8> + '_>,
     ) -> CacheChange {
         let last_change_sequence_number = match self.last_change_sequence_number.lock() {
             Ok(mut last_change_sequence_number) => {
@@ -617,6 +617,19 @@ impl Writer for StatefulWriter {
 
     fn nack_suppression_duration(&self) -> RtpsDuration {
         RtpsDuration::from(self.writer_reliability_extension.nack_suppression_duration)
+    }
+
+    fn allocate_sequence_number(&self) -> SequenceNumber {
+        match self.last_change_sequence_number.lock() {
+            Ok(mut seq) => {
+                *seq += 1;
+                *seq
+            }
+            Err(e) => {
+                error!("Failed to acquire last_change_sequence_number lock: {}", e);
+                SequenceNumber::UNKNOWN
+            }
+        }
     }
 
     fn push_mode(&self) -> bool {
