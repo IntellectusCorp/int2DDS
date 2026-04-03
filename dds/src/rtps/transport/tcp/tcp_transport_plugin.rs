@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
+use std::env;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crossbeam_channel::{bounded, Receiver};
+use dashmap::DashMap;
 use log::{debug, info};
 
 use crate::rtps::common::guid::GuidPrefix;
@@ -20,6 +22,7 @@ use crate::rtps::transport::tcp::tcp_sender::TcpSender;
 /// Channel buffer size for discovery and user data channels.
 const CHANNEL_BUFFER_SIZE: usize = 256;
 
+const DEFAULT_KEEPALIVE_INTERVAL: u64 = 500;
 /// TCP implementation of the TransportPlugin trait.
 ///
 /// Owns a TcpSender for outgoing traffic and a TcpMuxListener for incoming traffic.
@@ -39,7 +42,7 @@ pub(crate) struct TcpTransportPlugin {
     user_data_rx: Mutex<Option<Receiver<IncomingMessage>>>,
 
     /// Dead peer event receiver — taken once via `take_dead_peer_receiver()`.
-    dead_peer_rx: Mutex<Option<Receiver<GuidPrefix>>>,
+    dead_peer_rx: Mutex<Option<Receiver<SocketAddr>>>,
 
     /// Termination flag for the mux listening thread.
     terminated: Arc<AtomicBool>,
@@ -92,21 +95,29 @@ impl TcpTransportPlugin {
         let listener_port = mux_listener.port();
 
         // Create TcpSender
-        let sender =
-            TcpSender::new(working_ip, guid_prefix, domain_id, participant_id, listener_port)?;
+        let sender = TcpSender::new(
+            working_ip,
+            guid_prefix,
+            domain_id,
+            participant_id,
+            listener_port,
+            Arc::new(DashMap::new()),
+        )?;
 
-        // Dead peer event channel
-        let (dead_peer_tx, dead_peer_rx) = bounded::<GuidPrefix>(CHANNEL_BUFFER_SIZE);
+        // Dead peer event channel — carries SocketAddr so PeerMonitor can resolve the actual GuidPrefix
+        let (dead_peer_tx, dead_peer_rx) = bounded::<SocketAddr>(CHANNEL_BUFFER_SIZE);
 
         // Spawn mux listening thread
         let terminated = Arc::new(AtomicBool::new(false));
         let terminated_clone = terminated.clone();
 
+        let sender_clone = sender.clone();
         let handle = thread::Builder::new()
             .name("tcp_mux_listening".to_string())
             .spawn(move || {
                 let mut task = TcpMuxListeningLoopTask {
                     mux_listener,
+                    sender: sender_clone,
                     terminated: terminated_clone,
                     dead_peer_tx,
                 };
@@ -192,7 +203,7 @@ impl TransportPlugin for TcpTransportPlugin {
         Some(MessageSource::Channel { rx })
     }
 
-    fn take_dead_peer_receiver(&self) -> Option<crossbeam_channel::Receiver<GuidPrefix>> {
+    fn take_dead_peer_receiver(&self) -> Option<crossbeam_channel::Receiver<SocketAddr>> {
         self.dead_peer_rx.lock().expect("lock poisoned").take()
     }
 
@@ -227,8 +238,9 @@ impl TransportPlugin for TcpTransportPlugin {
 /// Uses AtomicBool for termination instead of Participant reference.
 struct TcpMuxListeningLoopTask {
     mux_listener: TcpMuxListener,
+    sender: TcpSender,
     terminated: Arc<AtomicBool>,
-    dead_peer_tx: crossbeam_channel::Sender<GuidPrefix>,
+    dead_peer_tx: crossbeam_channel::Sender<SocketAddr>,
 }
 
 impl TcpMuxListeningLoopTask {
@@ -238,7 +250,10 @@ impl TcpMuxListeningLoopTask {
 
         const MUX_LISTENER_TOKEN: Token = Token(0);
         const POLL_TIMEOUT_MS: u64 = 100;
-        const KEEPALIVE_CHECK_INTERVAL_SECS: u64 = 10;
+        let keepalive_check_interval: u64 = env::var("INT2DDS_TCP_KEEPALIVE_INTERVAL")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_KEEPALIVE_INTERVAL);
 
         info!("[TcpMuxListeningLoopTask] Starting on port {}", self.mux_listener.port());
 
@@ -252,7 +267,7 @@ impl TcpMuxListeningLoopTask {
         }
 
         let mut last_keepalive_check = Instant::now();
-        let keepalive_interval = Duration::from_secs(KEEPALIVE_CHECK_INTERVAL_SECS);
+        let keepalive_interval = Duration::from_millis(keepalive_check_interval);
 
         loop {
             match poll.poll(&mut events, Some(Duration::from_millis(POLL_TIMEOUT_MS))) {
@@ -292,11 +307,15 @@ impl TcpMuxListeningLoopTask {
 
             if last_keepalive_check.elapsed() >= keepalive_interval {
                 last_keepalive_check = Instant::now();
-                let dead_peers = self.mux_listener.send_keepalives();
-                for guid in dead_peers {
-                    log::warn!("[TcpMuxListeningLoopTask] Removing dead peer {:?}", guid);
-                    self.mux_listener.remove_peer(guid, poll.registry());
-                    let _ = self.dead_peer_tx.try_send(guid);
+                let dead_addrs = self.sender.send_keepalives();
+                for addr in dead_addrs {
+                    log::warn!(
+                        "[TcpMuxListeningLoopTask] Dead peer detected via keepalive: {:?}",
+                        addr
+                    );
+                    self.sender.disconnect_peer(&addr);
+                    // send dead peer from keepalive timeout to peer monitor
+                    let _ = self.dead_peer_tx.try_send(addr);
                 }
             }
         }
