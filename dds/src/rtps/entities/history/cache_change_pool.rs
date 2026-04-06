@@ -7,6 +7,7 @@ pub(crate) struct CacheChangePool {
 }
 
 impl CacheChangePool {
+    #[cfg(test)]
     pub(crate) fn new() -> Self {
         Self { free_changes: Vec::new() }
     }

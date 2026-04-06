@@ -56,6 +56,7 @@ use crate::{
             entity::Entity,
             history::history_cache::HistoryCache,
             reader::{Reader, ReaderStore, StatefulReader, StatelessReader},
+            wire_buffer_pool::WireBufferPool,
             writer::{StatefulWriter, StatelessWriter, Writer, WriterStore},
         },
         logic::{
@@ -103,6 +104,7 @@ pub struct Participant {
     liveliness_monitor: Arc<Mutex<Option<LivelinessMonitor>>>,
     working_ips: Vec<String>,
     terminated: Arc<AtomicBool>,
+    wire_buffer_pool: Arc<Mutex<WireBufferPool>>,
 }
 impl Debug for Participant {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -174,6 +176,7 @@ impl Participant {
             working_ips,
             terminated: Arc::new(AtomicBool::new(false)),
             liveliness_monitor: Arc::new(Mutex::new(None)),
+            wire_buffer_pool: Arc::new(Mutex::new(WireBufferPool::new())),
         }
     }
 
@@ -1145,6 +1148,10 @@ impl Participant {
             self.sedp_logic.get().expect("sedp_logic not set").clone(),
             self.user_logic.get().expect("user_logic not set").clone(),
         )
+    }
+
+    pub(crate) fn wire_buffer_pool(&self) -> &Mutex<WireBufferPool> {
+        &self.wire_buffer_pool
     }
 
     /// Initialize all logic instances. Must be called immediately after creating Participant.
