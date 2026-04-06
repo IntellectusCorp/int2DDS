@@ -228,11 +228,22 @@ impl UserLogic {
                         a_change.sequence_number()
                     );
 
+                    let participant = self.get_upgraded_participant()?;
                     let timestamp = Utc::now();
                     for fragment_num in 1..=a_change.total_fragments() {
                         if let Some(fragment_data) = a_change.get_fragment_data(fragment_num) {
-                            let buffer = MessageCreator::create_data_frag_msg(
-                                a_change.clone(),
+                            let mut send_buffer = participant
+                                .wire_buffer_pool()
+                                .lock()
+                                .map_err(|_| {
+                                    RtpsError::new(
+                                        RtpsErrorCode::LockError,
+                                        "Failed to lock wire buffer pool",
+                                    )
+                                })?
+                                .acquire();
+                            let result = MessageCreator::create_data_frag_msg(
+                                &a_change,
                                 reader_proxy.remote_reader_guid(),
                                 reader_proxy.remote_group_entity_id(),
                                 writer.endpoint_id(),
@@ -243,38 +254,71 @@ impl UserLogic {
                                 fragment_data,
                                 heartbeat_info,
                                 timestamp,
+                                &mut send_buffer,
                             );
 
-                            if let Ok(buf) = buffer {
+                            if result.is_ok() {
                                 if let Err(e) = self.send_rtps_message_to_locators(
                                     reader_proxy.unicast_locator_list(),
-                                    buf.as_slice(),
+                                    &send_buffer,
                                 ) {
                                     warn!("Failed to send DATA_FRAG for requested change: {:?}", e);
                                 }
                             }
+                            participant
+                                .wire_buffer_pool()
+                                .lock()
+                                .map_err(|_| {
+                                    RtpsError::new(
+                                        RtpsErrorCode::LockError,
+                                        "Failed to lock wire buffer pool",
+                                    )
+                                })?
+                                .release(send_buffer);
                         }
                     }
                 } else {
                     // No fragment case - send regular DATA message
-                    let buffer = MessageCreator::create_data_msg(
-                        a_change.clone(),
+                    let participant = self.get_upgraded_participant()?;
+                    let mut send_buffer = participant
+                        .wire_buffer_pool()
+                        .lock()
+                        .map_err(|_| {
+                            RtpsError::new(
+                                RtpsErrorCode::LockError,
+                                "Failed to lock wire buffer pool",
+                            )
+                        })?
+                        .acquire();
+                    let result = MessageCreator::create_data_msg(
+                        &a_change,
                         reader_proxy.remote_reader_guid(),
                         reader_proxy.remote_group_entity_id(),
                         writer.endpoint_id(),
                         None, // No heartbeat
                         true, // Use inline QoS (default)
                         None, // No content filter for retransmission (TODO: consider adding filter)
+                        &mut send_buffer,
                     );
 
-                    if let Ok(buf) = buffer {
+                    if result.is_ok() {
                         if let Err(e) = self.send_rtps_message_to_locators(
                             reader_proxy.unicast_locator_list(),
-                            buf.as_slice(),
+                            &send_buffer,
                         ) {
                             warn!("Failed to send DATA for requested change: {:?}", e);
                         }
                     }
+                    participant
+                        .wire_buffer_pool()
+                        .lock()
+                        .map_err(|_| {
+                            RtpsError::new(
+                                RtpsErrorCode::LockError,
+                                "Failed to lock wire buffer pool",
+                            )
+                        })?
+                        .release(send_buffer);
                 }
             } else {
                 gap_list.push(*requested_change_sn);
@@ -386,24 +430,45 @@ impl UserLogic {
                                 Some((writer.heartbeat_count(), first_sn, last_sn, false, false));
                         }
 
-                        let buffer = MessageCreator::create_data_msg(
-                            a_change.clone(),
+                        let mut send_buffer = participant
+                            .wire_buffer_pool()
+                            .lock()
+                            .map_err(|_| {
+                                RtpsError::new(
+                                    RtpsErrorCode::LockError,
+                                    "Failed to lock wire buffer pool",
+                                )
+                            })?
+                            .acquire();
+                        MessageCreator::create_data_msg(
+                            &a_change,
                             reader_proxy.remote_reader_guid(),
                             reader_proxy.remote_group_entity_id(),
                             writer.endpoint_id(),
                             heartbeat_info,
                             true, // Use inline QoS (default)
                             reader_proxy.generate_content_filter_info(),
+                            &mut send_buffer,
                         )
                         .map_err(|e| RtpsError::new(RtpsErrorCode::Io, e.to_string()))?;
 
-                        if self
+                        let send_ok = self
                             .send_rtps_message_to_locators(
                                 reader_proxy.unicast_locator_list(),
-                                &buffer,
+                                &send_buffer,
                             )
-                            .is_ok()
-                        {
+                            .is_ok();
+                        participant
+                            .wire_buffer_pool()
+                            .lock()
+                            .map_err(|_| {
+                                RtpsError::new(
+                                    RtpsErrorCode::LockError,
+                                    "Failed to lock wire buffer pool",
+                                )
+                            })?
+                            .release(send_buffer);
+                        if send_ok {
                             writer.increase_heartbeat_count();
                             if !reader_proxy.is_first_hb_sent() {
                                 reader_proxy.set_first_hb_sent();
@@ -467,6 +532,8 @@ impl UserLogic {
             return Ok(()); // Nothing to send
         }
 
+        let participant = self.get_upgraded_participant()?;
+
         for (reader_locator, changes) in reader_tasks.iter() {
             for change in changes.iter() {
                 // Create DATA or DATA_FRAG message
@@ -475,8 +542,18 @@ impl UserLogic {
                     // Send each fragment as DATA_FRAG submessage immediately
                     for fragment_num in 1..=change.total_fragments() {
                         if let Some(fragment_data) = change.get_fragment_data(fragment_num) {
-                            let buffer = MessageCreator::create_data_frag_msg(
-                                Arc::clone(change),
+                            let mut send_buffer = participant
+                                .wire_buffer_pool()
+                                .lock()
+                                .map_err(|_| {
+                                    RtpsError::new(
+                                        RtpsErrorCode::LockError,
+                                        "Failed to lock wire buffer pool",
+                                    )
+                                })?
+                                .acquire();
+                            let result = MessageCreator::create_data_frag_msg(
+                                change,
                                 Guid::new(reader_locator.guid_prefix(), EntityId::PARTICIPANT),
                                 reader_locator.remote_entity_id(),
                                 writer.endpoint_id(),
@@ -487,38 +564,70 @@ impl UserLogic {
                                 fragment_data,
                                 None,
                                 timestamp,
+                                &mut send_buffer,
                             );
 
-                            if let Ok(buf) = buffer {
+                            if result.is_ok() {
                                 // Send fragmented message immediately
                                 if let Err(e) = self.send_rtps_message_to_locators(
                                     &[reader_locator.locator()],
-                                    &buf,
+                                    &send_buffer,
                                 ) {
                                     warn!("Failed to send DATA_FRAG message: {:?}", e);
                                 }
                             }
+                            participant
+                                .wire_buffer_pool()
+                                .lock()
+                                .map_err(|_| {
+                                    RtpsError::new(
+                                        RtpsErrorCode::LockError,
+                                        "Failed to lock wire buffer pool",
+                                    )
+                                })?
+                                .release(send_buffer);
                         }
                     }
                 } else {
                     // Send as regular DATA message
-                    let buffer = MessageCreator::create_data_msg(
-                        Arc::clone(change),
+                    let mut send_buffer = participant
+                        .wire_buffer_pool()
+                        .lock()
+                        .map_err(|_| {
+                            RtpsError::new(
+                                RtpsErrorCode::LockError,
+                                "Failed to lock wire buffer pool",
+                            )
+                        })?
+                        .acquire();
+                    MessageCreator::create_data_msg(
+                        change,
                         Guid::new(reader_locator.guid_prefix(), EntityId::PARTICIPANT),
                         reader_locator.remote_entity_id(),
                         writer.endpoint_id(),
                         None, // No heartbeat
                         true, // Use inline QoS (default)
                         None, // No content filter for stateless writer
+                        &mut send_buffer,
                     )
                     .map_err(|e| RtpsError::new(RtpsErrorCode::Io, e.to_string()))?;
 
-                    if let Err(e) =
-                        self.send_rtps_message_to_locators(&[reader_locator.locator()], &buffer)
+                    if let Err(e) = self
+                        .send_rtps_message_to_locators(&[reader_locator.locator()], &send_buffer)
                     {
                         warn!("Failed to send DATA message: {:?}", e);
                         // Continue sending other messages instead of aborting
                     }
+                    participant
+                        .wire_buffer_pool()
+                        .lock()
+                        .map_err(|_| {
+                            RtpsError::new(
+                                RtpsErrorCode::LockError,
+                                "Failed to lock wire buffer pool",
+                            )
+                        })?
+                        .release(send_buffer);
                 }
             }
         }
@@ -560,9 +669,17 @@ impl UserLogic {
         heartbeat_info: Option<(u32, SequenceNumber, SequenceNumber, bool, bool)>,
         timestamp: DateTime<Utc>,
     ) -> bool {
+        let participant = match self.get_upgraded_participant() {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
         if let Some(fragment_data) = change.get_fragment_data(fragment_num) {
-            let buffer = MessageCreator::create_data_frag_msg(
-                Arc::new(change.clone()),
+            let mut send_buffer = match participant.wire_buffer_pool().lock() {
+                Ok(mut pool) => pool.acquire(),
+                Err(_) => return false,
+            };
+            let result = MessageCreator::create_data_frag_msg(
+                change,
                 reader_proxy.remote_reader_guid(),
                 reader_proxy.remote_group_entity_id(),
                 writer_id,
@@ -573,16 +690,22 @@ impl UserLogic {
                 fragment_data,
                 heartbeat_info,
                 timestamp,
+                &mut send_buffer,
             );
 
-            if let Ok(buffer) = buffer {
-                return self
-                    .send_rtps_message_to_locators(
-                        reader_proxy.unicast_locator_list(),
-                        buffer.as_slice(),
-                    )
-                    .is_ok();
+            let sent = if result.is_ok() {
+                self.send_rtps_message_to_locators(
+                    reader_proxy.unicast_locator_list(),
+                    &send_buffer,
+                )
+                .is_ok()
+            } else {
+                false
+            };
+            if let Ok(mut pool) = participant.wire_buffer_pool().lock() {
+                pool.release(send_buffer);
             }
+            return sent;
         }
         false
     }

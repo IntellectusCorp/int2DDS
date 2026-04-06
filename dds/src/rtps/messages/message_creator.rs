@@ -139,14 +139,15 @@ impl MessageCreator {
     }
 
     pub(crate) fn create_data_msg(
-        cache_change: Arc<CacheChange>,
+        cache_change: &CacheChange,
         remote_guid: Guid,
         reader_entity_id: EntityId,
         writer_entity_id: EntityId,
         heartbeat_info: Option<(u32, SequenceNumber, SequenceNumber, bool, bool)>,
-        use_inline_qos: bool, // TODO: Can be changed to Vec<Parameter> in the future
+        use_inline_qos: bool,
         content_filter_info: Option<ContentFilterInfo>,
-    ) -> Result<Arc<Vec<u8>>, Box<dyn std::error::Error>> {
+        send_buffer: &mut Vec<u8>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         debug!("Creating RTPS message from cache change: {:?}", cache_change);
 
         let mut rtps_message = RtpsMessage::new(Header::new(cache_change.writer_guid().prefix()));
@@ -245,16 +246,17 @@ impl MessageCreator {
             rtps_message.add_submessage(heartbeat_submessage);
         }
 
-        // Serialize the complete RTPS message
-        match rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian) {
-            Ok(buffer) => Ok(Arc::new(buffer)),
-            Err(e) => Err(Box::new(e)),
-        }
+        // Serialize into the reusable send buffer
+        let size = Writable::<Endianness>::bytes_needed(&rtps_message)?;
+        send_buffer.clear();
+        send_buffer.resize(size, 0);
+        rtps_message.write_to_buffer_with_ctx(Endianness::LittleEndian, send_buffer)?;
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn create_data_frag_msg(
-        cache_change: Arc<CacheChange>,
+        cache_change: &CacheChange,
         remote_guid: Guid,
         reader_entity_id: EntityId,
         writer_entity_id: EntityId,
@@ -265,7 +267,8 @@ impl MessageCreator {
         fragment_data: &[u8],
         heartbeat_info: Option<(u32, SequenceNumber, SequenceNumber, bool, bool)>,
         timestamp: DateTime<Utc>,
-    ) -> Result<Arc<Vec<u8>>, Box<dyn std::error::Error>> {
+        send_buffer: &mut Vec<u8>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut rtps_message = RtpsMessage::new(Header::new(cache_change.writer_guid().prefix()));
 
         rtps_message
@@ -315,11 +318,12 @@ impl MessageCreator {
             rtps_message.add_submessage(heartbeat_submessage);
         }
 
-        // Serialize the complete RTPS message
-        match rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian) {
-            Ok(buffer) => Ok(Arc::new(buffer)),
-            Err(e) => Err(Box::new(e)),
-        }
+        // Serialize into the reusable send buffer
+        let size = Writable::<Endianness>::bytes_needed(&rtps_message)?;
+        send_buffer.clear();
+        send_buffer.resize(size, 0);
+        rtps_message.write_to_buffer_with_ctx(Endianness::LittleEndian, send_buffer)?;
+        Ok(())
     }
 
     pub(crate) fn create_gap_msg_consecutive(
