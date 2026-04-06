@@ -2211,6 +2211,22 @@ impl UnicastMessageProcessor for SedpLogic {
         submessage_header: &SubmessageHeader,
         heartbeat: &Heartbeat,
     ) -> RtpsResult<()> {
+        // ManualByTopic liveliness: user writer sends HEARTBEAT with liveliness_flag
+        // via metatraffic channel. Delegate to WLP logic for liveliness renewal.
+        let is_liveliness_heartbeat = submessage_header.liveliness_flag().unwrap_or(false);
+        if is_liveliness_heartbeat && !heartbeat.writer_id.entity_kind().is_built_in() {
+            let participant = self.get_upgraded_participant()?;
+            if let Some(wlp) = participant.wlp_logic() {
+                let _ = wlp.handle_heartbeat_message_inner(
+                    heartbeat,
+                    Guid::new(rtps_header.guid_prefix(), heartbeat.writer_id),
+                    submessage_header.final_flag().unwrap_or(false),
+                    true,
+                );
+            }
+            return Ok(());
+        }
+
         if heartbeat.writer_id == EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_WRITER {
             debug!("[heartbeat] P2P heartbeat, skipping in sedp_logic");
             return Ok(());
