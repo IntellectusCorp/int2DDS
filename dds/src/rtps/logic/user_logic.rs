@@ -370,7 +370,8 @@ impl UserLogic {
                                         "[DataFrag] Peer disconnected for reader {:?}",
                                         reader_proxy.remote_reader_guid()
                                     );
-                                    disconnected_peer = Some(reader_proxy.remote_reader_guid().prefix());
+                                    disconnected_peer =
+                                        Some(reader_proxy.remote_reader_guid().prefix());
                                     break;
                                 }
                                 _ => {}
@@ -411,7 +412,8 @@ impl UserLogic {
                                     "[Data] Peer disconnected for reader {:?}",
                                     reader_proxy.remote_reader_guid()
                                 );
-                                disconnected_peer = Some(reader_proxy.remote_reader_guid().prefix());
+                                disconnected_peer =
+                                    Some(reader_proxy.remote_reader_guid().prefix());
                                 break;
                             }
                             Err(_) => {}
@@ -1420,199 +1422,194 @@ impl UnicastMessageProcessor for UserLogic {
         submessage_header: &SubmessageHeader,
         heartbeat: &Heartbeat,
     ) -> RtpsResult<()> {
+        // Temporarily commented out the seemingly unnecessary liveliness heartbeat logic in UserLogic.
+        // let participant = self.get_upgraded_participant()?;
+        // let is_liveliness_heartbeat = submessage_header.liveliness_flag().unwrap_or(false);
+
+        // if is_liveliness_heartbeat {
+        //     if let Some(wlp) = participant.wlp_logic() {
+        //         let _ = wlp.handle_heartbeat_message_inner(
+        //             heartbeat,
+        //             Guid::new(rtps_header.guid_prefix(), heartbeat.writer_id),
+        //             submessage_header.final_flag().unwrap_or(false),
+        //             true,
+        //         );
+        //     }
+        // } else {
+        let final_flag = submessage_header.final_flag().unwrap_or(false);
+        let remote_writer_guid = Guid::new(rtps_header.guid_prefix(), heartbeat.writer_id);
+
         let participant = self.get_upgraded_participant()?;
-        let is_liveliness_heartbeat = submessage_header.liveliness_flag().unwrap_or(false);
+        let matched_readers = self.get_matched_readers(remote_writer_guid, heartbeat.reader_id)?;
 
-        if is_liveliness_heartbeat {
-            if let Some(wlp) = participant.wlp_logic() {
-                let _ = wlp.handle_heartbeat_message_inner(
-                    heartbeat,
-                    Guid::new(rtps_header.guid_prefix(), heartbeat.writer_id),
-                    submessage_header.final_flag().unwrap_or(false),
-                    true,
-                );
-            }
-        } else {
-            let final_flag = submessage_header.final_flag().unwrap_or(false);
-            let remote_writer_guid = Guid::new(rtps_header.guid_prefix(), heartbeat.writer_id);
-
-            let participant = self.get_upgraded_participant()?;
-            let matched_readers =
-                self.get_matched_readers(remote_writer_guid, heartbeat.reader_id)?;
-
-            if matched_readers.is_empty() {
-                debug!(
+        if matched_readers.is_empty() {
+            debug!(
                 "[Heartbeat] No matched readers found for remote writer: {:?}, skipping data handling.",
                 remote_writer_guid
             );
-                return Ok(());
-            }
+            return Ok(());
+        }
 
-            for reader in matched_readers {
-                let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() else {
-                    continue;
-                };
+        for reader in matched_readers {
+            let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() else {
+                continue;
+            };
 
-                let writer_proxies = stateful_reader.writer_proxies();
-                let mut matched_writers = writer_proxies.lock().map_err(|e| {
-                    RtpsError::new(
-                        RtpsErrorCode::LockError,
-                        format!("Failed to acquire writer_proxies lock: {}", e),
-                    )
+            let writer_proxies = stateful_reader.writer_proxies();
+            let mut matched_writers = writer_proxies.lock().map_err(|e| {
+                RtpsError::new(
+                    RtpsErrorCode::LockError,
+                    format!("Failed to acquire writer_proxies lock: {}", e),
+                )
+            })?;
+
+            let writer_proxy = matched_writers
+                .iter_mut()
+                .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
+                .ok_or_else(|| {
+                    RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, "WriterProxy not found")
                 })?;
 
-                let writer_proxy = matched_writers
-                    .iter_mut()
-                    .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
-                    .ok_or_else(|| {
-                        RtpsError::new(
-                            RtpsErrorCode::MatchedEntityNotFound,
-                            "WriterProxy not found",
-                        )
-                    })?;
-
-                match writer_proxy.last_heartbeat_count() {
-                    Some(prev) => {
-                        if (heartbeat.count.wrapping_sub(prev) as i32) <= 0 {
-                            debug!(
+            match writer_proxy.last_heartbeat_count() {
+                Some(prev) => {
+                    if (heartbeat.count.wrapping_sub(prev) as i32) <= 0 {
+                        debug!(
                                 "[UserLogic] [Heartbeat] Ignoring old Heartbeat: count={} <= last_count={}",
                                 heartbeat.count, prev
                             );
-                            return Ok(());
-                        }
+                        return Ok(());
                     }
-                    None => {
-                        debug!(
-                            "[UserLogic] [Heartbeat] First Heartbeat received: count={}",
-                            heartbeat.count
+                }
+                None => {
+                    debug!(
+                        "[UserLogic] [Heartbeat] First Heartbeat received: count={}",
+                        heartbeat.count
+                    );
+                }
+            }
+
+            writer_proxy.set_last_heartbeat_count(heartbeat.count);
+
+            let missing_changes =
+                writer_proxy.process_heartbeat(heartbeat.first_sn, heartbeat.last_sn);
+
+            // Case when ACKNACK sending is required: no fragments or
+            // all fragments have been received
+            if !writer_proxy.has_fragmented_changes(heartbeat.first_sn, heartbeat.last_sn)
+                || writer_proxy.all_fragments_received(heartbeat.last_sn)
+            {
+                // This is the first HB for reader
+                if writer_proxy.expected_sn() == SequenceNumber::UNKNOWN {
+                    writer_proxy.set_expected_sn(heartbeat.first_sn);
+                }
+
+                // Always flush buffer after updating sequence number
+                let change_to_add = writer_proxy.flush_buffered_changes();
+                self.add_change_to_reader_cache_and_notify(reader.as_ref(), change_to_add)?;
+
+                // Apply heartbeat response delay
+                let heartbeat_response_delay = stateful_reader.heartbeat_response_delay();
+                let delay_duration = heartbeat_response_delay.to_std_duration();
+
+                if delay_duration.is_zero() {
+                    // No delay - send immediately
+                    let bitmap_base = writer_proxy.expected_sn();
+                    self.send_acknack_to_writer_proxy_inner(
+                        writer_proxy,
+                        stateful_reader,
+                        missing_changes,
+                        bitmap_base,
+                        final_flag,
+                        false,
+                    )?;
+                } else {
+                    // Schedule delayed ACKNACK via SendingHandler
+                    let remote_writer_guid = writer_proxy.remote_writer_guid();
+                    let reader_entity_id = stateful_reader.guid().entity_id();
+                    let participant_guid = participant.guid();
+
+                    let timer_id = TimerId::Acknack { reader_entity_id, remote_writer_guid };
+
+                    if let Ok(locked_timer_handler) =
+                        TimerHandler::get_instance(participant.guid().prefix()).lock()
+                    {
+                        locked_timer_handler.add_timer(
+                            timer_id,
+                            delay_duration,
+                            false, // one-shot
+                            move || {
+                                if let Some(sending_handler) =
+                                    SendingHandler::get_instance_by_participant_guid(
+                                        participant_guid,
+                                    )
+                                {
+                                    sending_handler.push_message_and_wake(
+                                        MessageType::UserAcknack(
+                                            reader_entity_id,
+                                            remote_writer_guid,
+                                            final_flag,
+                                            false, // is_preemptive
+                                        ),
+                                    );
+                                }
+                            },
                         );
                     }
                 }
+            } else {
+                // Case when fragments are not completely received yet - apply suppression delay
+                let missing_fragments =
+                    writer_proxy.calculate_missing_fragments(heartbeat.first_sn, heartbeat.last_sn);
 
-                writer_proxy.set_last_heartbeat_count(heartbeat.count);
+                if missing_fragments.is_some() {
+                    let writer_proxies_clone = writer_proxies.clone();
+                    let stateful_reader_guid = stateful_reader.guid();
+                    let participant = participant.clone();
+                    let transport_clone = self.transport.clone();
+                    let last_sn = heartbeat.last_sn;
+                    let missing_fragments_clone = missing_fragments.clone();
+                    let remote_writer_guid = writer_proxy.remote_writer_guid();
 
-                let missing_changes =
-                    writer_proxy.process_heartbeat(heartbeat.first_sn, heartbeat.last_sn);
+                    writer_proxy.increase_nackfrag_count();
 
-                // Case when ACKNACK sending is required: no fragments or
-                // all fragments have been received
-                if !writer_proxy.has_fragmented_changes(heartbeat.first_sn, heartbeat.last_sn)
-                    || writer_proxy.all_fragments_received(heartbeat.last_sn)
-                {
-                    // This is the first HB for reader
-                    if writer_proxy.expected_sn() == SequenceNumber::UNKNOWN {
-                        writer_proxy.set_expected_sn(heartbeat.first_sn);
-                    }
-
-                    // Always flush buffer after updating sequence number
-                    let change_to_add = writer_proxy.flush_buffered_changes();
-                    self.add_change_to_reader_cache_and_notify(reader.as_ref(), change_to_add)?;
-
-                    // Apply heartbeat response delay
-                    let heartbeat_response_delay = stateful_reader.heartbeat_response_delay();
-                    let delay_duration = heartbeat_response_delay.to_std_duration();
-
-                    if delay_duration.is_zero() {
-                        // No delay - send immediately
-                        let bitmap_base = writer_proxy.expected_sn();
-                        self.send_acknack_to_writer_proxy_inner(
-                            writer_proxy,
-                            stateful_reader,
-                            missing_changes,
-                            bitmap_base,
-                            final_flag,
-                            false,
-                        )?;
-                    } else {
-                        // Schedule delayed ACKNACK via SendingHandler
-                        let remote_writer_guid = writer_proxy.remote_writer_guid();
-                        let reader_entity_id = stateful_reader.guid().entity_id();
-                        let participant_guid = participant.guid();
-
-                        let timer_id = TimerId::Acknack { reader_entity_id, remote_writer_guid };
-
-                        if let Ok(locked_timer_handler) =
-                            TimerHandler::get_instance(participant.guid().prefix()).lock()
-                        {
-                            locked_timer_handler.add_timer(
-                                timer_id,
-                                delay_duration,
-                                false, // one-shot
-                                move || {
-                                    if let Some(sending_handler) =
-                                        SendingHandler::get_instance_by_participant_guid(
-                                            participant_guid,
-                                        )
-                                    {
-                                        sending_handler.push_message_and_wake(
-                                            MessageType::UserAcknack(
-                                                reader_entity_id,
-                                                remote_writer_guid,
-                                                final_flag,
-                                                false, // is_preemptive
-                                            ),
-                                        );
+                    let timer_id = TimerId::NackFrag {
+                        reader_entity_id: stateful_reader.guid().entity_id(),
+                        remote_writer_guid,
+                        sequence_number: last_sn,
+                    };
+                    if let Ok(locked_timer_handler) =
+                        TimerHandler::get_instance(participant.guid().prefix()).lock()
+                    {
+                        locked_timer_handler.remove_timer(timer_id);
+                        locked_timer_handler.add_timer(
+                            timer_id,
+                            Duration::from_millis(5),
+                            false, // not repeating
+                            move || {
+                                let mut writer_proxies_guard = match writer_proxies_clone.lock() {
+                                    Ok(guard) => guard,
+                                    Err(e) => {
+                                        warn!("Failed to acquire writer_proxies lock: {}", e);
+                                        return;
                                     }
-                                },
-                            );
-                        }
-                    }
-                } else {
-                    // Case when fragments are not completely received yet - apply suppression delay
-                    let missing_fragments = writer_proxy
-                        .calculate_missing_fragments(heartbeat.first_sn, heartbeat.last_sn);
+                                };
 
-                    if missing_fragments.is_some() {
-                        let writer_proxies_clone = writer_proxies.clone();
-                        let stateful_reader_guid = stateful_reader.guid();
-                        let participant = participant.clone();
-                        let transport_clone = self.transport.clone();
-                        let last_sn = heartbeat.last_sn;
-                        let missing_fragments_clone = missing_fragments.clone();
-                        let remote_writer_guid = writer_proxy.remote_writer_guid();
+                                if let Some(current_writer_proxy) = writer_proxies_guard
+                                    .iter_mut()
+                                    .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
+                                {
+                                    let still_missing =
+                                        current_writer_proxy.still_missing_fragments(last_sn);
 
-                        writer_proxy.increase_nackfrag_count();
+                                    if still_missing {
+                                        // Create and send NACK_FRAG message
+                                        current_writer_proxy.increase_acknack_count();
 
-                        let timer_id = TimerId::NackFrag {
-                            reader_entity_id: stateful_reader.guid().entity_id(),
-                            remote_writer_guid,
-                            sequence_number: last_sn,
-                        };
-                        if let Ok(locked_timer_handler) =
-                            TimerHandler::get_instance(participant.guid().prefix()).lock()
-                        {
-                            locked_timer_handler.remove_timer(timer_id);
-                            locked_timer_handler.add_timer(
-                                timer_id,
-                                Duration::from_millis(5),
-                                false, // not repeating
-                                move || {
-                                    let mut writer_proxies_guard = match writer_proxies_clone.lock()
-                                    {
-                                        Ok(guard) => guard,
-                                        Err(e) => {
-                                            warn!("Failed to acquire writer_proxies lock: {}", e);
-                                            return;
-                                        }
-                                    };
-
-                                    if let Some(current_writer_proxy) =
-                                        writer_proxies_guard.iter_mut().find(|proxy| {
-                                            proxy.remote_writer_guid() == remote_writer_guid
-                                        })
-                                    {
-                                        let still_missing =
-                                            current_writer_proxy.still_missing_fragments(last_sn);
-
-                                        if still_missing {
-                                            // Create and send NACK_FRAG message
-                                            current_writer_proxy.increase_acknack_count();
-
-                                            let acknack_info = Some((
-                                                current_writer_proxy.acknack_count(),
-                                                last_sn,
-                                                missing_changes.clone(),
-                                            ));
+                                        let acknack_info = Some((
+                                            current_writer_proxy.acknack_count(),
+                                            last_sn,
+                                            missing_changes.clone(),
+                                        ));
 
                                             if let Ok(buffer) = MessageCreator::create_nackfrag_msg(
                                                 participant.guid(),
@@ -1640,7 +1637,6 @@ impl UnicastMessageProcessor for UserLogic {
                                     }
                                 },
                             );
-                        }
                     }
                 }
             }
