@@ -154,6 +154,10 @@ impl<'a> PyGen<'a> {
         self.emit_serialize_cdr(s);
         self.line("");
 
+        // _serialize_cdr_inline method (for nested struct serialization)
+        self.emit_serialize_cdr_inline(s);
+        self.line("");
+
         // _deserialize_cdr class method
         self.emit_deserialize_cdr(s);
         self.line("");
@@ -230,10 +234,10 @@ impl<'a> PyGen<'a> {
     // ---- Serialization ----
 
     fn emit_serialize_cdr(&mut self, s: &ResolvedStruct) {
-        self.line("def _serialize_cdr(self) -> bytes:");
+        self.line("def _serialize_cdr(self, xcdr2: bool = True) -> bytes:");
         self.indent += 1;
         self.line("\"\"\"Serialize to CDR bytes with encapsulation header.\"\"\"");
-        self.line("w = CdrWriter(extensibility=self._extensibility)");
+        self.line("w = CdrWriter(extensibility=self._extensibility, xcdr2=xcdr2)");
 
         match s.extensibility {
             ExtensibilityKind::Final => {
@@ -244,8 +248,18 @@ impl<'a> PyGen<'a> {
                 }
             }
             ExtensibilityKind::Appendable => {
-                // Appendable: wrap with DHEADER
+                // Appendable: wrap with DHEADER only in XCDR2
+                self.line("if w._xcdr2:");
+                self.indent += 1;
                 self.line("with w.dheader():");
+                self.indent += 1;
+                for m in &s.members {
+                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
+                    self.emit_write_field(&m.resolved_type, &format!("self.{}", field_name));
+                }
+                self.indent -= 1;
+                self.indent -= 1;
+                self.line("else:");
                 self.indent += 1;
                 for m in &s.members {
                     let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
@@ -278,6 +292,67 @@ impl<'a> PyGen<'a> {
         self.indent -= 1;
     }
 
+    fn emit_serialize_cdr_inline(&mut self, s: &ResolvedStruct) {
+        self.line("def _serialize_cdr_inline(self, w: CdrWriter) -> None:");
+        self.indent += 1;
+        self.line("\"\"\"Serialize fields directly into an existing writer (no encap header).\"\"\"");
+
+        match s.extensibility {
+            ExtensibilityKind::Final => {
+                for m in &s.members {
+                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
+                    self.emit_write_field(&m.resolved_type, &format!("self.{}", field_name));
+                }
+            }
+            ExtensibilityKind::Appendable => {
+                self.line("if w._xcdr2:");
+                self.indent += 1;
+                self.line("with w.dheader():");
+                self.indent += 1;
+                for m in &s.members {
+                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
+                    self.emit_write_field(&m.resolved_type, &format!("self.{}", field_name));
+                }
+                self.indent -= 1;
+                self.indent -= 1;
+                self.line("else:");
+                self.indent += 1;
+                for m in &s.members {
+                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
+                    self.emit_write_field(&m.resolved_type, &format!("self.{}", field_name));
+                }
+                self.indent -= 1;
+            }
+            ExtensibilityKind::Mutable => {
+                self.line("with w.dheader():");
+                self.indent += 1;
+                for (i, m) in s.members.iter().enumerate() {
+                    let member_id = m.member_id.unwrap_or(i as u32);
+                    let must_understand = if m.must_understand { "True" } else { "False" };
+                    self.line(&format!(
+                        "with w.emheader(member_id={}, must_understand={}):",
+                        member_id, must_understand
+                    ));
+                    self.indent += 1;
+                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
+                    self.emit_write_field(&m.resolved_type, &format!("self.{}", field_name));
+                    self.indent -= 1;
+                }
+                self.line("w.write_sentinel()");
+                self.indent -= 1;
+            }
+        }
+
+        self.indent -= 1;
+    }
+
+    fn is_non_primitive_element(element: &ResolvedType) -> bool {
+        // Only String needs per-sequence DHEADER in XCDR2.
+        // Enum: fixed-size (i32), no DHEADER needed.
+        // Struct: APPENDABLE structs already have per-element DHEADER.
+        matches!(element, ResolvedType::String { .. })
+    }
+
     fn emit_write_field(&mut self, ty: &ResolvedType, accessor: &str) {
         match ty {
             ResolvedType::Bool => self.line(&format!("w.write_bool({})", accessor)),
@@ -295,16 +370,37 @@ impl<'a> PyGen<'a> {
             ResolvedType::String { .. } => self.line(&format!("w.write_string({})", accessor)),
             ResolvedType::Enum(_) => self.line(&format!("w.write_enum(int({}))", accessor)),
             ResolvedType::Struct(_) => {
-                // Nested struct: write its serialized bytes (without encap header)
-                self.line(&format!("_nested = {}._serialize_cdr()", accessor));
-                self.line("w.write_bytes(_nested[4:])  # Skip encap header");
+                // Nested struct: write directly to parent writer (preserves alignment)
+                self.line(&format!("{}._serialize_cdr_inline(w)", accessor));
             }
             ResolvedType::Sequence { element, .. } => {
-                self.line(&format!("w.write_seq_header(len({}))", accessor));
-                self.line(&format!("for _item in {}:", accessor));
-                self.indent += 1;
-                self.emit_write_field(element, "_item");
-                self.indent -= 1;
+                if Self::is_non_primitive_element(element) {
+                    // XCDR2: non-primitive sequences need DHEADER
+                    self.line("if w._xcdr2:");
+                    self.indent += 1;
+                    self.line("_seq_token = w.write_dheader_begin()");
+                    self.line(&format!("w.write_seq_header(len({}))", accessor));
+                    self.line(&format!("for _item in {}:", accessor));
+                    self.indent += 1;
+                    self.emit_write_field(element, "_item");
+                    self.indent -= 1;
+                    self.line("w.write_dheader_finalize(_seq_token)");
+                    self.indent -= 1;
+                    self.line("else:");
+                    self.indent += 1;
+                    self.line(&format!("w.write_seq_header(len({}))", accessor));
+                    self.line(&format!("for _item in {}:", accessor));
+                    self.indent += 1;
+                    self.emit_write_field(element, "_item");
+                    self.indent -= 1;
+                    self.indent -= 1;
+                } else {
+                    self.line(&format!("w.write_seq_header(len({}))", accessor));
+                    self.line(&format!("for _item in {}:", accessor));
+                    self.indent += 1;
+                    self.emit_write_field(element, "_item");
+                    self.indent -= 1;
+                }
             }
             ResolvedType::Array { element, size } => {
                 self.line(&format!(
@@ -346,13 +442,19 @@ impl<'a> PyGen<'a> {
                 }
             }
             ExtensibilityKind::Appendable => {
-                // Appendable: read DHEADER, then fields
+                // Appendable: read DHEADER only in XCDR2
+                self.line("if r._xcdr2:");
+                self.indent += 1;
                 self.line("_dsize, _dstart = r.read_dheader()");
+                self.indent -= 1;
                 for m in &s.members {
                     let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
                     self.emit_read_field(&m.resolved_type, &field_name);
                 }
+                self.line("if r._xcdr2:");
+                self.indent += 1;
                 self.line("r.read_dheader_end(_dsize, _dstart)");
+                self.indent -= 1;
             }
             ExtensibilityKind::Mutable => {
                 // Mutable: read DHEADER, then loop over EMHEADERs
@@ -436,12 +538,18 @@ impl<'a> PyGen<'a> {
                 }
             }
             ExtensibilityKind::Appendable => {
+                self.line("if r._xcdr2:");
+                self.indent += 1;
                 self.line("_dsize, _dstart = r.read_dheader()");
+                self.indent -= 1;
                 for m in &s.members {
                     let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
                     self.emit_read_field(&m.resolved_type, &field_name);
                 }
+                self.line("if r._xcdr2:");
+                self.indent += 1;
                 self.line("r.read_dheader_end(_dsize, _dstart)");
+                self.indent -= 1;
             }
             ExtensibilityKind::Mutable => {
                 self.line("_dsize, _dstart = r.read_dheader()");
@@ -523,6 +631,13 @@ impl<'a> PyGen<'a> {
                 self.line(&format!("{} = {}._deserialize_cdr_inline(r)", name, struct_name));
             }
             ResolvedType::Sequence { element, .. } => {
+                if Self::is_non_primitive_element(element) {
+                    // XCDR2: non-primitive sequences have DHEADER
+                    self.line("if r._xcdr2:");
+                    self.indent += 1;
+                    self.line("_seq_dsize, _seq_dstart = r.read_dheader()");
+                    self.indent -= 1;
+                }
                 self.line(&format!("_{}_count = r.read_seq_header()", name));
                 self.line(&format!("{} = []", name));
                 self.line(&format!("for _ in range(_{}_count):", name));
@@ -531,6 +646,12 @@ impl<'a> PyGen<'a> {
                 self.emit_read_field(element, &item_name);
                 self.line(&format!("{}.append({})", name, item_name));
                 self.indent -= 1;
+                if Self::is_non_primitive_element(element) {
+                    self.line("if r._xcdr2:");
+                    self.indent += 1;
+                    self.line("r.read_dheader_end(_seq_dsize, _seq_dstart)");
+                    self.indent -= 1;
+                }
             }
             ResolvedType::Array { element, size } => {
                 self.line(&format!("{} = []", name));
