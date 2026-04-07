@@ -40,6 +40,8 @@ pub fn init_from_env() {
     // - INT2DDS_TCP_KEEPALIVE_INTERVAL: Set TCP control keepalive send interval (milliseconds) - Default: 30000
     // - INT2DDS_TCP_KEEPALIVE_TIMEOUT: Set TCP keepalive response timeout (milliseconds) - Default: 10000
     // - INT2DDS_TCP_KEEPALIVE_MAX_MISSES: Set TCP keepalive max consecutive misses before disconnect - Default: 3
+    // - INT2DDS_TCP_INCOMING_IDLE_TIMEOUT: Set idle timeout for incoming TCP connections (milliseconds) - Default: 10000
+    // - INT2DDS_TCP_ORPHAN_DATA_GRACE: Set grace period before orphan data connections are torn down (milliseconds) - Default: 1000
 
     // - INT2DDS_INITIAL_PEERS: Set initial peers for SPDP unicast discovery (comma-separated, e.g., "192.168.1.10:7400,192.168.1.11:7400") - Default: none
 
@@ -231,6 +233,22 @@ fn apply_cli_args_to_env() {
                     .value_hint(ValueHint::Other),
             )
             .arg(
+                Arg::new("int2dds_tcp_incoming_idle_timeout")
+                    .long("int2dds-tcp-incoming-idle-timeout")
+                    .value_name("MILLISECONDS")
+                    .help("Idle timeout for incoming TCP connections (milliseconds)")
+                    .num_args(1)
+                    .value_hint(ValueHint::Other),
+            )
+            .arg(
+                Arg::new("int2dds_tcp_orphan_data_grace")
+                    .long("int2dds-tcp-orphan-data-grace")
+                    .value_name("MILLISECONDS")
+                    .help("Grace period before orphan data connections are torn down (milliseconds)")
+                    .num_args(1)
+                    .value_hint(ValueHint::Other),
+            )
+            .arg(
                 Arg::new("int2dds_initial_peers")
                     .long("int2dds-initial-peers")
                     .value_name("PEERS")
@@ -335,6 +353,14 @@ fn apply_cli_args_to_env() {
     if let Some(v) = matches.get_one::<String>("int2dds_tcp_keepalive_max_misses") {
         log::info!("Environment variable set: INT2DDS_TCP_KEEPALIVE_MAX_MISSES = {}", v);
         unsafe { std::env::set_var("INT2DDS_TCP_KEEPALIVE_MAX_MISSES", v) };
+    }
+    if let Some(v) = matches.get_one::<String>("int2dds_tcp_incoming_idle_timeout") {
+        log::info!("Environment variable set: INT2DDS_TCP_INCOMING_IDLE_TIMEOUT = {}", v);
+        unsafe { std::env::set_var("INT2DDS_TCP_INCOMING_IDLE_TIMEOUT", v) };
+    }
+    if let Some(v) = matches.get_one::<String>("int2dds_tcp_orphan_data_grace") {
+        log::info!("Environment variable set: INT2DDS_TCP_ORPHAN_DATA_GRACE = {}", v);
+        unsafe { std::env::set_var("INT2DDS_TCP_ORPHAN_DATA_GRACE", v) };
     }
     if let Some(v) = matches.get_one::<String>("int2dds_initial_peers") {
         log::info!("Environment variable set: INT2DDS_INITIAL_PEERS = {}", v);
@@ -673,6 +699,36 @@ pub fn get_tcp_keepalive_max_misses() -> u32 {
 pub fn set_tcp_keepalive_max_misses(max_misses: u32) {
     log::info!("Environment variable set: INT2DDS_TCP_KEEPALIVE_MAX_MISSES = {}", max_misses);
     unsafe { std::env::set_var("INT2DDS_TCP_KEEPALIVE_MAX_MISSES", max_misses.to_string()) };
+}
+
+/// Get the idle timeout for incoming TCP connections in milliseconds
+/// Default: 10000ms (10 seconds)
+pub fn get_tcp_incoming_idle_timeout_ms() -> u64 {
+    std::env::var("INT2DDS_TCP_INCOMING_IDLE_TIMEOUT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10_000)
+}
+
+/// Set the idle timeout for incoming TCP connections via environment variable
+pub fn set_tcp_incoming_idle_timeout(timeout_ms: u64) {
+    log::info!("Environment variable set: INT2DDS_TCP_INCOMING_IDLE_TIMEOUT = {}", timeout_ms);
+    unsafe { std::env::set_var("INT2DDS_TCP_INCOMING_IDLE_TIMEOUT", timeout_ms.to_string()) };
+}
+
+/// Get the grace period before orphan data connections are torn down in milliseconds
+/// Default: 1000ms (1 second)
+pub fn get_tcp_orphan_data_grace_ms() -> u64 {
+    std::env::var("INT2DDS_TCP_ORPHAN_DATA_GRACE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1_000)
+}
+
+/// Set the grace period before orphan data connections are torn down via environment variable
+pub fn set_tcp_orphan_data_grace(grace_ms: u64) {
+    log::info!("Environment variable set: INT2DDS_TCP_ORPHAN_DATA_GRACE = {}", grace_ms);
+    unsafe { std::env::set_var("INT2DDS_TCP_ORPHAN_DATA_GRACE", grace_ms.to_string()) };
 }
 
 /// Get the TCP public address for WAN/NAT traversal.
