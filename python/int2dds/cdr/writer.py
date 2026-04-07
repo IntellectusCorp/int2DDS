@@ -188,6 +188,22 @@ class CdrWriter:
         self.write_u32(len(encoded))
         self._buf.extend(encoded)
 
+    def write_wstring(self, val: str) -> None:
+        """
+        Write a wide string (UTF-16) with length prefix.
+
+        Length is the number of UTF-16 code units (NOT bytes, NOT including null).
+        No null terminator is written.
+        """
+        # Encode as UTF-16 without BOM
+        encoding = "utf-16-le" if self._le else "utf-16-be"
+        encoded = val.encode(encoding)
+        # Number of UTF-16 code units = bytes / 2
+        code_units = len(encoded) // 2
+        self.write_u32(code_units)
+        self._align(2)
+        self._buf.extend(encoded)
+
     def write_seq_header(self, count: int) -> None:
         """Write a sequence header (element count as u32)."""
         self.write_u32(count)
