@@ -43,6 +43,11 @@ pub(crate) struct TcpMuxListener {
     next_cookie: u8,
     /// Maps cookie → logical_port for PORT_BIND verification
     cookie_to_port: HashMap<[u8; 16], u16>,
+    /// Maps cookie → control connection's GuidPrefix so the matching
+    /// PORT_BIND (which arrives on a brand-new TCP connection with a
+    /// different source port) can be attached to the same peer group
+    /// as the control connection that issued the cookie.
+    cookie_to_guid: HashMap<[u8; 16], GuidPrefix>,
 }
 
 #[derive(Debug)]
@@ -119,6 +124,7 @@ impl TcpMuxListener {
             user_data_tx,
             next_cookie: 0x31,
             cookie_to_port: HashMap::new(),
+            cookie_to_guid: HashMap::new(),
         })
     }
 
@@ -296,9 +302,18 @@ impl TcpMuxListener {
                     return;
                 }
 
-                // Issue cookie and store mapping
+                // Issue cookie and store mappings.
+                // The cookie → guid mapping lets the matching PORT_BIND
+                // (which arrives on a fresh TCP connection with a different
+                // source port) attach itself to the same peer group as the
+                // control connection that issued the cookie.
                 let cookie = generate_cookie(&mut self.next_cookie);
                 self.cookie_to_port.insert(cookie, logical_port);
+                if let Some(ctrl_guid) =
+                    self.connections.get(&token).and_then(|c| c.remote_guid_prefix)
+                {
+                    self.cookie_to_guid.insert(cookie, ctrl_guid);
+                }
 
                 let ack = ControlMsg::PortReserveAck { cookie };
                 self.send_control(token, &ack);
@@ -347,18 +362,27 @@ impl TcpMuxListener {
             conn.state = ConnectionState::Active;
         }
 
-        // Register in peer connection group (synthetic guid from addr)
-        let remote_addr = self.connections.get(&token).map(|c| c.remote_addr);
-        if let Some(addr) = remote_addr {
-            let mut synthetic_guid = [0u8; 12];
-            if let SocketAddr::V4(v4) = addr {
-                synthetic_guid[0..4].copy_from_slice(&v4.ip().octets());
-                synthetic_guid[4..6].copy_from_slice(&v4.port().to_be_bytes());
-            }
+        // Resolve the peer group: prefer the GuidPrefix that the control
+        // connection associated with this cookie at PORT_RESERVE time. The
+        // PORT_BIND arrives on a brand-new TCP connection with a different
+        // source port, so falling back on the bound socket address would
+        // place the data connection in a different group than the control.
+        let group_guid = self.cookie_to_guid.remove(cookie).or_else(|| {
+            let remote_addr = self.connections.get(&token).map(|c| c.remote_addr);
+            remote_addr.map(|addr| {
+                let mut synthetic_guid = [0u8; 12];
+                if let SocketAddr::V4(v4) = addr {
+                    synthetic_guid[0..4].copy_from_slice(&v4.ip().octets());
+                    synthetic_guid[4..6].copy_from_slice(&v4.port().to_be_bytes());
+                }
+                synthetic_guid
+            })
+        });
 
+        if let Some(guid) = group_guid {
             let group = self
                 .peer_connections
-                .entry(synthetic_guid)
+                .entry(guid)
                 .or_insert_with(PeerConnectionGroup::new);
 
             if PortManager::is_discovery_unicast_port(self.domain_id, logical_port) {
@@ -368,7 +392,7 @@ impl TcpMuxListener {
             }
 
             if let Some(conn) = self.connections.get_mut(&token) {
-                conn.remote_guid_prefix = Some(synthetic_guid);
+                conn.remote_guid_prefix = Some(guid);
             }
         }
 
