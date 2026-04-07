@@ -364,7 +364,7 @@ impl<'a> RustGen<'a> {
             ResolvedType::U64 => "u64".to_string(),
             ResolvedType::F32 => "f32".to_string(),
             ResolvedType::F64 => "f64".to_string(),
-            ResolvedType::Char => "char".to_string(),
+            ResolvedType::Char => "u8".to_string(),
             ResolvedType::WChar => "WChar".to_string(),
             ResolvedType::String { .. } => "String".to_string(),
             ResolvedType::WString { .. } => "WString".to_string(),
