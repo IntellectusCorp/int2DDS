@@ -42,6 +42,8 @@ pub fn init_from_env() {
     // - INT2DDS_TCP_KEEPALIVE_MAX_MISSES: Set TCP keepalive max consecutive misses before disconnect - Default: 3
     // - INT2DDS_TCP_INCOMING_IDLE_TIMEOUT: Set idle timeout for incoming TCP connections (milliseconds) - Default: 10000
     // - INT2DDS_TCP_ORPHAN_DATA_GRACE: Set grace period before orphan data connections are torn down (milliseconds) - Default: 1000
+    // - INT2DDS_TCP_SO_RCVBUF: Force SO_RCVBUF on every TCP socket (bytes). Used by tests to induce backpressure - Default: OS-managed
+    // - INT2DDS_TCP_SO_SNDBUF: Force SO_SNDBUF on every TCP socket (bytes). Used by tests to induce backpressure - Default: OS-managed
 
     // - INT2DDS_INITIAL_PEERS: Set initial peers for SPDP unicast discovery (comma-separated, e.g., "192.168.1.10:7400,192.168.1.11:7400") - Default: none
 
@@ -249,6 +251,22 @@ fn apply_cli_args_to_env() {
                     .value_hint(ValueHint::Other),
             )
             .arg(
+                Arg::new("int2dds_tcp_so_rcvbuf")
+                    .long("int2dds-tcp-so-rcvbuf")
+                    .value_name("BYTES")
+                    .help("Force SO_RCVBUF on every TCP socket (bytes). Used by tests to induce backpressure")
+                    .num_args(1)
+                    .value_hint(ValueHint::Other),
+            )
+            .arg(
+                Arg::new("int2dds_tcp_so_sndbuf")
+                    .long("int2dds-tcp-so-sndbuf")
+                    .value_name("BYTES")
+                    .help("Force SO_SNDBUF on every TCP socket (bytes). Used by tests to induce backpressure")
+                    .num_args(1)
+                    .value_hint(ValueHint::Other),
+            )
+            .arg(
                 Arg::new("int2dds_initial_peers")
                     .long("int2dds-initial-peers")
                     .value_name("PEERS")
@@ -361,6 +379,14 @@ fn apply_cli_args_to_env() {
     if let Some(v) = matches.get_one::<String>("int2dds_tcp_orphan_data_grace") {
         log::info!("Environment variable set: INT2DDS_TCP_ORPHAN_DATA_GRACE = {}", v);
         unsafe { std::env::set_var("INT2DDS_TCP_ORPHAN_DATA_GRACE", v) };
+    }
+    if let Some(v) = matches.get_one::<String>("int2dds_tcp_so_rcvbuf") {
+        log::info!("Environment variable set: INT2DDS_TCP_SO_RCVBUF = {}", v);
+        unsafe { std::env::set_var("INT2DDS_TCP_SO_RCVBUF", v) };
+    }
+    if let Some(v) = matches.get_one::<String>("int2dds_tcp_so_sndbuf") {
+        log::info!("Environment variable set: INT2DDS_TCP_SO_SNDBUF = {}", v);
+        unsafe { std::env::set_var("INT2DDS_TCP_SO_SNDBUF", v) };
     }
     if let Some(v) = matches.get_one::<String>("int2dds_initial_peers") {
         log::info!("Environment variable set: INT2DDS_INITIAL_PEERS = {}", v);
@@ -729,6 +755,44 @@ pub fn get_tcp_orphan_data_grace_ms() -> u64 {
 pub fn set_tcp_orphan_data_grace(grace_ms: u64) {
     log::info!("Environment variable set: INT2DDS_TCP_ORPHAN_DATA_GRACE = {}", grace_ms);
     unsafe { std::env::set_var("INT2DDS_TCP_ORPHAN_DATA_GRACE", grace_ms.to_string()) };
+}
+
+/// Get the TCP write timeout in milliseconds
+/// Default: 10000ms (10 seconds)
+pub fn get_tcp_write_timeout_ms() -> u64 {
+    std::env::var("INT2DDS_TCP_WRITE_TIMEOUT").ok().and_then(|v| v.parse().ok()).unwrap_or(10_000)
+}
+
+/// Get the TCP_NODELAY flag (true = disable Nagle, false = enable Nagle)
+/// Default: true
+pub fn get_tcp_nodelay() -> bool {
+    std::env::var("INT2DDS_TCP_NODELAY").ok().and_then(|v| v.parse().ok()).unwrap_or(true)
+}
+
+/// Get the optional SO_RCVBUF override (bytes) for every TCP socket.
+/// Used by tests to induce backpressure deterministically.
+/// Default: None (OS-managed)
+pub fn get_tcp_so_rcvbuf() -> Option<usize> {
+    std::env::var("INT2DDS_TCP_SO_RCVBUF").ok().and_then(|v| v.parse().ok())
+}
+
+/// Set the optional SO_RCVBUF override via environment variable
+pub fn set_tcp_so_rcvbuf(bytes: usize) {
+    log::info!("Environment variable set: INT2DDS_TCP_SO_RCVBUF = {}", bytes);
+    unsafe { std::env::set_var("INT2DDS_TCP_SO_RCVBUF", bytes.to_string()) };
+}
+
+/// Get the optional SO_SNDBUF override (bytes) for every TCP socket.
+/// Used by tests to induce backpressure deterministically.
+/// Default: None (OS-managed)
+pub fn get_tcp_so_sndbuf() -> Option<usize> {
+    std::env::var("INT2DDS_TCP_SO_SNDBUF").ok().and_then(|v| v.parse().ok())
+}
+
+/// Set the optional SO_SNDBUF override via environment variable
+pub fn set_tcp_so_sndbuf(bytes: usize) {
+    log::info!("Environment variable set: INT2DDS_TCP_SO_SNDBUF = {}", bytes);
+    unsafe { std::env::set_var("INT2DDS_TCP_SO_SNDBUF", bytes.to_string()) };
 }
 
 /// Get the TCP public address for WAN/NAT traversal.

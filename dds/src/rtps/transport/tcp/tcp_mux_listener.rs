@@ -165,6 +165,19 @@ impl TcpMuxListener {
                 let token = Token(self.next_token);
                 self.next_token += 1;
                 let _ = stream.set_nodelay(true);
+
+                // Apply optional buffer-size overrides on the accepted socket.
+                // Used by tests to induce backpressure on the receive direction
+                // of the mux listener (incoming traffic from the peer).
+                if let Some(sz) = crate::common::env::get_tcp_so_rcvbuf() {
+                    let sock = socket2::SockRef::from(&stream);
+                    let _ = sock.set_recv_buffer_size(sz);
+                }
+                if let Some(sz) = crate::common::env::get_tcp_so_sndbuf() {
+                    let sock = socket2::SockRef::from(&stream);
+                    let _ = sock.set_send_buffer_size(sz);
+                }
+
                 registry.register(&mut stream, token, Interest::READABLE)?;
 
                 debug!("TcpMuxListener: Accepted from {:?} (token={:?})", addr, token);
@@ -398,10 +411,7 @@ impl TcpMuxListener {
         });
 
         if let Some(guid) = group_guid {
-            let group = self
-                .peer_connections
-                .entry(guid)
-                .or_insert_with(PeerConnectionGroup::new);
+            let group = self.peer_connections.entry(guid).or_insert_with(PeerConnectionGroup::new);
 
             if PortManager::is_discovery_unicast_port(self.domain_id, logical_port) {
                 group.discovery_token = Some(token);
@@ -630,9 +640,7 @@ impl Drop for TcpMuxListener {
 mod tests {
     use super::*;
     use crate::rtps::transport::tcp::framing::write_framed_message;
-    use crate::rtps::transport::tcp::protocol::{
-        ControlMsg, MSG_ERROR, MSG_PEER_HELLO_ACK,
-    };
+    use crate::rtps::transport::tcp::protocol::{ControlMsg, MSG_ERROR, MSG_PEER_HELLO_ACK};
     use crossbeam_channel::bounded;
     use mio::{Events, Poll};
     use std::io::Read;
@@ -644,11 +652,7 @@ mod tests {
         let (user_tx, user_rx) = bounded(64);
         let listener = TcpMuxListener::new(
             0, // OS-assigned ephemeral port
-            0,
-            0,
-            [0u8; 12],
-            disc_tx,
-            user_tx,
+            0, 0, [0u8; 12], disc_tx, user_tx,
         )
         .expect("listener creation");
         (listener, user_rx)
@@ -773,14 +777,7 @@ mod tests {
         let guid = [0xDD; 12];
         // Data tokens exist but control_lost_at was never set (e.g. data
         // bound before any control loss). Should NOT be pruned.
-        install_fake_group(
-            &mut listener,
-            guid,
-            None,
-            Some(Token(4001)),
-            None,
-            None,
-        );
+        install_fake_group(&mut listener, guid, None, Some(Token(4001)), None, None);
 
         let dummy_poll = Poll::new().unwrap();
         let pruned =
@@ -823,10 +820,7 @@ mod tests {
             assert!(Instant::now() < deadline, "no accept-ready event");
         }
 
-        let token = listener
-            .accept(poll.registry())
-            .unwrap()
-            .expect("accept should yield a token");
+        let token = listener.accept(poll.registry()).unwrap().expect("accept should yield a token");
         let _stream = client.join().unwrap();
 
         assert_eq!(listener.connection_count(), 1);
@@ -1056,8 +1050,7 @@ mod tests {
         // Background client: connect with SO_LINGER 0 then drop → RST.
         let client = std::thread::spawn(move || {
             let sock = Socket::new(Domain::IPV4, Type::STREAM, None).unwrap();
-            let addr: std::net::SocketAddr =
-                format!("127.0.0.1:{}", port).parse().unwrap();
+            let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
             sock.connect(&SockAddr::from(addr)).unwrap();
             sock.set_linger(Some(Duration::from_secs(0))).unwrap();
             // SO_LINGER 0 + drop = RST
@@ -1169,8 +1162,7 @@ mod tests {
             .map(|_| {
                 std::thread::spawn(move || {
                     let sock = Socket::new(Domain::IPV4, Type::STREAM, None).unwrap();
-                    let addr: std::net::SocketAddr =
-                        format!("127.0.0.1:{}", port).parse().unwrap();
+                    let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
                     sock.connect(&SockAddr::from(addr)).unwrap();
                     sock.set_linger(Some(Duration::from_secs(0))).unwrap();
                     drop(sock);
@@ -1198,15 +1190,7 @@ mod tests {
             }
         }
 
-        assert_eq!(
-            listener.connection_count(),
-            0,
-            "RST burst leaked connection tokens"
-        );
-        assert_eq!(
-            listener.peer_count(),
-            0,
-            "RST burst leaked peer groups"
-        );
+        assert_eq!(listener.connection_count(), 0, "RST burst leaked connection tokens");
+        assert_eq!(listener.peer_count(), 0, "RST burst leaked peer groups");
     }
 }
