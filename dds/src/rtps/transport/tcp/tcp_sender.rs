@@ -85,19 +85,11 @@ impl TcpSender {
     }
 
     fn get_write_timeout() -> Duration {
-        Duration::from_millis(
-            env::var("INT2DDS_TCP_WRITE_TIMEOUT")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(Self::DEFAULT_WRITE_TIMEOUT_MS),
-        )
+        Duration::from_millis(crate::common::env::get_tcp_write_timeout_ms())
     }
 
     fn get_nodelay() -> bool {
-        env::var("INT2DDS_TCP_NODELAY")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(Self::DEFAULT_NODELAY)
+        crate::common::env::get_tcp_nodelay()
     }
 
     pub(crate) fn port(&self) -> u16 {
@@ -377,6 +369,15 @@ impl TcpSender {
 
     fn tcp_connect(&self, addr: &SocketAddr) -> io::Result<TcpStream> {
         let socket2 = Socket2::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+
+        // Apply optional buffer-size overrides BEFORE connect so they take
+        // effect on the initial handshake's window negotiation.
+        if let Some(sz) = crate::common::env::get_tcp_so_rcvbuf() {
+            let _ = socket2.set_recv_buffer_size(sz);
+        }
+        if let Some(sz) = crate::common::env::get_tcp_so_sndbuf() {
+            let _ = socket2.set_send_buffer_size(sz);
+        }
 
         let local_ip: IpAddr = self.working_ip.parse().map_err(|e| {
             io::Error::new(ErrorKind::InvalidInput, format!("Invalid working_ip: {}", e))
