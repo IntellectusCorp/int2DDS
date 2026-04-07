@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
-use std::env;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -250,27 +249,13 @@ impl TcpMuxListeningLoopTask {
 
         const MUX_LISTENER_TOKEN: Token = Token(0);
         const POLL_TIMEOUT_MS: u64 = 100;
-        /// Default idle timeout for incoming connections (ms).
-        const DEFAULT_INCOMING_IDLE_TIMEOUT_MS: u64 = 10_000;
-        /// Default grace period before orphan data connections (control lost
-        /// but data still alive) are torn down (ms).
-        const DEFAULT_ORPHAN_DATA_GRACE_MS: u64 = 1_000;
 
-        let keepalive_check_interval: u64 = env::var("INT2DDS_TCP_KEEPALIVE_INTERVAL")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(DEFAULT_KEEPALIVE_INTERVAL);
+        let keepalive_check_interval: u64 = crate::common::env::get_tcp_keepalive_interval_ms();
 
-        let incoming_idle_timeout_ms: u64 = env::var("INT2DDS_TCP_INCOMING_IDLE_TIMEOUT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(DEFAULT_INCOMING_IDLE_TIMEOUT_MS);
+        let incoming_idle_timeout_ms = crate::common::env::get_tcp_incoming_idle_timeout_ms();
         let incoming_idle_timeout = Duration::from_millis(incoming_idle_timeout_ms);
 
-        let orphan_data_grace_ms: u64 = env::var("INT2DDS_TCP_ORPHAN_DATA_GRACE")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(DEFAULT_ORPHAN_DATA_GRACE_MS);
+        let orphan_data_grace_ms = crate::common::env::get_tcp_orphan_data_grace_ms();
         let orphan_data_grace = Duration::from_millis(orphan_data_grace_ms);
 
         info!(
