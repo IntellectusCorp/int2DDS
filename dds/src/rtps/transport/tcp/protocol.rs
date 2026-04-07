@@ -28,6 +28,7 @@
 //! |-------|--------------|--------------------------------------|
 //! | 0x03  | PORT_RESERVE | Logical port not recognized (code=1) |
 //! | 0x05  | PORT_BIND    | Cookie is invalid or expired (code=2) |
+//! | 0xF0  | IDLE_TIMEOUT | Incoming connection idle too long (code=3) |
 
 use std::io;
 use std::net::Ipv4Addr;
@@ -95,9 +96,32 @@ pub(crate) enum ControlMsg {
     KeepaliveAck,
 
     /// Error response with operation context, code, and message.
-    /// `operation` identifies which handshake step failed (uses MSG_* constants).
+    /// `operation` identifies which handshake step failed (uses MSG_* constants),
+    /// or one of the synthetic OP_* markers below for non-handshake errors.
     Error { operation: u8, code: u16, message: String },
 }
+
+// ─── ERROR payload fields ───────────────────────────────────────────────────
+//
+// These constants populate the `operation` / `code` fields of a
+// `ControlMsg::Error`. They are NOT control message types of their own.
+//
+// `operation` reuses the MSG_* constants when the failure happened during a
+// real handshake step (PORT_RESERVE / PORT_BIND), and synthetic OP_*
+// markers (>= 0xF0, outside the MSG_* range) for non-handshake failures.
+
+// Synthetic operation markers (must not collide with MSG_* constants)
+/// Server is tearing down an incoming connection that has been silent past
+/// the configured idle threshold.
+pub(crate) const OP_IDLE_TIMEOUT: u8 = 0xF0;
+
+// Error codes
+/// PORT_RESERVE: requested logical port is not recognized.
+pub(crate) const ERR_CODE_INVALID_PORT: u16 = 1;
+/// PORT_BIND: cookie is unknown or expired.
+pub(crate) const ERR_CODE_INVALID_COOKIE: u16 = 2;
+/// IDLE_TIMEOUT: connection pruned by idle-timeout sweep.
+pub(crate) const ERR_CODE_IDLE_TIMEOUT: u16 = 3;
 
 impl ControlMsg {
     /// Serialize to bytes (the payload portion, after frame magic).
@@ -310,7 +334,11 @@ mod tests {
 
     #[test]
     fn test_error_roundtrip() {
-        let msg = ControlMsg::Error { operation: MSG_PORT_RESERVE, code: 0x0001, message: "no matching port".to_string() };
+        let msg = ControlMsg::Error {
+            operation: MSG_PORT_RESERVE,
+            code: 0x0001,
+            message: "no matching port".to_string(),
+        };
         let bytes = msg.to_bytes();
         let parsed = ControlMsg::from_bytes(&bytes).unwrap();
         assert_eq!(parsed, msg);
