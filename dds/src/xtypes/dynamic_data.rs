@@ -14,8 +14,9 @@ use crate::xtypes::dynamic_type::{DynamicType, DynamicTypeError, DynamicTypeKind
 pub struct DynamicData {
     /// The type descriptor
     dynamic_type: Arc<DynamicType>,
-    /// Field values by name
-    values: HashMap<String, DynamicValue>,
+    /// Field values by name. Keys use `Arc<str>` so they can be cheaply
+    /// shared with `MemberDescriptor::name` (refcount bump instead of alloc).
+    values: HashMap<Arc<str>, DynamicValue>,
 }
 
 impl PartialEq for DynamicData {
@@ -35,7 +36,7 @@ impl DynamicData {
     /// Create a new DynamicData with pre-populated values.
     pub fn with_values(
         dynamic_type: Arc<DynamicType>,
-        values: HashMap<String, DynamicValue>,
+        values: HashMap<Arc<str>, DynamicValue>,
     ) -> Self {
         Self { dynamic_type, values }
     }
@@ -75,7 +76,7 @@ impl DynamicData {
                 return Err(DynamicTypeError::FieldNotFound(field.to_string()));
             }
         }
-        self.values.insert(field.to_string(), value.into_dynamic());
+        self.values.insert(Arc::from(field), value.into_dynamic());
         Ok(())
     }
 
@@ -133,7 +134,7 @@ impl DynamicData {
                 return Err(DynamicTypeError::FieldNotFound(field.to_string()));
             }
         }
-        self.values.insert(field.to_string(), value);
+        self.values.insert(Arc::from(field), value);
         Ok(())
     }
 
@@ -158,7 +159,7 @@ impl DynamicData {
 
     /// Iterate over all field values.
     pub fn iter_fields(&self) -> impl Iterator<Item = (&str, &DynamicValue)> {
-        self.values.iter().map(|(k, v)| (k.as_str(), v))
+        self.values.iter().map(|(k, v)| (k.as_ref(), v))
     }
 
     /// Get all key field values.
@@ -166,7 +167,7 @@ impl DynamicData {
         let key_members = self.dynamic_type.key_members();
         key_members
             .iter()
-            .filter_map(|m| self.values.get(&m.name).map(|v| (m.name.as_str(), v)))
+            .filter_map(|m| self.values.get(&*m.name).map(|v| (m.name.as_ref(), v)))
             .collect()
     }
 
@@ -176,12 +177,12 @@ impl DynamicData {
     }
 
     /// Get all values as a HashMap reference.
-    pub fn values(&self) -> &HashMap<String, DynamicValue> {
+    pub fn values(&self) -> &HashMap<Arc<str>, DynamicValue> {
         &self.values
     }
 
     /// Take ownership of all values.
-    pub fn into_values(self) -> HashMap<String, DynamicValue> {
+    pub fn into_values(self) -> HashMap<Arc<str>, DynamicValue> {
         self.values
     }
 }
