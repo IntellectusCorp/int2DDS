@@ -953,11 +953,22 @@ fn generate_xcdr_serialize_impl(
                 // For Mutable types: write EMHEADER before each field
                 // Generate EMHEADER backpatch logic supporting 28-bit member_id
                 let emheader_backpatch = if member_id <= 0x0FFF {
-                    // Compact: member_id fits in 12 bits
+                    // Compact: member_id fits in 12 bits.
+                    // If the payload length overflows 16 bits, retroactively
+                    // promote to LC=4 (NEXTINT) encoding by inserting a 4-byte
+                    // length slot right after the EMHEADER. This avoids the
+                    // silent truncation of `field_len & 0xFFFF`.
                     quote! {
                         let field_len = (serializer.position() - field_start) as u32;
-                        let emheader = ((#member_id & 0x0FFFu32) << 16) | (field_len & 0xFFFF);
-                        serializer.write_dheader_at(emheader_pos, emheader);
+                        if field_len <= 0xFFFF {
+                            let emheader = ((#member_id & 0x0FFFu32) << 16) | (field_len & 0xFFFF);
+                            serializer.write_dheader_at(emheader_pos, emheader);
+                        } else {
+                            serializer.insert_nextint_slot_at(emheader_pos + 4);
+                            let emheader = (4u32 << 28) | (#member_id & 0x0FFF_FFFFu32);
+                            serializer.write_dheader_at(emheader_pos, emheader);
+                            serializer.write_dheader_at(emheader_pos + 4, field_len);
+                        }
                     }
                 } else {
                     // 28-bit member_id: use LC=4 format, reserve extra 4 bytes for length
