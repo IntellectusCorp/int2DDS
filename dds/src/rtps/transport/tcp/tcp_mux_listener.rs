@@ -1015,4 +1015,198 @@ mod tests {
         let conn = listener.connections.get(&token).unwrap();
         assert_eq!(conn.state, ConnectionState::Control);
     }
+
+    /// Drive accept + on_readable until the listener observes a read error
+    /// or until `deadline`. Used by the RST/FIN cleanup tests.
+    fn pump_until_token_gone(
+        listener: &mut TcpMuxListener,
+        poll: &mut Poll,
+        token: Token,
+        deadline: Instant,
+    ) {
+        let mut events = Events::with_capacity(16);
+        while Instant::now() < deadline {
+            poll.poll(&mut events, Some(Duration::from_millis(50))).unwrap();
+            for ev in events.iter() {
+                if ev.token() == Token(0) && ev.is_readable() {
+                    let _ = listener.accept(poll.registry());
+                } else if ev.is_readable() {
+                    listener.on_readable(ev.token(), poll.registry());
+                }
+            }
+            if !listener.connections.contains_key(&token) {
+                return;
+            }
+        }
+    }
+
+    #[test]
+    fn test_rst_close_cleans_up_connection_and_token() {
+        use socket2::{Domain, SockAddr, Socket, Type};
+
+        let (mut listener, _) = make_listener();
+        let port = listener.port();
+
+        let mut poll = Poll::new().unwrap();
+        let mux_token = Token(0);
+        poll.registry()
+            .register(listener.listener_mut().unwrap(), mux_token, Interest::READABLE)
+            .unwrap();
+
+        // Background client: connect with SO_LINGER 0 then drop → RST.
+        let client = std::thread::spawn(move || {
+            let sock = Socket::new(Domain::IPV4, Type::STREAM, None).unwrap();
+            let addr: std::net::SocketAddr =
+                format!("127.0.0.1:{}", port).parse().unwrap();
+            sock.connect(&SockAddr::from(addr)).unwrap();
+            sock.set_linger(Some(Duration::from_secs(0))).unwrap();
+            // SO_LINGER 0 + drop = RST
+            drop(sock);
+        });
+
+        // Wait for accept-ready and accept once.
+        let mut events = Events::with_capacity(8);
+        let accept_deadline = Instant::now() + Duration::from_secs(2);
+        let mut accepted = None;
+        while Instant::now() < accept_deadline {
+            poll.poll(&mut events, Some(Duration::from_millis(100))).unwrap();
+            if events.iter().any(|e| e.token() == mux_token && e.is_readable()) {
+                accepted = listener.accept(poll.registry()).unwrap();
+                if accepted.is_some() {
+                    break;
+                }
+            }
+        }
+        let token = accepted.expect("accepted token");
+        client.join().unwrap();
+        assert_eq!(listener.connection_count(), 1);
+
+        // Drive on_readable until the read error is observed and the
+        // connection is removed by `remove_connection`.
+        pump_until_token_gone(
+            &mut listener,
+            &mut poll,
+            token,
+            Instant::now() + Duration::from_secs(2),
+        );
+
+        assert!(
+            !listener.connections.contains_key(&token),
+            "connection token must be removed after RST"
+        );
+        assert_eq!(listener.connection_count(), 0);
+    }
+
+    #[test]
+    fn test_fin_close_cleans_up_connection_and_token() {
+        use std::net::{Shutdown, TcpStream};
+
+        let (mut listener, _) = make_listener();
+        let port = listener.port();
+
+        let mut poll = Poll::new().unwrap();
+        let mux_token = Token(0);
+        poll.registry()
+            .register(listener.listener_mut().unwrap(), mux_token, Interest::READABLE)
+            .unwrap();
+
+        // Background client: connect, then shutdown(WR) and drop → graceful FIN
+        let client = std::thread::spawn(move || {
+            let stream = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+            stream.shutdown(Shutdown::Both).unwrap();
+            drop(stream);
+        });
+
+        // Accept first
+        let mut events = Events::with_capacity(8);
+        let accept_deadline = Instant::now() + Duration::from_secs(2);
+        let mut accepted = None;
+        while Instant::now() < accept_deadline {
+            poll.poll(&mut events, Some(Duration::from_millis(100))).unwrap();
+            if events.iter().any(|e| e.token() == mux_token && e.is_readable()) {
+                accepted = listener.accept(poll.registry()).unwrap();
+                if accepted.is_some() {
+                    break;
+                }
+            }
+        }
+        let token = accepted.expect("accepted token");
+        client.join().unwrap();
+        assert_eq!(listener.connection_count(), 1);
+
+        // Pump until the EOF causes remove_connection.
+        pump_until_token_gone(
+            &mut listener,
+            &mut poll,
+            token,
+            Instant::now() + Duration::from_secs(2),
+        );
+
+        assert!(
+            !listener.connections.contains_key(&token),
+            "connection token must be removed after graceful FIN"
+        );
+        assert_eq!(listener.connection_count(), 0);
+    }
+
+    #[test]
+    fn test_rst_burst_does_not_leak_tokens() {
+        use socket2::{Domain, SockAddr, Socket, Type};
+
+        let (mut listener, _) = make_listener();
+        let port = listener.port();
+
+        let mut poll = Poll::new().unwrap();
+        let mux_token = Token(0);
+        poll.registry()
+            .register(listener.listener_mut().unwrap(), mux_token, Interest::READABLE)
+            .unwrap();
+
+        const ROUNDS: usize = 8;
+
+        // Hammer the listener with RSTs from a burst of clients.
+        let clients: Vec<_> = (0..ROUNDS)
+            .map(|_| {
+                std::thread::spawn(move || {
+                    let sock = Socket::new(Domain::IPV4, Type::STREAM, None).unwrap();
+                    let addr: std::net::SocketAddr =
+                        format!("127.0.0.1:{}", port).parse().unwrap();
+                    sock.connect(&SockAddr::from(addr)).unwrap();
+                    sock.set_linger(Some(Duration::from_secs(0))).unwrap();
+                    drop(sock);
+                })
+            })
+            .collect();
+        for c in clients {
+            c.join().unwrap();
+        }
+
+        // Drive the listener until everything has been observed and cleaned up.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut events = Events::with_capacity(32);
+        while Instant::now() < deadline {
+            poll.poll(&mut events, Some(Duration::from_millis(50))).unwrap();
+            for ev in events.iter() {
+                if ev.token() == mux_token && ev.is_readable() {
+                    while listener.accept(poll.registry()).unwrap().is_some() {}
+                } else if ev.is_readable() {
+                    listener.on_readable(ev.token(), poll.registry());
+                }
+            }
+            if listener.connection_count() == 0 {
+                break;
+            }
+        }
+
+        assert_eq!(
+            listener.connection_count(),
+            0,
+            "RST burst leaked connection tokens"
+        );
+        assert_eq!(
+            listener.peer_count(),
+            0,
+            "RST burst leaked peer groups"
+        );
+    }
 }
