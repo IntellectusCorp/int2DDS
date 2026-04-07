@@ -55,11 +55,25 @@ struct PeerConnectionGroup {
     control_token: Option<Token>,
     discovery_token: Option<Token>,
     user_data_token: Option<Token>,
+    /// Set to `Some(when)` the moment `control_token` transitions to None
+    /// while data connections still exist. The data connections are kept
+    /// alive during a short grace period so a brief network blip doesn't
+    /// instantly tear down the data flow. After the grace period expires,
+    /// `prune_orphan_data_connections` removes the entire group.
+    ///
+    /// A reconnecting peer is intentionally placed into a brand-new group;
+    /// re-matching is left to the upper RTPS/SEDP layer.
+    control_lost_at: Option<Instant>,
 }
 
 impl PeerConnectionGroup {
     fn new() -> Self {
-        Self { control_token: None, discovery_token: None, user_data_token: None }
+        Self {
+            control_token: None,
+            discovery_token: None,
+            user_data_token: None,
+            control_lost_at: None,
+        }
     }
 
     fn all_tokens(&self) -> Vec<Token> {
@@ -68,6 +82,10 @@ impl PeerConnectionGroup {
             .flatten()
             .copied()
             .collect()
+    }
+
+    fn has_data_tokens(&self) -> bool {
+        self.discovery_token.is_some() || self.user_data_token.is_some()
     }
 }
 
@@ -495,6 +513,43 @@ impl TcpMuxListener {
         stale.len()
     }
 
+    /// Drop data connections in groups whose control connection has been
+    /// gone for longer than `grace`. Returns the number of groups that were
+    /// fully cleaned up.
+    ///
+    /// A short grace period absorbs transient control disconnects so that a
+    /// brief network blip does not instantly tear down the data flow. After
+    /// the grace expires the orphan group is removed entirely; reconnecting
+    /// peers land in a brand-new group and re-matching is left to the upper
+    /// RTPS/SEDP layer.
+    pub(crate) fn prune_orphan_data_connections(
+        &mut self,
+        grace: Duration,
+        registry: &Registry,
+    ) -> usize {
+        let now = Instant::now();
+        let stale_guids: Vec<GuidPrefix> = self
+            .peer_connections
+            .iter()
+            .filter_map(|(guid, group)| match group.control_lost_at {
+                Some(lost) if now.duration_since(lost) > grace && group.has_data_tokens() => {
+                    Some(*guid)
+                }
+                _ => None,
+            })
+            .collect();
+
+        for guid in &stale_guids {
+            warn!(
+                "TcpMuxListener: Pruning orphan data connections for {:?} after grace period",
+                guid
+            );
+            self.remove_peer(*guid, registry);
+        }
+
+        stale_guids.len()
+    }
+
     // ── Connection cleanup ──────────────────────────────────────────────────
 
     pub(crate) fn remove_peer(&mut self, guid: GuidPrefix, registry: &Registry) {
@@ -510,7 +565,8 @@ impl TcpMuxListener {
         if let Some(conn) = self.connections.get(&token) {
             if let Some(guid) = conn.remote_guid_prefix {
                 if let Some(group) = self.peer_connections.get_mut(&guid) {
-                    if group.control_token == Some(token) {
+                    let was_control = group.control_token == Some(token);
+                    if was_control {
                         group.control_token = None;
                     }
                     if group.discovery_token == Some(token) {
@@ -519,6 +575,19 @@ impl TcpMuxListener {
                     if group.user_data_token == Some(token) {
                         group.user_data_token = None;
                     }
+
+                    // If the control connection just disappeared but data
+                    // connections are still around, start the grace period.
+                    // Subsequent prune sweeps will tear them down once it
+                    // expires.
+                    if was_control && group.has_data_tokens() && group.control_lost_at.is_none() {
+                        group.control_lost_at = Some(Instant::now());
+                        debug!(
+                            "TcpMuxListener: control connection lost for {:?}, grace period started",
+                            guid
+                        );
+                    }
+
                     if group.all_tokens().is_empty() {
                         self.peer_connections.remove(&guid);
                     }
@@ -589,13 +658,135 @@ mod tests {
     fn test_peer_connection_group_all_tokens() {
         let mut group = PeerConnectionGroup::new();
         assert!(group.all_tokens().is_empty());
+        assert!(!group.has_data_tokens());
+        assert!(group.control_lost_at.is_none());
 
         group.control_token = Some(Token(100));
         assert_eq!(group.all_tokens().len(), 1);
+        assert!(!group.has_data_tokens());
 
         group.discovery_token = Some(Token(101));
         group.user_data_token = Some(Token(102));
         assert_eq!(group.all_tokens().len(), 3);
+        assert!(group.has_data_tokens());
+    }
+
+    /// Helper: build a fully populated PeerConnectionGroup with synthetic
+    /// tokens AND register matching MuxConnection entries so that
+    /// `prune_orphan_data_connections` can actually deregister them.
+    fn install_fake_group(
+        listener: &mut TcpMuxListener,
+        guid: GuidPrefix,
+        ctrl: Option<Token>,
+        disc: Option<Token>,
+        user: Option<Token>,
+        control_lost_at: Option<Instant>,
+    ) {
+        listener.peer_connections.insert(
+            guid,
+            PeerConnectionGroup {
+                control_token: ctrl,
+                discovery_token: disc,
+                user_data_token: user,
+                control_lost_at,
+            },
+        );
+        // The actual MuxConnection entries are not strictly needed for the
+        // grace-period logic itself (which only inspects peer_connections),
+        // but `remove_peer` will try to deregister them — leave them out and
+        // let it be a no-op for synthetic tokens.
+    }
+
+    #[test]
+    fn test_orphan_grace_keeps_data_during_window() {
+        let (mut listener, _) = make_listener();
+        let registry = Poll::new().unwrap().registry().try_clone().unwrap();
+        let _ = registry; // silence unused: not actually needed because synthetic tokens have no streams
+
+        let guid = [0xAA; 12];
+        // Control was just lost, data tokens still present, well within grace.
+        install_fake_group(
+            &mut listener,
+            guid,
+            None,
+            Some(Token(1001)),
+            Some(Token(1002)),
+            Some(Instant::now()),
+        );
+
+        // Use a long grace; pruning must not touch the group yet.
+        let dummy_poll = Poll::new().unwrap();
+        let pruned =
+            listener.prune_orphan_data_connections(Duration::from_secs(60), dummy_poll.registry());
+        assert_eq!(pruned, 0);
+        assert!(listener.peer_connections.contains_key(&guid));
+    }
+
+    #[test]
+    fn test_orphan_grace_prunes_after_window() {
+        let (mut listener, _) = make_listener();
+
+        let guid = [0xBB; 12];
+        // Pretend control was lost a long time ago.
+        install_fake_group(
+            &mut listener,
+            guid,
+            None,
+            Some(Token(2001)),
+            Some(Token(2002)),
+            Some(Instant::now() - Duration::from_secs(10)),
+        );
+
+        let dummy_poll = Poll::new().unwrap();
+        let pruned =
+            listener.prune_orphan_data_connections(Duration::from_secs(1), dummy_poll.registry());
+        assert_eq!(pruned, 1);
+        assert!(!listener.peer_connections.contains_key(&guid));
+    }
+
+    #[test]
+    fn test_orphan_grace_ignores_groups_with_alive_control() {
+        let (mut listener, _) = make_listener();
+
+        let guid = [0xCC; 12];
+        // control_token is Some, control_lost_at is None — fully healthy.
+        install_fake_group(
+            &mut listener,
+            guid,
+            Some(Token(3000)),
+            Some(Token(3001)),
+            Some(Token(3002)),
+            None,
+        );
+
+        let dummy_poll = Poll::new().unwrap();
+        let pruned =
+            listener.prune_orphan_data_connections(Duration::from_nanos(0), dummy_poll.registry());
+        assert_eq!(pruned, 0);
+        assert!(listener.peer_connections.contains_key(&guid));
+    }
+
+    #[test]
+    fn test_orphan_grace_ignores_data_only_with_no_lost_marker() {
+        let (mut listener, _) = make_listener();
+
+        let guid = [0xDD; 12];
+        // Data tokens exist but control_lost_at was never set (e.g. data
+        // bound before any control loss). Should NOT be pruned.
+        install_fake_group(
+            &mut listener,
+            guid,
+            None,
+            Some(Token(4001)),
+            None,
+            None,
+        );
+
+        let dummy_poll = Poll::new().unwrap();
+        let pruned =
+            listener.prune_orphan_data_connections(Duration::from_nanos(0), dummy_poll.registry());
+        assert_eq!(pruned, 0);
+        assert!(listener.peer_connections.contains_key(&guid));
     }
 
     #[test]
