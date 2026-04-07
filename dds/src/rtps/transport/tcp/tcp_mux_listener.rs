@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::io::{self, ErrorKind};
 use std::net::{Ipv4Addr, SocketAddr};
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
 use log::{debug, info, warn};
@@ -17,7 +18,8 @@ use crate::rtps::transport::tcp::framing::{
     classify_frame, write_framed_message, FramedReader, TcpFrameKind,
 };
 use crate::rtps::transport::tcp::protocol::{
-    generate_cookie, ControlMsg, MSG_PORT_BIND, MSG_PORT_RESERVE,
+    generate_cookie, ControlMsg, ERR_CODE_IDLE_TIMEOUT, ERR_CODE_INVALID_COOKIE,
+    ERR_CODE_INVALID_PORT, MSG_PORT_BIND, MSG_PORT_RESERVE, OP_IDLE_TIMEOUT,
 };
 
 const LISTENER_TOKEN: Token = Token(0);
@@ -84,6 +86,10 @@ struct MuxConnection {
     remote_addr: SocketAddr,
     bound_logical_port: Option<u16>,
     remote_guid_prefix: Option<GuidPrefix>,
+    /// Last time we successfully read any data from this peer.
+    /// Used by `prune_idle_connections` to defend against silent peers
+    /// (PEER_HELLO without follow-up, half-broken networks, etc.).
+    last_activity: Instant,
 }
 
 impl TcpMuxListener {
@@ -148,6 +154,7 @@ impl TcpMuxListener {
                         remote_addr: addr,
                         bound_logical_port: None,
                         remote_guid_prefix: None,
+                        last_activity: Instant::now(),
                     },
                 );
                 Ok(Some(token))
@@ -166,7 +173,10 @@ impl TcpMuxListener {
                 };
 
                 match conn.framed_reader.read_message(&mut conn.stream) {
-                    Ok(Some(msg)) => msg,
+                    Ok(Some(msg)) => {
+                        conn.last_activity = Instant::now();
+                        msg
+                    }
                     Ok(None) => continue,
                     Err(ref e) if e.kind() == ErrorKind::WouldBlock => return,
                     Err(e) => {
@@ -279,7 +289,7 @@ impl TcpMuxListener {
                     warn!("TcpMuxListener: Invalid port {} on {:?}", logical_port, token);
                     let err = ControlMsg::Error {
                         operation: MSG_PORT_RESERVE,
-                        code: 1,
+                        code: ERR_CODE_INVALID_PORT,
                         message: "no matching port".to_string(),
                     };
                     self.send_control(token, &err);
@@ -320,7 +330,7 @@ impl TcpMuxListener {
                 warn!("TcpMuxListener: Unknown cookie [{}] on {:?}", cookie_hex, token);
                 let err = ControlMsg::Error {
                     operation: MSG_PORT_BIND,
-                    code: 2,
+                    code: ERR_CODE_INVALID_COOKIE,
                     message: format!("invalid cookie [{}]", cookie_hex),
                 };
                 self.send_control(token, &err);
@@ -414,6 +424,53 @@ impl TcpMuxListener {
         }
     }
 
+    // ── Idle timeout pruning ────────────────────────────────────────────────
+
+    /// Drop incoming connections whose `last_activity` has exceeded `timeout`.
+    ///
+    /// Before tearing them down, sends an ERROR(IDLE_TIMEOUT) on a best-effort
+    /// basis so cooperative clients can log the reason. Returns the number of
+    /// connections that were pruned.
+    ///
+    /// This protects the server from peers that perform a partial handshake
+    /// (e.g. PEER_HELLO followed by silence) and never send another byte: the
+    /// server has no incoming-direction keepalive of its own, so without this
+    /// pruning a single broken or malicious peer could pin a token forever.
+    pub(crate) fn prune_idle_connections(
+        &mut self,
+        timeout: Duration,
+        registry: &Registry,
+    ) -> usize {
+        let now = Instant::now();
+        let stale: Vec<Token> = self
+            .connections
+            .iter()
+            .filter(|(_, c)| now.duration_since(c.last_activity) > timeout)
+            .map(|(t, _)| *t)
+            .collect();
+
+        for token in &stale {
+            if let Some(conn) = self.connections.get(token) {
+                warn!(
+                    "TcpMuxListener: Pruning idle incoming connection {:?} from {:?} (idle for {:?})",
+                    token,
+                    conn.remote_addr,
+                    now.duration_since(conn.last_activity)
+                );
+            }
+            // Best-effort ERROR notice — ignore failures.
+            let err = ControlMsg::Error {
+                operation: OP_IDLE_TIMEOUT,
+                code: ERR_CODE_IDLE_TIMEOUT,
+                message: "incoming connection idle timeout".to_string(),
+            };
+            self.send_control(*token, &err);
+            self.remove_connection(*token, registry);
+        }
+
+        stale.len()
+    }
+
     // ── Connection cleanup ──────────────────────────────────────────────────
 
     pub(crate) fn remove_peer(&mut self, guid: GuidPrefix, registry: &Registry) {
@@ -479,6 +536,30 @@ impl Drop for TcpMuxListener {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rtps::transport::tcp::framing::write_framed_message;
+    use crate::rtps::transport::tcp::protocol::{
+        ControlMsg, MSG_ERROR, MSG_PEER_HELLO_ACK,
+    };
+    use crossbeam_channel::bounded;
+    use mio::{Events, Poll};
+    use std::io::Read;
+    use std::net::TcpStream;
+    use std::time::{Duration, Instant};
+
+    fn make_listener() -> (TcpMuxListener, crossbeam_channel::Receiver<IncomingMessage>) {
+        let (disc_tx, _disc_rx) = bounded(64);
+        let (user_tx, user_rx) = bounded(64);
+        let listener = TcpMuxListener::new(
+            0, // OS-assigned ephemeral port
+            0,
+            0,
+            [0u8; 12],
+            disc_tx,
+            user_tx,
+        )
+        .expect("listener creation");
+        (listener, user_rx)
+    }
 
     #[test]
     fn test_peer_connection_group_all_tokens() {
@@ -491,5 +572,232 @@ mod tests {
         group.discovery_token = Some(Token(101));
         group.user_data_token = Some(Token(102));
         assert_eq!(group.all_tokens().len(), 3);
+    }
+
+    #[test]
+    fn test_listener_binds_to_ephemeral_port() {
+        let (listener, _) = make_listener();
+        assert!(listener.port() != 0, "OS should have assigned a port");
+        assert_eq!(listener.connection_count(), 0);
+    }
+
+    #[test]
+    fn test_accept_registers_connection() {
+        let (mut listener, _) = make_listener();
+        let port = listener.port();
+
+        let mut poll = Poll::new().unwrap();
+        let mux_token = Token(0);
+        poll.registry()
+            .register(listener.listener_mut().unwrap(), mux_token, Interest::READABLE)
+            .unwrap();
+
+        // Drive a client connection on a separate thread.
+        let client = std::thread::spawn(move || {
+            TcpStream::connect(format!("127.0.0.1:{}", port)).expect("client connect")
+        });
+
+        // Wait until the listener fires a readable event.
+        let mut events = Events::with_capacity(8);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            poll.poll(&mut events, Some(Duration::from_millis(100))).unwrap();
+            if events.iter().any(|e| e.token() == mux_token && e.is_readable()) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "no accept-ready event");
+        }
+
+        let token = listener
+            .accept(poll.registry())
+            .unwrap()
+            .expect("accept should yield a token");
+        let _stream = client.join().unwrap();
+
+        assert_eq!(listener.connection_count(), 1);
+
+        // The accepted connection must be tracked with a fresh activity stamp.
+        let conn = listener.connections.get(&token).unwrap();
+        assert_eq!(conn.state, ConnectionState::AwaitingFirstMessage);
+        assert!(conn.last_activity.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_prune_idle_connections_with_zero_timeout() {
+        let (mut listener, _) = make_listener();
+        let port = listener.port();
+
+        let mut poll = Poll::new().unwrap();
+        let mux_token = Token(0);
+        poll.registry()
+            .register(listener.listener_mut().unwrap(), mux_token, Interest::READABLE)
+            .unwrap();
+
+        // Connect from a background thread; the kernel completes the TCP
+        // handshake immediately because we're on loopback.
+        let _client = std::thread::spawn(move || {
+            let stream = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+            // Hold the client side open until the test finishes.
+            std::thread::sleep(Duration::from_secs(2));
+            drop(stream);
+        });
+
+        // Wait for accept-ready and accept once.
+        let mut events = Events::with_capacity(8);
+        for _ in 0..20 {
+            poll.poll(&mut events, Some(Duration::from_millis(100))).unwrap();
+            if events.iter().any(|e| e.token() == mux_token && e.is_readable()) {
+                break;
+            }
+        }
+        listener.accept(poll.registry()).unwrap();
+        assert_eq!(listener.connection_count(), 1);
+
+        // Pruning with a zero timeout must remove the still-fresh connection.
+        let pruned = listener.prune_idle_connections(Duration::from_nanos(0), poll.registry());
+        assert_eq!(pruned, 1);
+        assert_eq!(listener.connection_count(), 0);
+    }
+
+    #[test]
+    fn test_prune_keeps_fresh_connections() {
+        let (mut listener, _) = make_listener();
+        let port = listener.port();
+
+        let mut poll = Poll::new().unwrap();
+        let mux_token = Token(0);
+        poll.registry()
+            .register(listener.listener_mut().unwrap(), mux_token, Interest::READABLE)
+            .unwrap();
+
+        let _client = std::thread::spawn(move || {
+            let stream = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+            std::thread::sleep(Duration::from_secs(2));
+            drop(stream);
+        });
+
+        let mut events = Events::with_capacity(8);
+        for _ in 0..20 {
+            poll.poll(&mut events, Some(Duration::from_millis(100))).unwrap();
+            if events.iter().any(|e| e.token() == mux_token && e.is_readable()) {
+                break;
+            }
+        }
+        listener.accept(poll.registry()).unwrap();
+        assert_eq!(listener.connection_count(), 1);
+
+        // A long timeout must not prune a fresh connection.
+        let pruned = listener.prune_idle_connections(Duration::from_secs(60), poll.registry());
+        assert_eq!(pruned, 0);
+        assert_eq!(listener.connection_count(), 1);
+    }
+
+    #[test]
+    fn test_prune_emits_idle_timeout_error_to_peer() {
+        let (mut listener, _) = make_listener();
+        let port = listener.port();
+
+        let mut poll = Poll::new().unwrap();
+        let mux_token = Token(0);
+        poll.registry()
+            .register(listener.listener_mut().unwrap(), mux_token, Interest::READABLE)
+            .unwrap();
+
+        // Client thread holds the socket and waits for the server's ERROR.
+        let client = std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            // Read length(4) + magic(4) + payload up to 64 bytes
+            let mut len_buf = [0u8; 4];
+            stream.read_exact(&mut len_buf).expect("read length");
+            let len = u32::from_be_bytes(len_buf) as usize;
+            let mut data = vec![0u8; len];
+            stream.read_exact(&mut data).expect("read payload");
+            data
+        });
+
+        let mut events = Events::with_capacity(8);
+        for _ in 0..20 {
+            poll.poll(&mut events, Some(Duration::from_millis(100))).unwrap();
+            if events.iter().any(|e| e.token() == mux_token && e.is_readable()) {
+                break;
+            }
+        }
+        listener.accept(poll.registry()).unwrap();
+
+        // Force prune.
+        let pruned = listener.prune_idle_connections(Duration::from_nanos(0), poll.registry());
+        assert_eq!(pruned, 1);
+
+        let received = client.join().unwrap();
+        // received = magic(4 bytes) + payload
+        assert_eq!(&received[..4], b"INT2");
+        let payload = &received[4..];
+        assert_eq!(payload[0], MSG_ERROR);
+        assert_eq!(payload[1], OP_IDLE_TIMEOUT);
+        let code = u16::from_be_bytes([payload[2], payload[3]]);
+        assert_eq!(code, ERR_CODE_IDLE_TIMEOUT);
+    }
+
+    #[test]
+    fn test_handshake_first_message_advances_state() {
+        let (mut listener, _) = make_listener();
+        let port = listener.port();
+
+        let mut poll = Poll::new().unwrap();
+        let mux_token = Token(0);
+        poll.registry()
+            .register(listener.listener_mut().unwrap(), mux_token, Interest::READABLE)
+            .unwrap();
+
+        // Background client: connect, send PEER_HELLO, expect ACK back.
+        let client = std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+
+            let hello = ControlMsg::PeerHello { locator: [0u8; 16] };
+            write_framed_message(&mut stream, &hello.to_bytes()).unwrap();
+
+            // Read ACK
+            let mut len_buf = [0u8; 4];
+            stream.read_exact(&mut len_buf).unwrap();
+            let len = u32::from_be_bytes(len_buf) as usize;
+            let mut data = vec![0u8; len];
+            stream.read_exact(&mut data).unwrap();
+            data
+        });
+
+        // Drive accept + readable events on the listener side.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut accepted_token: Option<Token> = None;
+        let mut events = Events::with_capacity(16);
+
+        while Instant::now() < deadline {
+            poll.poll(&mut events, Some(Duration::from_millis(100))).unwrap();
+            for ev in events.iter() {
+                if ev.token() == mux_token && ev.is_readable() {
+                    if let Ok(Some(t)) = listener.accept(poll.registry()) {
+                        accepted_token = Some(t);
+                    }
+                } else if ev.is_readable() {
+                    listener.on_readable(ev.token(), poll.registry());
+                }
+            }
+            if let Some(t) = accepted_token {
+                if let Some(c) = listener.connections.get(&t) {
+                    if c.state == ConnectionState::Control {
+                        break;
+                    }
+                }
+            }
+        }
+
+        let received = client.join().unwrap();
+        assert_eq!(&received[..4], b"INT2");
+        assert_eq!(received[4], MSG_PEER_HELLO_ACK);
+
+        let token = accepted_token.expect("accepted");
+        let conn = listener.connections.get(&token).unwrap();
+        assert_eq!(conn.state, ConnectionState::Control);
     }
 }

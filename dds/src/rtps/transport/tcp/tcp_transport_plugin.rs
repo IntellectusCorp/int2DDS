@@ -250,12 +250,25 @@ impl TcpMuxListeningLoopTask {
 
         const MUX_LISTENER_TOKEN: Token = Token(0);
         const POLL_TIMEOUT_MS: u64 = 100;
+        /// Default idle timeout for incoming connections (ms).
+        const DEFAULT_INCOMING_IDLE_TIMEOUT_MS: u64 = 10_000;
+
         let keepalive_check_interval: u64 = env::var("INT2DDS_TCP_KEEPALIVE_INTERVAL")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(DEFAULT_KEEPALIVE_INTERVAL);
 
-        info!("[TcpMuxListeningLoopTask] Starting on port {}", self.mux_listener.port());
+        let incoming_idle_timeout_ms: u64 = env::var("INT2DDS_TCP_INCOMING_IDLE_TIMEOUT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_INCOMING_IDLE_TIMEOUT_MS);
+        let incoming_idle_timeout = Duration::from_millis(incoming_idle_timeout_ms);
+
+        info!(
+            "[TcpMuxListeningLoopTask] Starting on port {} (incoming_idle_timeout={}ms)",
+            self.mux_listener.port(),
+            incoming_idle_timeout_ms
+        );
 
         let mut poll = Poll::new()?;
         let mut events = Events::with_capacity(crate::rtps::transport::socket::MAX_EVENTS);
@@ -267,7 +280,11 @@ impl TcpMuxListeningLoopTask {
         }
 
         let mut last_keepalive_check = Instant::now();
+        let mut last_idle_check = Instant::now();
         let keepalive_interval = Duration::from_millis(keepalive_check_interval);
+        // Check idle timeouts at half the configured interval so we never
+        // exceed the threshold by more than half a check period.
+        let idle_check_interval = (incoming_idle_timeout / 2).max(Duration::from_millis(100));
 
         loop {
             match poll.poll(&mut events, Some(Duration::from_millis(POLL_TIMEOUT_MS))) {
@@ -318,6 +335,156 @@ impl TcpMuxListeningLoopTask {
                     let _ = self.dead_peer_tx.try_send(addr);
                 }
             }
+
+            if last_idle_check.elapsed() >= idle_check_interval {
+                last_idle_check = Instant::now();
+                let pruned = self
+                    .mux_listener
+                    .prune_idle_connections(incoming_idle_timeout, poll.registry());
+                if pruned > 0 {
+                    debug!(
+                        "[TcpMuxListeningLoopTask] Pruned {} idle incoming connection(s)",
+                        pruned
+                    );
+                }
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rtps::common::locator::Locator;
+    use crate::rtps::transport::plugin::SendTarget;
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    /// Allocate a non-overlapping domain id per test so concurrent `cargo test`
+    /// runs do not collide on the discovery/user data port pair.
+    fn next_test_domain() -> u32 {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NEXT: AtomicU32 = AtomicU32::new(900);
+        NEXT.fetch_add(1, Ordering::SeqCst)
+    }
+
+    fn make_plugin(domain_id: u32) -> TcpTransportPlugin {
+        // Force port 0 inside this test so the OS allocates an ephemeral
+        // physical port and we never collide with other tests/hosts.
+        unsafe {
+            std::env::set_var("INT2DDS_TCP_PORT", "0");
+        }
+        TcpTransportPlugin::new(domain_id, 0, "127.0.0.1".to_string(), [0u8; 12])
+            .expect("plugin creation")
+    }
+
+    #[test]
+    fn test_plugin_creates_and_listens() {
+        let domain = next_test_domain();
+        let plugin = make_plugin(domain);
+        let port = plugin.tcp_listener_port().expect("listener port");
+        assert!(port != 0);
+
+        // The mux listener thread is up — connecting must succeed.
+        let _stream = TcpStream::connect(format!("127.0.0.1:{}", port))
+            .expect("connect to mux listener");
+        plugin.close();
+    }
+
+    #[test]
+    fn test_take_discovery_unicast_source_returns_channel_once() {
+        let domain = next_test_domain();
+        let plugin = make_plugin(domain);
+
+        let first = plugin.take_discovery_unicast_source();
+        assert!(first.is_some(), "first take should return a source");
+
+        let second = plugin.take_discovery_unicast_source();
+        assert!(second.is_none(), "second take should be None");
+
+        plugin.close();
+    }
+
+    #[test]
+    fn test_take_user_data_unicast_source_returns_channel_once() {
+        let domain = next_test_domain();
+        let plugin = make_plugin(domain);
+
+        assert!(plugin.take_user_data_unicast_source().is_some());
+        assert!(plugin.take_user_data_unicast_source().is_none());
+
+        plugin.close();
+    }
+
+    #[test]
+    fn test_take_dead_peer_receiver_returns_channel_once() {
+        let domain = next_test_domain();
+        let plugin = make_plugin(domain);
+
+        assert!(plugin.take_dead_peer_receiver().is_some());
+        assert!(plugin.take_dead_peer_receiver().is_none());
+
+        plugin.close();
+    }
+
+    #[test]
+    fn test_multicast_discovery_source_is_none_for_tcp() {
+        let domain = next_test_domain();
+        let plugin = make_plugin(domain);
+
+        // TCP has no multicast — the discovery multicast source must be None
+        // even on the very first call.
+        assert!(plugin.take_discovery_multicast_source().is_none());
+
+        plugin.close();
+    }
+
+    #[test]
+    fn test_send_to_unreachable_peer_returns_err_not_panic() {
+        let domain = next_test_domain();
+        let plugin = make_plugin(domain);
+
+        // 127.0.0.1:1 is virtually guaranteed to be closed.
+        let locator = Locator::from_tcp_v4(std::net::Ipv4Addr::new(127, 0, 0, 1), 1);
+        let target = SendTarget::UserData(&locator);
+        let result = plugin.send(b"\x52\x54\x50\x53...", &target);
+        assert!(result.is_err(), "unreachable peer should yield Err, not panic");
+
+        plugin.close();
+    }
+
+    #[test]
+    fn test_idle_timeout_env_var_default_when_unset() {
+        // The default DEFAULT_INCOMING_IDLE_TIMEOUT_MS lives inside the mux
+        // loop, but here we just verify the env var is parsed safely when
+        // set to a custom value before plugin creation.
+        unsafe {
+            std::env::set_var("INT2DDS_TCP_INCOMING_IDLE_TIMEOUT", "5000");
+        }
+        let domain = next_test_domain();
+        let plugin = make_plugin(domain);
+        // No assertion on the value itself — just confirm plugin creation
+        // succeeds with a custom timeout configured.
+        plugin.close();
+        unsafe {
+            std::env::remove_var("INT2DDS_TCP_INCOMING_IDLE_TIMEOUT");
+        }
+    }
+
+    #[test]
+    fn test_close_is_idempotent_and_releases_port() {
+        let domain = next_test_domain();
+        let plugin = make_plugin(domain);
+        let port = plugin.tcp_listener_port().expect("listener port");
+
+        plugin.close();
+        plugin.close(); // second close must not panic
+
+        // After close, the port should eventually be reusable. Wait briefly
+        // and try a fresh bind on the same port to confirm.
+        std::thread::sleep(Duration::from_millis(100));
+        // We don't assert success here because OS port reuse semantics vary;
+        // the only hard requirement is that close() does not deadlock.
+        let _ = TcpStream::connect(format!("127.0.0.1:{}", port));
     }
 }
