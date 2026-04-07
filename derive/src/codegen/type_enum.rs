@@ -3,6 +3,7 @@ use syn::punctuated::Punctuated;
 use syn::token::Comma;
 use syn::{DeriveInput, Variant};
 
+use crate::codegen::type_config::ExtensibilityKind;
 use crate::codegen::DdsTypeConfig;
 use crate::codegen::{
     generate_additional_derives, generate_enum_cdr_deserialize_impl,
@@ -43,12 +44,18 @@ pub fn derive_enum_impl(
         }
     };
 
+    // Resolve extensibility for unions (defaults to Final if unspecified).
+    // C-style enums have no extensibility but the helper still emits the
+    // hardcoded Final variant via this value.
+    let union_extensibility = type_config.extensibility.unwrap_or(ExtensibilityKind::Final);
+
     // Generate TypeSupport trait implementation for enum/union
     let type_support_impl = generate_enum_type_support_impl(
         &type_support_name,
         name,
         crate_path,
         type_config.type_name.as_deref(),
+        union_extensibility,
     );
 
     // Generate CdrSerialize/CdrDeserialize and XcdrSerialize/XcdrDeserialize
@@ -66,8 +73,20 @@ pub fn derive_enum_impl(
             (
                 generate_union_cdr_serialize_impl(name, variants, crate_path, disc_type),
                 generate_union_cdr_deserialize_impl(name, variants, crate_path, disc_type),
-                generate_union_xcdr_serialize_impl(name, variants, crate_path, disc_type),
-                generate_union_xcdr_deserialize_impl(name, variants, crate_path, disc_type),
+                generate_union_xcdr_serialize_impl(
+                    name,
+                    variants,
+                    crate_path,
+                    disc_type,
+                    union_extensibility,
+                ),
+                generate_union_xcdr_deserialize_impl(
+                    name,
+                    variants,
+                    crate_path,
+                    disc_type,
+                    union_extensibility,
+                ),
             )
         };
 
@@ -100,12 +119,15 @@ pub fn generate_enum_type_support_impl(
     name: &syn::Ident,
     crate_path: &proc_macro2::TokenStream,
     type_name_override: Option<&str>,
+    extensibility: ExtensibilityKind,
 ) -> proc_macro2::TokenStream {
     let get_type_name_body = if let Some(tn) = type_name_override {
         quote! { #tn }
     } else {
         quote! { stringify!(#name) }
     };
+    let extensibility_tokens =
+        crate::codegen::type_config::quote_extensibility_tokens(extensibility, crate_path);
     quote! {
         impl #crate_path::dcps::topic::type_support::TypeSupport for #type_support_name {
             fn get_type_name(&self) -> &str {
@@ -121,7 +143,7 @@ pub fn generate_enum_type_support_impl(
             }
 
             fn get_extensibility_kind(&self) -> #crate_path::serialize::xcdr::ExtensibilityKind {
-                #crate_path::serialize::xcdr::ExtensibilityKind::Final
+                #extensibility_tokens
             }
 
             fn serialize(&self, data: &dyn std::any::Any, format: Option<&#crate_path::dcps::topic::type_support::SerializationFormat>) -> #crate_path::dcps::core::error::DdsResult<#crate_path::rtps::common::types::SerializedData> {
