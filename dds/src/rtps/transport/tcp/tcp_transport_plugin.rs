@@ -252,6 +252,9 @@ impl TcpMuxListeningLoopTask {
         const POLL_TIMEOUT_MS: u64 = 100;
         /// Default idle timeout for incoming connections (ms).
         const DEFAULT_INCOMING_IDLE_TIMEOUT_MS: u64 = 10_000;
+        /// Default grace period before orphan data connections (control lost
+        /// but data still alive) are torn down (ms).
+        const DEFAULT_ORPHAN_DATA_GRACE_MS: u64 = 1_000;
 
         let keepalive_check_interval: u64 = env::var("INT2DDS_TCP_KEEPALIVE_INTERVAL")
             .ok()
@@ -264,10 +267,17 @@ impl TcpMuxListeningLoopTask {
             .unwrap_or(DEFAULT_INCOMING_IDLE_TIMEOUT_MS);
         let incoming_idle_timeout = Duration::from_millis(incoming_idle_timeout_ms);
 
+        let orphan_data_grace_ms: u64 = env::var("INT2DDS_TCP_ORPHAN_DATA_GRACE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_ORPHAN_DATA_GRACE_MS);
+        let orphan_data_grace = Duration::from_millis(orphan_data_grace_ms);
+
         info!(
-            "[TcpMuxListeningLoopTask] Starting on port {} (incoming_idle_timeout={}ms)",
+            "[TcpMuxListeningLoopTask] Starting on port {} (incoming_idle_timeout={}ms, orphan_data_grace={}ms)",
             self.mux_listener.port(),
-            incoming_idle_timeout_ms
+            incoming_idle_timeout_ms,
+            orphan_data_grace_ms
         );
 
         let mut poll = Poll::new()?;
@@ -281,10 +291,14 @@ impl TcpMuxListeningLoopTask {
 
         let mut last_keepalive_check = Instant::now();
         let mut last_idle_check = Instant::now();
+        let mut last_orphan_check = Instant::now();
         let keepalive_interval = Duration::from_millis(keepalive_check_interval);
         // Check idle timeouts at half the configured interval so we never
         // exceed the threshold by more than half a check period.
         let idle_check_interval = (incoming_idle_timeout / 2).max(Duration::from_millis(100));
+        // Same logic for orphan-data sweeps; the grace is short by default
+        // so the check cadence must keep up.
+        let orphan_check_interval = (orphan_data_grace / 2).max(Duration::from_millis(100));
 
         loop {
             match poll.poll(&mut events, Some(Duration::from_millis(POLL_TIMEOUT_MS))) {
@@ -344,6 +358,19 @@ impl TcpMuxListeningLoopTask {
                 if pruned > 0 {
                     debug!(
                         "[TcpMuxListeningLoopTask] Pruned {} idle incoming connection(s)",
+                        pruned
+                    );
+                }
+            }
+
+            if last_orphan_check.elapsed() >= orphan_check_interval {
+                last_orphan_check = Instant::now();
+                let pruned = self
+                    .mux_listener
+                    .prune_orphan_data_connections(orphan_data_grace, poll.registry());
+                if pruned > 0 {
+                    debug!(
+                        "[TcpMuxListeningLoopTask] Pruned {} orphan peer group(s) past grace period",
                         pruned
                     );
                 }
