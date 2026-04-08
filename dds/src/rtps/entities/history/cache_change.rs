@@ -188,6 +188,27 @@ impl CacheChange {
         self.fragment_size
     }
 
+    // Apply fragmentation metadata based on the current `data_value` length.
+    // If the payload exceeds `max_payload_size`, marks the change as fragmented
+    // and fills `total_fragments`, `fragment_size`, and `fragment_set`.
+    // Otherwise clears any prior fragmentation state.
+    pub(crate) fn apply_fragmentation(&mut self, max_payload_size: usize) {
+        self.fragment_set.clear();
+        if max_payload_size > 0 && self.data_value.len() > max_payload_size {
+            self.fragmented = true;
+            self.fragment_size = max_payload_size as u32;
+            let num_fragments = self.data_value.len().div_ceil(max_payload_size);
+            self.total_fragments = num_fragments as u32;
+            for i in 1..=num_fragments {
+                self.fragment_set.insert(i as u32);
+            }
+        } else {
+            self.fragmented = false;
+            self.total_fragments = 0;
+            self.fragment_size = 0;
+        }
+    }
+
     pub(crate) fn get_fragment_data(&self, fragment_num: u32) -> Option<&[u8]> {
         if !self.fragmented || fragment_num == 0 || fragment_num > self.total_fragments {
             return None;
@@ -218,21 +239,7 @@ impl CacheChange {
             source_timestamp,
         );
 
-        if payload.len() > max_payload_size {
-            change.fragmented = true;
-
-            let fragment_size = max_payload_size;
-            let num_fragments = payload.len().div_ceil(fragment_size);
-            change.total_fragments = num_fragments as u32;
-            change.fragment_size = fragment_size as u32;
-
-            for i in 1..=num_fragments {
-                change.fragment_set.insert(i as u32);
-            }
-        } else {
-            change.fragmented = false;
-        }
-
+        change.apply_fragmentation(max_payload_size);
         change
     }
 }
