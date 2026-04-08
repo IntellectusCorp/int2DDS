@@ -334,6 +334,19 @@ impl<'a> RustGen<'a> {
             _ => {}
         }
 
+        // IDL `char` is mapped to Rust u8 (Rust char is 4 bytes), but the
+        // XTypes TypeObject must still register it as CHAR8 to interoperate
+        // with codegen from other languages. The derive macro reads the
+        // #[dds(char)] hint to override the metadata kind.
+        let is_char_field = matches!(&m.resolved_type, ResolvedType::Char)
+            || matches!(
+                &m.resolved_type,
+                ResolvedType::Array { element, .. } if matches!(**element, ResolvedType::Char)
+            );
+        if is_char_field {
+            dds_attrs.push("char".to_string());
+        }
+
         if !dds_attrs.is_empty() {
             self.line(&format!("#[dds({})]", dds_attrs.join(", ")));
         }
