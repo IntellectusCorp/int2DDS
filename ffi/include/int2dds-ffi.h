@@ -90,6 +90,11 @@
 
 /**
  * Field type constants for C FFI.
+ *
+ * These describe primitive wire types. Complex types (enum, bitmask, struct,
+ * map, sequence-of-complex) are not represented here — they go through
+ * `int2dds_type_info_add_named_type_field`, which mirrors the derive macro's
+ * `Fallback` path so the resulting `EquivalenceHash` matches the native side.
  */
 #define INT2DDS_FIELD_BOOL 0
 
@@ -119,9 +124,24 @@
 
 #define INT2DDS_FIELD_STRING 13
 
-#define INT2DDS_FIELD_ENUM 14
+#define INT2DDS_FIELD_CHAR16 14
 
 #define INT2DDS_FIELD_WSTRING 15
+
+/**
+ * Member flag bits for the `flags` parameter of `int2dds_type_info_add_*`.
+ *
+ * These mirror the bits the derive macro sets in `MemberFlag` and must stay
+ * in sync with `int2dds::xtypes::MemberFlag::new` so that hashed TypeObjects
+ * agree between native and FFI participants.
+ */
+#define INT2DDS_MEMBER_KEY (1 << 0)
+
+#define INT2DDS_MEMBER_OPTIONAL (1 << 1)
+
+#define INT2DDS_MEMBER_MUST_UNDERSTAND (1 << 2)
+
+#define INT2DDS_MEMBER_EXTERNAL (1 << 3)
 
 /**
  * C-compatible QoS policy ID enum
@@ -2514,18 +2534,18 @@ Int2DdsRet int2dds_type_info_create(const char *type_name,
                                     struct Int2DdsTypeInfo **out);
 
 /**
- * Add a field to the type info builder.
+ * Add a primitive-typed field to the type info builder.
  *
  * # Safety
  * - `type_info` must be a valid type info created by `int2dds_type_info_create`
  * - `field_name` must be a valid null-terminated C string
- * - `field_type`: one of the INT2DDS_FIELD_* constants
- * - `is_key`: non-zero if this field is a key field
+ * - `field_type`: one of the `INT2DDS_FIELD_*` primitive constants
+ * - `flags`: bitwise OR of `INT2DDS_MEMBER_*` flag bits (0 for a plain field)
  */
 Int2DdsRet int2dds_type_info_add_field(struct Int2DdsTypeInfo *type_info,
                                        const char *field_name,
                                        int32_t field_type,
-                                       int32_t is_key);
+                                       int32_t flags);
 
 /**
  * Add a sequence field to the type info builder.
@@ -2536,15 +2556,17 @@ Int2DdsRet int2dds_type_info_add_field(struct Int2DdsTypeInfo *type_info,
  * # Safety
  * - `type_info` must be a valid type info created by `int2dds_type_info_create`
  * - `field_name` must be a valid null-terminated C string
- * - `element_type`: one of the INT2DDS_FIELD_* constants for the sequence element
+ * - `element_type`: one of the `INT2DDS_FIELD_*` primitive constants for the
+ *   sequence element. Sequences whose elements are themselves complex types
+ *   must be registered through `int2dds_type_info_add_named_type_field`.
  * - `bound`: maximum sequence length (0 = unbounded)
- * - `is_key`: non-zero if this field is a key field
+ * - `flags`: bitwise OR of `INT2DDS_MEMBER_*` flag bits
  */
 Int2DdsRet int2dds_type_info_add_sequence_field(struct Int2DdsTypeInfo *type_info,
                                                 const char *field_name,
                                                 int32_t element_type,
                                                 uint32_t bound,
-                                                int32_t is_key);
+                                                int32_t flags);
 
 /**
  * Add an array field to the type info builder.
@@ -2555,36 +2577,45 @@ Int2DdsRet int2dds_type_info_add_sequence_field(struct Int2DdsTypeInfo *type_inf
  * # Safety
  * - `type_info` must be a valid type info created by `int2dds_type_info_create`
  * - `field_name` must be a valid null-terminated C string
- * - `element_type`: one of the INT2DDS_FIELD_* constants for the array element
+ * - `element_type`: one of the `INT2DDS_FIELD_*` primitive constants for the
+ *   array element
  * - `array_size`: fixed size of the array
- * - `is_key`: non-zero if this field is a key field
+ * - `flags`: bitwise OR of `INT2DDS_MEMBER_*` flag bits
  */
 Int2DdsRet int2dds_type_info_add_array_field(struct Int2DdsTypeInfo *type_info,
                                              const char *field_name,
                                              int32_t element_type,
                                              uint32_t array_size,
-                                             int32_t is_key);
+                                             int32_t flags);
 
 /**
  * Add a named (complex) type field to the type info builder.
  *
  * Creates a `MinimalTypeId(EquivalenceHash::compute(type_hash_name))` TypeIdentifier,
- * matching how int2DDS-Rust represents struct fields via the derive macro's
- * `Fallback` path in `type_to_identifier`.
+ * matching how int2DDS-Rust represents complex fields via the derive macro's
+ * `Fallback` path in `type_to_identifier`. The string passed in
+ * `type_hash_name` must be byte-identical to what `quote!(#field_type).to_string()`
+ * would produce on the native side, since both ends hash this string to derive
+ * the member's TypeIdentifier.
  *
- * For direct struct fields: pass the struct name (e.g., "InnerStruct").
- * For `Vec<Struct>` fields: pass "Vec < StructName >" (matching Rust `quote!` formatting).
+ * Examples (must match `quote!` whitespace exactly):
+ * - struct field            → `"InnerStruct"`
+ * - enum field              → `"Color"`
+ * - bitmask field           → `"PermissionFlagsValue"`
+ * - `Vec<Struct>`           → `"Vec < StructName >"`
+ * - `HashMap<K,V>`          → `"HashMap < K , V >"`
+ * - `@external Box<T>`      → `"Box < T >"`
  *
  * # Safety
  * - `type_info` must be a valid type info created by `int2dds_type_info_create`
  * - `field_name` must be a valid null-terminated C string
- * - `type_hash_name` must be a valid null-terminated C string (the type name to hash)
- * - `is_key`: non-zero if this field is a key field
+ * - `type_hash_name` must be a valid null-terminated C string
+ * - `flags`: bitwise OR of `INT2DDS_MEMBER_*` flag bits
  */
 Int2DdsRet int2dds_type_info_add_named_type_field(struct Int2DdsTypeInfo *type_info,
                                                   const char *field_name,
                                                   const char *type_hash_name,
-                                                  int32_t is_key);
+                                                  int32_t flags);
 
 /**
  * Destroy a type info builder.

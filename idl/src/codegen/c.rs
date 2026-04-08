@@ -1328,48 +1328,130 @@ impl<'a> CGen<'a> {
             ResolvedType::F64 => Some("INT2DDS_FIELD_FLOAT64"),
             ResolvedType::String { .. } => Some("INT2DDS_FIELD_STRING"),
             ResolvedType::WString { .. } => Some("INT2DDS_FIELD_WSTRING"),
-            ResolvedType::Enum(_) => Some("INT2DDS_FIELD_ENUM"),
             _ => None,
         }
     }
 
-    fn emit_type_info_field(&mut self, name: &str, ty: &ResolvedType, is_key: i32) {
+    fn rust_type_quote_str(ty: &ResolvedType) -> String {
         match ty {
-            ResolvedType::Sequence { element, .. } => match element.as_ref() {
-                ResolvedType::Struct(struct_name) => {
+            ResolvedType::Bool => "bool".to_string(),
+            ResolvedType::U8 => "u8".to_string(),
+            ResolvedType::I8 => "i8".to_string(),
+            ResolvedType::I16 => "i16".to_string(),
+            ResolvedType::U16 => "u16".to_string(),
+            ResolvedType::I32 => "i32".to_string(),
+            ResolvedType::U32 => "u32".to_string(),
+            ResolvedType::I64 => "i64".to_string(),
+            ResolvedType::U64 => "u64".to_string(),
+            ResolvedType::F32 => "f32".to_string(),
+            ResolvedType::F64 => "f64".to_string(),
+            ResolvedType::Char => "char".to_string(),
+            ResolvedType::WChar => "WChar".to_string(),
+            ResolvedType::String { .. } => "String".to_string(),
+            ResolvedType::WString { .. } => "WString".to_string(),
+            ResolvedType::Sequence { element, .. } => {
+                format!("Vec < {} >", Self::rust_type_quote_str(element))
+            }
+            ResolvedType::Array { element, size } => {
+                format!("[{} ; {}]", Self::rust_type_quote_str(element), size)
+            }
+            ResolvedType::Map { key, value, .. } => {
+                format!(
+                    "HashMap < {} , {} >",
+                    Self::rust_type_quote_str(key),
+                    Self::rust_type_quote_str(value)
+                )
+            }
+            ResolvedType::Struct(name) | ResolvedType::Enum(name) => {
+                let simple = name.rsplit("::").next().unwrap_or(name);
+                naming::to_pascal_case(simple)
+            }
+            ResolvedType::Bitmask(name) => {
+                let simple = name.rsplit("::").next().unwrap_or(name);
+                format!("{}Value", naming::to_pascal_case(simple))
+            }
+        }
+    }
+
+    fn type_uses_fallback_hash(ty: &ResolvedType) -> bool {
+        match ty {
+            ResolvedType::Enum(_)
+            | ResolvedType::Bitmask(_)
+            | ResolvedType::Struct(_)
+            | ResolvedType::Map { .. } => true,
+            ResolvedType::Sequence { element, .. } | ResolvedType::Array { element, .. } => {
+                Self::type_uses_fallback_hash(element)
+            }
+            _ => false,
+        }
+    }
+
+    fn member_flags_literal(m: &ResolvedMember) -> String {
+        let mut bits: Vec<&str> = Vec::new();
+        if m.is_key {
+            bits.push("INT2DDS_MEMBER_KEY");
+        }
+        if m.is_optional {
+            bits.push("INT2DDS_MEMBER_OPTIONAL");
+        }
+        if m.must_understand {
+            bits.push("INT2DDS_MEMBER_MUST_UNDERSTAND");
+        }
+        if m.is_external {
+            bits.push("INT2DDS_MEMBER_EXTERNAL");
+        }
+        if bits.is_empty() {
+            "0".to_string()
+        } else {
+            bits.join(" | ")
+        }
+    }
+
+    fn emit_type_info_field(&mut self, m: &ResolvedMember) {
+        let name = &m.name;
+        let ty = &m.resolved_type;
+        let flags = Self::member_flags_literal(m);
+
+        if m.is_external {
+            let inner = Self::rust_type_quote_str(ty);
+            self.raw(&format!(
+                "    int2dds_type_info_add_named_type_field(ti, \"{}\", \"Box < {} >\", {});\n",
+                name, inner, flags
+            ));
+            return;
+        }
+
+        if Self::type_uses_fallback_hash(ty) {
+            let hash_name = Self::rust_type_quote_str(ty);
+            self.raw(&format!(
+                "    int2dds_type_info_add_named_type_field(ti, \"{}\", \"{}\", {});\n",
+                name, hash_name, flags
+            ));
+            return;
+        }
+
+        match ty {
+            ResolvedType::Sequence { element, .. } => {
+                if let Some(elem_const) = Self::resolved_type_to_field_constant(element) {
                     self.raw(&format!(
-                            "    int2dds_type_info_add_named_type_field(ti, \"{}\", \"Vec < {} >\", {});\n",
-                            name, struct_name, is_key
-                        ));
+                        "    int2dds_type_info_add_sequence_field(ti, \"{}\", {}, 0, {});\n",
+                        name, elem_const, flags
+                    ));
                 }
-                _ => {
-                    if let Some(elem_const) = Self::resolved_type_to_field_constant(element) {
-                        self.raw(&format!(
-                            "    int2dds_type_info_add_sequence_field(ti, \"{}\", {}, 0, {});\n",
-                            name, elem_const, is_key
-                        ));
-                    }
-                }
-            },
+            }
             ResolvedType::Array { element, size } => {
                 if let Some(elem_const) = Self::resolved_type_to_field_constant(element) {
                     self.raw(&format!(
                         "    int2dds_type_info_add_array_field(ti, \"{}\", {}, {}, {});\n",
-                        name, elem_const, size, is_key
+                        name, elem_const, size, flags
                     ));
                 }
-            }
-            ResolvedType::Struct(struct_name) => {
-                self.raw(&format!(
-                    "    int2dds_type_info_add_named_type_field(ti, \"{}\", \"{}\", {});\n",
-                    name, struct_name, is_key
-                ));
             }
             _ => {
                 if let Some(field_const) = Self::resolved_type_to_field_constant(ty) {
                     self.raw(&format!(
                         "    int2dds_type_info_add_field(ti, \"{}\", {}, {});\n",
-                        name, field_const, is_key
+                        name, field_const, flags
                     ));
                 }
             }
@@ -1388,8 +1470,7 @@ impl<'a> CGen<'a> {
         self.raw(&format!("    int2dds_type_info_create(\"{}\", {}, &ti);\n", s.name, ext_int));
 
         for m in &s.members {
-            let is_key = if m.is_key { 1 } else { 0 };
-            self.emit_type_info_field(&m.name, &m.resolved_type, is_key);
+            self.emit_type_info_field(m);
         }
 
         self.raw("    return ti;\n}\n");
