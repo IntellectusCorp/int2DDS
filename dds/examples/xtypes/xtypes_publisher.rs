@@ -1,7 +1,21 @@
 //! XTypes Publisher Example
 //!
-//! This publisher uses a compile-time defined type (SensorData) to publish data.
-//! The XTypes Subscriber can receive this data without knowing the type at compile time.
+//! Publishes a `SensorData` topic. The companion `xtypes_subscriber` example
+//! receives this data WITHOUT knowing the type at compile time, by discovering
+//! the TypeObject at runtime and decoding samples through `DynamicData`.
+//!
+//! XTypes features demonstrated here:
+//!
+//! * `#[dds(key)]` — marks the instance key field.
+//! * `#[dds(bound = N)]` — declares a maximum length for the `String` field
+//!   which appears in the published TypeObject.
+//!
+//! `SensorData` is intentionally declared as **Final** extensibility because
+//! that is what the dynamic type-object discovery path supports today end to
+//! end. For the wire-format demos of Mutable / Appendable / Hash member-IDs /
+//! optional fields see the dedicated `xtypes_extensibility_*`,
+//! `xtypes_member_id_*`, and `xtypes_bitmask_bitset_*` example pairs, which
+//! use compile-time-typed readers on the subscriber side.
 //!
 //! # Usage
 //!
@@ -35,10 +49,8 @@ struct Args {
     domain: i32,
 }
 
-/// SensorData - the data type published by this example.
-///
-/// The XTypes Subscriber will receive this data without knowing
-/// this struct definition at compile time.
+/// SensorData — published as Final extensibility for compatibility with the
+/// dynamic type-object discovery path used by `xtypes_subscriber`.
 #[derive(DdsType)]
 #[dds_type(crate_path = "int2dds")]
 struct SensorData {
@@ -46,6 +58,8 @@ struct SensorData {
     sensor_id: i32,
     temperature: f64,
     humidity: f64,
+    /// Bounded string — max length recorded in TypeObject.
+    #[dds(bound = 32)]
     location: String,
 }
 
@@ -55,7 +69,7 @@ fn main() {
 
     let args = Args::parse();
 
-    println!("Publishing SensorData with compile-time type definition.");
+    println!("XTypes Publisher — Final SensorData with bounded string");
     println!("The XTypes Subscriber receives this using DynamicData.\n");
 
     let factory = DomainParticipantFactory::get_instance();
@@ -94,7 +108,6 @@ fn main() {
         .create_datawriter::<SensorData>(&topic, writer_qos, None, StatusMask::default())
         .expect("Failed to create datawriter");
 
-    // Wait for subscriber match
     println!("Waiting for subscriber to match...");
     let mut condition = writer.get_statuscondition().unwrap().clone();
     condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
@@ -106,7 +119,7 @@ fn main() {
 
     let locations = ["Lab A", "Lab B", "Warehouse", "Office"];
     let mut sensor_id = 1;
-    let mut index = 0;
+    let mut index = 0usize;
 
     loop {
         let data = SensorData {
@@ -119,13 +132,11 @@ fn main() {
         match writer.write(&data, InstanceHandle::NIL) {
             Ok(_) => {
                 println!(
-                    "[SEND] sensor_id={}, temp={:.1}°C, humidity={:.1}%, location={}",
+                    "[SEND] id={} temp={:.1}°C hum={:.1}% loc={}",
                     data.sensor_id, data.temperature, data.humidity, data.location
                 );
             }
-            Err(e) => {
-                eprintln!("Write failed: {:?}", e);
-            }
+            Err(e) => eprintln!("Write failed: {:?}", e),
         }
 
         std::thread::sleep(std::time::Duration::from_secs(1));
