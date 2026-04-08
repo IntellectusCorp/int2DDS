@@ -18,6 +18,9 @@ pub struct FieldConfig {
     pub position: Option<u8>,
     /// @bitfield: bit width for bitset fields
     pub bitfield: Option<u8>,
+    /// #[dds(char)]: storage is u8 / [u8; N] but TypeObject must register CHAR8.
+    /// IDL `char`는 Rust char(4바이트)로 못 담아 u8로 매핑하지만 XTypes 메타데이터는 CHAR8여야 호환됨.
+    pub as_char: bool,
 }
 
 /// Convert a literal to a TokenStream for code generation
@@ -94,6 +97,8 @@ pub fn parse_field_attributes(field: &syn::Field) -> FieldConfig {
                     let value = meta.value()?;
                     let lit: syn::LitInt = value.parse()?;
                     config.bitfield = Some(lit.base10_parse::<u8>()?);
+                } else if meta.path.is_ident("char") {
+                    config.as_char = true;
                 }
                 Ok(())
             });
