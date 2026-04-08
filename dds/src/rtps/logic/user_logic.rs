@@ -230,18 +230,21 @@ impl UserLogic {
 
                     let participant = self.get_upgraded_participant()?;
                     let timestamp = Utc::now();
+
+                    // Reuse a single send buffer across every fragment of this change.
+                    let mut send_buffer = participant
+                        .wire_buffer_pool()
+                        .lock()
+                        .map_err(|_| {
+                            RtpsError::new(
+                                RtpsErrorCode::LockError,
+                                "Failed to lock wire buffer pool",
+                            )
+                        })?
+                        .acquire();
+
                     for fragment_num in 1..=a_change.total_fragments() {
                         if let Some(fragment_data) = a_change.get_fragment_data(fragment_num) {
-                            let mut send_buffer = participant
-                                .wire_buffer_pool()
-                                .lock()
-                                .map_err(|_| {
-                                    RtpsError::new(
-                                        RtpsErrorCode::LockError,
-                                        "Failed to lock wire buffer pool",
-                                    )
-                                })?
-                                .acquire();
                             let result = MessageCreator::create_data_frag_msg(
                                 &a_change,
                                 reader_proxy.remote_reader_guid(),
@@ -265,18 +268,19 @@ impl UserLogic {
                                     warn!("Failed to send DATA_FRAG for requested change: {:?}", e);
                                 }
                             }
-                            participant
-                                .wire_buffer_pool()
-                                .lock()
-                                .map_err(|_| {
-                                    RtpsError::new(
-                                        RtpsErrorCode::LockError,
-                                        "Failed to lock wire buffer pool",
-                                    )
-                                })?
-                                .release(send_buffer);
                         }
                     }
+
+                    participant
+                        .wire_buffer_pool()
+                        .lock()
+                        .map_err(|_| {
+                            RtpsError::new(
+                                RtpsErrorCode::LockError,
+                                "Failed to lock wire buffer pool",
+                            )
+                        })?
+                        .release(send_buffer);
                 } else {
                     // No fragment case - send regular DATA message
                     let participant = self.get_upgraded_participant()?;
@@ -394,6 +398,19 @@ impl UserLogic {
 
                     if a_change.is_fragmented() {
                         let timestamp = Utc::now();
+
+                        // Reuse a single send buffer across every fragment of this change.
+                        let mut send_buffer = participant
+                            .wire_buffer_pool()
+                            .lock()
+                            .map_err(|_| {
+                                RtpsError::new(
+                                    RtpsErrorCode::LockError,
+                                    "Failed to lock wire buffer pool",
+                                )
+                            })?
+                            .acquire();
+
                         for fragment_num in 1..=a_change.total_fragments() {
                             let mut heartbeat_info = None;
 
@@ -414,6 +431,7 @@ impl UserLogic {
                                 fragment_num,
                                 heartbeat_info,
                                 timestamp,
+                                &mut send_buffer,
                             ) {
                                 writer.increase_heartbeat_count();
                                 if !reader_proxy.is_first_hb_sent() {
@@ -421,6 +439,17 @@ impl UserLogic {
                                 }
                             }
                         }
+
+                        participant
+                            .wire_buffer_pool()
+                            .lock()
+                            .map_err(|_| {
+                                RtpsError::new(
+                                    RtpsErrorCode::LockError,
+                                    "Failed to lock wire buffer pool",
+                                )
+                            })?
+                            .release(send_buffer);
                     } else {
                         // TODO: Fill in inlineQos if ReaderProxy.expects_inline_qos() == true
                         let mut heartbeat_info = None;
@@ -539,19 +568,22 @@ impl UserLogic {
                 // Create DATA or DATA_FRAG message
                 if change.is_fragmented() {
                     let timestamp = Utc::now();
+
+                    // Reuse a single send buffer across every fragment of this change.
+                    let mut send_buffer = participant
+                        .wire_buffer_pool()
+                        .lock()
+                        .map_err(|_| {
+                            RtpsError::new(
+                                RtpsErrorCode::LockError,
+                                "Failed to lock wire buffer pool",
+                            )
+                        })?
+                        .acquire();
+
                     // Send each fragment as DATA_FRAG submessage immediately
                     for fragment_num in 1..=change.total_fragments() {
                         if let Some(fragment_data) = change.get_fragment_data(fragment_num) {
-                            let mut send_buffer = participant
-                                .wire_buffer_pool()
-                                .lock()
-                                .map_err(|_| {
-                                    RtpsError::new(
-                                        RtpsErrorCode::LockError,
-                                        "Failed to lock wire buffer pool",
-                                    )
-                                })?
-                                .acquire();
                             let result = MessageCreator::create_data_frag_msg(
                                 change,
                                 Guid::new(reader_locator.guid_prefix(), EntityId::PARTICIPANT),
@@ -576,18 +608,19 @@ impl UserLogic {
                                     warn!("Failed to send DATA_FRAG message: {:?}", e);
                                 }
                             }
-                            participant
-                                .wire_buffer_pool()
-                                .lock()
-                                .map_err(|_| {
-                                    RtpsError::new(
-                                        RtpsErrorCode::LockError,
-                                        "Failed to lock wire buffer pool",
-                                    )
-                                })?
-                                .release(send_buffer);
                         }
                     }
+
+                    participant
+                        .wire_buffer_pool()
+                        .lock()
+                        .map_err(|_| {
+                            RtpsError::new(
+                                RtpsErrorCode::LockError,
+                                "Failed to lock wire buffer pool",
+                            )
+                        })?
+                        .release(send_buffer);
                 } else {
                     // Send as regular DATA message
                     let mut send_buffer = participant
@@ -668,16 +701,9 @@ impl UserLogic {
         fragment_num: u32,
         heartbeat_info: Option<(u32, SequenceNumber, SequenceNumber, bool, bool)>,
         timestamp: DateTime<Utc>,
+        send_buffer: &mut Vec<u8>,
     ) -> bool {
-        let participant = match self.get_upgraded_participant() {
-            Ok(p) => p,
-            Err(_) => return false,
-        };
         if let Some(fragment_data) = change.get_fragment_data(fragment_num) {
-            let mut send_buffer = match participant.wire_buffer_pool().lock() {
-                Ok(mut pool) => pool.acquire(),
-                Err(_) => return false,
-            };
             let result = MessageCreator::create_data_frag_msg(
                 change,
                 reader_proxy.remote_reader_guid(),
@@ -690,22 +716,15 @@ impl UserLogic {
                 fragment_data,
                 heartbeat_info,
                 timestamp,
-                &mut send_buffer,
+                send_buffer,
             );
 
-            let sent = if result.is_ok() {
-                self.send_rtps_message_to_locators(
-                    reader_proxy.unicast_locator_list(),
-                    &send_buffer,
-                )
-                .is_ok()
+            return if result.is_ok() {
+                self.send_rtps_message_to_locators(reader_proxy.unicast_locator_list(), send_buffer)
+                    .is_ok()
             } else {
                 false
             };
-            if let Ok(mut pool) = participant.wire_buffer_pool().lock() {
-                pool.release(send_buffer);
-            }
-            return sent;
         }
         false
     }
@@ -2180,6 +2199,14 @@ impl UnicastMessageProcessor for UserLogic {
         let heartbeat_info = Some((heartbeat_count, writer_sn, last_sn, false, false));
 
         let timestamp = Utc::now();
+        let participant = self.get_upgraded_participant()?;
+        let mut send_buffer = participant
+            .wire_buffer_pool()
+            .lock()
+            .map_err(|_| {
+                RtpsError::new(RtpsErrorCode::LockError, "Failed to lock wire buffer pool")
+            })?
+            .acquire();
         for fragment_num in requested_fragments {
             if fragment_num >= 1 && fragment_num <= total_frags {
                 self.send_data_frag_to_reader_proxy(
@@ -2189,9 +2216,17 @@ impl UnicastMessageProcessor for UserLogic {
                     fragment_num,
                     heartbeat_info,
                     timestamp,
+                    &mut send_buffer,
                 );
             }
         }
+        participant
+            .wire_buffer_pool()
+            .lock()
+            .map_err(|_| {
+                RtpsError::new(RtpsErrorCode::LockError, "Failed to lock wire buffer pool")
+            })?
+            .release(send_buffer);
 
         Ok(())
     }

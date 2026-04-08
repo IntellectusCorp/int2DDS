@@ -246,11 +246,10 @@ impl MessageCreator {
             rtps_message.add_submessage(heartbeat_submessage);
         }
 
-        // Serialize into the reusable send buffer
-        let size = Writable::<Endianness>::bytes_needed(&rtps_message)?;
+        // Serialize directly into the reusable Vec via its `Write` impl.
+        // Avoids the `bytes_needed` pre-pass and the zero-fill from `resize(_, 0)`.
         send_buffer.clear();
-        send_buffer.resize(size, 0);
-        rtps_message.write_to_buffer_with_ctx(Endianness::LittleEndian, send_buffer)?;
+        rtps_message.write_to_stream_with_ctx(Endianness::LittleEndian, &mut *send_buffer)?;
         Ok(())
     }
 
@@ -318,11 +317,9 @@ impl MessageCreator {
             rtps_message.add_submessage(heartbeat_submessage);
         }
 
-        // Serialize into the reusable send buffer
-        let size = Writable::<Endianness>::bytes_needed(&rtps_message)?;
+        // Serialize directly into the reusable Vec via its `Write` impl.
         send_buffer.clear();
-        send_buffer.resize(size, 0);
-        rtps_message.write_to_buffer_with_ctx(Endianness::LittleEndian, send_buffer)?;
+        rtps_message.write_to_stream_with_ctx(Endianness::LittleEndian, &mut *send_buffer)?;
         Ok(())
     }
 
