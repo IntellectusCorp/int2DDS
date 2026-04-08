@@ -90,11 +90,6 @@
 
 /**
  * Field type constants for C FFI.
- *
- * These describe primitive wire types. Complex types (enum, bitmask, struct,
- * map, sequence-of-complex) are not represented here — they go through
- * `int2dds_type_info_add_named_type_field`, which mirrors the derive macro's
- * `Fallback` path so the resulting `EquivalenceHash` matches the native side.
  */
 #define INT2DDS_FIELD_BOOL 0
 
@@ -128,13 +123,6 @@
 
 #define INT2DDS_FIELD_WSTRING 15
 
-/**
- * Member flag bits for the `flags` parameter of `int2dds_type_info_add_*`.
- *
- * These mirror the bits the derive macro sets in `MemberFlag` and must stay
- * in sync with `int2dds::xtypes::MemberFlag::new` so that hashed TypeObjects
- * agree between native and FFI participants.
- */
 #define INT2DDS_MEMBER_KEY (1 << 0)
 
 #define INT2DDS_MEMBER_OPTIONAL (1 << 1)
@@ -2535,12 +2523,6 @@ Int2DdsRet int2dds_type_info_create(const char *type_name,
 
 /**
  * Add a primitive-typed field to the type info builder.
- *
- * # Safety
- * - `type_info` must be a valid type info created by `int2dds_type_info_create`
- * - `field_name` must be a valid null-terminated C string
- * - `field_type`: one of the `INT2DDS_FIELD_*` primitive constants
- * - `flags`: bitwise OR of `INT2DDS_MEMBER_*` flag bits (0 for a plain field)
  */
 Int2DdsRet int2dds_type_info_add_field(struct Int2DdsTypeInfo *type_info,
                                        const char *field_name,
@@ -2549,18 +2531,6 @@ Int2DdsRet int2dds_type_info_add_field(struct Int2DdsTypeInfo *type_info,
 
 /**
  * Add a sequence field to the type info builder.
- *
- * Creates a `PlainSequenceLarge` TypeIdentifier wrapping the element type,
- * matching how int2DDS-Rust represents `Vec<T>` in DDS-XTypes.
- *
- * # Safety
- * - `type_info` must be a valid type info created by `int2dds_type_info_create`
- * - `field_name` must be a valid null-terminated C string
- * - `element_type`: one of the `INT2DDS_FIELD_*` primitive constants for the
- *   sequence element. Sequences whose elements are themselves complex types
- *   must be registered through `int2dds_type_info_add_named_type_field`.
- * - `bound`: maximum sequence length (0 = unbounded)
- * - `flags`: bitwise OR of `INT2DDS_MEMBER_*` flag bits
  */
 Int2DdsRet int2dds_type_info_add_sequence_field(struct Int2DdsTypeInfo *type_info,
                                                 const char *field_name,
@@ -2570,17 +2540,6 @@ Int2DdsRet int2dds_type_info_add_sequence_field(struct Int2DdsTypeInfo *type_inf
 
 /**
  * Add an array field to the type info builder.
- *
- * Creates a `PlainArrayLarge` TypeIdentifier wrapping the element type,
- * matching how int2DDS-Rust represents `[T; N]` in DDS-XTypes.
- *
- * # Safety
- * - `type_info` must be a valid type info created by `int2dds_type_info_create`
- * - `field_name` must be a valid null-terminated C string
- * - `element_type`: one of the `INT2DDS_FIELD_*` primitive constants for the
- *   array element
- * - `array_size`: fixed size of the array
- * - `flags`: bitwise OR of `INT2DDS_MEMBER_*` flag bits
  */
 Int2DdsRet int2dds_type_info_add_array_field(struct Int2DdsTypeInfo *type_info,
                                              const char *field_name,
@@ -2590,27 +2549,6 @@ Int2DdsRet int2dds_type_info_add_array_field(struct Int2DdsTypeInfo *type_info,
 
 /**
  * Add a named (complex) type field to the type info builder.
- *
- * Creates a `MinimalTypeId(EquivalenceHash::compute(type_hash_name))` TypeIdentifier,
- * matching how int2DDS-Rust represents complex fields via the derive macro's
- * `Fallback` path in `type_to_identifier`. The string passed in
- * `type_hash_name` must be byte-identical to what `quote!(#field_type).to_string()`
- * would produce on the native side, since both ends hash this string to derive
- * the member's TypeIdentifier.
- *
- * Examples (must match `quote!` whitespace exactly):
- * - struct field            → `"InnerStruct"`
- * - enum field              → `"Color"`
- * - bitmask field           → `"PermissionFlagsValue"`
- * - `Vec<Struct>`           → `"Vec < StructName >"`
- * - `HashMap<K,V>`          → `"HashMap < K , V >"`
- * - `@external Box<T>`      → `"Box < T >"`
- *
- * # Safety
- * - `type_info` must be a valid type info created by `int2dds_type_info_create`
- * - `field_name` must be a valid null-terminated C string
- * - `type_hash_name` must be a valid null-terminated C string
- * - `flags`: bitwise OR of `INT2DDS_MEMBER_*` flag bits
  */
 Int2DdsRet int2dds_type_info_add_named_type_field(struct Int2DdsTypeInfo *type_info,
                                                   const char *field_name,
@@ -2619,10 +2557,6 @@ Int2DdsRet int2dds_type_info_add_named_type_field(struct Int2DdsTypeInfo *type_i
 
 /**
  * Destroy a type info builder.
- *
- * # Safety
- * - `type_info` must be a valid type info, or null (no-op)
- * - Must not be used after this call
  */
 void int2dds_type_info_destroy(struct Int2DdsTypeInfo *type_info);
 
