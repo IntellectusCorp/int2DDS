@@ -49,7 +49,10 @@ use std::{
 };
 
 use crate::{
-    common::{env::init_from_env, instance_handle::InstanceHandle},
+    common::{
+        env::{init_from_env, DEFAULT_DOMAIN_ID},
+        instance_handle::InstanceHandle,
+    },
     config::json::QosProvider,
     core::{
         error::{DdsError, DdsResult},
@@ -110,6 +113,17 @@ impl DomainParticipantFactory {
         listener: Option<Arc<dyn DomainParticipantListener>>,
         mask: StatusMask,
     ) -> DdsResult<DomainParticipant> {
+        let domain_id = if domain_id != DEFAULT_DOMAIN_ID {
+            domain_id
+        } else {
+            std::env::var("DDS_DOMAIN_ID")
+                .ok()
+                .and_then(|v| v.parse::<DomainId>().ok())
+                .unwrap_or_else(|| {
+                    log::warn!("DDS_DOMAIN_ID is not set or invalid, defaulting to 0");
+                    0
+                })
+        };
         let participant =
             DomainParticipant::new(false, domain_id, qos_list.clone(), listener, mask)?;
         if self.get_qos()?.entity_factory.autoenable_created_entities {
