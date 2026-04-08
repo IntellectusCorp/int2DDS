@@ -589,7 +589,7 @@ impl Socket {
         {
             let ip = addr.ip().to_string();
             if ip != "127.0.0.1" && ip != "0.0.0.0" {
-                log::debug!("Resolved default outgoing IP: {}", ip);
+                log::debug!("Resolved default outgoing multicast interface IP: {}", ip);
                 return ip;
             }
         }
@@ -607,7 +607,7 @@ impl Socket {
                 "127.0.0.1".to_string()
             }); // Fallback to loopback if no other IPs are available
 
-        log::debug!("Using multicast interface IP: {}", chosen_ip);
+        log::debug!("Using multicast interface IP chosen from working IPs: {}", chosen_ip);
         chosen_ip
     }
 }
