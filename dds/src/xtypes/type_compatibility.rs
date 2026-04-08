@@ -770,7 +770,7 @@ fn check_member_type_compatibility(
         if writer_type.equivalence_hash() == reader_type.equivalence_hash() {
             return Ok(());
         }
-        
+
         if !tce_policy.force_type_validation {
             return Ok(());
         }
