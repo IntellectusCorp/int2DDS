@@ -11,11 +11,38 @@ use crate::codegen::utils::{
 };
 
 /// Generate TypeIdentifier expression for a Rust type.
+///
+/// `as_char`: when true and the type is `u8` / `[u8; N]`, advertise it as
+/// `Char8` (resp. `Char8` array element) in XTypes metadata so that codegen
+/// from other languages — which keep IDL `char` as native char — can match.
 fn type_to_identifier(
     ty: &syn::Type,
     crate_path: &proc_macro2::TokenStream,
+    as_char: bool,
 ) -> proc_macro2::TokenStream {
     let method = get_serialization_method(ty);
+
+    if as_char {
+        // Override only u8 / [u8; N] cases. Other types fall through to the
+        // normal mapping below.
+        if matches!(method, SerializationMethod::U8) {
+            return quote! { #crate_path::xtypes::TypeIdentifier::Char8 };
+        }
+        if matches!(method, SerializationMethod::U8Array) {
+            if let syn::Type::Array(array) = ty {
+                let size = &array.len;
+                return quote! {
+                    #crate_path::xtypes::TypeIdentifier::PlainArrayLarge {
+                        header: #crate_path::xtypes::PlainCollectionHeader::default(),
+                        array_bound_seq: vec![#size as u32],
+                        element_identifier: Box::new(
+                            #crate_path::xtypes::TypeIdentifier::Char8
+                        ),
+                    }
+                };
+            }
+        }
+    }
 
     match method {
         SerializationMethod::Bool => quote! { #crate_path::xtypes::TypeIdentifier::Boolean },
@@ -50,7 +77,7 @@ fn type_to_identifier(
                 if let Some(segment) = type_path.path.segments.last() {
                     if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
                         if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
-                            let inner_id = type_to_identifier(inner_ty, crate_path);
+                            let inner_id = type_to_identifier(inner_ty, crate_path, false);
                             return quote! {
                                 #crate_path::xtypes::TypeIdentifier::PlainSequenceLarge {
                                     header: #crate_path::xtypes::PlainCollectionHeader::default(),
@@ -80,7 +107,7 @@ fn type_to_identifier(
         | SerializationMethod::StringArray => {
             // Arrays - get size from type
             if let syn::Type::Array(array) = ty {
-                let inner_id = type_to_identifier(&array.elem, crate_path);
+                let inner_id = type_to_identifier(&array.elem, crate_path, false);
                 let size = &array.len;
                 return quote! {
                     #crate_path::xtypes::TypeIdentifier::PlainArrayLarge {
@@ -145,7 +172,7 @@ pub fn generate_has_type_object_impl(
             let field_name_str = field_name.to_string();
             let field_config = parse_field_attributes(field);
             let member_id = resolve_member_id(&field_config, &field_name_str, index, autoid);
-            let type_id = type_to_identifier(&field.ty, crate_path);
+            let type_id = type_to_identifier(&field.ty, crate_path, field_config.as_char);
 
             let is_key = field_config.key;
             let is_optional = field_config.optional;
@@ -179,7 +206,7 @@ pub fn generate_has_type_object_impl(
             let field_name_str = field_name.to_string();
             let field_config = parse_field_attributes(field);
             let member_id = resolve_member_id(&field_config, &field_name_str, index, autoid);
-            let type_id = type_to_identifier(&field.ty, crate_path);
+            let type_id = type_to_identifier(&field.ty, crate_path, field_config.as_char);
 
             let is_key = field_config.key;
             let is_optional = field_config.optional;
@@ -389,7 +416,7 @@ pub fn generate_has_type_object_union_impl(
             let variant_name_str = variant.ident.to_string();
             let disc_value = get_discriminant_value(variant, index) as i32;
             let member_type_id = match get_variant_type(variant) {
-                Some(ty) => type_to_identifier(ty, crate_path),
+                Some(ty) => type_to_identifier(ty, crate_path, false),
                 None => quote! { #crate_path::xtypes::TypeIdentifier::None },
             };
 
@@ -413,7 +440,7 @@ pub fn generate_has_type_object_union_impl(
             let variant_name_str = variant.ident.to_string();
             let disc_value = get_discriminant_value(variant, index) as i32;
             let member_type_id = match get_variant_type(variant) {
-                Some(ty) => type_to_identifier(ty, crate_path),
+                Some(ty) => type_to_identifier(ty, crate_path, false),
                 None => quote! { #crate_path::xtypes::TypeIdentifier::None },
             };
 
@@ -567,7 +594,7 @@ pub fn generate_has_type_object_bitset_impl(
             let field_name = field.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
             let attrs = parse_field_attributes(field);
             let bitcount = attrs.bitfield.unwrap_or(1) as u8;
-            let field_type_id = type_to_identifier(&field.ty, crate_path);
+            let field_type_id = type_to_identifier(&field.ty, crate_path, false);
             let pos = position;
             position += bitcount as u16;
 
@@ -590,7 +617,7 @@ pub fn generate_has_type_object_bitset_impl(
             let field_name = field.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
             let attrs = parse_field_attributes(field);
             let bitcount = attrs.bitfield.unwrap_or(1) as u8;
-            let field_type_id = type_to_identifier(&field.ty, crate_path);
+            let field_type_id = type_to_identifier(&field.ty, crate_path, false);
             let pos = position;
             position += bitcount as u16;
 
