@@ -38,6 +38,7 @@ use crate::{
             impl_check_parent_enabled, impl_dds_entity, impl_dds_entity_impl, BaseEntity,
             EnableChild, Entity, EntityInternal, UpdateStatus,
         },
+        qos_kind::QosKind,
         qos_policy::{PresentationQosAccessScopeKind, Qos},
         status::StatusMask,
         status_condition::StatusCondition,
@@ -53,7 +54,7 @@ use crate::{
 use super::{
     data_reader::{DataReader, DataReaderBase, DataReaderInternal},
     data_reader_listener::DataReaderListener,
-    qos::{DataReaderQos, SubscriberQos, DATAREADER_QOS_DEFAULT},
+    qos::{DataReaderQos, SubscriberQos},
     sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind},
     subscriber_listener::SubscriberListener,
 };
@@ -85,7 +86,7 @@ pub struct Subscriber {
         Arc<Mutex<HashMap<InstanceHandle, Vec<Weak<dyn DataReaderInternal<Qos = DataReaderQos>>>>>>,
     builtin_readers: Arc<Mutex<Vec<Arc<dyn DataReaderInternal<Qos = DataReaderQos>>>>>,
     orphaned_readers: Arc<Mutex<Vec<Arc<dyn DataReaderInternal<Qos = DataReaderQos>>>>>,
-    default_datareader_qos: Arc<Mutex<DataReaderQos>>,
+    default_datareader_qos: Arc<Mutex<Option<DataReaderQos>>>,
     participant: Option<Weak<DomainParticipant>>,
 }
 
@@ -186,7 +187,7 @@ impl Subscriber {
             readers_by_topic_handle: Arc::new(Mutex::new(HashMap::new())),
             builtin_readers: Arc::new(Mutex::new(Vec::new())),
             orphaned_readers: Arc::new(Mutex::new(Vec::new())),
-            default_datareader_qos: Arc::new(Mutex::new(DATAREADER_QOS_DEFAULT)),
+            default_datareader_qos: Arc::new(Mutex::new(None)),
             participant: Some(Arc::downgrade(participant)),
         };
         let subscriber_arc = Arc::new(subscriber.clone());
@@ -241,7 +242,7 @@ impl Subscriber {
     pub fn create_datareader<Foo: DdsType>(
         &self,
         topic_description: &dyn TopicDescription,
-        qos: DataReaderQos,
+        qos: impl Into<QosKind<DataReaderQos>>,
         listener: Option<Arc<dyn DataReaderListener<Foo = Foo>>>,
         mask: StatusMask,
     ) -> DdsResult<DataReader<Foo>> {
@@ -250,25 +251,23 @@ impl Subscriber {
         }
         self.is_deleted()?;
 
-        // Sentinel resolution: see Publisher::create_datawriter for rationale.
-        let qos = if qos == DATAREADER_QOS_DEFAULT {
-            let registered = self
-                .default_datareader_qos
-                .lock()
-                .ok()
-                .map(|g| g.clone())
-                .unwrap_or(DATAREADER_QOS_DEFAULT);
-            if registered != DATAREADER_QOS_DEFAULT {
-                registered
-            } else if let Ok(profile_qos) =
-                DomainParticipantFactory::get_instance().get_datareader_qos_from_profile("")
-            {
-                profile_qos
-            } else {
-                qos
+        // Resolution chain for QosKind::Default: registered default → configured
+        // default profile → spec default. QosKind::Specific is used as-is.
+        let qos = match qos.into() {
+            QosKind::Specific(q) => q,
+            QosKind::Default => {
+                if let Some(registered) =
+                    self.default_datareader_qos.lock().ok().and_then(|g| g.clone())
+                {
+                    registered
+                } else if let Ok(profile_qos) =
+                    DomainParticipantFactory::get_instance().get_datareader_qos_from_profile("")
+                {
+                    profile_qos
+                } else {
+                    DataReaderQos::default()
+                }
             }
-        } else {
-            qos
         };
 
         let type_support =
@@ -1031,30 +1030,33 @@ impl Subscriber {
         Err(DdsError::Error("Participant reference is invalid or expired".to_string()))
     }
 
-    pub fn set_default_datareader_qos(&self, qos: DataReaderQos) -> DdsResult<()> {
+    pub fn set_default_datareader_qos(
+        &self,
+        qos: impl Into<QosKind<DataReaderQos>>,
+    ) -> DdsResult<()> {
         if self.is_builtin {
             return Err(DdsError::PreconditionNotMet);
         }
         self.is_deleted()?;
-        if qos == DATAREADER_QOS_DEFAULT {
-            return self.reset_default_datareader_qos();
-        }
-        match qos.is_consistent() {
-            Ok(()) => match self.default_datareader_qos.lock() {
-                Ok(mut default_qos) => {
-                    *default_qos = qos;
-                    Ok(())
+        match qos.into() {
+            QosKind::Default => self.reset_default_datareader_qos(),
+            QosKind::Specific(qos) => {
+                qos.is_consistent()?;
+                match self.default_datareader_qos.lock() {
+                    Ok(mut default_qos) => {
+                        *default_qos = Some(qos);
+                        Ok(())
+                    }
+                    Err(e) => Err(DdsError::Error(e.to_string())),
                 }
-                Err(e) => Err(DdsError::Error(e.to_string())),
-            },
-            Err(err_code) => Err(err_code),
+            }
         }
     }
 
     fn reset_default_datareader_qos(&self) -> DdsResult<()> {
         match self.default_datareader_qos.lock() {
             Ok(mut default_qos) => {
-                *default_qos = DATAREADER_QOS_DEFAULT;
+                *default_qos = None;
                 Ok(())
             }
             Err(e) => Err(DdsError::Error(e.to_string())),
@@ -1064,7 +1066,7 @@ impl Subscriber {
     pub fn get_default_datareader_qos(&self) -> DdsResult<DataReaderQos> {
         self.is_deleted()?;
         match self.default_datareader_qos.lock() {
-            Ok(default_datareader_qos) => Ok(default_datareader_qos.clone()),
+            Ok(default_datareader_qos) => Ok(default_datareader_qos.clone().unwrap_or_default()),
             Err(e) => Err(DdsError::Error(e.to_string())),
         }
     }

@@ -18,7 +18,7 @@ use int2dds::{
     common::instance_handle::InstanceHandle,
     core::time::{Duration, Time},
     infrastructure::status::StatusMask,
-    publication::{data_writer_listener::DataWriterListener, qos::PublisherQos},
+    publication::data_writer_listener::DataWriterListener,
 };
 
 use crate::data::Int2DdsData;
@@ -51,8 +51,10 @@ pub unsafe extern "C" fn int2dds_create_publisher(
 
     let participant_ref = &*participant;
 
+    // Pass the default sentinel so the core resolution chain (registered
+    // default → configured default profile → spec default) is engaged.
     let publisher = ffi_try!(participant_ref.inner.create_publisher(
-        PublisherQos::default(),
+        int2dds::publication::qos::PUBLISHER_QOS_DEFAULT,
         None,
         StatusMask::default()
     ));
@@ -257,10 +259,11 @@ pub unsafe extern "C" fn int2dds_create_datawriter(
     let publisher_ref = &*publisher;
     let topic_ref = &*topic;
 
+    // NULL qos → default sentinel (engages profile fallback). Non-NULL → use as-is.
     let writer_qos = if qos.is_null() {
-        int2dds::publication::qos::DataWriterQos::default()
+        int2dds::infrastructure::qos_kind::QosKind::Default
     } else {
-        (*qos).inner.clone()
+        int2dds::infrastructure::qos_kind::QosKind::Specific((*qos).inner.clone())
     };
 
     // Create DataWriter<Int2DdsData>
@@ -305,10 +308,11 @@ pub unsafe extern "C" fn int2dds_create_datawriter_with_listener(
     let publisher_ref = &*publisher;
     let topic_ref = &*topic;
 
+    // NULL qos → default sentinel (engages profile fallback). Non-NULL → use as-is.
     let writer_qos = if qos.is_null() {
-        int2dds::publication::qos::DataWriterQos::default()
+        int2dds::infrastructure::qos_kind::QosKind::Default
     } else {
-        (*qos).inner.clone()
+        int2dds::infrastructure::qos_kind::QosKind::Specific((*qos).inner.clone())
     };
 
     // Create DataWriter<Int2DdsData> first without listener

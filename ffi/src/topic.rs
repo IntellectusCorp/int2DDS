@@ -17,8 +17,7 @@ use std::os::raw::c_char;
 use std::sync::Arc;
 
 use int2dds::{
-    infrastructure::status::StatusMask, serialize::cdr::ExtensibilityKind, topic::qos::TopicQos,
-    topic::TypeSupport,
+    infrastructure::status::StatusMask, serialize::cdr::ExtensibilityKind, topic::TypeSupport,
 };
 
 use crate::data::Int2DdsData;
@@ -119,7 +118,12 @@ pub unsafe extern "C" fn int2dds_create_topic_keyed(
         .inner
         .register_type_support(type_support as Arc<dyn TypeSupport>, dds_type_name_str));
 
-    let topic_qos = if qos.is_null() { TopicQos::default() } else { (*qos).inner.clone() };
+    // NULL qos → default sentinel (engages profile fallback). Non-NULL → use as-is.
+    let topic_qos = if qos.is_null() {
+        int2dds::infrastructure::qos_kind::QosKind::Default
+    } else {
+        int2dds::infrastructure::qos_kind::QosKind::Specific((*qos).inner.clone())
+    };
 
     let topic = ffi_try!(participant_ref.inner.create_topic::<Int2DdsData>(
         topic_name_str,
@@ -191,7 +195,12 @@ pub unsafe extern "C" fn int2dds_create_topic_with_type_info(
         .inner
         .register_type_support(type_support as Arc<dyn TypeSupport>, dds_type_name));
 
-    let topic_qos = if qos.is_null() { TopicQos::default() } else { (*qos).inner.clone() };
+    // NULL qos → default sentinel (engages profile fallback). Non-NULL → use as-is.
+    let topic_qos = if qos.is_null() {
+        int2dds::infrastructure::qos_kind::QosKind::Default
+    } else {
+        int2dds::infrastructure::qos_kind::QosKind::Specific((*qos).inner.clone())
+    };
 
     let topic = ffi_try!(participant_ref.inner.create_topic::<Int2DdsData>(
         topic_name_str,

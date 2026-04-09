@@ -289,8 +289,7 @@ impl DataReaderListener for LivelinessStateListener {
         status: &int2dds::infrastructure::status::LivelinessChangedStatus,
     ) {
         self.alive.store(status.alive_count(), Ordering::SeqCst);
-        self.not_alive
-            .store(status.not_alive_count(), Ordering::SeqCst);
+        self.not_alive.store(status.not_alive_count(), Ordering::SeqCst);
     }
 }
 
@@ -304,12 +303,7 @@ fn test_manual_by_topic_assert_liveliness_lifecycle() {
     let factory = DomainParticipantFactory::get_instance();
 
     let participant = factory
-        .create_participant(
-            domain_id,
-            DomainParticipantQos::default(),
-            None,
-            StatusMask::default(),
-        )
+        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
         .unwrap();
 
     let topic = participant
@@ -322,9 +316,8 @@ fn test_manual_by_topic_assert_liveliness_lifecycle() {
         )
         .unwrap();
 
-    let publisher = participant
-        .create_publisher(PublisherQos::default(), None, StatusMask::default())
-        .unwrap();
+    let publisher =
+        participant.create_publisher(PublisherQos::default(), None, StatusMask::default()).unwrap();
 
     let writer_qos = DataWriterQos {
         liveliness: LivelinessQosPolicy {
@@ -335,12 +328,7 @@ fn test_manual_by_topic_assert_liveliness_lifecycle() {
     };
 
     let data_writer = publisher
-        .create_datawriter::<KeyedDataType>(
-            &topic,
-            writer_qos,
-            None,
-            StatusMask::default(),
-        )
+        .create_datawriter::<KeyedDataType>(&topic, writer_qos, None, StatusMask::default())
         .unwrap();
 
     let subscriber = participant
@@ -357,10 +345,8 @@ fn test_manual_by_topic_assert_liveliness_lifecycle() {
 
     let alive = Arc::new(AtomicI32::new(0));
     let not_alive = Arc::new(AtomicI32::new(0));
-    let listener = LivelinessStateListener {
-        alive: Arc::clone(&alive),
-        not_alive: Arc::clone(&not_alive),
-    };
+    let listener =
+        LivelinessStateListener { alive: Arc::clone(&alive), not_alive: Arc::clone(&not_alive) };
 
     let data_reader = subscriber
         .create_datareader::<KeyedDataType>(
