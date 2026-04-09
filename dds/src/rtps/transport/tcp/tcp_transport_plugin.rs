@@ -21,7 +21,6 @@ use crate::rtps::transport::tcp::tcp_sender::TcpSender;
 /// Channel buffer size for discovery and user data channels.
 const CHANNEL_BUFFER_SIZE: usize = 256;
 
-const DEFAULT_KEEPALIVE_INTERVAL: u64 = 500;
 /// TCP implementation of the TransportPlugin trait.
 ///
 /// Owns a TcpSender for outgoing traffic and a TcpMuxListener for incoming traffic.
@@ -398,8 +397,8 @@ mod tests {
         assert!(port != 0);
 
         // The mux listener thread is up — connecting must succeed.
-        let _stream = TcpStream::connect(format!("127.0.0.1:{}", port))
-            .expect("connect to mux listener");
+        let _stream =
+            TcpStream::connect(format!("127.0.0.1:{}", port)).expect("connect to mux listener");
         plugin.close();
     }
 

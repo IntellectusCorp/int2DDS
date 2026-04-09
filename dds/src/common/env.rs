@@ -47,10 +47,10 @@ pub fn init_from_env() {
     // - INT2DDS_TCP_WRITE_TIMEOUT: Set TCP write timeout (milliseconds) - Default: 10000
     // - INT2DDS_TCP_NODELAY: Enable TCP Nodelay (disable Nagle algorithm) (true, false) - Default: true
     // - INT2DDS_TCP_BIND_TIMEOUT: Set TCP BIND handshake response timeout (milliseconds) - Default: 5000
-    // - INT2DDS_TCP_KEEPALIVE_INTERVAL: Set TCP control keepalive send interval (milliseconds) - Default: 30000
-    // - INT2DDS_TCP_KEEPALIVE_TIMEOUT: Set TCP keepalive response timeout (milliseconds) - Default: 10000
+    // - INT2DDS_TCP_KEEPALIVE_INTERVAL: Set TCP control keepalive send interval (milliseconds) - Default: 10000
+    // - INT2DDS_TCP_KEEPALIVE_TIMEOUT: Set TCP keepalive response timeout (milliseconds) - Default: 5000
     // - INT2DDS_TCP_KEEPALIVE_MAX_MISSES: Set TCP keepalive max consecutive misses before disconnect - Default: 3
-    // - INT2DDS_TCP_INCOMING_IDLE_TIMEOUT: Set idle timeout for incoming TCP connections (milliseconds) - Default: 10000
+    // - INT2DDS_TCP_INCOMING_IDLE_TIMEOUT: Set idle timeout for incoming TCP connections (milliseconds) - Default: 60000
     // - INT2DDS_TCP_ORPHAN_DATA_GRACE: Set grace period before orphan data connections are torn down (milliseconds) - Default: 1000
     // - INT2DDS_TCP_SO_RCVBUF: Force SO_RCVBUF on every TCP socket (bytes). Used by tests to induce backpressure - Default: OS-managed
     // - INT2DDS_TCP_SO_SNDBUF: Force SO_SNDBUF on every TCP socket (bytes). Used by tests to induce backpressure - Default: OS-managed
@@ -737,7 +737,7 @@ pub fn get_tcp_keepalive_interval_ms() -> u64 {
     std::env::var("INT2DDS_TCP_KEEPALIVE_INTERVAL")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(30000)
+        .unwrap_or(10000)
 }
 
 /// Set the TCP keepalive send interval via environment variable
@@ -749,10 +749,7 @@ pub fn set_tcp_keepalive_interval(interval_ms: u64) {
 /// Get the TCP keepalive response timeout in milliseconds
 /// Default: 10000ms (10 seconds)
 pub fn get_tcp_keepalive_timeout_ms() -> u64 {
-    std::env::var("INT2DDS_TCP_KEEPALIVE_TIMEOUT")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(10000)
+    std::env::var("INT2DDS_TCP_KEEPALIVE_TIMEOUT").ok().and_then(|v| v.parse().ok()).unwrap_or(5000)
 }
 
 /// Set the TCP keepalive response timeout via environment variable
@@ -779,7 +776,7 @@ pub fn get_tcp_incoming_idle_timeout_ms() -> u64 {
     std::env::var("INT2DDS_TCP_INCOMING_IDLE_TIMEOUT")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(10_000)
+        .unwrap_or(60_000)
 }
 
 /// Set the idle timeout for incoming TCP connections via environment variable

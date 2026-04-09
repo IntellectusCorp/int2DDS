@@ -23,8 +23,6 @@ type ConnectionKey = (SocketAddr, u16);
 
 /// Logical port 0 = control connection
 const CONTROL_LOGICAL_PORT: u16 = 0;
-const DEFAULT_MAX_MISSED_KEEPALIVES: u32 = 3;
-const DEFAULT_KEEPALIVE_ACK_TIMEOUT_MS: u64 = 1000;
 
 /// Cached peer info from PEER_HELLO handshake
 #[derive(Debug, Clone)]
@@ -277,17 +275,9 @@ impl TcpSender {
     /// ACK waiting is offloaded to a spawned thread so the mux loop is never blocked.
     /// Returns list of peer addresses that have exceeded max missed keepalives.
     pub(crate) fn send_keepalives(&self) -> Vec<SocketAddr> {
-        let max_missed: u32 = env::var("INT2DDS_TCP_MAX_MISSES")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(DEFAULT_MAX_MISSED_KEEPALIVES);
+        let max_missed: u32 = crate::common::env::get_tcp_keepalive_max_misses();
 
-        let ack_timeout = Duration::from_millis(
-            env::var("INT2DDS_TCP_KEEPALIVE_ACK_TIMEOUT")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(DEFAULT_KEEPALIVE_ACK_TIMEOUT_MS),
-        );
+        let ack_timeout = Duration::from_millis(crate::common::env::get_tcp_keepalive_timeout_ms());
 
         let mut dead_peers = Vec::new();
         let control_peers: Vec<SocketAddr> = self
