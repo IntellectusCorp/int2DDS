@@ -1,6 +1,6 @@
 //! XTypes Publisher Example
 //!
-//! Publishes a `SensorData` topic. The companion `xtypes_subscriber` example
+//! Publishes a `SensorData` topic. The companion `dynamic_type_subscriber` example
 //! receives this data WITHOUT knowing the type at compile time, by discovering
 //! the TypeObject at runtime and decoding samples through `DynamicData`.
 //!
@@ -20,7 +20,7 @@
 //! # Usage
 //!
 //! ```bash
-//! cargo run --example xtypes_publisher -- --domain 0
+//! cargo run --example dynamic_type_publisher -- --domain 0
 //! ```
 
 use clap::Parser;
