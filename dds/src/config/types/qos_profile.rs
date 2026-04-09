@@ -18,6 +18,11 @@ pub(crate) struct QosProfile {
     pub(crate) name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) base_name: Option<String>,
+    /// When true, this profile is used as the default when an entity is created
+    /// without an explicit profile path (mirrors RTI Connext `is_default_qos`
+    /// and FastDDS `is_default_profile`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) is_default_profile: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) domain_participant_qos:
         Option<SingleOrSeq<DomainParticipantQos, DomainParticipantQosSeq>>,

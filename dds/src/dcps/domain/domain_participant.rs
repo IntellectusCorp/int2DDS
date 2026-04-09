@@ -388,9 +388,9 @@ impl DomainParticipant {
             // multi_topics: Arc::new(Mutex::new(Vec::new())),
             orphaned_entities: Arc::new(Mutex::new(OrphanedEntities::default())),
             types: Arc::new(RwLock::new(HashMap::new())),
-            default_subscriber_qos: Arc::new(Mutex::new(SubscriberQos::default())),
-            default_publisher_qos: Arc::new(Mutex::new(PublisherQos::default())),
-            default_topic_qos: Arc::new(Mutex::new(TopicQos::default())),
+            default_subscriber_qos: Arc::new(Mutex::new(SUBSCRIBER_QOS_DEFAULT)),
+            default_publisher_qos: Arc::new(Mutex::new(PUBLISHER_QOS_DEFAULT)),
+            default_topic_qos: Arc::new(Mutex::new(TOPIC_QOS_DEFAULT)),
             next_instance_id: Arc::new(AtomicU32::new(0)),
         };
 
@@ -727,6 +727,27 @@ impl DomainParticipant {
         }
         self.is_deleted()?;
 
+        // Sentinel resolution: PUBLISHER_QOS_DEFAULT → registered default → default profile → sentinel.
+        let qos = if qos == PUBLISHER_QOS_DEFAULT {
+            let registered = self
+                .default_publisher_qos
+                .lock()
+                .ok()
+                .map(|g| g.clone())
+                .unwrap_or(PUBLISHER_QOS_DEFAULT);
+            if registered != PUBLISHER_QOS_DEFAULT {
+                registered
+            } else if let Ok(profile_qos) =
+                DomainParticipantFactory::get_instance().get_publisher_qos_from_profile("")
+            {
+                profile_qos
+            } else {
+                qos
+            }
+        } else {
+            qos
+        };
+
         qos.is_consistent()?;
         let handle = self.create_instance_handle()?;
 
@@ -925,6 +946,27 @@ impl DomainParticipant {
             return Err(DdsError::PreconditionNotMet);
         }
         self.is_deleted()?;
+
+        // Sentinel resolution: SUBSCRIBER_QOS_DEFAULT → registered default → default profile → sentinel.
+        let qos = if qos == SUBSCRIBER_QOS_DEFAULT {
+            let registered = self
+                .default_subscriber_qos
+                .lock()
+                .ok()
+                .map(|g| g.clone())
+                .unwrap_or(SUBSCRIBER_QOS_DEFAULT);
+            if registered != SUBSCRIBER_QOS_DEFAULT {
+                registered
+            } else if let Ok(profile_qos) =
+                DomainParticipantFactory::get_instance().get_subscriber_qos_from_profile("")
+            {
+                profile_qos
+            } else {
+                qos
+            }
+        } else {
+            qos
+        };
 
         qos.is_consistent()?;
         let handle = self.create_instance_handle()?;
@@ -1533,6 +1575,23 @@ impl DomainParticipant {
             return Err(DdsError::PreconditionNotMet);
         }
         self.is_deleted()?;
+
+        // Sentinel resolution: TOPIC_QOS_DEFAULT → registered default → default profile → sentinel.
+        let qos = if qos == TOPIC_QOS_DEFAULT {
+            let registered =
+                self.default_topic_qos.lock().ok().map(|g| g.clone()).unwrap_or(TOPIC_QOS_DEFAULT);
+            if registered != TOPIC_QOS_DEFAULT {
+                registered
+            } else if let Ok(profile_qos) =
+                DomainParticipantFactory::get_instance().get_topic_qos_from_profile("")
+            {
+                profile_qos
+            } else {
+                qos
+            }
+        } else {
+            qos
+        };
 
         qos.is_consistent()?;
         let handle = self.create_instance_handle()?;

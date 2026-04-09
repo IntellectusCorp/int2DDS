@@ -186,7 +186,7 @@ impl Subscriber {
             readers_by_topic_handle: Arc::new(Mutex::new(HashMap::new())),
             builtin_readers: Arc::new(Mutex::new(Vec::new())),
             orphaned_readers: Arc::new(Mutex::new(Vec::new())),
-            default_datareader_qos: Arc::new(Mutex::new(DataReaderQos::default())),
+            default_datareader_qos: Arc::new(Mutex::new(DATAREADER_QOS_DEFAULT)),
             participant: Some(Arc::downgrade(participant)),
         };
         let subscriber_arc = Arc::new(subscriber.clone());
@@ -249,6 +249,27 @@ impl Subscriber {
             return Err(DdsError::PreconditionNotMet);
         }
         self.is_deleted()?;
+
+        // Sentinel resolution: see Publisher::create_datawriter for rationale.
+        let qos = if qos == DATAREADER_QOS_DEFAULT {
+            let registered = self
+                .default_datareader_qos
+                .lock()
+                .ok()
+                .map(|g| g.clone())
+                .unwrap_or(DATAREADER_QOS_DEFAULT);
+            if registered != DATAREADER_QOS_DEFAULT {
+                registered
+            } else if let Ok(profile_qos) =
+                DomainParticipantFactory::get_instance().get_datareader_qos_from_profile("")
+            {
+                profile_qos
+            } else {
+                qos
+            }
+        } else {
+            qos
+        };
 
         let type_support =
             self.get_participant()?.find_typesupport(topic_description.get_type_name());
