@@ -7,7 +7,7 @@
 //! # Usage
 //!
 //! ```bash
-//! cargo run --example xtypes_subscriber -- --domain 0
+//! cargo run --example dynamic_type_subscriber -- --domain 0
 //! ```
 //!
 //! # How it works
