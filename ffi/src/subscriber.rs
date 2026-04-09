@@ -19,7 +19,6 @@ use int2dds::{
     infrastructure::status::StatusMask,
     subscription::{
         data_reader_listener::DataReaderListener,
-        qos::SubscriberQos,
         sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind},
     },
 };
@@ -71,8 +70,10 @@ pub unsafe extern "C" fn int2dds_create_subscriber(
 
     let participant_ref = &*participant;
 
+    // Pass the default sentinel so the core resolution chain (registered
+    // default → configured default profile → spec default) is engaged.
     let subscriber = ffi_try!(participant_ref.inner.create_subscriber(
-        SubscriberQos::default(),
+        int2dds::subscription::qos::SUBSCRIBER_QOS_DEFAULT,
         None,
         StatusMask::default()
     ));
@@ -225,10 +226,11 @@ pub unsafe extern "C" fn int2dds_create_datareader(
     let subscriber_ref = &*subscriber;
     let topic_ref = &*topic;
 
+    // NULL qos → default sentinel (engages profile fallback). Non-NULL → use as-is.
     let reader_qos = if qos.is_null() {
-        int2dds::subscription::qos::DataReaderQos::default()
+        int2dds::infrastructure::qos_kind::QosKind::Default
     } else {
-        (*qos).inner.clone()
+        int2dds::infrastructure::qos_kind::QosKind::Specific((*qos).inner.clone())
     };
 
     // Create DataReader<Int2DdsData>
@@ -273,10 +275,11 @@ pub unsafe extern "C" fn int2dds_create_datareader_with_listener(
     let subscriber_ref = &*subscriber;
     let topic_ref = &*topic;
 
+    // NULL qos → default sentinel (engages profile fallback). Non-NULL → use as-is.
     let reader_qos = if qos.is_null() {
-        int2dds::subscription::qos::DataReaderQos::default()
+        int2dds::infrastructure::qos_kind::QosKind::Default
     } else {
-        (*qos).inner.clone()
+        int2dds::infrastructure::qos_kind::QosKind::Specific((*qos).inner.clone())
     };
 
     // Create DataReader<Int2DdsData> first without listener

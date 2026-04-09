@@ -16,7 +16,7 @@
 use std::{ffi::CStr, sync::Arc};
 
 use int2dds::{
-    domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
+    domain::domain_participant_factory::DomainParticipantFactory,
     infrastructure::status::StatusMask,
 };
 
@@ -45,9 +45,11 @@ pub unsafe extern "C" fn int2dds_create_participant(
 
     let factory = DomainParticipantFactory::get_instance();
 
+    // Pass the default sentinel so the core resolution chain (registered
+    // default → configured default profile → spec default) is engaged.
     let participant = ffi_try!(factory.create_participant(
         domain_id,
-        DomainParticipantQos::default(),
+        int2dds::domain::qos::PARTICIPANT_QOS_DEFAULT,
         None,
         StatusMask::default()
     ));
