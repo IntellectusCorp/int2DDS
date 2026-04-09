@@ -181,7 +181,7 @@ impl Publisher {
             writers_by_topic_name: Arc::new(Mutex::new(HashMap::new())),
             writers_by_topic_handle: Arc::new(Mutex::new(HashMap::new())),
             orphaned_writers: Arc::new(Mutex::new(Vec::new())),
-            default_datawriter_qos: Arc::new(Mutex::new(DataWriterQos::default())),
+            default_datawriter_qos: Arc::new(Mutex::new(DATAWRITER_QOS_DEFAULT)),
             participant: Some(Arc::downgrade(participant)),
         };
         let publisher_arc = Arc::new(publisher.clone());
@@ -242,6 +242,30 @@ impl Publisher {
             return Err(DdsError::PreconditionNotMet);
         }
         self.is_deleted()?;
+
+        // Sentinel resolution: when caller passes DATAWRITER_QOS_DEFAULT, look up
+        // (1) the QoS registered via set_default_datawriter_qos, then
+        // (2) the default profile loaded via DDS_QOS_PROFILE / is_default_profile.
+        // Falls through to the sentinel (= struct default) if neither is configured.
+        let qos = if qos == DATAWRITER_QOS_DEFAULT {
+            let registered = self
+                .default_datawriter_qos
+                .lock()
+                .ok()
+                .map(|g| g.clone())
+                .unwrap_or(DATAWRITER_QOS_DEFAULT);
+            if registered != DATAWRITER_QOS_DEFAULT {
+                registered
+            } else if let Ok(profile_qos) =
+                DomainParticipantFactory::get_instance().get_datawriter_qos_from_profile("")
+            {
+                profile_qos
+            } else {
+                qos
+            }
+        } else {
+            qos
+        };
 
         let type_support = self.get_participant()?.find_typesupport(topic.get_type_name());
         if type_support.is_none() {

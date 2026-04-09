@@ -50,7 +50,7 @@ use std::{
 
 use crate::{
     common::{
-        env::{init_from_env, DEFAULT_DOMAIN_ID},
+        env::{get_default_qos_profile, get_qos_profile_paths, init_from_env, DEFAULT_DOMAIN_ID},
         instance_handle::InstanceHandle,
     },
     config::json::QosProvider,
@@ -317,7 +317,27 @@ impl DomainParticipantFactory {
     pub fn get_instance() -> &'static Self {
         static INSTANCE: LazyLock<DomainParticipantFactory> = LazyLock::new(|| {
             init_from_env();
-            DomainParticipantFactory::default()
+            let factory = DomainParticipantFactory::default();
+
+            // Auto-load QoS profiles from DDS_QOS_PROFILE env var
+            let paths = get_qos_profile_paths();
+            if !paths.is_empty() {
+                match factory.load_profiles(&paths) {
+                    Ok(()) => {
+                        for p in &paths {
+                            log::info!("Auto-loaded QoS profile: {}", p.display());
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "Failed to auto-load QoS profiles from DDS_QOS_PROFILE: {:?}",
+                            e
+                        );
+                    }
+                }
+            }
+
+            factory
         });
         &INSTANCE
     }
@@ -402,10 +422,42 @@ impl DomainParticipantFactory {
         self.create_participant(domain_id, qos, listener, mask)
     }
 
+    /// Returns the default QoS profile path (`"Library::Profile"`) to be applied
+    /// when an entity is created via `*_with_profile("")`.
+    ///
+    /// Resolution order:
+    /// 1. `DDS_DEFAULT_QOS_PROFILE` environment variable
+    /// 2. The first profile in the loaded provider with `is_default_profile = true`
+    /// 3. `None` (callers fall back to library/profile defaults)
+    pub fn default_profile_path(&self) -> Option<String> {
+        if let Some(p) = get_default_qos_profile() {
+            return Some(p);
+        }
+        let provider = self.qos_provider.lock().ok()?;
+        provider.default_profile_path()
+    }
+
+    /// Resolve an effective QoS path:
+    /// - non-empty `qos_path` → returned unchanged.
+    /// - empty `qos_path` + a configured default profile → return that default.
+    /// - empty `qos_path` + no default profile → `Err` (callers fall through to spec defaults).
+    ///
+    /// This deliberately does NOT fall back to the provider's "first available" lookup,
+    /// because that would silently apply an arbitrary profile when the user intended none.
+    fn resolve_profile_path(&self, qos_path: &str) -> DdsResult<String> {
+        if qos_path.is_empty() {
+            self.default_profile_path()
+                .ok_or_else(|| DdsError::Error("No default QoS profile configured".to_string()))
+        } else {
+            Ok(qos_path.to_string())
+        }
+    }
+
     /// Retrieves `DomainParticipantQos` from a loaded profile.
     ///
     /// # Arguments
     /// * `qos_path` - QoS path. See [`QosProvider`](crate::config::json::QosProvider) for supported formats.
+    ///   Pass `""` to use the default profile (resolved via `default_profile_path()`).
     ///
     /// # Errors
     /// Returns an error if the profile is not found.
@@ -413,10 +465,11 @@ impl DomainParticipantFactory {
         &self,
         qos_path: &str,
     ) -> DdsResult<DomainParticipantQos> {
+        let resolved = self.resolve_profile_path(qos_path)?;
         let provider = self.qos_provider.lock().map_err(|e| DdsError::Error(e.to_string()))?;
         provider
-            .get_domainparticipant_qos(qos_path)
-            .ok_or_else(|| DdsError::Error(format!("QoS profile not found: {}", qos_path)))
+            .get_domainparticipant_qos(&resolved)
+            .ok_or_else(|| DdsError::Error(format!("QoS profile not found: {}", resolved)))
     }
 
     /// Retrieves `PublisherQos` from a loaded profile.
@@ -427,10 +480,11 @@ impl DomainParticipantFactory {
     /// # Errors
     /// Returns an error if the profile is not found.
     pub fn get_publisher_qos_from_profile(&self, qos_path: &str) -> DdsResult<PublisherQos> {
+        let resolved = self.resolve_profile_path(qos_path)?;
         let provider = self.qos_provider.lock().map_err(|e| DdsError::Error(e.to_string()))?;
         provider
-            .get_publisher_qos(qos_path)
-            .ok_or_else(|| DdsError::Error(format!("QoS profile not found: {}", qos_path)))
+            .get_publisher_qos(&resolved)
+            .ok_or_else(|| DdsError::Error(format!("QoS profile not found: {}", resolved)))
     }
 
     /// Retrieves `SubscriberQos` from a loaded profile.
@@ -441,10 +495,11 @@ impl DomainParticipantFactory {
     /// # Errors
     /// Returns an error if the profile is not found.
     pub fn get_subscriber_qos_from_profile(&self, qos_path: &str) -> DdsResult<SubscriberQos> {
+        let resolved = self.resolve_profile_path(qos_path)?;
         let provider = self.qos_provider.lock().map_err(|e| DdsError::Error(e.to_string()))?;
         provider
-            .get_subscriber_qos(qos_path)
-            .ok_or_else(|| DdsError::Error(format!("QoS profile not found: {}", qos_path)))
+            .get_subscriber_qos(&resolved)
+            .ok_or_else(|| DdsError::Error(format!("QoS profile not found: {}", resolved)))
     }
 
     /// Retrieves `TopicQos` from a loaded profile.
@@ -455,10 +510,11 @@ impl DomainParticipantFactory {
     /// # Errors
     /// Returns an error if the profile is not found.
     pub fn get_topic_qos_from_profile(&self, qos_path: &str) -> DdsResult<TopicQos> {
+        let resolved = self.resolve_profile_path(qos_path)?;
         let provider = self.qos_provider.lock().map_err(|e| DdsError::Error(e.to_string()))?;
         provider
-            .get_topic_qos(qos_path)
-            .ok_or_else(|| DdsError::Error(format!("QoS profile not found: {}", qos_path)))
+            .get_topic_qos(&resolved)
+            .ok_or_else(|| DdsError::Error(format!("QoS profile not found: {}", resolved)))
     }
 
     /// Retrieves `DataWriterQos` from a loaded profile.
@@ -469,10 +525,11 @@ impl DomainParticipantFactory {
     /// # Errors
     /// Returns an error if the profile is not found.
     pub fn get_datawriter_qos_from_profile(&self, qos_path: &str) -> DdsResult<DataWriterQos> {
+        let resolved = self.resolve_profile_path(qos_path)?;
         let provider = self.qos_provider.lock().map_err(|e| DdsError::Error(e.to_string()))?;
         provider
-            .get_datawriter_qos(qos_path)
-            .ok_or_else(|| DdsError::Error(format!("QoS profile not found: {}", qos_path)))
+            .get_datawriter_qos(&resolved)
+            .ok_or_else(|| DdsError::Error(format!("QoS profile not found: {}", resolved)))
     }
 
     /// Retrieves `DataReaderQos` from a loaded profile.
@@ -483,10 +540,11 @@ impl DomainParticipantFactory {
     /// # Errors
     /// Returns an error if the profile is not found.
     pub fn get_datareader_qos_from_profile(&self, qos_path: &str) -> DdsResult<DataReaderQos> {
+        let resolved = self.resolve_profile_path(qos_path)?;
         let provider = self.qos_provider.lock().map_err(|e| DdsError::Error(e.to_string()))?;
         provider
-            .get_datareader_qos(qos_path)
-            .ok_or_else(|| DdsError::Error(format!("QoS profile not found: {}", qos_path)))
+            .get_datareader_qos(&resolved)
+            .ok_or_else(|| DdsError::Error(format!("QoS profile not found: {}", resolved)))
     }
 }
 
