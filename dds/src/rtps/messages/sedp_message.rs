@@ -11,7 +11,7 @@ use crate::{
             entity_id::EntityId,
             parameters::{ParameterId, ParameterValue},
             sequence::SequenceNumber,
-            types::SerializedData,
+            types::{SerializedData, SubmessagePayload},
         },
         messages::{
             header::Header,
@@ -31,7 +31,7 @@ use crate::{
 #[derive(Debug, Clone)]
 pub(crate) struct SEDPMessage<T> {
     data: T,
-    rtps_message: Arc<RtpsMessage>,
+    rtps_message: Arc<RtpsMessage<'static>>,
 }
 
 #[allow(dead_code)]
@@ -61,7 +61,9 @@ impl SEDPMessage<DiscoveredWriterData> {
         Ok(DiscoveredWriterData { publication_builtin_topic_data })
     }
 
-    fn create_publication_data_submessage(writer_data: &DiscoveredWriterData) -> Submessage {
+    fn create_publication_data_submessage(
+        writer_data: &DiscoveredWriterData,
+    ) -> Submessage<'static> {
         let mut data_header_flag = SubmessageHeaderFlag::new();
         data_header_flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::DATA);
         data_header_flag.add_flag(SubmessageFlagType::DataFlag, SubmessageId::DATA);
@@ -72,7 +74,9 @@ impl SEDPMessage<DiscoveredWriterData> {
             SequenceNumber::new(0, 1), // Temporary sequence number
         );
 
-        data.add_serialized_data(Self::create_publication_serialized_data(writer_data));
+        data.add_serialized_data(SubmessagePayload::Owned(
+            Self::create_publication_serialized_data(writer_data),
+        ));
         let length = data.octets_to_next_header();
 
         let submessage_body = SubmessageBody::Data(data);
@@ -137,7 +141,9 @@ impl SEDPMessage<DiscoveredReaderData> {
         Ok(DiscoveredReaderData { subscription_builtin_topic_data, content_filter })
     }
 
-    fn create_subscription_data_submessage(reader_data: &DiscoveredReaderData) -> Submessage {
+    fn create_subscription_data_submessage(
+        reader_data: &DiscoveredReaderData,
+    ) -> Submessage<'static> {
         let mut data_header_flag = SubmessageHeaderFlag::new();
         data_header_flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::DATA);
         data_header_flag.add_flag(SubmessageFlagType::DataFlag, SubmessageId::DATA);
@@ -148,7 +154,9 @@ impl SEDPMessage<DiscoveredReaderData> {
             SequenceNumber::new(0, 1), // Temporary sequence number
         );
 
-        data.add_serialized_data(Self::create_subscription_serialized_data(reader_data));
+        data.add_serialized_data(SubmessagePayload::Owned(
+            Self::create_subscription_serialized_data(reader_data),
+        ));
         let length = data.octets_to_next_header();
 
         let submessage_body = SubmessageBody::Data(data);
@@ -184,7 +192,7 @@ impl SEDPMessage<DiscoveredReaderData> {
 
 #[allow(dead_code)]
 impl<T> SEDPMessage<T> {
-    pub(crate) fn rtps_message(self) -> Arc<RtpsMessage> {
+    pub(crate) fn rtps_message(self) -> Arc<RtpsMessage<'static>> {
         self.rtps_message.clone()
     }
 }

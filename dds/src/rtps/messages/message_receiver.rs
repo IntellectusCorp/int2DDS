@@ -52,8 +52,8 @@ use std::sync::Arc;
 pub enum TypedSubmessage<'a> {
     Heartbeat(&'a SubmessageHeader, &'a Heartbeat),
     AckNack(&'a SubmessageHeader, &'a AckNack),
-    Data(&'a SubmessageHeader, &'a Data),
-    DataFrag(&'a SubmessageHeader, &'a DataFrag),
+    Data(&'a SubmessageHeader, &'a Data<'static>),
+    DataFrag(&'a SubmessageHeader, &'a DataFrag<'static>),
     NackFrag(&'a SubmessageHeader, &'a NackFrag),
     Gap(&'a SubmessageHeader, &'a Gap),
 }
@@ -70,7 +70,7 @@ pub(crate) struct MessageReceiver {
     multicast_reply_locator_list: Vec<Locator>,
     have_timestamp: bool,
     timestamp: RtpsTime,
-    rtps_message: Option<Arc<RtpsMessage>>,
+    rtps_message: Option<Arc<RtpsMessage<'static>>>,
     sender_addr: SocketAddr, // for extended discovery message
 }
 
@@ -203,7 +203,7 @@ impl MessageReceiver {
         }
     }
 
-    pub(crate) fn init(&mut self, buffer: &Bytes) -> RtpsResult<Arc<RtpsMessage>> {
+    pub(crate) fn init(&mut self, buffer: &Bytes) -> RtpsResult<Arc<RtpsMessage<'static>>> {
         if buffer.len() < RTPS_HEADER_LENGTH as usize {
             return Err(RtpsError::new(
                 RtpsErrorCode::BufferTooShortForRtpsHeader,
