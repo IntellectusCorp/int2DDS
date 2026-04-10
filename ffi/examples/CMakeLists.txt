@@ -67,6 +67,13 @@ target_link_libraries(multi_participant_1 ${INT2DDS_FFI_LIB})
 add_executable(multi_participant_2 multiple_participant/multi_participant_2.c)
 target_link_libraries(multi_participant_2 ${INT2DDS_FFI_LIB})
 
+# Dynamic XTypes Examples (PHASE 1)
+add_executable(dynamic_type_publisher xtypes/dynamic_type_publisher.c)
+target_link_libraries(dynamic_type_publisher ${INT2DDS_FFI_LIB})
+
+add_executable(dynamic_type_subscriber xtypes/dynamic_type_subscriber.c)
+target_link_libraries(dynamic_type_subscriber ${INT2DDS_FFI_LIB})
+
 # Copy DLL to output directory on Windows
 if(WIN32 AND EXISTS ${INT2DDS_FFI_DLL})
     foreach(target
@@ -74,7 +81,8 @@ if(WIN32 AND EXISTS ${INT2DDS_FFI_DLL})
         waitset_publisher waitset_subscriber
         keyed_publisher keyed_subscriber
         listener_publisher listener_subscriber
-        multi_pub_sub multi_participant_1 multi_participant_2)
+        multi_pub_sub multi_participant_1 multi_participant_2
+        dynamic_type_publisher dynamic_type_subscriber)
         add_custom_command(TARGET ${target} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${INT2DDS_FFI_DLL}
@@ -103,4 +111,6 @@ message(STATUS "  ./listener_subscriber")
 message(STATUS "  ./multi_pub_sub")
 message(STATUS "  ./multi_participant_1")
 message(STATUS "  ./multi_participant_2")
+message(STATUS "  ./dynamic_type_publisher")
+message(STATUS "  ./dynamic_type_subscriber")
 message(STATUS "")
