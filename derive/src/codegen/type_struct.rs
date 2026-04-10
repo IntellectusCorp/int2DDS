@@ -343,6 +343,28 @@ fn quote_deserialize_impl(
     gc: &GenCtx,
 ) -> proc_macro2::TokenStream {
     let full_type = &gc.full_type;
+    let builtin_pl_cdr_fallback = quote! {
+        if data.len() >= 4 {
+            let encoding_id = u16::from_be_bytes([data[0], data[1]]);
+            if matches!(encoding_id, 0x0002 | 0x0003) {
+                // Discovery builtins are serialized as PL_CDR parameter lists rather than
+                // regular CDR/XCDR structs, so use their dedicated parser.
+                let type_id = std::any::TypeId::of::<#full_type>();
+
+                if type_id == std::any::TypeId::of::<#crate_path::common::builtin::topic::publication_builtin_topic_data::PublicationBuiltinTopicData>() {
+                    let value = #crate_path::common::builtin::topic::publication_builtin_topic_data::PublicationBuiltinTopicData::from_serialized_data(std::sync::Arc::<[u8]>::from(data))
+                        .map_err(#crate_path::dcps::core::error::DdsError::Error)?;
+                    return Ok(Box::new(value));
+                }
+
+                if type_id == std::any::TypeId::of::<#crate_path::common::builtin::topic::subscription_builtin_topic_data::SubscriptionBuiltinTopicData>() {
+                    let value = #crate_path::common::builtin::topic::subscription_builtin_topic_data::SubscriptionBuiltinTopicData::from_serialized_data(std::sync::Arc::<[u8]>::from(data))
+                        .map_err(#crate_path::dcps::core::error::DdsError::Error)?;
+                    return Ok(Box::new(value));
+                }
+            }
+        }
+    };
     // Generate format resolution for None case
     let ext_kind = extensibility.unwrap_or(ExtensibilityKind::Appendable);
     let extensibility_tokens = quote_extensibility_tokens(ext_kind, crate_path);
@@ -372,6 +394,8 @@ fn quote_deserialize_impl(
 
     quote! {
         fn deserialize(&self, data: &[u8], format: Option<&#crate_path::dcps::topic::type_support::SerializationFormat>) -> #crate_path::dcps::core::error::DdsResult<Box<dyn std::any::Any>> {
+            #builtin_pl_cdr_fallback
+
             let resolved_format = match format {
                 Some(f) => f.clone(),
                 None => {

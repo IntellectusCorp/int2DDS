@@ -224,6 +224,12 @@ typedef struct Int2DdsParticipantFactory Int2DdsParticipantFactory;
  */
 typedef struct Int2DdsParticipantQos Int2DdsParticipantQos;
 
+/**
+ * Opaque handle wrapping a discovered PublicationBuiltinTopicData sample.
+ * Owned by the caller; destroy via `int2dds_publication_data_destroy`.
+ */
+typedef struct Int2DdsPublicationBuiltinData Int2DdsPublicationBuiltinData;
+
 typedef struct Int2DdsPublicationBuiltinTopicData Int2DdsPublicationBuiltinTopicData;
 
 /**
@@ -278,6 +284,11 @@ typedef struct Int2DdsTopicQos Int2DdsTopicQos;
 typedef struct Int2DdsTypeInfo Int2DdsTypeInfo;
 
 /**
+ * Opaque handle wrapping a discovered TypeObject.
+ */
+typedef struct Int2DdsTypeObject Int2DdsTypeObject;
+
+/**
  * Opaque handle to a WaitSet
  */
 typedef struct Int2DdsWaitSet Int2DdsWaitSet;
@@ -286,6 +297,15 @@ typedef struct Int2DdsWaitSet Int2DdsWaitSet;
  * FFI return codes
  */
 typedef int32_t Int2DdsRet;
+
+/**
+ * C-visible per-member information returned by `int2dds_type_object_member_info`.
+ */
+typedef struct Int2DdsMemberInfo {
+  uint32_t member_id;
+  int32_t kind;
+  int32_t flags;
+} Int2DdsMemberInfo;
 
 /**
  * C-compatible publication matched status
@@ -617,6 +637,16 @@ typedef struct Int2DdsSampleInfo {
 
 #define INT2DDS_RET_NULL_POINTER 100
 
+#define INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND 200
+
+#define INT2DDS_RET_DYNAMIC_TYPE_MISMATCH 201
+
+#define INT2DDS_RET_DYNAMIC_UNSUPPORTED_TYPE 202
+
+#define INT2DDS_RET_DYNAMIC_TIMEOUT 203
+
+#define INT2DDS_RET_DYNAMIC_DECODE_ERROR 204
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -831,6 +861,123 @@ Int2DdsRet int2dds_subscription_builtin_topic_data_get_type_name(const struct In
  * Free a SubscriptionBuiltinTopicData obtained from discovery.
  */
 Int2DdsRet int2dds_subscription_builtin_topic_data_destroy(struct Int2DdsSubscriptionBuiltinTopicData *data);
+
+/**
+ * Destroy a publication builtin data handle. Safe to call with null.
+ */
+void int2dds_publication_data_destroy(struct Int2DdsPublicationBuiltinData *p);
+
+/**
+ * Copy the topic name of a discovered publication into `buf`.
+ */
+Int2DdsRet int2dds_publication_data_topic_name(const struct Int2DdsPublicationBuiltinData *p,
+                                               char *buf,
+                                               uintptr_t buf_len,
+                                               uintptr_t *out_len);
+
+/**
+ * Copy the type name of a discovered publication into `buf`.
+ */
+Int2DdsRet int2dds_publication_data_type_name(const struct Int2DdsPublicationBuiltinData *p,
+                                              char *buf,
+                                              uintptr_t buf_len,
+                                              uintptr_t *out_len);
+
+/**
+ * Take a clone of the TypeObject embedded in a publication discovery sample.
+ * Caller owns the returned handle and must destroy it via `int2dds_type_object_destroy`.
+ * Returns DYNAMIC_FIELD_NOT_FOUND if the publication did not carry a TypeObject.
+ */
+Int2DdsRet int2dds_publication_data_take_type_object(const struct Int2DdsPublicationBuiltinData *p,
+                                                     struct Int2DdsTypeObject **out);
+
+/**
+ * Get the builtin subscriber for discovery topics.
+ */
+Int2DdsRet int2dds_get_builtin_subscriber(const struct Int2DdsParticipant *participant,
+                                          struct Int2DdsSubscriber **out);
+
+/**
+ * Take one DCPSPublication discovery sample, optionally filtered by topic
+ * name. Blocks up to `timeout_ms` milliseconds (negative = infinite). Returns
+ * DYNAMIC_TIMEOUT on no match.
+ */
+Int2DdsRet int2dds_take_publication_data(const struct Int2DdsSubscriber *builtin_sub,
+                                         const char *topic_name_filter,
+                                         int32_t timeout_ms,
+                                         struct Int2DdsPublicationBuiltinData **out);
+
+/**
+ * High-level helper: wait until a publication for `topic_name` is discovered
+ * AND its TypeObject is present, then return the TypeObject and type name.
+ */
+Int2DdsRet int2dds_wait_for_type_object(const struct Int2DdsParticipant *participant,
+                                        const char *topic_name,
+                                        int32_t timeout_ms,
+                                        struct Int2DdsTypeObject **type_obj_out,
+                                        char *type_name_buf,
+                                        uintptr_t type_name_buf_len,
+                                        uintptr_t *out_len);
+
+/**
+ * Destroy a TypeObject handle. Safe to call with null.
+ */
+void int2dds_type_object_destroy(struct Int2DdsTypeObject *t);
+
+/**
+ * Return extensibility: 0 = Final, 1 = Appendable, 2 = Mutable.
+ */
+Int2DdsRet int2dds_type_object_extensibility(const struct Int2DdsTypeObject *t, int32_t *out);
+
+/**
+ * Return the number of struct members.
+ */
+Int2DdsRet int2dds_type_object_member_count(const struct Int2DdsTypeObject *t, uint32_t *out);
+
+/**
+ * Fill `out` with member info at `index`.
+ */
+Int2DdsRet int2dds_type_object_member_info(const struct Int2DdsTypeObject *t,
+                                           uint32_t index,
+                                           struct Int2DdsMemberInfo *out);
+
+/**
+ * Copy member name at `index` into `buf`.
+ */
+Int2DdsRet int2dds_type_object_member_name(const struct Int2DdsTypeObject *t,
+                                           uint32_t index,
+                                           char *buf,
+                                           uintptr_t buf_len,
+                                           uintptr_t *out_len);
+
+/**
+ * Find a member index by name.
+ */
+Int2DdsRet int2dds_type_object_find_member(const struct Int2DdsTypeObject *t,
+                                           const char *name,
+                                           uint32_t *index_out);
+
+/**
+ * Register a topic backed by a discovered TypeObject. The TypeObject is cloned
+ * internally; the caller still owns and must destroy `type_obj`.
+ */
+Int2DdsRet int2dds_create_topic_with_type_object(const struct Int2DdsParticipant *participant,
+                                                 const char *topic_name,
+                                                 const char *type_name,
+                                                 const struct Int2DdsTypeObject *type_obj,
+                                                 const struct Int2DdsTopicQos *qos,
+                                                 struct Int2DdsTopic **out);
+
+/**
+ * Read a string field by name from a serialized CDR sample.
+ */
+Int2DdsRet int2dds_dynamic_sample_get_string(const uint8_t *bytes,
+                                             uintptr_t len,
+                                             const struct Int2DdsTypeObject *type_obj,
+                                             const char *field_name,
+                                             char *out_buf,
+                                             uintptr_t buf_cap,
+                                             uintptr_t *out_len);
 
 /**
  * Create a DomainParticipant
@@ -2752,5 +2899,22 @@ Int2DdsRet int2dds_waitset_delete(struct Int2DdsWaitSet *waitset);
 #ifdef __cplusplus
 }  // extern "C"
 #endif  // __cplusplus
+
+
+/* Dynamic primitive sample getters (macro-generated in dynamic.rs;
+* manually declared here because cbindgen does not expand macros). */
+Int2DdsRet int2dds_dynamic_sample_get_bool  (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, bool     *out);
+Int2DdsRet int2dds_dynamic_sample_get_i8    (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, int8_t   *out);
+Int2DdsRet int2dds_dynamic_sample_get_u8    (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, uint8_t  *out);
+Int2DdsRet int2dds_dynamic_sample_get_byte  (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, uint8_t  *out);
+Int2DdsRet int2dds_dynamic_sample_get_char8 (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, uint8_t  *out);
+Int2DdsRet int2dds_dynamic_sample_get_i16   (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, int16_t  *out);
+Int2DdsRet int2dds_dynamic_sample_get_u16   (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, uint16_t *out);
+Int2DdsRet int2dds_dynamic_sample_get_i32   (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, int32_t  *out);
+Int2DdsRet int2dds_dynamic_sample_get_u32   (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, uint32_t *out);
+Int2DdsRet int2dds_dynamic_sample_get_i64   (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, int64_t  *out);
+Int2DdsRet int2dds_dynamic_sample_get_u64   (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, uint64_t *out);
+Int2DdsRet int2dds_dynamic_sample_get_f32   (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, float    *out);
+Int2DdsRet int2dds_dynamic_sample_get_f64   (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, double   *out);
 
 #endif  /* INT2DDS_FFI_H */
