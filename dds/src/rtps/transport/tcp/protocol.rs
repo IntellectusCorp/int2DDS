@@ -33,6 +33,8 @@
 use std::io;
 use std::net::Ipv4Addr;
 
+use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
+
 // ─── Message Types ──────────────────────────────────────────────────────────
 
 pub(crate) const MSG_PEER_HELLO: u8 = 0x01;
@@ -174,13 +176,19 @@ impl ControlMsg {
     /// Deserialize from bytes (payload after frame magic).
     pub(crate) fn from_bytes(payload: &[u8]) -> io::Result<Self> {
         if payload.is_empty() {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "Empty control payload"));
+            return Err(transport_io_error(
+                TransportErrorCode::TcpControlProtocolError,
+                "Empty control payload",
+            ));
         }
 
         match payload[0] {
             MSG_PEER_HELLO => {
                 if payload.len() < 17 {
-                    return Err(io::Error::new(io::ErrorKind::InvalidData, "PeerHello too short"));
+                    return Err(transport_io_error(
+                        TransportErrorCode::TcpControlProtocolError,
+                        "PeerHello too short",
+                    ));
                 }
                 let mut locator = [0u8; 16];
                 locator.copy_from_slice(&payload[1..17]);
@@ -190,8 +198,8 @@ impl ControlMsg {
 
             MSG_PORT_RESERVE => {
                 if payload.len() < 3 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
+                    return Err(transport_io_error(
+                        TransportErrorCode::TcpControlProtocolError,
                         "PortReserve too short",
                     ));
                 }
@@ -200,8 +208,8 @@ impl ControlMsg {
             }
             MSG_PORT_RESERVE_ACK => {
                 if payload.len() < 17 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
+                    return Err(transport_io_error(
+                        TransportErrorCode::TcpControlProtocolError,
                         "PortReserveAck too short",
                     ));
                 }
@@ -212,7 +220,10 @@ impl ControlMsg {
 
             MSG_PORT_BIND => {
                 if payload.len() < 17 {
-                    return Err(io::Error::new(io::ErrorKind::InvalidData, "PortBind too short"));
+                    return Err(transport_io_error(
+                        TransportErrorCode::TcpControlProtocolError,
+                        "PortBind too short",
+                    ));
                 }
                 let mut cookie = [0u8; 16];
                 cookie.copy_from_slice(&payload[1..17]);
@@ -225,7 +236,10 @@ impl ControlMsg {
 
             MSG_ERROR => {
                 if payload.len() < 6 {
-                    return Err(io::Error::new(io::ErrorKind::InvalidData, "Error too short"));
+                    return Err(transport_io_error(
+                        TransportErrorCode::TcpControlProtocolError,
+                        "Error too short",
+                    ));
                 }
                 let operation = payload[1];
                 let code = u16::from_be_bytes([payload[2], payload[3]]);
@@ -238,8 +252,8 @@ impl ControlMsg {
                 Ok(ControlMsg::Error { operation, code, message })
             }
 
-            other => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
+            other => Err(transport_io_error(
+                TransportErrorCode::TcpControlProtocolError,
                 format!("Unknown control message type: 0x{:02X}", other),
             )),
         }

@@ -13,6 +13,7 @@ use log::{debug, info};
 
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::locator::Locator;
+use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::plugin::{IncomingMessage, MessageSource, SendTarget, TransportPlugin};
 use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::tcp::tcp_mux_listener::TcpMuxListener;
@@ -87,7 +88,10 @@ impl TcpTransportPlugin {
                      Another participant may already be using this port on the same host.",
                     physical_port, domain_id, e
                 );
-                    return Err(e);
+                    return Err(transport_io_error(
+                        TransportErrorCode::TcpBindFailed,
+                        format!("Failed to bind TCP listener on port {} (domain={}): {}", physical_port, domain_id, e),
+                    ));
                 }
             };
         let listener_port = mux_listener.port();
@@ -310,7 +314,7 @@ impl TcpMuxListeningLoopTask {
                             Ok(Some(_token)) => {}
                             Ok(None) => break,
                             Err(e) => {
-                                log::error!("[TcpMuxListeningLoopTask] Accept error: {:?}", e);
+                                log::error!("[TcpMuxListeningLoopTask] [{}] Accept error: {:?}", TransportErrorCode::TcpAcceptFailed, e);
                                 break;
                             }
                         }
