@@ -125,7 +125,12 @@ impl TcpMuxListener {
         user_data_tx: Sender<IncomingMessage>,
     ) -> io::Result<Self> {
         let addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
-        let listener = MioTcpListener::bind(addr)?;
+        let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)?;
+        socket.set_reuse_address(true)?;
+        socket.set_nonblocking(true)?;
+        socket.bind(&addr.into())?;
+        socket.listen(128)?;
+        let listener = MioTcpListener::from_std(std::net::TcpListener::from(socket));
         let actual_port = listener.local_addr()?.port();
         info!("TcpMuxListener: Listening on port {} (domain={})", actual_port, domain_id);
 
