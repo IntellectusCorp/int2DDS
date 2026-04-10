@@ -3,6 +3,8 @@
 
 use std::io::{self, Read, Write};
 
+use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
+
 /// Maximum message size for TCP framing (16 MB)
 const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 
@@ -65,14 +67,14 @@ impl FramedReader {
 
                 // Validate length
                 if len == 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
+                    return Err(transport_io_error(
+                        TransportErrorCode::TcpFrameInvalidLength,
                         "Invalid message length: 0",
                     ));
                 }
                 if len > MAX_MESSAGE_SIZE {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
+                    return Err(transport_io_error(
+                        TransportErrorCode::TcpFrameTooLarge,
                         format!(
                             "Message too large: {} bytes (max: {} bytes)",
                             len, MAX_MESSAGE_SIZE
@@ -101,8 +103,8 @@ impl FramedReader {
             if expected_len < MAGIC_SIZE || self.buffer[4..8] != FRAME_MAGIC {
                 self.buffer.drain(0..total_len);
                 self.expected_len = None;
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
+                return Err(transport_io_error(
+                    TransportErrorCode::TcpFrameInvalidMagic,
                     "Invalid frame magic (expected INT2)",
                 ));
             }
@@ -140,8 +142,8 @@ impl FramedReader {
 /// Single write_all to prevent TCP segmentation of header vs body.
 pub(crate) fn write_framed_message<W: Write>(stream: &mut W, data: &[u8]) -> io::Result<()> {
     if data.len() > MAX_MESSAGE_SIZE {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
+        return Err(transport_io_error(
+            TransportErrorCode::TcpFrameTooLarge,
             format!("Message too large: {} bytes (max: {} bytes)", data.len(), MAX_MESSAGE_SIZE),
         ));
     }
@@ -167,15 +169,15 @@ pub(crate) fn read_framed_message<R: Read>(stream: &mut R) -> io::Result<Vec<u8>
     let len = u32::from_be_bytes(len_buf) as usize;
 
     if len < MAGIC_SIZE {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
+        return Err(transport_io_error(
+            TransportErrorCode::TcpFrameInvalidLength,
             format!("Frame too short: {} bytes (minimum {})", len, MAGIC_SIZE),
         ));
     }
 
     if len > MAX_MESSAGE_SIZE {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
+        return Err(transport_io_error(
+            TransportErrorCode::TcpFrameTooLarge,
             format!("Message too large: {} bytes (max: {} bytes)", len, MAX_MESSAGE_SIZE),
         ));
     }
@@ -185,8 +187,8 @@ pub(crate) fn read_framed_message<R: Read>(stream: &mut R) -> io::Result<Vec<u8>
 
     // Validate magic
     if data[0..4] != FRAME_MAGIC {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
+        return Err(transport_io_error(
+            TransportErrorCode::TcpFrameInvalidMagic,
             format!(
                 "Invalid frame magic: {:02x} {:02x} {:02x} {:02x} (expected INT2)",
                 data[0], data[1], data[2], data[3]

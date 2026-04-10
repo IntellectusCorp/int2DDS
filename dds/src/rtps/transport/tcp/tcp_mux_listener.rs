@@ -12,6 +12,7 @@ use mio::net::{TcpListener as MioTcpListener, TcpStream as MioTcpStream};
 use mio::{Interest, Registry, Token};
 
 use crate::rtps::common::guid::GuidPrefix;
+use crate::rtps::transport::error::TransportErrorCode;
 use crate::rtps::transport::plugin::IncomingMessage;
 use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::tcp::framing::{
@@ -222,7 +223,7 @@ impl TcpMuxListener {
                     Ok(None) => continue,
                     Err(ref e) if e.kind() == ErrorKind::WouldBlock => return,
                     Err(e) => {
-                        debug!("TcpMuxListener: Read error on {:?}: {:?}", token, e);
+                        debug!("TcpMuxListener [{}]: Read error on {:?}: {:?}", TransportErrorCode::TcpReadError, token, e);
                         self.remove_connection(token, registry);
                         return;
                     }
@@ -252,7 +253,7 @@ impl TcpMuxListener {
         let msg = match ControlMsg::from_bytes(payload) {
             Ok(m) => m,
             Err(e) => {
-                warn!("TcpMuxListener: Bad first message on {:?}: {:?}", token, e);
+                warn!("TcpMuxListener [{}]: Bad first message on {:?}: {:?}", TransportErrorCode::TcpControlProtocolError, token, e);
                 self.remove_connection(token, registry);
                 return;
             }
@@ -313,7 +314,7 @@ impl TcpMuxListener {
         let msg = match ControlMsg::from_bytes(payload) {
             Ok(m) => m,
             Err(e) => {
-                warn!("TcpMuxListener: Bad control msg on {:?}: {:?}", token, e);
+                warn!("TcpMuxListener [{}]: Bad control msg on {:?}: {:?}", TransportErrorCode::TcpControlProtocolError, token, e);
                 return;
             }
         };
@@ -328,7 +329,7 @@ impl TcpMuxListener {
                     PortManager::get_user_traffic_unicast_port(self.domain_id, self.participant_id);
 
                 if logical_port != my_disc && logical_port != my_user {
-                    warn!("TcpMuxListener: Invalid port {} on {:?}", logical_port, token);
+                    warn!("TcpMuxListener [{}]: Invalid port {} on {:?}", TransportErrorCode::TcpControlInvalidPort, logical_port, token);
                     let err = ControlMsg::Error {
                         operation: MSG_PORT_RESERVE,
                         code: ERR_CODE_INVALID_PORT,
@@ -378,7 +379,7 @@ impl TcpMuxListener {
             Some(port) => port,
             None => {
                 let cookie_hex: String = cookie.iter().map(|b| format!("{:02x}", b)).collect();
-                warn!("TcpMuxListener: Unknown cookie [{}] on {:?}", cookie_hex, token);
+                warn!("TcpMuxListener [{}]: Unknown cookie [{}] on {:?}", TransportErrorCode::TcpControlInvalidCookie, cookie_hex, token);
                 let err = ControlMsg::Error {
                     operation: MSG_PORT_BIND,
                     code: ERR_CODE_INVALID_COOKIE,
@@ -459,11 +460,11 @@ impl TcpMuxListener {
 
         if PortManager::is_discovery_unicast_port(self.domain_id, logical_port) {
             if let Err(e) = self.discovery_tx.try_send(msg) {
-                warn!("TcpMuxListener: Failed to route discovery: {:?}", e);
+                warn!("TcpMuxListener [{}]: Failed to route discovery: {:?}", TransportErrorCode::TcpChannelFull, e);
             }
         } else if PortManager::is_user_unicast_port(self.domain_id, logical_port) {
             if let Err(e) = self.user_data_tx.try_send(msg) {
-                warn!("TcpMuxListener: Failed to route user data: {:?}", e);
+                warn!("TcpMuxListener [{}]: Failed to route user data: {:?}", TransportErrorCode::TcpChannelFull, e);
             }
         }
     }
@@ -477,7 +478,7 @@ impl TcpMuxListener {
         };
 
         if let Err(e) = write_framed_message(&mut conn.stream, &msg.to_bytes()) {
-            warn!("TcpMuxListener: Failed to send {} to {:?}: {:?}", msg.type_name(), token, e);
+            warn!("TcpMuxListener [{}]: Failed to send {} to {:?}: {:?}", TransportErrorCode::TcpControlSendFailed, msg.type_name(), token, e);
         }
     }
 
@@ -509,7 +510,8 @@ impl TcpMuxListener {
         for token in &stale {
             if let Some(conn) = self.connections.get(token) {
                 warn!(
-                    "TcpMuxListener: Pruning idle incoming connection {:?} from {:?} (idle for {:?})",
+                    "TcpMuxListener [{}]: Pruning idle incoming connection {:?} from {:?} (idle for {:?})",
+                    TransportErrorCode::TcpConnectionIdlePruned,
                     token,
                     conn.remote_addr,
                     now.duration_since(conn.last_activity)
@@ -556,7 +558,8 @@ impl TcpMuxListener {
 
         for guid in &stale_guids {
             warn!(
-                "TcpMuxListener: Pruning orphan data connections for {:?} after grace period",
+                "TcpMuxListener [{}]: Pruning orphan data connections for {:?} after grace period",
+                TransportErrorCode::TcpOrphanPruned,
                 guid
             );
             self.remove_peer(*guid, registry);

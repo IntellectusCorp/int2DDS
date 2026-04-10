@@ -12,6 +12,7 @@ use log::{debug, warn};
 use socket2::{Domain, Protocol, SockAddr, Socket as Socket2, Type};
 
 use crate::rtps::common::guid::GuidPrefix;
+use crate::rtps::transport::error::{transport_io_error, TransportError, TransportErrorCode};
 use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::tcp::framing::{read_framed_message, write_framed_message};
 use crate::rtps::transport::tcp::protocol::{
@@ -104,7 +105,12 @@ impl TcpSender {
         if self.connections.contains_key(&key) {
             return Ok(());
         }
+        self.ensure_control_inner(physical_addr, key).map_err(|e| {
+            Self::wrap_raw_io_error(e, TransportErrorCode::TcpHandshakeHelloFailed, physical_addr)
+        })
+    }
 
+    fn ensure_control_inner(&self, physical_addr: &SocketAddr, key: ConnectionKey) -> io::Result<()> {
         let mut stream = self.tcp_connect(physical_addr)?;
 
         let local_ip: std::net::Ipv4Addr =
@@ -118,8 +124,8 @@ impl TcpSender {
         // Read PEER_HELLO_ACK
         let resp = self.read_control_response(&mut stream)?;
         if resp.to_bytes()[0] != MSG_PEER_HELLO_ACK {
-            return Err(io::Error::new(
-                ErrorKind::InvalidData,
+            return Err(transport_io_error(
+                TransportErrorCode::TcpHandshakeHelloFailed,
                 format!("Expected PEER_HELLO_ACK, got {}", resp.type_name()),
             ));
         }
@@ -142,25 +148,40 @@ impl TcpSender {
         // Ensure control connection exists
         self.ensure_control(physical_addr)?;
 
+        self.ensure_data_inner(physical_addr, logical_port, key)
+    }
+
+    fn ensure_data_inner(
+        &self,
+        physical_addr: &SocketAddr,
+        logical_port: u16,
+        key: ConnectionKey,
+    ) -> io::Result<()> {
         // Step 2: PORT_RESERVE on the control connection
         let control_key = (*physical_addr, CONTROL_LOGICAL_PORT);
         let cookie = {
             let mut control_stream = self
                 .connections
                 .get(&control_key)
-                .ok_or_else(|| io::Error::new(ErrorKind::NotConnected, "Control connection lost"))?
+                .ok_or_else(|| transport_io_error(
+                    TransportErrorCode::TcpHandshakeReserveFailed,
+                    "Control connection lost before PORT_RESERVE",
+                ))?
                 .value()
-                .try_clone()?;
+                .try_clone()
+                .map_err(|e| Self::wrap_raw_io_error(e, TransportErrorCode::TcpHandshakeReserveFailed, physical_addr))?;
 
             let reserve = ControlMsg::PortReserve { logical_port };
-            write_framed_message(&mut control_stream, &reserve.to_bytes())?;
+            write_framed_message(&mut control_stream, &reserve.to_bytes())
+                .map_err(|e| Self::wrap_raw_io_error(e, TransportErrorCode::TcpHandshakeReserveFailed, physical_addr))?;
 
-            let resp = self.read_control_response(&mut control_stream)?;
+            let resp = self.read_control_response(&mut control_stream)
+                .map_err(|e| Self::wrap_raw_io_error(e, TransportErrorCode::TcpHandshakeReserveFailed, physical_addr))?;
             match resp {
                 ControlMsg::PortReserveAck { cookie } => cookie,
                 ControlMsg::Error { operation, code, message } => {
-                    return Err(io::Error::new(
-                        ErrorKind::ConnectionRefused,
+                    return Err(transport_io_error(
+                        TransportErrorCode::TcpHandshakeReserveFailed,
                         format!(
                             "PORT_RESERVE rejected (op=0x{:02x}, code={}): {}",
                             operation, code, message
@@ -168,8 +189,8 @@ impl TcpSender {
                     ));
                 }
                 other => {
-                    return Err(io::Error::new(
-                        ErrorKind::InvalidData,
+                    return Err(transport_io_error(
+                        TransportErrorCode::TcpHandshakeReserveFailed,
                         format!("Expected PORT_RESERVE_ACK, got {}", other.type_name()),
                     ));
                 }
@@ -185,12 +206,14 @@ impl TcpSender {
         let mut data_stream = self.tcp_connect(physical_addr)?;
 
         let bind = ControlMsg::PortBind { cookie };
-        write_framed_message(&mut data_stream, &bind.to_bytes())?;
+        write_framed_message(&mut data_stream, &bind.to_bytes())
+            .map_err(|e| Self::wrap_raw_io_error(e, TransportErrorCode::TcpHandshakeBindFailed, physical_addr))?;
 
-        let resp = self.read_control_response(&mut data_stream)?;
+        let resp = self.read_control_response(&mut data_stream)
+            .map_err(|e| Self::wrap_raw_io_error(e, TransportErrorCode::TcpHandshakeBindFailed, physical_addr))?;
         if resp.to_bytes()[0] != MSG_PORT_BIND_ACK {
-            return Err(io::Error::new(
-                ErrorKind::InvalidData,
+            return Err(transport_io_error(
+                TransportErrorCode::TcpHandshakeBindFailed,
                 format!("Expected PORT_BIND_ACK, got {}", resp.type_name()),
             ));
         }
@@ -218,7 +241,10 @@ impl TcpSender {
         let mut stream = self
             .connections
             .get(&key)
-            .ok_or_else(|| io::Error::new(ErrorKind::NotConnected, "Connection not found"))?
+            .ok_or_else(|| transport_io_error(
+                TransportErrorCode::TcpConnectionRefused,
+                format!("Connection not found for {:?}", key),
+            ))?
             .value()
             .try_clone()?;
 
@@ -357,7 +383,32 @@ impl TcpSender {
     // Internal helpers
     // ========================================================================
 
+    /// Wrap a raw OS `io::Error` with a `TransportError` if it isn't one already.
+    fn wrap_raw_io_error(e: io::Error, code: TransportErrorCode, addr: &SocketAddr) -> io::Error {
+        if e.get_ref().and_then(|s| s.downcast_ref::<TransportError>()).is_some() {
+            return e;
+        }
+        transport_io_error(code, format!("{} (peer {:?})", e, addr))
+    }
+
     fn tcp_connect(&self, addr: &SocketAddr) -> io::Result<TcpStream> {
+        self.tcp_connect_inner(addr).map_err(|e| {
+            // Already a TransportError — pass through as-is.
+            if e.get_ref().and_then(|s| s.downcast_ref::<TransportError>()).is_some() {
+                return e;
+            }
+            // Wrap raw OS errors with a TransportErrorCode based on ErrorKind.
+            let code = match e.kind() {
+                ErrorKind::TimedOut => TransportErrorCode::TcpConnectionTimeout,
+                ErrorKind::ConnectionRefused => TransportErrorCode::TcpConnectionRefused,
+                ErrorKind::AddrNotAvailable | ErrorKind::AddrInUse => TransportErrorCode::TcpBindFailed,
+                _ => TransportErrorCode::TcpConnectionRefused,
+            };
+            transport_io_error(code, format!("{} (to {:?})", e, addr))
+        })
+    }
+
+    fn tcp_connect_inner(&self, addr: &SocketAddr) -> io::Result<TcpStream> {
         let socket2 = Socket2::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
 
         // Apply optional buffer-size overrides BEFORE connect so they take
@@ -385,15 +436,15 @@ impl TcpSender {
                 let start = std::time::Instant::now();
                 loop {
                     if start.elapsed() >= self.connect_timeout {
-                        return Err(io::Error::new(
-                            ErrorKind::TimedOut,
+                        return Err(transport_io_error(
+                            TransportErrorCode::TcpConnectionTimeout,
                             format!("Connection timeout to {:?}", addr),
                         ));
                     }
                     match socket2.take_error() {
                         Ok(Some(err)) => {
-                            return Err(io::Error::new(
-                                ErrorKind::ConnectionRefused,
+                            return Err(transport_io_error(
+                                TransportErrorCode::TcpConnectionRefused,
                                 format!("Connection failed to {:?}: {:?}", addr, err),
                             ));
                         }
