@@ -353,12 +353,23 @@ impl TcpMuxListeningLoopTask {
 
             if last_orphan_check.elapsed() >= orphan_check_interval {
                 last_orphan_check = Instant::now();
+
+                // Listener side: prune incoming orphan data connections
                 let pruned = self
                     .mux_listener
                     .prune_orphan_data_connections(orphan_data_grace, poll.registry());
                 if pruned > 0 {
                     debug!(
-                        "[TcpMuxListeningLoopTask] Pruned {} orphan peer group(s) past grace period",
+                        "[TcpMuxListeningLoopTask] Pruned {} incoming orphan peer group(s) past grace period",
+                        pruned
+                    );
+                }
+
+                // Sender side: prune outgoing orphan data connections
+                let pruned = self.sender.prune_orphan_connections();
+                if pruned > 0 {
+                    debug!(
+                        "[TcpMuxListeningLoopTask] Pruned {} outgoing orphan connection(s)",
                         pruned
                     );
                 }

@@ -365,6 +365,45 @@ impl TcpSender {
         dead_peers
     }
 
+    /// Prune outgoing data connections whose control connection is missing.
+    ///
+    /// This mirrors the listener-side orphan pruning in `TcpMuxListener`.
+    /// A data connection becomes orphaned when its control connection was
+    /// removed (e.g. write failure) but the data entry was not cleaned up
+    /// at the same time. Returns the number of pruned connections.
+    pub(crate) fn prune_orphan_connections(&self) -> usize {
+        // Collect peer addrs that have at least one data connection
+        let peers_with_data: Vec<SocketAddr> = self
+            .connections
+            .iter()
+            .filter(|e| e.key().1 != CONTROL_LOGICAL_PORT)
+            .map(|e| e.key().0)
+            .collect();
+
+        let mut pruned = 0;
+        for peer_addr in peers_with_data {
+            let has_control = self
+                .connections
+                .contains_key(&(peer_addr, CONTROL_LOGICAL_PORT));
+
+            if !has_control {
+                let before = self.connections.len();
+                self.connections.retain(|key, _| key.0 != peer_addr);
+                let removed = before - self.connections.len();
+                self.peer_info.remove(&peer_addr);
+                self.keepalive_missed.remove(&peer_addr);
+                if removed > 0 {
+                    warn!(
+                        "TcpSender [{}]: Pruned {} orphan outgoing connection(s) for {:?}",
+                        TransportErrorCode::TcpOrphanPruned, removed, peer_addr
+                    );
+                    pruned += removed;
+                }
+            }
+        }
+        pruned
+    }
+
     pub(crate) fn connection_count(&self) -> usize {
         self.connections.len()
     }
