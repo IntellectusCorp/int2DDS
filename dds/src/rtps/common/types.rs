@@ -115,6 +115,52 @@ impl ChangeCount {
 pub type SerializedData = Arc<[u8]>;
 pub type SerializedDataFragment = Arc<[u8]>;
 
+/// Payload carried by DATA / DATA_FRAG submessages.
+///
+/// On the send path, large payloads are already stored in a `CacheChange`
+/// and only need to be written into the wire buffer. Wrapping them in
+/// `Arc<[u8]>` would force a full copy per fragment; instead we borrow
+/// the slice for the duration of serialization.
+///
+/// On the receive path, payloads are parsed from the socket buffer and
+/// stored as `Owned` so the message can outlive the source buffer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SubmessagePayload<'a> {
+    Owned(Arc<[u8]>),
+    Borrowed(&'a [u8]),
+}
+
+impl<'a> SubmessagePayload<'a> {
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        match self {
+            SubmessagePayload::Owned(data) => data,
+            SubmessagePayload::Borrowed(data) => data,
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+}
+
+impl Default for SubmessagePayload<'_> {
+    fn default() -> Self {
+        SubmessagePayload::Owned(Arc::<[u8]>::from([]))
+    }
+}
+
+impl From<Arc<[u8]>> for SubmessagePayload<'_> {
+    fn from(data: Arc<[u8]>) -> Self {
+        SubmessagePayload::Owned(data)
+    }
+}
+
+impl<'a> From<&'a [u8]> for SubmessagePayload<'a> {
+    fn from(data: &'a [u8]) -> Self {
+        SubmessagePayload::Borrowed(data)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Readable, Writable)]
 pub struct GroupInfo<'a> {
     pub group_entity_id: u32,

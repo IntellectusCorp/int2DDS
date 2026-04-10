@@ -19,7 +19,7 @@ use crate::rtps::{
         parameters::{Parameter, ParameterId, ParameterList, StatusInfo},
         rtps_error_code::RtpsResult,
         sequence::{FragmentNumberSet, SequenceNumber},
-        types::ChangeKind,
+        types::{ChangeKind, SubmessagePayload},
     },
     entities::{entity::Entity, history::cache_change::CacheChange, participant::Participant},
     messages::{
@@ -39,7 +39,9 @@ use crate::rtps::{
 pub(crate) struct MessageCreator {}
 
 impl MessageCreator {
-    pub(crate) fn create_spdp_msg(participant: Arc<Participant>) -> RtpsResult<Arc<RtpsMessage>> {
+    pub(crate) fn create_spdp_msg(
+        participant: Arc<Participant>,
+    ) -> RtpsResult<Arc<RtpsMessage<'static>>> {
         let (participant_guid, _) = {
             let local_participant_data = participant.local_participant_proxy_data();
             (
@@ -58,7 +60,7 @@ impl MessageCreator {
 
     pub(crate) fn create_spdp_msg_with_inline_qos(
         participant: Arc<Participant>,
-    ) -> RtpsResult<Arc<RtpsMessage>> {
+    ) -> RtpsResult<Arc<RtpsMessage<'static>>> {
         let mut param_list = ParameterList::default();
         let key_hash = participant.guid().to_bytes();
         param_list.add_parameter(Self::create_key_hash_parameter(&key_hash));
@@ -218,7 +220,7 @@ impl MessageCreator {
             }
         }
 
-        data.add_serialized_data(Arc::from(cache_change.data_value()));
+        data.add_serialized_data(SubmessagePayload::Borrowed(cache_change.data_value()));
         let data_submessage = Submessage {
             header: SubmessageHeader::new(
                 SubmessageId::DATA,
@@ -288,7 +290,7 @@ impl MessageCreator {
             sample_size,
         );
 
-        data_frag.add_serialized_data(Arc::from(fragment_data));
+        data_frag.add_serialized_data(SubmessagePayload::Borrowed(fragment_data));
 
         let data_frag_submessage = Submessage {
             header: SubmessageHeader::new(

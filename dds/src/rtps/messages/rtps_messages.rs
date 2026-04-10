@@ -13,22 +13,22 @@ use crate::rtps::messages::{header::Header, submessage::Submessage};
 // pub type ParametersFlag = SubmessageFlag;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RtpsMessage {
+pub(crate) struct RtpsMessage<'a> {
     pub header: Header,
-    pub submessages: SmallVec<[Submessage; 4]>,
+    pub submessages: SmallVec<[Submessage<'a>; 4]>,
 }
 
-impl RtpsMessage {
+impl<'a> RtpsMessage<'a> {
     pub(crate) fn new(header: Header) -> Self {
         Self { header, submessages: SmallVec::new() }
     }
 
-    pub(crate) fn add_submessage(&mut self, submessage: Submessage) {
+    pub(crate) fn add_submessage(&mut self, submessage: Submessage<'a>) {
         self.submessages.push(submessage);
     }
 }
 
-impl<C: Context> Writable<C> for RtpsMessage {
+impl<C: Context> Writable<C> for RtpsMessage<'_> {
     fn write_to<T: ?Sized + Writer<C>>(&self, writer: &mut T) -> Result<(), C::Error> {
         writer.write_value(&self.header)?;
         for x in &self.submessages {

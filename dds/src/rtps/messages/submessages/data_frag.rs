@@ -16,7 +16,7 @@ use crate::rtps::{
         parameters::ParameterList,
         rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
         sequence::{FragmentNumber, SequenceNumber},
-        types::SerializedData,
+        types::SubmessagePayload,
     },
     messages::submessage_header::SubmessageHeader,
 };
@@ -25,7 +25,7 @@ const EXTRA_FLAGS: u16 = 0; // 9.4.5.3.2 - extraFlags
 const OCTETS_TO_INLINE_QOS: u16 = 28; // 9.4.5.3.3 - octetsToInlineQos
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DataFrag {
+pub(crate) struct DataFrag<'a> {
     pub reader_id: EntityId,
     pub writer_id: EntityId,
     pub writer_sn: SequenceNumber,
@@ -34,10 +34,10 @@ pub(crate) struct DataFrag {
     pub fragment_size: u16, // fragmentSize is the unit size determined by Writer when splitting the sample. This value must always be the same for the same Writer and the same sample
     pub sample_size: u32,
     inline_qos: Option<ParameterList>,
-    serialized_data: SerializedData,
+    serialized_data: SubmessagePayload<'a>,
 }
 
-impl DataFrag {
+impl<'a> DataFrag<'a> {
     pub(crate) fn new(
         reader_id: EntityId,
         writer_id: EntityId,
@@ -56,11 +56,11 @@ impl DataFrag {
             fragment_size,
             sample_size,
             inline_qos: None,
-            serialized_data: Arc::<[u8]>::from([]),
+            serialized_data: SubmessagePayload::default(),
         }
     }
 
-    pub(crate) fn add_serialized_data(&mut self, serialized_data: SerializedData) {
+    pub(crate) fn add_serialized_data(&mut self, serialized_data: SubmessagePayload<'a>) {
         self.serialized_data = serialized_data;
     }
 
@@ -84,7 +84,7 @@ impl DataFrag {
     }
 
     pub(crate) fn serialized_data(&self) -> &[u8] {
-        &self.serialized_data
+        self.serialized_data.as_slice()
     }
 
     pub(crate) fn deserialize(
@@ -183,7 +183,8 @@ impl DataFrag {
 
         // truncate padding bytes - only keep actual fragment data
         let actual_len = std::cmp::min(serialized_data_bytes.len(), expected_data_size);
-        let serialized_data = Arc::from(serialized_data_bytes[..actual_len].to_vec());
+        let serialized_data =
+            SubmessagePayload::Owned(Arc::from(serialized_data_bytes[..actual_len].to_vec()));
 
         Ok(Self {
             reader_id,
@@ -199,7 +200,7 @@ impl DataFrag {
     }
 }
 
-impl<C: Context> Writable<C> for DataFrag {
+impl<C: Context> Writable<C> for DataFrag<'_> {
     fn write_to<T: ?Sized + Writer<C>>(&self, writer: &mut T) -> Result<(), C::Error> {
         writer.write_u16(EXTRA_FLAGS)?;
         writer.write_u16(OCTETS_TO_INLINE_QOS)?;
@@ -213,7 +214,7 @@ impl<C: Context> Writable<C> for DataFrag {
         if let Some(ref inline_qos) = self.inline_qos {
             writer.write_value(inline_qos)?;
         }
-        writer.write_bytes(self.serialized_data.as_ref())?;
+        writer.write_bytes(self.serialized_data.as_slice())?;
 
         Ok(())
     }
@@ -299,7 +300,7 @@ mod tests {
 
     use speedy::{Endianness, Writable};
 
-    fn create_dummy_datafrag() -> DataFrag {
+    fn create_dummy_datafrag() -> DataFrag<'static> {
         DataFrag {
             reader_id: EntityId::new([0x01, 0x00, 0x00], EntityKind::USER_DEFINED_READER_NO_KEY),
             writer_id: EntityId::new([0x02, 0x00, 0x00], EntityKind::USER_DEFINED_WRITER_NO_KEY),
@@ -309,7 +310,7 @@ mod tests {
             fragment_size: 1,
             sample_size: 2,
             inline_qos: None,
-            serialized_data: Arc::from(vec![0 as u8]),
+            serialized_data: SubmessagePayload::Owned(Arc::from(vec![0u8])),
         }
     }
 
@@ -341,7 +342,7 @@ mod tests {
         assert_eq!(datafrag.fragment_size, deserialized.fragment_size);
         assert_eq!(datafrag.sample_size, deserialized.sample_size);
         assert_eq!(datafrag.inline_qos, deserialized.inline_qos);
-        assert_eq!(&datafrag.serialized_data[..], &deserialized.serialized_data[..]);
+        assert_eq!(datafrag.serialized_data.as_slice(), deserialized.serialized_data.as_slice());
     }
 
     #[test]
@@ -368,7 +369,7 @@ mod tests {
         datafrag.sample_size = 3;
 
         // serialized data of 7 bytes when only 3 (+3 padding max) are expected
-        datafrag.serialized_data = Arc::from(vec![1, 2, 3, 4, 5, 6, 7]);
+        datafrag.serialized_data = SubmessagePayload::Owned(Arc::from(vec![1, 2, 3, 4, 5, 6, 7]));
 
         let buffer = datafrag.write_to_vec_with_ctx(Endianness::BigEndian).unwrap();
 
