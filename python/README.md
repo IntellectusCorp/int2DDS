@@ -52,7 +52,7 @@ class HelloWorld:
     message: str = ""
 
     _dds_type_name: ClassVar[str] = "HelloWorld"
-    _extensibility: ClassVar[Extensibility] = Extensibility.FINAL
+    _extensibility: ClassVar[Extensibility] = Extensibility.APPENDABLE
     _has_key: ClassVar[bool] = False
 
     def _serialize_cdr(self) -> bytes:

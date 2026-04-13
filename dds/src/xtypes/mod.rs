@@ -49,6 +49,7 @@ mod dynamic_type;
 mod dynamic_type_support;
 mod type_compatibility;
 mod type_object;
+mod type_registry;
 
 pub use type_compatibility::{
     check_structural_compatibility, TypeCompatibilityError, TypeCompatibilityResult,
@@ -63,3 +64,4 @@ pub use dynamic_type::{
     MemberDescriptor, PrimitiveKind, StructDescriptor,
 };
 pub use dynamic_type_support::DynamicTypeSupport;
+pub use type_registry::{new_shared_registry, SharedTypeRegistry, TypeRegistry};
