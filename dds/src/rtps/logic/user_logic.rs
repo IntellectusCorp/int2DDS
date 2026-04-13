@@ -1571,7 +1571,7 @@ impl UnicastMessageProcessor for UserLogic {
                 message_receiver.get_source_timestamp(),
             );
             let serialized = data.serialized_data();
-            change.data_value.extend_from_slice(&serialized);
+            change.data_mut().extend_from_slice(&serialized);
 
             self.apply_writer_attributes_to_change(
                 reader.clone(),
@@ -2082,9 +2082,7 @@ impl UnicastMessageProcessor for UserLogic {
                 if removed.is_none() {
                     return Ok(());
                 }
-                let (_, mut buffer) = removed.unwrap();
-                let assembled_payload = std::mem::take(&mut buffer.payload);
-                let serialized_data = assembled_payload;
+                let (_, buffer) = removed.unwrap();
                 // Use timestamp from first fragment, fallback to current message
                 let assembled_timestamp = buffer.source_timestamp.or(source_timestamp);
                 if assembled_timestamp.is_none() {
@@ -2094,7 +2092,19 @@ impl UnicastMessageProcessor for UserLogic {
                     ));
                 }
 
-                for reader in &matched_readers {
+                let assembled_vec = buffer.assemble();
+
+                // Multi-reader: wrap in Arc for zero-copy sharing
+                // Single-reader: move Vec directly into CacheChange
+                let mut owned_payload = None;
+                let shared_payload = if matched_readers.len() > 1 {
+                    Some(Arc::new(assembled_vec))
+                } else {
+                    owned_payload = Some(assembled_vec);
+                    None
+                };
+
+                for (_reader_idx, reader) in matched_readers.iter().enumerate() {
                     let mut ownership_strength = None;
                     if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>()
                     {
@@ -2127,7 +2137,14 @@ impl UnicastMessageProcessor for UserLogic {
                         data_frag.writer_sn,
                         assembled_timestamp,
                     );
-                    assembled_change.data_value.extend_from_slice(&serialized_data);
+
+                    if let Some(ref shared) = shared_payload {
+                        // Multi-reader: share via Arc (0 copy)
+                        assembled_change.set_shared_payload(Arc::clone(shared));
+                    } else if let Some(vec) = owned_payload.take() {
+                        // Single reader: move Vec directly (0 copy)
+                        assembled_change.set_owned_payload(vec);
+                    }
 
                     assembled_change.set_ownership_strength(ownership_strength);
 

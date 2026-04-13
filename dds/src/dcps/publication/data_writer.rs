@@ -1212,7 +1212,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
 
         // 3. Reset metadata + serialize into reused buffer
         change.reset(kind, rtps_writer.guid(), handle, seq_num, source_timestamp);
-        self.type_support.serialize_into(data, &mut change.data_value, Some(format))?;
+        self.type_support.serialize_into(data, change.data_mut(), Some(format))?;
         change.apply_fragmentation(rtps_writer.data_max_size_serialized() as usize);
 
         // 4. Add to history (may evict → release back to pool)

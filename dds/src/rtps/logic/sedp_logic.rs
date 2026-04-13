@@ -2174,7 +2174,7 @@ impl UnicastMessageProcessor for SedpLogic {
                             data.writer_sn,
                             message_receiver.get_source_timestamp(),
                         );
-                        cache_change.data_value.extend_from_slice(&serialized_data);
+                        cache_change.data_mut().extend_from_slice(&serialized_data);
                         let _ = cache_guard.add_change(cache_change);
                     }
                 }
@@ -2208,7 +2208,7 @@ impl UnicastMessageProcessor for SedpLogic {
                             data.writer_sn,
                             message_receiver.get_source_timestamp(),
                         );
-                        cache_change.data_value.extend_from_slice(&serialized_data);
+                        cache_change.data_mut().extend_from_slice(&serialized_data);
                         let _ = cache_guard.add_change(cache_change);
                     }
                 }
