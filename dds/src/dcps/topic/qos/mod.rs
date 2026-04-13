@@ -31,6 +31,7 @@ use crate::{
         time::Duration,
         types::LENGTH_UNLIMITED,
     },
+    infrastructure::qos_kind::QosKind,
     infrastructure::qos_policy::{
         DataRepresentationQosPolicy, DeadlineQosPolicy, DestinationOrderQosPolicy,
         DurabilityQosPolicy, DurabilityServiceQosPolicy, HistoryQosPolicy, LatencyBudgetQosPolicy,
@@ -40,7 +41,7 @@ use crate::{
     },
 };
 
-pub const TOPIC_QOS_DEFAULT: TopicQos = TopicQos::DEFAULT;
+pub const TOPIC_QOS_DEFAULT: QosKind<TopicQos> = QosKind::Default;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicQos {

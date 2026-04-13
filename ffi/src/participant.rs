@@ -16,7 +16,7 @@
 use std::{ffi::CStr, sync::Arc};
 
 use int2dds::{
-    domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
+    domain::domain_participant_factory::DomainParticipantFactory,
     infrastructure::status::StatusMask,
 };
 
@@ -45,9 +45,54 @@ pub unsafe extern "C" fn int2dds_create_participant(
 
     let factory = DomainParticipantFactory::get_instance();
 
+    // Pass the default sentinel so the core resolution chain (registered
+    // default → configured default profile → spec default) is engaged.
     let participant = ffi_try!(factory.create_participant(
         domain_id,
-        DomainParticipantQos::default(),
+        int2dds::domain::qos::PARTICIPANT_QOS_DEFAULT,
+        None,
+        StatusMask::default()
+    ));
+
+    let participant_handle = Box::new(Int2DdsParticipant { inner: Arc::new(participant) });
+
+    *participant_out = Box::into_raw(participant_handle);
+
+    INT2DDS_RET_OK
+}
+
+/// Create a DomainParticipant using a QoS profile path
+///
+/// # Safety
+/// - `name` must be a valid null-terminated C string or null
+/// - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
+/// - `participant_out` must be a valid pointer to a null pointer
+/// - The returned participant must be freed with `int2dds_delete_participant`
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_create_participant_with_profile(
+    _factory: *const Int2DdsParticipantFactory,
+    name: *const std::os::raw::c_char,
+    domain_id: i32,
+    qos_path: *const std::os::raw::c_char,
+    participant_out: *mut *mut Int2DdsParticipant,
+) -> Int2DdsRet {
+    check_null!(qos_path);
+    check_null!(participant_out);
+
+    if !name.is_null() && CStr::from_ptr(name).to_str().is_err() {
+        return INT2DDS_RET_INVALID_ARGUMENT;
+    }
+
+    let qos_path_str = match CStr::from_ptr(qos_path).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    let factory = DomainParticipantFactory::get_instance();
+
+    let participant = ffi_try!(factory.create_participant_with_profile(
+        domain_id,
+        qos_path_str,
         None,
         StatusMask::default()
     ));
