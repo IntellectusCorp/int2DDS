@@ -1139,8 +1139,6 @@ impl UserLogic {
                         writer_proxy.expected_sn()
                     );
 
-                    let mut change_to_add: Vec<CacheChange> = vec![change.clone()];
-
                     writer_proxy.increment_expected_sn();
 
                     debug!("After delivering, new expected_sn: {:?}", writer_proxy.expected_sn());
@@ -1153,7 +1151,10 @@ impl UserLogic {
                         flushed_changes.last().map(|c| c.sequence_number())
                     );
 
-                    change_to_add.extend(flushed_changes.clone());
+                    let mut change_to_add: Vec<CacheChange> =
+                        Vec::with_capacity(1 + flushed_changes.len());
+                    change_to_add.push(change);
+                    change_to_add.extend(flushed_changes);
                     self.add_change_to_reader_cache_and_notify(reader, change_to_add)?;
                 }
                 // Buffer out-of-order changes
@@ -1177,8 +1178,9 @@ impl UserLogic {
                 // 8.4.12.1.2 The Best-Effort reader checks that the sequence number associated with the change is strictly greater than
                 // the highest sequence number of all changes received in the past from this RTPS Writer
                 if change.sequence_number() >= remote_writer_info.expected_sn() {
-                    self.add_change_to_reader_cache_and_notify(reader, vec![change.clone()])?;
-                    remote_writer_info.set_expected_sn(change.sequence_number().add(1));
+                    let next_sn = change.sequence_number().add(1);
+                    self.add_change_to_reader_cache_and_notify(reader, vec![change])?;
+                    remote_writer_info.set_expected_sn(next_sn);
                 }
             }
         }
@@ -1193,14 +1195,14 @@ impl UserLogic {
     ) -> RtpsResult<()> {
         let reader_cache = reader.reader_cache();
 
-        for change in changes.iter() {
+        for change in changes.into_iter() {
             let mut res: Option<RtpsResult<Arc<CacheChange>>> = None;
             if let Ok(mut cache_guard) = reader_cache.lock() {
-                res = Some(cache_guard.add_change(change.clone()));
+                res = Some(cache_guard.add_change(change));
             }
 
             if let Some(Ok(change)) = res {
-                reader.on_change(change.clone());
+                reader.on_change(change);
             }
         }
 
