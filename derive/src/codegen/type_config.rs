@@ -5,8 +5,8 @@ use crate::codegen::utils::AutoIdKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ExtensibilityKind {
-    #[default]
     Final,
+    #[default]
     Appendable,
     Mutable,
 }
