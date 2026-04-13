@@ -298,7 +298,7 @@ mod tests {
 
         let result = write_framed_message(&mut buffer, &large_data);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
