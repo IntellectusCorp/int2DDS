@@ -2647,7 +2647,7 @@ impl<Foo: DdsType> DataReader<Foo> {
 
     fn change_to_data_sample(
         &self,
-        change: &CacheChange,
+        change: &Arc<CacheChange>,
         instance_handle: InstanceHandle,
         sample_state: SampleStateKind,
     ) -> DdsResult<DataSample<Foo>> {
@@ -2658,7 +2658,7 @@ impl<Foo: DdsType> DataReader<Foo> {
     /// Optimized version that accepts pre-fetched instance_infos to avoid repeated lock acquisition
     fn change_to_data_sample_with_infos(
         &self,
-        change: &CacheChange,
+        change: &Arc<CacheChange>,
         instance_handle: InstanceHandle,
         sample_state: SampleStateKind,
         cached_instance_infos: Option<&HashMap<InstanceHandle, InstanceInfo>>,
@@ -2671,8 +2671,8 @@ impl<Foo: DdsType> DataReader<Foo> {
             | ChangeKind::NotAliveDisposedUnregistered => false,
         };
 
-        // Deserialize the data
-        let data = if has_valid_data { Some(Arc::from(change.data_value())) } else { None };
+        // Share the Arc<CacheChange> — zero-copy, just refcount increment.
+        let data = if has_valid_data { Some(Arc::clone(change)) } else { None };
 
         // Use cached instance_infos if provided, otherwise fetch
         let owned_instance_infos;
