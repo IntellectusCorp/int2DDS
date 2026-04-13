@@ -22,6 +22,11 @@
 //!
 //! ```no_run
 //! use int2dds::domain::domain_participant_factory::DomainParticipantFactory;
+//! use int2dds::domain::qos::DomainParticipantQos;
+//! use int2dds::infrastructure::status::StatusMask;
+//! use int2dds::publication::qos::PublisherQos;
+//! use int2dds::subscription::qos::SubscriberQos;
+//! use int2dds::topic::qos::TopicQos;
 //! use int2dds::topic::type_support::DdsType;
 //!
 //! #[derive(DdsType)]
@@ -32,14 +37,14 @@
 //!
 //! // Get factory and create participant
 //! let factory = DomainParticipantFactory::get_instance();
-//! let participant = factory.create_participant(0, Default::default(), None, Default::default()).unwrap();
+//! let participant = factory.create_participant(0, DomainParticipantQos::default(), None, StatusMask::default()).unwrap();
 //!
 //! // Create topic
-//! let topic = participant.create_topic::<MyData>("MyTopic", "MyData", Default::default(), None, Default::default()).unwrap();
+//! let topic = participant.create_topic::<MyData>("MyTopic", "MyData", TopicQos::default(), None, StatusMask::default()).unwrap();
 //!
 //! // Create publisher and subscriber
-//! let publisher = participant.create_publisher(Default::default(), None, Default::default()).unwrap();
-//! let subscriber = participant.create_subscriber(Default::default(), None, Default::default()).unwrap();
+//! let publisher = participant.create_publisher(PublisherQos::default(), None, StatusMask::default()).unwrap();
+//! let subscriber = participant.create_subscriber(SubscriberQos::default(), None, StatusMask::default()).unwrap();
 //!
 //! // Clean up
 //! participant.delete_subscriber(subscriber).unwrap();

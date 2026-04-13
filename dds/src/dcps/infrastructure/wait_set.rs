@@ -5,6 +5,9 @@
 //! ```no_run
 //! # use int2dds::domain::domain_participant_factory::DomainParticipantFactory;
 //! # use int2dds::infrastructure::wait_set::WaitSet;
+//! # use int2dds::domain::qos::DomainParticipantQos;
+//! # use int2dds::topic::qos::TopicQos;
+//! # use int2dds::subscription::qos::{SubscriberQos, DataReaderQos};
 //! # use int2dds::infrastructure::status::StatusMask;
 //! # use int2dds::core::time::Duration;
 //! # use int2dds::topic::type_support::DdsType;
@@ -15,10 +18,10 @@
 //! # #[derive(DdsType)]
 //! # struct MyData { id: u32 }
 //! # let factory = DomainParticipantFactory::get_instance();
-//! # let participant = factory.create_participant(0, Default::default(), None, Default::default()).unwrap();
-//! # let topic = participant.create_topic::<MyData>("MyTopic", "MyData", Default::default(), None, Default::default()).unwrap();
-//! # let subscriber = participant.create_subscriber(Default::default(), None, Default::default()).unwrap();
-//! # let reader = subscriber.create_datareader::<MyData>(&topic, Default::default(), None, Default::default()).unwrap();
+//! # let participant = factory.create_participant(0, DomainParticipantQos::default(), None, StatusMask::default()).unwrap();
+//! # let topic = participant.create_topic::<MyData>("MyTopic", "MyData", TopicQos::default(), None, StatusMask::default()).unwrap();
+//! # let subscriber = participant.create_subscriber(SubscriberQos::default(), None, StatusMask::default()).unwrap();
+//! # let reader = subscriber.create_datareader::<MyData>(&topic, DataReaderQos::default(), None, StatusMask::default()).unwrap();
 //! let mut wait_set = WaitSet::new();
 //!
 //! // Attach a condition for data availability
