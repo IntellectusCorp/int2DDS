@@ -101,8 +101,9 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
         self.lifespan_timers.clone()
     }
 
-    // Adds the given CacheChange to the history vector and map,
-    // and returns any CacheChange that was removed during space allocation before adding.
+    // Adds the given CacheChange to the history vector and map.
+    // Always returns Ok(None) — evicted changes are released directly to the pool
+    // rather than returned to the caller.
     fn add_change_with_cleanup(
         &mut self,
         a_change: Arc<CacheChange>,
@@ -140,9 +141,10 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
 
         let removed = self.ensure_capacity(a_change.instance_handle())?;
 
-        // Release evicted change back to pool for buffer reuse
-        if let Some(evicted) = &removed {
-            self.try_release_evicted(evicted.clone());
+        // Release evicted change back to pool for buffer reuse.
+        // Consume the Arc by value so Arc::try_unwrap succeeds (refcount == 1).
+        if let Some(evicted) = removed {
+            self.try_release_evicted(evicted);
         }
 
         if lifespan_duration.is_some() {
@@ -154,7 +156,10 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
         self.add_change_to_rtps_writer_cache(a_change)?;
 
         debug!("add_change_with_cleanup completed");
-        Ok(removed)
+
+        // Writer-side callers never use the removed value
+        // unlike DataReaderHistoryCache, which needs it to sync the RTPS history
+        Ok(None)
     }
 
     // Removes the given CacheChange from the history vector and map.
