@@ -460,13 +460,8 @@ impl DomainParticipantFactory {
         self.create_participant(domain_id, qos, listener, mask)
     }
 
-    /// Returns the default QoS profile path (`"Library::Profile"`) to be applied
-    /// when an entity is created via `*_with_profile("")`.
-    ///
-    /// Resolution order:
-    /// 1. `DDS_DEFAULT_QOS_PROFILE` environment variable
-    /// 2. The first profile in the loaded provider with `is_default_profile = true`
-    /// 3. `None` (callers fall back to library/profile defaults)
+    /// Returns the default QoS profile path (`"Library::Profile"`).
+    /// Checks `DDS_DEFAULT_QOS_PROFILE` env var first, then `is_default_profile` in the provider.
     pub fn default_profile_path(&self) -> Option<String> {
         if let Some(p) = get_default_qos_profile() {
             return Some(p);
@@ -475,13 +470,7 @@ impl DomainParticipantFactory {
         provider.default_profile_path()
     }
 
-    /// Resolve an effective QoS path:
-    /// - non-empty `qos_path` → returned unchanged.
-    /// - empty `qos_path` + a configured default profile → return that default.
-    /// - empty `qos_path` + no default profile → `Err` (callers fall through to spec defaults).
-    ///
-    /// This deliberately does NOT fall back to the provider's "first available" lookup,
-    /// because that would silently apply an arbitrary profile when the user intended none.
+    /// Resolves `qos_path`: returns as-is if non-empty, otherwise falls back to `default_profile_path()`.
     fn resolve_profile_path(&self, qos_path: &str) -> DdsResult<String> {
         if qos_path.is_empty() {
             self.default_profile_path()
