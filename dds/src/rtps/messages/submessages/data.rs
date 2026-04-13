@@ -60,6 +60,11 @@ impl<'a> Data<'a> {
         }
     }
 
+    /// Borrow the serialized data as a slice without allocating.
+    pub(crate) fn serialized_data_as_slice(&self) -> &[u8] {
+        self.serialized_data.as_slice()
+    }
+
     pub(crate) fn octets_to_next_header(&self) -> u16 {
         2  /* extra_flags */
          + 2  /* octets_to_inline_qos */
