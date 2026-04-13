@@ -7,6 +7,7 @@ use crate::serialize::{
 
 impl<'a> CdrDeserializer<'a> {
     /// Deserialize boolean
+    #[inline]
     pub fn deserialize_bool(&mut self) -> Result<bool, CdrError> {
         self.check_available(1)?;
         let value = self.data[self.position] != 0;
@@ -15,6 +16,7 @@ impl<'a> CdrDeserializer<'a> {
     }
 
     /// Deserialize 8-bit signed integer
+    #[inline]
     pub fn deserialize_i8(&mut self) -> Result<i8, CdrError> {
         self.check_available(1)?;
         let value = self.data[self.position] as i8;
@@ -23,6 +25,7 @@ impl<'a> CdrDeserializer<'a> {
     }
 
     /// Deserialize 8-bit unsigned integer
+    #[inline]
     pub fn deserialize_u8(&mut self) -> Result<u8, CdrError> {
         self.check_available(1)?;
         let value = self.data[self.position];
@@ -31,6 +34,7 @@ impl<'a> CdrDeserializer<'a> {
     }
 
     /// Deserialize 16-bit signed integer
+    #[inline]
     pub fn deserialize_i16(&mut self) -> Result<i16, CdrError> {
         self.align(2);
         self.check_available(2)?;
@@ -42,6 +46,7 @@ impl<'a> CdrDeserializer<'a> {
     }
 
     /// Deserialize 16-bit unsigned integer
+    #[inline]
     pub fn deserialize_u16(&mut self) -> Result<u16, CdrError> {
         self.align(2);
         self.check_available(2)?;
@@ -53,6 +58,7 @@ impl<'a> CdrDeserializer<'a> {
     }
 
     /// Deserialize 32-bit signed integer
+    #[inline]
     pub fn deserialize_i32(&mut self) -> Result<i32, CdrError> {
         self.align(4);
         self.check_available(4)?;
@@ -69,6 +75,7 @@ impl<'a> CdrDeserializer<'a> {
     }
 
     /// Deserialize 32-bit unsigned integer
+    #[inline]
     pub fn deserialize_u32(&mut self) -> Result<u32, CdrError> {
         self.align(4);
         self.check_available(4)?;
@@ -85,6 +92,7 @@ impl<'a> CdrDeserializer<'a> {
     }
 
     /// Deserialize 64-bit signed integer
+    #[inline]
     pub fn deserialize_i64(&mut self) -> Result<i64, CdrError> {
         self.align(8);
         self.check_available(8)?;
@@ -97,6 +105,7 @@ impl<'a> CdrDeserializer<'a> {
     }
 
     /// Deserialize 64-bit unsigned integer
+    #[inline]
     pub fn deserialize_u64(&mut self) -> Result<u64, CdrError> {
         self.align(8);
         self.check_available(8)?;
@@ -109,6 +118,7 @@ impl<'a> CdrDeserializer<'a> {
     }
 
     /// Deserialize 32-bit floating point
+    #[inline]
     pub fn deserialize_f32(&mut self) -> Result<f32, CdrError> {
         self.align(4);
         self.check_available(4)?;
@@ -125,6 +135,7 @@ impl<'a> CdrDeserializer<'a> {
     }
 
     /// Deserialize 64-bit floating point
+    #[inline]
     pub fn deserialize_f64(&mut self) -> Result<f64, CdrError> {
         self.align(8);
         self.check_available(8)?;
@@ -140,6 +151,7 @@ impl<'a> CdrDeserializer<'a> {
 // Xcdr2Deserializer uses the same primitive deserialization logic
 impl<'a> Xcdr2Deserializer<'a> {
     /// Deserialize boolean
+    #[inline]
     pub fn deserialize_bool(&mut self) -> Result<bool, CdrError> {
         self.check_available(1)?;
         let value = self.data[self.position] != 0;
@@ -148,6 +160,7 @@ impl<'a> Xcdr2Deserializer<'a> {
     }
 
     /// Deserialize 8-bit signed integer
+    #[inline]
     pub fn deserialize_i8(&mut self) -> Result<i8, CdrError> {
         self.check_available(1)?;
         let value = self.data[self.position] as i8;
@@ -156,6 +169,7 @@ impl<'a> Xcdr2Deserializer<'a> {
     }
 
     /// Deserialize 8-bit unsigned integer
+    #[inline]
     pub fn deserialize_u8(&mut self) -> Result<u8, CdrError> {
         self.check_available(1)?;
         let value = self.data[self.position];
@@ -164,6 +178,7 @@ impl<'a> Xcdr2Deserializer<'a> {
     }
 
     /// Deserialize 16-bit signed integer
+    #[inline]
     pub fn deserialize_i16(&mut self) -> Result<i16, CdrError> {
         self.align(2);
         self.check_available(2)?;
@@ -174,6 +189,7 @@ impl<'a> Xcdr2Deserializer<'a> {
     }
 
     /// Deserialize 16-bit unsigned integer
+    #[inline]
     pub fn deserialize_u16(&mut self) -> Result<u16, CdrError> {
         self.align(2);
         self.check_available(2)?;
@@ -184,6 +200,7 @@ impl<'a> Xcdr2Deserializer<'a> {
     }
 
     /// Deserialize 32-bit signed integer
+    #[inline]
     pub fn deserialize_i32(&mut self) -> Result<i32, CdrError> {
         self.align(4);
         self.check_available(4)?;
@@ -199,6 +216,7 @@ impl<'a> Xcdr2Deserializer<'a> {
     }
 
     /// Deserialize 32-bit unsigned integer
+    #[inline]
     pub fn deserialize_u32(&mut self) -> Result<u32, CdrError> {
         self.align(4);
         self.check_available(4)?;
@@ -214,6 +232,7 @@ impl<'a> Xcdr2Deserializer<'a> {
     }
 
     /// Deserialize 64-bit signed integer
+    #[inline]
     pub fn deserialize_i64(&mut self) -> Result<i64, CdrError> {
         self.align(8);
         self.check_available(8)?;
@@ -225,6 +244,7 @@ impl<'a> Xcdr2Deserializer<'a> {
     }
 
     /// Deserialize 64-bit unsigned integer
+    #[inline]
     pub fn deserialize_u64(&mut self) -> Result<u64, CdrError> {
         self.align(8);
         self.check_available(8)?;
@@ -236,6 +256,7 @@ impl<'a> Xcdr2Deserializer<'a> {
     }
 
     /// Deserialize 32-bit floating point
+    #[inline]
     pub fn deserialize_f32(&mut self) -> Result<f32, CdrError> {
         self.align(4);
         self.check_available(4)?;
@@ -251,6 +272,7 @@ impl<'a> Xcdr2Deserializer<'a> {
     }
 
     /// Deserialize 64-bit floating point
+    #[inline]
     pub fn deserialize_f64(&mut self) -> Result<f64, CdrError> {
         self.align(8);
         self.check_available(8)?;

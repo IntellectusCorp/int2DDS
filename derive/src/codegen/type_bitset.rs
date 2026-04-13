@@ -84,6 +84,12 @@ pub fn derive_bitset_impl(
     let additional_derives =
         crate::codegen::derives::generate_additional_derives(input, name, type_config);
 
+    let has_type_object_impl = crate::codegen::type_object::generate_has_type_object_bitset_impl(
+        name,
+        fields,
+        type_config,
+    );
+
     quote! {
         impl #crate_path::serialize::cdr::CdrSerialize for #name {
             fn serialize_cdr(&self, serializer: &mut #crate_path::serialize::cdr::CdrSerializer) -> #crate_path::serialize::cdr::CdrResult<()> {
@@ -122,5 +128,7 @@ pub fn derive_bitset_impl(
         }
 
         #additional_derives
+
+        #has_type_object_impl
     }
 }

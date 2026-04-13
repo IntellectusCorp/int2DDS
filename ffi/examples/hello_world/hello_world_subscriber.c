@@ -88,9 +88,9 @@ int main(int argc, char* argv[]) {
 
     /* Set reliability */
     if (use_reliable) {
-        ret = int2dds_datareader_qos_set_reliability(qos, INT2DDS_QOS_RELIABILITY_RELIABLE);
+        ret = int2dds_datareader_qos_set_reliability(qos, INT2DDS_QOS_RELIABILITY_RELIABLE, 100000000);
     } else {
-        ret = int2dds_datareader_qos_set_reliability(qos, INT2DDS_QOS_RELIABILITY_BEST_EFFORT);
+        ret = int2dds_datareader_qos_set_reliability(qos, INT2DDS_QOS_RELIABILITY_BEST_EFFORT, 0);
     }
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to set reliability: %d\n", ret);

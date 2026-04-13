@@ -22,10 +22,7 @@ use crate::{
         instance_handle::InstanceHandle,
     },
     dcps::{infrastructure::status::StatusKind, topic::type_support::DdsType},
-    infrastructure::qos_policy::{
-        DurabilityQosPolicyKind, QosPolicyId, ReliabilityQosPolicyKind,
-        TypeConsistencyEnforcementQosPolicy, TypeConsistencyKind,
-    },
+    infrastructure::qos_policy::{DurabilityQosPolicyKind, QosPolicyId, ReliabilityQosPolicyKind},
     rtps::{
         builtin::{
             builtin_endpoints::BuiltinEndpoints,
@@ -89,7 +86,7 @@ use crate::{
     },
     serialize::pl_cdr::InlineQosParameters,
     utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
-    xtypes::{check_structural_compatibility, TypeIdentifier, TypeObject},
+    xtypes::check_structural_compatibility,
 };
 
 enum MatchType {
@@ -160,13 +157,15 @@ fn validate_endpoint_compatibility<L>(
     }
 
     // Type Compatibility (DDS-XTypes)
-    if !check_type_compatibility(
+    if check_structural_compatibility(
         offered.type_identifier(),
         requested.type_identifier(),
         offered.type_object(),
         requested.type_object(),
         requested.type_consistency_enforcement(),
-    ) {
+    )
+    .is_err()
+    {
         debug!(
             "[{}] Type compatibility check failed: writer={:?}, reader={:?}",
             who,
@@ -208,134 +207,6 @@ fn is_partition_compatible(requested: &[String], offered: &[String]) -> bool {
         }
     }
     false
-}
-
-/// Check type compatibility based on DDS-XTypes 1.3 specification.
-///
-/// This function verifies that the writer's TypeIdentifier is compatible with
-/// the reader's TypeIdentifier according to the reader's TypeConsistencyEnforcementQosPolicy.
-///
-/// # Arguments
-/// * `writer_type_id` - TypeIdentifier from the writer (offered)
-/// * `reader_type_id` - TypeIdentifier from the reader (requested)
-/// * `writer_type_obj` - Optional TypeObject from the writer (for structural check)
-/// * `reader_type_obj` - Optional TypeObject from the reader (for structural check)
-/// * `type_consistency` - TypeConsistencyEnforcementQosPolicy from the reader
-///
-/// # Returns
-/// * `true` if types are compatible
-/// * `false` if types are incompatible
-fn check_type_compatibility(
-    writer_type_id: Option<&TypeIdentifier>,
-    reader_type_id: Option<&TypeIdentifier>,
-    writer_type_obj: Option<&TypeObject>,
-    reader_type_obj: Option<&TypeObject>,
-    type_consistency: &TypeConsistencyEnforcementQosPolicy,
-) -> bool {
-    match (writer_type_id, reader_type_id) {
-        (Some(writer_id), Some(reader_id)) => {
-            // Both have TypeIdentifier - check based on consistency policy
-            match type_consistency.kind {
-                TypeConsistencyKind::DisallowTypeCoercion => {
-                    // Strict mode: types must be identical
-                    // For complex types, compare equivalence hashes
-                    // For primitive types, compare discriminators
-                    if writer_id.is_complex() && reader_id.is_complex() {
-                        // Compare equivalence hashes for complex types
-                        writer_id.equivalence_hash() == reader_id.equivalence_hash()
-                    } else {
-                        // For primitive types, exact match required
-                        writer_id == reader_id
-                    }
-                }
-                TypeConsistencyKind::AllowTypeCoercion => {
-                    // Permissive mode: allow compatible type coercion
-                    // 1. Types are identical - fast path
-                    if writer_id == reader_id {
-                        return true;
-                    }
-
-                    // 2. Complex types: check hash first, then structural if needed
-                    if writer_id.is_complex() && reader_id.is_complex() {
-                        // Fast path: same hash means compatible
-                        if writer_id.equivalence_hash() == reader_id.equivalence_hash() {
-                            return true;
-                        }
-
-                        // Hash differs - use structural check if TypeObjects available
-                        // This enforces TCE flags (ignore_sequence_bounds, prevent_type_widening, etc.)
-                        if writer_type_obj.is_some() || reader_type_obj.is_some() {
-                            return check_structural_compatibility(
-                                writer_type_id,
-                                reader_type_id,
-                                writer_type_obj,
-                                reader_type_obj,
-                                type_consistency,
-                            )
-                            .is_ok();
-                        }
-
-                        // No TypeObjects available - trust type_name matching (backward compatible)
-                        return true;
-                    }
-
-                    // 3. Primitive types: check if coercion is possible
-                    is_primitive_coercion_allowed(writer_id, reader_id)
-                }
-            }
-        }
-        (None, None) => {
-            // Neither has TypeIdentifier - rely on type_name matching (handled elsewhere)
-            // This is backward compatible with non-XTypes implementations
-            true
-        }
-        (Some(_), None) | (None, Some(_)) => {
-            // One has TypeIdentifier, the other doesn't
-            // If force_type_validation is true, this is incompatible
-            // Otherwise, fall back to type_name matching
-            !type_consistency.force_type_validation
-        }
-    }
-}
-
-/// Check if primitive type coercion is allowed between two TypeIdentifiers.
-///
-/// According to DDS-XTypes, certain primitive type coercions are allowed
-/// when AllowTypeCoercion policy is set:
-/// - Widening integer conversions (int8 -> int16 -> int32 -> int64)
-/// - Widening float conversions (float32 -> float64)
-fn is_primitive_coercion_allowed(writer_id: &TypeIdentifier, reader_id: &TypeIdentifier) -> bool {
-    // Same types are always compatible
-    if writer_id == reader_id {
-        return true;
-    }
-
-    match (writer_id, reader_id) {
-        // Integer widening (signed)
-        (TypeIdentifier::Int8, TypeIdentifier::Int16)
-        | (TypeIdentifier::Int8, TypeIdentifier::Int32)
-        | (TypeIdentifier::Int8, TypeIdentifier::Int64) => true,
-        (TypeIdentifier::Int16, TypeIdentifier::Int32)
-        | (TypeIdentifier::Int16, TypeIdentifier::Int64) => true,
-        (TypeIdentifier::Int32, TypeIdentifier::Int64) => true,
-
-        // Integer widening (unsigned)
-        (TypeIdentifier::Uint8, TypeIdentifier::Uint16)
-        | (TypeIdentifier::Uint8, TypeIdentifier::Uint32)
-        | (TypeIdentifier::Uint8, TypeIdentifier::Uint64) => true,
-        (TypeIdentifier::Uint16, TypeIdentifier::Uint32)
-        | (TypeIdentifier::Uint16, TypeIdentifier::Uint64) => true,
-        (TypeIdentifier::Uint32, TypeIdentifier::Uint64) => true,
-
-        // Float widening
-        (TypeIdentifier::Float32, TypeIdentifier::Float64) => true,
-
-        // Char widening
-        (TypeIdentifier::Char8, TypeIdentifier::Char16) => true,
-
-        // All other cases are not allowed
-        _ => false,
-    }
 }
 
 /// Initialization
