@@ -12,7 +12,7 @@ pub struct Xcdr2Serializer {
     pub(super) endianness: Endianness,
     pub(super) buffer: Vec<u8>,
     pub(super) extensibility_kind: ExtensibilityKind,
-    pub(super) type_hash: Option<[u8; 32]>, // Type hash for type consistency checking
+    pub(super) type_hash: Option<[u8; 14]>,
 }
 
 impl Xcdr2Serializer {
@@ -44,7 +44,7 @@ impl Xcdr2Serializer {
     pub fn with_type_hash(
         little_endian: bool,
         extensibility: ExtensibilityKind,
-        type_hash: [u8; 32],
+        type_hash: [u8; 14],
     ) -> Self {
         Self {
             endianness: endianness_from_bool(little_endian),
@@ -78,7 +78,7 @@ impl Xcdr2Serializer {
         let options = if self.type_hash.is_some() { 0x0001u16 } else { 0x0000u16 };
         self.buffer.extend_from_slice(&options.to_be_bytes());
 
-        // Optional type hash (32 bytes) if present
+        // Optional EquivalenceHash (14 bytes) if present
         if let Some(hash) = self.type_hash {
             self.buffer.extend_from_slice(&hash);
         }
@@ -111,6 +111,13 @@ impl Xcdr2Serializer {
     pub fn write_dheader_at(&mut self, position: usize, length: u32) {
         let bytes = to_bytes_u32(length, self.endianness);
         self.buffer[position..position + 4].copy_from_slice(&bytes);
+    }
+
+    /// Insert 4 zero bytes at the given position, shifting subsequent bytes right.
+    /// Used when an EMHEADER's payload length overflows 16 bits and the codegen
+    /// needs to retroactively switch from compact (LC=0..3) to LC=4 (NEXTINT) encoding.
+    pub fn insert_nextint_slot_at(&mut self, position: usize) {
+        self.buffer.splice(position..position, [0u8; 4]);
     }
 
     /// Helper method for writing u32 (used by begin_struct)
@@ -380,7 +387,7 @@ impl<'a> DeserializerReader for Xcdr2Deserializer<'a> {
 }
 
 const TYPE_HASH_FLAG: u16 = 0x0001;
-const TYPE_HASH_LENGTH: usize = 32;
+const TYPE_HASH_LENGTH: usize = 14;
 
 fn parse_encapsulation_header(data: &[u8]) -> Result<(Endianness, usize, bool), CdrError> {
     if data.len() < 4 {

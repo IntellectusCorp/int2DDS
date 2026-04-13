@@ -91,7 +91,7 @@ impl TypeSupport for Int2DdsDataTypeSupport {
     }
 
     fn get_extensibility_kind(&self) -> ExtensibilityKind {
-        ExtensibilityKind::Final
+        ExtensibilityKind::Appendable
     }
 }
 
