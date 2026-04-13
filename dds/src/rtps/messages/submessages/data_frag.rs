@@ -8,7 +8,11 @@ use crate::rtps::common::time::RtpsTime;
 use bytes::Bytes;
 use speedy::{Context, Error, Readable, Writable, Writer};
 use std::time::Instant;
-use std::{collections::HashSet, io, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashSet},
+    io,
+    sync::Arc,
+};
 
 use crate::rtps::{
     common::{
@@ -225,7 +229,7 @@ impl<C: Context> Writable<C> for DataFrag<'_> {
 pub(crate) struct FragmentBuffer {
     pub sequence_number: SequenceNumber,
     pub total_size: u32,
-    pub payload: Vec<u8>,
+    pub fragments: BTreeMap<u32, Vec<u8>>,
     pub received_fragments: HashSet<u32>,
     pub total_fragments: u32,
     pub fragment_size: u16,
@@ -248,8 +252,8 @@ impl FragmentBuffer {
         Self {
             sequence_number,
             total_size,
-            payload: vec![0u8; total_size as usize],
-            received_fragments: std::collections::HashSet::new(),
+            fragments: BTreeMap::new(),
+            received_fragments: HashSet::new(),
             total_fragments,
             fragment_size,
             source_timestamp: None,
@@ -267,26 +271,33 @@ impl FragmentBuffer {
     }
 
     pub(crate) fn copy_fragment_data(&mut self, fragment_num: u32, data: &[u8]) -> bool {
-        // Calculate fragment_offset: (fragment_num - 1) * fragment_size
-        let fragment_offset = ((fragment_num - 1) * self.fragment_size as u32) as usize;
-
-        let actual_data_size = data.len();
-
-        // For the last fragment, adjust to actual data size
-        let max_available_size = self.payload.len() - fragment_offset;
-        let copy_size = std::cmp::min(actual_data_size, max_available_size);
-        let payload_end = fragment_offset + copy_size;
-
-        let payload_ok = payload_end <= self.payload.len();
-
-        if payload_ok {
-            self.payload[fragment_offset..payload_end].copy_from_slice(&data[..copy_size]);
-            self.received_fragments.insert(fragment_num);
-            self.last_updated = Instant::now();
-            true
-        } else {
-            false
+        if fragment_num == 0 || fragment_num > self.total_fragments {
+            return false;
         }
+
+        // Validate fragment data size
+        let expected_max = self.fragment_size as usize;
+        let remaining =
+            self.total_size as usize - ((fragment_num - 1) * self.fragment_size as u32) as usize;
+        let expected_size = std::cmp::min(expected_max, remaining);
+        if data.len() > expected_size {
+            return false;
+        }
+
+        self.fragments.insert(fragment_num, data.to_vec());
+        self.received_fragments.insert(fragment_num);
+        self.last_updated = Instant::now();
+        true
+    }
+
+    /// Assemble all fragments into a contiguous Vec.
+    /// BTreeMap iteration is sorted by key (fragment_num), guaranteeing correct order.
+    pub(crate) fn assemble(self) -> Vec<u8> {
+        let mut result = Vec::with_capacity(self.total_size as usize);
+        for (_num, data) in self.fragments {
+            result.extend_from_slice(&data);
+        }
+        result
     }
 }
 

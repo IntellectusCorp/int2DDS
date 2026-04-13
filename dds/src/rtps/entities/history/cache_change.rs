@@ -4,7 +4,7 @@
 //! stored in reader or writer history caches. Changes include the sequence number,
 //! data payload, instance handle, and metadata.
 
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
 use crate::{
     common::instance_handle::InstanceHandle,
@@ -18,6 +18,44 @@ use crate::{
     },
 };
 
+/// Data payload of a CacheChange.
+///
+/// `Owned` is used on the writer side (mutable, capacity-reusable via pool)
+/// and for non-fragmented reader reception.
+/// `Shared` is used when delivering fragmented data to multiple readers
+/// without copying — each reader gets an `Arc::clone` (refcount only).
+#[derive(Debug)]
+pub(crate) enum DataPayload {
+    Owned(Vec<u8>),
+    Shared(Arc<Vec<u8>>),
+}
+
+impl Clone for DataPayload {
+    fn clone(&self) -> Self {
+        match self {
+            DataPayload::Owned(v) => DataPayload::Owned(v.clone()),
+            DataPayload::Shared(a) => DataPayload::Shared(Arc::clone(a)),
+        }
+    }
+}
+
+impl PartialEq for DataPayload {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for DataPayload {}
+
+impl DataPayload {
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        match self {
+            DataPayload::Owned(v) => v,
+            DataPayload::Shared(a) => a,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CacheChange {
     kind: ChangeKind,
@@ -25,7 +63,7 @@ pub(crate) struct CacheChange {
     // From reader perspective: created remote writer guid
     writer_guid: Guid,
     pub(crate) sequence_number: SequenceNumber,
-    pub(crate) data_value: Vec<u8>,
+    data_payload: DataPayload,
     // inline_qos is RTPS version 2.5
     // inline_qos: ParameterList
     instance_handle: InstanceHandle,
@@ -66,7 +104,7 @@ impl CacheChange {
             writer_guid,
             writer_ownership_strength: None,
             instance_handle,
-            data_value,
+            data_payload: DataPayload::Owned(data_value),
             sequence_number,
             source_timestamp,
             reception_timestamp: None,
@@ -85,7 +123,7 @@ impl CacheChange {
             writer_guid: Guid::UNKNOWN,
             writer_ownership_strength: None,
             instance_handle: InstanceHandle::default(),
-            data_value: Vec::new(),
+            data_payload: DataPayload::Owned(Vec::new()),
             sequence_number: SequenceNumber::UNKNOWN,
             source_timestamp: None,
             reception_timestamp: None,
@@ -97,7 +135,7 @@ impl CacheChange {
         }
     }
 
-    /// Reset metadata for reuse, preserving data_value capacity.
+    /// Reset metadata for reuse, preserving data_value capacity for Owned payloads.
     pub(crate) fn reset(
         &mut self,
         kind: ChangeKind,
@@ -110,7 +148,12 @@ impl CacheChange {
         self.writer_guid = writer_guid;
         self.writer_ownership_strength = None;
         self.instance_handle = instance_handle;
-        self.data_value.clear();
+        match &mut self.data_payload {
+            DataPayload::Owned(v) => v.clear(),
+            DataPayload::Shared(_) => {
+                self.data_payload = DataPayload::Owned(Vec::new());
+            }
+        }
         self.sequence_number = sequence_number;
         self.source_timestamp = source_timestamp;
         self.reception_timestamp = None;
@@ -152,8 +195,36 @@ impl CacheChange {
     pub(crate) fn sequence_number(&self) -> SequenceNumber {
         self.sequence_number
     }
+
     pub(crate) fn data_value(&self) -> &[u8] {
-        &self.data_value
+        self.data_payload.as_slice()
+    }
+
+    /// Mutable access to the owned Vec buffer.
+    /// Used by writer serialization and non-fragmented reader reception.
+    pub(crate) fn data_mut(&mut self) -> &mut Vec<u8> {
+        match &mut self.data_payload {
+            DataPayload::Owned(v) => v,
+            DataPayload::Shared(_) => unreachable!("data_mut called on shared payload"),
+        }
+    }
+
+    /// Replace payload with an owned Vec (fragment assembly single-reader move).
+    pub(crate) fn set_owned_payload(&mut self, data: Vec<u8>) {
+        self.data_payload = DataPayload::Owned(data);
+    }
+
+    /// Set a shared payload for zero-copy multi-reader delivery.
+    pub(crate) fn set_shared_payload(&mut self, data: Arc<Vec<u8>>) {
+        self.data_payload = DataPayload::Shared(data);
+    }
+
+    /// Return the shared backing Arc if this is a Shared payload (for zero-copy deserialization).
+    pub(crate) fn shared_backing(&self) -> Option<Arc<Vec<u8>>> {
+        match &self.data_payload {
+            DataPayload::Shared(a) => Some(Arc::clone(a)),
+            DataPayload::Owned(_) => None,
+        }
     }
 
     pub(crate) fn source_timestamp(&self) -> Option<RtpsTime> {
@@ -189,15 +260,13 @@ impl CacheChange {
     }
 
     // Apply fragmentation metadata based on the current `data_value` length.
-    // If the payload exceeds `max_payload_size`, marks the change as fragmented
-    // and fills `total_fragments`, `fragment_size`, and `fragment_set`.
-    // Otherwise clears any prior fragmentation state.
     pub(crate) fn apply_fragmentation(&mut self, max_payload_size: usize) {
         self.fragment_set.clear();
-        if max_payload_size > 0 && self.data_value.len() > max_payload_size {
+        let data_len = self.data_value().len();
+        if max_payload_size > 0 && data_len > max_payload_size {
             self.fragmented = true;
             self.fragment_size = max_payload_size as u32;
-            let num_fragments = self.data_value.len().div_ceil(max_payload_size);
+            let num_fragments = data_len.div_ceil(max_payload_size);
             self.total_fragments = num_fragments as u32;
             for i in 1..=num_fragments {
                 self.fragment_set.insert(i as u32);
@@ -214,10 +283,11 @@ impl CacheChange {
             return None;
         }
 
+        let data = self.data_value();
         let start = (fragment_num - 1) * self.fragment_size;
-        let end = std::cmp::min(start + self.fragment_size, self.data_value.len() as u32);
+        let end = std::cmp::min(start + self.fragment_size, data.len() as u32);
 
-        Some(&self.data_value[start as usize..end as usize])
+        Some(&data[start as usize..end as usize])
     }
 
     // Create fragmented cache change from payload
