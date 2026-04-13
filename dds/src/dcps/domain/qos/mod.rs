@@ -14,15 +14,26 @@ use const_default::ConstDefault;
 
 use crate::{
     core::error::{DdsError, DdsResult},
-    infrastructure::qos_policy::{EntityFactoryQosPolicy, Qos, UserDataQosPolicy},
+    infrastructure::qos_policy::{
+        EntityFactoryQosPolicy, PropertyQosPolicy, Qos, UserDataQosPolicy,
+    },
 };
 
 pub const PARTICIPANT_QOS_DEFAULT: DomainParticipantQos = DomainParticipantQos::DEFAULT;
 
-#[derive(Debug, Default, ConstDefault, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct DomainParticipantQos {
     pub user_data: UserDataQosPolicy,
     pub entity_factory: EntityFactoryQosPolicy,
+    pub property: PropertyQosPolicy,
+}
+
+impl ConstDefault for DomainParticipantQos {
+    const DEFAULT: Self = Self {
+        user_data: UserDataQosPolicy::DEFAULT,
+        entity_factory: EntityFactoryQosPolicy::DEFAULT,
+        property: PropertyQosPolicy::DEFAULT,
+    };
 }
 
 impl Qos for DomainParticipantQos {

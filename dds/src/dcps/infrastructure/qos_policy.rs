@@ -2072,3 +2072,114 @@ impl QosPolicy for ReaderReliabilityExtensionQosPolicy {
         READER_RELIABILITY_EXTENSION_QOS_POLICY_NAME
     }
 }
+
+// ============================================================================
+// DDS-SEC Extension: PropertyQosPolicy
+// ============================================================================
+
+const PROPERTY_QOS_POLICY_NAME: &str = "Property";
+
+/// A single name-value property pair.
+///
+/// Based on DDS Security specification (DDS-SEC).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Property {
+    pub name: String,
+    pub value: String,
+}
+
+/// Extensible name-value property list for vendor-specific configuration.
+///
+/// Based on DDS Security specification (DDS-SEC).
+/// Used to configure transport, security, and other vendor-specific settings
+/// without extending the standard QoS struct fields.
+///
+/// # Example
+/// ```no_run
+/// use int2dds::infrastructure::qos_policy::PropertyQosPolicy;
+///
+/// let mut property = PropertyQosPolicy::default();
+/// property.set("int2dds.transport", "tcp");
+/// property.set("int2dds.initial_peers", "192.168.1.100:7400");
+///
+/// assert_eq!(property.get("int2dds.transport"), Some("tcp"));
+/// ```
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PropertyQosPolicy {
+    pub value: Vec<Property>,
+}
+
+impl ConstDefault for PropertyQosPolicy {
+    const DEFAULT: Self = Self { value: Vec::new() };
+}
+
+impl PropertyQosPolicy {
+    /// Set a property value. If the property already exists, update it.
+    pub fn set(&mut self, name: &str, value: &str) {
+        if let Some(prop) = self.value.iter_mut().find(|p| p.name == name) {
+            prop.value = value.to_string();
+        } else {
+            self.value.push(Property { name: name.to_string(), value: value.to_string() });
+        }
+    }
+
+    /// Get a property value by name.
+    pub fn get(&self, name: &str) -> Option<&str> {
+        self.value.iter().find(|p| p.name == name).map(|p| p.value.as_str())
+    }
+}
+
+impl QosPolicy for PropertyQosPolicy {
+    fn name(&self) -> &str {
+        PROPERTY_QOS_POLICY_NAME
+    }
+}
+
+#[cfg(test)]
+mod property_qos_tests {
+    use super::*;
+
+    #[test]
+    fn set_and_get_property() {
+        let mut prop = PropertyQosPolicy::default();
+        prop.set("int2dds.transport", "tcp");
+        assert_eq!(prop.get("int2dds.transport"), Some("tcp"));
+    }
+
+    #[test]
+    fn get_nonexistent_property_returns_none() {
+        let prop = PropertyQosPolicy::default();
+        assert_eq!(prop.get("int2dds.transport"), None);
+    }
+
+    #[test]
+    fn set_overwrites_existing_property() {
+        let mut prop = PropertyQosPolicy::default();
+        prop.set("int2dds.transport", "udp");
+        prop.set("int2dds.transport", "tcp");
+        assert_eq!(prop.get("int2dds.transport"), Some("tcp"));
+        assert_eq!(prop.value.len(), 1);
+    }
+
+    #[test]
+    fn set_multiple_properties() {
+        let mut prop = PropertyQosPolicy::default();
+        prop.set("int2dds.transport", "tcp");
+        prop.set("int2dds.initial_peers", "1.2.3.4:7400");
+        assert_eq!(prop.get("int2dds.transport"), Some("tcp"));
+        assert_eq!(prop.get("int2dds.initial_peers"), Some("1.2.3.4:7400"));
+        assert_eq!(prop.value.len(), 2);
+    }
+
+    #[test]
+    fn default_is_empty() {
+        let prop = PropertyQosPolicy::default();
+        assert!(prop.value.is_empty());
+    }
+
+    #[test]
+    fn const_default_is_empty() {
+        let prop = PropertyQosPolicy::DEFAULT;
+        assert!(prop.value.is_empty());
+    }
+}
