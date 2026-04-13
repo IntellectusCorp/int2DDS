@@ -9,7 +9,7 @@ use std::thread;
 
 use crossbeam_channel::{bounded, Receiver};
 use dashmap::DashMap;
-use log::{debug, info};
+use log::{debug, info, warn};
 
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::locator::Locator;
@@ -90,7 +90,10 @@ impl TcpTransportPlugin {
                 );
                     return Err(transport_io_error(
                         TransportErrorCode::TcpBindFailed,
-                        format!("Failed to bind TCP listener on port {} (domain={}): {}", physical_port, domain_id, e),
+                        format!(
+                            "Failed to bind TCP listener on port {} (domain={}): {}",
+                            physical_port, domain_id, e
+                        ),
                     ));
                 }
             };
@@ -314,7 +317,11 @@ impl TcpMuxListeningLoopTask {
                             Ok(Some(_token)) => {}
                             Ok(None) => break,
                             Err(e) => {
-                                log::error!("[TcpMuxListeningLoopTask] [{}] Accept error: {:?}", TransportErrorCode::TcpAcceptFailed, e);
+                                log::error!(
+                                    "[TcpMuxListeningLoopTask] [{}] Accept error: {:?}",
+                                    TransportErrorCode::TcpAcceptFailed,
+                                    e
+                                );
                                 break;
                             }
                         }
@@ -328,10 +335,7 @@ impl TcpMuxListeningLoopTask {
                 last_keepalive_check = Instant::now();
                 let dead_addrs = self.sender.send_keepalives();
                 for addr in dead_addrs {
-                    log::warn!(
-                        "[TcpMuxListeningLoopTask] Dead peer detected via keepalive: {:?}",
-                        addr
-                    );
+                    warn!("[TcpMuxListeningLoopTask] Dead peer detected via keepalive: {:?}", addr);
                     self.sender.disconnect_peer(&addr);
                     // send dead peer from keepalive timeout to peer monitor
                     let _ = self.dead_peer_tx.try_send(addr);
@@ -354,21 +358,13 @@ impl TcpMuxListeningLoopTask {
             if last_orphan_check.elapsed() >= orphan_check_interval {
                 last_orphan_check = Instant::now();
 
-                // Listener side: prune incoming orphan data connections
-                let pruned = self
-                    .mux_listener
-                    .prune_orphan_data_connections(orphan_data_grace, poll.registry());
-                if pruned > 0 {
-                    debug!(
-                        "[TcpMuxListeningLoopTask] Pruned {} incoming orphan peer group(s) past grace period",
-                        pruned
-                    );
-                }
-
-                // Sender side: prune outgoing orphan data connections
+                // Sender side: prune outgoing data connections whose control is gone.
+                // Incoming orphan connections are NOT pruned here — their cleanup is
+                // the remote peer's responsibility (via its own sender orphan pruning).
+                // If the remote peer crashes, the idle timeout handles it instead.
                 let pruned = self.sender.prune_orphan_connections();
                 if pruned > 0 {
-                    debug!(
+                    warn!(
                         "[TcpMuxListeningLoopTask] Pruned {} outgoing orphan connection(s)",
                         pruned
                     );
@@ -395,11 +391,6 @@ mod tests {
     }
 
     fn make_plugin(domain_id: u32) -> TcpTransportPlugin {
-        // Force port 0 inside this test so the OS allocates an ephemeral
-        // physical port and we never collide with other tests/hosts.
-        unsafe {
-            std::env::set_var("INT2DDS_TCP_PORT", "0");
-        }
         TcpTransportPlugin::new(domain_id, 0, "127.0.0.1".to_string(), [0u8; 12])
             .expect("plugin creation")
     }

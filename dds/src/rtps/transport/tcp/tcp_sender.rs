@@ -110,7 +110,11 @@ impl TcpSender {
         })
     }
 
-    fn ensure_control_inner(&self, physical_addr: &SocketAddr, key: ConnectionKey) -> io::Result<()> {
+    fn ensure_control_inner(
+        &self,
+        physical_addr: &SocketAddr,
+        key: ConnectionKey,
+    ) -> io::Result<()> {
         let mut stream = self.tcp_connect(physical_addr)?;
 
         let local_ip: std::net::Ipv4Addr =
@@ -163,20 +167,38 @@ impl TcpSender {
             let mut control_stream = self
                 .connections
                 .get(&control_key)
-                .ok_or_else(|| transport_io_error(
-                    TransportErrorCode::TcpHandshakeReserveFailed,
-                    "Control connection lost before PORT_RESERVE",
-                ))?
+                .ok_or_else(|| {
+                    transport_io_error(
+                        TransportErrorCode::TcpHandshakeReserveFailed,
+                        "Control connection lost before PORT_RESERVE",
+                    )
+                })?
                 .value()
                 .try_clone()
-                .map_err(|e| Self::wrap_raw_io_error(e, TransportErrorCode::TcpHandshakeReserveFailed, physical_addr))?;
+                .map_err(|e| {
+                    Self::wrap_raw_io_error(
+                        e,
+                        TransportErrorCode::TcpHandshakeReserveFailed,
+                        physical_addr,
+                    )
+                })?;
 
             let reserve = ControlMsg::PortReserve { logical_port };
-            write_framed_message(&mut control_stream, &reserve.to_bytes())
-                .map_err(|e| Self::wrap_raw_io_error(e, TransportErrorCode::TcpHandshakeReserveFailed, physical_addr))?;
+            write_framed_message(&mut control_stream, &reserve.to_bytes()).map_err(|e| {
+                Self::wrap_raw_io_error(
+                    e,
+                    TransportErrorCode::TcpHandshakeReserveFailed,
+                    physical_addr,
+                )
+            })?;
 
-            let resp = self.read_control_response(&mut control_stream)
-                .map_err(|e| Self::wrap_raw_io_error(e, TransportErrorCode::TcpHandshakeReserveFailed, physical_addr))?;
+            let resp = self.read_control_response(&mut control_stream).map_err(|e| {
+                Self::wrap_raw_io_error(
+                    e,
+                    TransportErrorCode::TcpHandshakeReserveFailed,
+                    physical_addr,
+                )
+            })?;
             match resp {
                 ControlMsg::PortReserveAck { cookie } => cookie,
                 ControlMsg::Error { operation, code, message } => {
@@ -206,11 +228,13 @@ impl TcpSender {
         let mut data_stream = self.tcp_connect(physical_addr)?;
 
         let bind = ControlMsg::PortBind { cookie };
-        write_framed_message(&mut data_stream, &bind.to_bytes())
-            .map_err(|e| Self::wrap_raw_io_error(e, TransportErrorCode::TcpHandshakeBindFailed, physical_addr))?;
+        write_framed_message(&mut data_stream, &bind.to_bytes()).map_err(|e| {
+            Self::wrap_raw_io_error(e, TransportErrorCode::TcpHandshakeBindFailed, physical_addr)
+        })?;
 
-        let resp = self.read_control_response(&mut data_stream)
-            .map_err(|e| Self::wrap_raw_io_error(e, TransportErrorCode::TcpHandshakeBindFailed, physical_addr))?;
+        let resp = self.read_control_response(&mut data_stream).map_err(|e| {
+            Self::wrap_raw_io_error(e, TransportErrorCode::TcpHandshakeBindFailed, physical_addr)
+        })?;
         if resp.to_bytes()[0] != MSG_PORT_BIND_ACK {
             return Err(transport_io_error(
                 TransportErrorCode::TcpHandshakeBindFailed,
@@ -241,10 +265,12 @@ impl TcpSender {
         let mut stream = self
             .connections
             .get(&key)
-            .ok_or_else(|| transport_io_error(
-                TransportErrorCode::TcpConnectionRefused,
-                format!("Connection not found for {:?}", key),
-            ))?
+            .ok_or_else(|| {
+                transport_io_error(
+                    TransportErrorCode::TcpConnectionRefused,
+                    format!("Connection not found for {:?}", key),
+                )
+            })?
             .value()
             .try_clone()?;
 
@@ -382,9 +408,7 @@ impl TcpSender {
 
         let mut pruned = 0;
         for peer_addr in peers_with_data {
-            let has_control = self
-                .connections
-                .contains_key(&(peer_addr, CONTROL_LOGICAL_PORT));
+            let has_control = self.connections.contains_key(&(peer_addr, CONTROL_LOGICAL_PORT));
 
             if !has_control {
                 let before = self.connections.len();
@@ -395,13 +419,32 @@ impl TcpSender {
                 if removed > 0 {
                     warn!(
                         "TcpSender [{}]: Pruned {} orphan outgoing connection(s) for {:?}",
-                        TransportErrorCode::TcpOrphanPruned, removed, peer_addr
+                        TransportErrorCode::TcpOrphanPruned,
+                        removed,
+                        peer_addr
                     );
                     pruned += removed;
                 }
             }
         }
         pruned
+    }
+
+    /// Test only: remove the control connection entry without touching data connections.
+    /// This creates an orphan state where data connections exist without their control.
+    #[cfg(test)]
+    pub(crate) fn drop_control_only(&self, addr: &SocketAddr) {
+        self.connections.remove(&(*addr, CONTROL_LOGICAL_PORT));
+        debug!("TcpSender: [test] dropped control-only for {:?}", addr);
+    }
+
+    /// Test only: remove a specific data connection entry without touching control.
+    /// The next send attempt to this logical port will trigger re-reserve + re-bind.
+    #[cfg(test)]
+    pub(crate) fn drop_data_connection(&self, addr: &SocketAddr, logical_port: u16) {
+        assert_ne!(logical_port, CONTROL_LOGICAL_PORT, "use drop_control_only for control");
+        self.connections.remove(&(*addr, logical_port));
+        debug!("TcpSender: [test] dropped data connection {:?} port={}", addr, logical_port);
     }
 
     pub(crate) fn connection_count(&self) -> usize {
@@ -440,7 +483,9 @@ impl TcpSender {
             let code = match e.kind() {
                 ErrorKind::TimedOut => TransportErrorCode::TcpConnectionTimeout,
                 ErrorKind::ConnectionRefused => TransportErrorCode::TcpConnectionRefused,
-                ErrorKind::AddrNotAvailable | ErrorKind::AddrInUse => TransportErrorCode::TcpBindFailed,
+                ErrorKind::AddrNotAvailable | ErrorKind::AddrInUse => {
+                    TransportErrorCode::TcpBindFailed
+                }
                 _ => TransportErrorCode::TcpConnectionRefused,
             };
             transport_io_error(code, format!("{} (to {:?})", e, addr))
@@ -513,10 +558,94 @@ impl TcpSender {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rtps::transport::tcp::tcp_mux_listener::TcpMuxListener;
+    use crossbeam_channel::bounded;
+
+    /// Allocate a non-overlapping domain so concurrent tests don't collide.
+    fn next_test_domain() -> u32 {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NEXT: AtomicU32 = AtomicU32::new(800);
+        NEXT.fetch_add(1, Ordering::SeqCst)
+    }
 
     fn create_test_sender() -> TcpSender {
         let keepalive_missed = Arc::new(DashMap::new());
         TcpSender::new("127.0.0.1".to_string(), [0x01; 12], 0, 0, 7400, keepalive_missed).unwrap()
+    }
+
+    /// Create a MuxListener on an ephemeral port + a TcpSender targeting it.
+    /// Returns (listener, sender, listener_addr, discovery_port, user_port).
+    fn create_listener_and_sender(
+        domain_id: u32,
+    ) -> (TcpMuxListener, TcpSender, SocketAddr, u16, u16) {
+        let (disc_tx, _disc_rx) = bounded(64);
+        let (user_tx, _user_rx) = bounded(64);
+        let listener = TcpMuxListener::new(
+            0, // port 0 → OS-assigned ephemeral port
+            domain_id, 0, [0x02; 12], disc_tx, user_tx,
+        )
+        .expect("listener creation");
+        let port = listener.port();
+        let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+
+        let disc_port =
+            crate::rtps::transport::port_manager::PortManager::get_discovery_traffic_unicast_port(
+                domain_id, 0,
+            );
+        let user_port =
+            crate::rtps::transport::port_manager::PortManager::get_user_traffic_unicast_port(
+                domain_id, 0,
+            );
+
+        let keepalive_missed = Arc::new(DashMap::new());
+        let sender = TcpSender::new(
+            "127.0.0.1".to_string(),
+            [0x01; 12],
+            domain_id,
+            0,
+            port,
+            keepalive_missed,
+        )
+        .expect("sender creation");
+
+        (listener, sender, addr, disc_port, user_port)
+    }
+
+    /// Pump the listener's accept + on_readable in a background thread until
+    /// the stop flag is set. Returns a JoinHandle.
+    fn spawn_listener_pump(
+        mut listener: TcpMuxListener,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+    ) -> std::thread::JoinHandle<()> {
+        use mio::{Events, Interest, Poll, Token};
+
+        std::thread::Builder::new()
+            .name("test_listener_pump".to_string())
+            .spawn(move || {
+                let mux_token = Token(0);
+                let mut poll = Poll::new().unwrap();
+                let mut events = Events::with_capacity(64);
+                poll.registry()
+                    .register(listener.listener_mut().unwrap(), mux_token, Interest::READABLE)
+                    .unwrap();
+
+                while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    let _ = poll.poll(&mut events, Some(Duration::from_millis(50)));
+                    for event in events.iter() {
+                        if event.token() == mux_token && event.is_readable() {
+                            while let Ok(Some(_)) = listener.accept(poll.registry()) {}
+                        } else if event.is_readable() {
+                            listener.on_readable(event.token(), poll.registry());
+                        }
+                    }
+                }
+
+                if let Some(l) = listener.listener_mut() {
+                    let _ = poll.registry().deregister(l);
+                }
+                listener.close();
+            })
+            .unwrap()
     }
 
     #[test]
@@ -533,5 +662,98 @@ mod tests {
         let addr: SocketAddr = "192.168.1.10:7400".parse().unwrap();
         sender.disconnect_peer(&addr);
         assert_eq!(sender.connection_count(), 0);
+    }
+
+    #[test]
+    fn control_drop_orphan_prune() {
+        let domain = next_test_domain();
+        let (listener, sender, addr, disc_port, _user_port) = create_listener_and_sender(domain);
+
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handle = spawn_listener_pump(listener, stop.clone());
+
+        // Allow listener thread to start
+        std::thread::sleep(Duration::from_millis(100));
+
+        // Establish control + discovery data connection
+        sender.ensure_data(&addr, disc_port).expect("ensure_data");
+        assert_eq!(sender.connection_count(), 2, "control + data");
+
+        // Drop control only → data becomes orphan
+        sender.drop_control_only(&addr);
+        assert_eq!(sender.connection_count(), 1, "orphan data remains");
+
+        // Prune orphans
+        let pruned = sender.prune_orphan_connections();
+        assert!(pruned > 0, "should have pruned orphan data");
+        assert_eq!(sender.connection_count(), 0, "all cleaned up");
+
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn discovery_data_drop_recovery() {
+        let domain = next_test_domain();
+        let (listener, sender, addr, disc_port, _user_port) = create_listener_and_sender(domain);
+
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handle = spawn_listener_pump(listener, stop.clone());
+
+        std::thread::sleep(Duration::from_millis(100));
+
+        // Establish control + discovery data
+        sender.ensure_data(&addr, disc_port).expect("ensure_data");
+        assert_eq!(sender.connection_count(), 2);
+
+        // Drop discovery data only → control survives
+        sender.drop_data_connection(&addr, disc_port);
+        assert_eq!(sender.connection_count(), 1, "only control remains");
+
+        // Next send triggers re-reserve + re-bind via ensure_data
+        let dummy_rtps = b"RTPS test payload for 12_8";
+        let result = sender.send_to_discovery(&addr, dummy_rtps);
+        assert!(
+            result.is_ok(),
+            "send_to_discovery should succeed after re-reserve: {:?}",
+            result.err()
+        );
+        assert_eq!(sender.connection_count(), 2, "control + new data restored");
+
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn user_data_drop_recovery() {
+        let domain = next_test_domain();
+        let (listener, sender, addr, disc_port, user_port) = create_listener_and_sender(domain);
+
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handle = spawn_listener_pump(listener, stop.clone());
+
+        std::thread::sleep(Duration::from_millis(100));
+
+        // Establish control + discovery + user data
+        sender.ensure_data(&addr, disc_port).expect("ensure disc");
+        sender.ensure_data(&addr, user_port).expect("ensure user");
+        assert_eq!(sender.connection_count(), 3, "control + disc + user");
+
+        // Drop user data only → control + discovery survive
+        sender.drop_data_connection(&addr, user_port);
+        assert_eq!(sender.connection_count(), 2, "control + disc remain");
+
+        // Next send triggers re-reserve + re-bind for user port
+        let dummy_rtps = b"RTPS test payload for 12_9";
+        let result = sender.send_to_user_data(&addr, dummy_rtps);
+        assert!(
+            result.is_ok(),
+            "send_to_user_data should succeed after re-reserve: {:?}",
+            result.err()
+        );
+        assert_eq!(sender.connection_count(), 3, "all three connections restored");
+
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        handle.join().unwrap();
     }
 }
