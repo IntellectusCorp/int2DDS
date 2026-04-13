@@ -27,6 +27,7 @@ use crate::{
         time::Duration,
         types::LENGTH_UNLIMITED,
     },
+    infrastructure::qos_kind::QosKind,
     infrastructure::qos_policy::{
         DataRepresentationQosPolicy, DeadlineQosPolicy, DestinationOrderQosPolicy,
         DurabilityQosPolicy, EntityFactoryQosPolicy, GroupDataQosPolicy, HistoryQosPolicy,
@@ -39,8 +40,8 @@ use crate::{
 };
 use const_default::ConstDefault;
 
-pub const SUBSCRIBER_QOS_DEFAULT: SubscriberQos = SubscriberQos::DEFAULT;
-pub const DATAREADER_QOS_DEFAULT: DataReaderQos = DataReaderQos::DEFAULT;
+pub const SUBSCRIBER_QOS_DEFAULT: QosKind<SubscriberQos> = QosKind::Default;
+pub const DATAREADER_QOS_DEFAULT: QosKind<DataReaderQos> = QosKind::Default;
 // todo # define DATAREADER_QOS_USE_TOPIC_QOS
 
 #[derive(Debug, Clone, PartialEq, Eq)]

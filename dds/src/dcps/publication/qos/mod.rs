@@ -27,6 +27,7 @@ use crate::{
         time::Duration,
         types::LENGTH_UNLIMITED,
     },
+    infrastructure::qos_kind::QosKind,
     infrastructure::qos_policy::{
         DataRepresentationQosPolicy, DeadlineQosPolicy, DestinationOrderQosPolicy,
         DurabilityQosPolicy, DurabilityServiceQosPolicy, EntityFactoryQosPolicy,
@@ -39,8 +40,8 @@ use crate::{
 };
 use const_default::ConstDefault;
 
-pub const PUBLISHER_QOS_DEFAULT: PublisherQos = PublisherQos::DEFAULT;
-pub const DATAWRITER_QOS_DEFAULT: DataWriterQos = DataWriterQos::DEFAULT;
+pub const PUBLISHER_QOS_DEFAULT: QosKind<PublisherQos> = QosKind::Default;
+pub const DATAWRITER_QOS_DEFAULT: QosKind<DataWriterQos> = QosKind::Default;
 // todo # define DATAWRITER_QOS_USE_TOPIC_QOS
 
 #[derive(Debug, Clone, PartialEq, Eq)]

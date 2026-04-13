@@ -79,6 +79,39 @@ namespace Int2Dds.Core
         }
 
         /// <summary>
+        /// Creates a new Topic using a QoS profile path.
+        /// Normally called via DomainParticipant.CreateTopicWithProfile.
+        /// </summary>
+        internal Topic(DomainParticipant participant, string topicName, string qosPath)
+        {
+            _name = topicName;
+            var attr = typeof(T).GetCustomAttribute<DdsTypeAttribute>();
+            _typeName = attr?.TypeName ?? typeof(T).Name;
+            var extensibility = attr?.Extensibility ?? 0;
+            var hasKey = attr?.HasKey ?? false;
+
+            unsafe
+            {
+                var topicNameBytes = Encoding.UTF8.GetBytes(topicName + '\0');
+                var typeNameBytes = Encoding.UTF8.GetBytes(_typeName + '\0');
+
+                fixed (byte* pTopicName = topicNameBytes)
+                fixed (byte* pTypeName = typeNameBytes)
+                {
+                    ReturnCodeHelper.CheckReturn(
+                        NativeMethods.int2dds_create_topic_with_profile(
+                            participant.Handle,
+                            pTopicName,
+                            pTypeName,
+                            (int)extensibility,
+                            hasKey,
+                            qosPath,
+                            out _handle));
+                }
+            }
+        }
+
+        /// <summary>
         /// Gets the native handle. For internal use by other Core types.
         /// </summary>
         internal IntPtr Handle => _handle;
