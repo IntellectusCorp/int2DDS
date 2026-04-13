@@ -31,7 +31,8 @@ fn type_to_identifier(
         SerializationMethod::Char => quote! { #crate_path::xtypes::TypeIdentifier::Char8 },
         SerializationMethod::String => quote! { #crate_path::xtypes::TypeIdentifier::String8 },
         SerializationMethod::WString => quote! { #crate_path::xtypes::TypeIdentifier::String16 },
-        SerializationMethod::VecU8
+        SerializationMethod::DdsBytes
+        | SerializationMethod::VecU8
         | SerializationMethod::VecU16
         | SerializationMethod::VecU32
         | SerializationMethod::VecU64

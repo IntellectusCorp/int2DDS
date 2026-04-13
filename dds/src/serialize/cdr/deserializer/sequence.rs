@@ -1,3 +1,6 @@
+use std::sync::Arc;
+
+use crate::serialize::cdr::dds_bytes::DdsBytes;
 use crate::serialize::cdr::{CdrDeserializer, CdrError, Xcdr2Deserializer};
 
 use crate::serialize::{
@@ -12,6 +15,24 @@ impl<'a> CdrDeserializer<'a> {
         self.check_available(length)?;
 
         let result = self.data[self.position..self.position + length].to_vec();
+        self.position += length;
+
+        Ok(result)
+    }
+
+    /// Deserialize byte sequence as DdsBytes (zero-copy when shared backing is available).
+    pub fn deserialize_shared_bytes(&mut self) -> Result<DdsBytes, CdrError> {
+        let length = self.deserialize_u32()? as usize;
+        self.check_available(length)?;
+
+        let result = if let Some(backing) = &self.shared_backing {
+            // data points to &backing[4..] (after encapsulation header)
+            // so real offset in backing = 4 + self.position
+            let real_offset = 4 + self.position;
+            DdsBytes::shared(Arc::clone(backing), real_offset, length)
+        } else {
+            DdsBytes::owned(self.data[self.position..self.position + length].to_vec())
+        };
         self.position += length;
 
         Ok(result)
@@ -235,6 +256,20 @@ impl<'a> Xcdr2Deserializer<'a> {
         let length = self.deserialize_u32()? as usize;
         self.check_available(length)?;
         let result = self.data[self.position..self.position + length].to_vec();
+        self.position += length;
+        Ok(result)
+    }
+
+    pub fn deserialize_shared_bytes(&mut self) -> Result<DdsBytes, CdrError> {
+        let length = self.deserialize_u32()? as usize;
+        self.check_available(length)?;
+        let result = if let Some(backing) = &self.shared_backing {
+            let header_size = self.data.as_ptr() as usize - backing.as_ptr() as usize;
+            let real_offset = header_size + self.position;
+            DdsBytes::shared(Arc::clone(backing), real_offset, length)
+        } else {
+            DdsBytes::owned(self.data[self.position..self.position + length].to_vec())
+        };
         self.position += length;
         Ok(result)
     }
