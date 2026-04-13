@@ -74,6 +74,16 @@ namespace Int2Dds.Core
         }
 
         /// <summary>
+        /// Creates a new Subscriber using a QoS profile path.
+        /// Normally called via DomainParticipant.CreateSubscriberWithProfile.
+        /// </summary>
+        internal Subscriber(DomainParticipant participant, string qosPath)
+        {
+            ReturnCodeHelper.CheckReturn(
+                NativeMethods.int2dds_create_subscriber_with_profile(participant.Handle, qosPath, out _handle));
+        }
+
+        /// <summary>
         /// Gets the native handle. For internal use by other Core types.
         /// </summary>
         internal IntPtr Handle => _handle;

@@ -121,6 +121,43 @@ pub unsafe extern "C" fn int2dds_create_subscriber_with_qos(
     INT2DDS_RET_OK
 }
 
+/// Create a Subscriber using a QoS profile path
+///
+/// # Safety
+/// - `participant` must be a valid participant
+/// - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
+/// - `subscriber_out` must be a valid pointer to a null pointer
+/// - The returned subscriber must be freed with `int2dds_delete_subscriber`
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_create_subscriber_with_profile(
+    participant: *const Int2DdsParticipant,
+    qos_path: *const std::os::raw::c_char,
+    subscriber_out: *mut *mut Int2DdsSubscriber,
+) -> Int2DdsRet {
+    check_null!(participant);
+    check_null!(qos_path);
+    check_null!(subscriber_out);
+
+    let participant_ref = &*participant;
+
+    let qos_path_str = match CStr::from_ptr(qos_path).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    let subscriber = ffi_try!(participant_ref.inner.create_subscriber_with_profile(
+        qos_path_str,
+        None,
+        StatusMask::default()
+    ));
+
+    let subscriber_arc = Arc::new(subscriber);
+    let subscriber_handle = Box::new(Int2DdsSubscriber { inner: subscriber_arc });
+    *subscriber_out = Box::into_raw(subscriber_handle);
+
+    INT2DDS_RET_OK
+}
+
 /// Set QoS on a Subscriber
 ///
 /// # Safety

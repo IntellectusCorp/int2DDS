@@ -102,6 +102,43 @@ pub unsafe extern "C" fn int2dds_create_publisher_with_qos(
     INT2DDS_RET_OK
 }
 
+/// Create a Publisher using a QoS profile path
+///
+/// # Safety
+/// - `participant` must be a valid participant
+/// - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
+/// - `publisher_out` must be a valid pointer to a null pointer
+/// - The returned publisher must be freed with `int2dds_delete_publisher`
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_create_publisher_with_profile(
+    participant: *const Int2DdsParticipant,
+    qos_path: *const std::os::raw::c_char,
+    publisher_out: *mut *mut Int2DdsPublisher,
+) -> Int2DdsRet {
+    check_null!(participant);
+    check_null!(qos_path);
+    check_null!(publisher_out);
+
+    let participant_ref = &*participant;
+
+    let qos_path_str = match CStr::from_ptr(qos_path).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    let publisher = ffi_try!(participant_ref.inner.create_publisher_with_profile(
+        qos_path_str,
+        None,
+        StatusMask::default()
+    ));
+
+    let publisher_arc = Arc::new(publisher);
+    let publisher_handle = Box::new(Int2DdsPublisher { inner: publisher_arc });
+    *publisher_out = Box::into_raw(publisher_handle);
+
+    INT2DDS_RET_OK
+}
+
 /// Set QoS on a Publisher
 ///
 /// Applies new QoS policies to an existing Publisher. Some policies can only

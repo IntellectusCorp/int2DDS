@@ -141,6 +141,84 @@ pub unsafe extern "C" fn int2dds_create_topic_keyed(
     INT2DDS_RET_OK
 }
 
+/// Create a Topic using a QoS profile path
+///
+/// Same as `int2dds_create_topic_keyed` but uses a QoS profile path instead of a QoS handle.
+///
+/// # Safety
+/// - `participant` must be a valid participant
+/// - `topic_name` must be a valid null-terminated C string
+/// - `dds_type_name` must be a valid null-terminated C string (DDS registration name)
+/// - `extensibility`: 0 = Final, 1 = Appendable, 2 = Mutable
+/// - `has_key`: whether the data type has key fields
+/// - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
+/// - `topic_out` must be a valid pointer to a null pointer
+/// - The returned topic must be freed with `int2dds_delete_topic`
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_create_topic_with_profile(
+    participant: *const Int2DdsParticipant,
+    topic_name: *const std::os::raw::c_char,
+    dds_type_name: *const std::os::raw::c_char,
+    extensibility: i32,
+    has_key: bool,
+    qos_path: *const std::os::raw::c_char,
+    topic_out: *mut *mut Int2DdsTopic,
+) -> Int2DdsRet {
+    check_null!(participant);
+    check_null!(topic_name);
+    check_null!(dds_type_name);
+    check_null!(qos_path);
+    check_null!(topic_out);
+
+    let participant_ref = &*participant;
+
+    let topic_name_str = match CStr::from_ptr(topic_name).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    let dds_type_name_str = match CStr::from_ptr(dds_type_name).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    let qos_path_str = match CStr::from_ptr(qos_path).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    let ext_kind = match extensibility {
+        0 => ExtensibilityKind::Final,
+        1 => ExtensibilityKind::Appendable,
+        2 => ExtensibilityKind::Mutable,
+        _ => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    // Create RawTypeSupport
+    let type_support =
+        Arc::new(RawTypeSupport::new_with_key(dds_type_name_str.to_string(), ext_kind, has_key));
+
+    // Register the RawTypeSupport with the participant
+    ffi_try!(participant_ref
+        .inner
+        .register_type_support(type_support as Arc<dyn TypeSupport>, dds_type_name_str));
+
+    let topic = ffi_try!(participant_ref.inner.create_topic_with_profile::<Int2DdsData>(
+        topic_name_str,
+        dds_type_name_str,
+        qos_path_str,
+        None,
+        StatusMask::default()
+    ));
+
+    let topic_handle =
+        Box::new(Int2DdsTopic { inner: Arc::new(topic), type_name: dds_type_name_str.to_string() });
+
+    *topic_out = Box::into_raw(topic_handle);
+
+    INT2DDS_RET_OK
+}
+
 /// Create a Topic with type information for DDS-XTypes discovery
 ///
 /// Creates a topic using a pre-built `Int2DdsTypeInfo` which provides
