@@ -12,6 +12,10 @@ namespace Int2Dds.Interop
         internal static extern int int2dds_create_subscriber_with_qos(IntPtr participant, IntPtr qos, out IntPtr subscriber_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_create_subscriber_with_profile(IntPtr participant,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string qos_path, out IntPtr subscriber_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_subscriber_set_qos(IntPtr subscriber, IntPtr qos);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]

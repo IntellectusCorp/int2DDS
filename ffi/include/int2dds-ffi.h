@@ -836,6 +836,21 @@ Int2DdsRet int2dds_create_participant(const struct Int2DdsParticipantFactory *_f
                                       struct Int2DdsParticipant **participant_out);
 
 /**
+ * Create a DomainParticipant using a QoS profile path
+ *
+ * # Safety
+ * - `name` must be a valid null-terminated C string or null
+ * - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
+ * - `participant_out` must be a valid pointer to a null pointer
+ * - The returned participant must be freed with `int2dds_delete_participant`
+ */
+Int2DdsRet int2dds_create_participant_with_profile(const struct Int2DdsParticipantFactory *_factory,
+                                                   const char *name,
+                                                   int32_t domain_id,
+                                                   const char *qos_path,
+                                                   struct Int2DdsParticipant **participant_out);
+
+/**
  * Delete a DomainParticipant
  *
  * # Safety
@@ -898,6 +913,19 @@ Int2DdsRet int2dds_create_publisher(const struct Int2DdsParticipant *participant
 Int2DdsRet int2dds_create_publisher_with_qos(const struct Int2DdsParticipant *participant,
                                              const struct Int2DdsPublisherQos *qos,
                                              struct Int2DdsPublisher **publisher_out);
+
+/**
+ * Create a Publisher using a QoS profile path
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
+ * - `publisher_out` must be a valid pointer to a null pointer
+ * - The returned publisher must be freed with `int2dds_delete_publisher`
+ */
+Int2DdsRet int2dds_create_publisher_with_profile(const struct Int2DdsParticipant *participant,
+                                                 const char *qos_path,
+                                                 struct Int2DdsPublisher **publisher_out);
 
 /**
  * Set QoS on a Publisher
@@ -2014,6 +2042,19 @@ Int2DdsRet int2dds_create_subscriber_with_qos(const struct Int2DdsParticipant *p
                                               struct Int2DdsSubscriber **subscriber_out);
 
 /**
+ * Create a Subscriber using a QoS profile path
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
+ * - `subscriber_out` must be a valid pointer to a null pointer
+ * - The returned subscriber must be freed with `int2dds_delete_subscriber`
+ */
+Int2DdsRet int2dds_create_subscriber_with_profile(const struct Int2DdsParticipant *participant,
+                                                  const char *qos_path,
+                                                  struct Int2DdsSubscriber **subscriber_out);
+
+/**
  * Set QoS on a Subscriber
  *
  * # Safety
@@ -2490,6 +2531,29 @@ Int2DdsRet int2dds_create_topic_keyed(const struct Int2DdsParticipant *participa
                                       bool has_key,
                                       const struct Int2DdsTopicQos *qos,
                                       struct Int2DdsTopic **topic_out);
+
+/**
+ * Create a Topic using a QoS profile path
+ *
+ * Same as `int2dds_create_topic_keyed` but uses a QoS profile path instead of a QoS handle.
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `topic_name` must be a valid null-terminated C string
+ * - `dds_type_name` must be a valid null-terminated C string (DDS registration name)
+ * - `extensibility`: 0 = Final, 1 = Appendable, 2 = Mutable
+ * - `has_key`: whether the data type has key fields
+ * - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
+ * - `topic_out` must be a valid pointer to a null pointer
+ * - The returned topic must be freed with `int2dds_delete_topic`
+ */
+Int2DdsRet int2dds_create_topic_with_profile(const struct Int2DdsParticipant *participant,
+                                             const char *topic_name,
+                                             const char *dds_type_name,
+                                             int32_t extensibility,
+                                             bool has_key,
+                                             const char *qos_path,
+                                             struct Int2DdsTopic **topic_out);
 
 /**
  * Create a Topic with type information for DDS-XTypes discovery
