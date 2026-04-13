@@ -159,13 +159,7 @@ impl Reader for SPDPBuiltinParticipantReader {
     }
     fn set_datareader_cache(
         &mut self,
-        datareader_cache: Weak<
-            Mutex<
-                dyn dcps_history_cache<CacheChangeInputType = Arc<Mutex<CacheChange>>>
-                    + Send
-                    + Sync,
-            >,
-        >,
+        datareader_cache: Weak<Mutex<dyn dcps_history_cache + Send + Sync>>,
     ) -> RtpsResult<()> {
         let cache_guard = self.reader_cache.lock();
         match cache_guard {

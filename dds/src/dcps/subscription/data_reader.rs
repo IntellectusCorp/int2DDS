@@ -408,16 +408,11 @@ impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
         // Common: Connect datareader cache to RTPS reader cache
         {
             let reader_cache = rtps_reader.reader_cache();
-            reader_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?.set_datareader_cache(
-                Arc::downgrade(&self.datareader_cache)
-                    as Weak<
-                        Mutex<
-                            dyn DcpsHistoryCache<CacheChangeInputType = Arc<Mutex<CacheChange>>>
-                                + Send
-                                + Sync,
-                        >,
-                    >,
-            );
+            reader_cache
+                .lock()
+                .map_err(|e| DdsError::Error(e.to_string()))?
+                .set_datareader_cache(Arc::downgrade(&self.datareader_cache)
+                    as Weak<Mutex<dyn DcpsHistoryCache + Send + Sync>>);
         }
 
         Ok(())

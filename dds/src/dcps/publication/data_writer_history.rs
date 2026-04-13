@@ -64,8 +64,6 @@ pub(crate) struct DataWriterHistoryCache<Foo> {
 }
 
 impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
-    type CacheChangeInputType = Arc<CacheChange>;
-
     // Returns a reference to the list of CacheChanges.
     fn get_changes(&self) -> &Vec<Arc<CacheChange>> {
         &self.changes
