@@ -22,12 +22,32 @@
 #define sleep_ms(ms) usleep((ms) * 1000)
 #endif
 
+#define INT2DDS_CDR_STATIC
 #include "int2dds-ffi.h"
+#include "int2dds_cdr.h"
+
+/* HelloWorld type - same layout as hello_world.h */
+typedef struct HelloWorld {
+    uint32_t index;
+    char message[257];
+} HelloWorld;
+
+static bool HelloWorld_deserialize_cdr(const uint8_t *buf, size_t len, HelloWorld *val_out) {
+    Int2DdsCdrReader r;
+    if (int2dds_cdr_reader_init(&r, buf, len) != INT2DDS_CDR_OK)
+        return false;
+    uint32_t obj_size = 0;
+    size_t start_pos = 0;
+    int2dds_cdr_read_dheader(&r, &obj_size, &start_pos);
+    int2dds_cdr_read_u32(&r, &val_out->index);
+    int2dds_cdr_read_string_copy(&r, val_out->message, 257, NULL);
+    int2dds_cdr_read_dheader_end(&r, obj_size, start_pos);
+    return int2dds_cdr_reader_error(&r) == INT2DDS_CDR_OK;
+}
 
 /* Application context - passed to callbacks via user_context */
 typedef struct {
     int message_count;
-    Int2DdsData* data;  /* Data container for receiving */
 } AppContext;
 
 /**
@@ -36,37 +56,26 @@ typedef struct {
  */
 void on_data_available(Int2DdsDataReader* reader, void* user_ctx) {
     AppContext* ctx = (AppContext*)user_ctx;
-    bool valid;
     Int2DdsRet ret;
 
     printf("\n[Callback] on_data_available called!\n");
 
     /* Take all available data */
-    while ((ret = int2dds_take(reader, ctx->data, &valid)) == INT2DDS_RET_OK) {
-        if (valid) {
-            uint32_t index;
-            char message[256];
-            size_t message_len;
+    uint8_t recv_buf[4096];
+    uintptr_t actual_size;
+    bool valid_data;
+    HelloWorld hw;
 
-            /* Get field values */
-            ret = int2dds_data_get_u32(ctx->data, "index", &index);
-            if (ret != INT2DDS_RET_OK) {
-                fprintf(stderr, "  [Error] Failed to get index: %d\n", ret);
-                continue;
+    while ((ret = int2dds_take_serialized(reader, recv_buf, sizeof(recv_buf),
+                                          &actual_size, &valid_data)) == INT2DDS_RET_OK) {
+        if (valid_data) {
+            if (HelloWorld_deserialize_cdr(recv_buf, actual_size, &hw)) {
+                printf("  [Data] Received: index=%u, message='%s'\n", hw.index, hw.message);
+                ctx->message_count++;
+            } else {
+                fprintf(stderr, "  [Error] Deserialization failed\n");
             }
-
-            ret = int2dds_data_get_string(ctx->data, "message", message, sizeof(message), &message_len);
-            if (ret != INT2DDS_RET_OK) {
-                fprintf(stderr, "  [Error] Failed to get message: %d\n", ret);
-                continue;
-            }
-
-            printf("  [Data] Received: index=%u, message='%s'\n", index, message);
-
-            /* Update application context */
-            ctx->message_count++;
         } else {
-            /* Invalid sample (e.g., dispose notification) */
             printf("  [Info] Received invalid sample (metadata only)\n");
         }
     }
@@ -105,8 +114,6 @@ int main(int argc, char* argv[]) {
     Int2DdsTopic* topic = NULL;
     Int2DdsDataReader* reader = NULL;
     Int2DdsDataReaderQos* qos = NULL;
-    Int2DdsTypeDescriptor* type_desc = NULL;
-    Int2DdsData* data = NULL;
 
     int32_t domain_id = 0;
     int use_reliable = 1;  /* Use reliable for better demonstration */
@@ -131,8 +138,8 @@ int main(int argc, char* argv[]) {
     printf("This example demonstrates DataReader listener callbacks.\n");
     printf("Start the publisher to see callbacks fire automatically!\n\n");
 
-    /* Initialize application context (data will be set later) */
-    AppContext app_context = {0, NULL};
+    /* Initialize application context */
+    AppContext app_context = {0};
 
     /* Initialize factory */
     ret = int2dds_domain_participant_factory_get_instance(&factory);
@@ -142,7 +149,7 @@ int main(int argc, char* argv[]) {
     }
 
     /* Create participant */
-    ret = int2dds_create_participant(factory, NULL, domain_id, &participant);
+    ret = int2dds_create_participant(factory, "listener_subscriber", domain_id, &participant);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create participant: %d\n", ret);
         return 1;
@@ -155,31 +162,13 @@ int main(int argc, char* argv[]) {
         goto cleanup_participant;
     }
 
-    /* Create type descriptor for HelloWorld */
-    ret = int2dds_type_descriptor_create("HelloWorld", &type_desc);
-    if (ret != INT2DDS_RET_OK) {
-        fprintf(stderr, "Failed to create type descriptor: %d\n", ret);
-        goto cleanup_subscriber;
-    }
-
-    /* Add fields to type descriptor */
-    ret = int2dds_type_descriptor_add_u32(type_desc, "index", false);
-    if (ret != INT2DDS_RET_OK) {
-        fprintf(stderr, "Failed to add index field: %d\n", ret);
-        goto cleanup_type_desc;
-    }
-
-    ret = int2dds_type_descriptor_add_string(type_desc, "message", 256, false);
-    if (ret != INT2DDS_RET_OK) {
-        fprintf(stderr, "Failed to add message field: %d\n", ret);
-        goto cleanup_type_desc;
-    }
-
-    /* Create topic with type descriptor */
-    ret = int2dds_create_topic(participant, "HelloWorldTopic", "HelloWorldType", type_desc, NULL, &topic);
+    /* Create topic (Appendable extensibility) */
+    ret = int2dds_create_topic(participant, "HelloWorldTopic", "HelloWorld",
+                               1,  /* APPENDABLE */
+                               NULL, &topic);
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create topic: %d\n", ret);
-        goto cleanup_type_desc;
+        goto cleanup_subscriber;
     }
 
     /* Configure QoS */
@@ -190,45 +179,39 @@ int main(int argc, char* argv[]) {
     }
 
     if (use_reliable) {
-        ret = int2dds_datareader_qos_set_reliability(qos, 1);  /* RELIABLE */
+        ret = int2dds_datareader_qos_set_reliability(qos, INT2DDS_QOS_RELIABILITY_RELIABLE, 100000000);
     } else {
-        ret = int2dds_datareader_qos_set_reliability(qos, 0);  /* BEST_EFFORT */
+        ret = int2dds_datareader_qos_set_reliability(qos, INT2DDS_QOS_RELIABILITY_BEST_EFFORT, 0);
     }
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to set reliability QoS: %d\n", ret);
         goto cleanup_qos;
     }
 
-    /* Create data container for receiving */
-    ret = int2dds_data_create(type_desc, &data);
-    if (ret != INT2DDS_RET_OK) {
-        fprintf(stderr, "Failed to create data: %d\n", ret);
-        goto cleanup_qos;
-    }
-    app_context.data = data;  /* Set data in application context */
-
     /* Configure listener with callbacks and user context */
-    Int2DdsDataReaderListener listener = {0};
-    listener.on_data_available = on_data_available;
-    listener.on_subscription_matched = on_subscription_matched;
-    listener.on_sample_rejected = NULL;  /* Not using other callbacks */
-    listener.on_liveliness_changed = NULL;
-    listener.on_requested_deadline_missed = NULL;
-    listener.on_requested_incompatible_qos = NULL;
-    listener.on_sample_lost = NULL;
-    listener.user_context = &app_context;  /* Pass application context */
+    {
+        Int2DdsDataReaderListener listener = {0};
+        listener.on_data_available = on_data_available;
+        listener.on_subscription_matched = on_subscription_matched;
+        listener.on_sample_rejected = NULL;
+        listener.on_liveliness_changed = NULL;
+        listener.on_requested_deadline_missed = NULL;
+        listener.on_requested_incompatible_qos = NULL;
+        listener.on_sample_lost = NULL;
+        listener.user_context = &app_context;
 
-    printf("Creating DataReader with listener...\n");
+        printf("Creating DataReader with listener...\n");
 
-    /* Create reader with listener - ALL status changes enabled (0xFFFFFFFF) */
-    ret = int2dds_create_datareader_with_listener(
-        subscriber,
-        topic,
-        qos,
-        &listener,
-        0xFFFFFFFF,  /* Enable all status notifications */
-        &reader
-    );
+        /* Create reader with listener - ALL status changes enabled (0xFFFFFFFF) */
+        ret = int2dds_create_datareader_with_listener(
+            subscriber,
+            topic,
+            qos,
+            &listener,
+            0xFFFFFFFF,
+            &reader
+        );
+    }
     if (ret != INT2DDS_RET_OK) {
         fprintf(stderr, "Failed to create datareader with listener: %d\n", ret);
         goto cleanup_qos;
@@ -240,7 +223,6 @@ int main(int argc, char* argv[]) {
     /* Wait for data - callbacks handle everything! */
     for (int i = 0; i < wait_time; i++) {
         sleep_ms(1000);
-        /* Note: We don't need to poll or call wait() - callbacks handle data automatically! */
     }
 
     printf("\n=== Final Statistics ===\n");
@@ -252,16 +234,12 @@ int main(int argc, char* argv[]) {
         printf("Cleaning up...\n");
         int2dds_delete_datareader(reader);
     }
-    if (data) int2dds_data_delete(data);
 
 cleanup_qos:
     if (qos) int2dds_datareader_qos_destroy(qos);
 
 cleanup_topic:
     if (topic) int2dds_delete_topic(topic);
-
-cleanup_type_desc:
-    if (type_desc) int2dds_type_descriptor_delete(type_desc);
 
 cleanup_subscriber:
     if (subscriber) int2dds_delete_subscriber(subscriber);
