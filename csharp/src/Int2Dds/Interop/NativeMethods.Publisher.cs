@@ -33,6 +33,14 @@ namespace Int2Dds.Interop
         internal static unsafe extern int int2dds_create_datawriter_with_listener(IntPtr publisher, IntPtr topic, IntPtr qos, NativeDataWriterListener* listener, uint mask, out IntPtr writer_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_create_datawriter_with_profile(IntPtr publisher, IntPtr topic,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string qos_path, out IntPtr writer_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_create_datawriter_with_profile_and_listener(IntPtr publisher, IntPtr topic,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string qos_path, NativeDataWriterListener* listener, uint mask, out IntPtr writer_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static unsafe extern int int2dds_datawriter_set_listener(IntPtr writer, NativeDataWriterListener* listener, uint mask);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
