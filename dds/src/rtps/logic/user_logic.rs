@@ -1553,15 +1553,25 @@ impl UnicastMessageProcessor for UserLogic {
         }
 
         for reader in matched_readers {
-            let mut change = CacheChange::new(
+            let mut change = {
+                let reader_cache = reader.reader_cache();
+                let mut cache = reader_cache.lock().map_err(|_| {
+                    RtpsError::new(
+                        RtpsErrorCode::LockError,
+                        "Failed to acquire reader cache lock for pool",
+                    )
+                })?;
+                cache.acquire_change()
+            };
+            change.reset(
                 ChangeKind::Alive,
                 remote_writer_guid,
                 InstanceHandle::NIL,
                 data.writer_sn,
-                data.serialized_data().to_vec(),
-                // inline_qos,
                 message_receiver.get_source_timestamp(),
             );
+            let serialized = data.serialized_data();
+            change.data_value.extend_from_slice(&serialized);
 
             self.apply_writer_attributes_to_change(
                 reader.clone(),
@@ -2100,14 +2110,24 @@ impl UnicastMessageProcessor for UserLogic {
                         }
                     }
 
-                    let mut assembled_change = CacheChange::new(
+                    let mut assembled_change = {
+                        let reader_cache = reader.reader_cache();
+                        let mut cache = reader_cache.lock().map_err(|_| {
+                            RtpsError::new(
+                                RtpsErrorCode::LockError,
+                                "Failed to acquire reader cache lock for pool",
+                            )
+                        })?;
+                        cache.acquire_change()
+                    };
+                    assembled_change.reset(
                         ChangeKind::Alive,
                         remote_writer_guid,
                         InstanceHandle::NIL,
                         data_frag.writer_sn,
-                        serialized_data.clone(),
                         assembled_timestamp,
                     );
+                    assembled_change.data_value.extend_from_slice(&serialized_data);
 
                     assembled_change.set_ownership_strength(ownership_strength);
 
