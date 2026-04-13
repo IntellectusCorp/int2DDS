@@ -20,8 +20,6 @@ pub mod xtypes;
 #[doc(hidden)]
 pub use dcps::topic::{DdsType, FieldAccessor};
 #[doc(hidden)]
-pub use int2dds_derive::DdsType as DeriveDdsType;
-#[doc(hidden)]
 pub mod utils;
 
 extern crate md5;
