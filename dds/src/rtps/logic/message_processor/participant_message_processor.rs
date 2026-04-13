@@ -209,17 +209,17 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
         &self,
         spdp_discovered_participant_data: Arc<SPDPDiscoveredParticipantData>,
     ) -> RtpsResult<()> {
-        let heartbeat_period =
-            match self.get_upgraded_participant()?.spdp_builtin_participant_writer().lock() {
-                Ok(writer) => writer.heartbeat_period(),
-                Err(e) => {
-                    log::error!("Failed to acquire spdp builtin participant writer lock: {}", e);
-                    RtpsDuration::from_seconds_f64(2.0)
-                }
-            };
+        let participant = self.get_upgraded_participant()?;
 
-        let sending_handler =
-            SendingHandler::get_instance(self.get_upgraded_participant()?, None, None);
+        let heartbeat_period = match participant.spdp_builtin_participant_writer().lock() {
+            Ok(writer) => writer.heartbeat_period(),
+            Err(e) => {
+                log::error!("Failed to acquire spdp builtin participant writer lock: {}", e);
+                RtpsDuration::from_seconds_f64(2.0)
+            }
+        };
+
+        let sending_handler = SendingHandler::get_instance(participant, None, None);
 
         sending_handler.push_message_and_wake(MessageType::PeriodicParticipantDataUnicast(
             None,
