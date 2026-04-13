@@ -999,6 +999,41 @@ Int2DdsRet int2dds_create_datawriter_with_listener(const struct Int2DdsPublisher
                                                    struct Int2DdsDataWriter **writer_out);
 
 /**
+ * Create a DataWriter using a QoS profile path
+ *
+ * # Safety
+ * - `publisher` must be a valid publisher
+ * - `topic` must be a valid topic
+ * - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
+ * - `writer_out` must be a valid pointer to a null pointer
+ * - The returned writer must be freed with `int2dds_delete_datawriter`
+ */
+Int2DdsRet int2dds_create_datawriter_with_profile(const struct Int2DdsPublisher *publisher,
+                                                  const struct Int2DdsTopic *topic,
+                                                  const char *qos_path,
+                                                  struct Int2DdsDataWriter **writer_out);
+
+/**
+ * Create a DataWriter with listener callbacks using a QoS profile path
+ *
+ * # Safety
+ * - `publisher` must be a valid publisher
+ * - `topic` must be a valid topic
+ * - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
+ * - `listener` can be null for no listener
+ * - `mask` specifies which status changes trigger callbacks
+ * - `writer_out` must be a valid pointer to a null pointer
+ * - The returned writer must be freed with `int2dds_delete_datawriter`
+ * - Listener callbacks must be thread-safe and remain valid until writer is deleted
+ */
+Int2DdsRet int2dds_create_datawriter_with_profile_and_listener(const struct Int2DdsPublisher *publisher,
+                                                               const struct Int2DdsTopic *topic,
+                                                               const char *qos_path,
+                                                               const struct Int2DdsDataWriterListener *listener,
+                                                               uint32_t mask,
+                                                               struct Int2DdsDataWriter **writer_out);
+
+/**
  * Set or update the listener for a DataWriter
  *
  * # Safety
@@ -2044,6 +2079,41 @@ Int2DdsRet int2dds_create_datareader_with_listener(const struct Int2DdsSubscribe
                                                    const struct Int2DdsDataReaderListener *listener,
                                                    uint32_t mask,
                                                    struct Int2DdsDataReader **reader_out);
+
+/**
+ * Create a DataReader using a QoS profile path
+ *
+ * # Safety
+ * - `subscriber` must be a valid subscriber
+ * - `topic` must be a valid topic
+ * - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
+ * - `reader_out` must be a valid pointer to a null pointer
+ * - The returned reader must be freed with `int2dds_delete_datareader`
+ */
+Int2DdsRet int2dds_create_datareader_with_profile(const struct Int2DdsSubscriber *subscriber,
+                                                  const struct Int2DdsTopic *topic,
+                                                  const char *qos_path,
+                                                  struct Int2DdsDataReader **reader_out);
+
+/**
+ * Create a DataReader with listener callbacks using a QoS profile path
+ *
+ * # Safety
+ * - `subscriber` must be a valid subscriber
+ * - `topic` must be a valid topic
+ * - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
+ * - `listener` can be null for no listener
+ * - `mask` specifies which status changes trigger callbacks
+ * - `reader_out` must be a valid pointer to a null pointer
+ * - The returned reader must be freed with `int2dds_delete_datareader`
+ * - Listener callbacks must be thread-safe and remain valid until reader is deleted
+ */
+Int2DdsRet int2dds_create_datareader_with_profile_and_listener(const struct Int2DdsSubscriber *subscriber,
+                                                               const struct Int2DdsTopic *topic,
+                                                               const char *qos_path,
+                                                               const struct Int2DdsDataReaderListener *listener,
+                                                               uint32_t mask,
+                                                               struct Int2DdsDataReader **reader_out);
 
 /**
  * Set or update the listener for a DataReader

@@ -12,6 +12,7 @@
 //! C users serialize data with IDL-generated code and pass CDR bytes
 //! directly via `int2dds_write_serialized`.
 
+use std::ffi::CStr;
 use std::sync::Arc;
 
 use int2dds::{
@@ -348,6 +349,133 @@ pub unsafe extern "C" fn int2dds_create_datawriter_with_listener(
         // Check if matching already occurred before the listener was set.
         // This handles the race condition where SEDP matching completes between
         // create_datawriter() and set_listener().
+        if mask & crate::status_condition::INT2DDS_STATUS_PUBLICATION_MATCHED != 0 {
+            if let Ok(status) = writer_handle.inner.get_publication_matched_status() {
+                if status.current_count() > 0 {
+                    listener_arc.on_publication_matched(&writer_handle.inner, &status);
+                }
+            }
+        }
+        if mask & crate::status_condition::INT2DDS_STATUS_OFFERED_INCOMPATIBLE_QOS != 0 {
+            if let Ok(status) = writer_handle.inner.get_offered_incompatible_qos_status() {
+                if status.total_count() > 0 {
+                    listener_arc.on_offered_incompatible_qos(&writer_handle.inner, &status);
+                }
+            }
+        }
+    }
+
+    *writer_out = Box::into_raw(writer_handle);
+
+    INT2DDS_RET_OK
+}
+
+/// Create a DataWriter using a QoS profile path
+///
+/// # Safety
+/// - `publisher` must be a valid publisher
+/// - `topic` must be a valid topic
+/// - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
+/// - `writer_out` must be a valid pointer to a null pointer
+/// - The returned writer must be freed with `int2dds_delete_datawriter`
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_create_datawriter_with_profile(
+    publisher: *const Int2DdsPublisher,
+    topic: *const Int2DdsTopic,
+    qos_path: *const std::os::raw::c_char,
+    writer_out: *mut *mut Int2DdsDataWriter,
+) -> Int2DdsRet {
+    check_null!(publisher);
+    check_null!(topic);
+    check_null!(qos_path);
+    check_null!(writer_out);
+
+    let publisher_ref = &*publisher;
+    let topic_ref = &*topic;
+
+    let qos_path_str = match CStr::from_ptr(qos_path).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    let writer = ffi_try!(publisher_ref.inner.create_datawriter_with_profile::<Int2DdsData>(
+        &topic_ref.inner,
+        qos_path_str,
+        None,
+        StatusMask::default()
+    ));
+
+    let writer_handle = Box::new(Int2DdsDataWriter { inner: writer, listener: None });
+
+    *writer_out = Box::into_raw(writer_handle);
+
+    INT2DDS_RET_OK
+}
+
+/// Create a DataWriter with listener callbacks using a QoS profile path
+///
+/// # Safety
+/// - `publisher` must be a valid publisher
+/// - `topic` must be a valid topic
+/// - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
+/// - `listener` can be null for no listener
+/// - `mask` specifies which status changes trigger callbacks
+/// - `writer_out` must be a valid pointer to a null pointer
+/// - The returned writer must be freed with `int2dds_delete_datawriter`
+/// - Listener callbacks must be thread-safe and remain valid until writer is deleted
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_create_datawriter_with_profile_and_listener(
+    publisher: *const Int2DdsPublisher,
+    topic: *const Int2DdsTopic,
+    qos_path: *const std::os::raw::c_char,
+    listener: *const Int2DdsDataWriterListener,
+    mask: u32,
+    writer_out: *mut *mut Int2DdsDataWriter,
+) -> Int2DdsRet {
+    check_null!(publisher);
+    check_null!(topic);
+    check_null!(qos_path);
+    check_null!(writer_out);
+
+    let publisher_ref = &*publisher;
+    let topic_ref = &*topic;
+
+    let qos_path_str = match CStr::from_ptr(qos_path).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    // Create DataWriter<Int2DdsData> first without listener
+    let writer = ffi_try!(publisher_ref.inner.create_datawriter_with_profile::<Int2DdsData>(
+        &topic_ref.inner,
+        qos_path_str,
+        None,
+        StatusMask::from_bits_truncate(mask)
+    ));
+
+    // Create writer_handle with the actual writer
+    let mut writer_handle = Box::new(Int2DdsDataWriter { inner: writer, listener: None });
+
+    // If listener is provided, set it now
+    if !listener.is_null() {
+        let writer_ptr = &mut *writer_handle as *mut Int2DdsDataWriter;
+        let ffi_listener = FfiDataWriterListener::new(*listener, writer_ptr);
+        let listener_arc = Arc::new(ffi_listener);
+
+        // Set the listener on the writer
+        let listener_clone = listener_arc.clone()
+            as Arc<
+                dyn int2dds::publication::data_writer_listener::DataWriterListener<
+                    Foo = Int2DdsData,
+                >,
+            >;
+        ffi_try!(writer_handle
+            .inner
+            .set_listener(Some(listener_clone), StatusMask::from_bits_truncate(mask)));
+
+        writer_handle.listener = Some(listener_arc.clone());
+
+        // Check if matching already occurred before the listener was set.
         if mask & crate::status_condition::INT2DDS_STATUS_PUBLICATION_MATCHED != 0 {
             if let Ok(status) = writer_handle.inner.get_publication_matched_status() {
                 if status.current_count() > 0 {

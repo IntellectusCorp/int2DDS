@@ -12,6 +12,7 @@
 //! C users receive raw CDR bytes via `int2dds_take_serialized` / `int2dds_read_serialized`
 //! and deserialize them with IDL-generated code.
 
+use std::ffi::CStr;
 use std::sync::Arc;
 
 use int2dds::{
@@ -315,6 +316,133 @@ pub unsafe extern "C" fn int2dds_create_datareader_with_listener(
         // Check if matching already occurred before the listener was set.
         // This handles the race condition where SEDP matching completes between
         // create_datareader() and set_listener().
+        if mask & crate::status_condition::INT2DDS_STATUS_SUBSCRIPTION_MATCHED != 0 {
+            if let Ok(status) = reader_handle.inner.get_subscription_matched_status() {
+                if status.current_count() > 0 {
+                    listener_arc.on_subscription_matched(&reader_handle.inner, &status);
+                }
+            }
+        }
+        if mask & crate::status_condition::INT2DDS_STATUS_REQUESTED_INCOMPATIBLE_QOS != 0 {
+            if let Ok(status) = reader_handle.inner.get_requested_incompatible_qos_status() {
+                if status.total_count() > 0 {
+                    listener_arc.on_requested_incompatible_qos(&reader_handle.inner, &status);
+                }
+            }
+        }
+    }
+
+    *reader_out = Box::into_raw(reader_handle);
+
+    INT2DDS_RET_OK
+}
+
+/// Create a DataReader using a QoS profile path
+///
+/// # Safety
+/// - `subscriber` must be a valid subscriber
+/// - `topic` must be a valid topic
+/// - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
+/// - `reader_out` must be a valid pointer to a null pointer
+/// - The returned reader must be freed with `int2dds_delete_datareader`
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_create_datareader_with_profile(
+    subscriber: *const Int2DdsSubscriber,
+    topic: *const Int2DdsTopic,
+    qos_path: *const std::os::raw::c_char,
+    reader_out: *mut *mut Int2DdsDataReader,
+) -> Int2DdsRet {
+    check_null!(subscriber);
+    check_null!(topic);
+    check_null!(qos_path);
+    check_null!(reader_out);
+
+    let subscriber_ref = &*subscriber;
+    let topic_ref = &*topic;
+
+    let qos_path_str = match CStr::from_ptr(qos_path).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    let reader = ffi_try!(subscriber_ref.inner.create_datareader_with_profile::<Int2DdsData>(
+        &*topic_ref.inner,
+        qos_path_str,
+        None,
+        StatusMask::default()
+    ));
+
+    let reader_handle = Box::new(Int2DdsDataReader { inner: reader, listener: None });
+
+    *reader_out = Box::into_raw(reader_handle);
+
+    INT2DDS_RET_OK
+}
+
+/// Create a DataReader with listener callbacks using a QoS profile path
+///
+/// # Safety
+/// - `subscriber` must be a valid subscriber
+/// - `topic` must be a valid topic
+/// - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
+/// - `listener` can be null for no listener
+/// - `mask` specifies which status changes trigger callbacks
+/// - `reader_out` must be a valid pointer to a null pointer
+/// - The returned reader must be freed with `int2dds_delete_datareader`
+/// - Listener callbacks must be thread-safe and remain valid until reader is deleted
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_create_datareader_with_profile_and_listener(
+    subscriber: *const Int2DdsSubscriber,
+    topic: *const Int2DdsTopic,
+    qos_path: *const std::os::raw::c_char,
+    listener: *const Int2DdsDataReaderListener,
+    mask: u32,
+    reader_out: *mut *mut Int2DdsDataReader,
+) -> Int2DdsRet {
+    check_null!(subscriber);
+    check_null!(topic);
+    check_null!(qos_path);
+    check_null!(reader_out);
+
+    let subscriber_ref = &*subscriber;
+    let topic_ref = &*topic;
+
+    let qos_path_str = match CStr::from_ptr(qos_path).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    // Create DataReader<Int2DdsData> first without listener
+    let reader = ffi_try!(subscriber_ref.inner.create_datareader_with_profile::<Int2DdsData>(
+        &*topic_ref.inner,
+        qos_path_str,
+        None,
+        StatusMask::from_bits_truncate(mask)
+    ));
+
+    // Create reader_handle with the actual reader
+    let mut reader_handle = Box::new(Int2DdsDataReader { inner: reader, listener: None });
+
+    // If listener is provided, set it now
+    if !listener.is_null() {
+        let reader_ptr = &mut *reader_handle as *mut Int2DdsDataReader;
+        let ffi_listener = FfiDataReaderListener::new(*listener, reader_ptr);
+        let listener_arc = Arc::new(ffi_listener);
+
+        // Set the listener on the reader
+        let listener_clone = listener_arc.clone()
+            as Arc<
+                dyn int2dds::subscription::data_reader_listener::DataReaderListener<
+                    Foo = Int2DdsData,
+                >,
+            >;
+        ffi_try!(reader_handle
+            .inner
+            .set_listener(Some(listener_clone), StatusMask::from_bits_truncate(mask)));
+
+        reader_handle.listener = Some(listener_arc.clone());
+
+        // Check if matching already occurred before the listener was set.
         if mask & crate::status_condition::INT2DDS_STATUS_SUBSCRIPTION_MATCHED != 0 {
             if let Ok(status) = reader_handle.inner.get_subscription_matched_status() {
                 if status.current_count() > 0 {
