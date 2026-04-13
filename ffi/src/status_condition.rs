@@ -92,6 +92,54 @@ pub unsafe extern "C" fn int2dds_datawriter_get_statuscondition(
     INT2DDS_RET_OK
 }
 
+/// Get the current status change bitmask from a DataReader.
+///
+/// # Safety
+/// - `reader` must be a valid datareader
+/// - `mask_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_get_status_changes(
+    reader: *const Int2DdsDataReader,
+    mask_out: *mut u32,
+) -> Int2DdsRet {
+    check_null!(reader);
+    check_null!(mask_out);
+
+    let reader_ref = &*reader;
+
+    match reader_ref.inner.get_status_changes() {
+        Ok(mask) => {
+            *mask_out = mask.bits();
+            INT2DDS_RET_OK
+        }
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
+/// Get the current status change bitmask from a DataWriter.
+///
+/// # Safety
+/// - `writer` must be a valid datawriter
+/// - `mask_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_get_status_changes(
+    writer: *const Int2DdsDataWriter,
+    mask_out: *mut u32,
+) -> Int2DdsRet {
+    check_null!(writer);
+    check_null!(mask_out);
+
+    let writer_ref = &*writer;
+
+    match writer_ref.inner.get_status_changes() {
+        Ok(mask) => {
+            *mask_out = mask.bits();
+            INT2DDS_RET_OK
+        }
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
 /// Set the enabled statuses for a StatusCondition
 ///
 /// Only the statuses in the mask will trigger the condition.

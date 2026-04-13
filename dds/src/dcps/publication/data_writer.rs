@@ -1690,7 +1690,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         let monitor_guard =
             self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
         if let Some(monitor) = monitor_guard.as_ref() {
-            if is_new_instance {
+            if is_new_instance || instance_handle.is_nil() {
                 monitor.track_instance(&instance_handle);
             }
             monitor.reschedule_instance(&instance_handle);
