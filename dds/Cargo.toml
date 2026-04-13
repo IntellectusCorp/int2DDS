@@ -91,20 +91,12 @@ name = "qos_profile_subscriber"
 path = "examples/qos_profile/subscriber.rs"
 
 [[example]]
-name = "xtypes_publisher"
-path = "examples/xtypes/xtypes_publisher.rs"
+name = "dynamic_type_publisher"
+path = "examples/xtypes/dynamic_type_publisher.rs"
 
 [[example]]
-name = "xtypes_subscriber"
-path = "examples/xtypes/xtypes_subscriber.rs"
-
-[[example]]
-name = "ffi_hello_world_publisher"
-path = "examples/ffi/hello_world_publisher.rs"
-
-[[example]]
-name = "ffi_hello_world_subscriber"
-path = "examples/ffi/hello_world_subscriber.rs"
+name = "dynamic_type_subscriber"
+path = "examples/xtypes/dynamic_type_subscriber.rs"
 
 [dev-dependencies]
 husky-rs = "0.1.5"

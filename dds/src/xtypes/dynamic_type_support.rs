@@ -73,6 +73,10 @@ impl DynamicTypeSupport {
         match complete {
             CompleteTypeObject::Struct(s) => s.header.detail.type_name.clone(),
             CompleteTypeObject::Enum(e) => e.header.detail.type_name.clone(),
+            CompleteTypeObject::Union(u) => u.header.type_name.clone(),
+            CompleteTypeObject::Alias(a) => a.header.type_name.clone(),
+            CompleteTypeObject::Bitmask(b) => b.header.detail.type_name.clone(),
+            CompleteTypeObject::Bitset(b) => b.header.type_name.clone(),
         }
     }
 

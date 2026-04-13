@@ -7,7 +7,7 @@
 //! # Usage
 //!
 //! ```bash
-//! cargo run --example xtypes_subscriber -- --domain 0
+//! cargo run --example dynamic_type_subscriber -- --domain 0
 //! ```
 //!
 //! # How it works
@@ -197,14 +197,14 @@ fn main() {
                 Ok(samples) => {
                     for sample in samples.iter() {
                         if let Ok(data) = sample.data() {
-                            // Access fields DYNAMICALLY by name!
+                            // Access fields DYNAMICALLY by name.
                             let sensor_id: i32 = data.get("sensor_id").unwrap_or_default();
                             let temperature: f64 = data.get("temperature").unwrap_or_default();
                             let humidity: f64 = data.get("humidity").unwrap_or_default();
                             let location: String = data.get("location").unwrap_or_default();
 
                             println!(
-                                "[RECV] sensor_id={}, temp={:.1}°C, humidity={:.1}%, location={}",
+                                "[RECV] id={} temp={:.1}°C hum={:.1}% loc={}",
                                 sensor_id, temperature, humidity, location
                             );
                         }
