@@ -1570,8 +1570,7 @@ impl UnicastMessageProcessor for UserLogic {
                 data.writer_sn,
                 message_receiver.get_source_timestamp(),
             );
-            let serialized = data.serialized_data();
-            change.data_mut().extend_from_slice(&serialized);
+            change.data_mut().extend_from_slice(data.serialized_data_as_slice());
 
             self.apply_writer_attributes_to_change(
                 reader.clone(),
