@@ -154,8 +154,6 @@ pub struct DomainParticipant {
     // multi_topics: Arc<Mutex<Vec<Weak<MultiTopic>>>>,
     orphaned_entities: Arc<Mutex<OrphanedEntities>>,
     types: Arc<RwLock<HashMap<String, Arc<dyn TypeSupport>>>>,
-    // `None` means "no application-registered default" — fall through to the
-    // profile / spec-default chain when a sentinel is passed to create_*.
     default_subscriber_qos: Arc<Mutex<Option<SubscriberQos>>>,
     default_publisher_qos: Arc<Mutex<Option<PublisherQos>>>,
     default_topic_qos: Arc<Mutex<Option<TopicQos>>>,

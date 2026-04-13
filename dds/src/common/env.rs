@@ -20,8 +20,8 @@ pub const DEFAULT_DOMAIN_ID: DomainId = -1;
 pub fn init_from_env() {
     // DDS environment variables:
     // - DDS_DOMAIN_ID: Set DDS domain ID (0-232) - Required when DEFAULT_DOMAIN_ID(-1) is used
-    // - DDS_QOS_PROFILE: Set QoS profile JSON file path(s) to auto-load (comma or OS-path-sep separated)
-    // - DDS_DEFAULT_QOS_PROFILE: Set default QoS profile path "Library::Profile" applied when create_*_with_profile("") is called
+    // - DDS_QOS_PROFILE: Set QoS profile JSON file path
+    // - DDS_DEFAULT_QOS_PROFILE: Set default QoS profile path "Library::Profile"
 
     // INT2DDS_ environment variables:
     // - INT2DDS_TRANSPORT: Set transport protocol type (udp, tcp) - Default: udp
@@ -79,7 +79,7 @@ fn apply_cli_args_to_env() {
                 Arg::new("dds_default_qos_profile")
                     .long("int2dds-default-qos-profile")
                     .value_name("LIB::PROFILE")
-                    .help("Set default QoS profile path applied when create_*_with_profile(\"\") is called")
+                    .help("Set default QoS profile path \"Library::Profile\"")
                     .num_args(1)
                     .value_hint(ValueHint::Other),
             )
