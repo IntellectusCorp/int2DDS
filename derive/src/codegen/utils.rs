@@ -147,6 +147,8 @@ pub enum SerializationMethod {
     BoolArray,
     CharArray,
     StringArray,
+    // Zero-copy byte sequence
+    DdsBytes,
     Fallback,
 }
 
@@ -196,6 +198,7 @@ pub fn get_serialization_method(ty: &syn::Type) -> SerializationMethod {
                     }
                     SerializationMethod::Fallback
                 }
+                "DdsBytes" => SerializationMethod::DdsBytes,
                 "HashMap" | "BTreeMap" => {
                     // HashMap<K, V> and BTreeMap<K, V> are supported via trait-based serialization
                     // Use Fallback to invoke CdrSerialize/XcdrSerialize trait methods

@@ -111,6 +111,18 @@ pub trait TypeSupport: Send + Sync + 'static {
         format: Option<&SerializationFormat>,
     ) -> DdsResult<Box<dyn Any>>;
 
+    /// Deserialize with an optional shared backing buffer for zero-copy DdsBytes.
+    /// Derive macro generates an override that passes the backing to the deserializer.
+    /// Manual implementations can ignore the backing and delegate to `deserialize`.
+    fn deserialize_with_backing(
+        &self,
+        data: &[u8],
+        _shared_backing: Option<Arc<Vec<u8>>>,
+        format: Option<&SerializationFormat>,
+    ) -> DdsResult<Box<dyn Any>> {
+        self.deserialize(data, format)
+    }
+
     /// Serialize into an existing buffer, reusing its capacity.
     /// The buffer is cleared and filled with serialized data (including encapsulation header).
     /// Default implementation delegates to `serialize()` (no buffer reuse).

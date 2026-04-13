@@ -1,3 +1,4 @@
+pub mod dds_bytes;
 pub mod deserializer;
 pub mod serializer;
 pub mod xcdr1;
@@ -633,6 +634,33 @@ impl<T: XcdrSerialize> XcdrSerialize for Box<T> {
 impl<T: XcdrDeserialize> XcdrDeserialize for Box<T> {
     fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
         Ok(Box::new(T::deserialize_xcdr(deserializer)?))
+    }
+}
+
+// DdsBytes support - zero-copy byte sequence
+pub use dds_bytes::DdsBytes;
+
+impl CdrSerialize for DdsBytes {
+    fn serialize_cdr(&self, serializer: &mut CdrSerializer) -> CdrResult<()> {
+        serializer.serialize_byte_sequence(self)
+    }
+}
+
+impl CdrDeserialize for DdsBytes {
+    fn deserialize_cdr(deserializer: &mut CdrDeserializer) -> CdrResult<Self> {
+        deserializer.deserialize_shared_bytes()
+    }
+}
+
+impl XcdrSerialize for DdsBytes {
+    fn serialize_xcdr(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()> {
+        serializer.serialize_byte_sequence(self)
+    }
+}
+
+impl XcdrDeserialize for DdsBytes {
+    fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
+        deserializer.deserialize_shared_bytes()
     }
 }
 
