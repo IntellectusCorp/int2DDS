@@ -147,6 +147,23 @@ namespace Int2Dds.Core
         }
 
         /// <summary>
+        /// Creates a DataReader using a QoS profile path (e.g. "Library::Profile").
+        /// </summary>
+        /// <typeparam name="T">The DDS data type.</typeparam>
+        /// <param name="topic">The topic to read from.</param>
+        /// <param name="qosPath">QoS profile path (e.g. "MyLibrary::MyProfile").</param>
+        /// <param name="listener">Optional listener for event callbacks.</param>
+        /// <param name="statusMask">Bitmask of statuses to listen for.</param>
+        /// <returns>A new DataReader instance.</returns>
+        public DataReader<T> CreateDataReaderWithProfile<T>(Topic<T> topic, string qosPath,
+            IDataReaderListener? listener = null, uint statusMask = 0)
+            where T : class, IDdsType, new()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            return new DataReader<T>(this, topic, qosPath, listener, statusMask);
+        }
+
+        /// <summary>
         /// Deletes all DataReaders created by this subscriber.
         /// </summary>
         public void DeleteContainedEntities()

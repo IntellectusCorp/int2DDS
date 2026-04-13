@@ -96,6 +96,23 @@ namespace Int2Dds.Core
         }
 
         /// <summary>
+        /// Creates a DataWriter using a QoS profile path (e.g. "Library::Profile").
+        /// </summary>
+        /// <typeparam name="T">The DDS data type.</typeparam>
+        /// <param name="topic">The topic to write to.</param>
+        /// <param name="qosPath">QoS profile path (e.g. "MyLibrary::MyProfile").</param>
+        /// <param name="listener">Optional listener for event callbacks.</param>
+        /// <param name="statusMask">Bitmask of statuses to listen for.</param>
+        /// <returns>A new DataWriter instance.</returns>
+        public DataWriter<T> CreateDataWriterWithProfile<T>(Topic<T> topic, string qosPath,
+            IDataWriterListener listener = null, uint statusMask = 0)
+            where T : class, IDdsType, new()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            return new DataWriter<T>(this, topic, qosPath, listener, statusMask);
+        }
+
+        /// <summary>
         /// Sets new QoS policies on this Publisher.
         /// Some policies can only be changed before the entity is enabled.
         /// </summary>
