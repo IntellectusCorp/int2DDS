@@ -639,11 +639,53 @@ impl TypeIdentifier {
                 ))
             }
 
-            // Maps - not fully supported yet
-            type_kind::TI_PLAIN_MAP_SMALL | type_kind::TI_PLAIN_MAP_LARGE => Err(format!(
-                "Map TypeIdentifier deserialization not yet supported: 0x{:02X}",
-                discriminator
-            )),
+            // Maps
+            type_kind::TI_PLAIN_MAP_SMALL => {
+                if rest.len() < 4 {
+                    return Err("Insufficient data for PlainMapSmall".to_string());
+                }
+                let header = PlainCollectionHeader {
+                    equiv_kind: EquivalenceKind::from_u8(rest[0]),
+                    element_flags: CollectionElementFlag(rest[1]),
+                };
+                let bound = rest[2];
+                let key_flags = CollectionElementFlag(rest[3]);
+                let (key_id, key_len) = TypeIdentifier::deserialize(&rest[4..])?;
+                let (element_id, elem_len) = TypeIdentifier::deserialize(&rest[4 + key_len..])?;
+                Ok((
+                    TypeIdentifier::PlainMapSmall {
+                        header,
+                        bound,
+                        key_flags,
+                        key_identifier: Box::new(key_id),
+                        element_identifier: Box::new(element_id),
+                    },
+                    1 + 4 + key_len + elem_len,
+                ))
+            }
+            type_kind::TI_PLAIN_MAP_LARGE => {
+                if rest.len() < 7 {
+                    return Err("Insufficient data for PlainMapLarge".to_string());
+                }
+                let header = PlainCollectionHeader {
+                    equiv_kind: EquivalenceKind::from_u8(rest[0]),
+                    element_flags: CollectionElementFlag(rest[1]),
+                };
+                let bound = u32::from_le_bytes([rest[2], rest[3], rest[4], rest[5]]);
+                let key_flags = CollectionElementFlag(rest[6]);
+                let (key_id, key_len) = TypeIdentifier::deserialize(&rest[7..])?;
+                let (element_id, elem_len) = TypeIdentifier::deserialize(&rest[7 + key_len..])?;
+                Ok((
+                    TypeIdentifier::PlainMapLarge {
+                        header,
+                        bound,
+                        key_flags,
+                        key_identifier: Box::new(key_id),
+                        element_identifier: Box::new(element_id),
+                    },
+                    1 + 7 + key_len + elem_len,
+                ))
+            }
 
             _ => Err(format!("Unsupported TypeIdentifier discriminator: 0x{:02X}", discriminator)),
         }
@@ -744,8 +786,8 @@ impl TryConstructKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(u8)]
 pub enum ExtensibilityKind {
-    #[default]
     Final = 0,
+    #[default]
     Appendable = 1,
     Mutable = 2,
 }
@@ -1006,15 +1048,26 @@ pub struct CompleteMemberDetail {
 
 impl CompleteMemberDetail {
     pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
-        // Serialize name as length-prefixed string
         let name_bytes = self.name.as_bytes();
         buffer.extend_from_slice(&(name_bytes.len() as u32 + 1).to_le_bytes());
         buffer.extend_from_slice(name_bytes);
-        buffer.push(0); // null terminator
+        buffer.push(0);
 
-        // Serialize optional annotations (simplified - just write empty for now)
-        buffer.push(0); // no builtin annotations
-        buffer.extend_from_slice(&0u32.to_le_bytes()); // empty custom annotations
+        if let Some(ref ann) = self.ann_builtin {
+            if !ann.is_empty() {
+                buffer.push(1);
+                ann.serialize_into(buffer);
+            } else {
+                buffer.push(0);
+            }
+        } else {
+            buffer.push(0);
+        }
+
+        buffer.extend_from_slice(&(self.ann_custom.len() as u32).to_le_bytes());
+        for ann in &self.ann_custom {
+            ann.serialize_into(buffer);
+        }
     }
 
     pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
@@ -1023,7 +1076,6 @@ impl CompleteMemberDetail {
         }
         let mut pos = 0;
 
-        // Read name length (includes null terminator)
         let name_len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
         pos += 4;
 
@@ -1031,7 +1083,6 @@ impl CompleteMemberDetail {
             return Err("Insufficient data for CompleteMemberDetail name".to_string());
         }
 
-        // Read name (excluding null terminator)
         let name = if name_len > 0 {
             String::from_utf8_lossy(&data[pos..pos + name_len - 1]).to_string()
         } else {
@@ -1039,31 +1090,383 @@ impl CompleteMemberDetail {
         };
         pos += name_len;
 
-        // Skip annotations (simplified - just read the flags)
         if data.len() < pos + 1 {
             return Err("Insufficient data for annotations flag".to_string());
         }
-        let _has_builtin = data[pos];
-        pos += 1;
+        let ann_builtin = if data[pos] != 0 {
+            pos += 1;
+            let (ann, consumed) = AppliedBuiltinMemberAnnotations::deserialize(&data[pos..])?;
+            pos += consumed;
+            Some(ann)
+        } else {
+            pos += 1;
+            None
+        };
 
         if data.len() < pos + 4 {
             return Err("Insufficient data for custom annotations count".to_string());
         }
-        let _custom_count =
-            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+        let custom_count =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
 
-        Ok((CompleteMemberDetail { name, ann_builtin: None, ann_custom: Vec::new() }, pos))
+        let mut ann_custom = Vec::with_capacity(custom_count);
+        for _ in 0..custom_count {
+            let (ann, consumed) = AppliedAnnotation::deserialize(&data[pos..])?;
+            pos += consumed;
+            ann_custom.push(ann);
+        }
+
+        Ok((CompleteMemberDetail { name, ann_builtin, ann_custom }, pos))
     }
 }
 
-/// Applied builtin member annotations (placeholder).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct AppliedBuiltinMemberAnnotations;
+/// Annotation parameter value (for custom annotations).
+#[derive(Debug, Clone, PartialEq)]
+pub enum AnnotationParameterValue {
+    BooleanValue(bool),
+    ByteValue(u8),
+    Int16Value(i16),
+    Uint16Value(u16),
+    Int32Value(i32),
+    Uint32Value(u32),
+    Int64Value(i64),
+    Uint64Value(u64),
+    Float32Value(f32),
+    Float64Value(f64),
+    CharValue(u8),
+    WcharValue(u16),
+    StringValue(String),
+    WstringValue(String),
+    EnumValue(i32),
+}
 
-/// Applied annotation (placeholder).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AppliedAnnotation;
+impl AnnotationParameterValue {
+    fn discriminator(&self) -> u8 {
+        match self {
+            Self::BooleanValue(_) => 0x01,
+            Self::ByteValue(_) => 0x02,
+            Self::Int16Value(_) => 0x03,
+            Self::Uint16Value(_) => 0x04,
+            Self::Int32Value(_) => 0x05,
+            Self::Uint32Value(_) => 0x06,
+            Self::Int64Value(_) => 0x07,
+            Self::Uint64Value(_) => 0x08,
+            Self::Float32Value(_) => 0x09,
+            Self::Float64Value(_) => 0x0A,
+            Self::CharValue(_) => 0x0B,
+            Self::WcharValue(_) => 0x0C,
+            Self::StringValue(_) => 0x0D,
+            Self::WstringValue(_) => 0x0E,
+            Self::EnumValue(_) => 0x0F,
+        }
+    }
+
+    pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
+        buffer.push(self.discriminator());
+        match self {
+            Self::BooleanValue(v) => buffer.push(*v as u8),
+            Self::ByteValue(v) | Self::CharValue(v) => buffer.push(*v),
+            Self::Int16Value(v) => buffer.extend_from_slice(&v.to_le_bytes()),
+            Self::Uint16Value(v) | Self::WcharValue(v) => {
+                buffer.extend_from_slice(&v.to_le_bytes())
+            }
+            Self::Int32Value(v) | Self::EnumValue(v) => buffer.extend_from_slice(&v.to_le_bytes()),
+            Self::Uint32Value(v) => buffer.extend_from_slice(&v.to_le_bytes()),
+            Self::Int64Value(v) => buffer.extend_from_slice(&v.to_le_bytes()),
+            Self::Uint64Value(v) => buffer.extend_from_slice(&v.to_le_bytes()),
+            Self::Float32Value(v) => buffer.extend_from_slice(&v.to_le_bytes()),
+            Self::Float64Value(v) => buffer.extend_from_slice(&v.to_le_bytes()),
+            Self::StringValue(s) | Self::WstringValue(s) => {
+                let bytes = s.as_bytes();
+                buffer.extend_from_slice(&(bytes.len() as u32 + 1).to_le_bytes());
+                buffer.extend_from_slice(bytes);
+                buffer.push(0);
+            }
+        }
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        if data.is_empty() {
+            return Err("Empty data for AnnotationParameterValue".to_string());
+        }
+        let disc = data[0];
+        let rest = &data[1..];
+        match disc {
+            0x01 => {
+                if rest.is_empty() {
+                    return Err("Missing boolean value".to_string());
+                }
+                Ok((Self::BooleanValue(rest[0] != 0), 2))
+            }
+            0x02 => {
+                if rest.is_empty() {
+                    return Err("Missing byte value".to_string());
+                }
+                Ok((Self::ByteValue(rest[0]), 2))
+            }
+            0x03 => {
+                if rest.len() < 2 {
+                    return Err("Missing int16 value".to_string());
+                }
+                Ok((Self::Int16Value(i16::from_le_bytes([rest[0], rest[1]])), 3))
+            }
+            0x04 => {
+                if rest.len() < 2 {
+                    return Err("Missing uint16 value".to_string());
+                }
+                Ok((Self::Uint16Value(u16::from_le_bytes([rest[0], rest[1]])), 3))
+            }
+            0x05 => {
+                if rest.len() < 4 {
+                    return Err("Missing int32 value".to_string());
+                }
+                Ok((Self::Int32Value(i32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]])), 5))
+            }
+            0x06 => {
+                if rest.len() < 4 {
+                    return Err("Missing uint32 value".to_string());
+                }
+                Ok((Self::Uint32Value(u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]])), 5))
+            }
+            0x07 => {
+                if rest.len() < 8 {
+                    return Err("Missing int64 value".to_string());
+                }
+                Ok((
+                    Self::Int64Value(i64::from_le_bytes([
+                        rest[0], rest[1], rest[2], rest[3], rest[4], rest[5], rest[6], rest[7],
+                    ])),
+                    9,
+                ))
+            }
+            0x08 => {
+                if rest.len() < 8 {
+                    return Err("Missing uint64 value".to_string());
+                }
+                Ok((
+                    Self::Uint64Value(u64::from_le_bytes([
+                        rest[0], rest[1], rest[2], rest[3], rest[4], rest[5], rest[6], rest[7],
+                    ])),
+                    9,
+                ))
+            }
+            0x09 => {
+                if rest.len() < 4 {
+                    return Err("Missing float32 value".to_string());
+                }
+                Ok((
+                    Self::Float32Value(f32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]])),
+                    5,
+                ))
+            }
+            0x0A => {
+                if rest.len() < 8 {
+                    return Err("Missing float64 value".to_string());
+                }
+                Ok((
+                    Self::Float64Value(f64::from_le_bytes([
+                        rest[0], rest[1], rest[2], rest[3], rest[4], rest[5], rest[6], rest[7],
+                    ])),
+                    9,
+                ))
+            }
+            0x0B => {
+                if rest.is_empty() {
+                    return Err("Missing char value".to_string());
+                }
+                Ok((Self::CharValue(rest[0]), 2))
+            }
+            0x0C => {
+                if rest.len() < 2 {
+                    return Err("Missing wchar value".to_string());
+                }
+                Ok((Self::WcharValue(u16::from_le_bytes([rest[0], rest[1]])), 3))
+            }
+            0x0D | 0x0E => {
+                if rest.len() < 4 {
+                    return Err("Missing string length".to_string());
+                }
+                let len = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]) as usize;
+                if rest.len() < 4 + len {
+                    return Err("Insufficient data for string value".to_string());
+                }
+                let s = if len > 0 {
+                    String::from_utf8_lossy(&rest[4..4 + len - 1]).to_string()
+                } else {
+                    String::new()
+                };
+                let val = if disc == 0x0D { Self::StringValue(s) } else { Self::WstringValue(s) };
+                Ok((val, 1 + 4 + len))
+            }
+            0x0F => {
+                if rest.len() < 4 {
+                    return Err("Missing enum value".to_string());
+                }
+                Ok((Self::EnumValue(i32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]])), 5))
+            }
+            _ => Err(format!("Unknown AnnotationParameterValue discriminator: 0x{:02X}", disc)),
+        }
+    }
+}
+
+/// Applied builtin member annotations.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AppliedBuiltinMemberAnnotations {
+    pub unit: Option<String>,
+    pub min: Option<AnnotationParameterValue>,
+    pub max: Option<AnnotationParameterValue>,
+    pub hash_id: Option<String>,
+}
+
+impl Eq for AppliedBuiltinMemberAnnotations {}
+
+impl AppliedBuiltinMemberAnnotations {
+    pub fn is_empty(&self) -> bool {
+        self.unit.is_none() && self.min.is_none() && self.max.is_none() && self.hash_id.is_none()
+    }
+
+    pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
+        fn write_opt_string(buffer: &mut Vec<u8>, s: &Option<String>) {
+            if let Some(ref val) = s {
+                buffer.push(1);
+                let bytes = val.as_bytes();
+                buffer.extend_from_slice(&(bytes.len() as u32 + 1).to_le_bytes());
+                buffer.extend_from_slice(bytes);
+                buffer.push(0);
+            } else {
+                buffer.push(0);
+            }
+        }
+
+        write_opt_string(buffer, &self.unit);
+        if let Some(ref val) = self.min {
+            buffer.push(1);
+            val.serialize_into(buffer);
+        } else {
+            buffer.push(0);
+        }
+        if let Some(ref val) = self.max {
+            buffer.push(1);
+            val.serialize_into(buffer);
+        } else {
+            buffer.push(0);
+        }
+        write_opt_string(buffer, &self.hash_id);
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        let mut pos = 0;
+
+        fn read_opt_string(data: &[u8], pos: &mut usize) -> Result<Option<String>, String> {
+            if data.len() < *pos + 1 {
+                return Err("Insufficient data for optional string flag".to_string());
+            }
+            let has = data[*pos];
+            *pos += 1;
+            if has == 0 {
+                return Ok(None);
+            }
+            if data.len() < *pos + 4 {
+                return Err("Insufficient data for string length".to_string());
+            }
+            let len =
+                u32::from_le_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]])
+                    as usize;
+            *pos += 4;
+            if data.len() < *pos + len {
+                return Err("Insufficient data for string".to_string());
+            }
+            let s = if len > 0 {
+                String::from_utf8_lossy(&data[*pos..*pos + len - 1]).to_string()
+            } else {
+                String::new()
+            };
+            *pos += len;
+            Ok(Some(s))
+        }
+
+        let unit = read_opt_string(data, &mut pos)?;
+
+        if data.len() < pos + 1 {
+            return Err("Insufficient data for min flag".to_string());
+        }
+        let min = if data[pos] != 0 {
+            pos += 1;
+            let (val, consumed) = AnnotationParameterValue::deserialize(&data[pos..])?;
+            pos += consumed;
+            Some(val)
+        } else {
+            pos += 1;
+            None
+        };
+
+        if data.len() < pos + 1 {
+            return Err("Insufficient data for max flag".to_string());
+        }
+        let max = if data[pos] != 0 {
+            pos += 1;
+            let (val, consumed) = AnnotationParameterValue::deserialize(&data[pos..])?;
+            pos += consumed;
+            Some(val)
+        } else {
+            pos += 1;
+            None
+        };
+
+        let hash_id = read_opt_string(data, &mut pos)?;
+
+        Ok((AppliedBuiltinMemberAnnotations { unit, min, max, hash_id }, pos))
+    }
+}
+
+/// Applied annotation (custom user-defined annotation).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AppliedAnnotation {
+    pub annotation_typeid: TypeIdentifier,
+    pub param_seq: Vec<(u32, AnnotationParameterValue)>,
+}
+
+impl Eq for AppliedAnnotation {}
+
+impl AppliedAnnotation {
+    pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
+        self.annotation_typeid.serialize_into(buffer);
+        buffer.extend_from_slice(&(self.param_seq.len() as u32).to_le_bytes());
+        for (name_hash, value) in &self.param_seq {
+            buffer.extend_from_slice(&name_hash.to_le_bytes());
+            value.serialize_into(buffer);
+        }
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        let mut pos = 0;
+        let (annotation_typeid, consumed) = TypeIdentifier::deserialize(data)?;
+        pos += consumed;
+
+        if data.len() < pos + 4 {
+            return Err("Insufficient data for param_seq length".to_string());
+        }
+        let param_count =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        pos += 4;
+
+        let mut param_seq = Vec::with_capacity(param_count);
+        for _ in 0..param_count {
+            if data.len() < pos + 4 {
+                return Err("Insufficient data for param name_hash".to_string());
+            }
+            let name_hash =
+                u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+            pos += 4;
+            let (value, consumed) = AnnotationParameterValue::deserialize(&data[pos..])?;
+            pos += consumed;
+            param_seq.push((name_hash, value));
+        }
+
+        Ok((AppliedAnnotation { annotation_typeid, param_seq }, pos))
+    }
+}
 
 // ============================================================================
 // Struct Type Definitions
@@ -1306,15 +1709,26 @@ pub struct CompleteTypeDetail {
 
 impl CompleteTypeDetail {
     pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
-        // Serialize name
         let name_bytes = self.type_name.as_bytes();
         buffer.extend_from_slice(&(name_bytes.len() as u32 + 1).to_le_bytes());
         buffer.extend_from_slice(name_bytes);
         buffer.push(0);
 
-        // Annotations (simplified)
-        buffer.push(0);
-        buffer.extend_from_slice(&0u32.to_le_bytes());
+        if let Some(ref ann) = self.ann_builtin {
+            if !ann.is_empty() {
+                buffer.push(1);
+                ann.serialize_into(buffer);
+            } else {
+                buffer.push(0);
+            }
+        } else {
+            buffer.push(0);
+        }
+
+        buffer.extend_from_slice(&(self.ann_custom.len() as u32).to_le_bytes());
+        for ann in &self.ann_custom {
+            ann.serialize_into(buffer);
+        }
     }
 
     pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
@@ -1323,7 +1737,6 @@ impl CompleteTypeDetail {
         }
         let mut pos = 0;
 
-        // Read name length (includes null terminator)
         let name_len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
         pos += 4;
 
@@ -1331,7 +1744,6 @@ impl CompleteTypeDetail {
             return Err("Insufficient data for CompleteTypeDetail type_name".to_string());
         }
 
-        // Read name (excluding null terminator)
         let type_name = if name_len > 0 {
             String::from_utf8_lossy(&data[pos..pos + name_len - 1]).to_string()
         } else {
@@ -1339,27 +1751,120 @@ impl CompleteTypeDetail {
         };
         pos += name_len;
 
-        // Skip annotations
         if data.len() < pos + 1 {
             return Err("Insufficient data for annotations flag".to_string());
         }
-        let _has_builtin = data[pos];
-        pos += 1;
+        let ann_builtin = if data[pos] != 0 {
+            pos += 1;
+            let (ann, consumed) = AppliedBuiltinTypeAnnotations::deserialize(&data[pos..])?;
+            pos += consumed;
+            Some(ann)
+        } else {
+            pos += 1;
+            None
+        };
 
         if data.len() < pos + 4 {
             return Err("Insufficient data for custom annotations count".to_string());
         }
-        let _custom_count =
-            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+        let custom_count =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
 
-        Ok((CompleteTypeDetail { type_name, ann_builtin: None, ann_custom: Vec::new() }, pos))
+        let mut ann_custom = Vec::with_capacity(custom_count);
+        for _ in 0..custom_count {
+            let (ann, consumed) = AppliedAnnotation::deserialize(&data[pos..])?;
+            pos += consumed;
+            ann_custom.push(ann);
+        }
+
+        Ok((CompleteTypeDetail { type_name, ann_builtin, ann_custom }, pos))
     }
 }
 
-/// Applied builtin type annotations (placeholder).
+/// Applied builtin type annotations.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct AppliedBuiltinTypeAnnotations;
+pub struct AppliedBuiltinTypeAnnotations {
+    pub verbatim: Option<bool>,
+    pub nested: Option<bool>,
+    pub data_representation: Option<u16>,
+}
+
+impl AppliedBuiltinTypeAnnotations {
+    pub fn is_empty(&self) -> bool {
+        self.verbatim.is_none() && self.nested.is_none() && self.data_representation.is_none()
+    }
+
+    pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
+        if let Some(v) = self.verbatim {
+            buffer.push(1);
+            buffer.push(v as u8);
+        } else {
+            buffer.push(0);
+        }
+        if let Some(v) = self.nested {
+            buffer.push(1);
+            buffer.push(v as u8);
+        } else {
+            buffer.push(0);
+        }
+        if let Some(v) = self.data_representation {
+            buffer.push(1);
+            buffer.extend_from_slice(&v.to_le_bytes());
+        } else {
+            buffer.push(0);
+        }
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        let mut pos = 0;
+        let mut result = Self::default();
+
+        if data.len() < pos + 1 {
+            return Err("Insufficient data for verbatim flag".to_string());
+        }
+        if data[pos] != 0 {
+            pos += 1;
+            if data.len() < pos + 1 {
+                return Err("Missing verbatim value".to_string());
+            }
+            result.verbatim = Some(data[pos] != 0);
+            pos += 1;
+        } else {
+            pos += 1;
+        }
+
+        if data.len() < pos + 1 {
+            return Err("Insufficient data for nested flag".to_string());
+        }
+        if data[pos] != 0 {
+            pos += 1;
+            if data.len() < pos + 1 {
+                return Err("Missing nested value".to_string());
+            }
+            result.nested = Some(data[pos] != 0);
+            pos += 1;
+        } else {
+            pos += 1;
+        }
+
+        if data.len() < pos + 1 {
+            return Err("Insufficient data for data_representation flag".to_string());
+        }
+        if data[pos] != 0 {
+            pos += 1;
+            if data.len() < pos + 2 {
+                return Err("Missing data_representation value".to_string());
+            }
+            result.data_representation = Some(u16::from_le_bytes([data[pos], data[pos + 1]]));
+            pos += 2;
+        } else {
+            pos += 1;
+        }
+
+        Ok((result, pos))
+    }
+}
 
 // ============================================================================
 // Enumerated Type Definitions
@@ -1695,6 +2200,980 @@ impl CompleteEnumeratedHeader {
 }
 
 // ============================================================================
+// Union Type Definitions
+// ============================================================================
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommonUnionMember {
+    pub member_id: u32,
+    pub member_flags: MemberFlag,
+    pub member_type_id: TypeIdentifier,
+    pub label_seq: Vec<i32>,
+}
+
+impl CommonUnionMember {
+    pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
+        buffer.extend_from_slice(&self.member_id.to_le_bytes());
+        self.member_flags.serialize_into(buffer);
+        self.member_type_id.serialize_into(buffer);
+        buffer.extend_from_slice(&(self.label_seq.len() as u32).to_le_bytes());
+        for label in &self.label_seq {
+            buffer.extend_from_slice(&label.to_le_bytes());
+        }
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        if data.len() < 6 {
+            return Err("Insufficient data for CommonUnionMember".to_string());
+        }
+        let mut pos = 0;
+
+        let member_id = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        pos += 4;
+
+        let (member_flags, consumed) = MemberFlag::deserialize(&data[pos..])?;
+        pos += consumed;
+
+        let (member_type_id, consumed) = TypeIdentifier::deserialize(&data[pos..])?;
+        pos += consumed;
+
+        if data.len() < pos + 4 {
+            return Err("Insufficient data for label_seq length".to_string());
+        }
+        let label_count =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        pos += 4;
+
+        if data.len() < pos + label_count * 4 {
+            return Err("Insufficient data for label_seq".to_string());
+        }
+        let mut label_seq = Vec::with_capacity(label_count);
+        for _ in 0..label_count {
+            let label =
+                i32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+            pos += 4;
+            label_seq.push(label);
+        }
+
+        Ok((CommonUnionMember { member_id, member_flags, member_type_id, label_seq }, pos))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MinimalUnionMember {
+    pub common: CommonUnionMember,
+    pub name_hash: u32,
+}
+
+impl MinimalUnionMember {
+    pub fn new(
+        member_id: u32,
+        flags: MemberFlag,
+        type_id: TypeIdentifier,
+        labels: Vec<i32>,
+        name: &str,
+    ) -> Self {
+        Self {
+            common: CommonUnionMember {
+                member_id,
+                member_flags: flags,
+                member_type_id: type_id,
+                label_seq: labels,
+            },
+            name_hash: compute_name_hash(name),
+        }
+    }
+
+    pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
+        self.common.serialize_into(buffer);
+        buffer.extend_from_slice(&self.name_hash.to_le_bytes());
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        let (common, mut pos) = CommonUnionMember::deserialize(data)?;
+        if data.len() < pos + 4 {
+            return Err("Insufficient data for MinimalUnionMember name_hash".to_string());
+        }
+        let name_hash =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+        pos += 4;
+        Ok((MinimalUnionMember { common, name_hash }, pos))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompleteUnionMember {
+    pub common: CommonUnionMember,
+    pub detail: CompleteMemberDetail,
+}
+
+impl CompleteUnionMember {
+    pub fn new(
+        member_id: u32,
+        flags: MemberFlag,
+        type_id: TypeIdentifier,
+        labels: Vec<i32>,
+        name: String,
+    ) -> Self {
+        Self {
+            common: CommonUnionMember {
+                member_id,
+                member_flags: flags,
+                member_type_id: type_id,
+                label_seq: labels,
+            },
+            detail: CompleteMemberDetail { name, ann_builtin: None, ann_custom: Vec::new() },
+        }
+    }
+
+    pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
+        self.common.serialize_into(buffer);
+        self.detail.serialize_into(buffer);
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        let (common, mut pos) = CommonUnionMember::deserialize(data)?;
+        let (detail, consumed) = CompleteMemberDetail::deserialize(&data[pos..])?;
+        pos += consumed;
+        Ok((CompleteUnionMember { common, detail }, pos))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommonDiscriminatorMember {
+    pub member_flags: MemberFlag,
+    pub type_id: TypeIdentifier,
+}
+
+impl CommonDiscriminatorMember {
+    pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
+        self.member_flags.serialize_into(buffer);
+        self.type_id.serialize_into(buffer);
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        let mut pos = 0;
+        let (member_flags, consumed) = MemberFlag::deserialize(data)?;
+        pos += consumed;
+        let (type_id, consumed) = TypeIdentifier::deserialize(&data[pos..])?;
+        pos += consumed;
+        Ok((CommonDiscriminatorMember { member_flags, type_id }, pos))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MinimalUnionType {
+    pub union_flags: TypeFlag,
+    pub discriminator: CommonDiscriminatorMember,
+    pub member_seq: Vec<MinimalUnionMember>,
+}
+
+impl Default for CommonDiscriminatorMember {
+    fn default() -> Self {
+        Self { member_flags: MemberFlag::default(), type_id: TypeIdentifier::Int32 }
+    }
+}
+
+impl MinimalUnionType {
+    pub fn new(flags: TypeFlag, disc_flags: MemberFlag, disc_type: TypeIdentifier) -> Self {
+        Self {
+            union_flags: flags,
+            discriminator: CommonDiscriminatorMember {
+                member_flags: disc_flags,
+                type_id: disc_type,
+            },
+            member_seq: Vec::new(),
+        }
+    }
+
+    pub fn add_member(&mut self, member: MinimalUnionMember) {
+        self.member_seq.push(member);
+    }
+
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        self.serialize_into(&mut buffer);
+        buffer
+    }
+
+    pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
+        self.union_flags.serialize_into(buffer);
+        self.discriminator.serialize_into(buffer);
+        buffer.extend_from_slice(&(self.member_seq.len() as u32).to_le_bytes());
+        for member in &self.member_seq {
+            member.serialize_into(buffer);
+        }
+    }
+
+    pub fn compute_hash(&self) -> EquivalenceHash {
+        EquivalenceHash::compute(&self.serialize())
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        let mut pos = 0;
+        let (union_flags, consumed) = TypeFlag::deserialize(data)?;
+        pos += consumed;
+        let (discriminator, consumed) = CommonDiscriminatorMember::deserialize(&data[pos..])?;
+        pos += consumed;
+
+        if data.len() < pos + 4 {
+            return Err("Insufficient data for union member_seq length".to_string());
+        }
+        let member_count =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        pos += 4;
+
+        let mut member_seq = Vec::with_capacity(member_count);
+        for _ in 0..member_count {
+            let (member, consumed) = MinimalUnionMember::deserialize(&data[pos..])?;
+            pos += consumed;
+            member_seq.push(member);
+        }
+
+        Ok((MinimalUnionType { union_flags, discriminator, member_seq }, pos))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CompleteUnionType {
+    pub union_flags: TypeFlag,
+    pub discriminator: CommonDiscriminatorMember,
+    pub header: CompleteTypeDetail,
+    pub member_seq: Vec<CompleteUnionMember>,
+}
+
+impl CompleteUnionType {
+    pub fn new(
+        flags: TypeFlag,
+        disc_flags: MemberFlag,
+        disc_type: TypeIdentifier,
+        type_name: String,
+    ) -> Self {
+        Self {
+            union_flags: flags,
+            discriminator: CommonDiscriminatorMember {
+                member_flags: disc_flags,
+                type_id: disc_type,
+            },
+            header: CompleteTypeDetail { type_name, ann_builtin: None, ann_custom: Vec::new() },
+            member_seq: Vec::new(),
+        }
+    }
+
+    pub fn add_member(&mut self, member: CompleteUnionMember) {
+        self.member_seq.push(member);
+    }
+
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        self.serialize_into(&mut buffer);
+        buffer
+    }
+
+    pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
+        self.union_flags.serialize_into(buffer);
+        self.discriminator.serialize_into(buffer);
+        self.header.serialize_into(buffer);
+        buffer.extend_from_slice(&(self.member_seq.len() as u32).to_le_bytes());
+        for member in &self.member_seq {
+            member.serialize_into(buffer);
+        }
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        let mut pos = 0;
+        let (union_flags, consumed) = TypeFlag::deserialize(data)?;
+        pos += consumed;
+        let (discriminator, consumed) = CommonDiscriminatorMember::deserialize(&data[pos..])?;
+        pos += consumed;
+        let (header, consumed) = CompleteTypeDetail::deserialize(&data[pos..])?;
+        pos += consumed;
+
+        if data.len() < pos + 4 {
+            return Err("Insufficient data for union member_seq length".to_string());
+        }
+        let member_count =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        pos += 4;
+
+        let mut member_seq = Vec::with_capacity(member_count);
+        for _ in 0..member_count {
+            let (member, consumed) = CompleteUnionMember::deserialize(&data[pos..])?;
+            pos += consumed;
+            member_seq.push(member);
+        }
+
+        Ok((CompleteUnionType { union_flags, discriminator, header, member_seq }, pos))
+    }
+}
+
+// ============================================================================
+// Alias Type Definitions
+// ============================================================================
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommonAliasBody {
+    pub related_flags: MemberFlag,
+    pub related_type: TypeIdentifier,
+}
+
+impl CommonAliasBody {
+    pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
+        self.related_flags.serialize_into(buffer);
+        self.related_type.serialize_into(buffer);
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        let mut pos = 0;
+        let (related_flags, consumed) = MemberFlag::deserialize(data)?;
+        pos += consumed;
+        let (related_type, consumed) = TypeIdentifier::deserialize(&data[pos..])?;
+        pos += consumed;
+        Ok((CommonAliasBody { related_flags, related_type }, pos))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MinimalAliasType {
+    pub alias_flags: TypeFlag,
+    pub body: CommonAliasBody,
+}
+
+impl Default for CommonAliasBody {
+    fn default() -> Self {
+        Self { related_flags: MemberFlag::default(), related_type: TypeIdentifier::None }
+    }
+}
+
+impl MinimalAliasType {
+    pub fn new(flags: TypeFlag, related_flags: MemberFlag, related_type: TypeIdentifier) -> Self {
+        Self { alias_flags: flags, body: CommonAliasBody { related_flags, related_type } }
+    }
+
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        self.serialize_into(&mut buffer);
+        buffer
+    }
+
+    pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
+        self.alias_flags.serialize_into(buffer);
+        self.body.serialize_into(buffer);
+    }
+
+    pub fn compute_hash(&self) -> EquivalenceHash {
+        EquivalenceHash::compute(&self.serialize())
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        let mut pos = 0;
+        let (alias_flags, consumed) = TypeFlag::deserialize(data)?;
+        pos += consumed;
+        let (body, consumed) = CommonAliasBody::deserialize(&data[pos..])?;
+        pos += consumed;
+        Ok((MinimalAliasType { alias_flags, body }, pos))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CompleteAliasType {
+    pub alias_flags: TypeFlag,
+    pub header: CompleteTypeDetail,
+    pub body: CommonAliasBody,
+}
+
+impl CompleteAliasType {
+    pub fn new(
+        flags: TypeFlag,
+        type_name: String,
+        related_flags: MemberFlag,
+        related_type: TypeIdentifier,
+    ) -> Self {
+        Self {
+            alias_flags: flags,
+            header: CompleteTypeDetail { type_name, ann_builtin: None, ann_custom: Vec::new() },
+            body: CommonAliasBody { related_flags, related_type },
+        }
+    }
+
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        self.serialize_into(&mut buffer);
+        buffer
+    }
+
+    pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
+        self.alias_flags.serialize_into(buffer);
+        self.header.serialize_into(buffer);
+        self.body.serialize_into(buffer);
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        let mut pos = 0;
+        let (alias_flags, consumed) = TypeFlag::deserialize(data)?;
+        pos += consumed;
+        let (header, consumed) = CompleteTypeDetail::deserialize(&data[pos..])?;
+        pos += consumed;
+        let (body, consumed) = CommonAliasBody::deserialize(&data[pos..])?;
+        pos += consumed;
+        Ok((CompleteAliasType { alias_flags, header, body }, pos))
+    }
+}
+
+// ============================================================================
+// Bitmask Type Definitions
+// ============================================================================
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommonBitflag {
+    pub position: u16,
+    pub flags: MemberFlag,
+}
+
+impl CommonBitflag {
+    pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
+        buffer.extend_from_slice(&self.position.to_le_bytes());
+        self.flags.serialize_into(buffer);
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        if data.len() < 4 {
+            return Err("Insufficient data for CommonBitflag".to_string());
+        }
+        let position = u16::from_le_bytes([data[0], data[1]]);
+        let (flags, consumed) = MemberFlag::deserialize(&data[2..])?;
+        Ok((CommonBitflag { position, flags }, 2 + consumed))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MinimalBitflag {
+    pub common: CommonBitflag,
+    pub name_hash: u32,
+}
+
+impl MinimalBitflag {
+    pub fn new(position: u16, flags: MemberFlag, name: &str) -> Self {
+        Self { common: CommonBitflag { position, flags }, name_hash: compute_name_hash(name) }
+    }
+
+    pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
+        self.common.serialize_into(buffer);
+        buffer.extend_from_slice(&self.name_hash.to_le_bytes());
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        let (common, mut pos) = CommonBitflag::deserialize(data)?;
+        if data.len() < pos + 4 {
+            return Err("Insufficient data for MinimalBitflag name_hash".to_string());
+        }
+        let name_hash =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+        pos += 4;
+        Ok((MinimalBitflag { common, name_hash }, pos))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompleteBitflag {
+    pub common: CommonBitflag,
+    pub detail: CompleteMemberDetail,
+}
+
+impl CompleteBitflag {
+    pub fn new(position: u16, flags: MemberFlag, name: String) -> Self {
+        Self {
+            common: CommonBitflag { position, flags },
+            detail: CompleteMemberDetail { name, ann_builtin: None, ann_custom: Vec::new() },
+        }
+    }
+
+    pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
+        self.common.serialize_into(buffer);
+        self.detail.serialize_into(buffer);
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        let (common, mut pos) = CommonBitflag::deserialize(data)?;
+        let (detail, consumed) = CompleteMemberDetail::deserialize(&data[pos..])?;
+        pos += consumed;
+        Ok((CompleteBitflag { common, detail }, pos))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MinimalBitmaskType {
+    pub bitmask_flags: TypeFlag,
+    pub header: CommonEnumeratedHeader,
+    pub flag_seq: Vec<MinimalBitflag>,
+}
+
+impl MinimalBitmaskType {
+    pub fn new(flags: TypeFlag, bit_bound: u16) -> Self {
+        Self {
+            bitmask_flags: flags,
+            header: CommonEnumeratedHeader { bit_bound },
+            flag_seq: Vec::new(),
+        }
+    }
+
+    pub fn add_flag(&mut self, flag: MinimalBitflag) {
+        self.flag_seq.push(flag);
+    }
+
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        self.serialize_into(&mut buffer);
+        buffer
+    }
+
+    pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
+        self.bitmask_flags.serialize_into(buffer);
+        self.header.serialize_into(buffer);
+        buffer.extend_from_slice(&(self.flag_seq.len() as u32).to_le_bytes());
+        for flag in &self.flag_seq {
+            flag.serialize_into(buffer);
+        }
+    }
+
+    pub fn compute_hash(&self) -> EquivalenceHash {
+        EquivalenceHash::compute(&self.serialize())
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        let mut pos = 0;
+        let (bitmask_flags, consumed) = TypeFlag::deserialize(data)?;
+        pos += consumed;
+        let (header, consumed) = CommonEnumeratedHeader::deserialize(&data[pos..])?;
+        pos += consumed;
+
+        if data.len() < pos + 4 {
+            return Err("Insufficient data for flag_seq length".to_string());
+        }
+        let flag_count =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        pos += 4;
+
+        let mut flag_seq = Vec::with_capacity(flag_count);
+        for _ in 0..flag_count {
+            let (flag, consumed) = MinimalBitflag::deserialize(&data[pos..])?;
+            pos += consumed;
+            flag_seq.push(flag);
+        }
+
+        Ok((MinimalBitmaskType { bitmask_flags, header, flag_seq }, pos))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CompleteBitmaskType {
+    pub bitmask_flags: TypeFlag,
+    pub header: CompleteEnumeratedHeader,
+    pub flag_seq: Vec<CompleteBitflag>,
+}
+
+impl CompleteBitmaskType {
+    pub fn new(flags: TypeFlag, type_name: String, bit_bound: u16) -> Self {
+        Self {
+            bitmask_flags: flags,
+            header: CompleteEnumeratedHeader {
+                common: CommonEnumeratedHeader { bit_bound },
+                detail: CompleteTypeDetail { type_name, ann_builtin: None, ann_custom: Vec::new() },
+            },
+            flag_seq: Vec::new(),
+        }
+    }
+
+    pub fn add_flag(&mut self, flag: CompleteBitflag) {
+        self.flag_seq.push(flag);
+    }
+
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        self.serialize_into(&mut buffer);
+        buffer
+    }
+
+    pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
+        self.bitmask_flags.serialize_into(buffer);
+        self.header.serialize_into(buffer);
+        buffer.extend_from_slice(&(self.flag_seq.len() as u32).to_le_bytes());
+        for flag in &self.flag_seq {
+            flag.serialize_into(buffer);
+        }
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        let mut pos = 0;
+        let (bitmask_flags, consumed) = TypeFlag::deserialize(data)?;
+        pos += consumed;
+        let (header, consumed) = CompleteEnumeratedHeader::deserialize(&data[pos..])?;
+        pos += consumed;
+
+        if data.len() < pos + 4 {
+            return Err("Insufficient data for flag_seq length".to_string());
+        }
+        let flag_count =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        pos += 4;
+
+        let mut flag_seq = Vec::with_capacity(flag_count);
+        for _ in 0..flag_count {
+            let (flag, consumed) = CompleteBitflag::deserialize(&data[pos..])?;
+            pos += consumed;
+            flag_seq.push(flag);
+        }
+
+        Ok((CompleteBitmaskType { bitmask_flags, header, flag_seq }, pos))
+    }
+}
+
+// ============================================================================
+// Bitset Type Definitions
+// ============================================================================
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommonBitfield {
+    pub position: u16,
+    pub flags: MemberFlag,
+    pub bitcount: u8,
+    pub holder_type: TypeIdentifier,
+}
+
+impl CommonBitfield {
+    pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
+        buffer.extend_from_slice(&self.position.to_le_bytes());
+        self.flags.serialize_into(buffer);
+        buffer.push(self.bitcount);
+        self.holder_type.serialize_into(buffer);
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        if data.len() < 5 {
+            return Err("Insufficient data for CommonBitfield".to_string());
+        }
+        let mut pos = 0;
+        let position = u16::from_le_bytes([data[0], data[1]]);
+        pos += 2;
+        let (flags, consumed) = MemberFlag::deserialize(&data[pos..])?;
+        pos += consumed;
+        let bitcount = data[pos];
+        pos += 1;
+        let (holder_type, consumed) = TypeIdentifier::deserialize(&data[pos..])?;
+        pos += consumed;
+        Ok((CommonBitfield { position, flags, bitcount, holder_type }, pos))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MinimalBitfield {
+    pub common: CommonBitfield,
+    pub name_hash: u32,
+}
+
+impl MinimalBitfield {
+    pub fn new(
+        position: u16,
+        flags: MemberFlag,
+        bitcount: u8,
+        holder_type: TypeIdentifier,
+        name: &str,
+    ) -> Self {
+        Self {
+            common: CommonBitfield { position, flags, bitcount, holder_type },
+            name_hash: compute_name_hash(name),
+        }
+    }
+
+    pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
+        self.common.serialize_into(buffer);
+        buffer.extend_from_slice(&self.name_hash.to_le_bytes());
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        let (common, mut pos) = CommonBitfield::deserialize(data)?;
+        if data.len() < pos + 4 {
+            return Err("Insufficient data for MinimalBitfield name_hash".to_string());
+        }
+        let name_hash =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+        pos += 4;
+        Ok((MinimalBitfield { common, name_hash }, pos))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompleteBitfield {
+    pub common: CommonBitfield,
+    pub detail: CompleteMemberDetail,
+}
+
+impl CompleteBitfield {
+    pub fn new(
+        position: u16,
+        flags: MemberFlag,
+        bitcount: u8,
+        holder_type: TypeIdentifier,
+        name: String,
+    ) -> Self {
+        Self {
+            common: CommonBitfield { position, flags, bitcount, holder_type },
+            detail: CompleteMemberDetail { name, ann_builtin: None, ann_custom: Vec::new() },
+        }
+    }
+
+    pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
+        self.common.serialize_into(buffer);
+        self.detail.serialize_into(buffer);
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        let (common, mut pos) = CommonBitfield::deserialize(data)?;
+        let (detail, consumed) = CompleteMemberDetail::deserialize(&data[pos..])?;
+        pos += consumed;
+        Ok((CompleteBitfield { common, detail }, pos))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MinimalBitsetType {
+    pub bitset_flags: TypeFlag,
+    pub field_seq: Vec<MinimalBitfield>,
+}
+
+impl MinimalBitsetType {
+    pub fn new(flags: TypeFlag) -> Self {
+        Self { bitset_flags: flags, field_seq: Vec::new() }
+    }
+
+    pub fn add_field(&mut self, field: MinimalBitfield) {
+        self.field_seq.push(field);
+    }
+
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        self.serialize_into(&mut buffer);
+        buffer
+    }
+
+    pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
+        self.bitset_flags.serialize_into(buffer);
+        buffer.extend_from_slice(&(self.field_seq.len() as u32).to_le_bytes());
+        for field in &self.field_seq {
+            field.serialize_into(buffer);
+        }
+    }
+
+    pub fn compute_hash(&self) -> EquivalenceHash {
+        EquivalenceHash::compute(&self.serialize())
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        let mut pos = 0;
+        let (bitset_flags, consumed) = TypeFlag::deserialize(data)?;
+        pos += consumed;
+
+        if data.len() < pos + 4 {
+            return Err("Insufficient data for field_seq length".to_string());
+        }
+        let field_count =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        pos += 4;
+
+        let mut field_seq = Vec::with_capacity(field_count);
+        for _ in 0..field_count {
+            let (field, consumed) = MinimalBitfield::deserialize(&data[pos..])?;
+            pos += consumed;
+            field_seq.push(field);
+        }
+
+        Ok((MinimalBitsetType { bitset_flags, field_seq }, pos))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CompleteBitsetType {
+    pub bitset_flags: TypeFlag,
+    pub header: CompleteTypeDetail,
+    pub field_seq: Vec<CompleteBitfield>,
+}
+
+impl CompleteBitsetType {
+    pub fn new(flags: TypeFlag, type_name: String) -> Self {
+        Self {
+            bitset_flags: flags,
+            header: CompleteTypeDetail { type_name, ann_builtin: None, ann_custom: Vec::new() },
+            field_seq: Vec::new(),
+        }
+    }
+
+    pub fn add_field(&mut self, field: CompleteBitfield) {
+        self.field_seq.push(field);
+    }
+
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        self.serialize_into(&mut buffer);
+        buffer
+    }
+
+    pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
+        self.bitset_flags.serialize_into(buffer);
+        self.header.serialize_into(buffer);
+        buffer.extend_from_slice(&(self.field_seq.len() as u32).to_le_bytes());
+        for field in &self.field_seq {
+            field.serialize_into(buffer);
+        }
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        let mut pos = 0;
+        let (bitset_flags, consumed) = TypeFlag::deserialize(data)?;
+        pos += consumed;
+        let (header, consumed) = CompleteTypeDetail::deserialize(&data[pos..])?;
+        pos += consumed;
+
+        if data.len() < pos + 4 {
+            return Err("Insufficient data for field_seq length".to_string());
+        }
+        let field_count =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        pos += 4;
+
+        let mut field_seq = Vec::with_capacity(field_count);
+        for _ in 0..field_count {
+            let (field, consumed) = CompleteBitfield::deserialize(&data[pos..])?;
+            pos += consumed;
+            field_seq.push(field);
+        }
+
+        Ok((CompleteBitsetType { bitset_flags, header, field_seq }, pos))
+    }
+}
+
+// ============================================================================
+// TypeInformation (DDS-XTypes 1.3 Section 7.6.3.3)
+// ============================================================================
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeIdentifierWithSize {
+    pub type_id: TypeIdentifier,
+    pub typeobject_serialized_size: u32,
+}
+
+impl TypeIdentifierWithSize {
+    pub fn new(type_id: TypeIdentifier, size: u32) -> Self {
+        Self { type_id, typeobject_serialized_size: size }
+    }
+
+    pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
+        self.type_id.serialize_into(buffer);
+        buffer.extend_from_slice(&self.typeobject_serialized_size.to_le_bytes());
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        let (type_id, mut pos) = TypeIdentifier::deserialize(data)?;
+        if data.len() < pos + 4 {
+            return Err("Insufficient data for typeobject_serialized_size".to_string());
+        }
+        let typeobject_serialized_size =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+        pos += 4;
+        Ok((TypeIdentifierWithSize { type_id, typeobject_serialized_size }, pos))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeIdentifierWithDependencies {
+    pub typeid_with_size: TypeIdentifierWithSize,
+    pub dependent_typeids: Vec<TypeIdentifierWithSize>,
+}
+
+impl TypeIdentifierWithDependencies {
+    pub fn new(typeid_with_size: TypeIdentifierWithSize) -> Self {
+        Self { typeid_with_size, dependent_typeids: Vec::new() }
+    }
+
+    pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
+        self.typeid_with_size.serialize_into(buffer);
+        buffer.extend_from_slice(&(self.dependent_typeids.len() as i32).to_le_bytes());
+        for dep in &self.dependent_typeids {
+            dep.serialize_into(buffer);
+        }
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        let (typeid_with_size, mut pos) = TypeIdentifierWithSize::deserialize(data)?;
+
+        if data.len() < pos + 4 {
+            return Err("Insufficient data for dependent_typeid_count".to_string());
+        }
+        let dep_count =
+            i32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+        pos += 4;
+
+        let count = if dep_count < 0 { 0 } else { dep_count as usize };
+        let mut dependent_typeids = Vec::with_capacity(count);
+        for _ in 0..count {
+            let (dep, consumed) = TypeIdentifierWithSize::deserialize(&data[pos..])?;
+            pos += consumed;
+            dependent_typeids.push(dep);
+        }
+
+        Ok((TypeIdentifierWithDependencies { typeid_with_size, dependent_typeids }, pos))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeInformation {
+    pub minimal: TypeIdentifierWithDependencies,
+    pub complete: TypeIdentifierWithDependencies,
+}
+
+impl TypeInformation {
+    pub fn new(
+        minimal: TypeIdentifierWithDependencies,
+        complete: TypeIdentifierWithDependencies,
+    ) -> Self {
+        Self { minimal, complete }
+    }
+
+    pub fn from_type_identifier(type_id: TypeIdentifier) -> Self {
+        let tws = TypeIdentifierWithSize::new(type_id.clone(), 0);
+        Self {
+            minimal: TypeIdentifierWithDependencies::new(TypeIdentifierWithSize::new(type_id, 0)),
+            complete: TypeIdentifierWithDependencies::new(tws),
+        }
+    }
+
+    pub fn minimal_type_id(&self) -> &TypeIdentifier {
+        &self.minimal.typeid_with_size.type_id
+    }
+
+    pub fn complete_type_id(&self) -> &TypeIdentifier {
+        &self.complete.typeid_with_size.type_id
+    }
+
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        self.serialize_into(&mut buffer);
+        buffer
+    }
+
+    pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
+        self.minimal.serialize_into(buffer);
+        self.complete.serialize_into(buffer);
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize), String> {
+        let (minimal, mut pos) = TypeIdentifierWithDependencies::deserialize(data)?;
+        let (complete, consumed) = TypeIdentifierWithDependencies::deserialize(&data[pos..])?;
+        pos += consumed;
+        Ok((TypeInformation { minimal, complete }, pos))
+    }
+}
+
+// ============================================================================
 // TypeObject - Top Level
 // ============================================================================
 
@@ -1717,6 +3196,10 @@ pub mod type_object_kind {
 pub enum MinimalTypeObject {
     Struct(MinimalStructType),
     Enum(MinimalEnumeratedType),
+    Union(MinimalUnionType),
+    Alias(MinimalAliasType),
+    Bitmask(MinimalBitmaskType),
+    Bitset(MinimalBitsetType),
 }
 
 impl Default for MinimalTypeObject {
@@ -1730,6 +3213,10 @@ impl MinimalTypeObject {
         match self {
             MinimalTypeObject::Struct(_) => type_object_kind::TK_STRUCT,
             MinimalTypeObject::Enum(_) => type_object_kind::TK_ENUM,
+            MinimalTypeObject::Union(_) => type_object_kind::TK_UNION,
+            MinimalTypeObject::Alias(_) => type_object_kind::TK_ALIAS,
+            MinimalTypeObject::Bitmask(_) => type_object_kind::TK_BITMASK,
+            MinimalTypeObject::Bitset(_) => type_object_kind::TK_BITSET,
         }
     }
 
@@ -1744,6 +3231,10 @@ impl MinimalTypeObject {
         match self {
             MinimalTypeObject::Struct(s) => s.serialize_into(buffer),
             MinimalTypeObject::Enum(e) => e.serialize_into(buffer),
+            MinimalTypeObject::Union(u) => u.serialize_into(buffer),
+            MinimalTypeObject::Alias(a) => a.serialize_into(buffer),
+            MinimalTypeObject::Bitmask(b) => b.serialize_into(buffer),
+            MinimalTypeObject::Bitset(b) => b.serialize_into(buffer),
         }
     }
 
@@ -1763,6 +3254,14 @@ impl MinimalTypeObject {
                 .map(|(s, consumed)| (MinimalTypeObject::Struct(s), 1 + consumed)),
             type_object_kind::TK_ENUM => MinimalEnumeratedType::deserialize(&data[1..])
                 .map(|(e, consumed)| (MinimalTypeObject::Enum(e), 1 + consumed)),
+            type_object_kind::TK_UNION => MinimalUnionType::deserialize(&data[1..])
+                .map(|(u, consumed)| (MinimalTypeObject::Union(u), 1 + consumed)),
+            type_object_kind::TK_ALIAS => MinimalAliasType::deserialize(&data[1..])
+                .map(|(a, consumed)| (MinimalTypeObject::Alias(a), 1 + consumed)),
+            type_object_kind::TK_BITMASK => MinimalBitmaskType::deserialize(&data[1..])
+                .map(|(b, consumed)| (MinimalTypeObject::Bitmask(b), 1 + consumed)),
+            type_object_kind::TK_BITSET => MinimalBitsetType::deserialize(&data[1..])
+                .map(|(b, consumed)| (MinimalTypeObject::Bitset(b), 1 + consumed)),
             _ => Err(format!("Unsupported MinimalTypeObject kind: 0x{:02X}", discriminator)),
         }
     }
@@ -1773,6 +3272,10 @@ impl MinimalTypeObject {
 pub enum CompleteTypeObject {
     Struct(CompleteStructType),
     Enum(CompleteEnumeratedType),
+    Union(CompleteUnionType),
+    Alias(CompleteAliasType),
+    Bitmask(CompleteBitmaskType),
+    Bitset(CompleteBitsetType),
 }
 
 impl Default for CompleteTypeObject {
@@ -1786,6 +3289,10 @@ impl CompleteTypeObject {
         match self {
             CompleteTypeObject::Struct(_) => type_object_kind::TK_STRUCT,
             CompleteTypeObject::Enum(_) => type_object_kind::TK_ENUM,
+            CompleteTypeObject::Union(_) => type_object_kind::TK_UNION,
+            CompleteTypeObject::Alias(_) => type_object_kind::TK_ALIAS,
+            CompleteTypeObject::Bitmask(_) => type_object_kind::TK_BITMASK,
+            CompleteTypeObject::Bitset(_) => type_object_kind::TK_BITSET,
         }
     }
 
@@ -1800,6 +3307,10 @@ impl CompleteTypeObject {
         match self {
             CompleteTypeObject::Struct(s) => s.serialize_into(buffer),
             CompleteTypeObject::Enum(e) => e.serialize_into(buffer),
+            CompleteTypeObject::Union(u) => u.serialize_into(buffer),
+            CompleteTypeObject::Alias(a) => a.serialize_into(buffer),
+            CompleteTypeObject::Bitmask(b) => b.serialize_into(buffer),
+            CompleteTypeObject::Bitset(b) => b.serialize_into(buffer),
         }
     }
 
@@ -1814,6 +3325,14 @@ impl CompleteTypeObject {
                 .map(|(s, consumed)| (CompleteTypeObject::Struct(s), 1 + consumed)),
             type_object_kind::TK_ENUM => CompleteEnumeratedType::deserialize(&data[1..])
                 .map(|(e, consumed)| (CompleteTypeObject::Enum(e), 1 + consumed)),
+            type_object_kind::TK_UNION => CompleteUnionType::deserialize(&data[1..])
+                .map(|(u, consumed)| (CompleteTypeObject::Union(u), 1 + consumed)),
+            type_object_kind::TK_ALIAS => CompleteAliasType::deserialize(&data[1..])
+                .map(|(a, consumed)| (CompleteTypeObject::Alias(a), 1 + consumed)),
+            type_object_kind::TK_BITMASK => CompleteBitmaskType::deserialize(&data[1..])
+                .map(|(b, consumed)| (CompleteTypeObject::Bitmask(b), 1 + consumed)),
+            type_object_kind::TK_BITSET => CompleteBitsetType::deserialize(&data[1..])
+                .map(|(b, consumed)| (CompleteTypeObject::Bitset(b), 1 + consumed)),
             _ => Err(format!("Unsupported CompleteTypeObject kind: 0x{:02X}", discriminator)),
         }
     }
@@ -2169,6 +3688,70 @@ impl<'a, C: Context> Readable<'a, C> for TypeObject {
         TypeObject::deserialize(&bytes)
             .map(|(obj, _)| obj)
             .map_err(|_| speedy::Error::custom("Failed to deserialize TypeObject").into())
+    }
+}
+
+// Speedy traits for TypeInformation
+impl<C: Context> Writable<C> for TypeInformation {
+    fn write_to<T: ?Sized + Writer<C>>(&self, writer: &mut T) -> Result<(), C::Error> {
+        let bytes = self.serialize();
+        let len = bytes.len() as u32;
+        writer.write_value(&len)?;
+        writer.write_bytes(&bytes)?;
+        Ok(())
+    }
+}
+
+impl<'a, C: Context> Readable<'a, C> for TypeInformation {
+    fn read_from<R: Reader<'a, C>>(reader: &mut R) -> Result<Self, C::Error> {
+        let len: u32 = reader.read_value()?;
+        let bytes = reader.read_vec(len as usize)?;
+        TypeInformation::deserialize(&bytes)
+            .map(|(obj, _)| obj)
+            .map_err(|_| speedy::Error::custom("Failed to deserialize TypeInformation").into())
+    }
+}
+
+// CDR/XCDR traits for TypeInformation
+impl CdrSerialize for TypeInformation {
+    fn serialize_cdr(&self, serializer: &mut CdrSerializer) -> CdrResult<()> {
+        let bytes = self.serialize();
+        let len = bytes.len() as u32;
+        serializer.serialize_u32(len)?;
+        serializer.buffer_mut().extend_from_slice(&bytes);
+        Ok(())
+    }
+}
+
+impl CdrDeserialize for TypeInformation {
+    fn deserialize_cdr(
+        deserializer: &mut crate::serialize::cdr::CdrDeserializer,
+    ) -> CdrResult<Self> {
+        let len = deserializer.deserialize_u32()? as usize;
+        let bytes = deserializer.deserialize_byte_array(len)?;
+        TypeInformation::deserialize(&bytes)
+            .map(|(obj, _)| obj)
+            .map_err(|e| crate::serialize::cdr::CdrError::DeserializationError(e))
+    }
+}
+
+impl XcdrSerialize for TypeInformation {
+    fn serialize_xcdr(&self, serializer: &mut Xcdr2Serializer) -> XcdrResult<()> {
+        let bytes = self.serialize();
+        let len = bytes.len() as u32;
+        serializer.serialize_u32(len)?;
+        serializer.buffer_mut().extend_from_slice(&bytes);
+        Ok(())
+    }
+}
+
+impl XcdrDeserialize for TypeInformation {
+    fn deserialize_xcdr(deserializer: &mut Xcdr2Deserializer) -> XcdrResult<Self> {
+        let len = deserializer.deserialize_u32()? as usize;
+        let bytes = deserializer.deserialize_byte_array(len)?;
+        TypeInformation::deserialize(&bytes)
+            .map(|(obj, _)| obj)
+            .map_err(|e| crate::serialize::cdr::XcdrError::DeserializationError(e))
     }
 }
 

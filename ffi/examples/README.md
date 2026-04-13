@@ -18,13 +18,10 @@ examples/
 ├── listener/               # Listener callback examples
 │   ├── listener_publisher.c
 │   └── listener_subscriber.c
-├── multiple_participant/   # Multi-participant examples
-│   ├── multi_pub_sub.c
-│   ├── multi_participant_1.c
-│   └── multi_participant_2.c
-└── performance_test/       # Performance benchmarks
-    ├── perftest_publisher.c
-    └── perftest_subscriber.c
+└── multiple_participant/   # Multi-participant examples
+    ├── multi_pub_sub.c
+    ├── multi_participant_1.c
+    └── multi_participant_2.c
 ```
 
 ## Prerequisites
