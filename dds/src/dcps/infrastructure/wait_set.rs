@@ -273,7 +273,7 @@ impl WaitSet {
 
         // condvar-based waiting loop
         loop {
-            if self.trigger_flag.load(Ordering::Acquire) {
+            if self.trigger_flag.swap(false, Ordering::AcqRel) {
                 debug!("[WaitSet-{}] trigger_flag detected, checking conditions", self.instance_id);
 
                 // Check conditions
@@ -284,11 +284,10 @@ impl WaitSet {
                         self.instance_id,
                         triggered_conditions.len()
                     );
-                    self.trigger_flag.store(false, Ordering::Release);
                     return Ok(triggered_conditions);
                 }
-                // No conditions triggered, continue loop to re-check trigger_flag
-                continue;
+                // A wake-up can be stale if the condition was cleared before we checked it.
+                // After consuming the flag, fall through to the normal wait/timeout path.
             }
 
             let conditions = self

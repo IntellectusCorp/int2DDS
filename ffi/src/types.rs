@@ -13,7 +13,7 @@
 //! All handle types implement Send and Sync, making them safe to use
 //! across threads in both Rust and C code.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use int2dds::{
     domain::domain_participant::DomainParticipant,
@@ -93,7 +93,7 @@ pub(crate) enum StatusConditionKind {
 /// `inner` is used by WaitSet (trait object), `kind` provides concrete access.
 pub struct Int2DdsStatusCondition {
     pub(crate) inner: Arc<dyn Condition + Send + Sync>,
-    pub(crate) kind: Mutex<StatusConditionKind>,
+    pub(crate) kind: StatusConditionKind,
 }
 
 /// Generic condition handle for use with WaitSet

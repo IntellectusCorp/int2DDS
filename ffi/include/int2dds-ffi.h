@@ -1911,6 +1911,26 @@ Int2DdsRet int2dds_datawriter_get_statuscondition(const struct Int2DdsDataWriter
                                                   struct Int2DdsStatusCondition **condition_out);
 
 /**
+ * Get the current status change bitmask from a DataReader.
+ *
+ * # Safety
+ * - `reader` must be a valid datareader
+ * - `mask_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_datareader_get_status_changes(const struct Int2DdsDataReader *reader,
+                                                 uint32_t *mask_out);
+
+/**
+ * Get the current status change bitmask from a DataWriter.
+ *
+ * # Safety
+ * - `writer` must be a valid datawriter
+ * - `mask_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_datawriter_get_status_changes(const struct Int2DdsDataWriter *writer,
+                                                 uint32_t *mask_out);
+
+/**
  * Set the enabled statuses for a StatusCondition
  *
  * Only the statuses in the mask will trigger the condition.

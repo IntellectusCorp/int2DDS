@@ -97,7 +97,7 @@ impl<Q: Debug> StatusCondition<Q> {
         }
     }
 
-    pub fn set_enabled_statuses(&mut self, mask: StatusMask) -> DdsResult<()> {
+    pub fn set_enabled_statuses(&self, mask: StatusMask) -> DdsResult<()> {
         {
             let mut enabled_statuses = match self.enabled_statuses.lock() {
                 Ok(guard) => guard,

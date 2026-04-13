@@ -112,7 +112,11 @@ pub struct PooledBuffer {
 impl PooledBuffer {
     /// Acquire a buffer from the pool with the specified size tier
     pub fn new(size: BufferSize) -> Self {
-        let buffer = BUFFER_POOL.with(|pool| pool.borrow_mut().acquire(size));
+        // During thread teardown, thread-local storage may already be unavailable.
+        // Fall back to a plain Vec so shutdown-time serialization can still complete.
+        let buffer = BUFFER_POOL
+            .try_with(|pool| pool.borrow_mut().acquire(size))
+            .unwrap_or_else(|_| Vec::with_capacity(size.capacity()));
         Self { buffer, size, taken: false }
     }
 
@@ -172,7 +176,10 @@ impl Drop for PooledBuffer {
     fn drop(&mut self) {
         if !self.taken {
             let buffer = std::mem::take(&mut self.buffer);
-            BUFFER_POOL.with(|pool| pool.borrow_mut().release(buffer, self.size));
+            // Thread-local storage may already be tearing down while a worker thread exits.
+            // In that case, dropping the buffer back into the pool must degrade gracefully
+            // instead of panicking during shutdown.
+            let _ = BUFFER_POOL.try_with(|pool| pool.borrow_mut().release(buffer, self.size));
         }
     }
 }
