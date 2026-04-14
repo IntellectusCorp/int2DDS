@@ -11,7 +11,7 @@ use crate::{
             entity_id::EntityId,
             parameters::{ParameterId, ParameterValue},
             sequence::SequenceNumber,
-            types::{SerializedData, SubmessagePayload},
+            types::SubmessagePayload,
         },
         messages::{
             header::Header,
@@ -89,11 +89,11 @@ impl SEDPMessage<DiscoveredWriterData> {
 
     pub(crate) fn create_publication_serialized_data(
         writer_data: &DiscoveredWriterData,
-    ) -> SerializedData {
+    ) -> bytes::Bytes {
         // Serialize PublicationBuiltinTopicData
         let base_payload = writer_data.publication_builtin_topic_data.to_serialized_data();
 
-        SerializedData::from(base_payload.to_vec())
+        bytes::Bytes::from(base_payload.to_vec())
     }
 }
 
@@ -169,7 +169,7 @@ impl SEDPMessage<DiscoveredReaderData> {
 
     pub(crate) fn create_subscription_serialized_data(
         reader_data: &DiscoveredReaderData,
-    ) -> SerializedData {
+    ) -> bytes::Bytes {
         // Serialize SubscriptionBuiltinTopicData
         let base_payload = reader_data.subscription_builtin_topic_data.to_serialized_data();
 
@@ -186,7 +186,7 @@ impl SEDPMessage<DiscoveredReaderData> {
             true, // little endian
         );
 
-        SerializedData::from(payload)
+        bytes::Bytes::from(payload)
     }
 }
 

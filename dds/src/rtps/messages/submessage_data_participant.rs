@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::rtps::common::{
     parameters::ParameterList,
     rtps_error_code::{RtpsError, RtpsErrorCode},
@@ -37,7 +35,7 @@ pub(crate) fn serialize_submessage_participant_data(
 }
 
 pub(crate) fn deserialize_submessage_participant_data(
-    buffer: &Arc<[u8]>,
+    buffer: &[u8],
 ) -> Result<(ParameterList, Endianness), RtpsError> {
     if buffer.len() < 4 {
         return Err(RtpsError::new(

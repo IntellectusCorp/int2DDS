@@ -11,7 +11,6 @@ use std::time::Instant;
 use std::{
     collections::{BTreeMap, HashSet},
     io,
-    sync::Arc,
 };
 
 use crate::rtps::{
@@ -87,8 +86,15 @@ impl<'a> DataFrag<'a> {
          + self.serialized_data.len() as u16
     }
 
-    pub(crate) fn serialized_data(&self) -> &[u8] {
-        self.serialized_data.as_slice()
+    /// Return the payload as `Bytes` for zero-copy sub-slicing on the receive path.
+    ///
+    /// Returns `None` if the payload is `Borrowed` (only happens on the send
+    /// path, where the caller would not need shared ownership anyway).
+    pub(crate) fn serialized_bytes(&self) -> Option<Bytes> {
+        match &self.serialized_data {
+            SubmessagePayload::Owned(b) => Some(b.clone()),
+            SubmessagePayload::Borrowed(_) => None,
+        }
     }
 
     pub(crate) fn deserialize(
@@ -185,10 +191,12 @@ impl<'a> DataFrag<'a> {
             ));
         }
 
-        // truncate padding bytes - only keep actual fragment data
+        // truncate padding bytes - only keep actual fragment data.
+        // `serialized_data_bytes` is already a `Bytes` obtained via
+        // `buffer.slice(start_pos..)`, so slicing it further is a zero-copy
+        // refcount bump on the same backing allocation.
         let actual_len = std::cmp::min(serialized_data_bytes.len(), expected_data_size);
-        let serialized_data =
-            SubmessagePayload::Owned(Arc::from(serialized_data_bytes[..actual_len].to_vec()));
+        let serialized_data = SubmessagePayload::Owned(serialized_data_bytes.slice(..actual_len));
 
         Ok(Self {
             reader_id,
@@ -229,7 +237,7 @@ impl<C: Context> Writable<C> for DataFrag<'_> {
 pub(crate) struct FragmentBuffer {
     pub sequence_number: SequenceNumber,
     pub total_size: u32,
-    pub fragments: BTreeMap<u32, Vec<u8>>,
+    pub fragments: BTreeMap<u32, Bytes>,
     pub received_fragments: HashSet<u32>,
     pub total_fragments: u32,
     pub fragment_size: u16,
@@ -270,7 +278,12 @@ impl FragmentBuffer {
         self.received_fragments.insert(fragment_num);
     }
 
-    pub(crate) fn copy_fragment_data(&mut self, fragment_num: u32, data: &[u8]) -> bool {
+    /// Store a fragment's payload without copying.
+    ///
+    /// `data` is a `Bytes` sub-slice of the original socket buffer; inserting
+    /// it into the `BTreeMap` is a refcount bump, not a data copy. Returns
+    /// `false` if the fragment number or size is invalid.
+    pub(crate) fn copy_fragment_data(&mut self, fragment_num: u32, data: Bytes) -> bool {
         if fragment_num == 0 || fragment_num > self.total_fragments {
             return false;
         }
@@ -284,7 +297,7 @@ impl FragmentBuffer {
             return false;
         }
 
-        self.fragments.insert(fragment_num, data.to_vec());
+        self.fragments.insert(fragment_num, data);
         self.received_fragments.insert(fragment_num);
         self.last_updated = Instant::now();
         true
@@ -321,7 +334,7 @@ mod tests {
             fragment_size: 1,
             sample_size: 2,
             inline_qos: None,
-            serialized_data: SubmessagePayload::Owned(Arc::from(vec![0u8])),
+            serialized_data: SubmessagePayload::Owned(Bytes::from_static(&[0u8])),
         }
     }
 
@@ -380,7 +393,7 @@ mod tests {
         datafrag.sample_size = 3;
 
         // serialized data of 7 bytes when only 3 (+3 padding max) are expected
-        datafrag.serialized_data = SubmessagePayload::Owned(Arc::from(vec![1, 2, 3, 4, 5, 6, 7]));
+        datafrag.serialized_data = SubmessagePayload::Owned(Bytes::from(vec![1, 2, 3, 4, 5, 6, 7]));
 
         let buffer = datafrag.write_to_vec_with_ctx(Endianness::BigEndian).unwrap();
 
