@@ -26,6 +26,8 @@
 //! - **AutoRelay** (planned): Automatic discovery of topics and creation
 //!   of TopicRelay instances.
 
+pub mod auto_relay;
 pub mod topic_relay;
 
+pub use auto_relay::{AutoRelay, TopicFilter};
 pub use topic_relay::TopicRelay;
