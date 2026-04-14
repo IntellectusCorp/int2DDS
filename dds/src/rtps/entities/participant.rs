@@ -963,13 +963,38 @@ impl Participant {
             return;
         }
 
+        // Remove discovered remote endpoint data used by graph/introspection paths.
+        // Without this, a terminated participant can stay visible in discovery snapshots
+        // even after its proxy/matching state has been removed.
+        let terminated_prefix = terminated_participant_guid.prefix();
+        self.remote_publications().retain(|topic_name, endpoints| {
+            endpoints.retain(|endpoint_guid, _| endpoint_guid.prefix() != terminated_prefix);
+            let keep_topic = !endpoints.is_empty();
+            if !keep_topic {
+                debug!(
+                    "Removed all remote publications for terminated participant on topic '{}'",
+                    topic_name
+                );
+            }
+            keep_topic
+        });
+        self.remote_subscriptions().retain(|topic_name, endpoints| {
+            endpoints.retain(|endpoint_guid, _| endpoint_guid.prefix() != terminated_prefix);
+            let keep_topic = !endpoints.is_empty();
+            if !keep_topic {
+                debug!(
+                    "Removed all remote subscriptions for terminated participant on topic '{}'",
+                    topic_name
+                );
+            }
+            keep_topic
+        });
+
         // Remove proxies from built-in endpoint
-        self.builtin_endpoints().remove_unmatched_endpoint(terminated_participant_guid.prefix());
+        self.builtin_endpoints().remove_unmatched_endpoint(terminated_prefix);
 
         // Remove proxies from endpoint
-        self.remove_all_unmatched_endpoint_from_terminated_participant(
-            terminated_participant_guid.prefix(),
-        );
+        self.remove_all_unmatched_endpoint_from_terminated_participant(terminated_prefix);
 
         info!("Successfully unmatched with remote participant: {:?}", terminated_participant_guid);
     }
