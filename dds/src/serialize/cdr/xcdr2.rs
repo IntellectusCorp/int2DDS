@@ -120,6 +120,42 @@ impl Xcdr2Serializer {
         self.buffer.splice(position..position, [0u8; 4]);
     }
 
+    pub fn write_member_with<F>(
+        &mut self,
+        member_id: u32,
+        must_understand: bool,
+        write_value: F,
+    ) -> Result<(), CdrError>
+    where
+        F: FnOnce(&mut Self) -> Result<(), CdrError>,
+    {
+        if member_id > 0x0FFF_FFFF {
+            return Err(CdrError::InvalidMemberId(member_id));
+        }
+        let emh_pos = self.reserve_dheader();
+        let start = self.position();
+        write_value(self)?;
+        let len = (self.position() - start) as u32;
+
+        let must_bit: u32 = if must_understand { 0x8000_0000 } else { 0 };
+        let (lc_word, needs_nextint) = match len {
+            1 => (0u32 << 28, false),
+            2 => (1u32 << 28, false),
+            4 => (2u32 << 28, false),
+            8 => (3u32 << 28, false),
+            _ => (4u32 << 28, true),
+        };
+        let emh = must_bit | lc_word | (member_id & 0x0FFF_FFFF);
+        if needs_nextint {
+            self.insert_nextint_slot_at(emh_pos + 4);
+            self.write_dheader_at(emh_pos, emh);
+            self.write_dheader_at(emh_pos + 4, len);
+        } else {
+            self.write_dheader_at(emh_pos, emh);
+        }
+        Ok(())
+    }
+
     /// Helper method for writing u32 (used by begin_struct)
     fn _write_u32(&mut self, value: u32) -> Result<(), CdrError> {
         self.align(4);

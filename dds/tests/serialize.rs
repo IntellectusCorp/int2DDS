@@ -563,23 +563,25 @@ use speedy::Endianness;
 
 #[test]
 fn test_emheader_roundtrip_small_length() {
-    // Test EMHEADER with small length (< 64KB, LC=0)
-    let header = MemberHeader::new(42, 100); // member_id=42, length=100
+    for (length, expected_lc) in [(1usize, 0u8), (2, 1), (4, 2), (8, 3)] {
+        let header = MemberHeader::new(42, length);
+        let mut buffer = Vec::new();
+        header.write(&mut buffer, Endianness::LittleEndian).unwrap();
 
-    let mut buffer = Vec::new();
-    header.write(&mut buffer, Endianness::LittleEndian).unwrap();
+        assert_eq!(buffer.len(), 4, "length={length} must encode as 4 bytes");
 
-    // Verify header is 4 bytes for small lengths
-    assert_eq!(buffer.len(), 4);
+        let word = u32::from_le_bytes(buffer[..4].try_into().unwrap());
+        assert_eq!((word >> 28) & 0x07, expected_lc as u32);
+        assert_eq!(word & 0x0FFF_FFFF, 42);
+        assert_eq!(word & 0x8000_0000, 0);
 
-    // Read it back
-    let (read_header, bytes_consumed) =
-        MemberHeader::read(&buffer, 0, Endianness::LittleEndian).unwrap();
-
-    assert_eq!(bytes_consumed, 4);
-    assert_eq!(read_header.member_id, 42);
-    assert_eq!(read_header.member_length, 100);
-    assert!(!read_header.must_understand);
+        let (read_header, bytes_consumed) =
+            MemberHeader::read(&buffer, 0, Endianness::LittleEndian).unwrap();
+        assert_eq!(bytes_consumed, 4);
+        assert_eq!(read_header.member_id, 42);
+        assert_eq!(read_header.member_length as usize, length);
+        assert!(!read_header.must_understand);
+    }
 }
 
 #[test]
