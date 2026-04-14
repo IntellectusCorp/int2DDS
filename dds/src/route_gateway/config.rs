@@ -13,6 +13,32 @@ use crate::{
     infrastructure::qos_policy::PropertyQosPolicy,
 };
 
+/// TLS settings for one side of a Route Gateway.
+///
+/// All three PEM file paths (`ca_file`, `cert_file`, `key_file`) must be
+/// provided together; omitting the entire block disables TLS for that node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TlsNodeConfig {
+    /// Path to a PEM file containing one or more trusted CA certificates.
+    pub ca_file: String,
+    /// Path to a PEM file containing this peer's certificate chain.
+    pub cert_file: String,
+    /// Path to a PEM file containing this peer's private key.
+    pub key_file: String,
+    /// SNI server name sent during TLS handshake (client side).
+    /// Defaults to `"localhost"` when omitted.
+    #[serde(default = "default_server_name")]
+    pub server_name: String,
+    /// Require the remote peer to present a certificate (mutual TLS).
+    /// Defaults to `false`.
+    #[serde(default)]
+    pub verify_peer: bool,
+}
+
+fn default_server_name() -> String {
+    "localhost".to_string()
+}
+
 /// Configuration for one side of a Route Gateway.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeConfig {
@@ -29,6 +55,10 @@ pub struct NodeConfig {
     /// `7400 + 250 * domain_id` unless `INT2DDS_TCP_PORT` is set.
     #[serde(default)]
     pub initial_peers: Vec<String>,
+    /// Optional TLS configuration. When present, TCP connections are wrapped
+    /// in TLS. When absent, plain TCP is used.
+    #[serde(default)]
+    pub tls: Option<TlsNodeConfig>,
 }
 
 impl NodeConfig {
@@ -37,6 +67,16 @@ impl NodeConfig {
         property.set("int2dds.transport", &self.transport);
         if !self.initial_peers.is_empty() {
             property.set("int2dds.initial_peers", &self.initial_peers.join(","));
+        }
+        if let Some(tls) = &self.tls {
+            property.set("int2dds.tls.ca_file", &tls.ca_file);
+            property.set("int2dds.tls.cert_file", &tls.cert_file);
+            property.set("int2dds.tls.key_file", &tls.key_file);
+            property.set("int2dds.tls.server_name", &tls.server_name);
+            property.set(
+                "int2dds.tls.verify_peer",
+                if tls.verify_peer { "true" } else { "false" },
+            );
         }
         DomainParticipantQos { property, ..Default::default() }
     }
@@ -126,9 +166,72 @@ mod tests {
             domain_id: 1,
             transport: "tcp".to_string(),
             initial_peers: vec!["1.2.3.4:7400".to_string()],
+            tls: None,
         };
         let qos = node.to_participant_qos();
         assert_eq!(qos.property.get("int2dds.transport"), Some("tcp"));
         assert_eq!(qos.property.get("int2dds.initial_peers"), Some("1.2.3.4:7400"));
+        assert!(qos.property.get("int2dds.tls.ca_file").is_none());
+    }
+
+    #[test]
+    fn parses_tls_config() {
+        let json = r#"{
+            "local":  { "domain_id": 0, "transport": "udp" },
+            "remote": {
+                "domain_id": 1,
+                "transport": "tcp",
+                "initial_peers": ["10.0.0.1:7650"],
+                "tls": {
+                    "ca_file":   "/etc/ssl/ca.pem",
+                    "cert_file": "/etc/ssl/cert.pem",
+                    "key_file":  "/etc/ssl/key.pem",
+                    "server_name": "gateway.example.com",
+                    "verify_peer": true
+                }
+            }
+        }"#;
+        let cfg = RouteGatewayConfig::from_json(json).unwrap();
+        let tls = cfg.remote.tls.expect("tls present");
+        assert_eq!(tls.ca_file, "/etc/ssl/ca.pem");
+        assert_eq!(tls.server_name, "gateway.example.com");
+        assert!(tls.verify_peer);
+    }
+
+    #[test]
+    fn tls_config_mapped_to_qos_properties() {
+        let node = NodeConfig {
+            domain_id: 1,
+            transport: "tcp".to_string(),
+            initial_peers: vec![],
+            tls: Some(TlsNodeConfig {
+                ca_file: "/etc/ssl/ca.pem".to_string(),
+                cert_file: "/etc/ssl/cert.pem".to_string(),
+                key_file: "/etc/ssl/key.pem".to_string(),
+                server_name: "gw.example.com".to_string(),
+                verify_peer: true,
+            }),
+        };
+        let qos = node.to_participant_qos();
+        assert_eq!(qos.property.get("int2dds.tls.ca_file"), Some("/etc/ssl/ca.pem"));
+        assert_eq!(qos.property.get("int2dds.tls.cert_file"), Some("/etc/ssl/cert.pem"));
+        assert_eq!(qos.property.get("int2dds.tls.key_file"), Some("/etc/ssl/key.pem"));
+        assert_eq!(qos.property.get("int2dds.tls.server_name"), Some("gw.example.com"));
+        assert_eq!(qos.property.get("int2dds.tls.verify_peer"), Some("true"));
+    }
+
+    #[test]
+    fn tls_server_name_defaults_to_localhost() {
+        let json = r#"{
+            "local":  { "domain_id": 0, "transport": "udp" },
+            "remote": {
+                "domain_id": 1, "transport": "tcp",
+                "tls": { "ca_file": "/a", "cert_file": "/b", "key_file": "/c" }
+            }
+        }"#;
+        let cfg = RouteGatewayConfig::from_json(json).unwrap();
+        let tls = cfg.remote.tls.unwrap();
+        assert_eq!(tls.server_name, "localhost");
+        assert!(!tls.verify_peer);
     }
 }
