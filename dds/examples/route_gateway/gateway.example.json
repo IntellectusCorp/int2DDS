@@ -1,0 +1,17 @@
+{
+  "_comment_wan_support": "WAN transport supported: TCP only. Set remote.transport to 'tcp'.",
+  "local": {
+    "domain_id": 0,
+    "transport": "udp"
+  },
+  "remote": {
+    "domain_id": 1,
+    "transport": "tcp",
+    "_comment_initial_peers": "TCP physical port = 7400 + 250 * domain_id (domain 1 → 7650). Override with INT2DDS_TCP_PORT.",
+    "initial_peers": ["192.168.1.100:7650"]
+  },
+  "auto_relay": {
+    "filter": "*"
+  },
+  "poll_period_ms": 50
+}

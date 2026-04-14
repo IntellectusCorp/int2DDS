@@ -98,10 +98,16 @@ path = "examples/xtypes/dynamic_type_publisher.rs"
 name = "dynamic_type_subscriber"
 path = "examples/xtypes/dynamic_type_subscriber.rs"
 
+[[example]]
+name = "route_gateway"
+path = "examples/route_gateway/route_gateway.rs"
+required-features = []
+
 [dev-dependencies]
 husky-rs = "0.1.5"
 criterion = { version = "0.7.0", features = ["html_reports"] }
 tempfile = "3"
+ctrlc = "3.4"
 
 # Faster than opt-level = 0 and still reasonably debuggable
 # opt-level = 1: keeps most of the code structure while applying light optimizations → much faster debugging

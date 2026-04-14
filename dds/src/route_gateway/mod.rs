@@ -23,11 +23,20 @@
 //!
 //! - **TopicRelay**: Bidirectional forwarding of a single topic between
 //!   LocalNode and RemoteNode using DynamicData.
-//! - **AutoRelay** (planned): Automatic discovery of topics and creation
-//!   of TopicRelay instances.
+//! - **AutoRelay**: Automatic discovery of topics and creation of TopicRelay
+//!   instances based on a topic-name filter.
+//! - **Config**: JSON configuration loader for the `route_gateway` binary.
+//!
+//! ## Supported WAN transport
+//!
+//! Currently only **TCP** is supported as the WAN transport for RemoteNode.
+//! UDP/Hybrid/SHM are accepted by [`config::NodeConfig`] for forward
+//! compatibility but are not part of the validated Route Gateway scenario.
 
 pub mod auto_relay;
+pub mod config;
 pub mod topic_relay;
 
 pub use auto_relay::{AutoRelay, TopicFilter};
+pub use config::{AutoRelayConfig, NodeConfig, RouteGatewayConfig};
 pub use topic_relay::TopicRelay;
