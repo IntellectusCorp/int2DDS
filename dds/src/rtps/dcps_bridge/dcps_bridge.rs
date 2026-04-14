@@ -83,6 +83,15 @@ impl DcpsBridge {
             .and_then(|v| v.parse().ok())
             .unwrap_or_else(crate::rtps::transport::get_transport_type);
 
+        // Build optional TLS config from the same PropertyQosPolicy.
+        // A partial/invalid TLS config is a hard error so misconfiguration
+        // surfaces immediately instead of silently falling back to plain TCP.
+        let tls_config = match crate::rtps::transport::tcp::tls::TlsConfig::from_property(property)
+        {
+            Ok(cfg) => cfg.map(std::sync::Arc::new),
+            Err(e) => panic!("Invalid TLS configuration in DomainParticipantQos: {e}"),
+        };
+
         let participant_id = socket.participant_id();
 
         // For TCP/Hybrid, we need guid_prefix before creating transport.
@@ -106,6 +115,7 @@ impl DcpsBridge {
                 multicast_if_ip,
                 working_ips,
                 guid_prefix,
+                tls_config,
             )
             .expect("Failed to create transport plugin"),
         );

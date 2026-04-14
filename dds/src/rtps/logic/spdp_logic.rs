@@ -275,6 +275,7 @@ mod tests {
             socket.get_sender_multicast_if_addr(),
             socket.working_ips().iter().map(|ip| ip.to_string()).collect(),
             GUIDPREFIX_UNKNOWN,
+            None,
         )
         .expect("Failed to create transport plugin");
         socket.set_transport(Arc::from(transport));
