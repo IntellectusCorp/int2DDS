@@ -18,7 +18,7 @@ use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 /// All TCP connections in the transport layer use this trait instead of
 /// `TcpStream` directly, so that TLS can be added later by implementing
 /// this trait for `TlsStream<TcpStream>`.
-pub(crate) trait TcpStreamWrapper: Read + Write + Send {
+pub(crate) trait TcpStreamWrapper: Read + Write + Send + Sync {
     /// Get the remote peer's address
     fn peer_addr(&self) -> io::Result<SocketAddr>;
 
@@ -27,6 +27,9 @@ pub(crate) trait TcpStreamWrapper: Read + Write + Send {
 
     /// Set write timeout
     fn set_write_timeout(&self, dur: Option<std::time::Duration>) -> io::Result<()>;
+
+    /// Set read timeout (applied to the underlying TCP socket).
+    fn set_read_timeout(&self, dur: Option<std::time::Duration>) -> io::Result<()>;
 
     /// Clone the stream (for concurrent read/write)
     fn try_clone_box(&self) -> io::Result<Box<dyn TcpStreamWrapper>>;
@@ -85,6 +88,10 @@ impl TcpStreamWrapper for PlainTcpStream {
 
     fn set_write_timeout(&self, dur: Option<std::time::Duration>) -> io::Result<()> {
         self.inner.set_write_timeout(dur)
+    }
+
+    fn set_read_timeout(&self, dur: Option<std::time::Duration>) -> io::Result<()> {
+        self.inner.set_read_timeout(dur)
     }
 
     fn try_clone_box(&self) -> io::Result<Box<dyn TcpStreamWrapper>> {
@@ -189,6 +196,14 @@ impl TcpStreamWrapper for TlsTcpStream {
             .expect("TlsTcpStream lock poisoned")
             .socket()
             .set_write_timeout(dur)
+    }
+
+    fn set_read_timeout(&self, dur: Option<std::time::Duration>) -> io::Result<()> {
+        self.inner
+            .lock()
+            .expect("TlsTcpStream lock poisoned")
+            .socket()
+            .set_read_timeout(dur)
     }
 
     fn try_clone_box(&self) -> io::Result<Box<dyn TcpStreamWrapper>> {
