@@ -8,7 +8,15 @@
     "domain_id": 1,
     "transport": "tcp",
     "_comment_initial_peers": "TCP physical port = 7400 + 250 * domain_id (domain 1 → 7650). Override with INT2DDS_TCP_PORT.",
-    "initial_peers": ["192.168.1.100:7650"]
+    "initial_peers": ["192.168.1.100:7650"],
+    "_comment_tls": "Remove the 'tls' block to use plain TCP. All three PEM paths are required when TLS is enabled.",
+    "tls": {
+      "ca_file":     "/etc/int2dds/ca.pem",
+      "cert_file":   "/etc/int2dds/cert.pem",
+      "key_file":    "/etc/int2dds/key.pem",
+      "server_name": "gateway.example.com",
+      "verify_peer": true
+    }
   },
   "auto_relay": {
     "filter": "*"
