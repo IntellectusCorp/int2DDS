@@ -135,7 +135,7 @@ impl DcpsBridge {
         let guid_prefix = participant.guid().prefix();
         let participant = Arc::new(participant);
 
-        participant.init_logics(transport.clone());
+        participant.init_logics(transport.clone(), property);
 
         let (spdp_logic, sedp_logic, user_logic) = participant.get_logics();
 

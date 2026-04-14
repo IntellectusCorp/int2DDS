@@ -1182,9 +1182,21 @@ impl Participant {
 
     /// Initialize all logic instances. Must be called immediately after creating Participant.
     /// This creates SPDP, SEDP, User, and WLP logic instances using the provided transport.
-    pub(crate) fn init_logics(self: &Arc<Self>, transport: Arc<dyn TransportPlugin>) {
-        // Get initial peers from environment for TCP/Hybrid discovery
-        let initial_peers = crate::common::env::get_initial_peers();
+    ///
+    /// `property` is consulted first for `int2dds.initial_peers`; if absent, falls back to the
+    /// `INT2DDS_INITIAL_PEERS` environment variable.
+    pub(crate) fn init_logics(
+        self: &Arc<Self>,
+        transport: Arc<dyn TransportPlugin>,
+        property: &crate::infrastructure::qos_policy::PropertyQosPolicy,
+    ) {
+        // Prefer initial_peers from PropertyQosPolicy; fall back to env var.
+        let initial_peers = property
+            .get("int2dds.initial_peers")
+            .map(|v| {
+                crate::common::env::parse_initial_peers(&v)
+            })
+            .unwrap_or_else(crate::common::env::get_initial_peers);
         if !initial_peers.is_empty() {
             log::info!("Configured initial peers for SPDP: {:?}", initial_peers);
         }
