@@ -15,10 +15,10 @@ use int2dds::dcps::infrastructure::qos_policy::{
 use int2dds::dcps::infrastructure::status::StatusMask;
 use int2dds::dcps::infrastructure::wait_set::WaitSet;
 use int2dds::dcps::publication::data_writer::DataWriter;
-use int2dds::dcps::publication::qos::{DataWriterQos, DATAWRITER_QOS_DEFAULT};
+use int2dds::dcps::publication::qos::DataWriterQos;
 use int2dds::dcps::subscription::data_reader::DataReader;
 use int2dds::dcps::subscription::data_reader_listener::DataReaderListener;
-use int2dds::dcps::subscription::qos::{DataReaderQos, DATAREADER_QOS_DEFAULT};
+use int2dds::dcps::subscription::qos::DataReaderQos;
 use int2dds::dcps::subscription::query_condition::QueryCondition;
 use int2dds::dcps::subscription::sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind};
 use int2dds::dcps::topic::qos::TopicQos;
@@ -441,7 +441,7 @@ impl<TReq: DdsRpcType, TRep: DdsRpcType> DataReaderListener for RequesterDdsAdap
 
 // RPC default QoS: RELIABLE, KEEP_ALL, VOLATILE
 fn rpc_datawriter_qos() -> DataWriterQos {
-    let mut qos = DATAWRITER_QOS_DEFAULT;
+    let mut qos = DataWriterQos::default();
     qos.reliability =
         ReliabilityQosPolicy { kind: ReliabilityQosPolicyKind::Reliable, ..qos.reliability };
     qos.history = HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll };
@@ -450,7 +450,7 @@ fn rpc_datawriter_qos() -> DataWriterQos {
 }
 
 fn rpc_datareader_qos() -> DataReaderQos {
-    let mut qos = DATAREADER_QOS_DEFAULT;
+    let mut qos = DataReaderQos::default();
     qos.reliability =
         ReliabilityQosPolicy { kind: ReliabilityQosPolicyKind::Reliable, ..qos.reliability };
     qos.history = HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll };

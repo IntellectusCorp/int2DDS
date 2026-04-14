@@ -350,10 +350,8 @@ impl PlCdrSerializer {
                     buffer.extend(std::iter::repeat_n(0u8, padding));
                 }
             }
-            ParameterValue::TypeInformation(type_id) => {
-                // Use TypeIdentifier's XCDR2 serialization
-                buffer.extend_from_slice(&type_id.serialize());
-                // CDR alignment - pad to 4-byte boundary if needed
+            ParameterValue::TypeInformation(type_info) => {
+                buffer.extend_from_slice(&type_info.serialize());
                 let padding = (4 - (buffer.len() % 4)) % 4;
                 if padding > 0 {
                     buffer.extend(std::iter::repeat_n(0u8, padding));
@@ -1008,11 +1006,12 @@ impl super::ParsedBuiltinTopicData {
             }
         }
 
-        // TypeIdentifier (DDS-XTypes)
+        // TypeInformation (DDS-XTypes)
         if let Some(type_id) = &self.type_identifier {
+            let type_info = crate::xtypes::TypeInformation::from_type_identifier(type_id.clone());
             parameters.push(PlCdrParameter {
                 id: ParameterId::PidTypeInformation,
-                value: ParameterValue::TypeInformation(type_id.clone()),
+                value: ParameterValue::TypeInformation(type_info),
             });
         }
 

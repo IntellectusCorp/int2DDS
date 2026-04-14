@@ -102,18 +102,16 @@ impl SpdpLogic {
         let start = Instant::now();
         match data {
             Some(ref data) => {
-                if self.initial_peers.is_empty() {
-                    // No initial peers: use multicast (default behavior)
-                    if let Some(ref sender) = self.sender {
-                        let _ = sender.send_multicast(domain_id, data);
-                        log::debug!("discovery multicast packet send");
-                    } else {
-                        log::debug!("UDP sender not available, skipping SPDP multicast");
-                    }
+                // No initial peers: use multicast (default behavior)
+                if let Some(ref sender) = self.sender {
+                    let _ = sender.send_multicast(domain_id, data);
+                    log::debug!("discovery multicast packet send");
                 } else {
-                    // Initial peers configured: send unicast only
-                    self.send_spdp_to_initial_peers(data);
+                    log::debug!("UDP sender not available, skipping SPDP multicast");
                 }
+
+                // This will send to initial peers if configured
+                self.send_spdp_to_initial_peers(data);
             }
             None => {
                 log::error!("spdp message is not set");
@@ -212,18 +210,15 @@ impl SpdpLogic {
         {
             let buffer = rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian);
             if let Ok(buffer) = buffer {
-                if self.initial_peers.is_empty() {
-                    if let Some(ref sender) = self.sender {
-                        let _ = sender.send_multicast(participant.domain_id(), &buffer);
-                        log::debug!("discovery multicast packet send");
-                    } else {
-                        log::debug!(
-                            "UDP sender not available, skipping SPDP termination multicast"
-                        );
-                    }
+                if let Some(ref sender) = self.sender {
+                    let _ = sender.send_multicast(participant.domain_id(), &buffer);
+                    log::debug!("discovery multicast packet send");
                 } else {
-                    self.send_spdp_to_initial_peers(&buffer);
+                    log::debug!("UDP sender not available, skipping SPDP termination multicast");
                 }
+
+                // This will send to initial peers if configured
+                self.send_spdp_to_initial_peers(&buffer);
             } else {
                 log::error!("Failed to serialize SPDP message with inline qos");
             }
