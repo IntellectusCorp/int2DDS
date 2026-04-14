@@ -30,7 +30,7 @@ use super::{
     data_writer::{DataWriter, DataWriterBase, DataWriterInternal},
     data_writer_listener::DataWriterListener,
     publisher_listener::PublisherListener,
-    qos::{DataWriterQos, PublisherQos, DATAWRITER_QOS_DEFAULT},
+    qos::{DataWriterQos, PublisherQos},
 };
 use crate::{
     common::instance_handle::InstanceHandle,
@@ -48,6 +48,7 @@ use crate::{
             impl_check_parent_enabled, impl_dds_entity, impl_dds_entity_impl, BaseEntity,
             EnableChild, Entity, EntityInternal, UpdateStatus,
         },
+        qos_kind::QosKind,
         qos_policy::Qos,
         status::StatusMask,
         status_condition::StatusCondition,
@@ -81,7 +82,7 @@ pub struct Publisher {
     writers_by_topic_handle:
         Arc<Mutex<HashMap<InstanceHandle, Vec<Weak<dyn DataWriterInternal<Qos = DataWriterQos>>>>>>,
     orphaned_writers: Arc<Mutex<Vec<Arc<dyn DataWriterInternal<Qos = DataWriterQos>>>>>,
-    default_datawriter_qos: Arc<Mutex<DataWriterQos>>,
+    default_datawriter_qos: Arc<Mutex<Option<DataWriterQos>>>,
     participant: Option<Weak<DomainParticipant>>,
 }
 
@@ -181,7 +182,7 @@ impl Publisher {
             writers_by_topic_name: Arc::new(Mutex::new(HashMap::new())),
             writers_by_topic_handle: Arc::new(Mutex::new(HashMap::new())),
             orphaned_writers: Arc::new(Mutex::new(Vec::new())),
-            default_datawriter_qos: Arc::new(Mutex::new(DataWriterQos::default())),
+            default_datawriter_qos: Arc::new(Mutex::new(None)),
             participant: Some(Arc::downgrade(participant)),
         };
         let publisher_arc = Arc::new(publisher.clone());
@@ -234,7 +235,7 @@ impl Publisher {
     pub fn create_datawriter<Foo: 'static + Clone>(
         &self,
         topic: &Topic,
-        qos: DataWriterQos,
+        qos: impl Into<QosKind<DataWriterQos>>,
         listener: Option<Arc<dyn DataWriterListener<Foo = Foo>>>,
         mask: StatusMask,
     ) -> DdsResult<DataWriter<Foo>> {
@@ -242,6 +243,25 @@ impl Publisher {
             return Err(DdsError::PreconditionNotMet);
         }
         self.is_deleted()?;
+
+        // Resolution chain for QosKind::Default: registered default → configured
+        // default profile → spec default. QosKind::Specific is used as-is.
+        let qos = match qos.into() {
+            QosKind::Specific(q) => q,
+            QosKind::Default => {
+                if let Some(registered) =
+                    self.default_datawriter_qos.lock().ok().and_then(|g| g.clone())
+                {
+                    registered
+                } else if let Ok(profile_qos) =
+                    DomainParticipantFactory::get_instance().get_datawriter_qos_from_profile("")
+                {
+                    profile_qos
+                } else {
+                    DataWriterQos::default()
+                }
+            }
+        };
 
         let type_support = self.get_participant()?.find_typesupport(topic.get_type_name());
         if type_support.is_none() {
@@ -877,27 +897,30 @@ impl Publisher {
         }
         Ok(())
     }
-    pub fn set_default_datawriter_qos(&self, qos: DataWriterQos) -> DdsResult<()> {
+    pub fn set_default_datawriter_qos(
+        &self,
+        qos: impl Into<QosKind<DataWriterQos>>,
+    ) -> DdsResult<()> {
         self.is_deleted()?;
-        if qos == DATAWRITER_QOS_DEFAULT {
-            return self.reset_default_datawriter_qos();
-        }
-        match qos.is_consistent() {
-            Ok(()) => match self.default_datawriter_qos.lock() {
-                Ok(mut default_qos) => {
-                    *default_qos = qos;
-                    Ok(())
+        match qos.into() {
+            QosKind::Default => self.reset_default_datawriter_qos(),
+            QosKind::Specific(qos) => {
+                qos.is_consistent()?;
+                match self.default_datawriter_qos.lock() {
+                    Ok(mut default_qos) => {
+                        *default_qos = Some(qos);
+                        Ok(())
+                    }
+                    Err(e) => Err(DdsError::Error(e.to_string())),
                 }
-                Err(e) => Err(DdsError::Error(e.to_string())),
-            },
-            Err(err_code) => Err(err_code),
+            }
         }
     }
 
     fn reset_default_datawriter_qos(&self) -> DdsResult<()> {
         match self.default_datawriter_qos.lock() {
             Ok(mut default_qos) => {
-                *default_qos = DATAWRITER_QOS_DEFAULT;
+                *default_qos = None;
                 Ok(())
             }
             Err(e) => Err(DdsError::Error(e.to_string())),
@@ -907,7 +930,7 @@ impl Publisher {
     pub fn get_default_datawriter_qos(&self) -> DdsResult<DataWriterQos> {
         self.is_deleted()?;
         match self.default_datawriter_qos.lock() {
-            Ok(default_datawriter_qos) => Ok(default_datawriter_qos.clone()),
+            Ok(default_datawriter_qos) => Ok(default_datawriter_qos.clone().unwrap_or_default()),
             Err(e) => Err(DdsError::Error(e.to_string())),
         }
     }

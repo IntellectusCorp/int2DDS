@@ -40,13 +40,33 @@ pub const INT2DDS_FIELD_UINT64: i32 = 10;
 pub const INT2DDS_FIELD_FLOAT32: i32 = 11;
 pub const INT2DDS_FIELD_FLOAT64: i32 = 12;
 pub const INT2DDS_FIELD_STRING: i32 = 13;
-pub const INT2DDS_FIELD_ENUM: i32 = 14;
+pub const INT2DDS_FIELD_CHAR16: i32 = 14;
+pub const INT2DDS_FIELD_WSTRING: i32 = 15;
+pub const INT2DDS_MEMBER_KEY: i32 = 1 << 0;
+pub const INT2DDS_MEMBER_OPTIONAL: i32 = 1 << 1;
+pub const INT2DDS_MEMBER_MUST_UNDERSTAND: i32 = 1 << 2;
+pub const INT2DDS_MEMBER_EXTERNAL: i32 = 1 << 3;
 
 /// Internal field description.
 struct FieldInfo {
     name: String,
     type_id: TypeIdentifier,
-    is_key: bool,
+    flags: i32,
+}
+
+impl FieldInfo {
+    fn is_key(&self) -> bool {
+        self.flags & INT2DDS_MEMBER_KEY != 0
+    }
+    fn is_optional(&self) -> bool {
+        self.flags & INT2DDS_MEMBER_OPTIONAL != 0
+    }
+    fn is_must_understand(&self) -> bool {
+        self.flags & INT2DDS_MEMBER_MUST_UNDERSTAND != 0
+    }
+    fn is_external(&self) -> bool {
+        self.flags & INT2DDS_MEMBER_EXTERNAL != 0
+    }
 }
 
 /// Opaque type info builder for the FFI layer.
@@ -73,11 +93,11 @@ impl Int2DdsTypeInfo {
         for (index, field) in self.fields.iter().enumerate() {
             let member_flags = MemberFlag::new(
                 TryConstructKind::Discard,
-                false,        // is_external
-                false,        // is_optional
-                false,        // is_must_understand
-                field.is_key, // is_key
-                false,        // is_default
+                field.is_external(),
+                field.is_optional(),
+                field.is_must_understand(),
+                field.is_key(),
+                false, // is_default
             );
             let common = CommonStructMember {
                 member_id: index as u32,
@@ -103,7 +123,7 @@ impl Int2DdsTypeInfo {
 
     /// Check if any field is marked as a key field.
     pub(crate) fn has_key_field(&self) -> bool {
-        self.fields.iter().any(|f| f.is_key)
+        self.fields.iter().any(|f| f.is_key())
     }
 
     /// Build TypeIdentifier (CompleteTypeId hash) from the collected fields.
@@ -119,6 +139,7 @@ fn field_type_to_type_identifier(field_type: i32) -> Option<TypeIdentifier> {
         INT2DDS_FIELD_BOOL => Some(TypeIdentifier::Boolean),
         INT2DDS_FIELD_BYTE => Some(TypeIdentifier::Byte),
         INT2DDS_FIELD_CHAR8 => Some(TypeIdentifier::Char8),
+        INT2DDS_FIELD_CHAR16 => Some(TypeIdentifier::Char16),
         INT2DDS_FIELD_INT8 => Some(TypeIdentifier::Int8),
         INT2DDS_FIELD_INT16 => Some(TypeIdentifier::Int16),
         INT2DDS_FIELD_INT32 => Some(TypeIdentifier::Int32),
@@ -130,7 +151,7 @@ fn field_type_to_type_identifier(field_type: i32) -> Option<TypeIdentifier> {
         INT2DDS_FIELD_FLOAT32 => Some(TypeIdentifier::Float32),
         INT2DDS_FIELD_FLOAT64 => Some(TypeIdentifier::Float64),
         INT2DDS_FIELD_STRING => Some(TypeIdentifier::String8),
-        INT2DDS_FIELD_ENUM => Some(TypeIdentifier::Int32), // enums are i32 on wire
+        INT2DDS_FIELD_WSTRING => Some(TypeIdentifier::String16),
         _ => None,
     }
 }
@@ -177,19 +198,13 @@ pub unsafe extern "C" fn int2dds_type_info_create(
     INT2DDS_RET_OK
 }
 
-/// Add a field to the type info builder.
-///
-/// # Safety
-/// - `type_info` must be a valid type info created by `int2dds_type_info_create`
-/// - `field_name` must be a valid null-terminated C string
-/// - `field_type`: one of the INT2DDS_FIELD_* constants
-/// - `is_key`: non-zero if this field is a key field
+/// Add a primitive-typed field to the type info builder.
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_add_field(
     type_info: *mut Int2DdsTypeInfo,
     field_name: *const std::os::raw::c_char,
     field_type: i32,
-    is_key: i32,
+    flags: i32,
 ) -> Int2DdsRet {
     check_null!(type_info);
     check_null!(field_name);
@@ -206,29 +221,19 @@ pub unsafe extern "C" fn int2dds_type_info_add_field(
         None => return INT2DDS_RET_INVALID_ARGUMENT,
     };
 
-    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, is_key: is_key != 0 });
+    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags });
 
     INT2DDS_RET_OK
 }
 
 /// Add a sequence field to the type info builder.
-///
-/// Creates a `PlainSequenceLarge` TypeIdentifier wrapping the element type,
-/// matching how int2DDS-Rust represents `Vec<T>` in DDS-XTypes.
-///
-/// # Safety
-/// - `type_info` must be a valid type info created by `int2dds_type_info_create`
-/// - `field_name` must be a valid null-terminated C string
-/// - `element_type`: one of the INT2DDS_FIELD_* constants for the sequence element
-/// - `bound`: maximum sequence length (0 = unbounded)
-/// - `is_key`: non-zero if this field is a key field
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_add_sequence_field(
     type_info: *mut Int2DdsTypeInfo,
     field_name: *const std::os::raw::c_char,
     element_type: i32,
     bound: u32,
-    is_key: i32,
+    flags: i32,
 ) -> Int2DdsRet {
     check_null!(type_info);
     check_null!(field_name);
@@ -251,29 +256,19 @@ pub unsafe extern "C" fn int2dds_type_info_add_sequence_field(
         element_identifier: Box::new(element_id),
     };
 
-    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, is_key: is_key != 0 });
+    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags });
 
     INT2DDS_RET_OK
 }
 
 /// Add an array field to the type info builder.
-///
-/// Creates a `PlainArrayLarge` TypeIdentifier wrapping the element type,
-/// matching how int2DDS-Rust represents `[T; N]` in DDS-XTypes.
-///
-/// # Safety
-/// - `type_info` must be a valid type info created by `int2dds_type_info_create`
-/// - `field_name` must be a valid null-terminated C string
-/// - `element_type`: one of the INT2DDS_FIELD_* constants for the array element
-/// - `array_size`: fixed size of the array
-/// - `is_key`: non-zero if this field is a key field
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_add_array_field(
     type_info: *mut Int2DdsTypeInfo,
     field_name: *const std::os::raw::c_char,
     element_type: i32,
     array_size: u32,
-    is_key: i32,
+    flags: i32,
 ) -> Int2DdsRet {
     check_null!(type_info);
     check_null!(field_name);
@@ -296,31 +291,18 @@ pub unsafe extern "C" fn int2dds_type_info_add_array_field(
         element_identifier: Box::new(element_id),
     };
 
-    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, is_key: is_key != 0 });
+    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags });
 
     INT2DDS_RET_OK
 }
 
 /// Add a named (complex) type field to the type info builder.
-///
-/// Creates a `MinimalTypeId(EquivalenceHash::compute(type_hash_name))` TypeIdentifier,
-/// matching how int2DDS-Rust represents struct fields via the derive macro's
-/// `Fallback` path in `type_to_identifier`.
-///
-/// For direct struct fields: pass the struct name (e.g., "InnerStruct").
-/// For `Vec<Struct>` fields: pass "Vec < StructName >" (matching Rust `quote!` formatting).
-///
-/// # Safety
-/// - `type_info` must be a valid type info created by `int2dds_type_info_create`
-/// - `field_name` must be a valid null-terminated C string
-/// - `type_hash_name` must be a valid null-terminated C string (the type name to hash)
-/// - `is_key`: non-zero if this field is a key field
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_add_named_type_field(
     type_info: *mut Int2DdsTypeInfo,
     field_name: *const std::os::raw::c_char,
     type_hash_name: *const std::os::raw::c_char,
-    is_key: i32,
+    flags: i32,
 ) -> Int2DdsRet {
     check_null!(type_info);
     check_null!(field_name);
@@ -340,16 +322,12 @@ pub unsafe extern "C" fn int2dds_type_info_add_named_type_field(
 
     let type_id = TypeIdentifier::MinimalTypeId(EquivalenceHash::compute(hash_name.as_bytes()));
 
-    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, is_key: is_key != 0 });
+    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags });
 
     INT2DDS_RET_OK
 }
 
 /// Destroy a type info builder.
-///
-/// # Safety
-/// - `type_info` must be a valid type info, or null (no-op)
-/// - Must not be used after this call
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_destroy(type_info: *mut Int2DdsTypeInfo) {
     if !type_info.is_null() {
@@ -365,13 +343,6 @@ mod tests {
         TypeFlag, TypeIdentifier, TypeObject,
     };
 
-    /// Test that the FFI type_info builder produces the same hash as the derive macro path.
-    ///
-    /// This test constructs PrimitivesType using both:
-    /// 1. Int2DdsTypeInfo builder (FFI path)
-    /// 2. Manual CompleteStructType construction (simulating what the derive macro generates)
-    ///
-    /// Both should produce identical TypeIdentifier hashes.
     #[test]
     fn test_primitives_type_hash_matches_derive_macro() {
         // === Path 1: FFI type_info builder (same as C code) ===
@@ -383,22 +354,22 @@ mod tests {
         ti.fields.push(FieldInfo {
             name: "id".to_string(),
             type_id: TypeIdentifier::Int32,
-            is_key: true,
+            flags: INT2DDS_MEMBER_KEY,
         });
         ti.fields.push(FieldInfo {
             name: "bool_val".to_string(),
             type_id: TypeIdentifier::Boolean,
-            is_key: false,
+            flags: 0,
         });
         ti.fields.push(FieldInfo {
             name: "byte_val".to_string(),
             type_id: TypeIdentifier::Byte,
-            is_key: false,
+            flags: 0,
         });
         ti.fields.push(FieldInfo {
             name: "char_val".to_string(),
             type_id: TypeIdentifier::Char8,
-            is_key: false,
+            flags: 0,
         });
 
         let ffi_type_id = ti.build_type_identifier();
@@ -487,7 +458,7 @@ mod tests {
         ti.fields.push(FieldInfo {
             name: "id".to_string(),
             type_id: TypeIdentifier::Int32,
-            is_key: true,
+            flags: INT2DDS_MEMBER_KEY,
         });
         // Unbounded sequence<bool>
         ti.fields.push(FieldInfo {
@@ -497,7 +468,7 @@ mod tests {
                 bound: 0,
                 element_identifier: Box::new(TypeIdentifier::Boolean),
             },
-            is_key: false,
+            flags: 0,
         });
         // Bounded sequence<int32, 10>
         ti.fields.push(FieldInfo {
@@ -507,7 +478,7 @@ mod tests {
                 bound: 10,
                 element_identifier: Box::new(TypeIdentifier::Int32),
             },
-            is_key: false,
+            flags: 0,
         });
         // Array bool[4]
         ti.fields.push(FieldInfo {
@@ -517,7 +488,7 @@ mod tests {
                 array_bound_seq: vec![4],
                 element_identifier: Box::new(TypeIdentifier::Boolean),
             },
-            is_key: false,
+            flags: 0,
         });
 
         let ffi_type_id = ti.build_type_identifier();

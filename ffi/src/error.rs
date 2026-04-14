@@ -38,6 +38,13 @@ pub const INT2DDS_RET_NO_DATA: Int2DdsRet = 27;
 // Null pointer errors
 pub const INT2DDS_RET_NULL_POINTER: Int2DdsRet = 100;
 
+// Dynamic xtypes errors (200..=299 reserved for the dynamic surface; see docs/superpowers/specs/2026-04-09-ffi-xtypes-parity-roadmap.md principle P2)
+pub const INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND: Int2DdsRet = 200;
+pub const INT2DDS_RET_DYNAMIC_TYPE_MISMATCH: Int2DdsRet = 201;
+pub const INT2DDS_RET_DYNAMIC_UNSUPPORTED_TYPE: Int2DdsRet = 202;
+pub const INT2DDS_RET_DYNAMIC_TIMEOUT: Int2DdsRet = 203;
+pub const INT2DDS_RET_DYNAMIC_DECODE_ERROR: Int2DdsRet = 204;
+
 /// Convert DdsResult to FFI return code
 pub fn to_ffi_result<T>(result: int2dds::core::error::DdsResult<T>) -> (Int2DdsRet, Option<T>) {
     match result {
