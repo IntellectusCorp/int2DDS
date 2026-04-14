@@ -10,6 +10,23 @@ use crate::codegen::utils::{
     DiscriminantType, SerializationMethod,
 };
 
+pub fn wrap_with_emheader(
+    member_id_expr: TokenStream,
+    must_understand: bool,
+    payload: TokenStream,
+) -> TokenStream {
+    quote! {
+        serializer.write_member_with(
+            (#member_id_expr) as u32,
+            #must_understand,
+            |serializer| -> ::std::result::Result<(), _> {
+                #payload
+                Ok(())
+            },
+        )?;
+    }
+}
+
 /// Generate CdrSerialize implementation for union (enum with data)
 pub fn generate_union_cdr_serialize_impl(
     name: &syn::Ident,
@@ -138,26 +155,8 @@ pub fn generate_union_xcdr_serialize_impl(
     let disc_rust_type = syn::Ident::new(disc_type.rust_type(), name.span());
     let is_mutable = matches!(extensibility, ExtensibilityKind::Mutable);
 
-    // Helper to build a "EMHEADER + payload + backpatch" block for one member.
-    // member_id is a u32 literal known at codegen time (always <= 0x0FFF here).
-    let wrap_with_emheader = |member_id: u32, payload: TokenStream| -> TokenStream {
-        quote! {
-            {
-                let emheader_pos = serializer.reserve_dheader();
-                let field_start = serializer.position();
-                #payload
-                let field_len = (serializer.position() - field_start) as u32;
-                if field_len <= 0xFFFF {
-                    let emheader = ((#member_id & 0x0FFFu32) << 16) | (field_len & 0xFFFF);
-                    serializer.write_dheader_at(emheader_pos, emheader);
-                } else {
-                    serializer.insert_nextint_slot_at(emheader_pos + 4);
-                    let emheader = (4u32 << 28) | (#member_id & 0x0FFF_FFFFu32);
-                    serializer.write_dheader_at(emheader_pos, emheader);
-                    serializer.write_dheader_at(emheader_pos + 4, field_len);
-                }
-            }
-        }
+    let wrap_member = |member_id: u32, payload: TokenStream| -> TokenStream {
+        wrap_with_emheader(quote! { #member_id }, false, payload)
     };
 
     let match_arms: Vec<_> = variants
@@ -182,8 +181,8 @@ pub fn generate_union_xcdr_serialize_impl(
                 };
 
                 if is_mutable {
-                    let disc_block = wrap_with_emheader(0, disc_payload);
-                    let val_block = wrap_with_emheader(branch_id, value_serialization);
+                    let disc_block = wrap_member(0, disc_payload);
+                    let val_block = wrap_member(branch_id, value_serialization);
                     quote! {
                         #name::#variant_name(value) => {
                             #disc_block
@@ -199,7 +198,7 @@ pub fn generate_union_xcdr_serialize_impl(
                     }
                 }
             } else if is_mutable {
-                let disc_block = wrap_with_emheader(0, disc_payload);
+                let disc_block = wrap_member(0, disc_payload);
                 quote! {
                     #name::#variant_name => {
                         #disc_block
