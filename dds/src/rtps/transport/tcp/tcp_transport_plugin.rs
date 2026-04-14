@@ -534,3 +534,202 @@ mod tests {
         let _ = TcpStream::connect(format!("127.0.0.1:{}", port));
     }
 }
+
+// ── TLS E2E tests (Phase 3e) ──────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tls_tests {
+    use std::io::Write as IoWrite;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use crossbeam_channel::bounded;
+    use dashmap::DashMap;
+    use rcgen::{generate_simple_self_signed, CertifiedKey};
+    use tempfile::NamedTempFile;
+
+    use crate::infrastructure::qos_policy::PropertyQosPolicy;
+    use crate::rtps::transport::tcp::stream_wrapper::{accept_tls, wrap_stream};
+    use crate::rtps::transport::tcp::tcp_mux_listener::TcpMuxListener;
+    use crate::rtps::transport::tcp::tcp_sender::TcpSender;
+    use crate::rtps::transport::tcp::tls::TlsConfig;
+
+    // ── cert helpers ─────────────────────────────────────────────────────────
+
+    struct Bundle {
+        ca_file: NamedTempFile,
+        cert_file: NamedTempFile,
+        key_file: NamedTempFile,
+    }
+
+    fn make_bundle() -> Bundle {
+        let CertifiedKey { cert, key_pair } =
+            generate_simple_self_signed(vec!["localhost".into()]).expect("rcgen");
+        let mut ca = NamedTempFile::new().unwrap();
+        let mut crt = NamedTempFile::new().unwrap();
+        let mut key = NamedTempFile::new().unwrap();
+        ca.write_all(cert.pem().as_bytes()).unwrap();
+        crt.write_all(cert.pem().as_bytes()).unwrap();
+        key.write_all(key_pair.serialize_pem().as_bytes()).unwrap();
+        Bundle { ca_file: ca, cert_file: crt, key_file: key }
+    }
+
+    fn tls_config_from_bundle(bundle: &Bundle, server_name: &str) -> Arc<TlsConfig> {
+        let mut p = PropertyQosPolicy::default();
+        p.set("int2dds.tls.ca_file", bundle.ca_file.path().to_str().unwrap());
+        p.set("int2dds.tls.cert_file", bundle.cert_file.path().to_str().unwrap());
+        p.set("int2dds.tls.key_file", bundle.key_file.path().to_str().unwrap());
+        p.set("int2dds.tls.server_name", server_name);
+        p.set("int2dds.tls.verify_peer", "false");
+        Arc::new(TlsConfig::from_property(&p).expect("parse ok").expect("config present"))
+    }
+
+    /// Spawn the TLS accept loop for `listener` in a background thread.
+    /// Accepts connections until `terminated` is set.
+    fn spawn_tls_accept_loop(
+        mut listener: TcpMuxListener,
+        tls: Arc<TlsConfig>,
+        terminated: Arc<AtomicBool>,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let raw = match listener.take_listener() {
+                Some(l) => l,
+                None => return,
+            };
+            let idle = Duration::from_secs(30);
+            while !terminated.load(Ordering::SeqCst) {
+                match raw.accept() {
+                    Ok((tcp, addr)) => {
+                        let server_cfg = match tls.build_server_config() {
+                            Ok(c) => c,
+                            Err(_) => continue,
+                        };
+                        match accept_tls(tcp, server_cfg) {
+                            Ok(stream) => {
+                                listener.accept_connection(
+                                    stream,
+                                    addr,
+                                    terminated.clone(),
+                                    idle,
+                                );
+                            }
+                            Err(e) => {
+                                log::warn!("[tls_test] TLS accept failed: {:?}", e);
+                            }
+                        }
+                    }
+                    Err(ref e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                    {}
+                    Err(_) => break,
+                }
+            }
+        })
+    }
+
+    // ── Test 1: full TLS data roundtrip ──────────────────────────────────────
+
+    /// Verifies that a TLS-wrapped sender can send RTPS data to a TLS-wrapped
+    /// listener and the data is correctly routed to the discovery channel.
+    #[test]
+    fn tls_sender_to_listener_data_roundtrip() {
+        let bundle = make_bundle();
+        let tls = tls_config_from_bundle(&bundle, "localhost");
+
+        // Use domain 0 for both sides so their logical discovery ports match.
+        // Listener uses port 0 (OS-assigned) so there is no port conflict.
+        let domain_id = 0u32;
+        let participant_id = 0u32;
+
+        let (disc_tx, disc_rx) = bounded(64);
+        let (user_tx, _) = bounded(64);
+        let listener =
+            TcpMuxListener::new(0, domain_id, participant_id, [0x10; 12], disc_tx, user_tx)
+                .expect("listener creation");
+        let server_port = listener.port();
+        let server_addr: std::net::SocketAddr =
+            format!("127.0.0.1:{}", server_port).parse().unwrap();
+
+        let terminated = Arc::new(AtomicBool::new(false));
+        let _accept_thread =
+            spawn_tls_accept_loop(listener, tls.clone(), terminated.clone());
+
+        // TLS-enabled sender, same domain/participant so logical port matches.
+        let sender = TcpSender::new_with_tls(
+            "127.0.0.1".to_string(),
+            [0x11; 12],
+            domain_id,
+            participant_id,
+            server_port,
+            Arc::new(DashMap::new()),
+            Some(tls.clone()),
+        )
+        .expect("sender creation");
+
+        // A minimal RTPS header (12 bytes) — enough for the listener to route.
+        let rtps_header = b"RTPS\x02\x04\x00\x00\x01\x02\x03\x04";
+        sender.send_to_discovery(&server_addr, rtps_header).expect("send ok");
+
+        let msg = disc_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("discovery message not received within 3 s");
+        assert!(
+            msg.data.starts_with(b"RTPS"),
+            "unexpected payload: {:?}",
+            &msg.data[..msg.data.len().min(16)]
+        );
+
+        terminated.store(true, Ordering::SeqCst);
+    }
+
+    // ── Test 2: plain client rejected by TLS server ───────────────────────────
+
+    /// A plain (non-TLS) client should fail to complete the handshake,
+    /// so no data reaches the discovery channel.
+    #[test]
+    fn plaintext_client_rejected_by_tls_listener() {
+        let bundle = make_bundle();
+        let tls = tls_config_from_bundle(&bundle, "localhost");
+
+        let (disc_tx, disc_rx) = bounded(64);
+        let (user_tx, _) = bounded(64);
+        let listener =
+            TcpMuxListener::new(0, 0, 0, [0x20; 12], disc_tx, user_tx).expect("listener");
+        let server_port = listener.port();
+
+        let terminated = Arc::new(AtomicBool::new(false));
+        let _accept_thread = spawn_tls_accept_loop(listener, tls, terminated.clone());
+
+        // Plain TCP sender — no TLS config.
+        let sender = TcpSender::new_with_tls(
+            "127.0.0.1".to_string(),
+            [0x21; 12],
+            0,
+            0,
+            server_port,
+            Arc::new(DashMap::new()),
+            None, // no TLS
+        )
+        .expect("sender creation");
+
+        let server_addr: std::net::SocketAddr =
+            format!("127.0.0.1:{}", server_port).parse().unwrap();
+        let rtps_header = b"RTPS\x02\x04\x00\x00\x01\x02\x03\x04";
+
+        // The send may fail (TLS server closes the connection) or the RTPS
+        // frame may arrive garbled. Either way, no valid message should be
+        // routed to the discovery channel.
+        let _ = sender.send_to_discovery(&server_addr, rtps_header);
+
+        let result = disc_rx.recv_timeout(Duration::from_millis(500));
+        assert!(
+            result.is_err(),
+            "plain client must not reach discovery channel, but got a message with {} bytes",
+            result.map(|m| m.data.len()).unwrap_or(0),
+        );
+
+        terminated.store(true, Ordering::SeqCst);
+    }
+}
