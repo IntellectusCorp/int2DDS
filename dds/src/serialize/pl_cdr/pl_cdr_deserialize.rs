@@ -649,13 +649,20 @@ impl PlCdrParser {
                     value: representations,
                 })
             }
-            ParameterId::PidTypeInformation => match TypeIdentifier::deserialize(data) {
-                Ok((type_id, _consumed)) => ParameterValue::TypeInformation(type_id),
-                Err(e) => {
-                    warn!("Failed to parse TypeIdentifier: {}", e);
-                    ParameterValue::Unknown(data)
+            ParameterId::PidTypeInformation => {
+                match crate::xtypes::TypeInformation::deserialize(data) {
+                    Ok((type_info, _consumed)) => ParameterValue::TypeInformation(type_info),
+                    Err(_) => match TypeIdentifier::deserialize(data) {
+                        Ok((type_id, _consumed)) => ParameterValue::TypeInformation(
+                            crate::xtypes::TypeInformation::from_type_identifier(type_id),
+                        ),
+                        Err(e) => {
+                            warn!("Failed to parse TypeInformation: {}", e);
+                            ParameterValue::Unknown(data)
+                        }
+                    },
                 }
-            },
+            }
             ParameterId::PidTypeConsistencyEnforcement => {
                 // TypeConsistencyEnforcementQosPolicy: kind(2) + 5 bools(5) + padding(1) = 8 bytes
                 if data.len() < 7 {

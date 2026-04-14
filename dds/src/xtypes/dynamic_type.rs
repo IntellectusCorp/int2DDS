@@ -111,6 +111,10 @@ impl DynamicType {
             CompleteTypeObject::Enum(enum_type) => {
                 Self::from_enum_type(enum_type, type_identifier, type_object.clone())
             }
+            _ => Err(DynamicTypeError::UnsupportedType(format!(
+                "TypeObject kind 0x{:02X} not yet supported for DynamicType",
+                type_object.discriminator()
+            ))),
         }
     }
 
@@ -130,7 +134,7 @@ impl DynamicType {
         for (index, member) in struct_type.member_seq.iter().enumerate() {
             let member_type = Self::type_from_identifier(&member.common.member_type_id)?;
             let descriptor = MemberDescriptor {
-                name: member.detail.name.clone(),
+                name: Arc::from(member.detail.name.as_str()),
                 member_id: member.common.member_id,
                 member_type,
                 is_key: member.common.member_flags.is_key(),
@@ -396,7 +400,7 @@ pub struct StructDescriptor {
     /// Members in declaration order
     members: Vec<MemberDescriptor>,
     /// Map from member name to index
-    member_by_name: HashMap<String, usize>,
+    member_by_name: HashMap<Arc<str>, usize>,
     /// Map from member ID to index
     member_by_id: HashMap<u32, usize>,
 }
@@ -431,8 +435,8 @@ impl StructDescriptor {
 /// Descriptor for a single struct member.
 #[derive(Debug, Clone)]
 pub struct MemberDescriptor {
-    /// Member name
-    pub name: String,
+    /// Member name (shared via Arc so cloning is a refcount bump)
+    pub name: Arc<str>,
     /// Member ID (used in MUTABLE types)
     pub member_id: u32,
     /// Member type kind
@@ -560,12 +564,12 @@ mod tests {
         assert_eq!(members.len(), 2);
 
         let id_member = dynamic_type.get_member("id").unwrap();
-        assert_eq!(id_member.name, "id");
+        assert_eq!(&*id_member.name, "id");
         assert!(id_member.is_key);
         assert!(matches!(id_member.member_type, DynamicTypeKind::Primitive(PrimitiveKind::Int32)));
 
         let msg_member = dynamic_type.get_member("message").unwrap();
-        assert_eq!(msg_member.name, "message");
+        assert_eq!(&*msg_member.name, "message");
         assert!(!msg_member.is_key);
         assert!(matches!(msg_member.member_type, DynamicTypeKind::String { bound: None }));
     }
@@ -624,7 +628,7 @@ mod tests {
 
         let key_members = dynamic_type.key_members();
         assert_eq!(key_members.len(), 2);
-        assert_eq!(key_members[0].name, "key1");
-        assert_eq!(key_members[1].name, "key2");
+        assert_eq!(&*key_members[0].name, "key1");
+        assert_eq!(&*key_members[1].name, "key2");
     }
 }

@@ -4,6 +4,7 @@ use syn::punctuated::Punctuated;
 use syn::token::Comma;
 use syn::Variant;
 
+use crate::codegen::type_config::ExtensibilityKind;
 use crate::codegen::utils::{
     get_discriminant_value, get_serialization_method, get_variant_type, variant_has_data,
     DiscriminantType, SerializationMethod,
@@ -120,14 +121,44 @@ pub fn generate_union_cdr_deserialize_impl(
 }
 
 /// Generate XcdrSerialize implementation for union (enum with data)
+///
+/// Encoding per DDS-XTypes §7.4.4 (XCDR2):
+///  - Final     : discriminant + selected branch value (no DHEADER, no EMHEADER)
+///  - Appendable: DHEADER + (discriminant + value)
+///  - Mutable   : DHEADER + EMHEADER(0)+discriminant + EMHEADER(branch_id)+value
+///                 (branch_id = variant_index + 1; 0 is reserved for the discriminant)
 pub fn generate_union_xcdr_serialize_impl(
     name: &syn::Ident,
     variants: &Punctuated<Variant, Comma>,
     crate_path: &TokenStream,
     disc_type: DiscriminantType,
+    extensibility: ExtensibilityKind,
 ) -> TokenStream {
     let serialize_disc_method = syn::Ident::new(disc_type.serialize_method(), name.span());
     let disc_rust_type = syn::Ident::new(disc_type.rust_type(), name.span());
+    let is_mutable = matches!(extensibility, ExtensibilityKind::Mutable);
+
+    // Helper to build a "EMHEADER + payload + backpatch" block for one member.
+    // member_id is a u32 literal known at codegen time (always <= 0x0FFF here).
+    let wrap_with_emheader = |member_id: u32, payload: TokenStream| -> TokenStream {
+        quote! {
+            {
+                let emheader_pos = serializer.reserve_dheader();
+                let field_start = serializer.position();
+                #payload
+                let field_len = (serializer.position() - field_start) as u32;
+                if field_len <= 0xFFFF {
+                    let emheader = ((#member_id & 0x0FFFu32) << 16) | (field_len & 0xFFFF);
+                    serializer.write_dheader_at(emheader_pos, emheader);
+                } else {
+                    serializer.insert_nextint_slot_at(emheader_pos + 4);
+                    let emheader = (4u32 << 28) | (#member_id & 0x0FFF_FFFFu32);
+                    serializer.write_dheader_at(emheader_pos, emheader);
+                    serializer.write_dheader_at(emheader_pos + 4, field_len);
+                }
+            }
+        }
+    };
 
     let match_arms: Vec<_> = variants
         .iter()
@@ -135,8 +166,13 @@ pub fn generate_union_xcdr_serialize_impl(
         .map(|(idx, variant)| {
             let variant_name = &variant.ident;
             let disc_value = get_discriminant_value(variant, idx);
+            let branch_id = (idx as u32) + 1; // 0 reserved for discriminant
 
-            if variant_has_data(variant) {
+            let disc_payload = quote! {
+                serializer.#serialize_disc_method(#disc_value as #disc_rust_type)?;
+            };
+
+            let body = if variant_has_data(variant) {
                 let value_serialization = if let Some(field_type) = get_variant_type(variant) {
                     generate_value_serialization(field_type, crate_path, true)
                 } else {
@@ -145,42 +181,86 @@ pub fn generate_union_xcdr_serialize_impl(
                     }
                 };
 
+                if is_mutable {
+                    let disc_block = wrap_with_emheader(0, disc_payload);
+                    let val_block = wrap_with_emheader(branch_id, value_serialization);
+                    quote! {
+                        #name::#variant_name(value) => {
+                            #disc_block
+                            #val_block
+                        }
+                    }
+                } else {
+                    quote! {
+                        #name::#variant_name(value) => {
+                            #disc_payload
+                            #value_serialization
+                        }
+                    }
+                }
+            } else if is_mutable {
+                let disc_block = wrap_with_emheader(0, disc_payload);
                 quote! {
-                    #name::#variant_name(value) => {
-                        serializer.#serialize_disc_method(#disc_value as #disc_rust_type)?;
-                        #value_serialization
+                    #name::#variant_name => {
+                        #disc_block
                     }
                 }
             } else {
                 quote! {
                     #name::#variant_name => {
-                        serializer.#serialize_disc_method(#disc_value as #disc_rust_type)?;
+                        #disc_payload
                     }
                 }
-            }
+            };
+
+            body
         })
         .collect();
+
+    let needs_dheader = !matches!(extensibility, ExtensibilityKind::Final);
+    let body = if needs_dheader {
+        quote! {
+            let size_pos = serializer.begin_struct()?;
+            match self {
+                #(#match_arms)*
+            }
+            serializer.end_struct(size_pos)?;
+            Ok(())
+        }
+    } else {
+        quote! {
+            match self {
+                #(#match_arms)*
+            }
+            Ok(())
+        }
+    };
 
     quote! {
         impl #crate_path::serialize::cdr::XcdrSerialize for #name {
             fn serialize_xcdr(&self, serializer: &mut #crate_path::serialize::cdr::XcdrSerializer) -> #crate_path::serialize::cdr::XcdrResult<()> {
-                match self {
-                    #(#match_arms)*
-                }
-                Ok(())
+                #body
             }
         }
     }
 }
 
 /// Generate XcdrDeserialize implementation for union (enum with data)
+///
+/// Mirrors `generate_union_xcdr_serialize_impl`. For Mutable, the deserializer
+/// expects the discriminant member (member_id = 0) before the branch member,
+/// matching what the serializer emits. Unknown member IDs are skipped for
+/// forward compatibility.
 pub fn generate_union_xcdr_deserialize_impl(
     name: &syn::Ident,
     variants: &Punctuated<Variant, Comma>,
     crate_path: &TokenStream,
     disc_type: DiscriminantType,
+    extensibility: ExtensibilityKind,
 ) -> TokenStream {
     let deserialize_disc_method = syn::Ident::new(disc_type.deserialize_method(), name.span());
+
+    let is_mutable = matches!(extensibility, ExtensibilityKind::Mutable);
 
     let match_arms: Vec<_> = variants
         .iter()
@@ -198,10 +278,21 @@ pub fn generate_union_xcdr_deserialize_impl(
                     }
                 };
 
-                quote! {
-                    #disc_value => {
-                        #value_deserialization
-                        Ok(#name::#variant_name(value))
+                if is_mutable {
+                    // Consume the branch's EMHEADER before reading payload.
+                    quote! {
+                        #disc_value => {
+                            let (_mid, _mlen) = deserializer.read_member_header()?;
+                            #value_deserialization
+                            Ok(#name::#variant_name(value))
+                        }
+                    }
+                } else {
+                    quote! {
+                        #disc_value => {
+                            #value_deserialization
+                            Ok(#name::#variant_name(value))
+                        }
                     }
                 }
             } else {
@@ -212,14 +303,49 @@ pub fn generate_union_xcdr_deserialize_impl(
         })
         .collect();
 
+    let body = match extensibility {
+        ExtensibilityKind::Final => quote! {
+            let discriminant = deserializer.#deserialize_disc_method()? as i64;
+            match discriminant {
+                #(#match_arms)*
+                _ => Err(#crate_path::serialize::core::SerializationError::InvalidUnionDiscriminant(discriminant as i32)),
+            }
+        },
+        ExtensibilityKind::Appendable => quote! {
+            let (object_size, start_position) = deserializer.begin_struct()?;
+            let discriminant = deserializer.#deserialize_disc_method()? as i64;
+            let result = match discriminant {
+                #(#match_arms)*
+                _ => Err(#crate_path::serialize::core::SerializationError::InvalidUnionDiscriminant(discriminant as i32)),
+            };
+            deserializer.end_struct(object_size, start_position)?;
+            result
+        },
+        ExtensibilityKind::Mutable => quote! {
+            let (object_size, start_position) = deserializer.begin_struct()?;
+
+            // Read discriminant member (member_id == 0).
+            let (mid, _mlen) = deserializer.read_member_header()?;
+            if mid != 0 {
+                return Err(#crate_path::serialize::core::SerializationError::InvalidMemberHeader);
+            }
+            let discriminant = deserializer.#deserialize_disc_method()? as i64;
+
+            // Then the branch member header + payload (consumed inside arm).
+            let result = match discriminant {
+                #(#match_arms)*
+                _ => Err(#crate_path::serialize::core::SerializationError::InvalidUnionDiscriminant(discriminant as i32)),
+            };
+
+            deserializer.end_struct(object_size, start_position)?;
+            result
+        },
+    };
+
     quote! {
         impl #crate_path::serialize::cdr::XcdrDeserialize for #name {
             fn deserialize_xcdr(deserializer: &mut #crate_path::serialize::cdr::XcdrDeserializer) -> #crate_path::serialize::cdr::XcdrResult<Self> {
-                let discriminant = deserializer.#deserialize_disc_method()? as i64;
-                match discriminant {
-                    #(#match_arms)*
-                    _ => Err(#crate_path::serialize::core::SerializationError::InvalidUnionDiscriminant(discriminant as i32)),
-                }
+                #body
             }
         }
     }

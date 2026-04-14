@@ -21,6 +21,7 @@ This crate provides a C-compatible API for the int2dds DDS middleware, enabling 
 │  - C-compatible function exports    │
 │  - Opaque pointer types             │
 │  - Error code conversion            │
+│  - Dynamic XTypes support           │
 └──────────────┬──────────────────────┘
                │ Rust API
                ▼
@@ -28,7 +29,7 @@ This crate provides a C-compatible API for the int2dds DDS middleware, enabling 
 │           int2dds (core)            │
 │  - DDS implementation               │
 │  - RTPS protocol                    │
-│  - Type system                      │
+│  - Type system & XTypes             │
 └─────────────────────────────────────┘
 ```
 
@@ -67,6 +68,8 @@ The generated header includes:
 - Opaque struct definitions
 - Error code constants
 - QoS constants
+- Status mask constants
+- XTypes field type and member flag constants
 
 ## API Structure
 
@@ -80,35 +83,86 @@ int2dds_domain_participant_factory_finalize()      // Finalize factory
 
 #### DomainParticipant
 ```c
-int2dds_create_participant()           // Create domain participant
-int2dds_delete_participant()           // Delete participant
-int2dds_participant_get_domain_id()    // Get domain ID
-int2dds_participant_assert_liveliness() // Assert liveliness
+int2dds_create_participant()                       // Create domain participant
+int2dds_delete_participant()                       // Delete participant
+int2dds_participant_get_domain_id()                // Get domain ID
+int2dds_participant_assert_liveliness()            // Assert liveliness
+int2dds_participant_delete_contained_entities()    // Delete all contained entities
 ```
 
 #### Publisher & DataWriter
 ```c
-int2dds_create_publisher()              // Create publisher
-int2dds_delete_publisher()              // Delete publisher
-int2dds_create_datawriter()             // Create data writer
-int2dds_write()                         // Write data (CDR serialized)
-int2dds_write_with_key()                // Write keyed data
-int2dds_register_instance()             // Register keyed instance
-int2dds_unregister_instance()           // Unregister keyed instance
-int2dds_dispose()                       // Dispose keyed instance
-int2dds_delete_datawriter()             // Delete data writer
-int2dds_get_publication_matched_status() // Get matched readers count
+// Publisher
+int2dds_create_publisher()                         // Create publisher
+int2dds_create_publisher_with_qos()                // Create publisher with QoS
+int2dds_publisher_set_qos()                        // Set publisher QoS
+int2dds_publisher_get_qos()                        // Get publisher QoS
+int2dds_delete_publisher()                         // Delete publisher
+int2dds_publisher_delete_contained_entities()      // Delete all contained entities
+int2dds_publisher_wait_for_acknowledgments()       // Wait for acknowledgments
+
+// DataWriter
+int2dds_create_datawriter()                        // Create data writer
+int2dds_create_datawriter_with_listener()          // Create writer with listener callbacks
+int2dds_datawriter_set_listener()                  // Set/update listener
+int2dds_datawriter_get_listener()                  // Get current listener
+int2dds_datawriter_set_qos()                       // Set writer QoS
+int2dds_datawriter_get_qos()                       // Get writer QoS
+int2dds_delete_datawriter()                        // Delete data writer
+
+// Write operations
+int2dds_write_serialized()                         // Write CDR-serialized data
+int2dds_write_serialized_w_timestamp()             // Write with source timestamp
+
+// Instance management
+int2dds_datawriter_register_instance()             // Register keyed instance
+int2dds_datawriter_unregister_instance()           // Unregister keyed instance
+int2dds_datawriter_dispose()                       // Dispose keyed instance
+int2dds_datawriter_lookup_instance()               // Lookup instance handle by key
+int2dds_datawriter_get_key_value()                 // Get key value from instance handle
+
+// Status & lifecycle
+int2dds_get_publication_matched_status()           // Get matched readers count
+int2dds_datawriter_get_liveliness_lost_status()    // Get liveliness lost status
+int2dds_datawriter_get_offered_deadline_missed_status()     // Get offered deadline missed status
+int2dds_datawriter_get_offered_incompatible_qos_status()    // Get offered incompatible QoS status
+int2dds_datawriter_wait_for_acknowledgments()      // Wait for acknowledgments
+int2dds_datawriter_assert_liveliness()             // Assert liveliness
 ```
 
 #### Subscriber & DataReader
 ```c
-int2dds_create_subscriber()               // Create subscriber
-int2dds_delete_subscriber()               // Delete subscriber
-int2dds_create_datareader()               // Create data reader
-int2dds_take()                            // Take data (removes from cache)
-int2dds_read()                            // Read data (keeps in cache)
-int2dds_delete_datareader()               // Delete data reader
-int2dds_get_subscription_matched_status() // Get matched writers count
+// Subscriber
+int2dds_create_subscriber()                        // Create subscriber
+int2dds_create_subscriber_with_qos()               // Create subscriber with QoS
+int2dds_subscriber_set_qos()                       // Set subscriber QoS
+int2dds_subscriber_get_qos()                       // Get subscriber QoS
+int2dds_delete_subscriber()                        // Delete subscriber
+int2dds_subscriber_delete_contained_entities()     // Delete all contained entities
+
+// DataReader
+int2dds_create_datareader()                        // Create data reader
+int2dds_create_datareader_with_listener()          // Create reader with listener callbacks
+int2dds_datareader_set_listener()                  // Set/update listener
+int2dds_datareader_get_listener()                  // Get current listener
+int2dds_datareader_set_qos()                       // Set reader QoS
+int2dds_datareader_get_qos()                       // Get reader QoS
+int2dds_delete_datareader()                        // Delete data reader
+
+// Read operations
+int2dds_take_serialized()                          // Take data (removes from cache)
+int2dds_read_serialized()                          // Read data (keeps in cache)
+int2dds_take_serialized_w_info()                   // Take with sample info
+int2dds_read_serialized_w_info()                   // Read with sample info
+int2dds_take_serialized_batch()                    // Take batch of samples
+
+// Status
+int2dds_get_subscription_matched_status()          // Get matched writers count
+int2dds_datareader_get_liveliness_changed_status()          // Get liveliness changed status
+int2dds_datareader_get_sample_rejected_status()             // Get sample rejected status
+int2dds_datareader_get_sample_lost_status()                 // Get sample lost status
+int2dds_datareader_get_requested_deadline_missed_status()   // Get requested deadline missed status
+int2dds_datareader_get_requested_incompatible_qos_status()  // Get requested incompatible QoS status
 ```
 
 #### DataReader Listener (Callbacks)
@@ -144,23 +198,77 @@ int2dds_datawriter_get_listener()            // Get current listener configurati
 
 #### Topic
 ```c
-int2dds_create_topic()        // Create topic
-int2dds_delete_topic()        // Delete topic
-int2dds_topic_get_name()      // Get topic name
-int2dds_topic_get_type_name() // Get type name
+int2dds_create_topic()                     // Create topic
+int2dds_create_topic_keyed()               // Create topic with explicit key flag
+int2dds_create_topic_with_type_info()      // Create topic with TypeInfo (XTypes)
+int2dds_topic_set_qos()                    // Set topic QoS
+int2dds_topic_get_qos()                    // Get topic QoS
+int2dds_delete_topic()                     // Delete topic
+int2dds_topic_get_name()                   // Get topic name
+int2dds_topic_get_type_name()              // Get type name
 ```
 
 #### QoS Policies
+
+**DataWriter QoS:**
 ```c
 int2dds_datawriter_qos_create_default()
 int2dds_datawriter_qos_set_reliability()
 int2dds_datawriter_qos_set_durability()
 int2dds_datawriter_qos_set_history()
+int2dds_datawriter_qos_set_data_representation()  // XCDR1 or XCDR2
+int2dds_datawriter_qos_set_ownership()
+int2dds_datawriter_qos_set_ownership_strength()
+int2dds_datawriter_qos_set_resource_limits()
+int2dds_datawriter_qos_set_lifespan()
+int2dds_datawriter_qos_set_destination_order()
+int2dds_datawriter_qos_set_latency_budget()
+int2dds_datawriter_qos_set_writer_data_lifecycle()
+int2dds_datawriter_qos_set_transport_priority()
+int2dds_datawriter_qos_set_liveliness()
+int2dds_datawriter_qos_set_deadline()
+int2dds_datawriter_qos_destroy()
+```
 
+**DataReader QoS:**
+```c
 int2dds_datareader_qos_create_default()
 int2dds_datareader_qos_set_reliability()
 int2dds_datareader_qos_set_durability()
 int2dds_datareader_qos_set_history()
+int2dds_datareader_qos_set_ownership()
+int2dds_datareader_qos_set_resource_limits()
+int2dds_datareader_qos_set_destination_order()
+int2dds_datareader_qos_set_latency_budget()
+int2dds_datareader_qos_set_reader_data_lifecycle()
+int2dds_datareader_qos_set_transport_priority()
+int2dds_datareader_qos_set_liveliness()
+int2dds_datareader_qos_set_deadline()
+int2dds_datareader_qos_destroy()
+```
+
+**Topic QoS:**
+```c
+int2dds_topic_qos_create_default()
+int2dds_topic_qos_set_reliability()
+int2dds_topic_qos_set_durability()
+int2dds_topic_qos_set_history()
+int2dds_topic_qos_set_ownership()
+int2dds_topic_qos_set_resource_limits()
+int2dds_topic_qos_set_destination_order()
+int2dds_topic_qos_set_transport_priority()
+int2dds_topic_qos_set_lifespan()
+int2dds_topic_qos_set_deadline()
+int2dds_topic_qos_set_liveliness()
+int2dds_topic_qos_destroy()
+```
+
+**Publisher / Subscriber QoS:**
+```c
+int2dds_publisher_qos_create_default()
+int2dds_publisher_qos_destroy()
+int2dds_subscriber_qos_create_default()
+int2dds_subscriber_qos_destroy()
 ```
 
 #### WaitSet & Conditions
@@ -199,76 +307,293 @@ int2dds_statuscondition_get_trigger_value()    // Get trigger value
 int2dds_statuscondition_delete()               // Delete status condition
 ```
 
+#### Discovery API
+```c
+// Participant discovery
+int2dds_participant_get_discovered_participants()       // Get discovered participant handles
+int2dds_participant_get_discovered_participant_data()    // Get participant builtin topic data
+
+// Writer/Reader matched discovery
+int2dds_datawriter_get_matched_subscriptions()          // Get matched subscription handles
+int2dds_datareader_get_matched_publications()           // Get matched publication handles
+int2dds_datawriter_get_matched_subscription_data()      // Get subscription builtin topic data
+int2dds_datareader_get_matched_publication_data()       // Get publication builtin topic data
+
+// ParticipantBuiltinTopicData accessors
+int2dds_participant_builtin_topic_data_get_key()
+int2dds_participant_builtin_topic_data_get_user_data()
+int2dds_participant_builtin_topic_data_destroy()
+
+// PublicationBuiltinTopicData accessors
+int2dds_publication_builtin_topic_data_get_key()
+int2dds_publication_builtin_topic_data_get_topic_name()
+int2dds_publication_builtin_topic_data_get_type_name()
+int2dds_publication_builtin_topic_data_get_user_data()
+int2dds_publication_builtin_topic_data_get_writer_id()
+int2dds_publication_builtin_topic_data_destroy()
+
+// SubscriptionBuiltinTopicData accessors
+int2dds_subscription_builtin_topic_data_get_key()
+int2dds_subscription_builtin_topic_data_get_topic_name()
+int2dds_subscription_builtin_topic_data_get_type_name()
+int2dds_subscription_builtin_topic_data_get_user_data()
+int2dds_subscription_builtin_topic_data_get_reader_id()
+int2dds_subscription_builtin_topic_data_destroy()
+```
+
+#### Dynamic XTypes (Runtime Type Discovery)
+```c
+// Builtin discovery
+int2dds_get_builtin_subscriber()           // Get builtin discovery subscriber
+int2dds_take_publication_data()            // Take publication discovery data
+int2dds_wait_for_type_object()             // Wait for type object discovery
+
+// Publication data accessors
+int2dds_publication_data_topic_name()      // Get discovered topic name
+int2dds_publication_data_type_name()       // Get discovered type name
+int2dds_publication_data_take_type_object() // Extract TypeObject from discovery data
+int2dds_publication_data_destroy()         // Destroy publication data
+
+// TypeObject introspection
+int2dds_type_object_extensibility()        // Get extensibility (Final/Appendable/Mutable)
+int2dds_type_object_member_count()         // Get number of members
+int2dds_type_object_member_info()          // Get member info (id, kind, flags)
+int2dds_type_object_member_name()          // Get member name
+int2dds_type_object_member_type()          // Get member type identifier
+int2dds_type_object_destroy()              // Destroy type object
+
+// Dynamic data field extraction (from CDR)
+int2dds_dynamic_get_field_bool()           // Extract bool field by name
+int2dds_dynamic_get_field_byte()           // Extract byte field
+int2dds_dynamic_get_field_int8()           // Extract int8 field
+int2dds_dynamic_get_field_int16()          // Extract int16 field
+int2dds_dynamic_get_field_int32()          // Extract int32 field
+int2dds_dynamic_get_field_int64()          // Extract int64 field
+int2dds_dynamic_get_field_uint8()          // Extract uint8 field
+int2dds_dynamic_get_field_uint16()         // Extract uint16 field
+int2dds_dynamic_get_field_uint32()         // Extract uint32 field
+int2dds_dynamic_get_field_uint64()         // Extract uint64 field
+int2dds_dynamic_get_field_float32()        // Extract float32 field
+int2dds_dynamic_get_field_float64()        // Extract float64 field
+int2dds_dynamic_get_field_string()         // Extract string field
+
+// TypeInfo builder (for topic creation with type metadata)
+int2dds_type_info_create()                 // Create type info with name and extensibility
+int2dds_type_info_add_field_primitive()    // Add primitive field with flags
+int2dds_type_info_destroy()                // Destroy type info
+```
+
 ### Error Codes
 
 All functions return `Int2DdsRet` (i32) with the following codes:
 
 ```c
-INT2DDS_RET_OK                  = 0    // Success
-INT2DDS_RET_ERROR               = 1    // General error
-INT2DDS_RET_TIMEOUT             = 2    // Timeout
-INT2DDS_RET_UNSUPPORTED         = 3    // Unsupported operation
-INT2DDS_RET_INVALID_ARGUMENT    = 11   // Invalid argument
-INT2DDS_RET_NULL_POINTER        = 100  // Null pointer
-// ... and more DDS-specific error codes
+INT2DDS_RET_OK                      = 0    // Success
+INT2DDS_RET_ERROR                   = 1    // General error
+INT2DDS_RET_TIMEOUT                 = 2    // Timeout
+INT2DDS_RET_UNSUPPORTED             = 3    // Unsupported operation
+INT2DDS_RET_BAD_ALLOC               = 10   // Memory allocation failure
+INT2DDS_RET_INVALID_ARGUMENT        = 11   // Invalid argument
+INT2DDS_RET_ALREADY_DELETED         = 20   // Entity already deleted
+INT2DDS_RET_NOT_ENABLED             = 21   // Entity not enabled
+INT2DDS_RET_IMMUTABLE_POLICY        = 22   // Policy cannot be changed
+INT2DDS_RET_INCONSISTENT_POLICY     = 23   // Inconsistent policy
+INT2DDS_RET_PRECONDITION_NOT_MET    = 24   // Precondition not met
+INT2DDS_RET_OUT_OF_RESOURCES        = 25   // Out of resources
+INT2DDS_RET_ILLEGAL_OPERATION       = 26   // Illegal operation
+INT2DDS_RET_NO_DATA                 = 27   // No data available
+INT2DDS_RET_NULL_POINTER            = 100  // Null pointer
+INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND = 200  // Dynamic field not found
+INT2DDS_RET_DYNAMIC_TYPE_MISMATCH   = 201  // Dynamic type mismatch
+INT2DDS_RET_DYNAMIC_UNSUPPORTED_TYPE = 202 // Dynamic unsupported type
+INT2DDS_RET_DYNAMIC_TIMEOUT         = 203  // Dynamic timeout
+INT2DDS_RET_DYNAMIC_DECODE_ERROR    = 204  // Dynamic decode error
+```
+
+### QoS Constants
+
+```c
+// Reliability
+INT2DDS_QOS_RELIABILITY_BEST_EFFORT     = 0
+INT2DDS_QOS_RELIABILITY_RELIABLE        = 1
+
+// Durability
+INT2DDS_QOS_DURABILITY_VOLATILE         = 0
+INT2DDS_QOS_DURABILITY_TRANSIENT_LOCAL  = 1
+INT2DDS_QOS_DURABILITY_TRANSIENT        = 2
+INT2DDS_QOS_DURABILITY_PERSISTENT       = 3
+
+// History
+INT2DDS_QOS_HISTORY_KEEP_LAST           = 0
+INT2DDS_QOS_HISTORY_KEEP_ALL            = 1
+
+// Data Representation
+INT2DDS_QOS_DATA_REPR_XCDR1             = 0
+INT2DDS_QOS_DATA_REPR_XCDR2             = 2
+
+// Liveliness
+INT2DDS_QOS_LIVELINESS_AUTOMATIC                = 0
+INT2DDS_QOS_LIVELINESS_MANUAL_BY_PARTICIPANT    = 1
+INT2DDS_QOS_LIVELINESS_MANUAL_BY_TOPIC          = 2
+
+// Ownership
+INT2DDS_QOS_OWNERSHIP_SHARED            = 0
+INT2DDS_QOS_OWNERSHIP_EXCLUSIVE         = 1
+
+// Destination Order
+INT2DDS_QOS_DEST_ORDER_BY_RECEPTION     = 0
+INT2DDS_QOS_DEST_ORDER_BY_SOURCE        = 1
+```
+
+### Status Masks
+
+```c
+INT2DDS_STATUS_INCONSISTENT_TOPIC           = 1 << 0
+INT2DDS_STATUS_OFFERED_DEADLINE_MISSED      = 1 << 1
+INT2DDS_STATUS_REQUESTED_DEADLINE_MISSED    = 1 << 2
+INT2DDS_STATUS_OFFERED_INCOMPATIBLE_QOS     = 1 << 5
+INT2DDS_STATUS_REQUESTED_INCOMPATIBLE_QOS   = 1 << 6
+INT2DDS_STATUS_SAMPLE_LOST                  = 1 << 7
+INT2DDS_STATUS_SAMPLE_REJECTED              = 1 << 8
+INT2DDS_STATUS_DATA_ON_READERS              = 1 << 9
+INT2DDS_STATUS_DATA_AVAILABLE               = 1 << 10
+INT2DDS_STATUS_LIVELINESS_LOST              = 1 << 11
+INT2DDS_STATUS_LIVELINESS_CHANGED           = 1 << 12
+INT2DDS_STATUS_PUBLICATION_MATCHED          = 1 << 13
+INT2DDS_STATUS_SUBSCRIPTION_MATCHED         = 1 << 14
+```
+
+### Sample / View / Instance State Masks
+
+```c
+// Sample states
+INT2DDS_SAMPLE_STATE_READ               = 0x0001
+INT2DDS_SAMPLE_STATE_NOT_READ           = 0x0002
+INT2DDS_SAMPLE_STATE_ANY                = 0xFFFF
+
+// View states
+INT2DDS_VIEW_STATE_NEW                  = 0x0001
+INT2DDS_VIEW_STATE_NOT_NEW              = 0x0002
+INT2DDS_VIEW_STATE_ANY                  = 0xFFFF
+
+// Instance states
+INT2DDS_INSTANCE_STATE_ALIVE                    = 0x0001
+INT2DDS_INSTANCE_STATE_NOT_ALIVE_DISPOSED       = 0x0002
+INT2DDS_INSTANCE_STATE_NOT_ALIVE_NO_WRITERS     = 0x0004
+INT2DDS_INSTANCE_STATE_ANY                      = 0xFFFF
+```
+
+### XTypes Field Types & Member Flags
+
+```c
+// Field types (for int2dds_type_info_add_field_primitive)
+INT2DDS_FIELD_BOOL      = 0
+INT2DDS_FIELD_BYTE      = 1
+INT2DDS_FIELD_CHAR8     = 2
+INT2DDS_FIELD_INT8      = 3
+INT2DDS_FIELD_INT16     = 4
+INT2DDS_FIELD_INT32     = 5
+INT2DDS_FIELD_INT64     = 6
+INT2DDS_FIELD_UINT8     = 7
+INT2DDS_FIELD_UINT16    = 8
+INT2DDS_FIELD_UINT32    = 9
+INT2DDS_FIELD_UINT64    = 10
+INT2DDS_FIELD_FLOAT32   = 11
+INT2DDS_FIELD_FLOAT64   = 12
+INT2DDS_FIELD_STRING    = 13
+INT2DDS_FIELD_CHAR16    = 14
+INT2DDS_FIELD_WSTRING   = 15
+
+// Member flags (bitmask, combine with |)
+INT2DDS_MEMBER_KEY              = 1 << 0
+INT2DDS_MEMBER_OPTIONAL         = 1 << 1
+INT2DDS_MEMBER_MUST_UNDERSTAND  = 1 << 2
+INT2DDS_MEMBER_EXTERNAL         = 1 << 3
 ```
 
 ## Data Format
 
-The FFI uses a **Type System with CDR serialization**:
-- C applications define types using `Int2DdsTypeDescriptor`
-- Data is stored in `Int2DdsData` containers with type-checked field access
-- CDR serialization/deserialization is handled automatically by the DDS core
+The FFI uses **CDR serialization** with raw bytes:
+- C applications send/receive raw CDR-serialized byte arrays
+- `int2dds_write_serialized()` sends CDR bytes with optional key bytes
+- `int2dds_take_serialized()` / `int2dds_read_serialized()` receive CDR bytes into caller-provided buffers
+- `int2dds_take_serialized_w_info()` / `int2dds_read_serialized_w_info()` additionally return `Int2DdsSampleInfo`
+- `int2dds_take_serialized_batch()` takes multiple samples at once
 
-### Type Descriptor API
+### TypeInfo Builder (for XTypes topic creation)
 
 ```c
-// Create type descriptor
-Int2DdsTypeDescriptor* desc;
-int2dds_type_descriptor_create("HelloWorld", &desc);
+// Create type info with extensibility
+Int2DdsTypeInfo* ti;
+int2dds_type_info_create("SensorData", INT2DDS_EXTENSIBILITY_APPENDABLE, &ti);
 
-// Add fields (with optional key designation)
-int2dds_type_descriptor_add_u32(desc, "id", true);        // key field
-int2dds_type_descriptor_add_string(desc, "message", 256, false);
-int2dds_type_descriptor_add_f64(desc, "value", false);
+// Add fields with type and flags
+int2dds_type_info_add_field_primitive(ti, "sensor_id", INT2DDS_FIELD_INT32, INT2DDS_MEMBER_KEY);
+int2dds_type_info_add_field_primitive(ti, "temperature", INT2DDS_FIELD_FLOAT64, 0);
+int2dds_type_info_add_field_primitive(ti, "humidity", INT2DDS_FIELD_FLOAT64, 0);
+int2dds_type_info_add_field_primitive(ti, "location", INT2DDS_FIELD_STRING, 0);
 
-// Optional: Set XCDR version (default is XCDR1 for compatibility)
-int2dds_type_descriptor_set_xcdr_version(desc, INT2DDS_XCDR_VERSION_XCDR2);
+// Create topic with type info (enables XTypes discovery)
+int2dds_create_topic_with_type_info(participant, "SensorTopic", ti, NULL, &topic);
+
+int2dds_type_info_destroy(ti);
 ```
 
-### Data API
+### Dynamic Type Discovery (XTypes Phase 1)
 
 ```c
-// Create data instance
-Int2DdsData* data;
-int2dds_data_create(desc, &data);
+// Wait for a publisher's TypeObject to be discovered
+Int2DdsTypeObject* type_obj;
+char type_name[256];
+int2dds_wait_for_type_object(participant, "SensorTopic", 10000, &type_obj, type_name, 256, &name_len);
 
-// Set field values (type-checked)
-int2dds_data_set_u32(data, "id", 42);
-int2dds_data_set_string(data, "message", "Hello World");
-int2dds_data_set_f64(data, "value", 3.14);
+// Introspect the type
+uint32_t member_count;
+int2dds_type_object_member_count(type_obj, &member_count);
 
-// Write data (CDR serialization is automatic)
-int2dds_write(writer, data);
+for (uint32_t i = 0; i < member_count; i++) {
+    char name[128];
+    Int2DdsMemberInfo info;
+    int2dds_type_object_member_name(type_obj, i, name, 128, &len);
+    int2dds_type_object_member_info(type_obj, i, &info);
+    // info.member_id, info.type_kind, info.flags
+}
 
-// Read data (CDR deserialization is automatic)
-Int2DdsData* received_data;
-int2dds_take(reader, &received_data, ...);
+// After receiving a sample, extract fields dynamically
+int32_t sensor_id;
+double temperature;
+char location[256];
+int2dds_dynamic_get_field_int32(data, "sensor_id", &sensor_id);
+int2dds_dynamic_get_field_float64(data, "temperature", &temperature);
+int2dds_dynamic_get_field_string(data, "location", location, 256, &len);
 
-// Get field values
-uint32_t id;
-int2dds_data_get_u32(received_data, "id", &id);
+int2dds_type_object_destroy(type_obj);
 ```
 
 ## Examples
 
 See the [examples](examples/) directory for complete C examples:
+
+### hello_world
 - `hello_world/hello_world_publisher.c` - Basic publisher example
 - `hello_world/hello_world_subscriber.c` - Basic subscriber example
+- `hello_world/waitset_publisher.c` - Using WaitSet for publisher notification
 - `hello_world/waitset_subscriber.c` - Using WaitSet for data notification
 - `hello_world/keyed_publisher.c` - Keyed data with instance management
 - `hello_world/keyed_subscriber.c` - Receiving keyed data
+
+### listener
+- `listener/listener_publisher.c` - Publisher with listener callbacks
+- `listener/listener_subscriber.c` - Subscriber with listener callbacks
+
+### multiple_participant
 - `multiple_participant/multi_pub_sub.c` - Multiple participants example
+- `multiple_participant/multi_participant_1.c` - Multi-participant test 1
+- `multiple_participant/multi_participant_2.c` - Multi-participant test 2
+
+### xtypes (Dynamic Type Discovery)
+- `xtypes/dynamic_type_publisher.c` - Publishes typed data with TypeObject metadata
+- `xtypes/dynamic_type_subscriber.c` - Discovers type at runtime, decodes fields dynamically
 
 Build examples:
 ```bash
@@ -337,6 +662,7 @@ Listener callbacks are invoked from DDS background threads:
 ## Dependencies
 
 - **int2dds**: Core DDS implementation (path = "../dds")
+- **log**: Logging facade
 - **env_logger**: Logging initialization
 - **cbindgen**: C header generation (build-time)
 
