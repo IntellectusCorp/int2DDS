@@ -526,6 +526,9 @@ impl Participant {
             };
 
             if let Some((writer_guid, publication_builtin_topic_data)) = writer_info {
+                // Also unmatch local readers in this participant before removing the writer.
+                self.remove_unmatched_writer_from_reader(writer_guid);
+
                 // Make payload (In case matched DDS requires payload in addition to inline QoS)
                 let payload = publication_builtin_topic_data.to_serialized_data();
                 let a_cache_change = self.sedp_builtin_publications_writer().new_change(
@@ -607,6 +610,9 @@ impl Participant {
             };
 
             if let Some((reader_guid, subscription_builtin_topic_data)) = reader_info {
+                // Also unmatch local writers in this participant before removing the reader.
+                self.remove_unmatched_reader_from_writer(reader_guid);
+
                 let payload = subscription_builtin_topic_data.to_serialized_data();
                 let a_cache_change = self.sedp_builtin_subscriptions_writer().new_change(
                     ChangeKind::NotAliveDisposedUnregistered,
