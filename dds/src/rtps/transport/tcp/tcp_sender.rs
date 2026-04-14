@@ -682,32 +682,42 @@ mod tests {
         mut listener: TcpMuxListener,
         stop: Arc<std::sync::atomic::AtomicBool>,
     ) -> std::thread::JoinHandle<()> {
-        use mio::{Events, Interest, Poll, Token};
+        use crate::rtps::transport::tcp::stream_wrapper::wrap_stream;
 
         std::thread::Builder::new()
             .name("test_listener_pump".to_string())
             .spawn(move || {
-                let mux_token = Token(0);
-                let mut poll = Poll::new().unwrap();
-                let mut events = Events::with_capacity(64);
-                poll.registry()
-                    .register(listener.listener_mut().unwrap(), mux_token, Interest::READABLE)
-                    .unwrap();
+                // TcpMuxListener already sets SO_RCVTIMEO = 100ms on the socket,
+                // so accept() returns WouldBlock periodically for stop-flag checks.
+                let raw_listener = match listener.take_listener() {
+                    Some(l) => l,
+                    None => return,
+                };
+
+                let terminated = stop.clone();
+                let idle_timeout = Duration::from_secs(30);
 
                 while !stop.load(std::sync::atomic::Ordering::SeqCst) {
-                    let _ = poll.poll(&mut events, Some(Duration::from_millis(50)));
-                    for event in events.iter() {
-                        if event.token() == mux_token && event.is_readable() {
-                            while let Ok(Some(_)) = listener.accept(poll.registry()) {}
-                        } else if event.is_readable() {
-                            listener.on_readable(event.token(), poll.registry());
+                    match raw_listener.accept() {
+                        Ok((tcp, addr)) => {
+                            let stream = wrap_stream(tcp);
+                            listener.accept_connection(
+                                stream,
+                                addr,
+                                terminated.clone(),
+                                idle_timeout,
+                            );
                         }
+                        Err(ref e)
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                || e.kind() == std::io::ErrorKind::TimedOut =>
+                        {
+                            // Timeout — check stop flag on next iteration.
+                        }
+                        Err(_) => break,
                     }
                 }
 
-                if let Some(l) = listener.listener_mut() {
-                    let _ = poll.registry().deregister(l);
-                }
                 listener.close();
             })
             .unwrap()

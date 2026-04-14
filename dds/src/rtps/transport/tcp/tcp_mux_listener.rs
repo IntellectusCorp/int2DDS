@@ -3,13 +3,15 @@
 
 use std::collections::HashMap;
 use std::io::{self, ErrorKind};
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
+use dashmap::DashMap;
 use log::{debug, info, warn};
-use mio::net::{TcpListener as MioTcpListener, TcpStream as MioTcpStream};
-use mio::{Interest, Registry, Token};
 
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::transport::error::TransportErrorCode;
@@ -22,98 +24,495 @@ use crate::rtps::transport::tcp::protocol::{
     generate_cookie, ControlMsg, ERR_CODE_IDLE_TIMEOUT, ERR_CODE_INVALID_COOKIE,
     ERR_CODE_INVALID_PORT, MSG_PORT_BIND, MSG_PORT_RESERVE, OP_IDLE_TIMEOUT,
 };
+use crate::rtps::transport::tcp::stream_wrapper::TcpStreamWrapper;
 
-const LISTENER_TOKEN: Token = Token(0);
-const CONNECTION_TOKEN_START: usize = 65536;
+/// Unique identifier for an accepted connection (replaces mio::Token).
+pub(crate) type ConnectionId = usize;
 
-/// TCP multiplexed listener with 3-step handshake:
-/// PEER_HELLO → PORT_RESERVE (repeatable) → PORT_BIND (separate connection)
-#[derive(Debug)]
-pub(crate) struct TcpMuxListener {
-    port: u16,
-    domain_id: u32,
-    participant_id: u32,
-    local_guid_prefix: GuidPrefix,
-    listener: Option<MioTcpListener>,
-    connections: HashMap<Token, MuxConnection>,
-    next_token: usize,
-    peer_connections: HashMap<GuidPrefix, PeerConnectionGroup>,
-    discovery_tx: Sender<IncomingMessage>,
-    user_data_tx: Sender<IncomingMessage>,
-    /// Cookie counter for PORT_RESERVE responses (0x31, 0x32, ...)
-    next_cookie: u8,
-    /// Maps cookie → logical_port for PORT_BIND verification
-    cookie_to_port: HashMap<[u8; 16], u16>,
-    /// Maps cookie → control connection's GuidPrefix so the matching
-    /// PORT_BIND (which arrives on a brand-new TCP connection with a
-    /// different source port) can be attached to the same peer group
-    /// as the control connection that issued the cookie.
-    cookie_to_guid: HashMap<[u8; 16], GuidPrefix>,
+/// Connection state machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConnectionState {
+    /// Waiting for first message (PEER_HELLO or PORT_BIND).
+    AwaitingFirstMessage,
+    /// PEER_HELLO done — control connection, accepts PORT_RESERVE + KEEPALIVE.
+    Control,
+    /// PORT_BIND done — data connection, accepts RTPS data.
+    Active,
+    Closing,
 }
 
+/// Per-peer group: tracks which connections (control / discovery / user-data)
+/// belong to the same remote participant.
 #[derive(Debug)]
 struct PeerConnectionGroup {
-    control_token: Option<Token>,
-    discovery_token: Option<Token>,
-    user_data_token: Option<Token>,
-    /// Set to `Some(when)` the moment `control_token` transitions to None
-    /// while data connections still exist. The data connections are kept
-    /// alive during a short grace period so a brief network blip doesn't
-    /// instantly tear down the data flow. After the grace period expires,
-    /// `prune_orphan_data_connections` removes the entire group.
-    ///
-    /// A reconnecting peer is intentionally placed into a brand-new group;
-    /// re-matching is left to the upper RTPS/SEDP layer.
+    control_conn: Option<ConnectionId>,
+    discovery_conn: Option<ConnectionId>,
+    user_data_conn: Option<ConnectionId>,
+    /// Set to `Some(when)` the moment `control_conn` transitions to None while
+    /// data connections still exist.  After the grace period expires,
+    /// `prune_orphan_data_connections` tears down the group.
     control_lost_at: Option<Instant>,
 }
 
 impl PeerConnectionGroup {
     fn new() -> Self {
-        Self {
-            control_token: None,
-            discovery_token: None,
-            user_data_token: None,
-            control_lost_at: None,
-        }
+        Self { control_conn: None, discovery_conn: None, user_data_conn: None, control_lost_at: None }
     }
 
-    fn all_tokens(&self) -> Vec<Token> {
-        [self.control_token, self.discovery_token, self.user_data_token]
+    fn all_conns(&self) -> Vec<ConnectionId> {
+        [self.control_conn, self.discovery_conn, self.user_data_conn]
             .iter()
             .flatten()
             .copied()
             .collect()
     }
 
-    fn has_data_tokens(&self) -> bool {
-        self.discovery_token.is_some() || self.user_data_token.is_some()
+    fn has_data_conns(&self) -> bool {
+        self.discovery_conn.is_some() || self.user_data_conn.is_some()
     }
 }
 
-/// Connection state machine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConnectionState {
-    /// Waiting for first message (PEER_HELLO or PORT_BIND)
-    AwaitingFirstMessage,
-    /// PEER_HELLO done — control connection, accepts PORT_RESERVE + KEEPALIVE
-    Control,
-    /// PORT_BIND done — data connection, accepts RTPS data
-    Active,
-    Closing,
+/// Metadata stored in the shared map for each active connection.
+/// The stream itself is owned by the connection's read thread.
+pub(crate) struct ConnectionEntry {
+    pub(crate) remote_addr: SocketAddr,
+    pub(crate) state: ConnectionState,
+    pub(crate) bound_logical_port: Option<u16>,
+    pub(crate) remote_guid_prefix: Option<GuidPrefix>,
+    pub(crate) last_activity: Instant,
+    /// Set by prune logic to signal the read thread to exit.
+    pub(crate) shutdown: Arc<AtomicBool>,
+    /// When true, the read thread should send an ERROR(IDLE_TIMEOUT) before
+    /// exiting (used by prune_idle_connections to notify the remote peer).
+    pub(crate) error_on_exit: Arc<AtomicBool>,
 }
 
-#[derive(Debug)]
-struct MuxConnection {
-    stream: MioTcpStream,
-    framed_reader: FramedReader,
-    state: ConnectionState,
-    remote_addr: SocketAddr,
-    bound_logical_port: Option<u16>,
-    remote_guid_prefix: Option<GuidPrefix>,
-    /// Last time we successfully read any data from this peer.
-    /// Used by `prune_idle_connections` to defend against silent peers
-    /// (PEER_HELLO without follow-up, half-broken networks, etc.).
-    last_activity: Instant,
+// ── Shared state (all connections share this via Arc) ────────────────────────
+
+/// Thread-safe shared state for the mux listener.
+/// Connections are tracked in a DashMap; peer groups in a Mutex<HashMap>.
+pub(crate) struct MuxListenerShared {
+    pub(crate) domain_id: u32,
+    pub(crate) participant_id: u32,
+    local_guid_prefix: GuidPrefix,
+    pub(crate) connections: DashMap<ConnectionId, ConnectionEntry>,
+    peer_connections: Mutex<HashMap<GuidPrefix, PeerConnectionGroup>>,
+    cookie_to_port: DashMap<[u8; 16], u16>,
+    cookie_to_guid: DashMap<[u8; 16], GuidPrefix>,
+    next_cookie: AtomicU8,
+    pub(crate) next_conn_id: AtomicUsize,
+    discovery_tx: Sender<IncomingMessage>,
+    user_data_tx: Sender<IncomingMessage>,
+}
+
+impl MuxListenerShared {
+    fn new(
+        domain_id: u32,
+        participant_id: u32,
+        local_guid_prefix: GuidPrefix,
+        discovery_tx: Sender<IncomingMessage>,
+        user_data_tx: Sender<IncomingMessage>,
+    ) -> Self {
+        Self {
+            domain_id,
+            participant_id,
+            local_guid_prefix,
+            connections: DashMap::new(),
+            peer_connections: Mutex::new(HashMap::new()),
+            cookie_to_port: DashMap::new(),
+            cookie_to_guid: DashMap::new(),
+            next_cookie: AtomicU8::new(0x31),
+            next_conn_id: AtomicUsize::new(0),
+            discovery_tx,
+            user_data_tx,
+        }
+    }
+
+    pub(crate) fn connection_count(&self) -> usize {
+        self.connections.len()
+    }
+
+    pub(crate) fn peer_count(&self) -> usize {
+        self.peer_connections.lock().expect("peer_connections lock").len()
+    }
+
+    // ── Idle timeout pruning ─────────────────────────────────────────────────
+
+    /// Drop connections whose last_activity has exceeded `timeout`.
+    ///
+    /// Sets the `error_on_exit` flag so the read thread sends an
+    /// ERROR(IDLE_TIMEOUT) notice to the remote peer before closing.
+    /// Returns the number of connections removed from the map.
+    pub(crate) fn prune_idle_connections(&self, timeout: Duration) -> usize {
+        let now = Instant::now();
+        let stale: Vec<ConnectionId> = self
+            .connections
+            .iter()
+            .filter(|e| now.duration_since(e.last_activity) > timeout)
+            .map(|e| *e.key())
+            .collect();
+
+        for conn_id in &stale {
+            if let Some(entry) = self.connections.get(conn_id) {
+                warn!(
+                    "TcpMuxListener [{}]: Pruning idle conn {} from {:?} (idle {:?})",
+                    TransportErrorCode::TcpConnectionIdlePruned,
+                    conn_id,
+                    entry.remote_addr,
+                    now.duration_since(entry.last_activity),
+                );
+                // Signal read thread to send ERROR before exiting.
+                entry.error_on_exit.store(true, Ordering::SeqCst);
+                entry.shutdown.store(true, Ordering::SeqCst);
+            }
+            self.remove_connection(*conn_id);
+        }
+
+        stale.len()
+    }
+
+    // ── Orphan data connection pruning ───────────────────────────────────────
+
+    /// Drop peer groups whose control connection has been gone for > `grace`.
+    pub(crate) fn prune_orphan_data_connections(&self, grace: Duration) -> usize {
+        let now = Instant::now();
+        let stale_guids: Vec<GuidPrefix> = {
+            let pc = self.peer_connections.lock().expect("peer_connections lock");
+            pc.iter()
+                .filter_map(|(guid, g)| match g.control_lost_at {
+                    Some(lost) if now.duration_since(lost) > grace && g.has_data_conns() => {
+                        Some(*guid)
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+
+        for guid in &stale_guids {
+            warn!(
+                "TcpMuxListener [{}]: Pruning orphan data connections for peer {:?}",
+                TransportErrorCode::TcpOrphanPruned,
+                guid
+            );
+            self.remove_peer(*guid);
+        }
+
+        stale_guids.len()
+    }
+
+    // ── Connection / peer cleanup ────────────────────────────────────────────
+
+    pub(crate) fn remove_peer(&self, guid: GuidPrefix) {
+        let group = self.peer_connections.lock().expect("peer_connections lock").remove(&guid);
+        if let Some(group) = group {
+            for conn_id in group.all_conns() {
+                self.remove_connection_inner(conn_id);
+            }
+            debug!("TcpMuxListener: Removed peer {:?}", guid);
+        }
+    }
+
+    /// Update peer_connections bookkeeping and remove the connection entry.
+    pub(crate) fn remove_connection(&self, conn_id: ConnectionId) {
+        let guid_opt = self.connections.get(&conn_id).and_then(|e| e.remote_guid_prefix);
+        if let Some(guid) = guid_opt {
+            let mut pc = self.peer_connections.lock().expect("peer_connections lock");
+            if let Some(group) = pc.get_mut(&guid) {
+                let was_control = group.control_conn == Some(conn_id);
+                if was_control {
+                    group.control_conn = None;
+                }
+                if group.discovery_conn == Some(conn_id) {
+                    group.discovery_conn = None;
+                }
+                if group.user_data_conn == Some(conn_id) {
+                    group.user_data_conn = None;
+                }
+
+                // Start grace period if control just dropped but data conns remain.
+                if was_control && group.has_data_conns() && group.control_lost_at.is_none() {
+                    group.control_lost_at = Some(Instant::now());
+                    debug!("TcpMuxListener: control lost for {:?}, grace started", guid);
+                }
+
+                if group.all_conns().is_empty() {
+                    pc.remove(&guid);
+                }
+            }
+        }
+        self.remove_connection_inner(conn_id);
+    }
+
+    fn remove_connection_inner(&self, conn_id: ConnectionId) {
+        if let Some((_, entry)) = self.connections.remove(&conn_id) {
+            // Signal the read thread to exit (if not already done).
+            entry.shutdown.store(true, Ordering::SeqCst);
+            debug!("TcpMuxListener: Removed conn {} (addr={:?})", conn_id, entry.remote_addr);
+        }
+    }
+
+    // ── Protocol handlers (called from connection read threads) ──────────────
+
+    pub(crate) fn handle_first_message(
+        &self,
+        stream: &mut Box<dyn TcpStreamWrapper>,
+        conn_id: ConnectionId,
+        payload: &[u8],
+    ) {
+        let msg = match ControlMsg::from_bytes(payload) {
+            Ok(m) => m,
+            Err(e) => {
+                warn!(
+                    "TcpMuxListener [{}]: Bad first message on conn {}: {:?}",
+                    TransportErrorCode::TcpControlProtocolError,
+                    conn_id,
+                    e
+                );
+                // Signal the read thread to exit.
+                if let Some(entry) = self.connections.get(&conn_id) {
+                    entry.shutdown.store(true, Ordering::SeqCst);
+                }
+                return;
+            }
+        };
+
+        match msg {
+            ControlMsg::PeerHello { locator: _ } => {
+                send_control(stream, &ControlMsg::PeerHelloAck);
+
+                if let Some(mut conn) = self.connections.get_mut(&conn_id) {
+                    conn.state = ConnectionState::Control;
+                }
+
+                // Register in peer group (synthetic guid from remote address).
+                let remote_addr = self.connections.get(&conn_id).map(|c| c.remote_addr);
+                if let Some(addr) = remote_addr {
+                    let synthetic_guid = addr_to_guid(addr);
+                    let mut pc = self.peer_connections.lock().expect("peer_connections lock");
+                    let group = pc.entry(synthetic_guid).or_insert_with(PeerConnectionGroup::new);
+                    group.control_conn = Some(conn_id);
+
+                    if let Some(mut conn) = self.connections.get_mut(&conn_id) {
+                        conn.remote_guid_prefix = Some(synthetic_guid);
+                    }
+                }
+
+                debug!("TcpMuxListener: PEER_HELLO ok (conn={})", conn_id);
+            }
+
+            ControlMsg::PortBind { cookie } => {
+                self.handle_port_bind(stream, conn_id, &cookie);
+            }
+
+            other => {
+                warn!(
+                    "TcpMuxListener: Expected PEER_HELLO or PORT_BIND, got {} on conn {}",
+                    other.type_name(),
+                    conn_id
+                );
+                if let Some(entry) = self.connections.get(&conn_id) {
+                    entry.shutdown.store(true, Ordering::SeqCst);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn handle_control_frame(
+        &self,
+        stream: &mut Box<dyn TcpStreamWrapper>,
+        conn_id: ConnectionId,
+        payload: &[u8],
+    ) {
+        let msg = match ControlMsg::from_bytes(payload) {
+            Ok(m) => m,
+            Err(e) => {
+                warn!(
+                    "TcpMuxListener [{}]: Bad control msg on conn {}: {:?}",
+                    TransportErrorCode::TcpControlProtocolError,
+                    conn_id,
+                    e
+                );
+                return;
+            }
+        };
+
+        match msg {
+            ControlMsg::PortReserve { logical_port } => {
+                let my_disc = PortManager::get_discovery_traffic_unicast_port(
+                    self.domain_id,
+                    self.participant_id,
+                );
+                let my_user = PortManager::get_user_traffic_unicast_port(
+                    self.domain_id,
+                    self.participant_id,
+                );
+
+                if logical_port != my_disc && logical_port != my_user {
+                    warn!(
+                        "TcpMuxListener [{}]: Invalid port {} on conn {}",
+                        TransportErrorCode::TcpControlInvalidPort,
+                        logical_port,
+                        conn_id
+                    );
+                    send_control(
+                        stream,
+                        &ControlMsg::Error {
+                            operation: MSG_PORT_RESERVE,
+                            code: ERR_CODE_INVALID_PORT,
+                            message: "no matching port".to_string(),
+                        },
+                    );
+                    return;
+                }
+
+                // Generate cookie atomically.
+                let counter_val = self.next_cookie.fetch_add(1, Ordering::SeqCst);
+                let mut c = counter_val;
+                let cookie = generate_cookie(&mut c);
+
+                self.cookie_to_port.insert(cookie, logical_port);
+                if let Some(ctrl_guid) =
+                    self.connections.get(&conn_id).and_then(|c| c.remote_guid_prefix)
+                {
+                    self.cookie_to_guid.insert(cookie, ctrl_guid);
+                }
+
+                send_control(stream, &ControlMsg::PortReserveAck { cookie });
+
+                debug!(
+                    "TcpMuxListener: PORT_RESERVE ok (port={}, cookie=0x{:02x})",
+                    logical_port, cookie[0]
+                );
+            }
+
+            ControlMsg::Keepalive => {
+                send_control(stream, &ControlMsg::KeepaliveAck);
+            }
+
+            other => {
+                debug!(
+                    "TcpMuxListener: Ignoring {} on control conn {}",
+                    other.type_name(),
+                    conn_id
+                );
+            }
+        }
+    }
+
+    fn handle_port_bind(
+        &self,
+        stream: &mut Box<dyn TcpStreamWrapper>,
+        conn_id: ConnectionId,
+        cookie: &[u8; 16],
+    ) {
+        let logical_port = match self.cookie_to_port.remove(cookie) {
+            Some((_, port)) => port,
+            None => {
+                let cookie_hex: String = cookie.iter().map(|b| format!("{:02x}", b)).collect();
+                warn!(
+                    "TcpMuxListener [{}]: Unknown cookie [{}] on conn {}",
+                    TransportErrorCode::TcpControlInvalidCookie,
+                    cookie_hex,
+                    conn_id
+                );
+                send_control(
+                    stream,
+                    &ControlMsg::Error {
+                        operation: MSG_PORT_BIND,
+                        code: ERR_CODE_INVALID_COOKIE,
+                        message: format!("invalid cookie [{}]", cookie_hex),
+                    },
+                );
+                if let Some(entry) = self.connections.get(&conn_id) {
+                    entry.shutdown.store(true, Ordering::SeqCst);
+                }
+                return;
+            }
+        };
+
+        send_control(stream, &ControlMsg::PortBindAck);
+
+        if let Some(mut conn) = self.connections.get_mut(&conn_id) {
+            conn.bound_logical_port = Some(logical_port);
+            conn.state = ConnectionState::Active;
+        }
+
+        // Resolve peer group — prefer the guid from PORT_RESERVE time so the
+        // data connection lands in the same group as the control connection.
+        let group_guid = self.cookie_to_guid.remove(cookie).map(|(_, g)| g).or_else(|| {
+            self.connections.get(&conn_id).map(|c| addr_to_guid(c.remote_addr))
+        });
+
+        if let Some(guid) = group_guid {
+            let mut pc = self.peer_connections.lock().expect("peer_connections lock");
+            let group = pc.entry(guid).or_insert_with(PeerConnectionGroup::new);
+
+            if PortManager::is_discovery_unicast_port(self.domain_id, logical_port) {
+                group.discovery_conn = Some(conn_id);
+            } else {
+                group.user_data_conn = Some(conn_id);
+            }
+
+            if let Some(mut conn) = self.connections.get_mut(&conn_id) {
+                conn.remote_guid_prefix = Some(guid);
+            }
+        }
+
+        debug!(
+            "TcpMuxListener: PORT_BIND ok (conn={}, port={}, cookie=0x{:02x})",
+            conn_id, logical_port, cookie[0]
+        );
+    }
+
+    pub(crate) fn handle_active_frame(&self, conn_id: ConnectionId, payload: &[u8]) {
+        if matches!(classify_frame(payload), TcpFrameKind::RtpsData) {
+            let remote_addr = match self.connections.get(&conn_id).map(|c| c.remote_addr) {
+                Some(a) => a,
+                None => return,
+            };
+            self.route_rtps_data(conn_id, payload, remote_addr);
+        }
+    }
+
+    fn route_rtps_data(&self, conn_id: ConnectionId, payload: &[u8], remote_addr: SocketAddr) {
+        let logical_port =
+            match self.connections.get(&conn_id).and_then(|c| c.bound_logical_port) {
+                Some(p) => p,
+                None => return,
+            };
+
+        let msg = IncomingMessage { data: payload.to_vec(), source: remote_addr };
+
+        if PortManager::is_discovery_unicast_port(self.domain_id, logical_port) {
+            if let Err(e) = self.discovery_tx.try_send(msg) {
+                warn!(
+                    "TcpMuxListener [{}]: Failed to route discovery: {:?}",
+                    TransportErrorCode::TcpChannelFull,
+                    e
+                );
+            }
+        } else if PortManager::is_user_unicast_port(self.domain_id, logical_port) {
+            if let Err(e) = self.user_data_tx.try_send(msg) {
+                warn!(
+                    "TcpMuxListener [{}]: Failed to route user data: {:?}",
+                    TransportErrorCode::TcpChannelFull,
+                    e
+                );
+            }
+        }
+    }
+}
+
+// ── TcpMuxListener ───────────────────────────────────────────────────────────
+
+/// TCP multiplexed listener.
+///
+/// Binds a TCP listen socket and exposes shared state for connection threads.
+/// The actual accept loop lives in `TcpMuxListeningLoopTask` (tcp_transport_plugin.rs).
+pub(crate) struct TcpMuxListener {
+    port: u16,
+    listener: Option<TcpListener>,
+    pub(crate) shared: Arc<MuxListenerShared>,
 }
 
 impl TcpMuxListener {
@@ -128,512 +527,112 @@ impl TcpMuxListener {
         let addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
         let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)?;
         socket.set_reuse_address(true)?;
-        socket.set_nonblocking(true)?;
+        socket.set_nonblocking(false)?;
+        // Periodic accept timeout so the loop can check the termination flag.
+        socket.set_read_timeout(Some(Duration::from_millis(100)))?;
         socket.bind(&addr.into())?;
         socket.listen(128)?;
-        let listener = MioTcpListener::from_std(std::net::TcpListener::from(socket));
+
+        let listener = TcpListener::from(socket);
         let actual_port = listener.local_addr()?.port();
         info!("TcpMuxListener: Listening on port {} (domain={})", actual_port, domain_id);
 
         Ok(Self {
             port: actual_port,
-            domain_id,
-            participant_id,
-            local_guid_prefix,
             listener: Some(listener),
-            connections: HashMap::new(),
-            next_token: CONNECTION_TOKEN_START,
-            peer_connections: HashMap::new(),
-            discovery_tx,
-            user_data_tx,
-            next_cookie: 0x31,
-            cookie_to_port: HashMap::new(),
-            cookie_to_guid: HashMap::new(),
+            shared: Arc::new(MuxListenerShared::new(
+                domain_id,
+                participant_id,
+                local_guid_prefix,
+                discovery_tx,
+                user_data_tx,
+            )),
         })
-    }
-
-    pub(crate) fn listener_mut(&mut self) -> Option<&mut MioTcpListener> {
-        self.listener.as_mut()
     }
 
     pub(crate) fn port(&self) -> u16 {
         self.port
     }
 
-    pub(crate) fn accept(&mut self, registry: &Registry) -> io::Result<Option<Token>> {
-        let listener = match &self.listener {
-            Some(l) => l,
-            None => return Err(io::Error::new(ErrorKind::NotConnected, "Not initialized")),
-        };
-
-        match listener.accept() {
-            Ok((mut stream, addr)) => {
-                let token = Token(self.next_token);
-                self.next_token += 1;
-                let _ = stream.set_nodelay(true);
-
-                // Apply optional buffer-size overrides on the accepted socket.
-                // Used by tests to induce backpressure on the receive direction
-                // of the mux listener (incoming traffic from the peer).
-                if let Some(sz) = crate::common::env::get_tcp_so_rcvbuf() {
-                    let sock = socket2::SockRef::from(&stream);
-                    let _ = sock.set_recv_buffer_size(sz);
-                }
-                if let Some(sz) = crate::common::env::get_tcp_so_sndbuf() {
-                    let sock = socket2::SockRef::from(&stream);
-                    let _ = sock.set_send_buffer_size(sz);
-                }
-
-                registry.register(&mut stream, token, Interest::READABLE)?;
-
-                debug!("TcpMuxListener: Accepted from {:?} (token={:?})", addr, token);
-
-                self.connections.insert(
-                    token,
-                    MuxConnection {
-                        stream,
-                        framed_reader: FramedReader::new(),
-                        state: ConnectionState::AwaitingFirstMessage,
-                        remote_addr: addr,
-                        bound_logical_port: None,
-                        remote_guid_prefix: None,
-                        last_activity: Instant::now(),
-                    },
-                );
-                Ok(Some(token))
-            }
-            Err(ref e) if e.kind() == ErrorKind::WouldBlock => Ok(None),
-            Err(e) => Err(e),
-        }
+    /// Remove the underlying `TcpListener` for use in the accept loop.
+    pub(crate) fn take_listener(&mut self) -> Option<TcpListener> {
+        self.listener.take()
     }
 
-    pub(crate) fn on_readable(&mut self, token: Token, registry: &Registry) {
-        loop {
-            let payload = {
-                let conn = match self.connections.get_mut(&token) {
-                    Some(c) if c.state != ConnectionState::Closing => c,
-                    _ => return,
-                };
+    /// Accept one connection from the listener and spawn its read thread.
+    ///
+    /// Returns the `ConnectionId` assigned to the new connection.
+    pub(crate) fn accept_connection(
+        &self,
+        stream: Box<dyn TcpStreamWrapper>,
+        addr: SocketAddr,
+        terminated: Arc<AtomicBool>,
+        idle_timeout: Duration,
+    ) -> ConnectionId {
+        let conn_id = self.shared.next_conn_id.fetch_add(1, Ordering::SeqCst);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let error_on_exit = Arc::new(AtomicBool::new(false));
 
-                match conn.framed_reader.read_message(&mut conn.stream) {
-                    Ok(Some(msg)) => {
-                        conn.last_activity = Instant::now();
-                        msg
-                    }
-                    Ok(None) => continue,
-                    Err(ref e) if e.kind() == ErrorKind::WouldBlock => return,
-                    Err(e) => {
-                        debug!("TcpMuxListener [{}]: Read error on {:?}: {:?}", TransportErrorCode::TcpReadError, token, e);
-                        self.remove_connection(token, registry);
-                        return;
-                    }
-                }
-            };
-
-            let state = self.connections.get(&token).map(|c| c.state);
-
-            match state {
-                Some(ConnectionState::AwaitingFirstMessage) => {
-                    self.handle_first_message(token, &payload, registry);
-                }
-                Some(ConnectionState::Control) => {
-                    self.handle_control_frame(token, &payload, registry);
-                }
-                Some(ConnectionState::Active) => {
-                    self.handle_active_frame(token, &payload, registry);
-                }
-                _ => {}
-            }
-        }
-    }
-
-    // ── First message: PEER_HELLO or PORT_BIND ──────────────────────────────
-
-    fn handle_first_message(&mut self, token: Token, payload: &[u8], registry: &Registry) {
-        let msg = match ControlMsg::from_bytes(payload) {
-            Ok(m) => m,
-            Err(e) => {
-                warn!("TcpMuxListener [{}]: Bad first message on {:?}: {:?}", TransportErrorCode::TcpControlProtocolError, token, e);
-                self.remove_connection(token, registry);
-                return;
-            }
-        };
-
-        match msg {
-            ControlMsg::PeerHello { locator } => {
-                // Send PEER_HELLO_ACK
-                let ack = ControlMsg::PeerHelloAck;
-                self.send_control(token, &ack);
-
-                if let Some(conn) = self.connections.get_mut(&token) {
-                    conn.state = ConnectionState::Control;
-                }
-
-                // Register in peer connection group (synthetic guid from addr)
-                let remote_addr = self.connections.get(&token).map(|c| c.remote_addr);
-                if let Some(addr) = remote_addr {
-                    let mut synthetic_guid = [0u8; 12];
-                    if let SocketAddr::V4(v4) = addr {
-                        synthetic_guid[0..4].copy_from_slice(&v4.ip().octets());
-                        synthetic_guid[4..6].copy_from_slice(&v4.port().to_be_bytes());
-                    }
-
-                    let group = self
-                        .peer_connections
-                        .entry(synthetic_guid)
-                        .or_insert_with(PeerConnectionGroup::new);
-
-                    group.control_token = Some(token);
-
-                    if let Some(conn) = self.connections.get_mut(&token) {
-                        conn.remote_guid_prefix = Some(synthetic_guid);
-                    }
-                }
-
-                debug!("TcpMuxListener: PEER_HELLO ok (token={:?})", token);
-            }
-
-            ControlMsg::PortBind { cookie } => {
-                self.handle_port_bind(token, &cookie, registry);
-            }
-
-            other => {
-                warn!(
-                    "TcpMuxListener: Expected PEER_HELLO or PORT_BIND, got {} on {:?}",
-                    other.type_name(),
-                    token
-                );
-                self.remove_connection(token, registry);
-            }
-        }
-    }
-
-    // ── Control connection: PORT_RESERVE + KEEPALIVE ────────────────────────
-
-    fn handle_control_frame(&mut self, token: Token, payload: &[u8], registry: &Registry) {
-        let msg = match ControlMsg::from_bytes(payload) {
-            Ok(m) => m,
-            Err(e) => {
-                warn!("TcpMuxListener [{}]: Bad control msg on {:?}: {:?}", TransportErrorCode::TcpControlProtocolError, token, e);
-                return;
-            }
-        };
-
-        match msg {
-            ControlMsg::PortReserve { logical_port } => {
-                let my_disc = PortManager::get_discovery_traffic_unicast_port(
-                    self.domain_id,
-                    self.participant_id,
-                );
-                let my_user =
-                    PortManager::get_user_traffic_unicast_port(self.domain_id, self.participant_id);
-
-                if logical_port != my_disc && logical_port != my_user {
-                    warn!("TcpMuxListener [{}]: Invalid port {} on {:?}", TransportErrorCode::TcpControlInvalidPort, logical_port, token);
-                    let err = ControlMsg::Error {
-                        operation: MSG_PORT_RESERVE,
-                        code: ERR_CODE_INVALID_PORT,
-                        message: "no matching port".to_string(),
-                    };
-                    self.send_control(token, &err);
-                    return;
-                }
-
-                // Issue cookie and store mappings.
-                // The cookie → guid mapping lets the matching PORT_BIND
-                // (which arrives on a fresh TCP connection with a different
-                // source port) attach itself to the same peer group as the
-                // control connection that issued the cookie.
-                let cookie = generate_cookie(&mut self.next_cookie);
-                self.cookie_to_port.insert(cookie, logical_port);
-                if let Some(ctrl_guid) =
-                    self.connections.get(&token).and_then(|c| c.remote_guid_prefix)
-                {
-                    self.cookie_to_guid.insert(cookie, ctrl_guid);
-                }
-
-                let ack = ControlMsg::PortReserveAck { cookie };
-                self.send_control(token, &ack);
-
-                debug!(
-                    "TcpMuxListener: PORT_RESERVE ok (port={}, cookie=0x{:02x})",
-                    logical_port, cookie[0]
-                );
-            }
-
-            ControlMsg::Keepalive => {
-                self.send_control(token, &ControlMsg::KeepaliveAck);
-            }
-
-            other => {
-                debug!("TcpMuxListener: Ignoring {} on control {:?}", other.type_name(), token);
-            }
-        }
-    }
-
-    // ── PORT_BIND handler (from first message or control) ───────────────────
-
-    fn handle_port_bind(&mut self, token: Token, cookie: &[u8; 16], registry: &Registry) {
-        // Look up logical port from cookie
-        let logical_port = match self.cookie_to_port.remove(cookie) {
-            Some(port) => port,
-            None => {
-                let cookie_hex: String = cookie.iter().map(|b| format!("{:02x}", b)).collect();
-                warn!("TcpMuxListener [{}]: Unknown cookie [{}] on {:?}", TransportErrorCode::TcpControlInvalidCookie, cookie_hex, token);
-                let err = ControlMsg::Error {
-                    operation: MSG_PORT_BIND,
-                    code: ERR_CODE_INVALID_COOKIE,
-                    message: format!("invalid cookie [{}]", cookie_hex),
-                };
-                self.send_control(token, &err);
-                self.remove_connection(token, registry);
-                return;
-            }
-        };
-
-        // Send PORT_BIND_ACK
-        self.send_control(token, &ControlMsg::PortBindAck);
-
-        if let Some(conn) = self.connections.get_mut(&token) {
-            conn.bound_logical_port = Some(logical_port);
-            conn.state = ConnectionState::Active;
-        }
-
-        // Resolve the peer group: prefer the GuidPrefix that the control
-        // connection associated with this cookie at PORT_RESERVE time. The
-        // PORT_BIND arrives on a brand-new TCP connection with a different
-        // source port, so falling back on the bound socket address would
-        // place the data connection in a different group than the control.
-        let group_guid = self.cookie_to_guid.remove(cookie).or_else(|| {
-            let remote_addr = self.connections.get(&token).map(|c| c.remote_addr);
-            remote_addr.map(|addr| {
-                let mut synthetic_guid = [0u8; 12];
-                if let SocketAddr::V4(v4) = addr {
-                    synthetic_guid[0..4].copy_from_slice(&v4.ip().octets());
-                    synthetic_guid[4..6].copy_from_slice(&v4.port().to_be_bytes());
-                }
-                synthetic_guid
-            })
-        });
-
-        if let Some(guid) = group_guid {
-            let group = self.peer_connections.entry(guid).or_insert_with(PeerConnectionGroup::new);
-
-            if PortManager::is_discovery_unicast_port(self.domain_id, logical_port) {
-                group.discovery_token = Some(token);
-            } else {
-                group.user_data_token = Some(token);
-            }
-
-            if let Some(conn) = self.connections.get_mut(&token) {
-                conn.remote_guid_prefix = Some(guid);
-            }
-        }
-
-        debug!(
-            "TcpMuxListener: PORT_BIND ok (token={:?}, port={}, cookie=0x{:02x})",
-            token, logical_port, cookie[0]
+        self.shared.connections.insert(
+            conn_id,
+            ConnectionEntry {
+                remote_addr: addr,
+                state: ConnectionState::AwaitingFirstMessage,
+                bound_logical_port: None,
+                remote_guid_prefix: None,
+                last_activity: Instant::now(),
+                shutdown: shutdown.clone(),
+                error_on_exit: error_on_exit.clone(),
+            },
         );
-    }
 
-    // ── Active data connection: RTPS data ───────────────────────
-
-    fn handle_active_frame(&mut self, token: Token, payload: &[u8], registry: &Registry) {
-        let kind = classify_frame(payload);
-
-        match kind {
-            TcpFrameKind::RtpsData => {
-                let remote_addr = self.connections.get(&token).map(|c| c.remote_addr).unwrap();
-                self.route_rtps_data(token, payload, remote_addr);
-            }
-            _ => {}
-        }
-    }
-
-    fn route_rtps_data(&self, token: Token, payload: &[u8], remote_addr: SocketAddr) {
-        let logical_port = match self.connections.get(&token).and_then(|c| c.bound_logical_port) {
-            Some(p) => p,
-            None => return,
-        };
-
-        let msg = IncomingMessage { data: payload.to_vec(), source: remote_addr };
-
-        if PortManager::is_discovery_unicast_port(self.domain_id, logical_port) {
-            if let Err(e) = self.discovery_tx.try_send(msg) {
-                warn!("TcpMuxListener [{}]: Failed to route discovery: {:?}", TransportErrorCode::TcpChannelFull, e);
-            }
-        } else if PortManager::is_user_unicast_port(self.domain_id, logical_port) {
-            if let Err(e) = self.user_data_tx.try_send(msg) {
-                warn!("TcpMuxListener [{}]: Failed to route user data: {:?}", TransportErrorCode::TcpChannelFull, e);
-            }
-        }
-    }
-
-    // ── Control sending ─────────────────────────────────────────────────────
-
-    fn send_control(&mut self, token: Token, msg: &ControlMsg) {
-        let conn = match self.connections.get_mut(&token) {
-            Some(c) => c,
-            None => return,
-        };
-
-        if let Err(e) = write_framed_message(&mut conn.stream, &msg.to_bytes()) {
-            warn!("TcpMuxListener [{}]: Failed to send {} to {:?}: {:?}", TransportErrorCode::TcpControlSendFailed, msg.type_name(), token, e);
-        }
-    }
-
-    // ── Idle timeout pruning ────────────────────────────────────────────────
-
-    /// Drop incoming connections whose `last_activity` has exceeded `timeout`.
-    ///
-    /// Before tearing them down, sends an ERROR(IDLE_TIMEOUT) on a best-effort
-    /// basis so cooperative clients can log the reason. Returns the number of
-    /// connections that were pruned.
-    ///
-    /// This protects the server from peers that perform a partial handshake
-    /// (e.g. PEER_HELLO followed by silence) and never send another byte: the
-    /// server has no incoming-direction keepalive of its own, so without this
-    /// pruning a single broken or malicious peer could pin a token forever.
-    pub(crate) fn prune_idle_connections(
-        &mut self,
-        timeout: Duration,
-        registry: &Registry,
-    ) -> usize {
-        let now = Instant::now();
-        let stale: Vec<Token> = self
-            .connections
-            .iter()
-            .filter(|(_, c)| now.duration_since(c.last_activity) > timeout)
-            .map(|(t, _)| *t)
-            .collect();
-
-        for token in &stale {
-            if let Some(conn) = self.connections.get(token) {
-                warn!(
-                    "TcpMuxListener [{}]: Pruning idle incoming connection {:?} from {:?} (idle for {:?})",
-                    TransportErrorCode::TcpConnectionIdlePruned,
-                    token,
-                    conn.remote_addr,
-                    now.duration_since(conn.last_activity)
+        let conn_shared = Arc::clone(&self.shared);
+        let _ = thread::Builder::new()
+            .name(format!("tcp_conn_{}", conn_id))
+            .stack_size(128 * 1024)
+            .spawn(move || {
+                read_loop(
+                    stream,
+                    conn_id,
+                    conn_shared,
+                    terminated,
+                    shutdown,
+                    error_on_exit,
+                    idle_timeout,
                 );
-            }
-            // Best-effort ERROR notice — ignore failures.
-            let err = ControlMsg::Error {
-                operation: OP_IDLE_TIMEOUT,
-                code: ERR_CODE_IDLE_TIMEOUT,
-                message: "incoming connection idle timeout".to_string(),
-            };
-            self.send_control(*token, &err);
-            self.remove_connection(*token, registry);
-        }
+            });
 
-        stale.len()
+        conn_id
     }
 
-    /// Drop data connections in groups whose control connection has been
-    /// gone for longer than `grace`. Returns the number of groups that were
-    /// fully cleaned up.
-    ///
-    /// A short grace period absorbs transient control disconnects so that a
-    /// brief network blip does not instantly tear down the data flow. After
-    /// the grace expires the orphan group is removed entirely; reconnecting
-    /// peers land in a brand-new group and re-matching is left to the upper
-    /// RTPS/SEDP layer.
-    pub(crate) fn prune_orphan_data_connections(
-        &mut self,
-        grace: Duration,
-        registry: &Registry,
-    ) -> usize {
-        let now = Instant::now();
-        let stale_guids: Vec<GuidPrefix> = self
-            .peer_connections
-            .iter()
-            .filter_map(|(guid, group)| match group.control_lost_at {
-                Some(lost) if now.duration_since(lost) > grace && group.has_data_tokens() => {
-                    Some(*guid)
-                }
-                _ => None,
-            })
-            .collect();
+    // Convenience delegates for callers that have a TcpMuxListener reference.
 
-        for guid in &stale_guids {
-            warn!(
-                "TcpMuxListener [{}]: Pruning orphan data connections for {:?} after grace period",
-                TransportErrorCode::TcpOrphanPruned,
-                guid
-            );
-            self.remove_peer(*guid, registry);
-        }
-
-        stale_guids.len()
+    pub(crate) fn prune_idle_connections(&self, timeout: Duration) -> usize {
+        self.shared.prune_idle_connections(timeout)
     }
 
-    // ── Connection cleanup ──────────────────────────────────────────────────
-
-    pub(crate) fn remove_peer(&mut self, guid: GuidPrefix, registry: &Registry) {
-        if let Some(group) = self.peer_connections.remove(&guid) {
-            for token in group.all_tokens() {
-                self.remove_connection_inner(token, registry);
-            }
-            debug!("TcpMuxListener: Removed peer {:?}", guid);
-        }
-    }
-
-    pub(crate) fn remove_connection(&mut self, token: Token, registry: &Registry) {
-        if let Some(conn) = self.connections.get(&token) {
-            if let Some(guid) = conn.remote_guid_prefix {
-                if let Some(group) = self.peer_connections.get_mut(&guid) {
-                    let was_control = group.control_token == Some(token);
-                    if was_control {
-                        group.control_token = None;
-                    }
-                    if group.discovery_token == Some(token) {
-                        group.discovery_token = None;
-                    }
-                    if group.user_data_token == Some(token) {
-                        group.user_data_token = None;
-                    }
-
-                    // If the control connection just disappeared but data
-                    // connections are still around, start the grace period.
-                    // Subsequent prune sweeps will tear them down once it
-                    // expires.
-                    if was_control && group.has_data_tokens() && group.control_lost_at.is_none() {
-                        group.control_lost_at = Some(Instant::now());
-                        debug!(
-                            "TcpMuxListener: control connection lost for {:?}, grace period started",
-                            guid
-                        );
-                    }
-
-                    if group.all_tokens().is_empty() {
-                        self.peer_connections.remove(&guid);
-                    }
-                }
-            }
-        }
-        self.remove_connection_inner(token, registry);
-    }
-
-    fn remove_connection_inner(&mut self, token: Token, registry: &Registry) {
-        if let Some(mut conn) = self.connections.remove(&token) {
-            let _ = registry.deregister(&mut conn.stream);
-            debug!("TcpMuxListener: Removed {:?} from {:?}", token, conn.remote_addr);
-        }
+    pub(crate) fn prune_orphan_data_connections(&self, grace: Duration) -> usize {
+        self.shared.prune_orphan_data_connections(grace)
     }
 
     pub(crate) fn connection_count(&self) -> usize {
-        self.connections.len()
+        self.shared.connection_count()
     }
+
     pub(crate) fn peer_count(&self) -> usize {
-        self.peer_connections.len()
+        self.shared.peer_count()
     }
 
     pub(crate) fn close(&mut self) {
-        self.connections.clear();
-        self.peer_connections.clear();
-        self.cookie_to_port.clear();
-        self.listener.take();
+        self.listener.take(); // Drop the listener socket.
+        // Signal all active read threads to exit before clearing the map.
+        for entry in self.shared.connections.iter() {
+            entry.shutdown.store(true, Ordering::SeqCst);
+        }
+        self.shared.connections.clear();
+        self.shared.peer_connections.lock().expect("peer_connections lock").clear();
+        self.shared.cookie_to_port.clear();
+        self.shared.cookie_to_guid.clear();
         info!("TcpMuxListener: Closed (port {})", self.port);
     }
 }
@@ -644,248 +643,360 @@ impl Drop for TcpMuxListener {
     }
 }
 
+// ── Per-connection read thread ───────────────────────────────────────────────
+
+/// Run the read loop for a single connection.
+///
+/// Owns the `stream` exclusively (read + write for protocol responses).
+/// Exits when `terminated`, `shutdown`, or a read error is detected.
+pub(crate) fn read_loop(
+    mut stream: Box<dyn TcpStreamWrapper>,
+    conn_id: ConnectionId,
+    shared: Arc<MuxListenerShared>,
+    terminated: Arc<AtomicBool>,
+    shutdown: Arc<AtomicBool>,
+    error_on_exit: Arc<AtomicBool>,
+    idle_timeout: Duration,
+) {
+    // 100 ms read timeout — allows periodic checks of the control flags.
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+    let mut framed = FramedReader::new();
+
+    loop {
+        // Global termination or per-connection shutdown.
+        if terminated.load(Ordering::SeqCst) || shutdown.load(Ordering::SeqCst) {
+            if error_on_exit.load(Ordering::SeqCst) {
+                let err = ControlMsg::Error {
+                    operation: OP_IDLE_TIMEOUT,
+                    code: ERR_CODE_IDLE_TIMEOUT,
+                    message: "incoming connection idle timeout".to_string(),
+                };
+                let _ = write_framed_message(&mut stream, &err.to_bytes());
+            }
+            break;
+        }
+
+        match framed.read_message(&mut stream) {
+            Ok(Some(msg)) => {
+                // Update last_activity timestamp.
+                if let Some(mut e) = shared.connections.get_mut(&conn_id) {
+                    e.last_activity = Instant::now();
+                }
+
+                let state = shared.connections.get(&conn_id).map(|e| e.state);
+                match state {
+                    Some(ConnectionState::AwaitingFirstMessage) => {
+                        shared.handle_first_message(&mut stream, conn_id, &msg);
+                    }
+                    Some(ConnectionState::Control) => {
+                        shared.handle_control_frame(&mut stream, conn_id, &msg);
+                    }
+                    Some(ConnectionState::Active) => {
+                        shared.handle_active_frame(conn_id, &msg);
+                    }
+                    _ => break,
+                }
+
+                // Re-check shutdown after handling (handler may have set it).
+                if shutdown.load(Ordering::SeqCst) {
+                    break;
+                }
+            }
+
+            // Partial message — framing is buffering, continue reading.
+            Ok(None) => continue,
+
+            // Read timeout — no data within 100 ms.
+            Err(ref e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {
+                // Check control flags (same as top of loop, hit earlier on long waits).
+                if terminated.load(Ordering::SeqCst) || shutdown.load(Ordering::SeqCst) {
+                    if error_on_exit.load(Ordering::SeqCst) {
+                        let err = ControlMsg::Error {
+                            operation: OP_IDLE_TIMEOUT,
+                            code: ERR_CODE_IDLE_TIMEOUT,
+                            message: "incoming connection idle timeout".to_string(),
+                        };
+                        let _ = write_framed_message(&mut stream, &err.to_bytes());
+                    }
+                    break;
+                }
+
+                // Check per-connection idle timeout.
+                let last_act = shared.connections.get(&conn_id).map(|e| e.last_activity);
+                if let Some(last) = last_act {
+                    if last.elapsed() > idle_timeout {
+                        let err = ControlMsg::Error {
+                            operation: OP_IDLE_TIMEOUT,
+                            code: ERR_CODE_IDLE_TIMEOUT,
+                            message: "incoming connection idle timeout".to_string(),
+                        };
+                        let _ = write_framed_message(&mut stream, &err.to_bytes());
+                        break;
+                    }
+                }
+            }
+
+            // Real read error (EOF, RST, etc.) — close connection.
+            Err(e) => {
+                debug!("TcpMuxListener: Read error on conn {}: {:?}", conn_id, e);
+                break;
+            }
+        }
+    }
+
+    // Cleanup — idempotent if already removed by prune.
+    shared.remove_connection(conn_id);
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Derive a synthetic GuidPrefix from a remote socket address.
+/// Used to group connections from the same participant when we don't yet
+/// know the real GUID prefix.
+fn addr_to_guid(addr: SocketAddr) -> GuidPrefix {
+    let mut g = [0u8; 12];
+    if let SocketAddr::V4(v4) = addr {
+        g[0..4].copy_from_slice(&v4.ip().octets());
+        g[4..6].copy_from_slice(&v4.port().to_be_bytes());
+    }
+    g
+}
+
+/// Write a framed control message to `stream`.  Best-effort — errors are
+/// logged and ignored so that a write failure does not crash the caller.
+fn send_control(stream: &mut Box<dyn TcpStreamWrapper>, msg: &ControlMsg) {
+    if let Err(e) = write_framed_message(stream, &msg.to_bytes()) {
+        warn!(
+            "TcpMuxListener [{}]: Failed to send {}: {:?}",
+            TransportErrorCode::TcpControlSendFailed,
+            msg.type_name(),
+            e
+        );
+    }
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::rtps::transport::tcp::framing::write_framed_message;
     use crate::rtps::transport::tcp::protocol::{ControlMsg, MSG_ERROR, MSG_PEER_HELLO_ACK};
+    use crate::rtps::transport::tcp::stream_wrapper::wrap_stream;
     use crossbeam_channel::bounded;
-    use mio::{Events, Poll};
     use std::io::Read;
     use std::net::TcpStream;
     use std::time::{Duration, Instant};
 
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
     fn make_listener() -> (TcpMuxListener, crossbeam_channel::Receiver<IncomingMessage>) {
         let (disc_tx, _disc_rx) = bounded(64);
         let (user_tx, user_rx) = bounded(64);
-        let listener = TcpMuxListener::new(
-            0, // OS-assigned ephemeral port
-            0, 0, [0u8; 12], disc_tx, user_tx,
-        )
-        .expect("listener creation");
+        let listener =
+            TcpMuxListener::new(0, 0, 0, [0u8; 12], disc_tx, user_tx).expect("listener creation");
         (listener, user_rx)
     }
+
+    /// Accept one raw connection from the listener and register it in the shared
+    /// map (no read thread).  Returns the assigned ConnectionId.
+    fn accept_raw_no_thread(listener: &TcpMuxListener) -> ConnectionId {
+        let (tcp, addr) =
+            listener.listener.as_ref().expect("listener present").accept().expect("accept");
+        let conn_id = listener.shared.next_conn_id.fetch_add(1, Ordering::SeqCst);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let error_on_exit = Arc::new(AtomicBool::new(false));
+        listener.shared.connections.insert(
+            conn_id,
+            ConnectionEntry {
+                remote_addr: addr,
+                state: ConnectionState::AwaitingFirstMessage,
+                bound_logical_port: None,
+                remote_guid_prefix: None,
+                last_activity: Instant::now(),
+                shutdown,
+                error_on_exit,
+            },
+        );
+        conn_id
+    }
+
+    /// Accept one connection and spawn its read thread.  Returns the ConnectionId.
+    fn accept_and_spawn(
+        listener: &TcpMuxListener,
+        terminated: Arc<AtomicBool>,
+        idle_timeout: Duration,
+    ) -> ConnectionId {
+        let (tcp, addr) =
+            listener.listener.as_ref().expect("listener present").accept().expect("accept");
+        listener.accept_connection(wrap_stream(tcp), addr, terminated, idle_timeout)
+    }
+
+    /// Spin-wait (up to `deadline`) until `pred` returns true.
+    fn wait_until(deadline: Instant, pred: impl Fn() -> bool) -> bool {
+        while Instant::now() < deadline {
+            if pred() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
+    // ── PeerConnectionGroup unit tests ────────────────────────────────────────
 
     #[test]
     fn test_peer_connection_group_all_tokens() {
         let mut group = PeerConnectionGroup::new();
-        assert!(group.all_tokens().is_empty());
-        assert!(!group.has_data_tokens());
+        assert!(group.all_conns().is_empty());
+        assert!(!group.has_data_conns());
         assert!(group.control_lost_at.is_none());
 
-        group.control_token = Some(Token(100));
-        assert_eq!(group.all_tokens().len(), 1);
-        assert!(!group.has_data_tokens());
+        group.control_conn = Some(100);
+        assert_eq!(group.all_conns().len(), 1);
+        assert!(!group.has_data_conns());
 
-        group.discovery_token = Some(Token(101));
-        group.user_data_token = Some(Token(102));
-        assert_eq!(group.all_tokens().len(), 3);
-        assert!(group.has_data_tokens());
+        group.discovery_conn = Some(101);
+        group.user_data_conn = Some(102);
+        assert_eq!(group.all_conns().len(), 3);
+        assert!(group.has_data_conns());
     }
 
-    /// Helper: build a fully populated PeerConnectionGroup with synthetic
-    /// tokens AND register matching MuxConnection entries so that
-    /// `prune_orphan_data_connections` can actually deregister them.
+    // ── Orphan grace-period tests (use fake groups, no real sockets) ──────────
+
     fn install_fake_group(
-        listener: &mut TcpMuxListener,
+        listener: &TcpMuxListener,
         guid: GuidPrefix,
-        ctrl: Option<Token>,
-        disc: Option<Token>,
-        user: Option<Token>,
+        ctrl: Option<ConnectionId>,
+        disc: Option<ConnectionId>,
+        user: Option<ConnectionId>,
         control_lost_at: Option<Instant>,
     ) {
-        listener.peer_connections.insert(
-            guid,
-            PeerConnectionGroup {
-                control_token: ctrl,
-                discovery_token: disc,
-                user_data_token: user,
-                control_lost_at,
-            },
-        );
-        // The actual MuxConnection entries are not strictly needed for the
-        // grace-period logic itself (which only inspects peer_connections),
-        // but `remove_peer` will try to deregister them — leave them out and
-        // let it be a no-op for synthetic tokens.
+        listener
+            .shared
+            .peer_connections
+            .lock()
+            .expect("lock")
+            .insert(guid, PeerConnectionGroup { control_conn: ctrl, discovery_conn: disc, user_data_conn: user, control_lost_at });
     }
 
     #[test]
     fn test_orphan_grace_keeps_data_during_window() {
-        let (mut listener, _) = make_listener();
-        let registry = Poll::new().unwrap().registry().try_clone().unwrap();
-        let _ = registry; // silence unused: not actually needed because synthetic tokens have no streams
-
-        let guid = [0xAA; 12];
-        // Control was just lost, data tokens still present, well within grace.
+        let (listener, _) = make_listener();
+        let guid = [0xAAu8; 12];
         install_fake_group(
-            &mut listener,
+            &listener,
             guid,
             None,
-            Some(Token(1001)),
-            Some(Token(1002)),
+            Some(1001),
+            Some(1002),
             Some(Instant::now()),
         );
 
-        // Use a long grace; pruning must not touch the group yet.
-        let dummy_poll = Poll::new().unwrap();
-        let pruned =
-            listener.prune_orphan_data_connections(Duration::from_secs(60), dummy_poll.registry());
+        let pruned = listener.prune_orphan_data_connections(Duration::from_secs(60));
         assert_eq!(pruned, 0);
-        assert!(listener.peer_connections.contains_key(&guid));
+        assert!(
+            listener.shared.peer_connections.lock().unwrap().contains_key(&guid)
+        );
     }
 
     #[test]
     fn test_orphan_grace_prunes_after_window() {
-        let (mut listener, _) = make_listener();
-
-        let guid = [0xBB; 12];
-        // Pretend control was lost a long time ago.
+        let (listener, _) = make_listener();
+        let guid = [0xBBu8; 12];
         install_fake_group(
-            &mut listener,
+            &listener,
             guid,
             None,
-            Some(Token(2001)),
-            Some(Token(2002)),
+            Some(2001),
+            Some(2002),
             Some(Instant::now() - Duration::from_secs(10)),
         );
 
-        let dummy_poll = Poll::new().unwrap();
-        let pruned =
-            listener.prune_orphan_data_connections(Duration::from_secs(1), dummy_poll.registry());
+        let pruned = listener.prune_orphan_data_connections(Duration::from_secs(1));
         assert_eq!(pruned, 1);
-        assert!(!listener.peer_connections.contains_key(&guid));
+        assert!(
+            !listener.shared.peer_connections.lock().unwrap().contains_key(&guid)
+        );
     }
 
     #[test]
     fn test_orphan_grace_ignores_groups_with_alive_control() {
-        let (mut listener, _) = make_listener();
+        let (listener, _) = make_listener();
+        let guid = [0xCCu8; 12];
+        install_fake_group(&listener, guid, Some(3000), Some(3001), Some(3002), None);
 
-        let guid = [0xCC; 12];
-        // control_token is Some, control_lost_at is None — fully healthy.
-        install_fake_group(
-            &mut listener,
-            guid,
-            Some(Token(3000)),
-            Some(Token(3001)),
-            Some(Token(3002)),
-            None,
-        );
-
-        let dummy_poll = Poll::new().unwrap();
-        let pruned =
-            listener.prune_orphan_data_connections(Duration::from_nanos(0), dummy_poll.registry());
+        let pruned = listener.prune_orphan_data_connections(Duration::from_nanos(0));
         assert_eq!(pruned, 0);
-        assert!(listener.peer_connections.contains_key(&guid));
+        assert!(
+            listener.shared.peer_connections.lock().unwrap().contains_key(&guid)
+        );
     }
 
     #[test]
     fn test_orphan_grace_ignores_data_only_with_no_lost_marker() {
-        let (mut listener, _) = make_listener();
+        let (listener, _) = make_listener();
+        let guid = [0xDDu8; 12];
+        install_fake_group(&listener, guid, None, Some(4001), None, None);
 
-        let guid = [0xDD; 12];
-        // Data tokens exist but control_lost_at was never set (e.g. data
-        // bound before any control loss). Should NOT be pruned.
-        install_fake_group(&mut listener, guid, None, Some(Token(4001)), None, None);
-
-        let dummy_poll = Poll::new().unwrap();
-        let pruned =
-            listener.prune_orphan_data_connections(Duration::from_nanos(0), dummy_poll.registry());
+        let pruned = listener.prune_orphan_data_connections(Duration::from_nanos(0));
         assert_eq!(pruned, 0);
-        assert!(listener.peer_connections.contains_key(&guid));
+        assert!(
+            listener.shared.peer_connections.lock().unwrap().contains_key(&guid)
+        );
     }
+
+    // ── Listener bind / accept ────────────────────────────────────────────────
 
     #[test]
     fn test_listener_binds_to_ephemeral_port() {
         let (listener, _) = make_listener();
-        assert!(listener.port() != 0, "OS should have assigned a port");
+        assert!(listener.port() != 0, "OS should assign a port");
         assert_eq!(listener.connection_count(), 0);
     }
 
     #[test]
     fn test_accept_registers_connection() {
-        let (mut listener, _) = make_listener();
+        let (listener, _) = make_listener();
         let port = listener.port();
 
-        let mut poll = Poll::new().unwrap();
-        let mux_token = Token(0);
-        poll.registry()
-            .register(listener.listener_mut().unwrap(), mux_token, Interest::READABLE)
-            .unwrap();
-
-        // Drive a client connection on a separate thread.
-        let client = std::thread::spawn(move || {
-            TcpStream::connect(format!("127.0.0.1:{}", port)).expect("client connect")
+        let _client = std::thread::spawn(move || {
+            TcpStream::connect(format!("127.0.0.1:{}", port)).expect("connect")
         });
 
-        // Wait until the listener fires a readable event.
-        let mut events = Events::with_capacity(8);
-        let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            poll.poll(&mut events, Some(Duration::from_millis(100))).unwrap();
-            if events.iter().any(|e| e.token() == mux_token && e.is_readable()) {
-                break;
-            }
-            assert!(Instant::now() < deadline, "no accept-ready event");
-        }
-
-        let token = listener.accept(poll.registry()).unwrap().expect("accept should yield a token");
-        let _stream = client.join().unwrap();
+        let conn_id = accept_raw_no_thread(&listener);
 
         assert_eq!(listener.connection_count(), 1);
-
-        // The accepted connection must be tracked with a fresh activity stamp.
-        let conn = listener.connections.get(&token).unwrap();
-        assert_eq!(conn.state, ConnectionState::AwaitingFirstMessage);
-        assert!(conn.last_activity.elapsed() < Duration::from_secs(1));
+        let entry = listener.shared.connections.get(&conn_id).unwrap();
+        assert_eq!(entry.state, ConnectionState::AwaitingFirstMessage);
+        assert!(entry.last_activity.elapsed() < Duration::from_secs(1));
     }
+
+    // ── Idle pruning ──────────────────────────────────────────────────────────
 
     #[test]
     fn test_prune_idle_connections_with_zero_timeout() {
-        let (mut listener, _) = make_listener();
+        let (listener, _) = make_listener();
         let port = listener.port();
 
-        let mut poll = Poll::new().unwrap();
-        let mux_token = Token(0);
-        poll.registry()
-            .register(listener.listener_mut().unwrap(), mux_token, Interest::READABLE)
-            .unwrap();
-
-        // Connect from a background thread; the kernel completes the TCP
-        // handshake immediately because we're on loopback.
         let _client = std::thread::spawn(move || {
             let stream = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
-            // Hold the client side open until the test finishes.
             std::thread::sleep(Duration::from_secs(2));
             drop(stream);
         });
 
-        // Wait for accept-ready and accept once.
-        let mut events = Events::with_capacity(8);
-        for _ in 0..20 {
-            poll.poll(&mut events, Some(Duration::from_millis(100))).unwrap();
-            if events.iter().any(|e| e.token() == mux_token && e.is_readable()) {
-                break;
-            }
-        }
-        listener.accept(poll.registry()).unwrap();
+        accept_raw_no_thread(&listener);
         assert_eq!(listener.connection_count(), 1);
 
-        // Pruning with a zero timeout must remove the still-fresh connection.
-        let pruned = listener.prune_idle_connections(Duration::from_nanos(0), poll.registry());
+        let pruned = listener.prune_idle_connections(Duration::from_nanos(0));
         assert_eq!(pruned, 1);
         assert_eq!(listener.connection_count(), 0);
     }
 
     #[test]
     fn test_prune_keeps_fresh_connections() {
-        let (mut listener, _) = make_listener();
+        let (listener, _) = make_listener();
         let port = listener.port();
-
-        let mut poll = Poll::new().unwrap();
-        let mux_token = Token(0);
-        poll.registry()
-            .register(listener.listener_mut().unwrap(), mux_token, Interest::READABLE)
-            .unwrap();
 
         let _client = std::thread::spawn(move || {
             let stream = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
@@ -893,38 +1004,24 @@ mod tests {
             drop(stream);
         });
 
-        let mut events = Events::with_capacity(8);
-        for _ in 0..20 {
-            poll.poll(&mut events, Some(Duration::from_millis(100))).unwrap();
-            if events.iter().any(|e| e.token() == mux_token && e.is_readable()) {
-                break;
-            }
-        }
-        listener.accept(poll.registry()).unwrap();
+        accept_raw_no_thread(&listener);
         assert_eq!(listener.connection_count(), 1);
 
-        // A long timeout must not prune a fresh connection.
-        let pruned = listener.prune_idle_connections(Duration::from_secs(60), poll.registry());
+        let pruned = listener.prune_idle_connections(Duration::from_secs(60));
         assert_eq!(pruned, 0);
         assert_eq!(listener.connection_count(), 1);
     }
 
     #[test]
     fn test_prune_emits_idle_timeout_error_to_peer() {
-        let (mut listener, _) = make_listener();
+        let (listener, _) = make_listener();
         let port = listener.port();
+        let terminated = Arc::new(AtomicBool::new(false));
 
-        let mut poll = Poll::new().unwrap();
-        let mux_token = Token(0);
-        poll.registry()
-            .register(listener.listener_mut().unwrap(), mux_token, Interest::READABLE)
-            .unwrap();
-
-        // Client thread holds the socket and waits for the server's ERROR.
+        // Client connects and waits to receive ERROR(IDLE_TIMEOUT).
         let client = std::thread::spawn(move || {
             let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
             stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-            // Read length(4) + magic(4) + payload up to 64 bytes
             let mut len_buf = [0u8; 4];
             stream.read_exact(&mut len_buf).expect("read length");
             let len = u32::from_be_bytes(len_buf) as usize;
@@ -933,244 +1030,151 @@ mod tests {
             data
         });
 
-        let mut events = Events::with_capacity(8);
-        for _ in 0..20 {
-            poll.poll(&mut events, Some(Duration::from_millis(100))).unwrap();
-            if events.iter().any(|e| e.token() == mux_token && e.is_readable()) {
-                break;
-            }
-        }
-        listener.accept(poll.registry()).unwrap();
+        // Accept and spawn read thread (needed to send ERROR asynchronously).
+        let _conn_id = accept_and_spawn(&listener, terminated.clone(), Duration::from_secs(60));
 
-        // Force prune.
-        let pruned = listener.prune_idle_connections(Duration::from_nanos(0), poll.registry());
+        // Force prune with zero timeout → sets error_on_exit + shutdown flags.
+        // The read thread will send ERROR within 100 ms (on its next wakeup).
+        let pruned = listener.prune_idle_connections(Duration::from_nanos(0));
         assert_eq!(pruned, 1);
+        assert_eq!(listener.connection_count(), 0);
 
-        let received = client.join().unwrap();
-        // received = magic(4 bytes) + payload
-        assert_eq!(&received[..4], b"INT2");
+        // Verify the client received ERROR(IDLE_TIMEOUT).
+        let received = client.join().expect("client thread");
+        assert_eq!(&received[..4], b"INT2", "frame magic mismatch");
         let payload = &received[4..];
         assert_eq!(payload[0], MSG_ERROR);
         assert_eq!(payload[1], OP_IDLE_TIMEOUT);
         let code = u16::from_be_bytes([payload[2], payload[3]]);
         assert_eq!(code, ERR_CODE_IDLE_TIMEOUT);
+
+        terminated.store(true, Ordering::SeqCst);
     }
+
+    // ── Handshake state machine ───────────────────────────────────────────────
 
     #[test]
     fn test_handshake_first_message_advances_state() {
-        let (mut listener, _) = make_listener();
+        let (listener, _) = make_listener();
         let port = listener.port();
+        let terminated = Arc::new(AtomicBool::new(false));
 
-        let mut poll = Poll::new().unwrap();
-        let mux_token = Token(0);
-        poll.registry()
-            .register(listener.listener_mut().unwrap(), mux_token, Interest::READABLE)
-            .unwrap();
+        // Signal channel: main thread tells client it may close.
+        let (done_tx, done_rx) = bounded::<()>(1);
 
-        // Background client: connect, send PEER_HELLO, expect ACK back.
+        // Client: connect, send PEER_HELLO, expect PEER_HELLO_ACK, then
+        // keep the connection open until the main thread is done checking state.
         let client = std::thread::spawn(move || {
             let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
-            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
 
             let hello = ControlMsg::PeerHello { locator: [0u8; 16] };
             write_framed_message(&mut stream, &hello.to_bytes()).unwrap();
 
-            // Read ACK
             let mut len_buf = [0u8; 4];
             stream.read_exact(&mut len_buf).unwrap();
             let len = u32::from_be_bytes(len_buf) as usize;
             let mut data = vec![0u8; len];
             stream.read_exact(&mut data).unwrap();
+
+            // Hold connection open until main thread finishes the state check.
+            let _ = done_rx.recv();
             data
         });
 
-        // Drive accept + readable events on the listener side.
+        let conn_id = accept_and_spawn(&listener, terminated.clone(), Duration::from_secs(60));
+
+        // Wait up to 3 s for the read thread to advance the state to Control.
         let deadline = Instant::now() + Duration::from_secs(3);
-        let mut accepted_token: Option<Token> = None;
-        let mut events = Events::with_capacity(16);
+        let advanced = wait_until(deadline, || {
+            listener
+                .shared
+                .connections
+                .get(&conn_id)
+                .map(|e| e.state == ConnectionState::Control)
+                .unwrap_or(false)
+        });
 
-        while Instant::now() < deadline {
-            poll.poll(&mut events, Some(Duration::from_millis(100))).unwrap();
-            for ev in events.iter() {
-                if ev.token() == mux_token && ev.is_readable() {
-                    if let Ok(Some(t)) = listener.accept(poll.registry()) {
-                        accepted_token = Some(t);
-                    }
-                } else if ev.is_readable() {
-                    listener.on_readable(ev.token(), poll.registry());
-                }
-            }
-            if let Some(t) = accepted_token {
-                if let Some(c) = listener.connections.get(&t) {
-                    if c.state == ConnectionState::Control {
-                        break;
-                    }
-                }
-            }
-        }
+        // Allow client to close its end.
+        let _ = done_tx.send(());
+        assert!(advanced, "state did not advance to Control within deadline");
 
-        let received = client.join().unwrap();
+        let received = client.join().expect("client thread");
         assert_eq!(&received[..4], b"INT2");
         assert_eq!(received[4], MSG_PEER_HELLO_ACK);
 
-        let token = accepted_token.expect("accepted");
-        let conn = listener.connections.get(&token).unwrap();
-        assert_eq!(conn.state, ConnectionState::Control);
+        terminated.store(true, Ordering::SeqCst);
     }
 
-    /// Drive accept + on_readable until the listener observes a read error
-    /// or until `deadline`. Used by the RST/FIN cleanup tests.
-    fn pump_until_token_gone(
-        listener: &mut TcpMuxListener,
-        poll: &mut Poll,
-        token: Token,
-        deadline: Instant,
-    ) {
-        let mut events = Events::with_capacity(16);
-        while Instant::now() < deadline {
-            poll.poll(&mut events, Some(Duration::from_millis(50))).unwrap();
-            for ev in events.iter() {
-                if ev.token() == Token(0) && ev.is_readable() {
-                    let _ = listener.accept(poll.registry());
-                } else if ev.is_readable() {
-                    listener.on_readable(ev.token(), poll.registry());
-                }
-            }
-            if !listener.connections.contains_key(&token) {
-                return;
-            }
-        }
-    }
+    // ── Connection cleanup on RST / FIN ───────────────────────────────────────
 
     #[test]
     fn test_rst_close_cleans_up_connection_and_token() {
         use socket2::{Domain, SockAddr, Socket, Type};
 
-        let (mut listener, _) = make_listener();
+        let (listener, _) = make_listener();
         let port = listener.port();
+        let terminated = Arc::new(AtomicBool::new(false));
 
-        let mut poll = Poll::new().unwrap();
-        let mux_token = Token(0);
-        poll.registry()
-            .register(listener.listener_mut().unwrap(), mux_token, Interest::READABLE)
-            .unwrap();
-
-        // Background client: connect with SO_LINGER 0 then drop → RST.
         let client = std::thread::spawn(move || {
             let sock = Socket::new(Domain::IPV4, Type::STREAM, None).unwrap();
-            let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+            let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
             sock.connect(&SockAddr::from(addr)).unwrap();
             sock.set_linger(Some(Duration::from_secs(0))).unwrap();
-            // SO_LINGER 0 + drop = RST
-            drop(sock);
+            drop(sock); // RST
         });
 
-        // Wait for accept-ready and accept once.
-        let mut events = Events::with_capacity(8);
-        let accept_deadline = Instant::now() + Duration::from_secs(2);
-        let mut accepted = None;
-        while Instant::now() < accept_deadline {
-            poll.poll(&mut events, Some(Duration::from_millis(100))).unwrap();
-            if events.iter().any(|e| e.token() == mux_token && e.is_readable()) {
-                accepted = listener.accept(poll.registry()).unwrap();
-                if accepted.is_some() {
-                    break;
-                }
-            }
-        }
-        let token = accepted.expect("accepted token");
+        let conn_id = accept_and_spawn(&listener, terminated.clone(), Duration::from_secs(60));
         client.join().unwrap();
-        assert_eq!(listener.connection_count(), 1);
 
-        // Drive on_readable until the read error is observed and the
-        // connection is removed by `remove_connection`.
-        pump_until_token_gone(
-            &mut listener,
-            &mut poll,
-            token,
-            Instant::now() + Duration::from_secs(2),
-        );
-
-        assert!(
-            !listener.connections.contains_key(&token),
-            "connection token must be removed after RST"
-        );
+        // Read thread should detect the error and remove the connection.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let gone = wait_until(deadline, || !listener.shared.connections.contains_key(&conn_id));
+        assert!(gone, "connection not removed after RST");
         assert_eq!(listener.connection_count(), 0);
+
+        terminated.store(true, Ordering::SeqCst);
     }
 
     #[test]
     fn test_fin_close_cleans_up_connection_and_token() {
-        use std::net::{Shutdown, TcpStream};
+        use std::net::Shutdown;
 
-        let (mut listener, _) = make_listener();
+        let (listener, _) = make_listener();
         let port = listener.port();
+        let terminated = Arc::new(AtomicBool::new(false));
 
-        let mut poll = Poll::new().unwrap();
-        let mux_token = Token(0);
-        poll.registry()
-            .register(listener.listener_mut().unwrap(), mux_token, Interest::READABLE)
-            .unwrap();
-
-        // Background client: connect, then shutdown(WR) and drop → graceful FIN
         let client = std::thread::spawn(move || {
             let stream = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
             stream.shutdown(Shutdown::Both).unwrap();
-            drop(stream);
         });
 
-        // Accept first
-        let mut events = Events::with_capacity(8);
-        let accept_deadline = Instant::now() + Duration::from_secs(2);
-        let mut accepted = None;
-        while Instant::now() < accept_deadline {
-            poll.poll(&mut events, Some(Duration::from_millis(100))).unwrap();
-            if events.iter().any(|e| e.token() == mux_token && e.is_readable()) {
-                accepted = listener.accept(poll.registry()).unwrap();
-                if accepted.is_some() {
-                    break;
-                }
-            }
-        }
-        let token = accepted.expect("accepted token");
+        let conn_id = accept_and_spawn(&listener, terminated.clone(), Duration::from_secs(60));
         client.join().unwrap();
-        assert_eq!(listener.connection_count(), 1);
 
-        // Pump until the EOF causes remove_connection.
-        pump_until_token_gone(
-            &mut listener,
-            &mut poll,
-            token,
-            Instant::now() + Duration::from_secs(2),
-        );
-
-        assert!(
-            !listener.connections.contains_key(&token),
-            "connection token must be removed after graceful FIN"
-        );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let gone = wait_until(deadline, || !listener.shared.connections.contains_key(&conn_id));
+        assert!(gone, "connection not removed after FIN");
         assert_eq!(listener.connection_count(), 0);
+
+        terminated.store(true, Ordering::SeqCst);
     }
 
     #[test]
     fn test_rst_burst_does_not_leak_tokens() {
         use socket2::{Domain, SockAddr, Socket, Type};
 
-        let (mut listener, _) = make_listener();
+        let (listener, _) = make_listener();
         let port = listener.port();
-
-        let mut poll = Poll::new().unwrap();
-        let mux_token = Token(0);
-        poll.registry()
-            .register(listener.listener_mut().unwrap(), mux_token, Interest::READABLE)
-            .unwrap();
+        let terminated = Arc::new(AtomicBool::new(false));
 
         const ROUNDS: usize = 8;
 
-        // Hammer the listener with RSTs from a burst of clients.
         let clients: Vec<_> = (0..ROUNDS)
             .map(|_| {
                 std::thread::spawn(move || {
                     let sock = Socket::new(Domain::IPV4, Type::STREAM, None).unwrap();
-                    let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+                    let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
                     sock.connect(&SockAddr::from(addr)).unwrap();
                     sock.set_linger(Some(Duration::from_secs(0))).unwrap();
                     drop(sock);
@@ -1181,24 +1185,17 @@ mod tests {
             c.join().unwrap();
         }
 
-        // Drive the listener until everything has been observed and cleaned up.
-        let deadline = Instant::now() + Duration::from_secs(3);
-        let mut events = Events::with_capacity(32);
-        while Instant::now() < deadline {
-            poll.poll(&mut events, Some(Duration::from_millis(50))).unwrap();
-            for ev in events.iter() {
-                if ev.token() == mux_token && ev.is_readable() {
-                    while listener.accept(poll.registry()).unwrap().is_some() {}
-                } else if ev.is_readable() {
-                    listener.on_readable(ev.token(), poll.registry());
-                }
-            }
-            if listener.connection_count() == 0 {
-                break;
-            }
+        // Accept all RST clients and spawn read threads.
+        for _ in 0..ROUNDS {
+            accept_and_spawn(&listener, terminated.clone(), Duration::from_secs(60));
         }
 
-        assert_eq!(listener.connection_count(), 0, "RST burst leaked connection tokens");
+        // Wait for all read threads to detect errors and clean up.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let clean = wait_until(deadline, || listener.connection_count() == 0);
+        assert!(clean, "RST burst leaked connection tokens");
         assert_eq!(listener.peer_count(), 0, "RST burst leaked peer groups");
+
+        terminated.store(true, Ordering::SeqCst);
     }
 }
