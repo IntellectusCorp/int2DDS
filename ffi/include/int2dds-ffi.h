@@ -232,6 +232,8 @@ typedef struct Int2DdsPublicationBuiltinData Int2DdsPublicationBuiltinData;
 
 typedef struct Int2DdsPublicationBuiltinTopicData Int2DdsPublicationBuiltinTopicData;
 
+typedef struct Int2DdsPublicationBuiltinTopicDataSeq Int2DdsPublicationBuiltinTopicDataSeq;
+
 /**
  * Opaque handle to a Publisher
  */
@@ -263,7 +265,15 @@ typedef struct Int2DdsSubscriber Int2DdsSubscriber;
  */
 typedef struct Int2DdsSubscriberQos Int2DdsSubscriberQos;
 
+/**
+ * Opaque handle wrapping a discovered SubscriptionBuiltinTopicData sample.
+ * Owned by the caller; destroy via `int2dds_subscription_data_destroy`.
+ */
+typedef struct Int2DdsSubscriptionBuiltinData Int2DdsSubscriptionBuiltinData;
+
 typedef struct Int2DdsSubscriptionBuiltinTopicData Int2DdsSubscriptionBuiltinTopicData;
+
+typedef struct Int2DdsSubscriptionBuiltinTopicDataSeq Int2DdsSubscriptionBuiltinTopicDataSeq;
 
 /**
  * Opaque handle to a Topic
@@ -737,6 +747,64 @@ Int2DdsRet int2dds_datareader_get_matched_publications(const struct Int2DdsDataR
                                                        uintptr_t *count_out);
 
 /**
+ * Get the number of discovered publications currently known to a participant.
+ */
+Int2DdsRet int2dds_participant_get_discovered_publication_count(const struct Int2DdsParticipant *participant,
+                                                                uintptr_t *count_out);
+
+/**
+ * Get discovered publication data by stable snapshot index.
+ */
+Int2DdsRet int2dds_participant_get_discovered_publication_data_by_index(const struct Int2DdsParticipant *participant,
+                                                                        uintptr_t index,
+                                                                        struct Int2DdsPublicationBuiltinTopicData **data_out);
+
+/**
+ * Get the number of discovered subscriptions currently known to a participant.
+ */
+Int2DdsRet int2dds_participant_get_discovered_subscription_count(const struct Int2DdsParticipant *participant,
+                                                                 uintptr_t *count_out);
+
+/**
+ * Get discovered subscription data by stable snapshot index.
+ */
+Int2DdsRet int2dds_participant_get_discovered_subscription_data_by_index(const struct Int2DdsParticipant *participant,
+                                                                         uintptr_t index,
+                                                                         struct Int2DdsSubscriptionBuiltinTopicData **data_out);
+
+/**
+ * Collect a snapshot of discovered publications via the builtin DCPSPublication reader.
+ */
+Int2DdsRet int2dds_take_discovered_publications_snapshot(const struct Int2DdsParticipant *participant,
+                                                         int32_t timeout_ms,
+                                                         struct Int2DdsPublicationBuiltinTopicDataSeq **seq_out);
+
+Int2DdsRet int2dds_publication_builtin_topic_data_seq_len(const struct Int2DdsPublicationBuiltinTopicDataSeq *seq,
+                                                          uintptr_t *count_out);
+
+Int2DdsRet int2dds_publication_builtin_topic_data_seq_get(const struct Int2DdsPublicationBuiltinTopicDataSeq *seq,
+                                                          uintptr_t index,
+                                                          struct Int2DdsPublicationBuiltinTopicData **data_out);
+
+Int2DdsRet int2dds_publication_builtin_topic_data_seq_destroy(struct Int2DdsPublicationBuiltinTopicDataSeq *seq);
+
+/**
+ * Collect a snapshot of discovered subscriptions via the builtin DCPSSubscription reader.
+ */
+Int2DdsRet int2dds_take_discovered_subscriptions_snapshot(const struct Int2DdsParticipant *participant,
+                                                          int32_t timeout_ms,
+                                                          struct Int2DdsSubscriptionBuiltinTopicDataSeq **seq_out);
+
+Int2DdsRet int2dds_subscription_builtin_topic_data_seq_len(const struct Int2DdsSubscriptionBuiltinTopicDataSeq *seq,
+                                                           uintptr_t *count_out);
+
+Int2DdsRet int2dds_subscription_builtin_topic_data_seq_get(const struct Int2DdsSubscriptionBuiltinTopicDataSeq *seq,
+                                                           uintptr_t index,
+                                                           struct Int2DdsSubscriptionBuiltinTopicData **data_out);
+
+Int2DdsRet int2dds_subscription_builtin_topic_data_seq_destroy(struct Int2DdsSubscriptionBuiltinTopicDataSeq *seq);
+
+/**
  * Get discovered participant data for a given handle.
  * On success, `*data_out` receives a heap-allocated opaque pointer.
  * The caller must free it with `int2dds_participant_builtin_topic_data_destroy`.
@@ -792,6 +860,13 @@ Int2DdsRet int2dds_publication_builtin_topic_data_get_key(const struct Int2DdsPu
                                                           uint8_t (*key_out)[12]);
 
 /**
+ * Get the endpoint GUID from a PublicationBuiltinTopicData.
+ * `guid_out` must point to a 16-byte buffer.
+ */
+Int2DdsRet int2dds_publication_builtin_topic_data_get_endpoint_guid(const struct Int2DdsPublicationBuiltinTopicData *data,
+                                                                    uint8_t (*guid_out)[16]);
+
+/**
  * Get the participant key from a PublicationBuiltinTopicData.
  * `key_out` must point to a 12-byte buffer.
  */
@@ -831,6 +906,13 @@ Int2DdsRet int2dds_subscription_builtin_topic_data_get_key(const struct Int2DdsS
                                                            uint8_t (*key_out)[12]);
 
 /**
+ * Get the endpoint GUID from a SubscriptionBuiltinTopicData.
+ * `guid_out` must point to a 16-byte buffer.
+ */
+Int2DdsRet int2dds_subscription_builtin_topic_data_get_endpoint_guid(const struct Int2DdsSubscriptionBuiltinTopicData *data,
+                                                                     uint8_t (*guid_out)[16]);
+
+/**
  * Get the participant key from a SubscriptionBuiltinTopicData.
  * `key_out` must point to a 12-byte buffer.
  */
@@ -868,6 +950,11 @@ Int2DdsRet int2dds_subscription_builtin_topic_data_destroy(struct Int2DdsSubscri
 void int2dds_publication_data_destroy(struct Int2DdsPublicationBuiltinData *p);
 
 /**
+ * Destroy a subscription builtin data handle. Safe to call with null.
+ */
+void int2dds_subscription_data_destroy(struct Int2DdsSubscriptionBuiltinData *p);
+
+/**
  * Copy the topic name of a discovered publication into `buf`.
  */
 Int2DdsRet int2dds_publication_data_topic_name(const struct Int2DdsPublicationBuiltinData *p,
@@ -876,12 +963,52 @@ Int2DdsRet int2dds_publication_data_topic_name(const struct Int2DdsPublicationBu
                                                uintptr_t *out_len);
 
 /**
+ * Copy the topic name of a discovered subscription into `buf`.
+ */
+Int2DdsRet int2dds_subscription_data_topic_name(const struct Int2DdsSubscriptionBuiltinData *p,
+                                                char *buf,
+                                                uintptr_t buf_len,
+                                                uintptr_t *out_len);
+
+/**
  * Copy the type name of a discovered publication into `buf`.
  */
 Int2DdsRet int2dds_publication_data_type_name(const struct Int2DdsPublicationBuiltinData *p,
                                               char *buf,
                                               uintptr_t buf_len,
                                               uintptr_t *out_len);
+
+/**
+ * Copy the type name of a discovered subscription into `buf`.
+ */
+Int2DdsRet int2dds_subscription_data_type_name(const struct Int2DdsSubscriptionBuiltinData *p,
+                                               char *buf,
+                                               uintptr_t buf_len,
+                                               uintptr_t *out_len);
+
+/**
+ * Copy the builtin topic key of a discovered publication into `key_out`.
+ */
+Int2DdsRet int2dds_publication_data_get_key(const struct Int2DdsPublicationBuiltinData *p,
+                                            uint8_t (*key_out)[12]);
+
+/**
+ * Copy the participant builtin topic key of a discovered publication into `key_out`.
+ */
+Int2DdsRet int2dds_publication_data_get_participant_key(const struct Int2DdsPublicationBuiltinData *p,
+                                                        uint8_t (*key_out)[12]);
+
+/**
+ * Copy the builtin topic key of a discovered subscription into `key_out`.
+ */
+Int2DdsRet int2dds_subscription_data_get_key(const struct Int2DdsSubscriptionBuiltinData *p,
+                                             uint8_t (*key_out)[12]);
+
+/**
+ * Copy the participant builtin topic key of a discovered subscription into `key_out`.
+ */
+Int2DdsRet int2dds_subscription_data_get_participant_key(const struct Int2DdsSubscriptionBuiltinData *p,
+                                                         uint8_t (*key_out)[12]);
 
 /**
  * Take a clone of the TypeObject embedded in a publication discovery sample.
@@ -906,6 +1033,16 @@ Int2DdsRet int2dds_take_publication_data(const struct Int2DdsSubscriber *builtin
                                          const char *topic_name_filter,
                                          int32_t timeout_ms,
                                          struct Int2DdsPublicationBuiltinData **out);
+
+/**
+ * Take one DCPSSubscription discovery sample, optionally filtered by topic
+ * name. Blocks up to `timeout_ms` milliseconds (negative = infinite). Returns
+ * DYNAMIC_TIMEOUT on no match.
+ */
+Int2DdsRet int2dds_take_subscription_data(const struct Int2DdsSubscriber *builtin_sub,
+                                          const char *topic_name_filter,
+                                          int32_t timeout_ms,
+                                          struct Int2DdsSubscriptionBuiltinData **out);
 
 /**
  * High-level helper: wait until a publication for `topic_name` is discovered

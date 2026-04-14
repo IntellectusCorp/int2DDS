@@ -1973,6 +1973,28 @@ impl DomainParticipant {
         Ok(ParticipantBuiltinTopicData::new(participant_guid, proxy_data.user_data().clone()))
     }
 
+    pub fn get_discovered_publications(&self) -> DdsResult<Vec<PublicationBuiltinTopicData>> {
+        self.is_deleted()?;
+        let rtps_participant = self.get_rtps_participant()?;
+        let remote_publications = rtps_participant.remote_publications();
+        let mut result = Vec::new();
+        for entry in remote_publications.iter() {
+            result.extend(entry.value().values().cloned());
+        }
+        Ok(result)
+    }
+
+    pub fn get_discovered_subscriptions(&self) -> DdsResult<Vec<SubscriptionBuiltinTopicData>> {
+        self.is_deleted()?;
+        let rtps_participant = self.get_rtps_participant()?;
+        let remote_subscriptions = rtps_participant.remote_subscriptions();
+        let mut result = Vec::new();
+        for entry in remote_subscriptions.iter() {
+            result.extend(entry.value().values().cloned());
+        }
+        Ok(result)
+    }
+
     // TODO: RTPS layer implementation must precede this (Built-in)
     pub fn get_discovered_topics(&self) -> DdsResult<Vec<InstanceHandle>> {
         /*
