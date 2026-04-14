@@ -146,6 +146,7 @@ impl TransportPluginFactory {
         multicast_if_ip: String,
         working_ips: Vec<String>,
         guid_prefix: GuidPrefix,
+        tls_config: Option<std::sync::Arc<crate::rtps::transport::tcp::tls::TlsConfig>>,
     ) -> io::Result<Box<dyn TransportPlugin>> {
         match transport_type {
             TransportType::UDP => {
@@ -161,8 +162,13 @@ impl TransportPluginFactory {
             }
             TransportType::TCP => {
                 use crate::rtps::transport::tcp::tcp_transport_plugin::TcpTransportPlugin;
-                let plugin =
-                    TcpTransportPlugin::new(domain_id, participant_id, bind_ip, guid_prefix)?;
+                let plugin = TcpTransportPlugin::new_with_tls(
+                    domain_id,
+                    participant_id,
+                    bind_ip,
+                    guid_prefix,
+                    tls_config,
+                )?;
                 Ok(Box::new(plugin))
             }
             TransportType::Hybrid => {

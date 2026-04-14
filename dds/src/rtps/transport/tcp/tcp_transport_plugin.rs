@@ -18,6 +18,7 @@ use crate::rtps::transport::plugin::{IncomingMessage, MessageSource, SendTarget,
 use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::tcp::tcp_mux_listener::TcpMuxListener;
 use crate::rtps::transport::tcp::tcp_sender::TcpSender;
+use crate::rtps::transport::tcp::tls::TlsConfig;
 
 /// Channel buffer size for discovery and user data channels.
 const CHANNEL_BUFFER_SIZE: usize = 256;
@@ -61,6 +62,19 @@ impl TcpTransportPlugin {
         working_ip: String,
         guid_prefix: GuidPrefix,
     ) -> io::Result<Self> {
+        Self::new_with_tls(domain_id, participant_id, working_ip, guid_prefix, None)
+    }
+
+    /// Same as [`new`] but with an optional TLS config that wraps outbound
+    /// connections. The listener side remains plain TCP for now; Phase 3a
+    /// will add TLS acceptance to the mux listener.
+    pub(crate) fn new_with_tls(
+        domain_id: u32,
+        participant_id: u32,
+        working_ip: String,
+        guid_prefix: GuidPrefix,
+        tls_config: Option<Arc<TlsConfig>>,
+    ) -> io::Result<Self> {
         // Physical port: use INT2DDS_TCP_PORT if set, otherwise calculate from domain_id
         let physical_port = crate::common::env::get_tcp_port()
             .unwrap_or_else(|| PortManager::get_tcp_physical_port(domain_id));
@@ -99,14 +113,15 @@ impl TcpTransportPlugin {
             };
         let listener_port = mux_listener.port();
 
-        // Create TcpSender
-        let sender = TcpSender::new(
+        // Create TcpSender (with optional TLS for outbound connections)
+        let sender = TcpSender::new_with_tls(
             working_ip,
             guid_prefix,
             domain_id,
             participant_id,
             listener_port,
             Arc::new(DashMap::new()),
+            tls_config,
         )?;
 
         // Dead peer event channel — carries SocketAddr so PeerMonitor can resolve the actual GuidPrefix

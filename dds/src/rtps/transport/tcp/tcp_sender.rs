@@ -18,6 +18,10 @@ use crate::rtps::transport::tcp::framing::{read_framed_message, write_framed_mes
 use crate::rtps::transport::tcp::protocol::{
     encode_locator, ControlMsg, MSG_KEEPALIVE_ACK, MSG_PEER_HELLO_ACK, MSG_PORT_BIND_ACK,
 };
+use crate::rtps::transport::tcp::stream_wrapper::{
+    connect_tls, wrap_stream, TcpStreamWrapper,
+};
+use crate::rtps::transport::tcp::tls::TlsConfig;
 
 /// Connection key: (physical address, logical_port)
 type ConnectionKey = (SocketAddr, u16);
@@ -33,10 +37,15 @@ struct PeerInfo {
 }
 
 /// TCP sender with 3-step handshake: PEER_HELLO → PORT_RESERVE → PORT_BIND
-#[derive(Debug, Clone)]
+///
+/// Connections are stored as `Box<dyn TcpStreamWrapper>` so that both
+/// plain TCP and TLS connections can be held uniformly. A per-connection
+/// TLS config on the sender decides which variant is used during
+/// `tcp_connect()`.
+#[derive(Clone)]
 pub(crate) struct TcpSender {
     working_ip: String,
-    connections: Arc<DashMap<ConnectionKey, TcpStream>>,
+    connections: Arc<DashMap<ConnectionKey, Box<dyn TcpStreamWrapper>>>,
     peer_info: Arc<DashMap<SocketAddr, PeerInfo>>,
     /// Missed keepalive count per peer (physical addr)
     keepalive_missed: Arc<DashMap<SocketAddr, u32>>,
@@ -45,6 +54,24 @@ pub(crate) struct TcpSender {
     domain_id: u32,
     participant_id: u32,
     listener_port: u16,
+    /// TLS configuration for outbound connections. When `Some`, every
+    /// newly-opened TCP socket is wrapped with TLS via `connect_tls`.
+    tls_config: Option<Arc<TlsConfig>>,
+}
+
+// `Debug` by hand — `Box<dyn TcpStreamWrapper>` doesn't derive Debug.
+impl std::fmt::Debug for TcpSender {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TcpSender")
+            .field("working_ip", &self.working_ip)
+            .field("connection_count", &self.connections.len())
+            .field("peer_count", &self.peer_info.len())
+            .field("domain_id", &self.domain_id)
+            .field("participant_id", &self.participant_id)
+            .field("listener_port", &self.listener_port)
+            .field("tls", &self.tls_config.is_some())
+            .finish()
+    }
 }
 
 impl TcpSender {
@@ -60,14 +87,38 @@ impl TcpSender {
         listener_port: u16,
         keepalive_missed: Arc<DashMap<SocketAddr, u32>>,
     ) -> io::Result<Self> {
+        Self::new_with_tls(
+            working_ip,
+            local_guid_prefix,
+            domain_id,
+            participant_id,
+            listener_port,
+            keepalive_missed,
+            None,
+        )
+    }
+
+    /// Like `new`, but with an optional TLS config for outbound connections.
+    pub(crate) fn new_with_tls(
+        working_ip: String,
+        local_guid_prefix: GuidPrefix,
+        domain_id: u32,
+        participant_id: u32,
+        listener_port: u16,
+        keepalive_missed: Arc<DashMap<SocketAddr, u32>>,
+        tls_config: Option<Arc<TlsConfig>>,
+    ) -> io::Result<Self> {
         let connect_timeout_ms = env::var("INT2DDS_TCP_CONNECT_TIMEOUT")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(Self::DEFAULT_CONNECT_TIMEOUT_MS);
 
         debug!(
-            "TcpSender: Created (domain={}, pid={}, port={})",
-            domain_id, participant_id, listener_port
+            "TcpSender: Created (domain={}, pid={}, port={}, tls={})",
+            domain_id,
+            participant_id,
+            listener_port,
+            tls_config.is_some()
         );
 
         Ok(Self {
@@ -80,6 +131,7 @@ impl TcpSender {
             domain_id,
             participant_id,
             listener_port,
+            tls_config,
         })
     }
 
@@ -174,7 +226,7 @@ impl TcpSender {
                     )
                 })?
                 .value()
-                .try_clone()
+                .try_clone_box()
                 .map_err(|e| {
                     Self::wrap_raw_io_error(
                         e,
@@ -272,7 +324,7 @@ impl TcpSender {
                 )
             })?
             .value()
-            .try_clone()?;
+            .try_clone_box()?;
 
         match write_framed_message(&mut stream, data) {
             Ok(()) => {
@@ -349,10 +401,11 @@ impl TcpSender {
             }
 
             let key = (peer_addr, CONTROL_LOGICAL_PORT);
-            let mut stream = match self.connections.get(&key).and_then(|s| s.try_clone().ok()) {
-                Some(s) => s,
-                None => continue,
-            };
+            let mut stream =
+                match self.connections.get(&key).and_then(|s| s.try_clone_box().ok()) {
+                    Some(s) => s,
+                    None => continue,
+                };
 
             if let Err(e) = write_framed_message(&mut stream, &ControlMsg::Keepalive.to_bytes()) {
                 warn!("TcpSender: Keepalive send failed to {:?}: {:?}", peer_addr, e);
@@ -473,7 +526,7 @@ impl TcpSender {
         transport_io_error(code, format!("{} (peer {:?})", e, addr))
     }
 
-    fn tcp_connect(&self, addr: &SocketAddr) -> io::Result<TcpStream> {
+    fn tcp_connect(&self, addr: &SocketAddr) -> io::Result<Box<dyn TcpStreamWrapper>> {
         self.tcp_connect_inner(addr).map_err(|e| {
             // Already a TransportError — pass through as-is.
             if e.get_ref().and_then(|s| s.downcast_ref::<TransportError>()).is_some() {
@@ -492,7 +545,7 @@ impl TcpSender {
         })
     }
 
-    fn tcp_connect_inner(&self, addr: &SocketAddr) -> io::Result<TcpStream> {
+    fn tcp_connect_inner(&self, addr: &SocketAddr) -> io::Result<Box<dyn TcpStreamWrapper>> {
         let socket2 = Socket2::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
 
         // Apply optional buffer-size overrides BEFORE connect so they take
@@ -546,10 +599,22 @@ impl TcpSender {
         let stream: TcpStream = socket2.into();
         let _ = stream.set_nodelay(Self::get_nodelay());
         let _ = stream.set_write_timeout(Some(Self::get_write_timeout()));
-        Ok(stream)
+
+        // If TLS is configured, wrap the connected TCP socket with a TLS
+        // session. The handshake runs synchronously on this thread.
+        match &self.tls_config {
+            Some(cfg) => {
+                let client_cfg = cfg.build_client_config()?;
+                connect_tls(stream, client_cfg, &cfg.server_name)
+            }
+            None => Ok(wrap_stream(stream)),
+        }
     }
 
-    fn read_control_response(&self, stream: &mut TcpStream) -> io::Result<ControlMsg> {
+    fn read_control_response(
+        &self,
+        stream: &mut Box<dyn TcpStreamWrapper>,
+    ) -> io::Result<ControlMsg> {
         let payload = read_framed_message(stream)?;
         ControlMsg::from_bytes(&payload)
     }
