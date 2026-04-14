@@ -27,6 +27,8 @@ use std::io;
 ///   740–749  TCP framing
 ///   750–759  TCP control protocol
 ///   760–769  TCP internal channel
+///   770–779  TCP listener / accept
+///   780–789  TLS configuration and handshake
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum TransportErrorCode {
@@ -83,6 +85,18 @@ pub enum TransportErrorCode {
     TcpConnectionIdlePruned = 773,
     /// Orphan data connections pruned after control connection loss.
     TcpOrphanPruned = 774,
+
+    // ── 780: TLS configuration and handshake ────────────────────────────
+    /// A required TLS property is missing in the participant QoS.
+    TlsMissingProperty = 780,
+    /// Failed to read a TLS PEM file (CA, cert, or key).
+    TlsFileIoError = 781,
+    /// PEM contents are malformed or empty.
+    TlsInvalidPem = 782,
+    /// `rustls` rejected the configuration (bad cert/key, etc.).
+    TlsConfigError = 783,
+    /// TLS handshake with the remote peer failed.
+    TlsHandshakeFailed = 784,
 }
 
 impl TransportErrorCode {
@@ -119,6 +133,11 @@ impl TransportErrorCode {
             Self::TcpControlSendFailed => io::ErrorKind::BrokenPipe,
             Self::TcpConnectionIdlePruned => io::ErrorKind::TimedOut,
             Self::TcpOrphanPruned => io::ErrorKind::TimedOut,
+
+            Self::TlsMissingProperty => io::ErrorKind::InvalidInput,
+            Self::TlsFileIoError => io::ErrorKind::NotFound,
+            Self::TlsInvalidPem | Self::TlsConfigError => io::ErrorKind::InvalidData,
+            Self::TlsHandshakeFailed => io::ErrorKind::ConnectionAborted,
         }
     }
 
@@ -151,6 +170,12 @@ impl TransportErrorCode {
             Self::TcpControlSendFailed => "TCP control response send failed",
             Self::TcpConnectionIdlePruned => "TCP idle connection pruned",
             Self::TcpOrphanPruned => "TCP orphan data connections pruned",
+
+            Self::TlsMissingProperty => "TLS required property missing",
+            Self::TlsFileIoError => "TLS PEM file I/O error",
+            Self::TlsInvalidPem => "TLS PEM contents invalid",
+            Self::TlsConfigError => "TLS rustls configuration rejected",
+            Self::TlsHandshakeFailed => "TLS handshake with peer failed",
         }
     }
 }
