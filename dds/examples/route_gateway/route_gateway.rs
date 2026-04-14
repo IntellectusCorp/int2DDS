@@ -73,8 +73,11 @@ fn main() {
         cfg.local.domain_id, cfg.local.transport
     );
     println!(
-        "  remote: domain={}, transport={}, initial_peers={:?}",
-        cfg.remote.domain_id, cfg.remote.transport, cfg.remote.initial_peers
+        "  remote: domain={}, transport={}, tls={}, initial_peers={:?}",
+        cfg.remote.domain_id,
+        cfg.remote.transport,
+        if cfg.remote.tls.is_some() { "enabled" } else { "disabled" },
+        cfg.remote.initial_peers
     );
     println!("  auto_relay filter: {}", cfg.auto_relay.filter);
     println!("  poll period: {} ms", cfg.poll_period_ms);
