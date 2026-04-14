@@ -265,12 +265,6 @@ typedef struct Int2DdsSubscriber Int2DdsSubscriber;
  */
 typedef struct Int2DdsSubscriberQos Int2DdsSubscriberQos;
 
-/**
- * Opaque handle wrapping a discovered SubscriptionBuiltinTopicData sample.
- * Owned by the caller; destroy via `int2dds_subscription_data_destroy`.
- */
-typedef struct Int2DdsSubscriptionBuiltinData Int2DdsSubscriptionBuiltinData;
-
 typedef struct Int2DdsSubscriptionBuiltinTopicData Int2DdsSubscriptionBuiltinTopicData;
 
 typedef struct Int2DdsSubscriptionBuiltinTopicDataSeq Int2DdsSubscriptionBuiltinTopicDataSeq;
@@ -950,11 +944,6 @@ Int2DdsRet int2dds_subscription_builtin_topic_data_destroy(struct Int2DdsSubscri
 void int2dds_publication_data_destroy(struct Int2DdsPublicationBuiltinData *p);
 
 /**
- * Destroy a subscription builtin data handle. Safe to call with null.
- */
-void int2dds_subscription_data_destroy(struct Int2DdsSubscriptionBuiltinData *p);
-
-/**
  * Copy the topic name of a discovered publication into `buf`.
  */
 Int2DdsRet int2dds_publication_data_topic_name(const struct Int2DdsPublicationBuiltinData *p,
@@ -963,52 +952,12 @@ Int2DdsRet int2dds_publication_data_topic_name(const struct Int2DdsPublicationBu
                                                uintptr_t *out_len);
 
 /**
- * Copy the topic name of a discovered subscription into `buf`.
- */
-Int2DdsRet int2dds_subscription_data_topic_name(const struct Int2DdsSubscriptionBuiltinData *p,
-                                                char *buf,
-                                                uintptr_t buf_len,
-                                                uintptr_t *out_len);
-
-/**
  * Copy the type name of a discovered publication into `buf`.
  */
 Int2DdsRet int2dds_publication_data_type_name(const struct Int2DdsPublicationBuiltinData *p,
                                               char *buf,
                                               uintptr_t buf_len,
                                               uintptr_t *out_len);
-
-/**
- * Copy the type name of a discovered subscription into `buf`.
- */
-Int2DdsRet int2dds_subscription_data_type_name(const struct Int2DdsSubscriptionBuiltinData *p,
-                                               char *buf,
-                                               uintptr_t buf_len,
-                                               uintptr_t *out_len);
-
-/**
- * Copy the builtin topic key of a discovered publication into `key_out`.
- */
-Int2DdsRet int2dds_publication_data_get_key(const struct Int2DdsPublicationBuiltinData *p,
-                                            uint8_t (*key_out)[12]);
-
-/**
- * Copy the participant builtin topic key of a discovered publication into `key_out`.
- */
-Int2DdsRet int2dds_publication_data_get_participant_key(const struct Int2DdsPublicationBuiltinData *p,
-                                                        uint8_t (*key_out)[12]);
-
-/**
- * Copy the builtin topic key of a discovered subscription into `key_out`.
- */
-Int2DdsRet int2dds_subscription_data_get_key(const struct Int2DdsSubscriptionBuiltinData *p,
-                                             uint8_t (*key_out)[12]);
-
-/**
- * Copy the participant builtin topic key of a discovered subscription into `key_out`.
- */
-Int2DdsRet int2dds_subscription_data_get_participant_key(const struct Int2DdsSubscriptionBuiltinData *p,
-                                                         uint8_t (*key_out)[12]);
 
 /**
  * Take a clone of the TypeObject embedded in a publication discovery sample.
@@ -1033,16 +982,6 @@ Int2DdsRet int2dds_take_publication_data(const struct Int2DdsSubscriber *builtin
                                          const char *topic_name_filter,
                                          int32_t timeout_ms,
                                          struct Int2DdsPublicationBuiltinData **out);
-
-/**
- * Take one DCPSSubscription discovery sample, optionally filtered by topic
- * name. Blocks up to `timeout_ms` milliseconds (negative = infinite). Returns
- * DYNAMIC_TIMEOUT on no match.
- */
-Int2DdsRet int2dds_take_subscription_data(const struct Int2DdsSubscriber *builtin_sub,
-                                          const char *topic_name_filter,
-                                          int32_t timeout_ms,
-                                          struct Int2DdsSubscriptionBuiltinData **out);
 
 /**
  * High-level helper: wait until a publication for `topic_name` is discovered
