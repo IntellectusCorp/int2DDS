@@ -6,6 +6,8 @@
 
 use std::sync::Arc;
 
+use bytes::Bytes;
+
 use super::{
     guid::{GroupDigest, Guid},
     parameters::ParameterList,
@@ -118,15 +120,15 @@ pub type SerializedDataFragment = Arc<[u8]>;
 /// Payload carried by DATA / DATA_FRAG submessages.
 ///
 /// On the send path, large payloads are already stored in a `CacheChange`
-/// and only need to be written into the wire buffer. Wrapping them in
-/// `Arc<[u8]>` would force a full copy per fragment; instead we borrow
-/// the slice for the duration of serialization.
+/// and only need to be written into the wire buffer; we borrow the slice
+/// for the duration of serialization.
 ///
-/// On the receive path, payloads are parsed from the socket buffer and
-/// stored as `Owned` so the message can outlive the source buffer.
+/// On the receive path, payloads are parsed from the socket buffer as
+/// `Owned(Bytes)` so they share the original allocation via refcount
+/// without copying. `Bytes::slice(range)` returns a zero-copy sub-slice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SubmessagePayload<'a> {
-    Owned(Arc<[u8]>),
+    Owned(Bytes),
     Borrowed(&'a [u8]),
 }
 
@@ -145,12 +147,12 @@ impl<'a> SubmessagePayload<'a> {
 
 impl Default for SubmessagePayload<'_> {
     fn default() -> Self {
-        SubmessagePayload::Owned(Arc::<[u8]>::from([]))
+        SubmessagePayload::Owned(Bytes::new())
     }
 }
 
-impl From<Arc<[u8]>> for SubmessagePayload<'_> {
-    fn from(data: Arc<[u8]>) -> Self {
+impl From<Bytes> for SubmessagePayload<'_> {
+    fn from(data: Bytes) -> Self {
         SubmessagePayload::Owned(data)
     }
 }

@@ -98,7 +98,7 @@ impl SpdpMessage {
         Ok(data_submessage)
     }
 
-    fn create_serialized_data(participant: Arc<Participant>) -> RtpsResult<SerializedData> {
+    fn create_serialized_data(participant: Arc<Participant>) -> RtpsResult<bytes::Bytes> {
         let domain_id = participant.domain_id();
         let participant_guid = participant.guid();
         let local_participant_proxy_data = participant.local_participant_proxy_data();
@@ -137,7 +137,7 @@ impl SpdpMessage {
             entity_name,
             locators,
         ) {
-            Ok(bytes) => Ok(Arc::from(bytes)),
+            Ok(bytes) => Ok(bytes::Bytes::from(bytes)),
             Err(e) => {
                 log::error!("Error creating SPDP serialized data: {}", e);
 
@@ -148,7 +148,7 @@ impl SpdpMessage {
                     vendor_id,
                     true,
                 ) {
-                    Ok(bytes) => Ok(Arc::from(bytes)),
+                    Ok(bytes) => Ok(bytes::Bytes::from(bytes)),
                     Err(fallback_err) => Err(RtpsError::new(
                         RtpsErrorCode::SerializationError,
                         format!("Fallback SPDP creation also failed: {}", fallback_err),

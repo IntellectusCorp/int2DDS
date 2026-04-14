@@ -1570,7 +1570,10 @@ impl UnicastMessageProcessor for UserLogic {
                 data.writer_sn,
                 message_receiver.get_source_timestamp(),
             );
-            change.data_mut().extend_from_slice(data.serialized_data_as_slice());
+            // Zero-copy share of the socket buffer: `data.serialized_data()`
+            // returns a `Bytes` slice of the original socket allocation, so
+            // each reader gets an Arc refcount bump instead of a payload copy.
+            change.set_shared_payload(data.serialized_data());
 
             self.apply_writer_attributes_to_change(
                 reader.clone(),
@@ -2024,17 +2027,21 @@ impl UnicastMessageProcessor for UserLogic {
                 }
             }
 
-            let serialized_data = data_frag.serialized_data();
-            let frag_size = data_frag.fragment_size as usize;
-            for i in 0..data_frag.fragments_in_submessage {
-                let fragment_num = data_frag.fragment_starting_num + i as u32;
-                let frag_data_start = i as usize * frag_size;
-                let frag_data_end =
-                    std::cmp::min(frag_data_start + frag_size, serialized_data.len());
-                buffer.copy_fragment_data(
-                    fragment_num,
-                    &serialized_data[frag_data_start..frag_data_end],
-                );
+            // Zero-copy: `serialized_bytes` is the DataFrag payload as `Bytes`
+            // (a refcount on the socket buffer). Per-fragment slices below are
+            // again refcount bumps, not memcpys.
+            if let Some(serialized_bytes) = data_frag.serialized_bytes() {
+                let frag_size = data_frag.fragment_size as usize;
+                let total_len = serialized_bytes.len();
+                for i in 0..data_frag.fragments_in_submessage {
+                    let fragment_num = data_frag.fragment_starting_num + i as u32;
+                    let frag_data_start = i as usize * frag_size;
+                    let frag_data_end = std::cmp::min(frag_data_start + frag_size, total_len);
+                    buffer.copy_fragment_data(
+                        fragment_num,
+                        serialized_bytes.slice(frag_data_start..frag_data_end),
+                    );
+                }
             }
         } // buffer RefMut is automatically dropped here
 
@@ -2093,11 +2100,11 @@ impl UnicastMessageProcessor for UserLogic {
 
                 let assembled_vec = buffer.assemble();
 
-                // Multi-reader: wrap in Arc for zero-copy sharing
+                // Multi-reader: wrap in `Bytes` for zero-copy sharing
                 // Single-reader: move Vec directly into CacheChange
                 let mut owned_payload = None;
                 let shared_payload = if matched_readers.len() > 1 {
-                    Some(Arc::new(assembled_vec))
+                    Some(bytes::Bytes::from(assembled_vec))
                 } else {
                     owned_payload = Some(assembled_vec);
                     None
@@ -2138,8 +2145,8 @@ impl UnicastMessageProcessor for UserLogic {
                     );
 
                     if let Some(ref shared) = shared_payload {
-                        // Multi-reader: share via Arc (0 copy)
-                        assembled_change.set_shared_payload(Arc::clone(shared));
+                        // Multi-reader: share via `Bytes` clone (refcount bump, 0 copy)
+                        assembled_change.set_shared_payload(shared.clone());
                     } else if let Some(vec) = owned_payload.take() {
                         // Single reader: move Vec directly (0 copy)
                         assembled_change.set_owned_payload(vec);

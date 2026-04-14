@@ -6,13 +6,11 @@
 
 use bytes::Bytes;
 use speedy::{Context, Error, Readable, Writable, Writer};
-use std::{io, sync::Arc};
+use std::io;
 
 use crate::rtps::common::{
-    parameters::ParameterList,
-    rtps_error_code::RtpsResult,
-    sequence::SequenceNumber,
-    types::{SerializedData, SubmessagePayload},
+    parameters::ParameterList, rtps_error_code::RtpsResult, sequence::SequenceNumber,
+    types::SubmessagePayload,
 };
 use crate::rtps::{
     common::{
@@ -51,18 +49,13 @@ impl<'a> Data<'a> {
         self.inline_qos.clone()
     }
 
-    pub(crate) fn serialized_data(&self) -> SerializedData {
-        // Returns an owned `Arc<[u8]>` copy for receivers that need to retain
-        // the payload beyond the lifetime of this submessage.
+    pub(crate) fn serialized_data(&self) -> Bytes {
+        // Returns a refcount-bumped `Bytes` so receivers can retain the payload
+        // beyond the lifetime of this submessage without copying the data.
         match &self.serialized_data {
             SubmessagePayload::Owned(data) => data.clone(),
-            SubmessagePayload::Borrowed(data) => Arc::from(*data),
+            SubmessagePayload::Borrowed(data) => Bytes::copy_from_slice(data),
         }
-    }
-
-    /// Borrow the serialized data as a slice without allocating.
-    pub(crate) fn serialized_data_as_slice(&self) -> &[u8] {
-        self.serialized_data.as_slice()
     }
 
     pub(crate) fn octets_to_next_header(&self) -> u16 {
@@ -180,9 +173,10 @@ impl<'a> Data<'a> {
 
         let serialized_data: SubmessagePayload<'static> = if data_flag || key_flag {
             let start_pos = cursor.position() as usize;
-            SubmessagePayload::Owned(Arc::from(&buffer[start_pos..]))
+            // Zero-copy slice of the original Bytes buffer (refcount bump only).
+            SubmessagePayload::Owned(buffer.slice(start_pos..))
         } else {
-            SubmessagePayload::Owned(Arc::new([]))
+            SubmessagePayload::Owned(Bytes::new())
         };
 
         Ok(Self {

@@ -4,7 +4,9 @@
 //! stored in reader or writer history caches. Changes include the sequence number,
 //! data payload, instance handle, and metadata.
 
-use std::{collections::HashSet, sync::Arc};
+use std::collections::HashSet;
+
+use bytes::Bytes;
 
 use crate::{
     common::instance_handle::InstanceHandle,
@@ -21,20 +23,21 @@ use crate::{
 /// Data payload of a CacheChange.
 ///
 /// `Owned` is used on the writer side (mutable, capacity-reusable via pool)
-/// and for non-fragmented reader reception.
-/// `Shared` is used when delivering fragmented data to multiple readers
-/// without copying — each reader gets an `Arc::clone` (refcount only).
+/// and in cases where the receiver owns a fresh buffer.
+/// `Shared` holds a `Bytes` slice of the original socket buffer (or a
+/// fragment-assembled buffer), allowing multiple readers to receive the
+/// same payload with only refcount increments.
 #[derive(Debug)]
 pub(crate) enum DataPayload {
     Owned(Vec<u8>),
-    Shared(Arc<Vec<u8>>),
+    Shared(Bytes),
 }
 
 impl Clone for DataPayload {
     fn clone(&self) -> Self {
         match self {
             DataPayload::Owned(v) => DataPayload::Owned(v.clone()),
-            DataPayload::Shared(a) => DataPayload::Shared(Arc::clone(a)),
+            DataPayload::Shared(b) => DataPayload::Shared(b.clone()),
         }
     }
 }
@@ -51,7 +54,7 @@ impl DataPayload {
     pub(crate) fn as_slice(&self) -> &[u8] {
         match self {
             DataPayload::Owned(v) => v,
-            DataPayload::Shared(a) => a,
+            DataPayload::Shared(b) => b,
         }
     }
 }
@@ -215,16 +218,30 @@ impl CacheChange {
     }
 
     /// Set a shared payload for zero-copy multi-reader delivery.
-    pub(crate) fn set_shared_payload(&mut self, data: Arc<Vec<u8>>) {
+    pub(crate) fn set_shared_payload(&mut self, data: Bytes) {
         self.data_payload = DataPayload::Shared(data);
     }
 
-    /// Return the shared backing Arc if this is a Shared payload (for zero-copy deserialization).
-    pub(crate) fn shared_backing(&self) -> Option<Arc<Vec<u8>>> {
-        match &self.data_payload {
-            DataPayload::Shared(a) => Some(Arc::clone(a)),
-            DataPayload::Owned(_) => None,
-        }
+    /// Return the shared backing for zero-copy deserialization of byte sequences.
+    ///
+    /// TEMPORARILY DISABLED (always returns `None`).
+    ///
+    /// The original purpose is to let `DdsBytes` fields reference a sub-slice
+    /// of the `CacheChange` payload without copying. The downstream plumbing
+    /// (`TypeSupport::deserialize_with_backing`, derive macro codegen,
+    /// `CdrDeserializer::set_shared_backing`, `DdsBytes::Shared`) is still wired
+    /// to `Option<Arc<Vec<u8>>>`, but `DataPayload::Shared` now holds
+    /// `bytes::Bytes` (changed to make non-fragmented / fragmented receive
+    /// paths zero-copy for `Vec<u8>` users). Since `DdsBytes` is scheduled to
+    /// be replaced wholesale by `bytes::Bytes` in a follow-up change, rather
+    /// than cascading the type through the old plumbing here we disconnect it
+    /// and let `DdsBytes` fall back to its owned/copy path until then.
+    ///
+    /// When the `DdsBytes` → `bytes::Bytes` migration lands, rewire this to
+    /// return the backing `Bytes` directly and thread it through the new
+    /// pipeline.
+    pub(crate) fn shared_backing(&self) -> Option<std::sync::Arc<Vec<u8>>> {
+        None
     }
 
     pub(crate) fn source_timestamp(&self) -> Option<RtpsTime> {

@@ -611,10 +611,10 @@ impl MessageReceiver {
         &self,
         reader_entity_id: EntityId,
         writer_entity_id: EntityId,
-    ) -> Option<Arc<[u8]>> {
+    ) -> Option<bytes::Bytes> {
         if let Some(rtps_message) = &self.rtps_message {
             let mut visited: bool = false;
-            let mut payload: Option<Arc<[u8]>> = None;
+            let mut payload: Option<bytes::Bytes> = None;
             for submessage in &rtps_message.submessages {
                 if let SubmessageBody::Data(data) = &submessage.body {
                     if data.reader_id == reader_entity_id && data.writer_id == writer_entity_id {
