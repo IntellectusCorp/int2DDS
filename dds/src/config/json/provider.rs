@@ -217,6 +217,22 @@ impl QosProvider {
         ))
     }
 
+    /// Returns the path (`"Library::Profile"`) of the first profile marked with
+    /// `is_default_profile = true` across all loaded libraries, or `None` if none is marked.
+    ///
+    pub fn default_profile_path(&self) -> Option<String> {
+        for (lib_name, lib) in &self.libraries {
+            if let Some(profiles) = &lib.qos_profiles {
+                for profile in profiles {
+                    if profile.is_default_profile == Some(true) {
+                        return Some(format!("{}::{}", lib_name, profile.name));
+                    }
+                }
+            }
+        }
+        None
+    }
+
     pub(crate) fn get_library(&self, library_name: &str) -> Option<&QosLibrary> {
         self.libraries.get(library_name)
     }

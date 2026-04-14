@@ -283,6 +283,25 @@ class CdrReader:
         self._pos += length
         return data.decode("utf-8")
 
+    def read_wstring(self) -> str:
+        """
+        Read a length-prefixed wide string (UTF-16).
+
+        Length is the number of UTF-16 code units (NOT bytes, NOT including null).
+        No null terminator is read.
+        """
+        code_units = self.read_u32()
+        if code_units == 0:
+            return ""
+
+        self._align(2)
+        byte_count = code_units * 2
+        self._ensure(byte_count)
+        data = bytes(self._buf[self._pos : self._pos + byte_count])
+        self._pos += byte_count
+        encoding = "utf-16-le" if self._le else "utf-16-be"
+        return data.decode(encoding)
+
     def read_seq_header(self) -> int:
         """Read a sequence header (element count)."""
         return self.read_u32()

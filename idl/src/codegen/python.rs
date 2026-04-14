@@ -67,6 +67,20 @@ impl<'a> PyGen<'a> {
             self.line("");
         }
 
+        // Bitsets (may be referenced by structs)
+        for b in &self.model.bitsets {
+            self.emit_bitset(b);
+            self.line("");
+            self.line("");
+        }
+
+        // Unions (may be referenced by structs)
+        for u in &self.model.unions {
+            self.emit_union(u);
+            self.line("");
+            self.line("");
+        }
+
         // Structs
         for s in &self.model.structs {
             self.emit_struct(s);
@@ -109,6 +123,345 @@ impl<'a> PyGen<'a> {
         self.indent -= 1;
     }
 
+    // ---- Bitset ----
+
+    /// Returns (write_method, read_method, python_int_size_for_mask) for a bitset based on total_bits.
+    fn bitset_methods(total_bits: u32) -> (&'static str, &'static str) {
+        match total_bits {
+            0..=8 => ("write_u8", "read_u8"),
+            9..=16 => ("write_u16", "read_u16"),
+            17..=32 => ("write_u32", "read_u32"),
+            _ => ("write_u64", "read_u64"),
+        }
+    }
+
+    fn emit_bitset(&mut self, b: &ResolvedBitset) {
+        let class_name = b.name.clone();
+        let (write_fn, read_fn) = Self::bitset_methods(b.total_bits);
+
+        self.line("@dataclass");
+        self.line(&format!("class {}:", class_name));
+        self.indent += 1;
+        self.line(&format!(
+            "\"\"\"IDL bitset: {} (total_bits={})\"\"\"",
+            b.qualified_name, b.total_bits
+        ));
+        self.line("");
+
+        self.line(&format!("_dds_type_name: ClassVar[str] = \"{}\"", b.qualified_name));
+        self.line("_extensibility: ClassVar[Extensibility] = Extensibility.FINAL");
+        self.line("_has_key: ClassVar[bool] = False");
+        self.line("");
+
+        // Fields (each as int with default 0)
+        for f in &b.fields {
+            let field_name = naming::escape_keyword(&f.name, naming::TargetLang::Python);
+            self.line(&format!("{}: int = 0", field_name));
+        }
+        self.line("");
+
+        // _serialize_cdr (with encap header)
+        self.line("def _serialize_cdr(self, xcdr2: bool = True) -> bytes:");
+        self.indent += 1;
+        self.line("\"\"\"Serialize to CDR bytes with encapsulation header.\"\"\"");
+        self.line("w = CdrWriter(extensibility=self._extensibility, xcdr2=xcdr2)");
+        self.line("self._serialize_cdr_inline(w)");
+        self.line("return w.to_bytes()");
+        self.indent -= 1;
+        self.line("");
+
+        // _serialize_cdr_inline (bit-packing)
+        self.line("def _serialize_cdr_inline(self, w: CdrWriter) -> None:");
+        self.indent += 1;
+        self.line("\"\"\"Serialize fields directly into an existing writer (no encap header).\"\"\"");
+        self.line("_packed = 0");
+        let mut bit_offset: u32 = 0;
+        for f in &b.fields {
+            let field_name = naming::escape_keyword(&f.name, naming::TargetLang::Python);
+            let mask: u64 = (1u64 << f.bit_width) - 1;
+            self.line(&format!(
+                "_packed |= (int(self.{}) & 0x{:x}) << {}",
+                field_name, mask, bit_offset
+            ));
+            bit_offset += f.bit_width;
+        }
+        self.line(&format!("w.{}(_packed)", write_fn));
+        self.indent -= 1;
+        self.line("");
+
+        // _deserialize_cdr (with encap header)
+        self.line("@classmethod");
+        self.line(&format!("def _deserialize_cdr(cls, data: bytes) -> \"{}\":", class_name));
+        self.indent += 1;
+        self.line("\"\"\"Deserialize from CDR bytes.\"\"\"");
+        self.line("r = CdrReader(data)");
+        self.line("return cls._deserialize_cdr_inline(r)");
+        self.indent -= 1;
+        self.line("");
+
+        // _deserialize_cdr_inline (bit-unpacking)
+        self.line("@classmethod");
+        self.line(&format!("def _deserialize_cdr_inline(cls, r: CdrReader) -> \"{}\":", class_name));
+        self.indent += 1;
+        self.line("\"\"\"Deserialize from an existing CdrReader (no encapsulation header).\"\"\"");
+        self.line(&format!("_packed = r.{}()", read_fn));
+        self.line("obj = cls()");
+        let mut bit_offset: u32 = 0;
+        for f in &b.fields {
+            let field_name = naming::escape_keyword(&f.name, naming::TargetLang::Python);
+            let mask: u64 = (1u64 << f.bit_width) - 1;
+            self.line(&format!(
+                "obj.{} = (_packed >> {}) & 0x{:x}",
+                field_name, bit_offset, mask
+            ));
+            bit_offset += f.bit_width;
+        }
+        self.line("return obj");
+        self.indent -= 1;
+        self.line("");
+
+        // _serialize_key
+        self.line("def _serialize_key(self) -> bytes:");
+        self.indent += 1;
+        self.line("\"\"\"Serialize key fields only (bitsets have no key).\"\"\"");
+        self.line("return b\"\"");
+        self.indent -= 1;
+
+        self.indent -= 1;
+    }
+
+    // ---- Union ----
+
+    fn discriminant_python_type(&self, ty: &ResolvedType) -> &str {
+        match ty {
+            ResolvedType::Bool => "bool",
+            ResolvedType::F32 | ResolvedType::F64 => "float",
+            _ => "int",
+        }
+    }
+
+    fn discriminant_default(&self, ty: &ResolvedType) -> &str {
+        match ty {
+            ResolvedType::Bool => "False",
+            ResolvedType::F32 | ResolvedType::F64 => "0.0",
+            _ => "0",
+        }
+    }
+
+    fn discriminant_read_method(&self, ty: &ResolvedType) -> &str {
+        match ty {
+            ResolvedType::Bool => "read_bool",
+            ResolvedType::I8 => "read_i8",
+            ResolvedType::U8 => "read_u8",
+            ResolvedType::I16 => "read_i16",
+            ResolvedType::U16 => "read_u16",
+            ResolvedType::I32 => "read_i32",
+            ResolvedType::U32 => "read_u32",
+            ResolvedType::I64 => "read_i64",
+            ResolvedType::U64 => "read_u64",
+            _ => "read_i32",
+        }
+    }
+
+    fn discriminant_write_method(&self, ty: &ResolvedType) -> &str {
+        match ty {
+            ResolvedType::Bool => "write_bool",
+            ResolvedType::I8 => "write_i8",
+            ResolvedType::U8 => "write_u8",
+            ResolvedType::I16 => "write_i16",
+            ResolvedType::U16 => "write_u16",
+            ResolvedType::I32 => "write_i32",
+            ResolvedType::U32 => "write_u32",
+            ResolvedType::I64 => "write_i64",
+            ResolvedType::U64 => "write_u64",
+            _ => "write_i32",
+        }
+    }
+
+    fn label_to_python(&self, label: &ResolvedUnionLabel) -> String {
+        match label {
+            ResolvedUnionLabel::Int(v) => format!("{}", v),
+            ResolvedUnionLabel::Bool(v) => if *v { "True".to_string() } else { "False".to_string() },
+            ResolvedUnionLabel::Ident(s) => s.clone(),
+        }
+    }
+
+    fn emit_union(&mut self, u: &ResolvedUnion) {
+        let class_name = u.name.clone();
+        let disc_py_type = self.discriminant_python_type(&u.discriminant_type).to_string();
+        let disc_default = self.discriminant_default(&u.discriminant_type).to_string();
+        let disc_read = self.discriminant_read_method(&u.discriminant_type).to_string();
+        let disc_write = self.discriminant_write_method(&u.discriminant_type).to_string();
+        let ext_name = match u.extensibility {
+            ExtensibilityKind::Final => "FINAL",
+            ExtensibilityKind::Appendable => "APPENDABLE",
+            ExtensibilityKind::Mutable => "MUTABLE",
+        };
+
+        // @dataclass class declaration
+        self.line("@dataclass");
+        self.line(&format!("class {}:", class_name));
+        self.indent += 1;
+        self.line(&format!("\"\"\"IDL union: {}\"\"\"", u.qualified_name));
+        self.line("");
+
+        // Type metadata
+        self.line(&format!("_dds_type_name: ClassVar[str] = \"{}\"", u.qualified_name));
+        self.line(&format!("_extensibility: ClassVar[Extensibility] = Extensibility.{}", ext_name));
+        self.line("_has_key: ClassVar[bool] = False");
+        self.line("");
+
+        // Discriminator field
+        self.line(&format!("discriminator: {} = {}", disc_py_type, disc_default));
+
+        // Fields for each case member
+        for case in &u.cases {
+            let field_name = naming::escape_keyword(&case.member.name, naming::TargetLang::Python);
+            let py_type = self.type_to_python(&case.member.resolved_type);
+            let default = self.default_value(&case.member.resolved_type);
+            self.line(&format!("{}: {} = {}", field_name, py_type, default));
+        }
+        if let Some(ref def) = u.default_case {
+            let field_name = naming::escape_keyword(&def.name, naming::TargetLang::Python);
+            let py_type = self.type_to_python(&def.resolved_type);
+            let default = self.default_value(&def.resolved_type);
+            self.line(&format!("{}: {} = {}", field_name, py_type, default));
+        }
+        self.line("");
+
+        // _serialize_cdr (with encap header)
+        self.line("def _serialize_cdr(self, xcdr2: bool = True) -> bytes:");
+        self.indent += 1;
+        self.line("\"\"\"Serialize to CDR bytes with encapsulation header.\"\"\"");
+        self.line("w = CdrWriter(extensibility=self._extensibility, xcdr2=xcdr2)");
+        self.line("self._serialize_cdr_inline(w)");
+        self.line("return w.to_bytes()");
+        self.indent -= 1;
+        self.line("");
+
+        // _serialize_cdr_inline
+        self.line("def _serialize_cdr_inline(self, w: CdrWriter) -> None:");
+        self.indent += 1;
+        self.line("\"\"\"Serialize fields directly into an existing writer (no encap header).\"\"\"");
+        self.line(&format!("w.{}(self.discriminator)", disc_write));
+        self.emit_union_switch_write(u);
+        self.indent -= 1;
+        self.line("");
+
+        // _deserialize_cdr (with encap header)
+        self.line("@classmethod");
+        self.line(&format!("def _deserialize_cdr(cls, data: bytes) -> \"{}\":", class_name));
+        self.indent += 1;
+        self.line("\"\"\"Deserialize from CDR bytes.\"\"\"");
+        self.line("r = CdrReader(data)");
+        self.line("return cls._deserialize_cdr_inline(r)");
+        self.indent -= 1;
+        self.line("");
+
+        // _deserialize_cdr_inline
+        self.line("@classmethod");
+        self.line(&format!("def _deserialize_cdr_inline(cls, r: CdrReader) -> \"{}\":", class_name));
+        self.indent += 1;
+        self.line("\"\"\"Deserialize from an existing CdrReader (no encapsulation header).\"\"\"");
+        self.line("obj = cls()");
+        self.line(&format!("obj.discriminator = r.{}()", disc_read));
+        self.emit_union_switch_read(u);
+        self.line("return obj");
+        self.indent -= 1;
+        self.line("");
+
+        // _serialize_key (no key for unions)
+        self.line("def _serialize_key(self) -> bytes:");
+        self.indent += 1;
+        self.line("\"\"\"Serialize key fields only (unions have no key).\"\"\"");
+        self.line("return b\"\"");
+        self.indent -= 1;
+
+        self.indent -= 1;
+    }
+
+    /// Emit the if/elif chain for union case write inside _serialize_cdr_inline.
+    fn emit_union_switch_write(&mut self, u: &ResolvedUnion) {
+        let mut first = true;
+        for case in &u.cases {
+            // Combine multiple labels with `or`
+            let conditions: Vec<String> = case
+                .labels
+                .iter()
+                .map(|l| format!("self.discriminator == {}", self.label_to_python(l)))
+                .collect();
+            let cond = conditions.join(" or ");
+            if first {
+                self.line(&format!("if {}:", cond));
+                first = false;
+            } else {
+                self.line(&format!("elif {}:", cond));
+            }
+            self.indent += 1;
+            let accessor = format!(
+                "self.{}",
+                naming::escape_keyword(&case.member.name, naming::TargetLang::Python)
+            );
+            self.emit_write_field(&case.member.resolved_type, &accessor);
+            self.indent -= 1;
+        }
+        if let Some(ref def) = u.default_case {
+            if first {
+                // No cases, only default
+                self.line("if True:");
+            } else {
+                self.line("else:");
+            }
+            self.indent += 1;
+            let accessor = format!(
+                "self.{}",
+                naming::escape_keyword(&def.name, naming::TargetLang::Python)
+            );
+            self.emit_write_field(&def.resolved_type, &accessor);
+            self.indent -= 1;
+        }
+    }
+
+    /// Emit the if/elif chain for union case read inside _deserialize_cdr_inline.
+    fn emit_union_switch_read(&mut self, u: &ResolvedUnion) {
+        let mut first = true;
+        for case in &u.cases {
+            let conditions: Vec<String> = case
+                .labels
+                .iter()
+                .map(|l| format!("obj.discriminator == {}", self.label_to_python(l)))
+                .collect();
+            let cond = conditions.join(" or ");
+            if first {
+                self.line(&format!("if {}:", cond));
+                first = false;
+            } else {
+                self.line(&format!("elif {}:", cond));
+            }
+            self.indent += 1;
+            let field_name = naming::escape_keyword(&case.member.name, naming::TargetLang::Python);
+            // emit_read_field assigns to a local variable; we need to assign to obj.field
+            // So generate: tmp = read; obj.field = tmp
+            let tmp_name = format!("_v");
+            self.emit_read_field(&case.member.resolved_type, &tmp_name);
+            self.line(&format!("obj.{} = _v", field_name));
+            self.indent -= 1;
+        }
+        if let Some(ref def) = u.default_case {
+            if first {
+                self.line("if True:");
+            } else {
+                self.line("else:");
+            }
+            self.indent += 1;
+            let field_name = naming::escape_keyword(&def.name, naming::TargetLang::Python);
+            let tmp_name = format!("_v");
+            self.emit_read_field(&def.resolved_type, &tmp_name);
+            self.line(&format!("obj.{} = _v", field_name));
+            self.indent -= 1;
+        }
+    }
+
     // ---- Struct ----
 
     fn emit_struct(&mut self, s: &ResolvedStruct) {
@@ -118,7 +471,9 @@ impl<'a> PyGen<'a> {
             ExtensibilityKind::Mutable => "MUTABLE",
         };
 
-        let has_key = s.members.iter().any(|m| m.is_key);
+        // Collect all members including inherited fields
+        let all_members = self.collect_all_members(s);
+        let has_key = all_members.iter().any(|m| m.is_key);
 
         // @dataclass decorator
         self.line("@dataclass");
@@ -141,8 +496,8 @@ impl<'a> PyGen<'a> {
         ));
         self.line("");
 
-        // Fields
-        for m in &s.members {
+        // Fields (including inherited from base structs)
+        for m in &all_members {
             let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
             let py_type = self.type_to_python(&m.resolved_type);
             let default = self.default_value(&m.resolved_type);
@@ -152,6 +507,10 @@ impl<'a> PyGen<'a> {
 
         // _serialize_cdr method
         self.emit_serialize_cdr(s);
+        self.line("");
+
+        // _serialize_cdr_inline method (for nested struct serialization)
+        self.emit_serialize_cdr_inline(s);
         self.line("");
 
         // _deserialize_cdr class method
@@ -210,7 +569,7 @@ impl<'a> PyGen<'a> {
                 let elem_default = self.default_value(element);
                 format!("field(default_factory=lambda: [{}] * {})", elem_default, size)
             }
-            ResolvedType::Struct(name) => format!("field(default_factory={})", name),
+            ResolvedType::Struct(name) => format!("field(default_factory=lambda: {}())", name),
             ResolvedType::Enum(name) => {
                 // Use first variant as default
                 if let Some(e) = self.model.enums.iter().find(|e| &e.name == name) {
@@ -230,24 +589,35 @@ impl<'a> PyGen<'a> {
     // ---- Serialization ----
 
     fn emit_serialize_cdr(&mut self, s: &ResolvedStruct) {
-        self.line("def _serialize_cdr(self) -> bytes:");
+        let members = self.collect_all_members(s);
+        self.line("def _serialize_cdr(self, xcdr2: bool = True) -> bytes:");
         self.indent += 1;
         self.line("\"\"\"Serialize to CDR bytes with encapsulation header.\"\"\"");
-        self.line("w = CdrWriter(extensibility=self._extensibility)");
+        self.line("w = CdrWriter(extensibility=self._extensibility, xcdr2=xcdr2)");
 
         match s.extensibility {
             ExtensibilityKind::Final => {
                 // Final: just serialize fields
-                for m in &s.members {
+                for m in &members {
                     let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
                     self.emit_write_field(&m.resolved_type, &format!("self.{}", field_name));
                 }
             }
             ExtensibilityKind::Appendable => {
-                // Appendable: wrap with DHEADER
+                // Appendable: wrap with DHEADER only in XCDR2
+                self.line("if w._xcdr2:");
+                self.indent += 1;
                 self.line("with w.dheader():");
                 self.indent += 1;
-                for m in &s.members {
+                // XCDR2: nested DHEADERs for inherited fields (matches Rust wire format)
+                let s_clone = s.clone();
+                self.emit_xcdr2_inherited_serialize(&s_clone);
+                self.indent -= 1;
+                self.indent -= 1;
+                self.line("else:");
+                self.indent += 1;
+                // XCDR1: flat field order (no DHEADER)
+                for m in &members {
                     let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
                     self.emit_write_field(&m.resolved_type, &format!("self.{}", field_name));
                 }
@@ -257,7 +627,7 @@ impl<'a> PyGen<'a> {
                 // Mutable: DHEADER + EMHEADER per field + sentinel
                 self.line("with w.dheader():");
                 self.indent += 1;
-                for (i, m) in s.members.iter().enumerate() {
+                for (i, m) in members.iter().enumerate() {
                     let member_id = m.member_id.unwrap_or(i as u32);
                     let must_understand = if m.must_understand { "True" } else { "False" };
                     self.line(&format!(
@@ -278,6 +648,143 @@ impl<'a> PyGen<'a> {
         self.indent -= 1;
     }
 
+    fn emit_serialize_cdr_inline(&mut self, s: &ResolvedStruct) {
+        let members = self.collect_all_members(s);
+        self.line("def _serialize_cdr_inline(self, w: CdrWriter) -> None:");
+        self.indent += 1;
+        self.line("\"\"\"Serialize fields directly into an existing writer (no encap header).\"\"\"");
+
+        match s.extensibility {
+            ExtensibilityKind::Final => {
+                for m in &members {
+                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
+                    self.emit_write_field(&m.resolved_type, &format!("self.{}", field_name));
+                }
+            }
+            ExtensibilityKind::Appendable => {
+                self.line("if w._xcdr2:");
+                self.indent += 1;
+                self.line("with w.dheader():");
+                self.indent += 1;
+                // XCDR2: nested DHEADERs for inherited fields (matches Rust wire format)
+                let s_clone = s.clone();
+                self.emit_xcdr2_inherited_serialize(&s_clone);
+                self.indent -= 1;
+                self.indent -= 1;
+                self.line("else:");
+                self.indent += 1;
+                // XCDR1: flat field order (no DHEADER)
+                for m in &members {
+                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
+                    self.emit_write_field(&m.resolved_type, &format!("self.{}", field_name));
+                }
+                self.indent -= 1;
+            }
+            ExtensibilityKind::Mutable => {
+                self.line("with w.dheader():");
+                self.indent += 1;
+                for (i, m) in members.iter().enumerate() {
+                    let member_id = m.member_id.unwrap_or(i as u32);
+                    let must_understand = if m.must_understand { "True" } else { "False" };
+                    self.line(&format!(
+                        "with w.emheader(member_id={}, must_understand={}):",
+                        member_id, must_understand
+                    ));
+                    self.indent += 1;
+                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
+                    self.emit_write_field(&m.resolved_type, &format!("self.{}", field_name));
+                    self.indent -= 1;
+                }
+                self.line("w.write_sentinel()");
+                self.indent -= 1;
+            }
+        }
+
+        self.indent -= 1;
+    }
+
+    /// Recursively collect all members including inherited fields from base structs.
+    /// Parent fields come first, then own fields (matches CDR wire order).
+    fn collect_all_members(&self, s: &ResolvedStruct) -> Vec<ResolvedMember> {
+        let mut all = Vec::new();
+        if let Some(ref base_name) = s.base_type {
+            let simple = base_name.rsplit("::").next().unwrap_or(base_name);
+            if let Some(base) = self.model.structs.iter().find(|st| st.name == simple) {
+                all.extend(self.collect_all_members(base));
+            }
+        }
+        all.extend(s.members.clone());
+        all
+    }
+
+    /// Find a struct's parent (clones to avoid borrow issues).
+    fn find_parent_struct(&self, s: &ResolvedStruct) -> Option<ResolvedStruct> {
+        let base_name = s.base_type.as_ref()?;
+        let simple = base_name.rsplit("::").next().unwrap_or(base_name);
+        self.model.structs.iter().find(|st| st.name == simple).cloned()
+    }
+
+    /// XCDR2: Serialize inherited fields with nested DHEADERs to match Rust's wire format.
+    /// For each ancestor in the chain, parent fields are wrapped in their own DHEADER
+    /// (if the parent is APPENDABLE).
+    fn emit_xcdr2_inherited_serialize(&mut self, s: &ResolvedStruct) {
+        if let Some(parent) = self.find_parent_struct(s) {
+            if parent.extensibility == ExtensibilityKind::Appendable {
+                self.line("with w.dheader():");
+                self.indent += 1;
+                self.emit_xcdr2_inherited_serialize(&parent);
+                self.indent -= 1;
+            } else {
+                self.emit_xcdr2_inherited_serialize(&parent);
+            }
+        }
+        for m in &s.members {
+            let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
+            self.emit_write_field(&m.resolved_type, &format!("self.{}", field_name));
+        }
+    }
+
+    /// XCDR2: Deserialize inherited fields with nested DHEADER reads (mirror of serialize).
+    /// `depth` is used to generate unique variable names for nested DHEADERs.
+    fn emit_xcdr2_inherited_deserialize(&mut self, s: &ResolvedStruct, depth: usize) {
+        if let Some(parent) = self.find_parent_struct(s) {
+            if parent.extensibility == ExtensibilityKind::Appendable {
+                self.line(&format!("_pdsize{0}, _pdstart{0} = r.read_dheader()", depth));
+                self.emit_xcdr2_inherited_deserialize(&parent, depth + 1);
+                self.line(&format!("r.read_dheader_end(_pdsize{0}, _pdstart{0})", depth));
+            } else {
+                self.emit_xcdr2_inherited_deserialize(&parent, depth);
+            }
+        }
+        for m in &s.members {
+            let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
+            self.emit_read_field(&m.resolved_type, &field_name);
+        }
+    }
+
+    fn is_non_primitive_element(element: &ResolvedType) -> bool {
+        // Only String needs per-sequence DHEADER in XCDR2.
+        // Enum: fixed-size (i32), no DHEADER needed.
+        // Struct: APPENDABLE structs already have per-element DHEADER.
+        matches!(element, ResolvedType::String { .. })
+    }
+
+    fn find_bitmask(&self, name: &str) -> Option<&ResolvedBitmask> {
+        let simple = name.rsplit("::").next().unwrap_or(name);
+        self.model.bitmasks.iter().find(|b| b.name == simple)
+    }
+
+    /// Returns (write_method, read_method) for a bitmask based on bit_bound.
+    fn bitmask_methods(&self, bitmask_name: &str) -> (&'static str, &'static str) {
+        let bit_bound = self.find_bitmask(bitmask_name).map(|b| b.bit_bound).unwrap_or(32);
+        match bit_bound {
+            0..=8 => ("write_u8", "read_u8"),
+            9..=16 => ("write_u16", "read_u16"),
+            17..=32 => ("write_u32", "read_u32"),
+            _ => ("write_u64", "read_u64"),
+        }
+    }
+
     fn emit_write_field(&mut self, ty: &ResolvedType, accessor: &str) {
         match ty {
             ResolvedType::Bool => self.line(&format!("w.write_bool({})", accessor)),
@@ -295,16 +802,37 @@ impl<'a> PyGen<'a> {
             ResolvedType::String { .. } => self.line(&format!("w.write_string({})", accessor)),
             ResolvedType::Enum(_) => self.line(&format!("w.write_enum(int({}))", accessor)),
             ResolvedType::Struct(_) => {
-                // Nested struct: write its serialized bytes (without encap header)
-                self.line(&format!("_nested = {}._serialize_cdr()", accessor));
-                self.line("w.write_bytes(_nested[4:])  # Skip encap header");
+                // Nested struct: write directly to parent writer (preserves alignment)
+                self.line(&format!("{}._serialize_cdr_inline(w)", accessor));
             }
             ResolvedType::Sequence { element, .. } => {
-                self.line(&format!("w.write_seq_header(len({}))", accessor));
-                self.line(&format!("for _item in {}:", accessor));
-                self.indent += 1;
-                self.emit_write_field(element, "_item");
-                self.indent -= 1;
+                if Self::is_non_primitive_element(element) {
+                    // XCDR2: non-primitive sequences need DHEADER
+                    self.line("if w._xcdr2:");
+                    self.indent += 1;
+                    self.line("_seq_token = w.write_dheader_begin()");
+                    self.line(&format!("w.write_seq_header(len({}))", accessor));
+                    self.line(&format!("for _item in {}:", accessor));
+                    self.indent += 1;
+                    self.emit_write_field(element, "_item");
+                    self.indent -= 1;
+                    self.line("w.write_dheader_finalize(_seq_token)");
+                    self.indent -= 1;
+                    self.line("else:");
+                    self.indent += 1;
+                    self.line(&format!("w.write_seq_header(len({}))", accessor));
+                    self.line(&format!("for _item in {}:", accessor));
+                    self.indent += 1;
+                    self.emit_write_field(element, "_item");
+                    self.indent -= 1;
+                    self.indent -= 1;
+                } else {
+                    self.line(&format!("w.write_seq_header(len({}))", accessor));
+                    self.line(&format!("for _item in {}:", accessor));
+                    self.indent += 1;
+                    self.emit_write_field(element, "_item");
+                    self.indent -= 1;
+                }
             }
             ResolvedType::Array { element, size } => {
                 self.line(&format!(
@@ -326,11 +854,15 @@ impl<'a> PyGen<'a> {
                 self.emit_write_field(value, "_v");
                 self.indent -= 1;
             }
-            ResolvedType::Bitmask(_) => self.line(&format!("w.write_u32(int({}))", accessor)),
+            ResolvedType::Bitmask(bitmask_name) => {
+                let (write_fn, _) = self.bitmask_methods(bitmask_name);
+                self.line(&format!("w.{}(int({}))", write_fn, accessor));
+            }
         }
     }
 
     fn emit_deserialize_cdr(&mut self, s: &ResolvedStruct) {
+        let members = self.collect_all_members(s);
         self.line("@classmethod");
         self.line(&format!("def _deserialize_cdr(cls, data: bytes) -> \"{}\":", s.name));
         self.indent += 1;
@@ -340,41 +872,52 @@ impl<'a> PyGen<'a> {
         match s.extensibility {
             ExtensibilityKind::Final => {
                 // Final: read fields directly
-                for m in &s.members {
+                for m in &members {
                     let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
                     self.emit_read_field(&m.resolved_type, &field_name);
                 }
             }
             ExtensibilityKind::Appendable => {
-                // Appendable: read DHEADER, then fields
+                // Appendable: XCDR2 uses nested DHEADERs for inheritance, XCDR1 is flat
+                self.line("if r._xcdr2:");
+                self.indent += 1;
                 self.line("_dsize, _dstart = r.read_dheader()");
-                for m in &s.members {
+                let s_clone = s.clone();
+                self.emit_xcdr2_inherited_deserialize(&s_clone, 0);
+                self.line("r.read_dheader_end(_dsize, _dstart)");
+                self.indent -= 1;
+                self.line("else:");
+                self.indent += 1;
+                for m in &members {
                     let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
                     self.emit_read_field(&m.resolved_type, &field_name);
                 }
-                self.line("r.read_dheader_end(_dsize, _dstart)");
+                self.indent -= 1;
             }
             ExtensibilityKind::Mutable => {
                 // Mutable: read DHEADER, then loop over EMHEADERs
                 self.line("_dsize, _dstart = r.read_dheader()");
 
                 // Initialize all fields with defaults
-                for m in &s.members {
+                for m in &members {
                     let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
                     let default = self.default_value(&m.resolved_type);
                     // Handle field(default_factory=...) case
                     if default.starts_with("field(") {
                         if default.contains("lambda:") {
-                            // Extract the lambda expression
+                            // Extract the lambda body: strip "field(default_factory=lambda: " prefix
+                            // and the single trailing ')'
                             let inner = default
                                 .trim_start_matches("field(default_factory=lambda: ")
-                                .trim_end_matches(')');
+                                .strip_suffix(')')
+                                .unwrap_or("");
                             self.line(&format!("{} = {}", field_name, inner));
                         } else {
                             // It's field(default_factory=TypeName)
                             let inner = default
                                 .trim_start_matches("field(default_factory=")
-                                .trim_end_matches(')');
+                                .strip_suffix(')')
+                                .unwrap_or("");
                             self.line(&format!("{} = {}()", field_name, inner));
                         }
                     } else {
@@ -388,7 +931,7 @@ impl<'a> PyGen<'a> {
 
                 // Switch on member_id
                 let mut first = true;
-                for (i, m) in s.members.iter().enumerate() {
+                for (i, m) in members.iter().enumerate() {
                     let member_id = m.member_id.unwrap_or(i as u32);
                     let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
                     if first {
@@ -413,8 +956,7 @@ impl<'a> PyGen<'a> {
         }
 
         // Create and return instance
-        let field_names: Vec<String> = s
-            .members
+        let field_names: Vec<String> = members
             .iter()
             .map(|m| naming::escape_keyword(&m.name, naming::TargetLang::Python))
             .collect();
@@ -423,6 +965,7 @@ impl<'a> PyGen<'a> {
     }
 
     fn emit_deserialize_cdr_inline(&mut self, s: &ResolvedStruct) {
+        let members = self.collect_all_members(s);
         self.line("@classmethod");
         self.line(&format!("def _deserialize_cdr_inline(cls, r: CdrReader) -> \"{}\":", s.name));
         self.indent += 1;
@@ -430,22 +973,30 @@ impl<'a> PyGen<'a> {
 
         match s.extensibility {
             ExtensibilityKind::Final => {
-                for m in &s.members {
+                for m in &members {
                     let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
                     self.emit_read_field(&m.resolved_type, &field_name);
                 }
             }
             ExtensibilityKind::Appendable => {
+                self.line("if r._xcdr2:");
+                self.indent += 1;
                 self.line("_dsize, _dstart = r.read_dheader()");
-                for m in &s.members {
+                let s_clone = s.clone();
+                self.emit_xcdr2_inherited_deserialize(&s_clone, 0);
+                self.line("r.read_dheader_end(_dsize, _dstart)");
+                self.indent -= 1;
+                self.line("else:");
+                self.indent += 1;
+                for m in &members {
                     let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
                     self.emit_read_field(&m.resolved_type, &field_name);
                 }
-                self.line("r.read_dheader_end(_dsize, _dstart)");
+                self.indent -= 1;
             }
             ExtensibilityKind::Mutable => {
                 self.line("_dsize, _dstart = r.read_dheader()");
-                for m in &s.members {
+                for m in &members {
                     let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
                     let default = self.default_value(&m.resolved_type);
                     if default.starts_with("field(") {
@@ -468,7 +1019,7 @@ impl<'a> PyGen<'a> {
                 self.indent += 1;
                 self.line("_mid, _mlen, _mu = r.read_emheader()");
                 let mut first = true;
-                for (i, m) in s.members.iter().enumerate() {
+                for (i, m) in members.iter().enumerate() {
                     let member_id = m.member_id.unwrap_or(i as u32);
                     let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
                     if first {
@@ -491,8 +1042,7 @@ impl<'a> PyGen<'a> {
             }
         }
 
-        let field_names: Vec<String> = s
-            .members
+        let field_names: Vec<String> = members
             .iter()
             .map(|m| naming::escape_keyword(&m.name, naming::TargetLang::Python))
             .collect();
@@ -523,6 +1073,13 @@ impl<'a> PyGen<'a> {
                 self.line(&format!("{} = {}._deserialize_cdr_inline(r)", name, struct_name));
             }
             ResolvedType::Sequence { element, .. } => {
+                if Self::is_non_primitive_element(element) {
+                    // XCDR2: non-primitive sequences have DHEADER
+                    self.line("if r._xcdr2:");
+                    self.indent += 1;
+                    self.line("_seq_dsize, _seq_dstart = r.read_dheader()");
+                    self.indent -= 1;
+                }
                 self.line(&format!("_{}_count = r.read_seq_header()", name));
                 self.line(&format!("{} = []", name));
                 self.line(&format!("for _ in range(_{}_count):", name));
@@ -531,6 +1088,12 @@ impl<'a> PyGen<'a> {
                 self.emit_read_field(element, &item_name);
                 self.line(&format!("{}.append({})", name, item_name));
                 self.indent -= 1;
+                if Self::is_non_primitive_element(element) {
+                    self.line("if r._xcdr2:");
+                    self.indent += 1;
+                    self.line("r.read_dheader_end(_seq_dsize, _seq_dstart)");
+                    self.indent -= 1;
+                }
             }
             ResolvedType::Array { element, size } => {
                 self.line(&format!("{} = []", name));
@@ -554,7 +1117,8 @@ impl<'a> PyGen<'a> {
                 self.indent -= 1;
             }
             ResolvedType::Bitmask(bitmask_name) => {
-                self.line(&format!("{} = {}(r.read_u32())", name, bitmask_name));
+                let (_, read_fn) = self.bitmask_methods(bitmask_name);
+                self.line(&format!("{} = {}(r.{}())", name, bitmask_name, read_fn));
             }
         }
     }
@@ -564,7 +1128,8 @@ impl<'a> PyGen<'a> {
         self.indent += 1;
         self.line("\"\"\"Serialize key fields only (big-endian, no encapsulation).\"\"\"");
 
-        let key_fields: Vec<&ResolvedMember> = s.members.iter().filter(|m| m.is_key).collect();
+        let all_members = self.collect_all_members(s);
+        let key_fields: Vec<ResolvedMember> = all_members.into_iter().filter(|m| m.is_key).collect();
 
         if key_fields.is_empty() {
             self.line("return b\"\"");
@@ -598,7 +1163,10 @@ impl<'a> PyGen<'a> {
             ResolvedType::Char => self.line(&format!("w.write_char({})", accessor)),
             ResolvedType::WChar => self.line(&format!("w.write_wchar({})", accessor)),
             ResolvedType::WString { .. } => self.line(&format!("w.write_wstring({})", accessor)),
-            ResolvedType::Bitmask(_) => self.line(&format!("w.write_u32(int({}))", accessor)),
+            ResolvedType::Bitmask(bitmask_name) => {
+                let (write_fn, _) = self.bitmask_methods(bitmask_name);
+                self.line(&format!("w.{}(int({}))", write_fn, accessor));
+            }
             _ => {
                 // Complex types (Struct, Sequence, Array, Map) in keys are not common
                 self.line(&format!("# TODO: Complex key field {}", accessor));

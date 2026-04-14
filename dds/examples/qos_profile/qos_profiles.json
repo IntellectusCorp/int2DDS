@@ -3,6 +3,7 @@
     "qos_profiles": [
         {
             "name": "ReliableProfile",
+            "is_default_profile": true,
             "publisher_qos": {
                 "partition": {
                     "name": { "element": ["HelloWorldPartition"] }

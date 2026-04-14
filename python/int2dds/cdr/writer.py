@@ -43,7 +43,7 @@ class CdrWriter:
     XCDR2 extensions for appendable and mutable types.
 
     Example:
-        >>> writer = CdrWriter(extensibility=Extensibility.FINAL)
+        >>> writer = CdrWriter(extensibility=Extensibility.APPENDABLE)
         >>> writer.write_u32(42)
         >>> writer.write_string("hello")
         >>> data = writer.to_bytes()
@@ -53,7 +53,7 @@ class CdrWriter:
 
     def __init__(
         self,
-        extensibility: Extensibility = Extensibility.FINAL,
+        extensibility: Extensibility = Extensibility.APPENDABLE,
         little_endian: bool = True,
         xcdr2: bool = True,
     ) -> None:
@@ -186,6 +186,22 @@ class CdrWriter:
         """
         encoded = val.encode("utf-8") + b"\x00"
         self.write_u32(len(encoded))
+        self._buf.extend(encoded)
+
+    def write_wstring(self, val: str) -> None:
+        """
+        Write a wide string (UTF-16) with length prefix.
+
+        Length is the number of UTF-16 code units (NOT bytes, NOT including null).
+        No null terminator is written.
+        """
+        # Encode as UTF-16 without BOM
+        encoding = "utf-16-le" if self._le else "utf-16-be"
+        encoded = val.encode(encoding)
+        # Number of UTF-16 code units = bytes / 2
+        code_units = len(encoded) // 2
+        self.write_u32(code_units)
+        self._align(2)
         self._buf.extend(encoded)
 
     def write_seq_header(self, count: int) -> None:

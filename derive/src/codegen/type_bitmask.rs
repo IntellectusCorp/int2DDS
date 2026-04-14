@@ -99,6 +99,13 @@ pub fn derive_bitmask_impl(
     let additional_derives =
         crate::codegen::derives::generate_additional_derives(input, name, type_config);
 
+    // Generate HasTypeObject
+    let has_type_object_impl = crate::codegen::type_object::generate_has_type_object_bitmask_impl(
+        name,
+        variants,
+        type_config,
+    );
+
     quote! {
         /// Companion value type for bitmask, supports bitwise operations
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -218,6 +225,8 @@ pub fn derive_bitmask_impl(
         }
 
         #additional_derives
+
+        #has_type_object_impl
     }
 }
 
