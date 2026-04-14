@@ -1,6 +1,7 @@
 use quote::quote;
 use syn::DeriveInput;
 
+use crate::codegen::union_ops::wrap_with_emheader;
 use crate::codegen::utils::{get_serialization_method, resolve_member_id, SerializationMethod};
 use crate::codegen::{
     generate_additional_derives, generate_field_deserialization,
@@ -974,74 +975,26 @@ fn generate_xcdr_serialize_impl(
             };
 
             if is_mutable {
-                // For Mutable types: write EMHEADER before each field
-                // Generate EMHEADER backpatch logic supporting 28-bit member_id
-                let emheader_backpatch = if member_id <= 0x0FFF {
-                    // Compact: member_id fits in 12 bits.
-                    // If the payload length overflows 16 bits, retroactively
-                    // promote to LC=4 (NEXTINT) encoding by inserting a 4-byte
-                    // length slot right after the EMHEADER. This avoids the
-                    // silent truncation of `field_len & 0xFFFF`.
-                    quote! {
-                        let field_len = (serializer.position() - field_start) as u32;
-                        if field_len <= 0xFFFF {
-                            let emheader = ((#member_id & 0x0FFFu32) << 16) | (field_len & 0xFFFF);
-                            serializer.write_dheader_at(emheader_pos, emheader);
-                        } else {
-                            serializer.insert_nextint_slot_at(emheader_pos + 4);
-                            let emheader = (4u32 << 28) | (#member_id & 0x0FFF_FFFFu32);
-                            serializer.write_dheader_at(emheader_pos, emheader);
-                            serializer.write_dheader_at(emheader_pos + 4, field_len);
-                        }
-                    }
-                } else {
-                    // 28-bit member_id: use LC=4 format, reserve extra 4 bytes for length
-                    quote! {
-                        let field_len = (serializer.position() - field_start) as u32;
-                        let emheader = (4u32 << 28) | (#member_id & 0x0FFF_FFFFu32);
-                        serializer.write_dheader_at(emheader_pos, emheader);
-                        serializer.write_dheader_at(emheader_pos + 4, field_len);
-                    }
-                };
-
-                // For 28-bit member_id, reserve 8 bytes (EMHEADER + NEXTINT length)
-                let reserve_code = if member_id > 0x0FFF {
-                    quote! {
-                        let emheader_pos = serializer.reserve_dheader();
-                        let _ = serializer.reserve_dheader(); // reserve NEXTINT length slot
-                    }
-                } else {
-                    quote! {
-                        let emheader_pos = serializer.reserve_dheader();
-                    }
-                };
-
+                let must_understand = field_config.must_understand;
                 if is_optional {
-                    // Optional field: only serialize if Some
+                    let inner = wrap_with_emheader(
+                        quote! { #member_id as u32 },
+                        must_understand,
+                        quote! {
+                            #crate_path::serialize::xcdr::XcdrSerialize::serialize_xcdr(opt_value, serializer)?;
+                        },
+                    );
                     quote! {
                         if let Some(ref opt_value) = self.#field_name {
-                            #reserve_code
-                            let field_start = serializer.position();
-
-                            // Serialize the field value
-                            #crate_path::serialize::xcdr::XcdrSerialize::serialize_xcdr(opt_value, serializer)?;
-
-                            #emheader_backpatch
+                            #inner
                         }
                     }
                 } else {
-                    // Required field: always serialize
-                    quote! {
-                        {
-                            #reserve_code
-                            let field_start = serializer.position();
-
-                            // Serialize the field
-                            #field_serialize
-
-                            #emheader_backpatch
-                        }
-                    }
+                    wrap_with_emheader(
+                        quote! { #member_id as u32 },
+                        must_understand,
+                        field_serialize,
+                    )
                 }
             } else {
                 // For Final/Appendable: serialize field directly
