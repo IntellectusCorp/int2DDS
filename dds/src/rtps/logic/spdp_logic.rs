@@ -284,7 +284,8 @@ mod tests {
             domain_id,
             socket.participant_id(),
             socket.working_ips(),
-            None,
+            Vec::new(),
+            Vec::new(),
         ));
 
         let spdp_logic = SpdpLogic::new(

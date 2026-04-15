@@ -75,11 +75,17 @@ pub(crate) trait TransportPlugin: Send + Sync {
     /// The implementation decides *how* (multicast, TCP BIND, SHM write, etc.).
     fn send(&self, data: &[u8], target: &SendTarget) -> io::Result<()>;
 
-    /// Return the locators this transport advertises to remote participants.
+    /// Metatraffic (discovery) unicast locators this transport advertises to
+    /// remote participants. Populated into the SPDP announcement.
     ///
-    /// Called during participant creation to build the locator list
-    /// included in SPDP announcements.
-    fn local_locators(&self, domain_id: u32, participant_id: u32) -> Vec<Locator>;
+    /// Encapsulates transport-specific knowledge: port formulas, WAN
+    /// public-address overrides, per-NIC IP expansion, locator kind, etc.
+    /// RTPS layer never branches on transport type to build this list.
+    fn advertised_metatraffic_unicast_locators(&self) -> Vec<Locator>;
+
+    /// User-data unicast locators this transport advertises to remote
+    /// participants. Populated into the SPDP announcement.
+    fn advertised_default_unicast_locators(&self) -> Vec<Locator>;
 
     /// Take ownership of the discovery multicast message source.
     ///
@@ -166,6 +172,7 @@ impl TransportPluginFactory {
                     domain_id,
                     participant_id,
                     bind_ip,
+                    working_ips,
                     guid_prefix,
                     tls_config,
                 )?;

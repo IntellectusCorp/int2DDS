@@ -67,8 +67,15 @@ impl HybridTransportPlugin {
         let discovery_uc = UdpListener::new(discovery_uc_port).ok();
         let user_uc = UdpListener::new(user_uc_port).ok();
 
-        // Create TCP plugin (handles its own mux listener thread)
-        let tcp_plugin = TcpTransportPlugin::new(domain_id, participant_id, bind_ip, guid_prefix)?;
+        // Create TCP plugin (handles its own mux listener thread).
+        // Pass working_ips so the TCP side can advertise per-NIC locators.
+        let tcp_plugin = TcpTransportPlugin::new(
+            domain_id,
+            participant_id,
+            bind_ip,
+            working_ips.clone(),
+            guid_prefix,
+        )?;
 
         // Create merged discovery unicast channel: UDP listener + TCP discovery rx
         let (disc_merged_tx, disc_merged_rx) = bounded::<IncomingMessage>(CHANNEL_BUFFER_SIZE);
@@ -125,6 +132,16 @@ impl HybridTransportPlugin {
             user_data_unicast_rx: Mutex::new(Some(user_merged_rx)),
         })
     }
+
+    fn udp_locators(&self, port: u32) -> Vec<Locator> {
+        let mut locators = Vec::new();
+        for ip_str in &self.working_ips {
+            if let Ok(ip) = ip_str.parse::<Ipv4Addr>() {
+                locators.push(Locator::from_ip_v4_addr_and_port(&ip, port));
+            }
+        }
+        locators
+    }
 }
 
 impl TransportPlugin for HybridTransportPlugin {
@@ -160,23 +177,23 @@ impl TransportPlugin for HybridTransportPlugin {
         }
     }
 
-    fn local_locators(&self, domain_id: u32, participant_id: u32) -> Vec<Locator> {
-        let metatraffic_port =
-            PortManager::get_discovery_traffic_unicast_port(domain_id, participant_id) as u32;
-        let user_port =
-            PortManager::get_user_traffic_unicast_port(domain_id, participant_id) as u32;
+    fn advertised_metatraffic_unicast_locators(&self) -> Vec<Locator> {
+        let udp_port = PortManager::get_discovery_traffic_unicast_port(
+            self.domain_id,
+            self.participant_id,
+        ) as u32;
+        let mut locators = self.udp_locators(udp_port);
+        // Hybrid advertises both UDP and TCP endpoints so peers on either
+        // transport can reach us.
+        locators.extend(self.tcp_plugin.advertised_metatraffic_unicast_locators());
+        locators
+    }
 
-        let mut locators = Vec::new();
-        for ip_str in &self.working_ips {
-            if let Ok(ip) = ip_str.parse::<Ipv4Addr>() {
-                // UDP locators
-                locators.push(Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port));
-                locators.push(Locator::from_ip_v4_addr_and_port(&ip, user_port));
-                // TCP locators
-                let tcp_port = self.tcp_plugin.port() as u32;
-                locators.push(Locator::from_tcp_v4(ip, tcp_port));
-            }
-        }
+    fn advertised_default_unicast_locators(&self) -> Vec<Locator> {
+        let udp_port =
+            PortManager::get_user_traffic_unicast_port(self.domain_id, self.participant_id) as u32;
+        let mut locators = self.udp_locators(udp_port);
+        locators.extend(self.tcp_plugin.advertised_default_unicast_locators());
         locators
     }
 

@@ -196,7 +196,8 @@ mod tests {
             domain_id,
             _socket.participant_id(),
             _socket.working_ips(),
-            None,
+            Vec::new(),
+            Vec::new(),
         ));
 
         // TODO: create transport and get MessageSource for discovery multicast

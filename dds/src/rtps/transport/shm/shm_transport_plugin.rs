@@ -95,6 +95,16 @@ impl ShmTransportPlugin {
             user_data_unicast_rx: Mutex::new(Some(user_merged_rx)),
         })
     }
+
+    fn udp_locators(&self, port: u32) -> Vec<Locator> {
+        let mut locators = Vec::new();
+        for ip_str in &self.working_ips {
+            if let Ok(ip) = ip_str.parse::<Ipv4Addr>() {
+                locators.push(Locator::from_ip_v4_addr_and_port(&ip, port));
+            }
+        }
+        locators
+    }
 }
 
 impl TransportPlugin for ShmTransportPlugin {
@@ -131,22 +141,18 @@ impl TransportPlugin for ShmTransportPlugin {
         }
     }
 
-    fn local_locators(&self, domain_id: u32, participant_id: u32) -> Vec<Locator> {
-        let metatraffic_port =
-            PortManager::get_discovery_traffic_unicast_port(domain_id, participant_id) as u32;
-        let user_port =
-            PortManager::get_user_traffic_unicast_port(domain_id, participant_id) as u32;
+    fn advertised_metatraffic_unicast_locators(&self) -> Vec<Locator> {
+        let port = PortManager::get_discovery_traffic_unicast_port(
+            self.domain_id,
+            self.participant_id,
+        ) as u32;
+        self.udp_locators(port)
+    }
 
-        let mut locators = Vec::new();
-        for ip_str in &self.working_ips {
-            if let Ok(ip) = ip_str.parse::<Ipv4Addr>() {
-                // Discovery uses UDP
-                locators.push(Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port));
-                // User data uses UDP (for non-SHM peers)
-                locators.push(Locator::from_ip_v4_addr_and_port(&ip, user_port));
-            }
-        }
-        // Add SHM locator for user data
+    fn advertised_default_unicast_locators(&self) -> Vec<Locator> {
+        let udp_port =
+            PortManager::get_user_traffic_unicast_port(self.domain_id, self.participant_id) as u32;
+        let mut locators = self.udp_locators(udp_port);
         if self.shm_sender.is_available() {
             locators.push(Locator::from_shm(&Ipv4Addr::new(127, 0, 0, 1), self.domain_id));
         }
