@@ -10,8 +10,6 @@
 use std::{
     collections::HashMap,
     fmt::Debug,
-    net::Ipv4Addr,
-    str::FromStr,
     sync::{atomic::AtomicBool, Arc, Mutex, OnceLock},
 };
 
@@ -63,9 +61,7 @@ use crate::{
             wlp_logic::WlpLogic,
         },
         task::sending_handler::{MessageType, SendingHandler},
-        transport::{
-            get_transport_type, plugin::TransportPlugin, port_manager::PortManager, TransportType,
-        },
+        transport::plugin::TransportPlugin,
     },
     utils::timer::timer_handler::TimerHandler,
 };
@@ -132,13 +128,18 @@ impl Entity for Participant {
 
 impl Participant {
     /// Create a new Participant.
-    /// `tcp_listener_port` is the actual TCP listener port (may differ from calculated physical port
-    /// if fallback to ephemeral port occurred). Pass `None` for non-TCP transport.
+    ///
+    /// `metatraffic_unicast_locators` / `default_unicast_locators` are the
+    /// locators this participant advertises to peers over SPDP. The caller
+    /// (typically `DcpsBridge`) obtains them from the owning `TransportPlugin`
+    /// so that locator generation stays encapsulated in the transport layer —
+    /// `Participant` intentionally has no knowledge of transport types.
     pub(crate) fn new(
         domain_id: DomainId,
         participant_id: ParticipantId,
         working_ips: Vec<String>,
-        tcp_listener_port: Option<u16>,
+        metatraffic_unicast_locators: Vec<Locator>,
+        default_unicast_locators: Vec<Locator>,
     ) -> Self {
         let guid = Guid::new(Guid::generate_unique_guid_prefix(), EntityId::PARTICIPANT);
 
@@ -148,13 +149,12 @@ impl Participant {
             Participant::init_builtin_endpoints(),
         );
 
-        Self::init_locators(
-            &working_ips,
-            &mut local_participant_proxy_data,
-            domain_id,
-            participant_id,
-            tcp_listener_port,
-        );
+        for locator in metatraffic_unicast_locators {
+            local_participant_proxy_data.add_metatraffic_unicast_locator(locator);
+        }
+        for locator in default_unicast_locators {
+            local_participant_proxy_data.add_default_unicast_locator(locator);
+        }
 
         let local_participant_proxy_data = Arc::new(local_participant_proxy_data);
         let builtin_endpoints = Arc::new(BuiltinEndpoints::new(guid));
@@ -198,95 +198,6 @@ impl Participant {
         endpointset.add(BuiltinEndpointFlag::DISC_BUILTIN_ENDPOINT_TOPICS_ANNOUNCER);
         endpointset.add(BuiltinEndpointFlag::DISC_BUILTIN_ENDPOINT_TOPICS_DETECTOR);
         endpointset
-    }
-
-    /// Initialize locators for participant proxy data based on transport type.
-    /// Registers locators for all available NIC IPs.
-    fn init_locators(
-        working_ips: &Vec<String>,
-        local_participant_proxy_data: &mut SPDPDiscoveredParticipantData,
-        domain_id: DomainId,
-        participant_id: ParticipantId,
-        tcp_listener_port: Option<u16>,
-    ) {
-        let transport_type = get_transport_type();
-        let metatraffic_port =
-            PortManager::get_discovery_traffic_unicast_port(domain_id, participant_id) as u32;
-        let user_port =
-            PortManager::get_user_traffic_unicast_port(domain_id, participant_id) as u32;
-        let tcp_physical_port = tcp_listener_port
-            .map(|p| p as u32)
-            .unwrap_or_else(|| PortManager::get_tcp_physical_port(domain_id) as u32);
-
-        for working_ip in working_ips {
-            let Ok(ip) = Ipv4Addr::from_str(working_ip) else {
-                continue;
-            };
-
-            match transport_type {
-                TransportType::UDP => {
-                    local_participant_proxy_data.add_metatraffic_unicast_locator(
-                        Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port),
-                    );
-                    local_participant_proxy_data.add_default_unicast_locator(
-                        Locator::from_ip_v4_addr_and_port(&ip, user_port),
-                    );
-                }
-                TransportType::TCP => {
-                    // WAN mode: advertise public address if configured
-                    let (advertised_ip, advertised_port) = if let Some(public_addr) =
-                        crate::common::env::get_tcp_public_addr()
-                    {
-                        log::info!(
-                                "[participant] WAN mode: advertising public address {} instead of {}:{}",
-                                public_addr, ip, tcp_physical_port
-                            );
-                        match public_addr.ip() {
-                            std::net::IpAddr::V4(v4) => (v4, public_addr.port() as u32),
-                            _ => {
-                                log::warn!(
-                                    "[participant] Public address is not IPv4, falling back to LAN"
-                                );
-                                (ip, tcp_physical_port)
-                            }
-                        }
-                    } else {
-                        (ip, tcp_physical_port)
-                    };
-
-                    local_participant_proxy_data.add_metatraffic_unicast_locator(
-                        Locator::from_tcp_v4(advertised_ip, advertised_port),
-                    );
-                    local_participant_proxy_data.add_default_unicast_locator(Locator::from_tcp_v4(
-                        advertised_ip,
-                        advertised_port,
-                    ));
-                }
-                TransportType::Hybrid => {
-                    // UDP locators use standard per-participant ports
-                    local_participant_proxy_data.add_metatraffic_unicast_locator(
-                        Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port),
-                    );
-                    local_participant_proxy_data.add_default_unicast_locator(
-                        Locator::from_ip_v4_addr_and_port(&ip, user_port),
-                    );
-                    // TCP locators use single physical port
-                    local_participant_proxy_data.add_metatraffic_unicast_locator(
-                        Locator::from_tcp_v4(ip, tcp_physical_port),
-                    );
-                    local_participant_proxy_data
-                        .add_default_unicast_locator(Locator::from_tcp_v4(ip, tcp_physical_port));
-                }
-                TransportType::SHM => {
-                    // metatraffic uses UDP, default uses SHM
-                    local_participant_proxy_data.add_metatraffic_unicast_locator(
-                        Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port),
-                    );
-                    local_participant_proxy_data
-                        .add_default_unicast_locator(Locator::from_shm(&ip, user_port));
-                }
-            }
-        }
     }
 
     pub(crate) fn builtin_endpoints(&self) -> Arc<BuiltinEndpoints> {

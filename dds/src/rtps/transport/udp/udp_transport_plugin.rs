@@ -101,6 +101,18 @@ impl UdpTransportPlugin {
     pub(crate) fn take_user_multicast_listener(&self) -> Option<UdpListener> {
         self.user_multicast_listener.lock().expect("lock poisoned").take()
     }
+
+    /// Expand a single UDP port into per-NIC IPv4 locators using the
+    /// plugin's `working_ips`.
+    fn udp_locators(&self, port: u32) -> Vec<Locator> {
+        let mut locators = Vec::new();
+        for ip_str in &self.working_ips {
+            if let Ok(ip) = ip_str.parse::<Ipv4Addr>() {
+                locators.push(Locator::from_ip_v4_addr_and_port(&ip, port));
+            }
+        }
+        locators
+    }
 }
 
 impl TransportPlugin for UdpTransportPlugin {
@@ -120,22 +132,18 @@ impl TransportPlugin for UdpTransportPlugin {
         }
     }
 
-    fn local_locators(&self, domain_id: u32, participant_id: u32) -> Vec<Locator> {
-        let metatraffic_port =
-            PortManager::get_discovery_traffic_unicast_port(domain_id, participant_id) as u32;
-        let user_port =
-            PortManager::get_user_traffic_unicast_port(domain_id, participant_id) as u32;
+    fn advertised_metatraffic_unicast_locators(&self) -> Vec<Locator> {
+        let port = PortManager::get_discovery_traffic_unicast_port(
+            self.domain_id,
+            self.participant_id,
+        ) as u32;
+        self.udp_locators(port)
+    }
 
-        let mut locators = Vec::new();
-        for ip_str in &self.working_ips {
-            if let Ok(ip) = ip_str.parse::<Ipv4Addr>() {
-                // metatraffic (discovery) locator
-                locators.push(Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port));
-                // default (user data) locator
-                locators.push(Locator::from_ip_v4_addr_and_port(&ip, user_port));
-            }
-        }
-        locators
+    fn advertised_default_unicast_locators(&self) -> Vec<Locator> {
+        let port =
+            PortManager::get_user_traffic_unicast_port(self.domain_id, self.participant_id) as u32;
+        self.udp_locators(port)
     }
 
     fn take_discovery_multicast_source(&self) -> Option<MessageSource> {

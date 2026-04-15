@@ -94,9 +94,17 @@ impl DcpsBridge {
 
         let participant_id = socket.participant_id();
 
-        // For TCP/Hybrid, we need guid_prefix before creating transport.
+        // For TCP/Hybrid, we need guid_prefix before creating the transport.
+        // Only guid() is used from this temporary participant, so locator
+        // lists are left empty.
         let guid_prefix = {
-            let temp = Participant::new(domain_id, participant_id, socket.working_ips(), None);
+            let temp = Participant::new(
+                domain_id,
+                participant_id,
+                socket.working_ips(),
+                Vec::new(),
+                Vec::new(),
+            );
             temp.guid().prefix()
         };
 
@@ -122,16 +130,25 @@ impl DcpsBridge {
 
         socket.set_transport(transport.clone());
 
-        // TCP/Hybrid: pass the actual TCP listener port so locators are advertised correctly.
-        // UDP/SHM: returns None (no TCP listener).
-        let tcp_listener_port = transport.tcp_listener_port();
-
         // Use the transport's final participant_id (may have been incremented
         // due to unicast port conflicts with other participants on the same host).
         let participant_id = transport.participant_id();
 
-        let participant =
-            Participant::new(domain_id, participant_id, socket.working_ips(), tcp_listener_port);
+        // Ask the transport itself which locators this participant should
+        // advertise over SPDP. The plugin encapsulates the locator kind
+        // (UDP/TCP/SHM), per-NIC expansion, port formulas, and any WAN
+        // public-address override — so Participant never needs to know.
+        let metatraffic_unicast_locators =
+            transport.advertised_metatraffic_unicast_locators();
+        let default_unicast_locators = transport.advertised_default_unicast_locators();
+
+        let participant = Participant::new(
+            domain_id,
+            participant_id,
+            socket.working_ips(),
+            metatraffic_unicast_locators,
+            default_unicast_locators,
+        );
         let guid_prefix = participant.guid().prefix();
         let participant = Arc::new(participant);
 

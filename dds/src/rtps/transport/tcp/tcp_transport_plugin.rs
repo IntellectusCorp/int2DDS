@@ -57,9 +57,10 @@ impl TcpTransportPlugin {
         domain_id: u32,
         participant_id: u32,
         working_ip: String,
+        working_ips: Vec<String>,
         guid_prefix: GuidPrefix,
     ) -> io::Result<Self> {
-        Self::new_with_tls(domain_id, participant_id, working_ip, guid_prefix, None)
+        Self::new_with_tls(domain_id, participant_id, working_ip, working_ips, guid_prefix, None)
     }
 
     /// Same as [`new`] but with an optional TLS config that wraps accepted
@@ -68,6 +69,7 @@ impl TcpTransportPlugin {
         domain_id: u32,
         participant_id: u32,
         working_ip: String,
+        working_ips: Vec<String>,
         guid_prefix: GuidPrefix,
         tls_config: Option<Arc<TlsConfig>>,
     ) -> io::Result<Self> {
@@ -147,7 +149,7 @@ impl TcpTransportPlugin {
             sender,
             domain_id,
             participant_id,
-            working_ips: Vec::new(),
+            working_ips,
             listener_port,
             discovery_rx: Mutex::new(Some(discovery_rx)),
             user_data_rx: Mutex::new(Some(user_data_rx)),
@@ -155,6 +157,34 @@ impl TcpTransportPlugin {
             terminated,
             mux_thread_handle: Mutex::new(Some(handle)),
         })
+    }
+
+    /// Build TCP locators this plugin is actually listening on. Encapsulates
+    /// the WAN `INT2DDS_TCP_PUBLIC_ADDR` override so upper layers never need
+    /// to know about it.
+    fn advertised_tcp_locators(&self) -> Vec<Locator> {
+        // WAN mode: if a public address is configured, it replaces every
+        // per-NIC locator (remote peers only reach us through the public
+        // address anyway).
+        if let Some(public_addr) = crate::common::env::get_tcp_public_addr() {
+            if let std::net::IpAddr::V4(v4) = public_addr.ip() {
+                log::info!(
+                    "[TcpTransportPlugin] WAN mode: advertising public address {} instead of :{}",
+                    public_addr, self.listener_port
+                );
+                return vec![Locator::from_tcp_v4(v4, public_addr.port() as u32)];
+            }
+            log::warn!(
+                "[TcpTransportPlugin] Public address is not IPv4, falling back to LAN NICs"
+            );
+        }
+        let mut locators = Vec::new();
+        for ip_str in &self.working_ips {
+            if let Ok(ip) = ip_str.parse::<Ipv4Addr>() {
+                locators.push(Locator::from_tcp_v4(ip, self.listener_port as u32));
+            }
+        }
+        locators
     }
 }
 
@@ -185,14 +215,14 @@ impl TransportPlugin for TcpTransportPlugin {
         }
     }
 
-    fn local_locators(&self, _domain_id: u32, _participant_id: u32) -> Vec<Locator> {
-        let mut locators = Vec::new();
-        for ip_str in &self.working_ips {
-            if let Ok(ip) = ip_str.parse::<Ipv4Addr>() {
-                locators.push(Locator::from_tcp_v4(ip, self.listener_port as u32));
-            }
-        }
-        locators
+    fn advertised_metatraffic_unicast_locators(&self) -> Vec<Locator> {
+        self.advertised_tcp_locators()
+    }
+
+    fn advertised_default_unicast_locators(&self) -> Vec<Locator> {
+        // TCP multiplexes discovery and user-data over the same listener;
+        // metatraffic and default locators resolve to identical endpoints.
+        self.advertised_tcp_locators()
     }
 
     fn take_discovery_multicast_source(&self) -> Option<MessageSource> {
@@ -436,8 +466,14 @@ mod tests {
     }
 
     fn make_plugin(domain_id: u32) -> TcpTransportPlugin {
-        TcpTransportPlugin::new(domain_id, 0, "127.0.0.1".to_string(), [0u8; 12])
-            .expect("plugin creation")
+        TcpTransportPlugin::new(
+            domain_id,
+            0,
+            "127.0.0.1".to_string(),
+            vec!["127.0.0.1".to_string()],
+            [0u8; 12],
+        )
+        .expect("plugin creation")
     }
 
     #[test]
