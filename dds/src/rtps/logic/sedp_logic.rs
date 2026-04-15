@@ -1727,8 +1727,7 @@ impl SedpLogic {
                 match self.send_to_single_locator(buffer, locator.clone(), message_type) {
                     Ok(()) => (),
                     Err(e) if e.code == RtpsErrorCode::PeerDisconnected => {
-                        disconnected_participants
-                            .push(remote_participant_data.participant_guid());
+                        disconnected_participants.push(remote_participant_data.participant_guid());
                         break;
                     }
                     Err(_) => (),
@@ -1988,10 +1987,18 @@ impl UnicastMessageProcessor for SedpLogic {
 
                 if let Ok(serialized_data) = writer_data.publication_builtin_topic_data.serialize()
                 {
+                    // In case of Route Gateway:
+                    // Key of DCPSPublication is the discovered endpoint GUID, so each
+                    // remote writer maps to a distinct DDS instance. Using NIL here
+                    // collapses every publication to one instance and lets KeepLast(1)
+                    // evict earlier samples (e.g. sensor) when a later one arrives.
+                    let instance_handle = InstanceHandle::from_guid(
+                        &writer_data.publication_builtin_topic_data.endpoint_guid(),
+                    );
                     let cache_change = CacheChange::new(
                         ChangeKind::Alive,
                         writer_guid,
-                        InstanceHandle::NIL,
+                        instance_handle,
                         data.writer_sn,
                         serialized_data,
                         message_receiver.get_source_timestamp(),
@@ -2022,10 +2029,14 @@ impl UnicastMessageProcessor for SedpLogic {
 
                 if let Ok(serialized_data) = reader_data.subscription_builtin_topic_data.serialize()
                 {
+                    // Same reasoning as DCPSPublication: key is the endpoint GUID.
+                    let instance_handle = InstanceHandle::from_guid(
+                        &reader_data.subscription_builtin_topic_data.endpoint_guid(),
+                    );
                     let cache_change = CacheChange::new(
                         ChangeKind::Alive,
                         writer_guid,
-                        InstanceHandle::NIL,
+                        instance_handle,
                         data.writer_sn,
                         serialized_data,
                         message_receiver.get_source_timestamp(),

@@ -23,6 +23,7 @@ use super::builtin_topic_key::BuiltinTopicKey;
 #[derive(DdsType, Eq)]
 #[dds_type(crate_path = "crate", no_default)]
 pub struct PublicationBuiltinTopicData {
+    #[dds(key)]
     endpoint_guid: Guid,
     key: BuiltinTopicKey,
     participant_key: BuiltinTopicKey,
@@ -361,5 +362,14 @@ impl PublicationBuiltinTopicData {
             && self.user_data == other.user_data
             && self.topic_data == other.topic_data
             && self.group_data == other.group_data
+    }
+}
+
+// Required by the DdsType derive's `deserialize_key` impl, which constructs an
+// empty holder via `Default::default()` and then overwrites the key field.
+// The non-key field values are never observed.
+impl Default for PublicationBuiltinTopicData {
+    fn default() -> Self {
+        Self::new(&DataWriterQos::default(), &PublisherQos::default(), &TopicQos::default())
     }
 }

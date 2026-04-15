@@ -21,6 +21,7 @@ use crate::{
 #[derive(DdsType, Eq)]
 #[dds_type(crate_path = "crate", no_default)]
 pub struct SubscriptionBuiltinTopicData {
+    #[dds(key)]
     endpoint_guid: Guid,
     key: BuiltinTopicKey,
     participant_key: BuiltinTopicKey,
@@ -350,5 +351,14 @@ impl SubscriptionBuiltinTopicData {
             && self.topic_data == other.topic_data
             && self.group_data == other.group_data
             && self.time_based_filter == other.time_based_filter
+    }
+}
+
+// Required by the DdsType derive's `deserialize_key` impl, which constructs an
+// empty holder via `Default::default()` and then overwrites the key field.
+// The non-key field values are never observed.
+impl Default for SubscriptionBuiltinTopicData {
+    fn default() -> Self {
+        Self::new(&DataReaderQos::default(), &SubscriberQos::default(), &TopicQos::default())
     }
 }
