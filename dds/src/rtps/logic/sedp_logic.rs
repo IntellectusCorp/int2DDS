@@ -123,6 +123,7 @@ fn validate_endpoint_compatibility<L>(
     update_inconsistent_topic: impl Fn(&L),
     who: &'static str, // for log
 ) -> RtpsResult<()> {
+    let diag_qos = std::env::var("INT2DDS_DIAG_QOS_MATCH").is_ok();
     // TopicKind - reject if writer and reader disagree on keyed vs keyless
     let writer_keyed = offered.endpoint_guid().entity_kind().is_with_key();
     let reader_keyed = requested.endpoint_guid().entity_kind().is_with_key();
@@ -145,6 +146,28 @@ fn validate_endpoint_compatibility<L>(
     if !check_qos_compatibility(requested, offered) {
         if let Some(pid) = check_qos_compatibility_with_policy_id(requested, offered) {
             update_incompatible_qos(local, pid);
+            if diag_qos {
+                eprintln!(
+                    "[INT2DDS_DIAG_QOS_MATCH] incompatible who={} pid={:?} writer={:?} reader={:?} \
+requested[liveliness={:?}, lease={:?}, durability={:?}, reliability={:?}, deadline={:?}] \
+offered[liveliness={:?}, lease={:?}, durability={:?}, reliability={:?}, deadline={:?}, lifespan={:?}]",
+                    who,
+                    pid,
+                    offered.endpoint_guid(),
+                    requested.endpoint_guid(),
+                    requested.liveliness().kind,
+                    requested.liveliness().lease_duration,
+                    requested.durability().kind,
+                    requested.reliability().kind,
+                    requested.deadline().period,
+                    offered.liveliness().kind,
+                    offered.liveliness().lease_duration,
+                    offered.durability().kind,
+                    offered.reliability().kind,
+                    offered.deadline().period,
+                    offered.lifespan().duration
+                );
+            }
         }
         let err = RtpsError::new(RtpsErrorCode::QosIncompatible, format!("[QoS failed :{}]", who));
 
@@ -540,13 +563,12 @@ impl SedpLogic {
                         .get_key_hash()
                         .unwrap_or_else(|| InstanceHandle::from_guid(&endpoint_guid));
 
-                    participant.remove_unmatched_reader_from_writer(InstanceHandle::to_guid(
-                        &terminated_reader_guid,
-                    ));
+                    let reader_guid = InstanceHandle::to_guid(&terminated_reader_guid);
+                    participant.remove_unmatched_reader_from_writer(reader_guid);
 
                     if let Some(mut entry) = participant.remote_subscriptions().get_mut(&topic_name)
                     {
-                        entry.value_mut().remove(&endpoint_guid);
+                        entry.value_mut().remove(&reader_guid);
 
                         if entry.value().is_empty() {
                             drop(entry);
@@ -946,13 +968,11 @@ impl SedpLogic {
                         }
                     }
 
-                    participant.remove_unmatched_writer_from_reader(InstanceHandle::to_guid(
-                        &terminated_writer_guid,
-                    ));
+                    participant.remove_unmatched_writer_from_reader(writer_guid);
 
                     if let Some(mut entry) = participant.remote_publications().get_mut(&topic_name)
                     {
-                        entry.value_mut().remove(&endpoint_guid);
+                        entry.value_mut().remove(&writer_guid);
 
                         if entry.value().is_empty() {
                             drop(entry);
@@ -1377,22 +1397,15 @@ impl SedpLogic {
                     match buffer {
                         Ok(buffer) => {
                             for locator in reader_proxy.unicast_locator_list() {
-                                if locator.kind() == 1 {
-                                    //UDPv4
-                                    let socket_addr = SocketAddr::V4(SocketAddrV4::new(
-                                        locator.to_ip_v4_addr(),
-                                        locator.port() as u16,
-                                    ));
-                                    if let Some(ref sender) = self.sender {
-                                        if let Err(e) = sender.send(&socket_addr, &buffer) {
-                                            warn!("Failed to send SEDP heartbeat: {:?}", e);
-                                        } else {
-                                            is_sent = true;
-                                        }
-                                    } else {
-                                        debug!("UDP sender not available, skipping SEDP heartbeat");
-                                    }
-                                };
+                                if let Err(e) = self.send_to_single_locator(
+                                    &buffer,
+                                    locator.clone(),
+                                    "SEDP heartbeat",
+                                ) {
+                                    warn!("Failed to send SEDP heartbeat: {:?}", e);
+                                } else {
+                                    is_sent = true;
+                                }
                             }
                             writer.increase_heartbeat_count();
                             if writer.last_change_sequence_number() != SequenceNumber::ZERO {
