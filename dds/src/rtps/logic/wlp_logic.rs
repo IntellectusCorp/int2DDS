@@ -396,6 +396,11 @@ impl WlpLogic {
         let logic_start_time = Instant::now();
 
         debug!("send_participant_message_data called, duration: {:?}", duration);
+        if participant_message_data.kind()
+            == ParticipantMessageDataKind::AUTOMATIC_LIVELINESS_UPDATE
+        {
+            let _ = self.update_local_automatic_liveliness();
+        }
         if let Err(e) = self.send_liveliness_once(&participant_message_data) {
             error!("Failed to send liveliness: {}", e);
         }
@@ -563,7 +568,6 @@ impl WlpLogic {
         })?;
 
         debug!("send_liveliness_once called, reader_proxy count: {}", proxies_guard.len());
-
         // If no reader proxies, don't add to cache and don't send
         if proxies_guard.is_empty() {
             debug!("No reader proxies, skipping");
@@ -1218,6 +1222,21 @@ impl WlpLogic {
             .local_writers
             .iter()
             .filter(|entry| entry.value().qos.kind == LivelinessQosPolicyKind::ManualByParticipant)
+            .map(|entry| *entry.key())
+            .collect();
+
+        for guid in guids {
+            self.update_local_writer_liveliness(&guid)?;
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn update_local_automatic_liveliness(&self) -> RtpsResult<()> {
+        let guids: Vec<Guid> = self
+            .local_writers
+            .iter()
+            .filter(|entry| entry.value().qos.kind == LivelinessQosPolicyKind::Automatic)
             .map(|entry| *entry.key())
             .collect();
 
