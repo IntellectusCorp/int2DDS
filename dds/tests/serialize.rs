@@ -108,33 +108,6 @@ fn test_cdr_vec_i32() {
     assert_eq!(result, value);
 }
 
-// Option Tests - CDR
-
-#[test]
-fn test_cdr_option() {
-    // None
-    let value: Option<i32> = None;
-    let mut serializer = CdrSerializer::new(true);
-    serializer.write_encapsulation_header().unwrap();
-    value.serialize_cdr(&mut serializer).unwrap();
-
-    let bytes = serializer.into_bytes();
-    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
-    let result = Option::<i32>::deserialize_cdr(&mut deserializer).unwrap();
-    assert_eq!(result, value);
-
-    // Some
-    let value: Option<i32> = Some(42);
-    let mut serializer = CdrSerializer::new(true);
-    serializer.write_encapsulation_header().unwrap();
-    value.serialize_cdr(&mut serializer).unwrap();
-
-    let bytes = serializer.into_bytes();
-    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
-    let result = Option::<i32>::deserialize_cdr(&mut deserializer).unwrap();
-    assert_eq!(result, value);
-}
-
 // Array Tests - CDR
 
 #[test]

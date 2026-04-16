@@ -1,7 +1,7 @@
 use quote::quote;
 
 use crate::codegen::utils::{
-    get_array_size, get_serialization_method, is_map_type, parse_field_attributes,
+    get_array_size, get_serialization_method, is_map_type, is_option_type, parse_field_attributes,
     SerializationMethod,
 };
 
@@ -268,6 +268,15 @@ fn gen_serialize_code(
             gen_array_serialize("serialize_string_array", field_name, crate_path)
         }
         SerializationMethod::Fallback => {
+            if !xcdr && is_option_type(field_type) {
+                let msg = format!(
+                    "XCDR1 does not support Option<T> field '{}' (PL_CDR v1 pending T2-1); use XCDR2",
+                    field_name
+                );
+                return quote! {
+                    return Err(#crate_path::dcps::core::error::DdsError::Error(#msg.to_string()));
+                };
+            }
             let trait_path = if xcdr {
                 quote!(#crate_path::serialize::xcdr::XcdrSerialize::serialize_xcdr)
             } else {
@@ -652,6 +661,17 @@ fn gen_deserialize_code(
             }
         }
         SerializationMethod::Fallback => {
+            if !xcdr && is_option_type(field_type) {
+                let msg = format!(
+                    "XCDR1 does not support Option<T> field '{}' (PL_CDR v1 pending T2-1); use XCDR2",
+                    field_name
+                );
+                return quote! {
+                    return Err(#crate_path::dcps::core::error::DdsError::Error(#msg.to_string()));
+                    #[allow(unreachable_code)]
+                    let #field_name: #field_type = None;
+                };
+            }
             if xcdr {
                 let trait_name = quote!(#crate_path::serialize::xcdr::XcdrDeserialize);
                 let method_name = quote!(deserialize_xcdr);
