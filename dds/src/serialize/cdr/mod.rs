@@ -250,27 +250,6 @@ impl<T: CdrDeserialize> CdrDeserialize for Vec<T> {
     }
 }
 
-impl<T: CdrSerialize> CdrSerialize for Option<T> {
-    fn serialize_cdr(&self, serializer: &mut CdrSerializer) -> CdrResult<()> {
-        match self {
-            Some(value) => {
-                serializer.serialize_bool(true)?;
-                value.serialize_cdr(serializer)?;
-            }
-            None => {
-                serializer.serialize_bool(false)?;
-            }
-        }
-        Ok(())
-    }
-}
-
-impl<T: CdrDeserialize> CdrDeserialize for Option<T> {
-    fn deserialize_cdr(deserializer: &mut CdrDeserializer) -> CdrResult<Self> {
-        deserializer.deserialize_optional(|d| T::deserialize_cdr(d))
-    }
-}
-
 impl<T: CdrSerialize, const N: usize> CdrSerialize for [T; N] {
     fn serialize_cdr(&self, serializer: &mut CdrSerializer) -> CdrResult<()> {
         // Arrays are fixed size, no need to write length

@@ -277,6 +277,18 @@ pub fn is_unbounded_string(ty: &syn::Type) -> bool {
     false
 }
 
+/// Check if a type is `Option<T>` (by last path segment).
+pub fn is_option_type(ty: &syn::Type) -> bool {
+    if let syn::Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.last() {
+            if segment.ident == "Option" {
+                return matches!(segment.arguments, syn::PathArguments::AngleBracketed(_));
+            }
+        }
+    }
+    false
+}
+
 /// Check if a type is HashMap or BTreeMap
 pub fn is_map_type(ty: &syn::Type) -> bool {
     if let syn::Type::Path(type_path) = ty {

@@ -366,6 +366,7 @@ impl<'a> Xcdr2Deserializer<'a> {
     }
 
     /// Check if the next member header is a sentinel (end of mutable struct)
+    #[allow(deprecated)]
     pub fn is_at_sentinel(&self) -> bool {
         use super::is_sentinel_member_id;
 

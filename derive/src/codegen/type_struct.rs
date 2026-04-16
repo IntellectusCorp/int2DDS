@@ -2,7 +2,9 @@ use quote::quote;
 use syn::DeriveInput;
 
 use crate::codegen::union_ops::wrap_with_emheader;
-use crate::codegen::utils::{get_serialization_method, resolve_member_id, SerializationMethod};
+use crate::codegen::utils::{
+    get_serialization_method, is_option_type, resolve_member_id, SerializationMethod,
+};
 use crate::codegen::{
     generate_additional_derives, generate_field_deserialization,
     generate_field_deserialization_xcdr, generate_field_deserialization_xcdr_per_field_dheader,
@@ -800,6 +802,21 @@ fn generate_cdr_serialize_impl(
         };
     }
 
+    // XCDR1 has no spec-compliant Option<T> wire format.
+    // If any field is Option<T>, emit a stub impl that errors at runtime so discovery
+    // types (which carry Option fields but never actually use XCDR1) still compile.
+    if fields.iter().any(|f| is_option_type(&f.ty)) {
+        return quote! {
+            impl #impl_generics #crate_path::serialize::cdr::CdrSerialize for #name #ty_generics #where_clause {
+                fn serialize_cdr(&self, _serializer: &mut #crate_path::serialize::cdr::CdrSerializer) -> #crate_path::serialize::cdr::CdrResult<()> {
+                    Err(#crate_path::serialize::cdr::CdrError::SerializationError(
+                        concat!("XCDR1 does not support Option<T> fields in '", stringify!(#name), "' (PL_CDR v1 pending T2-1); use XCDR2").to_string(),
+                    ))
+                }
+            }
+        };
+    }
+
     // Call CdrSerialize::serialize_cdr for each field
     let field_calls: Vec<_> = fields
         .iter()
@@ -838,6 +855,20 @@ fn generate_cdr_deserialize_impl(
             impl #impl_generics #crate_path::serialize::cdr::CdrDeserialize for #name #ty_generics #where_clause {
                 fn deserialize_cdr(_deserializer: &mut #crate_path::serialize::cdr::CdrDeserializer) -> #crate_path::serialize::cdr::CdrResult<Self> {
                     Ok(#name {})
+                }
+            }
+        };
+    }
+
+    // XCDR1 has no spec-compliant Option<T> wire format (PL_CDR v1 tracked in T2-1).
+    // Emit a stub impl that errors at runtime for structs with Option fields.
+    if fields.iter().any(|f| is_option_type(&f.ty)) {
+        return quote! {
+            impl #impl_generics #crate_path::serialize::cdr::CdrDeserialize for #name #ty_generics #where_clause {
+                fn deserialize_cdr(_deserializer: &mut #crate_path::serialize::cdr::CdrDeserializer) -> #crate_path::serialize::cdr::CdrResult<Self> {
+                    Err(#crate_path::serialize::cdr::CdrError::DeserializationError(
+                        concat!("XCDR1 does not support Option<T> fields in '", stringify!(#name), "' (PL_CDR v1 pending T2-1); use XCDR2").to_string(),
+                    ))
                 }
             }
         };
