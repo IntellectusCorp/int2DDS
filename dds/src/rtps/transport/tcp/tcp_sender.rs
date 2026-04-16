@@ -196,13 +196,16 @@ impl TcpSender {
 
     /// Steps 2+3: PORT_RESERVE on control connection, then PORT_BIND on new connection.
     fn ensure_data(&self, physical_addr: &SocketAddr, logical_port: u16) -> io::Result<()> {
+        // Ensure control connection is healthy first. If it was stale,
+        // disconnect_peer (called by the retry in send_to_logical_port)
+        // already removed all connections for this address, so the
+        // contains_key check below sees a clean slate.
+        self.ensure_control(physical_addr)?;
+
         let key = (*physical_addr, logical_port);
         if self.connections.contains_key(&key) {
             return Ok(());
         }
-
-        // Ensure control connection exists
-        self.ensure_control(physical_addr)?;
 
         self.ensure_data_inner(physical_addr, logical_port, key)
     }
@@ -305,7 +308,40 @@ impl TcpSender {
     // ========================================================================
 
     /// Send RTPS data to a logical port. Performs handshake if needed.
+    ///
+    /// If the write fails with BrokenPipe / ConnectionReset (peer went
+    /// away), the dead connection is purged and **one automatic retry** is
+    /// attempted. The retry re-runs the full ensure_control → ensure_data
+    /// → write sequence, which opens a fresh TCP connection to the same
+    /// address. This lets a restarted remote peer (new GUID, same
+    /// address) be discovered on the very next SPDP send cycle instead of
+    /// having to wait for the keepalive timeout to expire.
     pub(crate) fn send_to_logical_port(
+        &self,
+        addr: &SocketAddr,
+        logical_port: u16,
+        data: &[u8],
+    ) -> io::Result<usize> {
+        match self.send_to_logical_port_once(addr, logical_port, data) {
+            Ok(n) => Ok(n),
+            Err(e)
+                if e.kind() == ErrorKind::BrokenPipe
+                    || e.kind() == ErrorKind::ConnectionReset
+                    || e.kind() == ErrorKind::ConnectionAborted =>
+            {
+                debug!(
+                    "TcpSender: send to {:?}:{} failed ({}), reconnecting and retrying",
+                    addr, logical_port, e
+                );
+                self.disconnect_peer(addr);
+                // One retry — if this also fails, propagate the error.
+                self.send_to_logical_port_once(addr, logical_port, data)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn send_to_logical_port_once(
         &self,
         addr: &SocketAddr,
         logical_port: u16,
@@ -332,7 +368,6 @@ impl TcpSender {
                 Ok(data.len())
             }
             Err(e) => {
-                // BrokenPipe / ConnectionReset → peer is dead, clean up everything
                 if e.kind() == ErrorKind::BrokenPipe
                     || e.kind() == ErrorKind::ConnectionReset
                     || e.kind() == ErrorKind::ConnectionAborted
