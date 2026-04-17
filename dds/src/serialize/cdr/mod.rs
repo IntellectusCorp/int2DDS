@@ -6,7 +6,7 @@ pub mod xcdr2;
 use crate::serialize::core::{SerializationError, SerializationResult};
 
 // Re-export v1 (CDR) types
-pub use xcdr1::{CdrDeserializer, CdrSerializer};
+pub use xcdr1::{CdrDeserializer, CdrSerializer, PlCdrMemberHeader};
 
 // Re-export v2 (XCDR2) types
 pub use xcdr2::{Xcdr2Deserializer, Xcdr2Serializer};
@@ -52,20 +52,13 @@ pub struct MemberHeader {
     pub must_understand: bool,
 }
 
-#[deprecated(note = "XCDR2 MUTABLE per DDS-XTypes §7.4.3.4 does not require a sentinel; \
-            removal scheduled for Tier 2")]
-pub const MEMBER_ID_SENTINEL: u32 = 0x3F02;
-
-#[inline]
-#[deprecated(note = "see MEMBER_ID_SENTINEL")]
-pub fn is_sentinel_member_id(member_id: u32) -> bool {
-    #[allow(deprecated)]
-    {
-        member_id == MEMBER_ID_SENTINEL
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LcHint {
+    Auto,
+    SeqMul4,
+    SeqMul8,
 }
 
-/// EMHEADER Length Code values (LC field in bits 30-28)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LengthCode {
     /// LC 0-3: Length is directly in lower 16 bits (0-65535 bytes)
@@ -271,6 +264,14 @@ impl<T: CdrDeserialize, const N: usize> CdrDeserialize for [T; N] {
             SerializationError::DeserializationError("Failed to convert Vec to array".to_string())
         })
     }
+}
+
+pub trait XcdrSerializeMembers {
+    fn serialize_xcdr_members(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()>;
+}
+
+pub trait XcdrDeserializeMembers: Sized {
+    fn deserialize_xcdr_members(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self>;
 }
 
 /// Trait for types that can be serialized using XCDR
@@ -607,6 +608,18 @@ impl<T: XcdrSerialize> XcdrSerialize for Box<T> {
 impl<T: XcdrDeserialize> XcdrDeserialize for Box<T> {
     fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
         Ok(Box::new(T::deserialize_xcdr(deserializer)?))
+    }
+}
+
+impl<T: XcdrSerializeMembers> XcdrSerializeMembers for Box<T> {
+    fn serialize_xcdr_members(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()> {
+        (**self).serialize_xcdr_members(serializer)
+    }
+}
+
+impl<T: XcdrDeserializeMembers> XcdrDeserializeMembers for Box<T> {
+    fn deserialize_xcdr_members(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
+        Ok(Box::new(T::deserialize_xcdr_members(deserializer)?))
     }
 }
 
