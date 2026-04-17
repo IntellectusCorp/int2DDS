@@ -19,6 +19,8 @@ pub(crate) struct QosProfile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) base_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) is_default_profile: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) domain_participant_qos:
         Option<SingleOrSeq<DomainParticipantQos, DomainParticipantQosSeq>>,
     #[serde(skip_serializing_if = "Option::is_none")]

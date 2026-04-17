@@ -16,6 +16,7 @@ macro_rules! impl_primitive_serialization {
     ) => {
         $(
             impl $serialize_trait for $ty {
+                const IS_PRIMITIVE: bool = true;
                 #[inline]
                 fn $serialize_method(&self, serializer: &mut $serializer) -> $result<()> {
                     serializer.$ser_fn(*self)
@@ -23,6 +24,7 @@ macro_rules! impl_primitive_serialization {
             }
 
             impl $deserialize_trait for $ty {
+                const IS_PRIMITIVE: bool = true;
                 #[inline]
                 fn $deserialize_method(deserializer: &mut $deserializer) -> $result<Self> {
                     deserializer.$de_fn()

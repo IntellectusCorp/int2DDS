@@ -1,21 +1,27 @@
 //! QoS Profile Publisher Example
 //!
-//! This example demonstrates how to use QoS profiles loaded from a JSON file
-//! to create DDS entities with predefined QoS settings.
+//! Demonstrates QoS profile auto-loading via `DDS_QOS_PROFILE`.
+//! Entities are created with `_QOS_DEFAULT` sentinels — the loaded profile
+//! (`ReliableProfile`) is applied automatically.
 //!
-//! Run with:
 //! ```bash
-//! cargo run --example qos_profile_publisher
+//! DDS_QOS_PROFILE=dds/examples/qos_profile/qos_profiles.json \
+//!     cargo run --example qos_profile_publisher
 //! ```
 
 use std::sync::Arc;
 
 use int2dds::{
-    common::instance_handle::InstanceHandle,
-    domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
+    common::{env::DEFAULT_DOMAIN_ID, instance_handle::InstanceHandle},
+    core::time::Duration,
+    dcps::infrastructure::wait_set::WaitSet,
+    domain::{domain_participant_factory::DomainParticipantFactory, qos::PARTICIPANT_QOS_DEFAULT},
     infrastructure::status::StatusMask,
-    publication::data_writer_listener::DataWriterListener,
-    topic::type_support::DdsType,
+    publication::{
+        data_writer_listener::DataWriterListener,
+        qos::{DATAWRITER_QOS_DEFAULT, PUBLISHER_QOS_DEFAULT},
+    },
+    topic::{qos::TOPIC_QOS_DEFAULT, type_support::DdsType},
 };
 
 #[derive(DdsType)]
@@ -45,70 +51,58 @@ impl DataWriterListener for PublisherListener {
 }
 
 fn main() {
-    let domain_id = 0;
-
-    // Get the DomainParticipantFactory singleton
+    let domain_id = DEFAULT_DOMAIN_ID;
     let factory = DomainParticipantFactory::get_instance();
 
-    // Load QoS profiles from JSON file
-    // The path is relative to where the executable is run from
-    let profile_path = "dds/examples/qos_profile/qos_profiles.json";
-    if let Err(e) = factory.load_profiles(&[profile_path]) {
-        eprintln!("Failed to load QoS profiles: {:?}", e);
-        eprintln!("Make sure to run from the project root directory.");
-        return;
+    if std::env::var("DDS_QOS_PROFILE").is_err() {
+        eprintln!("[Publisher] WARNING: DDS_QOS_PROFILE is not set.");
+        eprintln!("           Set DDS_QOS_PROFILE=dds/examples/qos_profile/qos_profiles.json");
     }
-    println!("[Publisher] QoS profiles loaded from: {}", profile_path);
 
-    // Create DomainParticipant with default QoS
+    println!("[Publisher] domain_id = {}", domain_id);
+
     let participant = factory
-        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+        .create_participant(domain_id, PARTICIPANT_QOS_DEFAULT, None, StatusMask::default())
         .expect("Failed to create participant");
 
-    // Create Topic using QoS from profile
     let topic = participant
-        .create_topic_with_profile::<HelloWorld>(
+        .create_topic::<HelloWorld>(
             "HelloWorldTopic",
             "HelloWorld",
-            "HelloWorldLibrary::ReliableProfile",
+            TOPIC_QOS_DEFAULT,
             None,
             StatusMask::default(),
         )
         .expect("Failed to create topic");
-    println!("[Publisher] Topic created with ReliableProfile QoS");
 
-    // Create Publisher using QoS from profile
     let publisher = participant
-        .create_publisher_with_profile(
-            "HelloWorldLibrary::ReliableProfile",
-            None,
-            StatusMask::default(),
-        )
+        .create_publisher(PUBLISHER_QOS_DEFAULT, None, StatusMask::default())
         .expect("Failed to create publisher");
-    println!("[Publisher] Publisher created with ReliableProfile QoS");
 
-    // Create DataWriter using QoS from profile
     let writer = publisher
-        .create_datawriter_with_profile::<HelloWorld>(
+        .create_datawriter::<HelloWorld>(
             &topic,
-            "HelloWorldLibrary::ReliableProfile",
+            DATAWRITER_QOS_DEFAULT,
             Some(Arc::new(PublisherListener)),
             StatusMask::default(),
         )
         .expect("Failed to create datawriter");
-    println!("[Publisher] DataWriter created with ReliableProfile QoS");
 
-    // Print the applied QoS settings
     let qos = writer.get_qos().expect("Failed to get QoS");
-    println!("[Publisher] DataWriter QoS:");
+    println!("[Publisher] DataWriter QoS in effect:");
     println!("  - Reliability: {:?}", qos.reliability.kind);
-    println!("  - History: {:?}", qos.history.kind);
-    println!("  - Durability: {:?}", qos.durability.kind);
+    println!("  - Durability:  {:?}", qos.durability.kind);
+    println!("  - History:     {:?} (depth = {:?})", qos.history.kind, qos.history.depth());
 
-    println!("\n[Publisher] Publishing messages...");
-    println!("Press Ctrl+C to stop.\n");
+    println!("\n[Publisher] Publishing messages... (Ctrl+C to stop)\n");
 
-    // Publish data
+    let mut condition = writer.get_statuscondition().unwrap().clone();
+    condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
+    let wait_set = WaitSet::new();
+    wait_set.attach_condition(condition).unwrap();
+    wait_set.wait(Duration::infinite()).unwrap();
+    writer.get_publication_matched_status().unwrap();
+
     for i in 0.. {
         let data = HelloWorld { id: i, message: format!("Hello from QoS Profile example! #{}", i) };
 

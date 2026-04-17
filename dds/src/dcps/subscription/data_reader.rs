@@ -570,6 +570,10 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     ///
     /// ```no_run
     /// # use int2dds::domain::domain_participant_factory::DomainParticipantFactory;
+    /// # use int2dds::domain::qos::DomainParticipantQos;
+    /// # use int2dds::infrastructure::status::StatusMask;
+    /// # use int2dds::topic::qos::TopicQos;
+    /// # use int2dds::subscription::qos::{SubscriberQos, DataReaderQos};
     /// # use int2dds::topic::type_support::DdsType;
     /// # use int2dds::subscription::sample_info::SampleStateKind;
     /// # use int2dds::subscription::sample_info::ViewStateKind;
@@ -578,10 +582,10 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     /// # #[derive(DdsType)]
     /// # struct MyData { #[dds(key)] id: u32, message: String }
     /// # let factory = DomainParticipantFactory::get_instance();
-    /// # let participant = factory.create_participant(0, Default::default(), None, Default::default()).unwrap();
-    /// # let topic = participant.create_topic::<MyData>("MyTopic", "MyData", Default::default(), None, Default::default()).unwrap();
-    /// # let subscriber = participant.create_subscriber(Default::default(), None, Default::default()).unwrap();
-    /// # let reader = subscriber.create_datareader::<MyData>(&topic, Default::default(), None, Default::default()).unwrap();
+    /// # let participant = factory.create_participant(0, DomainParticipantQos::default(), None, StatusMask::default()).unwrap();
+    /// # let topic = participant.create_topic::<MyData>("MyTopic", "MyData", TopicQos::default(), None, StatusMask::default()).unwrap();
+    /// # let subscriber = participant.create_subscriber(SubscriberQos::default(), None, StatusMask::default()).unwrap();
+    /// # let reader = subscriber.create_datareader::<MyData>(&topic, DataReaderQos::default(), None, StatusMask::default()).unwrap();
     /// // Take some samples
     /// let samples = reader.take(
     ///     LENGTH_UNLIMITED,
@@ -652,15 +656,19 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     ///
     /// ```no_run
     /// # use int2dds::domain::domain_participant_factory::DomainParticipantFactory;
+    /// # use int2dds::domain::qos::DomainParticipantQos;
+    /// # use int2dds::infrastructure::status::StatusMask;
+    /// # use int2dds::topic::qos::TopicQos;
+    /// # use int2dds::subscription::qos::{SubscriberQos, DataReaderQos};
     /// # use int2dds::topic::type_support::DdsType;
     /// # use int2dds::common::instance_handle::InstanceHandle;
     /// # #[derive(DdsType)]
     /// # struct MyData { #[dds(key)] id: u32, message: String }
     /// # let factory = DomainParticipantFactory::get_instance();
-    /// # let participant = factory.create_participant(0, Default::default(), None, Default::default()).unwrap();
-    /// # let topic = participant.create_topic::<MyData>("MyTopic", "MyData", Default::default(), None, Default::default()).unwrap();
-    /// # let subscriber = participant.create_subscriber(Default::default(), None, Default::default()).unwrap();
-    /// # let reader = subscriber.create_datareader::<MyData>(&topic, Default::default(), None, Default::default()).unwrap();
+    /// # let participant = factory.create_participant(0, DomainParticipantQos::default(), None, StatusMask::default()).unwrap();
+    /// # let topic = participant.create_topic::<MyData>("MyTopic", "MyData", TopicQos::default(), None, StatusMask::default()).unwrap();
+    /// # let subscriber = participant.create_subscriber(SubscriberQos::default(), None, StatusMask::default()).unwrap();
+    /// # let reader = subscriber.create_datareader::<MyData>(&topic, DataReaderQos::default(), None, StatusMask::default()).unwrap();
     /// let instance = MyData { id: 1, message: String::new() };
     ///
     /// // Look up the handle for this instance
