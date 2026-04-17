@@ -673,7 +673,7 @@ fn position_reader_at_field<'a>(
             let dh_end = reader.get_position() + object_size as usize;
             let want_id = target_member.common.member_id;
             loop {
-                if reader.get_position() >= dh_end || reader.is_at_sentinel() {
+                if reader.get_position() >= dh_end {
                     return Err(INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND);
                 }
                 let (id, data_len) =
