@@ -27,6 +27,25 @@ pub fn wrap_with_emheader(
     }
 }
 
+pub fn wrap_with_emheader_lc(
+    member_id_expr: TokenStream,
+    must_understand: bool,
+    lc_hint: TokenStream,
+    payload: TokenStream,
+) -> TokenStream {
+    quote! {
+        serializer.write_member_with_lc(
+            (#member_id_expr) as u32,
+            #must_understand,
+            #lc_hint,
+            |serializer| -> ::std::result::Result<(), _> {
+                #payload
+                Ok(())
+            },
+        )?;
+    }
+}
+
 /// Generate CdrSerialize implementation for union (enum with data)
 pub fn generate_union_cdr_serialize_impl(
     name: &syn::Ident,

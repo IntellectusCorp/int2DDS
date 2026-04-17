@@ -289,7 +289,21 @@ pub fn is_option_type(ty: &syn::Type) -> bool {
     false
 }
 
-/// Check if a type is HashMap or BTreeMap
+pub fn extract_option_inner_type(ty: &syn::Type) -> Option<syn::Type> {
+    if let syn::Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.last() {
+            if segment.ident == "Option" {
+                if let syn::PathArguments::AngleBracketed(ref args) = segment.arguments {
+                    if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                        return Some(inner.clone());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 pub fn is_map_type(ty: &syn::Type) -> bool {
     if let syn::Type::Path(type_path) = ty {
         if let Some(segment) = type_path.path.segments.last() {
