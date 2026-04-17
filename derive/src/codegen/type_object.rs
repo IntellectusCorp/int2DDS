@@ -6,15 +6,43 @@ use quote::quote;
 
 use crate::codegen::type_config::DdsTypeConfig;
 use crate::codegen::utils::{
-    get_serialization_method, parse_field_attributes, resolve_member_id, SerializationMethod,
+    get_discriminant_value, get_serialization_method, get_variant_type, parse_field_attributes,
+    resolve_member_id, variant_has_data, DiscriminantType, SerializationMethod,
 };
 
 /// Generate TypeIdentifier expression for a Rust type.
+///
+/// `as_char`: when true and the type is `u8` / `[u8; N]`, advertise it as
+/// `Char8` (resp. `Char8` array element) in XTypes metadata so that codegen
+/// from other languages — which keep IDL `char` as native char — can match.
 fn type_to_identifier(
     ty: &syn::Type,
     crate_path: &proc_macro2::TokenStream,
+    as_char: bool,
 ) -> proc_macro2::TokenStream {
     let method = get_serialization_method(ty);
+
+    if as_char {
+        // Override only u8 / [u8; N] cases. Other types fall through to the
+        // normal mapping below.
+        if matches!(method, SerializationMethod::U8) {
+            return quote! { #crate_path::xtypes::TypeIdentifier::Char8 };
+        }
+        if matches!(method, SerializationMethod::U8Array) {
+            if let syn::Type::Array(array) = ty {
+                let size = &array.len;
+                return quote! {
+                    #crate_path::xtypes::TypeIdentifier::PlainArrayLarge {
+                        header: #crate_path::xtypes::PlainCollectionHeader::default(),
+                        array_bound_seq: vec![#size as u32],
+                        element_identifier: Box::new(
+                            #crate_path::xtypes::TypeIdentifier::Char8
+                        ),
+                    }
+                };
+            }
+        }
+    }
 
     match method {
         SerializationMethod::Bool => quote! { #crate_path::xtypes::TypeIdentifier::Boolean },
@@ -49,7 +77,7 @@ fn type_to_identifier(
                 if let Some(segment) = type_path.path.segments.last() {
                     if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
                         if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
-                            let inner_id = type_to_identifier(inner_ty, crate_path);
+                            let inner_id = type_to_identifier(inner_ty, crate_path, false);
                             return quote! {
                                 #crate_path::xtypes::TypeIdentifier::PlainSequenceLarge {
                                     header: #crate_path::xtypes::PlainCollectionHeader::default(),
@@ -79,7 +107,7 @@ fn type_to_identifier(
         | SerializationMethod::StringArray => {
             // Arrays - get size from type
             if let syn::Type::Array(array) = ty {
-                let inner_id = type_to_identifier(&array.elem, crate_path);
+                let inner_id = type_to_identifier(&array.elem, crate_path, false);
                 let size = &array.len;
                 return quote! {
                     #crate_path::xtypes::TypeIdentifier::PlainArrayLarge {
@@ -144,7 +172,7 @@ pub fn generate_has_type_object_impl(
             let field_name_str = field_name.to_string();
             let field_config = parse_field_attributes(field);
             let member_id = resolve_member_id(&field_config, &field_name_str, index, autoid);
-            let type_id = type_to_identifier(&field.ty, crate_path);
+            let type_id = type_to_identifier(&field.ty, crate_path, field_config.as_char);
 
             let is_key = field_config.key;
             let is_optional = field_config.optional;
@@ -178,7 +206,7 @@ pub fn generate_has_type_object_impl(
             let field_name_str = field_name.to_string();
             let field_config = parse_field_attributes(field);
             let member_id = resolve_member_id(&field_config, &field_name_str, index, autoid);
-            let type_id = type_to_identifier(&field.ty, crate_path);
+            let type_id = type_to_identifier(&field.ty, crate_path, field_config.as_char);
 
             let is_key = field_config.key;
             let is_optional = field_config.optional;
@@ -203,18 +231,17 @@ pub fn generate_has_type_object_impl(
         })
         .collect();
 
-    // Determine extensibility kind
-    let ext_kind = match &type_config.extensibility {
-        Some(crate::codegen::type_config::ExtensibilityKind::Final) => {
+    // Determine extensibility kind (default: Appendable)
+    let ext_kind = match type_config.extensibility.unwrap_or_default() {
+        crate::codegen::type_config::ExtensibilityKind::Final => {
             quote! { #crate_path::xtypes::ExtensibilityKind::Final }
         }
-        Some(crate::codegen::type_config::ExtensibilityKind::Appendable) => {
+        crate::codegen::type_config::ExtensibilityKind::Appendable => {
             quote! { #crate_path::xtypes::ExtensibilityKind::Appendable }
         }
-        Some(crate::codegen::type_config::ExtensibilityKind::Mutable) => {
+        crate::codegen::type_config::ExtensibilityKind::Mutable => {
             quote! { #crate_path::xtypes::ExtensibilityKind::Mutable }
         }
-        None => quote! { #crate_path::xtypes::ExtensibilityKind::Final },
     };
 
     let impl_generics = &gc.impl_generics;
@@ -355,6 +382,284 @@ pub fn generate_has_type_object_enum_impl(
                 );
                 #(enum_type.add_literal(#complete_literals);)*
                 #crate_path::xtypes::CompleteTypeObject::Enum(enum_type)
+            }
+
+            fn dds_type_name() -> &'static str {
+                #type_name_str
+            }
+        }
+    }
+}
+
+/// Generate HasTypeObject implementation for a union (enum with data).
+pub fn generate_has_type_object_union_impl(
+    name: &syn::Ident,
+    variants: &syn::punctuated::Punctuated<syn::Variant, syn::token::Comma>,
+    type_config: &DdsTypeConfig,
+    disc_type: DiscriminantType,
+) -> proc_macro2::TokenStream {
+    let crate_path = &type_config.crate_path;
+    let type_name_str = name.to_string();
+
+    let disc_type_id = match disc_type {
+        DiscriminantType::I32 => quote! { #crate_path::xtypes::TypeIdentifier::Int32 },
+        DiscriminantType::I16 => quote! { #crate_path::xtypes::TypeIdentifier::Int16 },
+        DiscriminantType::U8 => quote! { #crate_path::xtypes::TypeIdentifier::Byte },
+        DiscriminantType::Bool => quote! { #crate_path::xtypes::TypeIdentifier::Boolean },
+    };
+
+    let minimal_members: Vec<_> = variants
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| variant_has_data(v))
+        .map(|(index, variant)| {
+            let variant_name_str = variant.ident.to_string();
+            let disc_value = get_discriminant_value(variant, index) as i32;
+            let member_type_id = match get_variant_type(variant) {
+                Some(ty) => type_to_identifier(ty, crate_path, false),
+                None => quote! { #crate_path::xtypes::TypeIdentifier::None },
+            };
+
+            quote! {
+                #crate_path::xtypes::MinimalUnionMember::new(
+                    #index as u32,
+                    #crate_path::xtypes::MemberFlag::default(),
+                    #member_type_id,
+                    vec![#disc_value],
+                    #variant_name_str,
+                )
+            }
+        })
+        .collect();
+
+    let complete_members: Vec<_> = variants
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| variant_has_data(v))
+        .map(|(index, variant)| {
+            let variant_name_str = variant.ident.to_string();
+            let disc_value = get_discriminant_value(variant, index) as i32;
+            let member_type_id = match get_variant_type(variant) {
+                Some(ty) => type_to_identifier(ty, crate_path, false),
+                None => quote! { #crate_path::xtypes::TypeIdentifier::None },
+            };
+
+            quote! {
+                #crate_path::xtypes::CompleteUnionMember::new(
+                    #index as u32,
+                    #crate_path::xtypes::MemberFlag::default(),
+                    #member_type_id,
+                    vec![#disc_value],
+                    #variant_name_str.to_string(),
+                )
+            }
+        })
+        .collect();
+
+    quote! {
+        impl #crate_path::xtypes::HasTypeObject for #name {
+            fn type_identifier() -> #crate_path::xtypes::TypeIdentifier {
+                static TYPE_ID: std::sync::OnceLock<#crate_path::xtypes::TypeIdentifier> = std::sync::OnceLock::new();
+                TYPE_ID.get_or_init(|| {
+                    let complete = Self::complete_type_object();
+                    let type_obj = #crate_path::xtypes::TypeObject::Complete(complete);
+                    let hash = type_obj.compute_hash();
+                    #crate_path::xtypes::TypeIdentifier::CompleteTypeId(hash)
+                }).clone()
+            }
+
+            fn minimal_type_object() -> #crate_path::xtypes::MinimalTypeObject {
+                let mut union_type = #crate_path::xtypes::MinimalUnionType::new(
+                    #crate_path::xtypes::TypeFlag::default(),
+                    #crate_path::xtypes::MemberFlag::default(),
+                    #disc_type_id,
+                );
+                #(union_type.add_member(#minimal_members);)*
+                #crate_path::xtypes::MinimalTypeObject::Union(union_type)
+            }
+
+            fn complete_type_object() -> #crate_path::xtypes::CompleteTypeObject {
+                let mut union_type = #crate_path::xtypes::CompleteUnionType::new(
+                    #crate_path::xtypes::TypeFlag::default(),
+                    #crate_path::xtypes::MemberFlag::default(),
+                    #disc_type_id,
+                    #type_name_str.to_string(),
+                );
+                #(union_type.add_member(#complete_members);)*
+                #crate_path::xtypes::CompleteTypeObject::Union(union_type)
+            }
+
+            fn dds_type_name() -> &'static str {
+                #type_name_str
+            }
+        }
+    }
+}
+
+/// Generate HasTypeObject implementation for a bitmask enum.
+pub fn generate_has_type_object_bitmask_impl(
+    name: &syn::Ident,
+    variants: &syn::punctuated::Punctuated<syn::Variant, syn::token::Comma>,
+    type_config: &DdsTypeConfig,
+) -> proc_macro2::TokenStream {
+    let crate_path = &type_config.crate_path;
+    let type_name_str = name.to_string();
+    let bit_bound = type_config.bit_bound.unwrap_or(32) as u16;
+
+    let minimal_flags: Vec<_> = variants
+        .iter()
+        .enumerate()
+        .map(|(index, variant)| {
+            let variant_name_str = variant.ident.to_string();
+            let position = crate::codegen::utils::get_bitmask_position(variant, index) as u16;
+
+            quote! {
+                #crate_path::xtypes::MinimalBitflag::new(
+                    #position,
+                    #crate_path::xtypes::MemberFlag::default(),
+                    #variant_name_str,
+                )
+            }
+        })
+        .collect();
+
+    let complete_flags: Vec<_> = variants
+        .iter()
+        .enumerate()
+        .map(|(index, variant)| {
+            let variant_name_str = variant.ident.to_string();
+            let position = crate::codegen::utils::get_bitmask_position(variant, index) as u16;
+
+            quote! {
+                #crate_path::xtypes::CompleteBitflag::new(
+                    #position,
+                    #crate_path::xtypes::MemberFlag::default(),
+                    #variant_name_str.to_string(),
+                )
+            }
+        })
+        .collect();
+
+    quote! {
+        impl #crate_path::xtypes::HasTypeObject for #name {
+            fn type_identifier() -> #crate_path::xtypes::TypeIdentifier {
+                static TYPE_ID: std::sync::OnceLock<#crate_path::xtypes::TypeIdentifier> = std::sync::OnceLock::new();
+                TYPE_ID.get_or_init(|| {
+                    let complete = Self::complete_type_object();
+                    let type_obj = #crate_path::xtypes::TypeObject::Complete(complete);
+                    let hash = type_obj.compute_hash();
+                    #crate_path::xtypes::TypeIdentifier::CompleteTypeId(hash)
+                }).clone()
+            }
+
+            fn minimal_type_object() -> #crate_path::xtypes::MinimalTypeObject {
+                let mut bitmask_type = #crate_path::xtypes::MinimalBitmaskType::new(
+                    #crate_path::xtypes::TypeFlag::default(),
+                    #bit_bound,
+                );
+                #(bitmask_type.add_flag(#minimal_flags);)*
+                #crate_path::xtypes::MinimalTypeObject::Bitmask(bitmask_type)
+            }
+
+            fn complete_type_object() -> #crate_path::xtypes::CompleteTypeObject {
+                let mut bitmask_type = #crate_path::xtypes::CompleteBitmaskType::new(
+                    #crate_path::xtypes::TypeFlag::default(),
+                    #type_name_str.to_string(),
+                    #bit_bound,
+                );
+                #(bitmask_type.add_flag(#complete_flags);)*
+                #crate_path::xtypes::CompleteTypeObject::Bitmask(bitmask_type)
+            }
+
+            fn dds_type_name() -> &'static str {
+                #type_name_str
+            }
+        }
+    }
+}
+
+/// Generate HasTypeObject implementation for a bitset struct.
+pub fn generate_has_type_object_bitset_impl(
+    name: &syn::Ident,
+    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
+    type_config: &DdsTypeConfig,
+) -> proc_macro2::TokenStream {
+    let crate_path = &type_config.crate_path;
+    let type_name_str = name.to_string();
+
+    let mut position: u16 = 0;
+    let minimal_fields: Vec<_> = fields
+        .iter()
+        .map(|field| {
+            let field_name = field.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
+            let attrs = parse_field_attributes(field);
+            let bitcount = attrs.bitfield.unwrap_or(1) as u8;
+            let field_type_id = type_to_identifier(&field.ty, crate_path, false);
+            let pos = position;
+            position += bitcount as u16;
+
+            quote! {
+                #crate_path::xtypes::MinimalBitfield::new(
+                    #pos,
+                    #crate_path::xtypes::MemberFlag::default(),
+                    #bitcount,
+                    #field_type_id,
+                    #field_name,
+                )
+            }
+        })
+        .collect();
+
+    position = 0;
+    let complete_fields: Vec<_> = fields
+        .iter()
+        .map(|field| {
+            let field_name = field.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
+            let attrs = parse_field_attributes(field);
+            let bitcount = attrs.bitfield.unwrap_or(1) as u8;
+            let field_type_id = type_to_identifier(&field.ty, crate_path, false);
+            let pos = position;
+            position += bitcount as u16;
+
+            quote! {
+                #crate_path::xtypes::CompleteBitfield::new(
+                    #pos,
+                    #crate_path::xtypes::MemberFlag::default(),
+                    #bitcount,
+                    #field_type_id,
+                    #field_name.to_string(),
+                )
+            }
+        })
+        .collect();
+
+    quote! {
+        impl #crate_path::xtypes::HasTypeObject for #name {
+            fn type_identifier() -> #crate_path::xtypes::TypeIdentifier {
+                static TYPE_ID: std::sync::OnceLock<#crate_path::xtypes::TypeIdentifier> = std::sync::OnceLock::new();
+                TYPE_ID.get_or_init(|| {
+                    let complete = Self::complete_type_object();
+                    let type_obj = #crate_path::xtypes::TypeObject::Complete(complete);
+                    let hash = type_obj.compute_hash();
+                    #crate_path::xtypes::TypeIdentifier::CompleteTypeId(hash)
+                }).clone()
+            }
+
+            fn minimal_type_object() -> #crate_path::xtypes::MinimalTypeObject {
+                let mut bitset_type = #crate_path::xtypes::MinimalBitsetType::new(
+                    #crate_path::xtypes::TypeFlag::default(),
+                );
+                #(bitset_type.add_field(#minimal_fields);)*
+                #crate_path::xtypes::MinimalTypeObject::Bitset(bitset_type)
+            }
+
+            fn complete_type_object() -> #crate_path::xtypes::CompleteTypeObject {
+                let mut bitset_type = #crate_path::xtypes::CompleteBitsetType::new(
+                    #crate_path::xtypes::TypeFlag::default(),
+                    #type_name_str.to_string(),
+                );
+                #(bitset_type.add_field(#complete_fields);)*
+                #crate_path::xtypes::CompleteTypeObject::Bitset(bitset_type)
             }
 
             fn dds_type_name() -> &'static str {

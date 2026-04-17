@@ -9,24 +9,28 @@ use crate::serialize::{
 /// Provides default implementations that work for both CdrSerializer and Xcdr2Serializer
 pub trait PrimitiveSerialize: CdrSerializerCommon {
     /// Serialize boolean
+    #[inline]
     fn serialize_bool(&mut self, value: bool) -> Result<(), CdrError> {
         self.buffer_mut().push(if value { 1 } else { 0 });
         Ok(())
     }
 
     /// Serialize 8-bit signed integer
+    #[inline]
     fn serialize_i8(&mut self, value: i8) -> Result<(), CdrError> {
         self.buffer_mut().push(value as u8);
         Ok(())
     }
 
     /// Serialize 8-bit unsigned integer
+    #[inline]
     fn serialize_u8(&mut self, value: u8) -> Result<(), CdrError> {
         self.buffer_mut().push(value);
         Ok(())
     }
 
     /// Serialize 16-bit signed integer
+    #[inline]
     fn serialize_i16(&mut self, value: i16) -> Result<(), CdrError> {
         self.align(2);
         let bytes = to_bytes_i16(value, self.endianness());
@@ -35,6 +39,7 @@ pub trait PrimitiveSerialize: CdrSerializerCommon {
     }
 
     /// Serialize 16-bit unsigned integer
+    #[inline]
     fn serialize_u16(&mut self, value: u16) -> Result<(), CdrError> {
         self.align(2);
         let bytes = to_bytes_u16(value, self.endianness());
@@ -43,6 +48,7 @@ pub trait PrimitiveSerialize: CdrSerializerCommon {
     }
 
     /// Serialize 32-bit signed integer
+    #[inline]
     fn serialize_i32(&mut self, value: i32) -> Result<(), CdrError> {
         self.align(4);
         let bytes = to_bytes_i32(value, self.endianness());
@@ -51,6 +57,7 @@ pub trait PrimitiveSerialize: CdrSerializerCommon {
     }
 
     /// Serialize 32-bit unsigned integer
+    #[inline]
     fn serialize_u32(&mut self, value: u32) -> Result<(), CdrError> {
         self.align(4);
         let bytes = to_bytes_u32(value, self.endianness());
@@ -59,6 +66,7 @@ pub trait PrimitiveSerialize: CdrSerializerCommon {
     }
 
     /// Serialize 64-bit signed integer
+    #[inline]
     fn serialize_i64(&mut self, value: i64) -> Result<(), CdrError> {
         self.align(8);
         let bytes = to_bytes_i64(value, self.endianness());
@@ -67,6 +75,7 @@ pub trait PrimitiveSerialize: CdrSerializerCommon {
     }
 
     /// Serialize 64-bit unsigned integer
+    #[inline]
     fn serialize_u64(&mut self, value: u64) -> Result<(), CdrError> {
         self.align(8);
         let bytes = to_bytes_u64(value, self.endianness());
@@ -75,6 +84,7 @@ pub trait PrimitiveSerialize: CdrSerializerCommon {
     }
 
     /// Serialize 32-bit floating point
+    #[inline]
     fn serialize_f32(&mut self, value: f32) -> Result<(), CdrError> {
         self.align(4);
         let bytes = to_bytes_f32(value, self.endianness());
@@ -83,6 +93,7 @@ pub trait PrimitiveSerialize: CdrSerializerCommon {
     }
 
     /// Serialize 64-bit floating point
+    #[inline]
     fn serialize_f64(&mut self, value: f64) -> Result<(), CdrError> {
         self.align(8);
         let bytes = to_bytes_f64(value, self.endianness());

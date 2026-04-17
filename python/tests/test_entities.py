@@ -48,7 +48,7 @@ class TestMessage:
     value: int = 0
     text: str = ""
 
-    def _serialize_cdr(self) -> bytes:
+    def _serialize_cdr(self, xcdr2: bool = True) -> bytes:
         w = CdrWriter(extensibility=self._extensibility)
         w.write_i32(self.value)
         w.write_string(self.text)
@@ -85,7 +85,7 @@ class AllPrimitives:
     char_val: str = ""      # char
     text: str = ""          # string
 
-    def _serialize_cdr(self) -> bytes:
+    def _serialize_cdr(self, xcdr2: bool = True) -> bytes:
         w = CdrWriter(extensibility=self._extensibility)
         w.write_bool(self.flag)
         w.write_u8(self.byte_val)
@@ -138,7 +138,7 @@ class ArrayType:
 
     values: list[int] = field(default_factory=lambda: [0] * ARRAY_SIZE)  # u32[5]
 
-    def _serialize_cdr(self) -> bytes:
+    def _serialize_cdr(self, xcdr2: bool = True) -> bytes:
         w = CdrWriter(extensibility=self._extensibility)
         assert len(self.values) == ARRAY_SIZE, "Array size mismatch"
         for v in self.values:
@@ -165,7 +165,7 @@ class SequenceType:
 
     items: list[int] = field(default_factory=list)  # unbounded sequence of u32
 
-    def _serialize_cdr(self) -> bytes:
+    def _serialize_cdr(self, xcdr2: bool = True) -> bytes:
         w = CdrWriter(extensibility=self._extensibility)
         w.write_seq_header(len(self.items))
         for v in self.items:
@@ -214,7 +214,7 @@ class EnumMessage:
     color: Color = Color.RED
     status: StatusKind = StatusKind.UNKNOWN
 
-    def _serialize_cdr(self) -> bytes:
+    def _serialize_cdr(self, xcdr2: bool = True) -> bytes:
         w = CdrWriter(extensibility=self._extensibility)
         w.write_i32(self.id)
         w.write_enum(int(self.color))
@@ -246,7 +246,7 @@ class InnerStruct:
     y: int = 0       # i32
     name: str = ""   # string
 
-    def _serialize_cdr(self) -> bytes:
+    def _serialize_cdr(self, xcdr2: bool = True) -> bytes:
         w = CdrWriter(extensibility=self._extensibility)
         w.write_i32(self.x)
         w.write_i32(self.y)
@@ -278,7 +278,7 @@ class NestedType:
     id: int = 0                                              # i32
     inner: InnerStruct = field(default_factory=InnerStruct)  # nested struct
 
-    def _serialize_cdr(self) -> bytes:
+    def _serialize_cdr(self, xcdr2: bool = True) -> bytes:
         w = CdrWriter(extensibility=self._extensibility)
         w.write_i32(self.id)
         # Nested struct: write fields without encap header
@@ -308,7 +308,7 @@ class KeyedType:
     sensor_id: int = 0    # @key u32
     value: float = 0.0    # f64
 
-    def _serialize_cdr(self) -> bytes:
+    def _serialize_cdr(self, xcdr2: bool = True) -> bytes:
         w = CdrWriter(extensibility=self._extensibility)
         w.write_u32(self.sensor_id)
         w.write_f64(self.value)
@@ -336,7 +336,7 @@ class AppendableMsg:
     id: int = 0      # i32
     value: float = 0.0  # f64
 
-    def _serialize_cdr(self) -> bytes:
+    def _serialize_cdr(self, xcdr2: bool = True) -> bytes:
         w = CdrWriter(extensibility=self._extensibility)
         with w.dheader():
             w.write_i32(self.id)
@@ -367,7 +367,7 @@ class MutableMsg:
     id: int = 0         # member_id=0, i32
     value: float = 0.0  # member_id=1, f64
 
-    def _serialize_cdr(self) -> bytes:
+    def _serialize_cdr(self, xcdr2: bool = True) -> bytes:
         w = CdrWriter(extensibility=self._extensibility)
         with w.dheader():
             with w.emheader(member_id=0):

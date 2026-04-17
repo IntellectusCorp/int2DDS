@@ -30,7 +30,7 @@ namespace Int2Dds.Core
             _name = topicName;
             var attr = typeof(T).GetCustomAttribute<DdsTypeAttribute>();
             _typeName = attr?.TypeName ?? typeof(T).Name;
-            var extensibility = attr?.Extensibility ?? 0;
+            var extensibility = attr?.Extensibility ?? (int)Extensibility.Appendable;
             var hasKey = attr?.HasKey ?? false;
 
             // Create Topic QoS if provided
@@ -75,6 +75,39 @@ namespace Int2Dds.Core
             {
                 if (qosHandle != IntPtr.Zero)
                     NativeMethods.int2dds_topic_qos_destroy(qosHandle);
+            }
+        }
+
+        /// <summary>
+        /// Creates a new Topic using a QoS profile path.
+        /// Normally called via DomainParticipant.CreateTopicWithProfile.
+        /// </summary>
+        internal Topic(DomainParticipant participant, string topicName, string qosPath)
+        {
+            _name = topicName;
+            var attr = typeof(T).GetCustomAttribute<DdsTypeAttribute>();
+            _typeName = attr?.TypeName ?? typeof(T).Name;
+            var extensibility = attr?.Extensibility ?? 0;
+            var hasKey = attr?.HasKey ?? false;
+
+            unsafe
+            {
+                var topicNameBytes = Encoding.UTF8.GetBytes(topicName + '\0');
+                var typeNameBytes = Encoding.UTF8.GetBytes(_typeName + '\0');
+
+                fixed (byte* pTopicName = topicNameBytes)
+                fixed (byte* pTypeName = typeNameBytes)
+                {
+                    ReturnCodeHelper.CheckReturn(
+                        NativeMethods.int2dds_create_topic_with_profile(
+                            participant.Handle,
+                            pTopicName,
+                            pTypeName,
+                            (int)extensibility,
+                            hasKey,
+                            qosPath,
+                            out _handle));
+                }
             }
         }
 

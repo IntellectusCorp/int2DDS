@@ -234,13 +234,13 @@ mod tests {
 
     #[test]
     fn requester_params_qos_setters() {
-        use int2dds::dcps::publication::qos::DATAWRITER_QOS_DEFAULT;
-        use int2dds::dcps::subscription::qos::DATAREADER_QOS_DEFAULT;
+        use int2dds::dcps::publication::qos::DataWriterQos;
+        use int2dds::dcps::subscription::qos::DataReaderQos;
 
         let p = test_participant();
         let params = RequesterParams::new(p)
-            .datawriter_qos(DATAWRITER_QOS_DEFAULT)
-            .datareader_qos(DATAREADER_QOS_DEFAULT)
+            .datawriter_qos(DataWriterQos::default())
+            .datareader_qos(DataReaderQos::default())
             .publisher_qos(Default::default())
             .subscriber_qos(Default::default());
         assert!(params.datawriter_qos.is_some());
@@ -281,13 +281,13 @@ mod tests {
 
     #[test]
     fn replier_params_qos_setters() {
-        use int2dds::dcps::publication::qos::DATAWRITER_QOS_DEFAULT;
-        use int2dds::dcps::subscription::qos::DATAREADER_QOS_DEFAULT;
+        use int2dds::dcps::publication::qos::DataWriterQos;
+        use int2dds::dcps::subscription::qos::DataReaderQos;
 
         let p = test_participant();
         let params = ReplierParams::new(p)
-            .datawriter_qos(DATAWRITER_QOS_DEFAULT)
-            .datareader_qos(DATAREADER_QOS_DEFAULT)
+            .datawriter_qos(DataWriterQos::default())
+            .datareader_qos(DataReaderQos::default())
             .publisher_qos(Default::default())
             .subscriber_qos(Default::default());
         assert!(params.datawriter_qos.is_some());

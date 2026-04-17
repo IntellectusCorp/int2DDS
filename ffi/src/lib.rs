@@ -52,6 +52,7 @@ pub mod condition;
 pub mod context;
 pub mod data;
 pub mod discovery;
+pub mod dynamic;
 pub mod listener;
 pub mod participant;
 pub mod publisher;
