@@ -46,6 +46,11 @@ pub(crate) const MSG_PORT_BIND_ACK: u8 = 0x06;
 pub(crate) const MSG_KEEPALIVE: u8 = 0x08;
 pub(crate) const MSG_KEEPALIVE_ACK: u8 = 0x09;
 pub(crate) const MSG_ERROR: u8 = 0x0A;
+/// Asymmetric (connection reversal) hello: the dialer opens a TCP
+/// connection FOR the acceptor. After PEER_HELLO_ACK, ownership of the
+/// socket "flips" — the acceptor writes, the dialer reads. Used by hosts
+/// behind NAT to hand a send channel back to the reachable peer.
+pub(crate) const MSG_PEER_HELLO_REVERSE: u8 = 0x0B;
 
 // ─── Locator Encoding ───────────────────────────────────────────────────────
 
@@ -75,6 +80,17 @@ pub(crate) fn decode_locator(loc: &[u8; 16]) -> (Ipv4Addr, u16) {
 pub(crate) enum ControlMsg {
     /// Client announces its listener address.
     PeerHello { locator: [u8; 16] },
+
+    /// Connection-reversal hello: the dialer hands this TCP connection
+    /// over to the acceptor as a reverse send channel (the acceptor will
+    /// write on it, the dialer will read). Used by asymmetric (NAT-behind)
+    /// peers that cannot be dialed — they open both connections outbound,
+    /// tagging the second one as reverse.
+    ///
+    /// The embedded `locator` is the dialer's own marker address
+    /// (typically ip:0) so the acceptor can key its sender cache by the
+    /// same address the upper layer uses for this peer.
+    PeerHelloReverse { locator: [u8; 16] },
 
     /// Server acknowledges peer hello.
     PeerHelloAck,
@@ -132,6 +148,12 @@ impl ControlMsg {
             ControlMsg::PeerHello { locator } => {
                 let mut buf = Vec::with_capacity(17);
                 buf.push(MSG_PEER_HELLO);
+                buf.extend_from_slice(locator);
+                buf
+            }
+            ControlMsg::PeerHelloReverse { locator } => {
+                let mut buf = Vec::with_capacity(17);
+                buf.push(MSG_PEER_HELLO_REVERSE);
                 buf.extend_from_slice(locator);
                 buf
             }
@@ -193,6 +215,17 @@ impl ControlMsg {
                 let mut locator = [0u8; 16];
                 locator.copy_from_slice(&payload[1..17]);
                 Ok(ControlMsg::PeerHello { locator })
+            }
+            MSG_PEER_HELLO_REVERSE => {
+                if payload.len() < 17 {
+                    return Err(transport_io_error(
+                        TransportErrorCode::TcpControlProtocolError,
+                        "PeerHelloReverse too short",
+                    ));
+                }
+                let mut locator = [0u8; 16];
+                locator.copy_from_slice(&payload[1..17]);
+                Ok(ControlMsg::PeerHelloReverse { locator })
             }
             MSG_PEER_HELLO_ACK => Ok(ControlMsg::PeerHelloAck),
 
@@ -263,6 +296,7 @@ impl ControlMsg {
     pub(crate) fn type_name(&self) -> &'static str {
         match self {
             ControlMsg::PeerHello { .. } => "PEER_HELLO",
+            ControlMsg::PeerHelloReverse { .. } => "PEER_HELLO_REVERSE",
             ControlMsg::PeerHelloAck => "PEER_HELLO_ACK",
             ControlMsg::PortReserve { .. } => "PORT_RESERVE",
             ControlMsg::PortReserveAck { .. } => "PORT_RESERVE_ACK",

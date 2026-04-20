@@ -893,14 +893,27 @@ pub fn set_tcp_port(port: u16) {
 ///
 /// When `false`, the TCP transport operates in **asymmetric mode**:
 /// - TCP listener is not created (this host cannot be dialed from outside)
-/// - Advertised TCP locators are suppressed so peers do not attempt to dial
-/// - All RTPS communication uses outbound connections initiated by this host
+/// - Advertised TCP locators use a port-0 marker so peers know the host is
+///   unreachable but still have an address key for connection-reuse routing
+/// - All RTPS communication is initiated from this host via outbound
+///   connections. The reachable peer re-uses those inbound streams for
+///   its own outbound control traffic, via the TCP mux listener which
+///   registers accepted asymmetric-peer streams into the sender's cache.
 ///
 /// This mode matches the RTI Connext TCP transport `server_bind_port=0`
-/// pattern, intended for hosts behind NAT without port forwarding. In such
-/// configurations, the unreachable host can only communicate with at least
-/// one publicly reachable peer (two unreachable peers cannot communicate
-/// directly via TCP transport alone — use an overlay network or relay).
+/// pattern, intended for hosts behind NAT without port forwarding. Two
+/// asymmetric hosts cannot communicate directly via TCP transport alone
+/// — use an overlay network (Tailscale / ZeroTier / VPN) or a relay.
+///
+/// # Scope (Sprint 4)
+/// Control-channel reuse is in place: CONTROL messages (PEER_HELLO,
+/// KEEPALIVE, PORT_RESERVE, PORT_BIND cookies) reach the asymmetric peer
+/// through the reused inbound stream. **Data-channel** reuse (PORT_BIND'd
+/// user-data connections) is a follow-up; until then, workloads that
+/// require the reachable side to send large user-data streams to the
+/// asymmetric peer (most notably Route Gateway transit traffic) should
+/// keep using an overlay network so both sides appear reachable to
+/// int2DDS and `REACHABLE=false` is unnecessary.
 ///
 /// Environment variable: INT2DDS_TCP_REACHABLE
 /// Accepted values (case-insensitive): "true"/"false", "1"/"0"

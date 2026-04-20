@@ -53,6 +53,12 @@ pub(crate) struct TcpTransportPlugin {
 
     /// Join handle for the mux listening thread (None in asymmetric mode).
     mux_thread_handle: Mutex<Option<thread::JoinHandle<()>>>,
+
+    /// Shared state of the mux listener. Kept here so that asymmetric
+    /// hosts can adopt reverse-channel streams (dialed outbound, handed
+    /// off to the listener's read loop) even after the mux thread has
+    /// taken ownership of the listener struct itself.
+    mux_shared: Arc<crate::rtps::transport::tcp::tcp_mux_listener::MuxListenerShared>,
 }
 
 impl TcpTransportPlugin {
@@ -90,7 +96,12 @@ impl TcpTransportPlugin {
         let (dead_peer_tx, dead_peer_rx) = bounded::<SocketAddr>(CHANNEL_BUFFER_SIZE);
         let terminated = Arc::new(AtomicBool::new(false));
 
-        let (mux_listener_opt, listener_port) = if reachable {
+        // The mux listener is always created. In reachable mode it has a
+        // bound accept socket and a mux-thread driving accepts. In
+        // asymmetric mode it is "unbound" — no accept, but its read-loop
+        // infrastructure remains available so that reverse-channel
+        // streams dialed outbound can still be adopted.
+        let (mux_listener, listener_port) = if reachable {
             let listener = match TcpMuxListener::new(
                 physical_port,
                 domain_id,
@@ -116,20 +127,26 @@ impl TcpTransportPlugin {
                 }
             };
             let port = listener.port();
-            (Some(listener), port)
+            (listener, port)
         } else {
             log::info!(
                 "[TcpTransportPlugin] Asymmetric mode (INT2DDS_TCP_REACHABLE=false): \
-                 skipping TCP listener bind, outbound-only (domain={}, pid={})",
+                 skipping TCP accept bind, outbound-only (domain={}, pid={})",
                 domain_id, participant_id
             );
-            // Drop the send halves so any (unexpected) upstream send fails fast
-            // rather than silently buffering — the rx halves are still owned by
-            // this plugin below for the `take_*_source()` contract.
-            drop(discovery_tx);
-            drop(user_data_tx);
-            (None, 0u16)
+            (
+                TcpMuxListener::new_unbound(
+                    domain_id,
+                    participant_id,
+                    guid_prefix,
+                    discovery_tx,
+                    user_data_tx,
+                ),
+                0u16,
+            )
         };
+
+        let mux_shared = Arc::clone(&mux_listener.shared);
 
         let sender = TcpSender::new_with_tls(
             working_ip,
@@ -141,7 +158,12 @@ impl TcpTransportPlugin {
             tls_config.clone(),
         )?;
 
-        let mux_thread_handle = if let Some(mux_listener) = mux_listener_opt {
+        // Connection-reuse hook: when the mux listener receives a
+        // PEER_HELLO_REVERSE (from an asymmetric peer), the handoff path
+        // moves the accepted stream into this sender's connection cache.
+        mux_listener.set_sender(sender.clone());
+
+        let mux_thread_handle = if reachable {
             let terminated_clone = terminated.clone();
             let sender_clone = sender.clone();
             let tls_config_clone = tls_config.clone();
@@ -163,11 +185,12 @@ impl TcpTransportPlugin {
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
             Some(handle)
         } else {
-            // Asymmetric mode: no listener → no mux thread.
-            // dead_peer_tx is still needed by TcpSender (for keepalive-detected deaths),
-            // but its sender half is otherwise unused here. Keep it alive by attaching it
-            // to the sender's disconnect path (TcpSender already has its own mechanism).
+            // Asymmetric mode: no accept thread needed. `mux_listener` is
+            // dropped here, but `mux_shared` (an Arc clone) lives on in
+            // the plugin so reverse-channel streams can be adopted via
+            // the shared state's read-loop infrastructure.
             drop(dead_peer_tx);
+            drop(mux_listener);
             None
         };
 
@@ -188,6 +211,7 @@ impl TcpTransportPlugin {
             dead_peer_rx: Mutex::new(Some(dead_peer_rx)),
             terminated,
             mux_thread_handle: Mutex::new(mux_thread_handle),
+            mux_shared,
         })
     }
 
@@ -201,10 +225,36 @@ impl TcpTransportPlugin {
     /// this side via outbound connections.
     fn advertised_tcp_locators(&self) -> Vec<Locator> {
         if !self.reachable {
+            // Asymmetric (NAT-behind) host: no listener, peers cannot dial us.
+            // We still emit a marker locator with port 0 so peers know our
+            // address for connection-reuse routing (see TcpSender cache +
+            // TcpMuxListener PEER_HELLO handling). When a peer's sender is
+            // asked to talk to an asymmetric host, it looks up the cache
+            // keyed by (peer_ip, 0) — which is populated by our mux listener
+            // when we dialed the peer first.
+            let mut locators = Vec::new();
+            // Prefer PUBLIC_ADDR's IP (so NAT peers advertise their reflex'd
+            // public IP) but force port=0 regardless of the configured port.
+            if let Some(pa) = crate::common::env::get_tcp_public_addr() {
+                if let std::net::IpAddr::V4(v4) = pa.ip() {
+                    locators.push(Locator::from_tcp_v4(v4, 0));
+                    log::debug!(
+                        "[TcpTransportPlugin] Asymmetric: marker locator {:?}:0 (public_addr)",
+                        v4
+                    );
+                    return locators;
+                }
+            }
+            for ip_str in &self.working_ips {
+                if let Ok(ip) = ip_str.parse::<Ipv4Addr>() {
+                    locators.push(Locator::from_tcp_v4(ip, 0));
+                }
+            }
             log::debug!(
-                "[TcpTransportPlugin] Asymmetric mode: suppressing advertised TCP locators"
+                "[TcpTransportPlugin] Asymmetric: marker locators {} (NICs)",
+                locators.len()
             );
-            return Vec::new();
+            return locators;
         }
         // WAN mode: if a public address is configured, it replaces every
         // per-NIC locator (remote peers only reach us through the public
@@ -231,11 +281,61 @@ impl TcpTransportPlugin {
     }
 }
 
+impl TcpTransportPlugin {
+    /// When this host is asymmetric (listener disabled, no inbound
+    /// accept) and it's about to talk to `peer_addr`, ensure a reverse
+    /// channel is open toward that peer. The reverse channel is a
+    /// second outbound TCP connection this host dials and hands over
+    /// to the peer — the peer will write on it, and this host's mux
+    /// listener will read from it. Called on the send hot-path and
+    /// idempotent (uses `reverse_channels_dialed` tracking).
+    fn maybe_dial_reverse_channel(&self, peer_addr: &SocketAddr) {
+        if self.reachable {
+            return;
+        }
+        if self.sender.is_reverse_channel_dialed(peer_addr) {
+            return;
+        }
+        // Mark up-front to avoid duplicate dial attempts while the first
+        // is in-flight. If the dial fails, clear the mark so a future
+        // send can retry.
+        self.sender.mark_reverse_channel_dialed(*peer_addr);
+        match self.sender.dial_reverse_channel(peer_addr, 0) {
+            Ok(stream) => {
+                // Hand the stream to our mux listener's read-loop
+                // infrastructure. The peer's side will now use this
+                // connection to send frames to us; they arrive here
+                // via the adopted read loop.
+                let idle_timeout =
+                    Duration::from_millis(crate::common::env::get_tcp_incoming_idle_timeout_ms());
+                self.mux_shared.adopt_inbound_stream(
+                    stream,
+                    *peer_addr,
+                    self.terminated.clone(),
+                    idle_timeout,
+                );
+                log::info!(
+                    "[TcpTransportPlugin] Reverse channel established to {:?}",
+                    peer_addr
+                );
+            }
+            Err(e) => {
+                log::warn!(
+                    "[TcpTransportPlugin] Reverse channel dial to {:?} failed: {}",
+                    peer_addr, e
+                );
+                self.sender.clear_reverse_channel_dialed(peer_addr);
+            }
+        }
+    }
+}
+
 impl TransportPlugin for TcpTransportPlugin {
     fn send(&self, data: &[u8], target: &SendTarget) -> io::Result<()> {
         match target {
             SendTarget::SPDPDiscovery { initial_peers } => {
                 for peer_addr in *initial_peers {
+                    self.maybe_dial_reverse_channel(peer_addr);
                     let _ = self.sender.send_to_discovery(peer_addr, data);
                 }
                 Ok(())
@@ -244,6 +344,7 @@ impl TransportPlugin for TcpTransportPlugin {
                 let ip = locator.to_ip_v4_addr();
                 let port = locator.port() as u16;
                 let addr = SocketAddr::new(std::net::IpAddr::V4(ip), port);
+                self.maybe_dial_reverse_channel(&addr);
                 self.sender.send_to_discovery(&addr, data)?;
                 Ok(())
             }
@@ -251,6 +352,7 @@ impl TransportPlugin for TcpTransportPlugin {
                 let ip = locator.to_ip_v4_addr();
                 let port = locator.port() as u16;
                 let addr = SocketAddr::new(std::net::IpAddr::V4(ip), port);
+                self.maybe_dial_reverse_channel(&addr);
                 self.sender.send_to_user_data(&addr, data)?;
                 Ok(())
             }
