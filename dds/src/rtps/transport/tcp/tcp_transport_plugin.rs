@@ -234,14 +234,13 @@ impl TcpTransportPlugin {
 impl TransportPlugin for TcpTransportPlugin {
     fn send(&self, data: &[u8], target: &SendTarget) -> io::Result<()> {
         match target {
-            SendTarget::MulticastDiscovery => {
-                let initial_peers = crate::common::env::get_initial_peers();
-                for peer_addr in &initial_peers {
+            SendTarget::SPDPDiscovery { initial_peers } => {
+                for peer_addr in *initial_peers {
                     let _ = self.sender.send_to_discovery(peer_addr, data);
                 }
                 Ok(())
             }
-            SendTarget::UnicastDiscovery(locator) => {
+            SendTarget::SEDPDiscovery(locator) => {
                 let ip = locator.to_ip_v4_addr();
                 let port = locator.port() as u16;
                 let addr = SocketAddr::new(std::net::IpAddr::V4(ip), port);

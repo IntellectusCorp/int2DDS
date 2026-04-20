@@ -147,12 +147,18 @@ impl HybridTransportPlugin {
 impl TransportPlugin for HybridTransportPlugin {
     fn send(&self, data: &[u8], target: &SendTarget) -> io::Result<()> {
         match target {
-            SendTarget::MulticastDiscovery => {
-                // Discovery multicast always uses UDP
+            SendTarget::SPDPDiscovery { initial_peers } => {
+                // Discovery multicast always uses UDP.
                 self.udp_sender.send_multicast(self.domain_id, data)?;
+                // initial_peers fan-out: Hybrid reaches them over both UDP and
+                // TCP so peers reachable on either transport get the SPDP.
+                for peer_addr in *initial_peers {
+                    let _ = self.udp_sender.send(peer_addr, data);
+                }
+                let _ = self.tcp_plugin.send(data, target);
                 Ok(())
             }
-            SendTarget::UnicastDiscovery(locator) => {
+            SendTarget::SEDPDiscovery(locator) => {
                 if locator.is_tcp() {
                     self.tcp_plugin.send(data, target)
                 } else {

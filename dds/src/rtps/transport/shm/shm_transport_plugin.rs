@@ -110,12 +110,15 @@ impl ShmTransportPlugin {
 impl TransportPlugin for ShmTransportPlugin {
     fn send(&self, data: &[u8], target: &SendTarget) -> io::Result<()> {
         match target {
-            SendTarget::MulticastDiscovery => {
-                // Discovery always uses UDP multicast
+            SendTarget::SPDPDiscovery { initial_peers } => {
+                // Discovery always uses UDP multicast, plus fan-out to initial_peers.
                 self.udp_sender.send_multicast(self.domain_id, data)?;
+                for peer_addr in *initial_peers {
+                    let _ = self.udp_sender.send(peer_addr, data);
+                }
                 Ok(())
             }
-            SendTarget::UnicastDiscovery(locator) => {
+            SendTarget::SEDPDiscovery(locator) => {
                 // Discovery always uses UDP
                 let ip = locator.to_ip_v4_addr();
                 let port = locator.port() as u16;

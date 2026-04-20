@@ -523,7 +523,7 @@ impl WlpLogic {
                 if remote_data.participant_guid().prefix() == remote_prefix {
                     for locator in remote_data.metatraffic_unicast_locator_list() {
                         let _ =
-                            self.transport.send(&buffer, &SendTarget::UnicastDiscovery(locator));
+                            self.transport.send(&buffer, &SendTarget::SEDPDiscovery(locator));
                     }
                     break;
                 }
@@ -624,7 +624,7 @@ impl WlpLogic {
 
             for locator in reader_proxy.unicast_locator_list() {
                 if let Err(e) =
-                    self.transport.send(&buffer, &SendTarget::UnicastDiscovery(&locator))
+                    self.transport.send(&buffer, &SendTarget::SEDPDiscovery(&locator))
                 {
                     log::warn!("Failed to send P2P DATA message: {:?}", e);
                 }
@@ -651,7 +651,7 @@ impl WlpLogic {
                     if remote_participant_data.participant_guid().prefix() == remote_guid.prefix() {
                         for locator in remote_participant_data.metatraffic_unicast_locator_list() {
                             if let Ok(()) =
-                                self.transport.send(buffer, &SendTarget::UnicastDiscovery(&locator))
+                                self.transport.send(buffer, &SendTarget::SEDPDiscovery(&locator))
                             {
                                 debug!(
                                     "[{}] WLP Logic: {} message sent to {:?}",
@@ -1498,7 +1498,7 @@ impl UnicastMessageProcessor for WlpLogic {
 
                 for locator in reader_proxy.unicast_locator_list() {
                     if let Err(e) =
-                        self.transport.send(&buffer, &SendTarget::UnicastDiscovery(&locator))
+                        self.transport.send(&buffer, &SendTarget::SEDPDiscovery(&locator))
                     {
                         warn!(
                             "[WLP] Failed to send DATA message to locator {:?}: {:?}",
