@@ -52,7 +52,8 @@ mod type_object;
 mod type_registry;
 
 pub use type_compatibility::{
-    check_structural_compatibility, TypeCompatibilityError, TypeCompatibilityResult,
+    check_structural_compatibility, complete_key_erased, complete_key_holder, minimal_key_erased,
+    minimal_key_holder, TypeCompatibilityError, TypeCompatibilityResult,
 };
 pub use type_object::*;
 
