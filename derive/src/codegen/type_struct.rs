@@ -425,13 +425,13 @@ fn quote_deserialize_impl(
                 let type_id = std::any::TypeId::of::<#full_type>();
 
                 if type_id == std::any::TypeId::of::<#crate_path::common::builtin::topic::publication_builtin_topic_data::PublicationBuiltinTopicData>() {
-                    let value = #crate_path::common::builtin::topic::publication_builtin_topic_data::PublicationBuiltinTopicData::from_serialized_data(std::sync::Arc::<[u8]>::from(data))
+                    let value = #crate_path::common::builtin::topic::publication_builtin_topic_data::PublicationBuiltinTopicData::from_serialized_data(data)
                         .map_err(#crate_path::dcps::core::error::DdsError::Error)?;
                     return Ok(Box::new(value));
                 }
 
                 if type_id == std::any::TypeId::of::<#crate_path::common::builtin::topic::subscription_builtin_topic_data::SubscriptionBuiltinTopicData>() {
-                    let value = #crate_path::common::builtin::topic::subscription_builtin_topic_data::SubscriptionBuiltinTopicData::from_serialized_data(std::sync::Arc::<[u8]>::from(data))
+                    let value = #crate_path::common::builtin::topic::subscription_builtin_topic_data::SubscriptionBuiltinTopicData::from_serialized_data(data)
                         .map_err(#crate_path::dcps::core::error::DdsError::Error)?;
                     return Ok(Box::new(value));
                 }

@@ -1553,21 +1553,13 @@ impl UnicastMessageProcessor for UserLogic {
         }
 
         for reader in matched_readers {
-            let mut change = {
-                let reader_cache = reader.reader_cache();
-                let mut cache = reader_cache.lock().map_err(|_| {
-                    RtpsError::new(
-                        RtpsErrorCode::LockError,
-                        "Failed to acquire reader cache lock for pool",
-                    )
-                })?;
-                cache.acquire_change()
-            };
-            change.reset(
+            let mut change = CacheChange::new(
                 ChangeKind::Alive,
                 remote_writer_guid,
                 InstanceHandle::NIL,
                 data.writer_sn,
+                Vec::new(),
+                // inline_qos,
                 message_receiver.get_source_timestamp(),
             );
             // Zero-copy share of the socket buffer: `data.serialized_data()`
@@ -2118,24 +2110,14 @@ impl UnicastMessageProcessor for UserLogic {
                         }
                     }
 
-                    let mut assembled_change = {
-                        let reader_cache = reader.reader_cache();
-                        let mut cache = reader_cache.lock().map_err(|_| {
-                            RtpsError::new(
-                                RtpsErrorCode::LockError,
-                                "Failed to acquire reader cache lock for pool",
-                            )
-                        })?;
-                        cache.acquire_change()
-                    };
-                    assembled_change.reset(
+                    let mut assembled_change = CacheChange::new(
                         ChangeKind::Alive,
                         remote_writer_guid,
                         InstanceHandle::NIL,
                         data_frag.writer_sn,
+                        Vec::new(),
                         assembled_timestamp,
                     );
-
                     if let Some(ref shared) = shared_payload {
                         // Multi-reader: share via `Bytes` clone (refcount bump, 0 copy)
                         assembled_change.set_shared_payload(shared.clone());
