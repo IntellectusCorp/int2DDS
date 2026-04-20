@@ -115,8 +115,8 @@ impl ReaderLocator {
         self.remote_entity_id
     }
 
-    pub(crate) fn subscription_builtin_topic_data(&self) -> SubscriptionBuiltinTopicData {
-        self.subscription_builtin_topic_data.clone()
+    pub(crate) fn subscription_builtin_topic_data(&self) -> &SubscriptionBuiltinTopicData {
+        &self.subscription_builtin_topic_data
     }
 
     pub(crate) fn set_subscription_builtin_topic_data(

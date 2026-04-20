@@ -78,8 +78,8 @@ impl ReaderProxy {
         }
     }
 
-    pub(crate) fn subscription_builtin_topic_data(&self) -> SubscriptionBuiltinTopicData {
-        self.subscription_builtin_topic_data.clone()
+    pub(crate) fn subscription_builtin_topic_data(&self) -> &SubscriptionBuiltinTopicData {
+        &self.subscription_builtin_topic_data
     }
 
     pub(crate) fn is_reliable(&self) -> bool {
