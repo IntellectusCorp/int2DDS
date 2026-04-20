@@ -1829,3 +1829,33 @@ fn test_nested_flag_in_type_object() {
     assert!(nested);
     assert!(!not_nested);
 }
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final", nested)]
+#[dds_type(data_representation(XCDR2))]
+struct AnnBuiltinType {
+    #[dds(hashid = "custom_hash_name")]
+    pub v: i32,
+}
+
+#[test]
+fn test_type_ann_builtin_nested_and_data_representation() {
+    use int2dds::xtypes::{CompleteTypeObject, HasTypeObject};
+    let ann = match AnnBuiltinType::complete_type_object() {
+        CompleteTypeObject::Struct(s) => s.header.detail.ann_builtin.expect("ann_builtin"),
+        _ => panic!("expected struct"),
+    };
+    assert_eq!(ann.nested, Some(true));
+    assert_eq!(ann.data_representation, Some(1u16 << 2));
+}
+
+#[test]
+fn test_member_ann_builtin_hashid() {
+    use int2dds::xtypes::{CompleteTypeObject, HasTypeObject};
+    let member = match AnnBuiltinType::complete_type_object() {
+        CompleteTypeObject::Struct(s) => s.member_seq[0].clone(),
+        _ => panic!("expected struct"),
+    };
+    let ann = member.detail.ann_builtin.expect("member ann_builtin");
+    assert_eq!(ann.hash_id.as_deref(), Some("custom_hash_name"));
+}
