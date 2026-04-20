@@ -1575,3 +1575,257 @@ fn test_lc7_f64_sequence_emheader() {
     let result = MutableWithSeqF64::deserialize_xcdr(&mut deserializer).unwrap();
     assert_eq!(result.data, vec![1.0, 2.0]);
 }
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final")]
+struct TcWireSeq {
+    pub values: Vec<i32>,
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final")]
+struct TcSeqDiscard {
+    #[dds(bound = 4)]
+    pub values: Vec<i32>,
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final")]
+struct TcSeqUseDefault {
+    #[dds(bound = 4, try_construct = "use_default")]
+    pub values: Vec<i32>,
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final")]
+struct TcSeqTrim {
+    #[dds(bound = 4, try_construct = "trim")]
+    pub values: Vec<i32>,
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final")]
+struct TcWireString {
+    pub s: String,
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final")]
+struct TcStringTrim {
+    #[dds(bound = 5, try_construct = "trim")]
+    pub s: String,
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final")]
+struct TcStringUseDefault {
+    #[dds(bound = 5, try_construct = "use_default")]
+    pub s: String,
+}
+
+fn encode_cdr<T: CdrSerialize>(value: &T) -> Vec<u8> {
+    let mut serializer = CdrSerializer::new(true);
+    serializer.write_encapsulation_header().unwrap();
+    value.serialize_cdr(&mut serializer).unwrap();
+    serializer.into_bytes()
+}
+
+#[test]
+fn test_try_construct_discard_is_error() {
+    let bytes = encode_cdr(&TcWireSeq { values: vec![1, 2, 3, 4, 5, 6, 7, 8] });
+    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+    let result = TcSeqDiscard::deserialize_cdr(&mut deserializer);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_try_construct_use_default_yields_empty_sequence() {
+    let bytes = encode_cdr(&TcWireSeq { values: vec![1, 2, 3, 4, 5, 6, 7, 8] });
+    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+    let result = TcSeqUseDefault::deserialize_cdr(&mut deserializer).unwrap();
+    assert!(result.values.is_empty());
+}
+
+#[test]
+fn test_try_construct_trim_truncates_sequence() {
+    let bytes = encode_cdr(&TcWireSeq { values: vec![1, 2, 3, 4, 5, 6, 7, 8] });
+    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+    let result = TcSeqTrim::deserialize_cdr(&mut deserializer).unwrap();
+    assert_eq!(result.values, vec![1, 2, 3, 4]);
+}
+
+#[test]
+fn test_try_construct_trim_preserves_within_bound() {
+    let bytes = encode_cdr(&TcWireSeq { values: vec![1, 2] });
+    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+    let result = TcSeqTrim::deserialize_cdr(&mut deserializer).unwrap();
+    assert_eq!(result.values, vec![1, 2]);
+}
+
+#[test]
+fn test_try_construct_string_trim() {
+    let bytes = encode_cdr(&TcWireString { s: "Hello World!".to_string() });
+    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+    let result = TcStringTrim::deserialize_cdr(&mut deserializer).unwrap();
+    assert_eq!(result.s, "Hello");
+}
+
+#[test]
+fn test_try_construct_string_use_default() {
+    let bytes = encode_cdr(&TcWireString { s: "Hello World!".to_string() });
+    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+    let result = TcStringUseDefault::deserialize_cdr(&mut deserializer).unwrap();
+    assert!(result.s.is_empty());
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final")]
+struct NsLocalCache {
+    pub sent_field: i32,
+    #[dds(non_serialized)]
+    pub local_cache: i64,
+    pub other_sent: i32,
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final")]
+struct NsTwinWireOnly {
+    pub sent_field: i32,
+    pub other_sent: i32,
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final")]
+struct NsWithDefault {
+    pub a: i32,
+    #[dds(non_serialized, default = 42)]
+    pub cached: i64,
+}
+
+#[test]
+fn test_non_serialized_wire_omits_field() {
+    let value = NsLocalCache { sent_field: 1, local_cache: 9999, other_sent: 2 };
+    let bytes_full = encode_cdr(&value);
+    let bytes_twin = encode_cdr(&NsTwinWireOnly { sent_field: 1, other_sent: 2 });
+    assert_eq!(bytes_full, bytes_twin);
+}
+
+#[test]
+fn test_non_serialized_roundtrip_restores_default() {
+    let value = NsLocalCache { sent_field: 7, local_cache: 9999, other_sent: 3 };
+    let bytes = encode_cdr(&value);
+    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+    let result = NsLocalCache::deserialize_cdr(&mut deserializer).unwrap();
+    assert_eq!(result.sent_field, 7);
+    assert_eq!(result.other_sent, 3);
+    assert_eq!(result.local_cache, 0);
+}
+
+#[test]
+fn test_non_serialized_with_default_literal() {
+    let value = NsWithDefault { a: 5, cached: 999 };
+    let bytes = encode_cdr(&value);
+    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+    let result = NsWithDefault::deserialize_cdr(&mut deserializer).unwrap();
+    assert_eq!(result.a, 5);
+    assert_eq!(result.cached, 42);
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds")]
+#[repr(i32)]
+enum EnumWithValue {
+    First,
+    #[dds(value = 100)]
+    HundredLit,
+    Third,
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", ignore_literal_names)]
+#[repr(i32)]
+enum EnumWithDefaultLiteral {
+    Alpha,
+    #[dds(default_literal)]
+    Beta,
+    Gamma,
+}
+
+#[test]
+fn test_enum_value_attribute_roundtrip() {
+    use int2dds::xtypes::HasTypeObject;
+    let obj = EnumWithValue::complete_type_object();
+    let literals = match obj {
+        int2dds::xtypes::CompleteTypeObject::Enum(e) => e.literal_seq,
+        _ => panic!("expected enum complete type"),
+    };
+    assert_eq!(literals[0].common.value, 0);
+    assert_eq!(literals[1].common.value, 100);
+    assert_eq!(literals[2].common.value, 101);
+}
+
+#[test]
+fn test_enum_default_literal_flag() {
+    use int2dds::xtypes::HasTypeObject;
+    let obj = EnumWithDefaultLiteral::complete_type_object();
+    let literals = match obj {
+        int2dds::xtypes::CompleteTypeObject::Enum(e) => e.literal_seq,
+        _ => panic!("expected enum complete type"),
+    };
+    assert!(!literals[0].common.flags.is_default());
+    assert!(literals[1].common.flags.is_default());
+    assert!(!literals[2].common.flags.is_default());
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", alias, extensibility = "Final")]
+struct MyIntSequence(pub Vec<i32>);
+
+#[test]
+fn test_alias_emits_tk_alias_type_object() {
+    use int2dds::xtypes::{CompleteTypeObject, HasTypeObject};
+    let obj = MyIntSequence::complete_type_object();
+    match obj {
+        CompleteTypeObject::Alias(_) => {}
+        _ => panic!("expected Alias TypeObject"),
+    }
+}
+
+#[test]
+fn test_alias_wire_matches_base_type() {
+    let alias_value = MyIntSequence(vec![1, 2, 3]);
+    let base_value: Vec<i32> = vec![1, 2, 3];
+    let alias_bytes = encode_cdr(&alias_value);
+    let mut serializer = CdrSerializer::new(true);
+    serializer.write_encapsulation_header().unwrap();
+    base_value.serialize_cdr(&mut serializer).unwrap();
+    let base_bytes = serializer.into_bytes();
+    assert_eq!(alias_bytes, base_bytes);
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", nested, extensibility = "Final")]
+struct NestedOnly {
+    pub v: i32,
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final")]
+struct NotNested {
+    pub v: i32,
+}
+
+#[test]
+fn test_nested_flag_in_type_object() {
+    use int2dds::xtypes::{CompleteTypeObject, HasTypeObject};
+    let nested = match NestedOnly::complete_type_object() {
+        CompleteTypeObject::Struct(s) => s.struct_flags.is_nested(),
+        _ => panic!("expected struct"),
+    };
+    let not_nested = match NotNested::complete_type_object() {
+        CompleteTypeObject::Struct(s) => s.struct_flags.is_nested(),
+        _ => panic!("expected struct"),
+    };
+    assert!(nested);
+    assert!(!not_nested);
+}

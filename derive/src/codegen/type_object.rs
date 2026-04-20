@@ -7,7 +7,8 @@ use quote::quote;
 use crate::codegen::type_config::DdsTypeConfig;
 use crate::codegen::utils::{
     get_discriminant_value, get_serialization_method, get_variant_type, parse_field_attributes,
-    resolve_member_id, variant_has_data, DiscriminantType, SerializationMethod,
+    resolve_member_id, try_construct_to_tokens, variant_has_data, DiscriminantType,
+    SerializationMethod,
 };
 
 /// Generate TypeIdentifier expression for a Rust type.
@@ -167,10 +168,13 @@ pub fn generate_has_type_object_impl(
     let minimal_members: Vec<_> = fields
         .iter()
         .enumerate()
-        .map(|(index, field)| {
+        .filter_map(|(index, field)| {
             let field_name = field.ident.as_ref().unwrap();
             let field_name_str = field_name.to_string();
             let field_config = parse_field_attributes(field);
+            if field_config.non_serialized {
+                return None;
+            }
             let member_id = resolve_member_id(&field_config, &field_name_str, index, autoid);
             let type_id = type_to_identifier(&field.ty, crate_path, field_config.as_char);
 
@@ -178,12 +182,13 @@ pub fn generate_has_type_object_impl(
             let is_optional = field_config.optional;
             let is_must_understand = field_config.must_understand;
             let is_external = field_config.external;
+            let try_construct = try_construct_to_tokens(field_config.try_construct, crate_path);
 
-            quote! {
+            Some(quote! {
                 #crate_path::xtypes::MinimalStructMember::new(
                     #member_id,
                     #crate_path::xtypes::MemberFlag::new(
-                        #crate_path::xtypes::TryConstructKind::Discard,
+                        #try_construct,
                         #is_external,
                         #is_optional,
                         #is_must_understand,
@@ -193,7 +198,7 @@ pub fn generate_has_type_object_impl(
                     #type_id,
                     #field_name_str,
                 )
-            }
+            })
         })
         .collect();
 
@@ -201,10 +206,13 @@ pub fn generate_has_type_object_impl(
     let complete_members: Vec<_> = fields
         .iter()
         .enumerate()
-        .map(|(index, field)| {
+        .filter_map(|(index, field)| {
             let field_name = field.ident.as_ref().unwrap();
             let field_name_str = field_name.to_string();
             let field_config = parse_field_attributes(field);
+            if field_config.non_serialized {
+                return None;
+            }
             let member_id = resolve_member_id(&field_config, &field_name_str, index, autoid);
             let type_id = type_to_identifier(&field.ty, crate_path, field_config.as_char);
 
@@ -212,12 +220,13 @@ pub fn generate_has_type_object_impl(
             let is_optional = field_config.optional;
             let is_must_understand = field_config.must_understand;
             let is_external = field_config.external;
+            let try_construct = try_construct_to_tokens(field_config.try_construct, crate_path);
 
-            quote! {
+            Some(quote! {
                 #crate_path::xtypes::CompleteStructMember::new(
                     #member_id,
                     #crate_path::xtypes::MemberFlag::new(
-                        #crate_path::xtypes::TryConstructKind::Discard,
+                        #try_construct,
                         #is_external,
                         #is_optional,
                         #is_must_understand,
@@ -227,7 +236,7 @@ pub fn generate_has_type_object_impl(
                     #type_id,
                     #field_name_str.to_string(),
                 )
-            }
+            })
         })
         .collect();
 
@@ -243,6 +252,9 @@ pub fn generate_has_type_object_impl(
             quote! { #crate_path::xtypes::ExtensibilityKind::Mutable }
         }
     };
+    let is_nested = type_config.nested;
+    let is_autoid_hash =
+        matches!(type_config.autoid, Some(crate::codegen::utils::AutoIdKind::Hash));
 
     let impl_generics = &gc.impl_generics;
     let ty_generics = &gc.ty_generics;
@@ -280,7 +292,7 @@ pub fn generate_has_type_object_impl(
 
             fn minimal_type_object() -> #crate_path::xtypes::MinimalTypeObject {
                 let mut struct_type = #crate_path::xtypes::MinimalStructType::new(
-                    #crate_path::xtypes::TypeFlag::new(#ext_kind, false, false),
+                    #crate_path::xtypes::TypeFlag::new(#ext_kind, #is_nested, #is_autoid_hash),
                     #base_type_expr
                 );
                 #(struct_type.add_member(#minimal_members);)*
@@ -289,12 +301,63 @@ pub fn generate_has_type_object_impl(
 
             fn complete_type_object() -> #crate_path::xtypes::CompleteTypeObject {
                 let mut struct_type = #crate_path::xtypes::CompleteStructType::new(
-                    #crate_path::xtypes::TypeFlag::new(#ext_kind, false, false),
+                    #crate_path::xtypes::TypeFlag::new(#ext_kind, #is_nested, #is_autoid_hash),
                     #type_name_str.to_string(),
                     #base_type_expr
                 );
                 #(struct_type.add_member(#complete_members);)*
                 #crate_path::xtypes::CompleteTypeObject::Struct(struct_type)
+            }
+
+            fn dds_type_name() -> &'static str {
+                #type_name_str
+            }
+        }
+    }
+}
+
+/// Generate HasTypeObject implementation for an alias (typedef-style) newtype struct.
+/// Emits a `TK_ALIAS` TypeObject whose base is the inner field's `TypeIdentifier`.
+pub fn generate_has_type_object_alias_impl(
+    name: &syn::Ident,
+    inner_ty: &syn::Type,
+    type_config: &DdsTypeConfig,
+) -> proc_macro2::TokenStream {
+    let crate_path = &type_config.crate_path;
+    let type_name_str = name.to_string();
+    let related_type = type_to_identifier(inner_ty, crate_path, false);
+
+    quote! {
+        impl #crate_path::xtypes::HasTypeObject for #name {
+            fn type_identifier() -> #crate_path::xtypes::TypeIdentifier {
+                static TYPE_ID: std::sync::OnceLock<#crate_path::xtypes::TypeIdentifier> = std::sync::OnceLock::new();
+                TYPE_ID.get_or_init(|| {
+                    let complete = Self::complete_type_object();
+                    let type_obj = #crate_path::xtypes::TypeObject::Complete(complete);
+                    let hash = type_obj.compute_hash();
+                    #crate_path::xtypes::TypeIdentifier::CompleteTypeId(hash)
+                }).clone()
+            }
+
+            fn minimal_type_object() -> #crate_path::xtypes::MinimalTypeObject {
+                #crate_path::xtypes::MinimalTypeObject::Alias(
+                    #crate_path::xtypes::MinimalAliasType::new(
+                        #crate_path::xtypes::TypeFlag::default(),
+                        #crate_path::xtypes::MemberFlag::default(),
+                        #related_type,
+                    )
+                )
+            }
+
+            fn complete_type_object() -> #crate_path::xtypes::CompleteTypeObject {
+                #crate_path::xtypes::CompleteTypeObject::Alias(
+                    #crate_path::xtypes::CompleteAliasType::new(
+                        #crate_path::xtypes::TypeFlag::default(),
+                        #type_name_str.to_string(),
+                        #crate_path::xtypes::MemberFlag::default(),
+                        #related_type,
+                    )
+                )
             }
 
             fn dds_type_name() -> &'static str {
@@ -313,6 +376,15 @@ pub fn generate_has_type_object_enum_impl(
     let crate_path = &type_config.crate_path;
     let type_name_str = name.to_string();
 
+    let literal_flag_expr = |variant: &syn::Variant| {
+        if crate::codegen::utils::variant_is_default_literal(variant) {
+            quote! { #crate_path::xtypes::EnumeratedLiteralFlag::DEFAULT }
+        } else {
+            quote! { #crate_path::xtypes::EnumeratedLiteralFlag::default() }
+        }
+    };
+    let sequence = crate::codegen::utils::compute_enumerated_values(variants);
+
     // Generate literal definitions for MinimalEnumeratedType
     let minimal_literals: Vec<_> = variants
         .iter()
@@ -320,12 +392,13 @@ pub fn generate_has_type_object_enum_impl(
         .map(|(index, variant)| {
             let variant_name = &variant.ident;
             let variant_name_str = variant_name.to_string();
-            let value = crate::codegen::utils::get_discriminant_value(variant, index) as i32;
+            let value = sequence[index] as i32;
+            let flag = literal_flag_expr(variant);
 
             quote! {
                 #crate_path::xtypes::MinimalEnumeratedLiteral::new(
                     #value,
-                    #crate_path::xtypes::EnumeratedLiteralFlag::default(),
+                    #flag,
                     #variant_name_str,
                 )
             }
@@ -339,12 +412,13 @@ pub fn generate_has_type_object_enum_impl(
         .map(|(index, variant)| {
             let variant_name = &variant.ident;
             let variant_name_str = variant_name.to_string();
-            let value = crate::codegen::utils::get_discriminant_value(variant, index) as i32;
+            let value = sequence[index] as i32;
+            let flag = literal_flag_expr(variant);
 
             quote! {
                 #crate_path::xtypes::CompleteEnumeratedLiteral::new(
                     #value,
-                    #crate_path::xtypes::EnumeratedLiteralFlag::default(),
+                    #flag,
                     #variant_name_str.to_string(),
                 )
             }
