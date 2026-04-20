@@ -58,6 +58,12 @@ pub fn init_from_env() {
     // - INT2DDS_INITIAL_PEERS: Set initial peers for SPDP unicast discovery (comma-separated, e.g., "192.168.1.10:7400,192.168.1.11:7400") - Default: none
 
     // - INT2DDS_TCP_PUBLIC_ADDR: Set public address for WAN/NAT traversal (e.g., "203.0.113.5:7400") - Default: none (LAN mode)
+    // - INT2DDS_TCP_REACHABLE: Whether this host accepts inbound TCP connections (true, false) - Default: true
+    //   Set to false on hosts behind NAT without port forwarding. In this "asymmetric mode":
+    //     - TCP listener is disabled (no inbound accept)
+    //     - Advertised locators are suppressed (peers will not dial this host)
+    //     - Only outbound connections are established (dial-only)
+    //   Matches the RTI Connext TCP transport `server_bind_port=0` pattern.
     // - INT2DDS_TCP_TLS_ENABLED: Enable TLS for TCP connections (true, false) - Default: false (not yet implemented)
     // - INT2DDS_TCP_TLS_CERT_PATH: TLS certificate file path - Default: none (not yet implemented)
     // - INT2DDS_TCP_TLS_KEY_PATH: TLS private key file path - Default: none (not yet implemented)
@@ -300,6 +306,13 @@ fn apply_cli_args_to_env() {
                     .num_args(1)
                     .value_hint(ValueHint::Other),
             )
+            .arg(
+                Arg::new("int2dds_tcp_reachable")
+                    .long("int2dds-tcp-reachable")
+                    .value_name("true|false")
+                    .help("Whether this host accepts inbound TCP connections (false = asymmetric NAT mode, outbound-only)")
+                    .num_args(1),
+            )
     }
 
     let matches = build_command()
@@ -425,6 +438,10 @@ fn apply_cli_args_to_env() {
     if let Some(v) = matches.get_one::<String>("int2dds_initial_peers") {
         log::info!("Environment variable set: INT2DDS_INITIAL_PEERS = {}", v);
         unsafe { std::env::set_var("INT2DDS_INITIAL_PEERS", v) };
+    }
+    if let Some(v) = matches.get_one::<String>("int2dds_tcp_reachable") {
+        log::info!("Environment variable set: INT2DDS_TCP_REACHABLE = {}", v);
+        unsafe { std::env::set_var("INT2DDS_TCP_REACHABLE", v) };
     }
 }
 
@@ -870,6 +887,38 @@ pub fn get_tcp_port() -> Option<u16> {
 pub fn set_tcp_port(port: u16) {
     log::info!("Environment variable set: INT2DDS_TCP_PORT = {}", port);
     unsafe { std::env::set_var("INT2DDS_TCP_PORT", port.to_string()) };
+}
+
+/// Whether this host accepts inbound TCP connections.
+///
+/// When `false`, the TCP transport operates in **asymmetric mode**:
+/// - TCP listener is not created (this host cannot be dialed from outside)
+/// - Advertised TCP locators are suppressed so peers do not attempt to dial
+/// - All RTPS communication uses outbound connections initiated by this host
+///
+/// This mode matches the RTI Connext TCP transport `server_bind_port=0`
+/// pattern, intended for hosts behind NAT without port forwarding. In such
+/// configurations, the unreachable host can only communicate with at least
+/// one publicly reachable peer (two unreachable peers cannot communicate
+/// directly via TCP transport alone — use an overlay network or relay).
+///
+/// Environment variable: INT2DDS_TCP_REACHABLE
+/// Accepted values (case-insensitive): "true"/"false", "1"/"0"
+/// Default: true
+pub fn get_tcp_reachable() -> bool {
+    match std::env::var("INT2DDS_TCP_REACHABLE") {
+        Ok(v) => {
+            let trimmed = v.trim();
+            !(trimmed.eq_ignore_ascii_case("false") || trimmed == "0")
+        }
+        Err(_) => true,
+    }
+}
+
+/// Set TCP reachability via environment variable.
+pub fn set_tcp_reachable(reachable: bool) {
+    log::info!("Environment variable set: INT2DDS_TCP_REACHABLE = {}", reachable);
+    unsafe { std::env::set_var("INT2DDS_TCP_REACHABLE", reachable.to_string()) };
 }
 
 /// Check if TLS is enabled for TCP connections.
