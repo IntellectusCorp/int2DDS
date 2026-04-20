@@ -453,7 +453,7 @@ impl Writer for StatelessWriter {
         reader_guid: Guid,
     ) -> RtpsResult<SubscriptionBuiltinTopicData> {
         if let Some(reader) = self.matched_reader_lookup(reader_guid) {
-            Ok(reader.subscription_builtin_topic_data())
+            Ok(reader.subscription_builtin_topic_data().clone())
         } else {
             Err(RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, ""))
         }

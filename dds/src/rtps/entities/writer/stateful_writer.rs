@@ -369,10 +369,9 @@ impl StatefulWriter {
         seq_num: SequenceNumber,
     ) -> bool {
         match matched_readers.lock() {
-            Ok(readers) => readers
-                .iter()
-                .filter(|p| p.subscription_builtin_topic_data().is_reliable())
-                .all(|p| p.max_acked_sn() >= seq_num),
+            Ok(readers) => {
+                readers.iter().filter(|p| p.is_reliable()).all(|p| p.max_acked_sn() >= seq_num)
+            }
             Err(e) => {
                 error!("Failed to acquire matched_readers lock: {}", e);
                 false
@@ -738,7 +737,7 @@ impl Writer for StatefulWriter {
         reader_guid: Guid,
     ) -> RtpsResult<SubscriptionBuiltinTopicData> {
         if let Some(reader) = self.matched_reader_lookup(reader_guid) {
-            Ok(reader.subscription_builtin_topic_data())
+            Ok(reader.subscription_builtin_topic_data().clone())
         } else {
             Err(RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, ""))
         }
