@@ -77,7 +77,7 @@ typedef enum Int2DdsCdrError {
 #define INT2DDS_CDR_APPENDABLE  1
 #define INT2DDS_CDR_MUTABLE     2
 
-/** EMHEADER sentinel member_id (legacy — XCDR2 spec §7.4.3.4 uses DHEADER for end-of-struct; removal scheduled for Tier 2) */
+/** EMHEADER sentinel member_id (legacy — XCDR2 spec 7.4.3.4 uses DHEADER for end-of-struct; removal scheduled for Tier 2) */
 #define INT2DDS_CDR_MEMBER_ID_SENTINEL 0x3F02
 
 /* ========================================================================
