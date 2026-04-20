@@ -313,8 +313,16 @@ impl ParsedBuiltinTopicData {
                 }
             }
             ParameterId::PidTypeInformation => {
-                if let ParameterValue::TypeInformation(type_id) = parameter.value {
-                    self.type_identifier = Some(type_id);
+                if let ParameterValue::TypeInformation(type_info) = parameter.value {
+                    let type_id = type_info.minimal.typeid_with_size.type_id;
+                    if type_id != TypeIdentifier::None {
+                        self.type_identifier = Some(type_id);
+                    } else {
+                        let complete_id = type_info.complete.typeid_with_size.type_id;
+                        if complete_id != TypeIdentifier::None {
+                            self.type_identifier = Some(complete_id);
+                        }
+                    }
                 }
             }
             ParameterId::PidTypeConsistencyEnforcement => {

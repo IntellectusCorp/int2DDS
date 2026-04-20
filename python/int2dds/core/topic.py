@@ -47,7 +47,7 @@ class Topic(Generic[T]):
         # Get type metadata from the type class
         self._type_name: str = getattr(type_class, "_dds_type_name", type_class.__name__)
         extensibility: Extensibility = getattr(
-            type_class, "_extensibility", Extensibility.FINAL
+            type_class, "_extensibility", Extensibility.APPENDABLE
         )
         has_key: bool = getattr(type_class, "_has_key", False)
 

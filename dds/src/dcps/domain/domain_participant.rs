@@ -22,6 +22,11 @@
 //!
 //! ```no_run
 //! use int2dds::domain::domain_participant_factory::DomainParticipantFactory;
+//! use int2dds::domain::qos::DomainParticipantQos;
+//! use int2dds::infrastructure::status::StatusMask;
+//! use int2dds::publication::qos::PublisherQos;
+//! use int2dds::subscription::qos::SubscriberQos;
+//! use int2dds::topic::qos::TopicQos;
 //! use int2dds::topic::type_support::DdsType;
 //!
 //! #[derive(DdsType)]
@@ -32,14 +37,14 @@
 //!
 //! // Get factory and create participant
 //! let factory = DomainParticipantFactory::get_instance();
-//! let participant = factory.create_participant(0, Default::default(), None, Default::default()).unwrap();
+//! let participant = factory.create_participant(0, DomainParticipantQos::default(), None, StatusMask::default()).unwrap();
 //!
 //! // Create topic
-//! let topic = participant.create_topic::<MyData>("MyTopic", "MyData", Default::default(), None, Default::default()).unwrap();
+//! let topic = participant.create_topic::<MyData>("MyTopic", "MyData", TopicQos::default(), None, StatusMask::default()).unwrap();
 //!
 //! // Create publisher and subscriber
-//! let publisher = participant.create_publisher(Default::default(), None, Default::default()).unwrap();
-//! let subscriber = participant.create_subscriber(Default::default(), None, Default::default()).unwrap();
+//! let publisher = participant.create_publisher(PublisherQos::default(), None, StatusMask::default()).unwrap();
+//! let subscriber = participant.create_subscriber(SubscriberQos::default(), None, StatusMask::default()).unwrap();
 //!
 //! // Clean up
 //! participant.delete_subscriber(subscriber).unwrap();
@@ -77,6 +82,7 @@ use crate::{
         types::{DomainId, LENGTH_UNLIMITED},
     },
     domain::domain_participant_factory::DomainParticipantFactory,
+    infrastructure::qos_kind::QosKind,
     infrastructure::{
         entity::{
             impl_dds_entity, impl_dds_entity_impl, BaseEntity, EnableChild, Entity, EntityInternal,
@@ -92,11 +98,7 @@ use crate::{
         status::StatusMask,
         status_condition::StatusCondition,
     },
-    publication::{
-        publisher::Publisher,
-        publisher_listener::PublisherListener,
-        qos::{PublisherQos, PUBLISHER_QOS_DEFAULT},
-    },
+    publication::{publisher::Publisher, publisher_listener::PublisherListener, qos::PublisherQos},
     rtps::{
         builtin::data::participant_message_data::ParticipantMessageData,
         common::{guid::Guid, rtps_error_code::RtpsErrorCode},
@@ -107,14 +109,14 @@ use crate::{
         },
     },
     subscription::{
-        qos::{DataReaderQos, SubscriberQos, SUBSCRIBER_QOS_DEFAULT},
+        qos::{DataReaderQos, SubscriberQos},
         subscriber::Subscriber,
         subscriber_listener::SubscriberListener,
     },
     topic::{
         content_filtered_topic::ContentFilteredTopic,
         multi_topic::MultiTopic,
-        qos::{TopicQos, TOPIC_QOS_DEFAULT},
+        qos::TopicQos,
         topic::Topic,
         topic_description::{TopicDescription, TopicDescriptionInternal},
         topic_listener::TopicListener,
@@ -157,9 +159,9 @@ pub struct DomainParticipant {
     // multi_topics: Arc<Mutex<Vec<Weak<MultiTopic>>>>,
     orphaned_entities: Arc<Mutex<OrphanedEntities>>,
     types: Arc<RwLock<HashMap<String, Arc<dyn TypeSupport>>>>,
-    default_subscriber_qos: Arc<Mutex<SubscriberQos>>,
-    default_publisher_qos: Arc<Mutex<PublisherQos>>,
-    default_topic_qos: Arc<Mutex<TopicQos>>,
+    default_subscriber_qos: Arc<Mutex<Option<SubscriberQos>>>,
+    default_publisher_qos: Arc<Mutex<Option<PublisherQos>>>,
+    default_topic_qos: Arc<Mutex<Option<TopicQos>>>,
     next_instance_id: Arc<AtomicU32>,
 }
 
@@ -388,9 +390,9 @@ impl DomainParticipant {
             // multi_topics: Arc::new(Mutex::new(Vec::new())),
             orphaned_entities: Arc::new(Mutex::new(OrphanedEntities::default())),
             types: Arc::new(RwLock::new(HashMap::new())),
-            default_subscriber_qos: Arc::new(Mutex::new(SubscriberQos::default())),
-            default_publisher_qos: Arc::new(Mutex::new(PublisherQos::default())),
-            default_topic_qos: Arc::new(Mutex::new(TopicQos::default())),
+            default_subscriber_qos: Arc::new(Mutex::new(None)),
+            default_publisher_qos: Arc::new(Mutex::new(None)),
+            default_topic_qos: Arc::new(Mutex::new(None)),
             next_instance_id: Arc::new(AtomicU32::new(0)),
         };
 
@@ -718,7 +720,7 @@ impl DomainParticipant {
     /// * System resources are insufficient
     pub fn create_publisher(
         &self,
-        qos: PublisherQos,
+        qos: impl Into<QosKind<PublisherQos>>,
         listener: Option<Arc<dyn PublisherListener>>,
         mask: StatusMask,
     ) -> DdsResult<Publisher> {
@@ -726,6 +728,25 @@ impl DomainParticipant {
             return Err(DdsError::PreconditionNotMet);
         }
         self.is_deleted()?;
+
+        // Resolution chain for QosKind::Default: registered default → configured
+        // default profile → spec default. QosKind::Specific is used as-is.
+        let qos = match qos.into() {
+            QosKind::Specific(q) => q,
+            QosKind::Default => {
+                if let Some(registered) =
+                    self.default_publisher_qos.lock().ok().and_then(|g| g.clone())
+                {
+                    registered
+                } else if let Ok(profile_qos) =
+                    DomainParticipantFactory::get_instance().get_publisher_qos_from_profile("")
+                {
+                    profile_qos
+                } else {
+                    PublisherQos::default()
+                }
+            }
+        };
 
         qos.is_consistent()?;
         let handle = self.create_instance_handle()?;
@@ -917,7 +938,7 @@ impl DomainParticipant {
     /// * System resources are insufficient
     pub fn create_subscriber(
         &self,
-        qos: SubscriberQos,
+        qos: impl Into<QosKind<SubscriberQos>>,
         listener: Option<Arc<dyn SubscriberListener>>,
         mask: StatusMask,
     ) -> DdsResult<Subscriber> {
@@ -925,6 +946,23 @@ impl DomainParticipant {
             return Err(DdsError::PreconditionNotMet);
         }
         self.is_deleted()?;
+
+        let qos = match qos.into() {
+            QosKind::Specific(q) => q,
+            QosKind::Default => {
+                if let Some(registered) =
+                    self.default_subscriber_qos.lock().ok().and_then(|g| g.clone())
+                {
+                    registered
+                } else if let Ok(profile_qos) =
+                    DomainParticipantFactory::get_instance().get_subscriber_qos_from_profile("")
+                {
+                    profile_qos
+                } else {
+                    SubscriberQos::default()
+                }
+            }
+        };
 
         qos.is_consistent()?;
         let handle = self.create_instance_handle()?;
@@ -1522,7 +1560,7 @@ impl DomainParticipant {
         &self,
         topic_name: &str,
         type_name: &str,
-        qos: TopicQos,
+        qos: impl Into<QosKind<TopicQos>>,
         listener: Option<Arc<dyn TopicListener>>,
         mask: StatusMask,
     ) -> DdsResult<Topic>
@@ -1533,6 +1571,22 @@ impl DomainParticipant {
             return Err(DdsError::PreconditionNotMet);
         }
         self.is_deleted()?;
+
+        let qos = match qos.into() {
+            QosKind::Specific(q) => q,
+            QosKind::Default => {
+                if let Some(registered) = self.default_topic_qos.lock().ok().and_then(|g| g.clone())
+                {
+                    registered
+                } else if let Ok(profile_qos) =
+                    DomainParticipantFactory::get_instance().get_topic_qos_from_profile("")
+                {
+                    profile_qos
+                } else {
+                    TopicQos::default()
+                }
+            }
+        };
 
         qos.is_consistent()?;
         let handle = self.create_instance_handle()?;
@@ -2008,28 +2062,31 @@ impl DomainParticipant {
         }
     }
 
-    pub fn set_default_publisher_qos(&self, qos: PublisherQos) -> DdsResult<()> {
+    pub fn set_default_publisher_qos(
+        &self,
+        qos: impl Into<QosKind<PublisherQos>>,
+    ) -> DdsResult<()> {
         self.is_deleted()?;
 
-        if qos == PUBLISHER_QOS_DEFAULT {
-            return self.reset_default_publisher_qos();
-        }
-        match qos.is_consistent() {
-            Ok(()) => match self.default_publisher_qos.lock() {
-                Ok(mut default_qos) => {
-                    *default_qos = qos;
-                    Ok(())
+        match qos.into() {
+            QosKind::Default => self.reset_default_publisher_qos(),
+            QosKind::Specific(qos) => {
+                qos.is_consistent()?;
+                match self.default_publisher_qos.lock() {
+                    Ok(mut default_qos) => {
+                        *default_qos = Some(qos);
+                        Ok(())
+                    }
+                    Err(e) => Err(DdsError::Error(e.to_string())),
                 }
-                Err(e) => Err(DdsError::Error(e.to_string())),
-            },
-            Err(err_code) => Err(err_code),
+            }
         }
     }
 
     fn reset_default_publisher_qos(&self) -> DdsResult<()> {
         match self.default_publisher_qos.lock() {
             Ok(mut default_qos) => {
-                *default_qos = PUBLISHER_QOS_DEFAULT;
+                *default_qos = None;
                 Ok(())
             }
             Err(e) => Err(DdsError::Error(e.to_string())),
@@ -2039,7 +2096,12 @@ impl DomainParticipant {
     pub fn get_default_publisher_qos(&self) -> DdsResult<PublisherQos> {
         self.is_deleted()?;
 
-        Ok(self.default_publisher_qos.lock().map_err(|e| DdsError::Error(e.to_string()))?.clone())
+        Ok(self
+            .default_publisher_qos
+            .lock()
+            .map_err(|e| DdsError::Error(e.to_string()))?
+            .clone()
+            .unwrap_or_default())
     }
 
     /// Retrieves `PublisherQos` from a loaded profile.
@@ -2056,28 +2118,31 @@ impl DomainParticipant {
         DomainParticipantFactory::get_instance().get_publisher_qos_from_profile(qos_path)
     }
 
-    pub fn set_default_subscriber_qos(&self, qos: SubscriberQos) -> DdsResult<()> {
+    pub fn set_default_subscriber_qos(
+        &self,
+        qos: impl Into<QosKind<SubscriberQos>>,
+    ) -> DdsResult<()> {
         self.is_deleted()?;
 
-        if qos == SUBSCRIBER_QOS_DEFAULT {
-            return self.reset_default_subscriber_qos();
-        }
-        match qos.is_consistent() {
-            Ok(()) => match self.default_subscriber_qos.lock() {
-                Ok(mut default_qos) => {
-                    *default_qos = qos;
-                    Ok(())
+        match qos.into() {
+            QosKind::Default => self.reset_default_subscriber_qos(),
+            QosKind::Specific(qos) => {
+                qos.is_consistent()?;
+                match self.default_subscriber_qos.lock() {
+                    Ok(mut default_qos) => {
+                        *default_qos = Some(qos);
+                        Ok(())
+                    }
+                    Err(e) => Err(DdsError::Error(e.to_string())),
                 }
-                Err(e) => Err(DdsError::Error(e.to_string())),
-            },
-            Err(err_code) => Err(err_code),
+            }
         }
     }
 
     fn reset_default_subscriber_qos(&self) -> DdsResult<()> {
         match self.default_subscriber_qos.lock() {
             Ok(mut default_qos) => {
-                *default_qos = SUBSCRIBER_QOS_DEFAULT;
+                *default_qos = None;
                 Ok(())
             }
             Err(e) => Err(DdsError::Error(e.to_string())),
@@ -2087,7 +2152,12 @@ impl DomainParticipant {
     pub fn get_default_subscriber_qos(&self) -> DdsResult<SubscriberQos> {
         self.is_deleted()?;
 
-        Ok(self.default_subscriber_qos.lock().map_err(|e| DdsError::Error(e.to_string()))?.clone())
+        Ok(self
+            .default_subscriber_qos
+            .lock()
+            .map_err(|e| DdsError::Error(e.to_string()))?
+            .clone()
+            .unwrap_or_default())
     }
 
     /// Retrieves `SubscriberQos` from a loaded profile.
@@ -2104,28 +2174,28 @@ impl DomainParticipant {
         DomainParticipantFactory::get_instance().get_subscriber_qos_from_profile(qos_path)
     }
 
-    pub fn set_default_topic_qos(&self, qos: TopicQos) -> DdsResult<()> {
+    pub fn set_default_topic_qos(&self, qos: impl Into<QosKind<TopicQos>>) -> DdsResult<()> {
         self.is_deleted()?;
 
-        if qos == TOPIC_QOS_DEFAULT {
-            return self.reset_default_topic_qos();
-        }
-        match qos.is_consistent() {
-            Ok(()) => match self.default_topic_qos.lock() {
-                Ok(mut default_qos) => {
-                    *default_qos = qos;
-                    Ok(())
+        match qos.into() {
+            QosKind::Default => self.reset_default_topic_qos(),
+            QosKind::Specific(qos) => {
+                qos.is_consistent()?;
+                match self.default_topic_qos.lock() {
+                    Ok(mut default_qos) => {
+                        *default_qos = Some(qos);
+                        Ok(())
+                    }
+                    Err(e) => Err(DdsError::Error(e.to_string())),
                 }
-                Err(e) => Err(DdsError::Error(e.to_string())),
-            },
-            Err(err_code) => Err(err_code),
+            }
         }
     }
 
     fn reset_default_topic_qos(&self) -> DdsResult<()> {
         match self.default_topic_qos.lock() {
             Ok(mut default_qos) => {
-                *default_qos = TOPIC_QOS_DEFAULT;
+                *default_qos = None;
                 Ok(())
             }
             Err(e) => Err(DdsError::Error(e.to_string())),
@@ -2135,7 +2205,12 @@ impl DomainParticipant {
     pub fn get_default_topic_qos(&self) -> DdsResult<TopicQos> {
         self.is_deleted()?;
 
-        Ok(self.default_topic_qos.lock().map_err(|e| DdsError::Error(e.to_string()))?.clone())
+        Ok(self
+            .default_topic_qos
+            .lock()
+            .map_err(|e| DdsError::Error(e.to_string()))?
+            .clone()
+            .unwrap_or_default())
     }
 
     /// Retrieves `TopicQos` from a loaded profile.

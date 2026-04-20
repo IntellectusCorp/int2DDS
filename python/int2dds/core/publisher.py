@@ -111,7 +111,7 @@ class DataWriter(Generic[T]):
         >>> writer.write(MyType(value=42))
     """
 
-    __slots__ = ("_handle", "_publisher", "_topic", "_qos_handle", "_closed", "_listener_ctx_id")
+    __slots__ = ("_handle", "_publisher", "_topic", "_qos_handle", "_closed", "_listener_ctx_id", "_xcdr2")
 
     def __init__(
         self,
@@ -194,6 +194,11 @@ class DataWriter(Generic[T]):
                     self._qos_handle, qos.liveliness._kind_int, qos.liveliness._lease_duration_ns))
             qos_ptr = self._qos_handle
 
+        # Determine XCDR version from QoS data_representation
+        self._xcdr2 = (qos is not None
+                       and qos.data_representation is not None
+                       and qos.data_representation.kind == "XCDR2")
+
         writer_ptr = ffi.new("Int2DdsDataWriter **")
 
         if listener is not None:
@@ -236,7 +241,7 @@ class DataWriter(Generic[T]):
             sample: The data sample to write
         """
         # Serialize the sample
-        data = sample._serialize_cdr()
+        data = sample._serialize_cdr(self._xcdr2)
 
         # Serialize key if the type has key fields
         key: bytes | None = None

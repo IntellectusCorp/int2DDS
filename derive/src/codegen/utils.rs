@@ -18,6 +18,9 @@ pub struct FieldConfig {
     pub position: Option<u8>,
     /// @bitfield: bit width for bitset fields
     pub bitfield: Option<u8>,
+    /// #[dds(char)]: storage is u8 / [u8; N] but TypeObject must register CHAR8.
+    /// IDL `char`는 Rust char(4바이트)로 못 담아 u8로 매핑하지만 XTypes 메타데이터는 CHAR8여야 호환됨.
+    pub as_char: bool,
 }
 
 /// Convert a literal to a TokenStream for code generation
@@ -94,6 +97,8 @@ pub fn parse_field_attributes(field: &syn::Field) -> FieldConfig {
                     let value = meta.value()?;
                     let lit: syn::LitInt = value.parse()?;
                     config.bitfield = Some(lit.base10_parse::<u8>()?);
+                } else if meta.path.is_ident("char") {
+                    config.as_char = true;
                 }
                 Ok(())
             });
@@ -391,6 +396,28 @@ pub fn get_discriminant_value(variant: &syn::Variant, index: usize) -> i64 {
         }
     }
     index as i64 // default: use index
+}
+
+/// Get bitmask position from variant attributes (#[dds(position = N)]).
+/// Falls back to variant index if not specified.
+pub fn get_bitmask_position(variant: &syn::Variant, index: usize) -> u8 {
+    for attr in &variant.attrs {
+        if attr.path().is_ident("dds") {
+            let mut position = None;
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("position") {
+                    let value = meta.value()?;
+                    let lit: syn::LitInt = value.parse()?;
+                    position = Some(lit.base10_parse::<u8>()?);
+                }
+                Ok(())
+            });
+            if let Some(pos) = position {
+                return pos;
+            }
+        }
+    }
+    index as u8
 }
 
 /// AutoId kind for struct-level auto ID assignment

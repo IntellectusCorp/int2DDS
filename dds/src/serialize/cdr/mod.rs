@@ -236,11 +236,17 @@ pub type XcdrDeserializer<'a> = Xcdr2Deserializer<'a>;
 
 /// Trait for types that can be serialized using CDR
 pub trait CdrSerialize {
+    /// Whether this type is a CDR primitive. Unused by classic CDR encoding
+    /// (no DHEADER) but defined for symmetry with [`XcdrSerialize`] so the
+    /// shared `impl_primitive_serialization!` macro can set it uniformly.
+    const IS_PRIMITIVE: bool = false;
     fn serialize_cdr(&self, serializer: &mut CdrSerializer) -> CdrResult<()>;
 }
 
 /// Trait for types that can be deserialized using CDR
 pub trait CdrDeserialize: Sized {
+    /// See [`CdrSerialize::IS_PRIMITIVE`].
+    const IS_PRIMITIVE: bool = false;
     fn deserialize_cdr(deserializer: &mut CdrDeserializer) -> CdrResult<Self>;
 }
 
@@ -343,11 +349,17 @@ impl<T: CdrDeserialize, const N: usize> CdrDeserialize for [T; N] {
 
 /// Trait for types that can be serialized using XCDR
 pub trait XcdrSerialize {
+    /// Whether this type is a CDR primitive (no DHEADER required when used as
+    /// the element type of a sequence/array per DDS-XTypes §7.4.3.5.3-4).
+    /// Defaults to `false`; primitive impls override to `true`.
+    const IS_PRIMITIVE: bool = false;
     fn serialize_xcdr(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()>;
 }
 
 /// Trait for types that can be deserialized using XCDR
 pub trait XcdrDeserialize: Sized {
+    /// See [`XcdrSerialize::IS_PRIMITIVE`].
+    const IS_PRIMITIVE: bool = false;
     fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self>;
 }
 
@@ -387,28 +399,49 @@ impl XcdrDeserialize for String {
 
 impl<T: XcdrSerialize> XcdrSerialize for Vec<T> {
     fn serialize_xcdr(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()> {
-        // XCDR2: Sequence itself has no DHEADER per DDS-XTypes v1.3.
-        // Only APPENDABLE/MUTABLE struct elements carry their own DHEADERs.
-        // Encoding: uint32(count) + element[0] + element[1] + ...
-        serializer.serialize_u32(self.len() as u32)?;
-        for item in self {
-            item.serialize_xcdr(serializer)?;
+        // DDS-XTypes §7.4.3.5.4: a sequence whose element type is *non-primitive*
+        // is preceded by a 4-byte DHEADER carrying the byte size of the element
+        // payload (length + elements). Sequences of primitives omit the DHEADER.
+        if T::IS_PRIMITIVE {
+            serializer.serialize_u32(self.len() as u32)?;
+            for item in self {
+                item.serialize_xcdr(serializer)?;
+            }
+            Ok(())
+        } else {
+            let dheader_pos = serializer.reserve_dheader();
+            let content_start = serializer.position();
+            serializer.serialize_u32(self.len() as u32)?;
+            for item in self {
+                item.serialize_xcdr(serializer)?;
+            }
+            let content_size = (serializer.position() - content_start) as u32;
+            serializer.write_dheader_at(dheader_pos, content_size);
+            Ok(())
         }
-        Ok(())
     }
 }
 
 impl<T: XcdrDeserialize> XcdrDeserialize for Vec<T> {
     fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
-        // XCDR2: Sequence itself has no DHEADER per DDS-XTypes v1.3.
-        // Only APPENDABLE/MUTABLE struct elements carry their own DHEADERs.
-        // Encoding: uint32(count) + element[0] + element[1] + ...
-        let length = deserializer.deserialize_u32()? as usize;
-        let mut result = Vec::with_capacity(length);
-        for _ in 0..length {
-            result.push(T::deserialize_xcdr(deserializer)?);
+        if T::IS_PRIMITIVE {
+            let length = deserializer.deserialize_u32()? as usize;
+            let mut result = Vec::with_capacity(length);
+            for _ in 0..length {
+                result.push(T::deserialize_xcdr(deserializer)?);
+            }
+            Ok(result)
+        } else {
+            // Consume the DHEADER (object_size). We do not strictly need it for
+            // round-tripping, but reading it advances the cursor correctly.
+            let _object_size = deserializer.read_dheader()?;
+            let length = deserializer.deserialize_u32()? as usize;
+            let mut result = Vec::with_capacity(length);
+            for _ in 0..length {
+                result.push(T::deserialize_xcdr(deserializer)?);
+            }
+            Ok(result)
         }
-        Ok(result)
     }
 }
 
@@ -435,17 +468,31 @@ impl<T: XcdrDeserialize> XcdrDeserialize for Option<T> {
 
 impl<T: XcdrSerialize, const N: usize> XcdrSerialize for [T; N] {
     fn serialize_xcdr(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()> {
-        // Arrays are fixed size, no need to write length
-        for item in self.iter() {
-            item.serialize_xcdr(serializer)?;
+        // DDS-XTypes §7.4.3.5.3: arrays of non-primitive elements carry a
+        // DHEADER of the element payload byte size; primitive arrays do not.
+        if T::IS_PRIMITIVE {
+            for item in self.iter() {
+                item.serialize_xcdr(serializer)?;
+            }
+            Ok(())
+        } else {
+            let dheader_pos = serializer.reserve_dheader();
+            let content_start = serializer.position();
+            for item in self.iter() {
+                item.serialize_xcdr(serializer)?;
+            }
+            let content_size = (serializer.position() - content_start) as u32;
+            serializer.write_dheader_at(dheader_pos, content_size);
+            Ok(())
         }
-        Ok(())
     }
 }
 
 impl<T: XcdrDeserialize, const N: usize> XcdrDeserialize for [T; N] {
     fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
-        // Collect into Vec and try to convert to array
+        if !T::IS_PRIMITIVE {
+            let _object_size = deserializer.read_dheader()?;
+        }
         let mut vec = Vec::with_capacity(N);
         for _ in 0..N {
             vec.push(T::deserialize_xcdr(deserializer)?);

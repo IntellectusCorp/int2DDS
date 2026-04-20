@@ -9,6 +9,10 @@ namespace Int2Dds.Interop
         internal static unsafe extern int int2dds_create_participant(IntPtr factory, byte* name, int domain_id, out IntPtr participant_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_create_participant_with_profile(IntPtr factory, byte* name, int domain_id,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string qos_path, out IntPtr participant_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_delete_participant(IntPtr participant);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
