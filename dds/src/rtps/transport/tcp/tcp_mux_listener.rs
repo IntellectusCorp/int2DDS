@@ -21,7 +21,7 @@ use crate::rtps::transport::tcp::framing::{
     classify_frame, write_framed_message, FramedReader, TcpFrameKind,
 };
 use crate::rtps::transport::tcp::protocol::{
-    generate_cookie, ControlMsg, ERR_CODE_IDLE_TIMEOUT, ERR_CODE_INVALID_COOKIE,
+    decode_locator, generate_cookie, ControlMsg, ERR_CODE_IDLE_TIMEOUT, ERR_CODE_INVALID_COOKIE,
     ERR_CODE_INVALID_PORT, MSG_PORT_BIND, MSG_PORT_RESERVE, OP_IDLE_TIMEOUT,
 };
 use crate::rtps::transport::tcp::stream_wrapper::TcpStreamWrapper;
@@ -34,25 +34,47 @@ pub(crate) type ConnectionId = usize;
 /// Variants that require releasing the stream to another owner let the
 /// read loop move `stream` out of its local variable before exiting.
 ///
-/// Currently used to implement connection reversal: when a
-/// PEER_HELLO_REVERSE arrives, the acceptor hands its TCP socket over
-/// to this host's TcpSender cache (keyed by `key_addr`) so the sender
-/// can write on it, instead of the read loop continuing to read.
+/// Used to implement connection reversal: when PEER_HELLO_REVERSE or
+/// PORT_BIND_REVERSE arrives, the acceptor hands its TCP socket over
+/// to this host's TcpSender cache so the sender can write on it,
+/// instead of the read loop continuing to read.
 pub(crate) enum FirstMessageOutcome {
     /// Keep running the read loop on this connection (normal path).
     Continue,
     /// The first message was PEER_HELLO_REVERSE: move the stream into
-    /// the sender cache at `key_addr` and exit the read loop.
+    /// the sender cache at `key_addr` (logical port 0 = control).
     HandoffToSenderAsControl { key_addr: SocketAddr },
+    /// The first message was PORT_BIND_REVERSE: move the stream into
+    /// the sender cache at (`key_addr`, `logical_port`) as a user-data
+    /// send channel.
+    HandoffToSenderAsData { key_addr: SocketAddr, logical_port: u16 },
+}
+
+/// Outcome of `handle_reverse_control_frame` — returned to the read
+/// loop so it can dispatch a reverse-data dial on the asymmetric host.
+///
+/// The dial is blocking (tcp_connect + handshake) and must not run
+/// inline in the read loop.
+pub(crate) enum ReverseControlOutcome {
+    /// No action needed (keepalive handled, unknown frame, etc.).
+    Continue,
+    /// Dial a reverse data channel to `peer` for `logical_port`.
+    DialReverseData { peer: SocketAddr, logical_port: u16 },
 }
 
 /// Connection state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConnectionState {
-    /// Waiting for first message (PEER_HELLO or PORT_BIND).
+    /// Waiting for first message (PEER_HELLO / PEER_HELLO_REVERSE /
+    /// PORT_BIND / PORT_BIND_REVERSE).
     AwaitingFirstMessage,
     /// PEER_HELLO done — control connection, accepts PORT_RESERVE + KEEPALIVE.
     Control,
+    /// Adopted reverse-control stream: this host dialed PEER_HELLO_REVERSE,
+    /// so the *remote* (reachable) side writes PORT_RESERVE / Keepalive
+    /// here. On PORT_RESERVE we dial a reverse data channel instead of
+    /// issuing a cookie (the remote cannot dial us back).
+    ReverseControl,
     /// PORT_BIND done — data connection, accepts RTPS data.
     Active,
     Closing,
@@ -164,11 +186,11 @@ impl MuxListenerShared {
         let _ = self.sender.set(sender);
     }
 
-    /// Adopt an externally-dialed stream (e.g. a reverse channel opened by
-    /// an asymmetric host) by spawning a per-connection read loop against
-    /// this shared state. The connection starts in `Control` state because
-    /// the PEER_HELLO_REVERSE handshake already completed during the
-    /// outbound dial.
+    /// Adopt an externally-dialed reverse CONTROL stream (PEER_HELLO_REVERSE
+    /// handshake already completed). The connection starts in
+    /// `ReverseControl` state so that PORT_RESERVE arriving from the
+    /// reachable peer triggers a reverse data dial instead of the normal
+    /// cookie-issue path.
     pub(crate) fn adopt_inbound_stream(
         self: &Arc<Self>,
         stream: Box<dyn TcpStreamWrapper>,
@@ -184,7 +206,7 @@ impl MuxListenerShared {
             conn_id,
             ConnectionEntry {
                 remote_addr: peer_listen_addr,
-                state: ConnectionState::Control,
+                state: ConnectionState::ReverseControl,
                 bound_logical_port: None,
                 remote_guid_prefix: None,
                 last_activity: Instant::now(),
@@ -221,8 +243,74 @@ impl MuxListenerShared {
             });
 
         info!(
-            "TcpMuxListener(shared): adopted reverse-channel stream (peer={:?}, conn={})",
+            "TcpMuxListener(shared): adopted reverse-control stream (peer={:?}, conn={})",
             peer_listen_addr, conn_id
+        );
+        conn_id
+    }
+
+    /// Adopt an externally-dialed reverse DATA stream (PORT_BIND_REVERSE
+    /// handshake already completed). The connection starts in `Active`
+    /// state with `bound_logical_port` set so user data arriving from the
+    /// reachable peer is routed to the correct RTPS channel.
+    pub(crate) fn adopt_inbound_data_stream(
+        self: &Arc<Self>,
+        stream: Box<dyn TcpStreamWrapper>,
+        peer_listen_addr: SocketAddr,
+        logical_port: u16,
+        terminated: Arc<AtomicBool>,
+        idle_timeout: Duration,
+    ) -> ConnectionId {
+        let conn_id = self.next_conn_id.fetch_add(1, Ordering::SeqCst);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let error_on_exit = Arc::new(AtomicBool::new(false));
+
+        self.connections.insert(
+            conn_id,
+            ConnectionEntry {
+                remote_addr: peer_listen_addr,
+                state: ConnectionState::Active,
+                bound_logical_port: Some(logical_port),
+                remote_guid_prefix: None,
+                last_activity: Instant::now(),
+                shutdown: shutdown.clone(),
+                error_on_exit: error_on_exit.clone(),
+            },
+        );
+
+        {
+            let synthetic_guid = addr_to_guid(peer_listen_addr);
+            let mut pc = self.peer_connections.lock().expect("peer_connections lock");
+            let group = pc.entry(synthetic_guid).or_insert_with(PeerConnectionGroup::new);
+            if PortManager::is_discovery_unicast_port(self.domain_id, logical_port) {
+                group.discovery_conn = Some(conn_id);
+            } else {
+                group.user_data_conn = Some(conn_id);
+            }
+            if let Some(mut conn) = self.connections.get_mut(&conn_id) {
+                conn.remote_guid_prefix = Some(synthetic_guid);
+            }
+        }
+
+        let conn_shared = Arc::clone(self);
+        let _ = thread::Builder::new()
+            .name(format!("tcp_conn_reverse_data_{}", conn_id))
+            .stack_size(128 * 1024)
+            .spawn(move || {
+                read_loop(
+                    stream,
+                    conn_id,
+                    conn_shared,
+                    terminated,
+                    shutdown,
+                    error_on_exit,
+                    idle_timeout,
+                );
+            });
+
+        info!(
+            "TcpMuxListener(shared): adopted reverse-data stream (peer={:?}, port={}, conn={})",
+            peer_listen_addr, logical_port, conn_id
         );
         conn_id
     }
@@ -428,10 +516,51 @@ impl MuxListenerShared {
                 FirstMessageOutcome::Continue
             }
 
+            ControlMsg::PortBindReverse { locator, logical_port } => {
+                // The asymmetric peer dialed a data connection FOR US to
+                // use as our send channel for `logical_port`. ACK it,
+                // then hand the stream off to the sender cache.
+                let my_disc = PortManager::get_discovery_traffic_unicast_port(
+                    self.domain_id,
+                    self.participant_id,
+                );
+                let my_user = PortManager::get_user_traffic_unicast_port(
+                    self.domain_id,
+                    self.participant_id,
+                );
+                if logical_port != my_disc && logical_port != my_user {
+                    warn!(
+                        "TcpMuxListener [{}]: PORT_BIND_REVERSE with invalid port {} on conn {}",
+                        TransportErrorCode::TcpControlInvalidPort,
+                        logical_port,
+                        conn_id
+                    );
+                    if let Some(entry) = self.connections.get(&conn_id) {
+                        entry.shutdown.store(true, Ordering::SeqCst);
+                    }
+                    return FirstMessageOutcome::Continue;
+                }
+
+                send_control(stream, &ControlMsg::PortBindAck);
+
+                let (peer_ip, port) = decode_locator(&locator);
+                let key_addr = SocketAddr::new(std::net::IpAddr::V4(peer_ip), port);
+
+                info!(
+                    "TcpMuxListener: PORT_BIND_REVERSE from {:?} (key={:?}, port={}, conn={})",
+                    self.connections.get(&conn_id).map(|c| c.remote_addr),
+                    key_addr,
+                    logical_port,
+                    conn_id
+                );
+
+                FirstMessageOutcome::HandoffToSenderAsData { key_addr, logical_port }
+            }
+
             other => {
                 warn!(
-                    "TcpMuxListener: Expected PEER_HELLO / PEER_HELLO_REVERSE / PORT_BIND, \
-                     got {} on conn {}",
+                    "TcpMuxListener: Expected PEER_HELLO / PEER_HELLO_REVERSE / PORT_BIND / \
+                     PORT_BIND_REVERSE, got {} on conn {}",
                     other.type_name(),
                     conn_id
                 );
@@ -521,6 +650,61 @@ impl MuxListenerShared {
                     other.type_name(),
                     conn_id
                 );
+            }
+        }
+    }
+
+    /// Handle a frame received on an adopted reverse-control stream
+    /// (this host dialed PEER_HELLO_REVERSE; remote writes, we read).
+    ///
+    /// On PORT_RESERVE we return `DialReverseData` so the read loop
+    /// spawns the reverse dial off-thread (the dial blocks on TCP
+    /// handshake and must not stall further reads from this peer).
+    pub(crate) fn handle_reverse_control_frame(
+        &self,
+        stream: &mut Box<dyn TcpStreamWrapper>,
+        conn_id: ConnectionId,
+        payload: &[u8],
+    ) -> ReverseControlOutcome {
+        let msg = match ControlMsg::from_bytes(payload) {
+            Ok(m) => m,
+            Err(e) => {
+                warn!(
+                    "TcpMuxListener [{}]: Bad frame on reverse-control conn {}: {:?}",
+                    TransportErrorCode::TcpControlProtocolError,
+                    conn_id,
+                    e
+                );
+                return ReverseControlOutcome::Continue;
+            }
+        };
+
+        match msg {
+            ControlMsg::PortReserve { logical_port } => {
+                let peer = match self.connections.get(&conn_id).map(|c| c.remote_addr) {
+                    Some(a) => a,
+                    None => return ReverseControlOutcome::Continue,
+                };
+                debug!(
+                    "TcpMuxListener: PORT_RESERVE on reverse-control conn {} (peer={:?}, \
+                     port={}) → dispatching reverse data dial",
+                    conn_id, peer, logical_port
+                );
+                ReverseControlOutcome::DialReverseData { peer, logical_port }
+            }
+
+            ControlMsg::Keepalive => {
+                send_control(stream, &ControlMsg::KeepaliveAck);
+                ReverseControlOutcome::Continue
+            }
+
+            other => {
+                debug!(
+                    "TcpMuxListener: Ignoring {} on reverse-control conn {}",
+                    other.type_name(),
+                    conn_id
+                );
+                ReverseControlOutcome::Continue
             }
         }
     }
@@ -747,9 +931,11 @@ impl TcpMuxListener {
             conn_id,
             ConnectionEntry {
                 remote_addr: peer_listen_addr,
-                // Handshake already done during the outbound dial, so jump
-                // straight to Control state.
-                state: ConnectionState::Control,
+                // Handshake already done during the outbound dial — this
+                // host is the reader, remote is the writer, so use
+                // ReverseControl state (distinguishes cookie-issuing
+                // server from reverse-dial client).
+                state: ConnectionState::ReverseControl,
                 bound_logical_port: None,
                 remote_guid_prefix: None,
                 last_activity: Instant::now(),
@@ -940,10 +1126,61 @@ pub(crate) fn read_loop(
                                 shared.remove_connection_inner(conn_id);
                                 return;
                             }
+                            FirstMessageOutcome::HandoffToSenderAsData { key_addr, logical_port } => {
+                                if let Some(sender) = shared.sender.get() {
+                                    sender.register_incoming_data(
+                                        key_addr,
+                                        logical_port,
+                                        stream,
+                                    );
+                                } else {
+                                    warn!(
+                                        "TcpMuxListener: PORT_BIND_REVERSE but sender \
+                                         hook missing; dropping connection"
+                                    );
+                                }
+                                shared.remove_connection_inner(conn_id);
+                                return;
+                            }
                         }
                     }
                     Some(ConnectionState::Control) => {
                         shared.handle_control_frame(&mut stream, conn_id, &msg);
+                    }
+                    Some(ConnectionState::ReverseControl) => {
+                        match shared.handle_reverse_control_frame(&mut stream, conn_id, &msg) {
+                            ReverseControlOutcome::Continue => {}
+                            ReverseControlOutcome::DialReverseData { peer, logical_port } => {
+                                // Dial blocks — dispatch to a worker thread
+                                // so this read loop keeps consuming frames.
+                                if let Some(sender) = shared.sender.get() {
+                                    let sender = sender.clone();
+                                    let shared_clone = Arc::clone(&shared);
+                                    let terminated_clone = terminated.clone();
+                                    let _ = thread::Builder::new()
+                                        .name(format!(
+                                            "tcp_reverse_data_dial_{}_{}",
+                                            peer, logical_port
+                                        ))
+                                        .stack_size(128 * 1024)
+                                        .spawn(move || {
+                                            dispatch_reverse_data_dial(
+                                                sender,
+                                                shared_clone,
+                                                peer,
+                                                logical_port,
+                                                terminated_clone,
+                                                idle_timeout,
+                                            );
+                                        });
+                                } else {
+                                    warn!(
+                                        "TcpMuxListener: PORT_RESERVE on reverse-control but \
+                                         sender hook missing"
+                                    );
+                                }
+                            }
+                        }
                     }
                     Some(ConnectionState::Active) => {
                         shared.handle_active_frame(conn_id, &msg);
@@ -1000,6 +1237,55 @@ pub(crate) fn read_loop(
 
     // Cleanup — idempotent if already removed by prune.
     shared.remove_connection(conn_id);
+}
+
+/// Dial a reverse data channel to `peer` for `logical_port` and, on
+/// success, adopt the resulting stream as an inbound Active data
+/// connection so user data arriving from the reachable peer is routed
+/// into RTPS. Called from the read loop of a ReverseControl connection
+/// after a PORT_RESERVE frame triggers connection reversal.
+///
+/// The per-peer-port guard (`sender.reverse_data_dialed`) ensures we
+/// only run one dial at a time for a given (peer, logical_port).
+fn dispatch_reverse_data_dial(
+    sender: crate::rtps::transport::tcp::tcp_sender::TcpSender,
+    shared: Arc<MuxListenerShared>,
+    peer: SocketAddr,
+    logical_port: u16,
+    terminated: Arc<AtomicBool>,
+    idle_timeout: Duration,
+) {
+    if sender.is_reverse_data_dialed(peer, logical_port) {
+        debug!(
+            "TcpMuxListener: reverse data dial already in-flight for {:?}:{}",
+            peer, logical_port
+        );
+        return;
+    }
+    sender.mark_reverse_data_dialed(peer, logical_port);
+
+    match sender.dial_reverse_data_channel(&peer, 0, logical_port) {
+        Ok(stream) => {
+            shared.adopt_inbound_data_stream(
+                stream,
+                peer,
+                logical_port,
+                terminated,
+                idle_timeout,
+            );
+            info!(
+                "TcpMuxListener: reverse data channel up (peer={:?}, port={})",
+                peer, logical_port
+            );
+        }
+        Err(e) => {
+            warn!(
+                "TcpMuxListener: reverse data dial failed (peer={:?}, port={}): {:?}",
+                peer, logical_port, e
+            );
+            sender.clear_reverse_data_dialed(peer, logical_port);
+        }
+    }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
