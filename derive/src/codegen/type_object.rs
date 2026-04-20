@@ -136,6 +136,38 @@ fn type_to_identifier(
     }
 }
 
+/// Emit `CompleteTypeDetail.ann_builtin` assignment from type-level annotation flags, or empty tokens when none apply.
+fn build_type_ann_builtin(
+    type_config: &DdsTypeConfig,
+    crate_path: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let has_builtin = type_config.nested || type_config.data_representation_mask.is_some();
+    if !has_builtin {
+        return quote! {};
+    }
+
+    let nested_expr = if type_config.nested {
+        quote! { Some(true) }
+    } else {
+        quote! { None }
+    };
+    let data_rep_expr = match type_config.data_representation_mask {
+        Some(mask) => {
+            let mask_u16 = (mask & 0xFFFF) as u16;
+            quote! { Some(#mask_u16) }
+        }
+        None => quote! { None },
+    };
+
+    quote! {
+        struct_type.header.detail.ann_builtin = Some(#crate_path::xtypes::AppliedBuiltinTypeAnnotations {
+            verbatim: None,
+            nested: #nested_expr,
+            data_representation: #data_rep_expr,
+        });
+    }
+}
+
 /// Generate HasTypeObject implementation for a struct.
 pub fn generate_has_type_object_impl(
     name: &syn::Ident,
@@ -221,21 +253,38 @@ pub fn generate_has_type_object_impl(
             let is_must_understand = field_config.must_understand;
             let is_external = field_config.external;
             let try_construct = try_construct_to_tokens(field_config.try_construct, crate_path);
+            let hashid_expr = match field_config.hashid.as_ref() {
+                Some(name) if !name.is_empty() => quote! { Some(#name.to_string()) },
+                Some(_) => quote! { Some(#field_name_str.to_string()) },
+                None => quote! { None },
+            };
 
             Some(quote! {
-                #crate_path::xtypes::CompleteStructMember::new(
-                    #member_id,
-                    #crate_path::xtypes::MemberFlag::new(
-                        #try_construct,
-                        #is_external,
-                        #is_optional,
-                        #is_must_understand,
-                        #is_key,
-                        false, // is_default
-                    ),
-                    #type_id,
-                    #field_name_str.to_string(),
-                )
+                {
+                    let mut member = #crate_path::xtypes::CompleteStructMember::new(
+                        #member_id,
+                        #crate_path::xtypes::MemberFlag::new(
+                            #try_construct,
+                            #is_external,
+                            #is_optional,
+                            #is_must_understand,
+                            #is_key,
+                            false,
+                        ),
+                        #type_id,
+                        #field_name_str.to_string(),
+                    );
+                    let hash_id: Option<String> = #hashid_expr;
+                    if hash_id.is_some() {
+                        member.detail.ann_builtin = Some(#crate_path::xtypes::AppliedBuiltinMemberAnnotations {
+                            unit: None,
+                            min: None,
+                            max: None,
+                            hash_id,
+                        });
+                    }
+                    member
+                }
             })
         })
         .collect();
@@ -255,6 +304,7 @@ pub fn generate_has_type_object_impl(
     let is_nested = type_config.nested;
     let is_autoid_hash =
         matches!(type_config.autoid, Some(crate::codegen::utils::AutoIdKind::Hash));
+    let type_ann_expr = build_type_ann_builtin(type_config, crate_path);
 
     let impl_generics = &gc.impl_generics;
     let ty_generics = &gc.ty_generics;
@@ -306,6 +356,7 @@ pub fn generate_has_type_object_impl(
                     #base_type_expr
                 );
                 #(struct_type.add_member(#complete_members);)*
+                #type_ann_expr
                 #crate_path::xtypes::CompleteTypeObject::Struct(struct_type)
             }
 
