@@ -1,3 +1,12 @@
+/// TryConstruct behavior for bound-violating deserialized values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TryConstructKind {
+    #[default]
+    Discard,
+    UseDefault,
+    Trim,
+}
+
 /// Field attribute configuration parsed from #[dds(...)] attributes
 #[derive(Debug, Clone, Default)]
 pub struct FieldConfig {
@@ -19,8 +28,11 @@ pub struct FieldConfig {
     /// @bitfield: bit width for bitset fields
     pub bitfield: Option<u8>,
     /// #[dds(char)]: storage is u8 / [u8; N] but TypeObject must register CHAR8.
-    /// IDL `char`는 Rust char(4바이트)로 못 담아 u8로 매핑하지만 XTypes 메타데이터는 CHAR8여야 호환됨.
     pub as_char: bool,
+    /// @try_construct: deserialize-side behavior on bound violation.
+    pub try_construct: TryConstructKind,
+    /// @non_serialized: field is excluded from wire and from TypeObject.
+    pub non_serialized: bool,
 }
 
 /// Convert a literal to a TokenStream for code generation
@@ -50,7 +62,8 @@ pub fn literal_to_tokens(lit: &syn::Lit, ty: &syn::Type) -> proc_macro2::TokenSt
     }
 }
 
-/// Parse field attributes from #[dds(...)] annotations
+/// Parse field attributes from #[dds(...)] annotations.
+/// Panics on mutually-exclusive combinations such as `@key` + `@non_serialized`.
 pub fn parse_field_attributes(field: &syn::Field) -> FieldConfig {
     let mut config = FieldConfig::default();
 
@@ -99,10 +112,35 @@ pub fn parse_field_attributes(field: &syn::Field) -> FieldConfig {
                     config.bitfield = Some(lit.base10_parse::<u8>()?);
                 } else if meta.path.is_ident("char") {
                     config.as_char = true;
+                } else if meta.path.is_ident("non_serialized") {
+                    config.non_serialized = true;
+                } else if meta.path.is_ident("try_construct") {
+                    let value = meta.value()?;
+                    let lit: syn::LitStr = value.parse()?;
+                    config.try_construct = match lit.value().to_ascii_lowercase().as_str() {
+                        "discard" => TryConstructKind::Discard,
+                        "use_default" => TryConstructKind::UseDefault,
+                        "trim" => TryConstructKind::Trim,
+                        other => {
+                            return Err(meta.error(format!(
+                                "unknown try_construct value '{}', expected 'discard' | 'use_default' | 'trim'",
+                                other
+                            )));
+                        }
+                    };
                 }
                 Ok(())
             });
         }
+    }
+
+    if config.key && config.non_serialized {
+        let field_name =
+            field.ident.as_ref().map(ToString::to_string).unwrap_or_else(|| "<anon>".to_string());
+        panic!(
+            "Field '{}' cannot be both #[dds(key)] and #[dds(non_serialized)] (XTypes 7.3.1.2.1.14)",
+            field_name
+        );
     }
 
     config
@@ -398,15 +436,33 @@ pub fn get_variant_type(variant: &syn::Variant) -> Option<&syn::Type> {
     }
 }
 
-/// Get the discriminant value for a variant (explicit or auto-generated)
+/// Get the discriminant value for a variant. Priority:
+/// 1. `#[dds(value = N)]` attribute (XTypes @value, 7.3.1.2.1.5)
+/// 2. Rust `= N` discriminant syntax
+/// 3. Positional index
 pub fn get_discriminant_value(variant: &syn::Variant, index: usize) -> i64 {
+    for attr in &variant.attrs {
+        if attr.path().is_ident("dds") {
+            let mut value: Option<i64> = None;
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("value") {
+                    let parsed = meta.value()?;
+                    let lit: syn::LitInt = parsed.parse()?;
+                    value = Some(lit.base10_parse::<i64>()?);
+                }
+                Ok(())
+            });
+            if let Some(v) = value {
+                return v;
+            }
+        }
+    }
     if let Some((_, expr)) = &variant.discriminant {
         if let syn::Expr::Lit(lit) = expr {
             if let syn::Lit::Int(int_lit) = &lit.lit {
                 return int_lit.base10_parse().unwrap_or(index as i64);
             }
         }
-        // Handle negative literals
         if let syn::Expr::Unary(unary) = expr {
             if matches!(unary.op, syn::UnOp::Neg(_)) {
                 if let syn::Expr::Lit(lit) = &*unary.expr {
@@ -418,7 +474,88 @@ pub fn get_discriminant_value(variant: &syn::Variant, index: usize) -> i64 {
             }
         }
     }
-    index as i64 // default: use index
+    index as i64
+}
+
+/// Compute enumerated-literal values for an entire variant list with XTypes 7.3.1.2.1.5
+/// progression semantics: unspecified values continue from the most-recently specified value.
+pub fn compute_enumerated_values(
+    variants: &syn::punctuated::Punctuated<syn::Variant, syn::token::Comma>,
+) -> Vec<i64> {
+    let mut values = Vec::with_capacity(variants.len());
+    let mut next_implicit: i64 = 0;
+    for (index, variant) in variants.iter().enumerate() {
+        let explicit = explicit_dds_value(variant).or_else(|| explicit_rust_discriminant(variant));
+        let resolved = match explicit {
+            Some(v) => v,
+            None => {
+                let _ = index;
+                next_implicit
+            }
+        };
+        values.push(resolved);
+        next_implicit = resolved + 1;
+    }
+    values
+}
+
+fn explicit_dds_value(variant: &syn::Variant) -> Option<i64> {
+    for attr in &variant.attrs {
+        if attr.path().is_ident("dds") {
+            let mut found = None;
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("value") {
+                    let parsed = meta.value()?;
+                    let lit: syn::LitInt = parsed.parse()?;
+                    found = Some(lit.base10_parse::<i64>()?);
+                }
+                Ok(())
+            });
+            if found.is_some() {
+                return found;
+            }
+        }
+    }
+    None
+}
+
+fn explicit_rust_discriminant(variant: &syn::Variant) -> Option<i64> {
+    let (_, expr) = variant.discriminant.as_ref()?;
+    if let syn::Expr::Lit(lit) = expr {
+        if let syn::Lit::Int(int_lit) = &lit.lit {
+            return int_lit.base10_parse().ok();
+        }
+    }
+    if let syn::Expr::Unary(unary) = expr {
+        if matches!(unary.op, syn::UnOp::Neg(_)) {
+            if let syn::Expr::Lit(lit) = &*unary.expr {
+                if let syn::Lit::Int(int_lit) = &lit.lit {
+                    let val: i64 = int_lit.base10_parse().ok()?;
+                    return Some(-val);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Returns true if the variant is marked `#[dds(default_literal)]` (XTypes 7.3.1.2.1.10).
+pub fn variant_is_default_literal(variant: &syn::Variant) -> bool {
+    for attr in &variant.attrs {
+        if attr.path().is_ident("dds") {
+            let mut found = false;
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("default_literal") {
+                    found = true;
+                }
+                Ok(())
+            });
+            if found {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Get bitmask position from variant attributes (#[dds(position = N)]).
@@ -441,6 +578,21 @@ pub fn get_bitmask_position(variant: &syn::Variant, index: usize) -> u8 {
         }
     }
     index as u8
+}
+
+/// Emit `<crate_path>::xtypes::TryConstructKind::<Variant>` for MemberFlag construction.
+pub fn try_construct_to_tokens(
+    kind: TryConstructKind,
+    crate_path: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    use quote::quote;
+    match kind {
+        TryConstructKind::Discard => quote! { #crate_path::xtypes::TryConstructKind::Discard },
+        TryConstructKind::UseDefault => {
+            quote! { #crate_path::xtypes::TryConstructKind::UseDefault }
+        }
+        TryConstructKind::Trim => quote! { #crate_path::xtypes::TryConstructKind::Trim },
+    }
 }
 
 /// AutoId kind for struct-level auto ID assignment
