@@ -10,27 +10,28 @@ use crate::rtps::transport::udp::udp_listener::UdpListener;
 
 use super::TransportType;
 
-/// Intent-based send target.
-///
-/// RTPS logic expresses *what* it wants to do, not *how*.
-/// Each `TransportPlugin` implementation interprets these targets
-/// according to its own transport semantics.
+/// Intent-based send target, named after the RTPS protocol concept being
+/// delivered rather than the transport mechanism used. Each `TransportPlugin`
+/// picks the mechanism (multicast, unicast fan-out, BIND, SHM write, ...) that
+/// realizes the intent on its own transport.
 pub(crate) enum SendTarget<'a> {
-    /// Announce this participant's presence to the network.
+    /// Announce this participant's presence (SPDP).
     ///
-    /// - UDP: send_multicast to discovery multicast group
-    /// - TCP: unicast to each initial_peer via discovery connection
-    /// - Hybrid: UDP multicast (discovery always uses UDP)
-    /// - SHM: UDP multicast (discovery always uses UDP)
-    MulticastDiscovery,
+    /// The caller passes the configured `initial_peers`; the transport
+    /// reaches them alongside its native discovery mechanism:
+    /// - UDP: multicast to discovery group + unicast to each initial_peer
+    /// - TCP: unicast to each initial_peer (no multicast on TCP)
+    /// - Hybrid: UDP multicast + unicast fan-out to initial_peers
+    /// - SHM: UDP multicast + unicast fan-out to initial_peers
+    SPDPDiscovery { initial_peers: &'a [SocketAddr] },
 
-    /// Send discovery data (SEDP) to a specific remote participant.
+    /// Send endpoint discovery data (SEDP) to a specific remote participant.
     ///
     /// - UDP: sendto(locator address)
     /// - TCP: BIND handshake + send on discovery logical port
     /// - Hybrid: route by locator kind (UDP or TCP)
     /// - SHM: sendto via UDP (discovery is always UDP)
-    UnicastDiscovery(&'a Locator),
+    SEDPDiscovery(&'a Locator),
 
     /// Send user data to a specific remote endpoint.
     ///

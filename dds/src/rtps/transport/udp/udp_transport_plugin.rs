@@ -118,11 +118,14 @@ impl UdpTransportPlugin {
 impl TransportPlugin for UdpTransportPlugin {
     fn send(&self, data: &[u8], target: &SendTarget) -> io::Result<()> {
         match target {
-            SendTarget::MulticastDiscovery => {
+            SendTarget::SPDPDiscovery { initial_peers } => {
                 self.sender.send_multicast(self.domain_id, data)?;
+                for peer_addr in *initial_peers {
+                    let _ = self.sender.send(peer_addr, data);
+                }
                 Ok(())
             }
-            SendTarget::UnicastDiscovery(locator) | SendTarget::UserData(locator) => {
+            SendTarget::SEDPDiscovery(locator) | SendTarget::UserData(locator) => {
                 let ip = locator.to_ip_v4_addr();
                 let port = locator.port() as u16;
                 let addr = SocketAddr::new(IpAddr::V4(ip), port);

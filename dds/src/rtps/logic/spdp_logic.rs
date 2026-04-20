@@ -14,7 +14,6 @@ use speedy::{Endianness, Writable};
 use crate::rtps::{
     common::{
         guid::Guid,
-        locator::Locator,
         rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
         time::RtpsDuration,
         types::DomainId,
@@ -95,10 +94,11 @@ impl SpdpLogic {
         let start = Instant::now();
         match data {
             Some(ref data) => {
-                let _ = self.transport.send(data, &SendTarget::MulticastDiscovery);
-                log::debug!("discovery multicast packet send");
-                // This will send to initial peers if configured
-                self.send_spdp_to_initial_peers(data);
+                let _ = self.transport.send(
+                    data,
+                    &SendTarget::SPDPDiscovery { initial_peers: &self.initial_peers },
+                );
+                log::debug!("SPDP announcement dispatched (peers={})", self.initial_peers.len());
             }
             None => {
                 log::error!("spdp message is not set");
@@ -151,44 +151,6 @@ impl SpdpLogic {
         Ok(())
     }
 
-    /// Send SPDP message to initial peers via unicast.
-    /// Transport plugin handles the actual mechanism (UDP/TCP).
-    pub(crate) fn send_spdp_to_initial_peers(&self, data: &[u8]) {
-        if self.initial_peers.is_empty() {
-            return;
-        }
-
-        log::debug!(
-            "[SPDP] Sending to {} initial peers: {:?}",
-            self.initial_peers.len(),
-            self.initial_peers
-        );
-
-        for peer_addr in &self.initial_peers {
-            if let std::net::SocketAddr::V4(v4) = peer_addr {
-                let locator = Locator::from_ip_v4_addr_and_port(v4.ip(), v4.port() as u32);
-                match self.transport.send(data, &SendTarget::UnicastDiscovery(&locator)) {
-                    Ok(_) => {
-                        log::debug!("[SPDP] Sent discovery message to initial peer {}", peer_addr);
-                    }
-                    Err(e) => {
-                        if e.kind() == std::io::ErrorKind::BrokenPipe
-                            || e.kind() == std::io::ErrorKind::ConnectionReset
-                        {
-                            log::debug!("[SPDP] Peer {} disconnected: {}", peer_addr, e);
-                        } else {
-                            log::warn!(
-                                "[SPDP] Failed to send to initial peer {}: {}",
-                                peer_addr,
-                                e
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     /// Method to notify the network that the Participant has been terminated after deleting my Participant
     pub(crate) fn send_participant_termination_message_multicast(&self) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
@@ -198,9 +160,10 @@ impl SpdpLogic {
         {
             let buffer = rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian);
             if let Ok(buffer) = buffer {
-                let _ = self.transport.send(&buffer, &SendTarget::MulticastDiscovery);
-                // This will send to initial peers if configured
-                self.send_spdp_to_initial_peers(&buffer);
+                let _ = self.transport.send(
+                    &buffer,
+                    &SendTarget::SPDPDiscovery { initial_peers: &self.initial_peers },
+                );
             } else {
                 log::error!("Failed to serialize SPDP message with inline qos");
             }

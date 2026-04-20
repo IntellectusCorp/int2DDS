@@ -1372,7 +1372,7 @@ impl SedpLogic {
                             for locator in reader_proxy.unicast_locator_list() {
                                 match self
                                     .transport
-                                    .send(&buffer, &SendTarget::UnicastDiscovery(&locator))
+                                    .send(&buffer, &SendTarget::SEDPDiscovery(&locator))
                                 {
                                     Ok(_) => {
                                         is_sent = true;
@@ -1748,7 +1748,7 @@ impl SedpLogic {
         locator: Locator,
         message_type: &str,
     ) -> RtpsResult<()> {
-        self.transport.send(buffer, &SendTarget::UnicastDiscovery(&locator)).map_err(|e| {
+        self.transport.send(buffer, &SendTarget::SEDPDiscovery(&locator)).map_err(|e| {
             let code = match e.kind() {
                 std::io::ErrorKind::BrokenPipe
                 | std::io::ErrorKind::ConnectionReset
