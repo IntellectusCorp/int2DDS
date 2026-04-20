@@ -2028,17 +2028,17 @@ impl UnicastMessageProcessor for SedpLogic {
 
                 if let Ok(serialized_data) = writer_data.publication_builtin_topic_data.serialize()
                 {
+                    let cache_change = CacheChange::new(
+                        ChangeKind::Alive,
+                        writer_guid,
+                        InstanceHandle::NIL,
+                        data.writer_sn,
+                        serialized_data.to_vec(),
+                        message_receiver.get_source_timestamp(),
+                    );
+
                     let reader = builtin_endpoint_pair.reader();
                     if let Ok(mut cache_guard) = reader.reader_cache().lock() {
-                        let mut cache_change = cache_guard.acquire_change();
-                        cache_change.reset(
-                            ChangeKind::Alive,
-                            writer_guid,
-                            InstanceHandle::NIL,
-                            data.writer_sn,
-                            message_receiver.get_source_timestamp(),
-                        );
-                        cache_change.data_mut().extend_from_slice(&serialized_data);
                         let _ = cache_guard.add_change(cache_change);
                     }
                 }
@@ -2062,17 +2062,17 @@ impl UnicastMessageProcessor for SedpLogic {
 
                 if let Ok(serialized_data) = reader_data.subscription_builtin_topic_data.serialize()
                 {
+                    let cache_change = CacheChange::new(
+                        ChangeKind::Alive,
+                        writer_guid,
+                        InstanceHandle::NIL,
+                        data.writer_sn,
+                        serialized_data.to_vec(),
+                        message_receiver.get_source_timestamp(),
+                    );
+
                     let reader = builtin_endpoint_pair.reader();
                     if let Ok(mut cache_guard) = reader.reader_cache().lock() {
-                        let mut cache_change = cache_guard.acquire_change();
-                        cache_change.reset(
-                            ChangeKind::Alive,
-                            writer_guid,
-                            InstanceHandle::NIL,
-                            data.writer_sn,
-                            message_receiver.get_source_timestamp(),
-                        );
-                        cache_change.data_mut().extend_from_slice(&serialized_data);
                         let _ = cache_guard.add_change(cache_change);
                     }
                 }
