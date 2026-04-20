@@ -442,7 +442,9 @@ fn gen_serialize_code(
                     field_name
                 );
                 return quote! {
-                    return Err(#crate_path::dcps::core::error::DdsError::Error(#msg.to_string()));
+                    (|| -> ::std::result::Result<(), #crate_path::dcps::core::error::DdsError> {
+                        Err(#crate_path::dcps::core::error::DdsError::Error(#msg.to_string()))
+                    })()?;
                 };
             }
             let trait_path = if xcdr {
@@ -916,8 +918,9 @@ fn gen_deserialize_code(
                     field_name
                 );
                 return quote! {
-                    return Err(#crate_path::dcps::core::error::DdsError::Error(#msg.to_string()));
-                    #[allow(unreachable_code)]
+                    (|| -> ::std::result::Result<(), #crate_path::dcps::core::error::DdsError> {
+                        Err(#crate_path::dcps::core::error::DdsError::Error(#msg.to_string()))
+                    })()?;
                     let #field_name: #field_type = None;
                 };
             }
