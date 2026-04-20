@@ -1,7 +1,7 @@
 use quote::quote;
 use syn::DeriveInput;
 
-use crate::codegen::union_ops::{wrap_with_emheader, wrap_with_emheader_lc};
+use crate::codegen::union_ops::wrap_with_emheader;
 use crate::codegen::utils::{
     extract_option_inner_type, get_serialization_method, is_option_type, resolve_member_id,
     SerializationMethod,
@@ -1267,7 +1267,7 @@ fn generate_xcdr_serialize_impl(
                 let lc_hint = lc_hint_for_method(method, crate_path);
 
                 if is_optional {
-                    let inner = wrap_with_emheader_lc(
+                    let inner = wrap_with_emheader(
                         quote! { #member_id as u32 },
                         must_understand,
                         lc_hint,
@@ -1281,7 +1281,7 @@ fn generate_xcdr_serialize_impl(
                         }
                     }
                 } else {
-                    wrap_with_emheader_lc(
+                    wrap_with_emheader(
                         quote! { #member_id as u32 },
                         must_understand,
                         lc_hint,

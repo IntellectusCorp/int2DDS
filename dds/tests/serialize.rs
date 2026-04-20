@@ -1520,7 +1520,6 @@ fn test_lc6_u32_sequence_emheader() {
     let bytes = serializer.into_bytes();
     let payload = &bytes[4..];
 
-    let dheader_size = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
     let emheader_bytes = &payload[4..];
     let (header, _) =
         MemberHeader::read(emheader_bytes, 0, speedy::Endianness::LittleEndian).unwrap();
@@ -1550,8 +1549,6 @@ struct MutableWithSeqF64 {
 
 #[test]
 fn test_lc7_f64_sequence_emheader() {
-    use int2dds::serialize::cdr::MemberHeader;
-
     let value = MutableWithSeqF64 { data: vec![1.0, 2.0] };
 
     let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Mutable);

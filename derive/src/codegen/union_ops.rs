@@ -13,23 +13,6 @@ use crate::codegen::utils::{
 pub fn wrap_with_emheader(
     member_id_expr: TokenStream,
     must_understand: bool,
-    payload: TokenStream,
-) -> TokenStream {
-    quote! {
-        serializer.write_member_with(
-            (#member_id_expr) as u32,
-            #must_understand,
-            |serializer| -> ::std::result::Result<(), _> {
-                #payload
-                Ok(())
-            },
-        )?;
-    }
-}
-
-pub fn wrap_with_emheader_lc(
-    member_id_expr: TokenStream,
-    must_understand: bool,
     lc_hint: TokenStream,
     payload: TokenStream,
 ) -> TokenStream {
@@ -175,7 +158,12 @@ pub fn generate_union_xcdr_serialize_impl(
     let is_mutable = matches!(extensibility, ExtensibilityKind::Mutable);
 
     let wrap_member = |member_id: u32, payload: TokenStream| -> TokenStream {
-        wrap_with_emheader(quote! { #member_id }, false, payload)
+        wrap_with_emheader(
+            quote! { #member_id },
+            false,
+            quote! { #crate_path::serialize::cdr::LcHint::Auto },
+            payload,
+        )
     };
 
     let match_arms: Vec<_> = variants
