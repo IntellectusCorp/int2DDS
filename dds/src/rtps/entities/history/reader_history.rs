@@ -14,10 +14,7 @@ use crate::{
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
             sequence::SequenceNumber,
         },
-        entities::history::{
-            cache_change::CacheChange, cache_change_pool::CacheChangePool,
-            history_cache::HistoryCache,
-        },
+        entities::history::{cache_change::CacheChange, history_cache::HistoryCache},
     },
     subscription::data_reader_history::ReaderChangeId,
 };
@@ -30,7 +27,6 @@ pub struct ReaderHistoryCache {
     // Builtin endpoints do not have associated DDS entity at the moment, optional for now.
     // Use dyn trait object to erase the type parameter.
     datareader_cache: Option<Weak<Mutex<dyn dcps_history_cache + Send + Sync>>>,
-    pool: CacheChangePool,
 }
 
 impl HistoryCache for ReaderHistoryCache {
@@ -39,9 +35,6 @@ impl HistoryCache for ReaderHistoryCache {
             (change.writer_guid() != a_change.writer_guid())
                 || (change.sequence_number() != a_change.sequence_number())
         });
-        if let Ok(change) = Arc::try_unwrap(a_change) {
-            self.pool.release(change);
-        }
         Ok(())
     }
 
@@ -92,7 +85,6 @@ impl ReaderHistoryCache {
             owner_id,
             changes: Vec::new(),
             datareader_cache: datareader_cache.map(|arc| Arc::downgrade(&arc)),
-            pool: CacheChangePool::with_capacity(0),
         }
     }
 
@@ -105,10 +97,6 @@ impl ReaderHistoryCache {
             change.sequence_number() == seq_num && change.writer_guid() == writer_guid
         });
         change.cloned()
-    }
-
-    pub(crate) fn acquire_change(&mut self) -> CacheChange {
-        self.pool.acquire()
     }
 
     pub(crate) fn set_datareader_cache(
@@ -160,10 +148,7 @@ impl ReaderHistoryCache {
             // Built-in endpoint: Resource limits & History QoS not applied
             // Therefore arbitrarily limit size
             if self.changes.len() >= BUILTIN_ENDPOINT_HISTORYCACHE_CAPACITY {
-                let removed = self.changes.remove(0);
-                if let Ok(change) = Arc::try_unwrap(removed) {
-                    self.pool.release(change);
-                }
+                self.changes.remove(0);
             }
 
             let shared = Arc::new(a_change);
