@@ -49,6 +49,36 @@ namespace Int2Dds.Core
         }
 
         /// <summary>
+        /// Creates a new DomainParticipant using a QoS profile path.
+        /// </summary>
+        /// <param name="domainId">The DDS domain to join.</param>
+        /// <param name="qosPath">QoS profile path (e.g. "MyLibrary::MyProfile").</param>
+        /// <param name="name">Optional name for the participant.</param>
+        public DomainParticipant(int domainId, string qosPath, string? name = null)
+        {
+            _domainId = domainId;
+            var factory = DomainParticipantFactory.Instance;
+
+            unsafe
+            {
+                if (name != null)
+                {
+                    var nameBytes = Encoding.UTF8.GetBytes(name + '\0');
+                    fixed (byte* p = nameBytes)
+                    {
+                        ReturnCodeHelper.CheckReturn(
+                            NativeMethods.int2dds_create_participant_with_profile(factory.Handle, p, domainId, qosPath, out _handle));
+                    }
+                }
+                else
+                {
+                    ReturnCodeHelper.CheckReturn(
+                        NativeMethods.int2dds_create_participant_with_profile(factory.Handle, null, domainId, qosPath, out _handle));
+                }
+            }
+        }
+
+        /// <summary>
         /// Gets the native handle. For internal use by other Core types.
         /// </summary>
         internal IntPtr Handle => _handle;
@@ -70,6 +100,17 @@ namespace Int2Dds.Core
         }
 
         /// <summary>
+        /// Creates a Publisher using a QoS profile path.
+        /// </summary>
+        /// <param name="qosPath">QoS profile path (e.g. "MyLibrary::MyProfile").</param>
+        /// <returns>A new Publisher instance.</returns>
+        public Publisher CreatePublisherWithProfile(string qosPath)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            return new Publisher(this, qosPath);
+        }
+
+        /// <summary>
         /// Creates a Subscriber for this participant.
         /// </summary>
         /// <param name="qos">Optional QoS settings.</param>
@@ -78,6 +119,17 @@ namespace Int2Dds.Core
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
             return new Subscriber(this, qos);
+        }
+
+        /// <summary>
+        /// Creates a Subscriber using a QoS profile path.
+        /// </summary>
+        /// <param name="qosPath">QoS profile path (e.g. "MyLibrary::MyProfile").</param>
+        /// <returns>A new Subscriber instance.</returns>
+        public Subscriber CreateSubscriberWithProfile(string qosPath)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            return new Subscriber(this, qosPath);
         }
 
         /// <summary>
@@ -91,6 +143,19 @@ namespace Int2Dds.Core
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
             return new Topic<T>(this, topicName, qos);
+        }
+
+        /// <summary>
+        /// Creates a Topic using a QoS profile path.
+        /// </summary>
+        /// <typeparam name="T">The DDS data type, which must implement IDdsType.</typeparam>
+        /// <param name="topicName">The name of the topic.</param>
+        /// <param name="qosPath">QoS profile path (e.g. "MyLibrary::MyProfile").</param>
+        /// <returns>A new Topic instance.</returns>
+        public Topic<T> CreateTopicWithProfile<T>(string topicName, string qosPath) where T : class, IDdsType, new()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            return new Topic<T>(this, topicName, qosPath);
         }
 
         /// <summary>

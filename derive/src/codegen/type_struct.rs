@@ -416,41 +416,59 @@ fn quote_deserialize_impl(
     gc: &GenCtx,
 ) -> proc_macro2::TokenStream {
     let full_type = &gc.full_type;
-    // Generate format resolution for None case
-    let none_format_resolution = if let Some(ext_kind) = extensibility {
-        let extensibility_tokens = quote_extensibility_tokens(ext_kind, crate_path);
+    let builtin_pl_cdr_fallback = quote! {
+        if data.len() >= 4 {
+            let encoding_id = u16::from_be_bytes([data[0], data[1]]);
+            if matches!(encoding_id, 0x0002 | 0x0003) {
+                // Discovery builtins are serialized as PL_CDR parameter lists rather than
+                // regular CDR/XCDR structs, so use their dedicated parser.
+                let type_id = std::any::TypeId::of::<#full_type>();
 
-        quote! {
-            if data.len() >= 2 {
-                let encoding_id = u16::from_be_bytes([data[0], data[1]]);
-                match encoding_id {
-                    0x0000 | 0x0001 => #crate_path::dcps::topic::type_support::SerializationFormat::Cdr,
-                    0x0006 | 0x0007 => {
-                        #crate_path::dcps::topic::type_support::SerializationFormat::Xcdr {
-                            extensibility_kind: #extensibility_tokens,
-                            use_delimiters: false,
-                        }
-                    },
-                    0x0008..=0x000B => {
-                        #crate_path::dcps::topic::type_support::SerializationFormat::Xcdr {
-                            extensibility_kind: #extensibility_tokens,
-                            use_delimiters: true,
-                        }
-                    },
-                    _ => #crate_path::dcps::topic::type_support::SerializationFormat::Cdr,
+                if type_id == std::any::TypeId::of::<#crate_path::common::builtin::topic::publication_builtin_topic_data::PublicationBuiltinTopicData>() {
+                    let value = #crate_path::common::builtin::topic::publication_builtin_topic_data::PublicationBuiltinTopicData::from_serialized_data(std::sync::Arc::<[u8]>::from(data))
+                        .map_err(#crate_path::dcps::core::error::DdsError::Error)?;
+                    return Ok(Box::new(value));
                 }
-            } else {
-                return Err(#crate_path::dcps::core::error::DdsError::Error("Invalid data length".to_string()));
+
+                if type_id == std::any::TypeId::of::<#crate_path::common::builtin::topic::subscription_builtin_topic_data::SubscriptionBuiltinTopicData>() {
+                    let value = #crate_path::common::builtin::topic::subscription_builtin_topic_data::SubscriptionBuiltinTopicData::from_serialized_data(std::sync::Arc::<[u8]>::from(data))
+                        .map_err(#crate_path::dcps::core::error::DdsError::Error)?;
+                    return Ok(Box::new(value));
+                }
             }
         }
-    } else {
-        quote! {
-            #crate_path::dcps::topic::type_support::SerializationFormat::Cdr
+    };
+    // Generate format resolution for None case
+    let ext_kind = extensibility.unwrap_or(ExtensibilityKind::Appendable);
+    let extensibility_tokens = quote_extensibility_tokens(ext_kind, crate_path);
+    let none_format_resolution = quote! {
+        if data.len() >= 2 {
+            let encoding_id = u16::from_be_bytes([data[0], data[1]]);
+            match encoding_id {
+                0x0000 | 0x0001 => #crate_path::dcps::topic::type_support::SerializationFormat::Cdr,
+                0x0006 | 0x0007 => {
+                    #crate_path::dcps::topic::type_support::SerializationFormat::Xcdr {
+                        extensibility_kind: #extensibility_tokens,
+                        use_delimiters: false,
+                    }
+                },
+                0x0008..=0x000B => {
+                    #crate_path::dcps::topic::type_support::SerializationFormat::Xcdr {
+                        extensibility_kind: #extensibility_tokens,
+                        use_delimiters: true,
+                    }
+                },
+                _ => #crate_path::dcps::topic::type_support::SerializationFormat::Cdr,
+            }
+        } else {
+            return Err(#crate_path::dcps::core::error::DdsError::Error("Invalid data length".to_string()));
         }
     };
 
     quote! {
         fn deserialize(&self, data: &[u8], format: Option<&#crate_path::dcps::topic::type_support::SerializationFormat>) -> #crate_path::dcps::core::error::DdsResult<Box<dyn std::any::Any>> {
+            #builtin_pl_cdr_fallback
+
             self.deserialize_with_backing(data, None, format)
         }
 
@@ -607,11 +625,10 @@ fn generate_unified_type_support_impl(
         gc,
     );
 
-    let extensibility_tokens = if let Some(ext_kind) = extensibility {
-        quote_extensibility_tokens(ext_kind, crate_path)
-    } else {
-        quote! { #crate_path::serialize::xcdr::ExtensibilityKind::Appendable }
-    };
+    let extensibility_tokens = quote_extensibility_tokens(
+        extensibility.unwrap_or(ExtensibilityKind::Appendable),
+        crate_path,
+    );
 
     let impl_generics = &gc.impl_generics;
     let where_clause = &gc.where_clause;
@@ -1058,11 +1075,22 @@ fn generate_xcdr_serialize_impl(
                 // For Mutable types: write EMHEADER before each field
                 // Generate EMHEADER backpatch logic supporting 28-bit member_id
                 let emheader_backpatch = if member_id <= 0x0FFF {
-                    // Compact: member_id fits in 12 bits
+                    // Compact: member_id fits in 12 bits.
+                    // If the payload length overflows 16 bits, retroactively
+                    // promote to LC=4 (NEXTINT) encoding by inserting a 4-byte
+                    // length slot right after the EMHEADER. This avoids the
+                    // silent truncation of `field_len & 0xFFFF`.
                     quote! {
                         let field_len = (serializer.position() - field_start) as u32;
-                        let emheader = ((#member_id & 0x0FFFu32) << 16) | (field_len & 0xFFFF);
-                        serializer.write_dheader_at(emheader_pos, emheader);
+                        if field_len <= 0xFFFF {
+                            let emheader = ((#member_id & 0x0FFFu32) << 16) | (field_len & 0xFFFF);
+                            serializer.write_dheader_at(emheader_pos, emheader);
+                        } else {
+                            serializer.insert_nextint_slot_at(emheader_pos + 4);
+                            let emheader = (4u32 << 28) | (#member_id & 0x0FFF_FFFFu32);
+                            serializer.write_dheader_at(emheader_pos, emheader);
+                            serializer.write_dheader_at(emheader_pos + 4, field_len);
+                        }
                     }
                 } else {
                     // 28-bit member_id: use LC=4 format, reserve extra 4 bytes for length
@@ -1850,11 +1878,10 @@ fn generate_tuple_type_support_impl(
         &tuple_gc,
     );
 
-    let extensibility_tokens = if let Some(ext_kind) = extensibility {
-        quote_extensibility_tokens(ext_kind, crate_path)
-    } else {
-        quote! { #crate_path::serialize::xcdr::ExtensibilityKind::Appendable }
-    };
+    let extensibility_tokens = quote_extensibility_tokens(
+        extensibility.unwrap_or(ExtensibilityKind::Appendable),
+        crate_path,
+    );
 
     quote! {
         impl #crate_path::dcps::topic::type_support::TypeSupport for #type_support_name {

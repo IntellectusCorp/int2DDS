@@ -12,7 +12,7 @@ pub enum SerializationError {
     // XCDR specific errors
     InvalidExtensibility,
     InvalidMemberHeader,
-    TypeHashMismatch([u8; 32], [u8; 32]),
+    TypeHashMismatch([u8; 14], [u8; 14]),
     // Enum/Union specific errors
     InvalidEnumDiscriminant(i32),
     InvalidUnionDiscriminant(i32),

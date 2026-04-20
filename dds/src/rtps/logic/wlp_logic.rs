@@ -1359,10 +1359,10 @@ impl UnicastMessageProcessor for WlpLogic {
         rtps_header: &Header,
         _submessage_header: &SubmessageHeader,
         data: &Data,
-        message_receiver: &MessageReceiver,
+        _message_receiver: &MessageReceiver,
     ) -> RtpsResult<()> {
         if data.writer_id == EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_WRITER {
-            let payload = message_receiver.payload_from_data(data.reader_id, data.writer_id);
+            let payload = Some(data.serialized_data());
 
             match payload {
                 Some(payload) => match ParticipantMessageData::from_serialized_data(&payload) {

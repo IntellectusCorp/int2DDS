@@ -8,10 +8,21 @@ use clap::{Arg, ArgAction, Command, ValueHint};
 
 use crate::{
     common::log::{setting_log, LogLevel, LogType},
+    core::types::DomainId,
     rtps::transport::TransportType,
 };
 
+/// Default domain ID sentinel value.
+/// When this value is passed to `create_participant`, the domain ID is read from
+/// the `DDS_DOMAIN_ID` environment variable. If the env var is not set, defaults to 0.
+pub const DEFAULT_DOMAIN_ID: DomainId = -1;
+
 pub fn init_from_env() {
+    // DDS environment variables:
+    // - DDS_DOMAIN_ID: Set DDS domain ID (0-232) - Required when DEFAULT_DOMAIN_ID(-1) is used
+    // - DDS_QOS_PROFILE: Set QoS profile JSON file path
+    // - DDS_DEFAULT_QOS_PROFILE: Set default QoS profile path "Library::Profile"
+
     // INT2DDS_ environment variables:
     // - INT2DDS_TRANSPORT: Set transport protocol type (udp, tcp) - Default: udp
     // - INT2DDS_DISCOVERY_MODE: Set discovery mode (udp, tcp, hybrid) - Default: udp
@@ -48,6 +59,30 @@ fn apply_cli_args_to_env() {
         Command::new("int2dds")
             // .disable_help_subcommand(true)
             // .arg_required_else_help(false)
+            .arg(
+                Arg::new("dds_domain_id")
+                    .long("int2dds-domain-id")
+                    .value_name("ID")
+                    .help("Set DDS domain ID")
+                    .num_args(1)
+                    .value_hint(ValueHint::Other),
+            )
+            .arg(
+                Arg::new("dds_qos_profile")
+                    .long("int2dds-qos-profile")
+                    .value_name("PATH")
+                    .help("Set QoS profile JSON file path")
+                    .num_args(1)
+                    .value_hint(ValueHint::FilePath),
+            )
+            .arg(
+                Arg::new("dds_default_qos_profile")
+                    .long("int2dds-default-qos-profile")
+                    .value_name("LIB::PROFILE")
+                    .help("Set default QoS profile path \"Library::Profile\"")
+                    .num_args(1)
+                    .value_hint(ValueHint::Other),
+            )
             .arg(
                 Arg::new("int2dds_transport")
                     .long("int2dds-transport")
@@ -193,6 +228,18 @@ fn apply_cli_args_to_env() {
         .try_get_matches_from(std::env::args())
         .unwrap_or_else(|_| build_command().get_matches_from(Vec::<String>::new()));
 
+    if let Some(v) = matches.get_one::<String>("dds_domain_id") {
+        log::info!("Environment variable set: DDS_DOMAIN_ID = {}", v);
+        unsafe { std::env::set_var("DDS_DOMAIN_ID", v) };
+    }
+    if let Some(v) = matches.get_one::<String>("dds_qos_profile") {
+        log::info!("Environment variable set: DDS_QOS_PROFILE = {}", v);
+        unsafe { std::env::set_var("DDS_QOS_PROFILE", v) };
+    }
+    if let Some(v) = matches.get_one::<String>("dds_default_qos_profile") {
+        log::info!("Environment variable set: DDS_DEFAULT_QOS_PROFILE = {}", v);
+        unsafe { std::env::set_var("DDS_DEFAULT_QOS_PROFILE", v) };
+    }
     if let Some(v) = matches.get_one::<String>("int2dds_transport") {
         log::info!("Environment variable set: INT2DDS_TRANSPORT = {}", v);
         unsafe { std::env::set_var("INT2DDS_TRANSPORT", v) };
@@ -269,6 +316,63 @@ fn apply_cli_args_to_env() {
         log::info!("Environment variable set: INT2DDS_INITIAL_PEERS = {}", v);
         unsafe { std::env::set_var("INT2DDS_INITIAL_PEERS", v) };
     }
+}
+
+/// Set the DDS domain ID via environment variable
+pub fn set_domain_id(domain_id: i32) {
+    log::info!("Environment variable set: DDS_DOMAIN_ID = {}", domain_id);
+    unsafe { std::env::set_var("DDS_DOMAIN_ID", domain_id.to_string()) };
+}
+
+/// Set the QoS profile file path via environment variable
+pub fn set_qos_profile(path: &str) {
+    log::info!("Environment variable set: DDS_QOS_PROFILE = {}", path);
+    unsafe { std::env::set_var("DDS_QOS_PROFILE", path) };
+}
+
+/// Get the default QoS profile path (`"Library::Profile"`) from the
+/// `DDS_DEFAULT_QOS_PROFILE` environment variable, if set.
+pub fn get_default_qos_profile() -> Option<String> {
+    std::env::var("DDS_DEFAULT_QOS_PROFILE").ok().filter(|s| !s.is_empty())
+}
+
+/// Set the default QoS profile path via environment variable.
+pub fn set_default_qos_profile(path: &str) {
+    log::info!("Environment variable set: DDS_DEFAULT_QOS_PROFILE = {}", path);
+    unsafe { std::env::set_var("DDS_DEFAULT_QOS_PROFILE", path) };
+}
+
+/// Get QoS profile JSON file paths to auto-load.
+/// Returns an empty vector if no profile files are configured/found.
+pub fn get_qos_profile_paths() -> Vec<std::path::PathBuf> {
+    use std::path::PathBuf;
+
+    let mut paths: Vec<PathBuf> = Vec::new();
+
+    if let Ok(val) = std::env::var("DDS_QOS_PROFILE") {
+        // Use OS path separator (`;` on Windows, `:` on Unix) plus `,` as universal separator.
+        // Note: `:` is intentionally NOT used on Windows to avoid breaking drive letters (e.g. `C:\...`).
+        #[cfg(windows)]
+        let is_sep = |c: char| c == ',' || c == ';';
+        #[cfg(not(windows))]
+        let is_sep = |c: char| c == ',' || c == ':';
+
+        for entry in val.split(is_sep) {
+            let trimmed = entry.trim();
+            if !trimmed.is_empty() {
+                paths.push(PathBuf::from(trimmed));
+            }
+        }
+    }
+
+    if paths.is_empty() {
+        let default = PathBuf::from("USER_QOS_PROFILES.json");
+        if default.exists() {
+            paths.push(default);
+        }
+    }
+
+    paths
 }
 
 /// Set the transport type via environment variable
