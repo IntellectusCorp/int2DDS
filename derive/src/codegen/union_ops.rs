@@ -158,7 +158,7 @@ pub fn generate_union_cdr_deserialize_impl(
 
 /// Generate XcdrSerialize implementation for union (enum with data)
 ///
-/// Encoding per DDS-XTypes §7.4.4 (XCDR2):
+/// Encoding per DDS-XTypes 7.4.4 (XCDR2):
 ///  - Final     : discriminant + selected branch value (no DHEADER, no EMHEADER)
 ///  - Appendable: DHEADER + (discriminant + value)
 ///  - Mutable   : DHEADER + EMHEADER(0)+discriminant + EMHEADER(branch_id)+value

@@ -82,7 +82,7 @@ impl MemberHeader {
         Self { member_id, member_length: length as u32, must_understand }
     }
 
-    /// Write EMHEADER1 per DDS-XTypes §7.4.3.4.2.
+    /// Write EMHEADER1 per DDS-XTypes 7.4.3.4.2.
     pub fn write(
         &self,
         buffer: &mut Vec<u8>,
@@ -277,7 +277,7 @@ pub trait XcdrDeserializeMembers: Sized {
 /// Trait for types that can be serialized using XCDR
 pub trait XcdrSerialize {
     /// Whether this type is a CDR primitive (no DHEADER required when used as
-    /// the element type of a sequence/array per DDS-XTypes §7.4.3.5.3-4).
+    /// the element type of a sequence/array per DDS-XTypes 7.4.3.5.3-4).
     /// Defaults to `false`; primitive impls override to `true`.
     const IS_PRIMITIVE: bool = false;
     fn serialize_xcdr(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()>;
@@ -326,7 +326,7 @@ impl XcdrDeserialize for String {
 
 impl<T: XcdrSerialize> XcdrSerialize for Vec<T> {
     fn serialize_xcdr(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()> {
-        // DDS-XTypes §7.4.3.5.4: a sequence whose element type is *non-primitive*
+        // DDS-XTypes 7.4.3.5.4: a sequence whose element type is *non-primitive*
         // is preceded by a 4-byte DHEADER carrying the byte size of the element
         // payload (length + elements). Sequences of primitives omit the DHEADER.
         if T::IS_PRIMITIVE {
@@ -395,7 +395,7 @@ impl<T: XcdrDeserialize> XcdrDeserialize for Option<T> {
 
 impl<T: XcdrSerialize, const N: usize> XcdrSerialize for [T; N] {
     fn serialize_xcdr(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()> {
-        // DDS-XTypes §7.4.3.5.3: arrays of non-primitive elements carry a
+        // DDS-XTypes 7.4.3.5.3: arrays of non-primitive elements carry a
         // DHEADER of the element payload byte size; primitive arrays do not.
         if T::IS_PRIMITIVE {
             for item in self.iter() {
