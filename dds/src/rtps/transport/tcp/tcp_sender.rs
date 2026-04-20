@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::DashMap;
-use log::{debug, warn};
+use log::{debug, info, warn};
 use socket2::{Domain, Protocol, SockAddr, Socket as Socket2, Type};
 
 use crate::rtps::common::guid::GuidPrefix;
@@ -57,6 +57,11 @@ pub(crate) struct TcpSender {
     /// TLS configuration for outbound connections. When `Some`, every
     /// newly-opened TCP socket is wrapped with TLS via `connect_tls`.
     tls_config: Option<Arc<TlsConfig>>,
+    /// Set of peers for which an asymmetric host has already dialed a
+    /// reverse channel, so the plugin does not repeatedly open them for
+    /// the same peer on every SPDP tick. Managed by the plugin via
+    /// `reverse_channels_dialed()`.
+    reverse_channels_dialed: Arc<DashMap<SocketAddr, ()>>,
 }
 
 // `Debug` by hand — `Box<dyn TcpStreamWrapper>` doesn't derive Debug.
@@ -132,7 +137,27 @@ impl TcpSender {
             participant_id,
             listener_port,
             tls_config,
+            reverse_channels_dialed: Arc::new(DashMap::new()),
         })
+    }
+
+    /// Returns true if a reverse channel was already dialed for this
+    /// peer (so the plugin avoids redundant dials on SPDP retries).
+    /// The caller inserts into the set via `mark_reverse_channel_dialed`.
+    pub(crate) fn is_reverse_channel_dialed(&self, addr: &SocketAddr) -> bool {
+        self.reverse_channels_dialed.contains_key(addr)
+    }
+
+    pub(crate) fn mark_reverse_channel_dialed(&self, addr: SocketAddr) {
+        self.reverse_channels_dialed.insert(addr, ());
+    }
+
+    pub(crate) fn clear_reverse_channel_dialed(&self, addr: &SocketAddr) {
+        self.reverse_channels_dialed.remove(addr);
+    }
+
+    pub(crate) fn listener_port(&self) -> u16 {
+        self.listener_port
     }
 
     fn get_write_timeout() -> Duration {
@@ -148,6 +173,126 @@ impl TcpSender {
     }
 
     // ========================================================================
+    // Incoming connection re-use (Connection Reversal for asymmetric peers)
+    // ========================================================================
+
+    /// Register a stream accepted by our mux listener as the control
+    /// connection for `peer_listener_addr`.
+    ///
+    /// Used when the remote peer is in asymmetric NAT mode and cannot be
+    /// dialed. The incoming control stream accepted from the asymmetric
+    /// peer is re-purposed as this sender's outbound path to that peer:
+    /// subsequent `ensure_control` calls for `peer_listener_addr` find
+    /// the registered stream in cache and skip the outbound `tcp_connect`
+    /// (which would fail since the peer has no listener).
+    ///
+    /// The caller is responsible for passing a cloned stream — the
+    /// original should remain owned by the listener's read thread so that
+    /// inbound framing continues to be consumed.
+    pub(crate) fn register_incoming_control(
+        &self,
+        peer_listener_addr: SocketAddr,
+        stream: Box<dyn TcpStreamWrapper>,
+    ) {
+        let key = (peer_listener_addr, CONTROL_LOGICAL_PORT);
+        if self.connections.insert(key, stream).is_some() {
+            debug!(
+                "TcpSender: replaced inbound control stream for asymmetric peer {:?}",
+                peer_listener_addr
+            );
+        } else {
+            info!(
+                "TcpSender: registered inbound control stream for asymmetric peer {:?}",
+                peer_listener_addr
+            );
+        }
+        // Also record peer_info so features like keepalive can find this peer.
+        self.peer_info
+            .insert(peer_listener_addr, PeerInfo { control_addr: peer_listener_addr });
+    }
+
+    /// Register a data-channel stream accepted by our mux listener for an
+    /// asymmetric peer. `logical_port` is the port the peer expects us to
+    /// use for this stream (set via PORT_BIND).
+    pub(crate) fn register_incoming_data(
+        &self,
+        peer_listener_addr: SocketAddr,
+        logical_port: u16,
+        stream: Box<dyn TcpStreamWrapper>,
+    ) {
+        debug_assert_ne!(logical_port, CONTROL_LOGICAL_PORT);
+        let key = (peer_listener_addr, logical_port);
+        if self.connections.insert(key, stream).is_some() {
+            debug!(
+                "TcpSender: replaced inbound data stream for asymmetric peer {:?}:{}",
+                peer_listener_addr, logical_port
+            );
+        } else {
+            info!(
+                "TcpSender: registered inbound data stream for asymmetric peer {:?}:{}",
+                peer_listener_addr, logical_port
+            );
+        }
+    }
+
+    /// Open an additional outbound TCP connection to `physical_addr` and
+    /// hand it over to the remote side as its reverse send channel.
+    ///
+    /// Used by asymmetric (NAT-behind) hosts to implement connection
+    /// reversal: they open two physical TCP connections per peer — one
+    /// for their own sending (via `ensure_control`) and one as a
+    /// "reverse" channel the reachable peer uses for its sending. The
+    /// stream returned here belongs to the listener side (this host's
+    /// mux listener must adopt it and run a read loop, since the remote
+    /// peer will write to it).
+    ///
+    /// This method only performs the dial + PEER_HELLO_REVERSE exchange;
+    /// the caller is responsible for handing the returned stream to the
+    /// local mux listener (see `TcpMuxListener::adopt_inbound_stream`).
+    pub(crate) fn dial_reverse_channel(
+        &self,
+        physical_addr: &SocketAddr,
+        marker_locator_port: u16,
+    ) -> io::Result<Box<dyn TcpStreamWrapper>> {
+        let mut stream = self.tcp_connect(physical_addr)?;
+
+        let local_ip: std::net::Ipv4Addr =
+            self.working_ip.parse().unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
+        let locator = encode_locator(local_ip, marker_locator_port);
+        let hello = ControlMsg::PeerHelloReverse { locator };
+        write_framed_message(&mut stream, &hello.to_bytes()).map_err(|e| {
+            Self::wrap_raw_io_error(
+                e,
+                TransportErrorCode::TcpHandshakeHelloFailed,
+                physical_addr,
+            )
+        })?;
+
+        let resp = self.read_control_response(&mut stream).map_err(|e| {
+            Self::wrap_raw_io_error(
+                e,
+                TransportErrorCode::TcpHandshakeHelloFailed,
+                physical_addr,
+            )
+        })?;
+        if resp.to_bytes()[0] != MSG_PEER_HELLO_ACK {
+            return Err(transport_io_error(
+                TransportErrorCode::TcpHandshakeHelloFailed,
+                format!(
+                    "Expected PEER_HELLO_ACK after PEER_HELLO_REVERSE, got {}",
+                    resp.type_name()
+                ),
+            ));
+        }
+
+        info!(
+            "TcpSender: reverse channel dialed to {:?} (marker_port={})",
+            physical_addr, marker_locator_port
+        );
+        Ok(stream)
+    }
+
+    // ========================================================================
     // 3-Step Handshake
     // ========================================================================
 
@@ -156,6 +301,18 @@ impl TcpSender {
         let key = (*physical_addr, CONTROL_LOGICAL_PORT);
         if self.connections.contains_key(&key) {
             return Ok(());
+        }
+        // Asymmetric peer marker: a locator with port 0 means the peer has
+        // no listener and we must wait for them to dial us. Never attempt
+        // an outbound `tcp_connect` to port 0 — it would just fail.
+        if physical_addr.port() == 0 {
+            return Err(transport_io_error(
+                TransportErrorCode::TcpConnectionRefused,
+                format!(
+                    "Asymmetric peer {:?} not yet connected (no inbound stream cached)",
+                    physical_addr
+                ),
+            ));
         }
         self.ensure_control_inner(physical_addr, key).map_err(|e| {
             Self::wrap_raw_io_error(e, TransportErrorCode::TcpHandshakeHelloFailed, physical_addr)

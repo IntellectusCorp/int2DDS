@@ -29,6 +29,23 @@ use crate::rtps::transport::tcp::stream_wrapper::TcpStreamWrapper;
 /// Unique identifier for an accepted connection (replaces mio::Token).
 pub(crate) type ConnectionId = usize;
 
+/// Outcome of `handle_first_message` for the read loop to act on.
+///
+/// Variants that require releasing the stream to another owner let the
+/// read loop move `stream` out of its local variable before exiting.
+///
+/// Currently used to implement connection reversal: when a
+/// PEER_HELLO_REVERSE arrives, the acceptor hands its TCP socket over
+/// to this host's TcpSender cache (keyed by `key_addr`) so the sender
+/// can write on it, instead of the read loop continuing to read.
+pub(crate) enum FirstMessageOutcome {
+    /// Keep running the read loop on this connection (normal path).
+    Continue,
+    /// The first message was PEER_HELLO_REVERSE: move the stream into
+    /// the sender cache at `key_addr` and exit the read loop.
+    HandoffToSenderAsControl { key_addr: SocketAddr },
+}
+
 /// Connection state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConnectionState {
@@ -103,6 +120,14 @@ pub(crate) struct MuxListenerShared {
     pub(crate) next_conn_id: AtomicUsize,
     discovery_tx: Sender<IncomingMessage>,
     user_data_tx: Sender<IncomingMessage>,
+    /// Sender hook for connection-reuse on asymmetric peers.
+    ///
+    /// Populated once, after the listener is created, via [`set_sender`].
+    /// When an incoming PEER_HELLO advertises an unreachable locator
+    /// (port == 0), the listener clones the accepted stream and hands the
+    /// clone to the sender so that outbound traffic to that peer can
+    /// reuse the same TCP connection.
+    sender: std::sync::OnceLock<crate::rtps::transport::tcp::tcp_sender::TcpSender>,
 }
 
 impl MuxListenerShared {
@@ -125,7 +150,81 @@ impl MuxListenerShared {
             next_conn_id: AtomicUsize::new(0),
             discovery_tx,
             user_data_tx,
+            sender: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Set the sender used for asymmetric connection re-use. Should be
+    /// called once after the TcpSender is constructed, before any
+    /// connections are accepted.
+    pub(crate) fn set_sender(
+        &self,
+        sender: crate::rtps::transport::tcp::tcp_sender::TcpSender,
+    ) {
+        let _ = self.sender.set(sender);
+    }
+
+    /// Adopt an externally-dialed stream (e.g. a reverse channel opened by
+    /// an asymmetric host) by spawning a per-connection read loop against
+    /// this shared state. The connection starts in `Control` state because
+    /// the PEER_HELLO_REVERSE handshake already completed during the
+    /// outbound dial.
+    pub(crate) fn adopt_inbound_stream(
+        self: &Arc<Self>,
+        stream: Box<dyn TcpStreamWrapper>,
+        peer_listen_addr: SocketAddr,
+        terminated: Arc<AtomicBool>,
+        idle_timeout: Duration,
+    ) -> ConnectionId {
+        let conn_id = self.next_conn_id.fetch_add(1, Ordering::SeqCst);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let error_on_exit = Arc::new(AtomicBool::new(false));
+
+        self.connections.insert(
+            conn_id,
+            ConnectionEntry {
+                remote_addr: peer_listen_addr,
+                state: ConnectionState::Control,
+                bound_logical_port: None,
+                remote_guid_prefix: None,
+                last_activity: Instant::now(),
+                shutdown: shutdown.clone(),
+                error_on_exit: error_on_exit.clone(),
+            },
+        );
+
+        // Register in peer group using the peer's listen address.
+        {
+            let synthetic_guid = addr_to_guid(peer_listen_addr);
+            let mut pc = self.peer_connections.lock().expect("peer_connections lock");
+            let group = pc.entry(synthetic_guid).or_insert_with(PeerConnectionGroup::new);
+            group.control_conn = Some(conn_id);
+            if let Some(mut conn) = self.connections.get_mut(&conn_id) {
+                conn.remote_guid_prefix = Some(synthetic_guid);
+            }
+        }
+
+        let conn_shared = Arc::clone(self);
+        let _ = thread::Builder::new()
+            .name(format!("tcp_conn_reverse_{}", conn_id))
+            .stack_size(128 * 1024)
+            .spawn(move || {
+                read_loop(
+                    stream,
+                    conn_id,
+                    conn_shared,
+                    terminated,
+                    shutdown,
+                    error_on_exit,
+                    idle_timeout,
+                );
+            });
+
+        info!(
+            "TcpMuxListener(shared): adopted reverse-channel stream (peer={:?}, conn={})",
+            peer_listen_addr, conn_id
+        );
+        conn_id
     }
 
     pub(crate) fn connection_count(&self) -> usize {
@@ -258,7 +357,7 @@ impl MuxListenerShared {
         stream: &mut Box<dyn TcpStreamWrapper>,
         conn_id: ConnectionId,
         payload: &[u8],
-    ) {
+    ) -> FirstMessageOutcome {
         let msg = match ControlMsg::from_bytes(payload) {
             Ok(m) => m,
             Err(e) => {
@@ -272,7 +371,7 @@ impl MuxListenerShared {
                 if let Some(entry) = self.connections.get(&conn_id) {
                     entry.shutdown.store(true, Ordering::SeqCst);
                 }
-                return;
+                return FirstMessageOutcome::Continue;
             }
         };
 
@@ -298,21 +397,48 @@ impl MuxListenerShared {
                 }
 
                 debug!("TcpMuxListener: PEER_HELLO ok (conn={})", conn_id);
+                FirstMessageOutcome::Continue
+            }
+
+            ControlMsg::PeerHelloReverse { locator } => {
+                // The dialer opened this TCP connection FOR US to use as our
+                // outbound send channel. Ack, then tell the read loop to
+                // hand this stream off to the sender cache.
+                send_control(stream, &ControlMsg::PeerHelloAck);
+
+                let (peer_ip, _port) =
+                    crate::rtps::transport::tcp::protocol::decode_locator(&locator);
+                // The locator port is the dialer's "marker" — typically 0 for
+                // asymmetric peers. We key the sender cache by this address
+                // so it matches whatever upper-layer locator is given.
+                let key_addr = SocketAddr::new(std::net::IpAddr::V4(peer_ip), _port);
+
+                info!(
+                    "TcpMuxListener: PEER_HELLO_REVERSE from {:?} (key={:?}, conn={})",
+                    self.connections.get(&conn_id).map(|c| c.remote_addr),
+                    key_addr,
+                    conn_id
+                );
+
+                FirstMessageOutcome::HandoffToSenderAsControl { key_addr }
             }
 
             ControlMsg::PortBind { cookie } => {
                 self.handle_port_bind(stream, conn_id, &cookie);
+                FirstMessageOutcome::Continue
             }
 
             other => {
                 warn!(
-                    "TcpMuxListener: Expected PEER_HELLO or PORT_BIND, got {} on conn {}",
+                    "TcpMuxListener: Expected PEER_HELLO / PEER_HELLO_REVERSE / PORT_BIND, \
+                     got {} on conn {}",
                     other.type_name(),
                     conn_id
                 );
                 if let Some(entry) = self.connections.get(&conn_id) {
                     entry.shutdown.store(true, Ordering::SeqCst);
                 }
+                FirstMessageOutcome::Continue
             }
         }
     }
@@ -550,13 +676,120 @@ impl TcpMuxListener {
         })
     }
 
+    /// Construct a TcpMuxListener without a bound accept socket, for
+    /// asymmetric (NAT-behind) hosts. The accept loop does not run, but
+    /// the listener's shared state and per-connection read loops remain
+    /// usable for adopted reverse-channel streams.
+    pub(crate) fn new_unbound(
+        domain_id: u32,
+        participant_id: u32,
+        local_guid_prefix: GuidPrefix,
+        discovery_tx: Sender<IncomingMessage>,
+        user_data_tx: Sender<IncomingMessage>,
+    ) -> Self {
+        info!(
+            "TcpMuxListener: Unbound (asymmetric mode, domain={}, pid={})",
+            domain_id, participant_id
+        );
+        Self {
+            port: 0,
+            listener: None,
+            shared: Arc::new(MuxListenerShared::new(
+                domain_id,
+                participant_id,
+                local_guid_prefix,
+                discovery_tx,
+                user_data_tx,
+            )),
+        }
+    }
+
     pub(crate) fn port(&self) -> u16 {
         self.port
+    }
+
+    /// Attach the TcpSender so asymmetric peer streams can be re-registered
+    /// as outbound control/data connections on the sender's cache.
+    pub(crate) fn set_sender(
+        &self,
+        sender: crate::rtps::transport::tcp::tcp_sender::TcpSender,
+    ) {
+        self.shared.set_sender(sender);
     }
 
     /// Remove the underlying `TcpListener` for use in the accept loop.
     pub(crate) fn take_listener(&mut self) -> Option<TcpListener> {
         self.listener.take()
+    }
+
+    /// Adopt an outbound-dialed stream whose ownership has been handed to
+    /// this host (reverse channel). The stream is treated like an accepted
+    /// connection — a read loop is spawned to process incoming frames —
+    /// but the state starts at `Control` because the PEER_HELLO handshake
+    /// already completed during the outbound dial.
+    ///
+    /// This is used by asymmetric (NAT-behind) hosts: after they dial a
+    /// PEER_HELLO_REVERSE channel to a reachable peer, the stream becomes
+    /// this host's inbound channel for reads of control/data frames the
+    /// reachable peer writes on that connection.
+    pub(crate) fn adopt_inbound_stream(
+        &self,
+        stream: Box<dyn TcpStreamWrapper>,
+        peer_listen_addr: SocketAddr,
+        terminated: Arc<AtomicBool>,
+        idle_timeout: Duration,
+    ) -> ConnectionId {
+        let conn_id = self.shared.next_conn_id.fetch_add(1, Ordering::SeqCst);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let error_on_exit = Arc::new(AtomicBool::new(false));
+
+        self.shared.connections.insert(
+            conn_id,
+            ConnectionEntry {
+                remote_addr: peer_listen_addr,
+                // Handshake already done during the outbound dial, so jump
+                // straight to Control state.
+                state: ConnectionState::Control,
+                bound_logical_port: None,
+                remote_guid_prefix: None,
+                last_activity: Instant::now(),
+                shutdown: shutdown.clone(),
+                error_on_exit: error_on_exit.clone(),
+            },
+        );
+
+        // Register in peer group using the peer's listen address.
+        {
+            let synthetic_guid = addr_to_guid(peer_listen_addr);
+            let mut pc = self.shared.peer_connections.lock().expect("peer_connections lock");
+            let group = pc.entry(synthetic_guid).or_insert_with(PeerConnectionGroup::new);
+            group.control_conn = Some(conn_id);
+            if let Some(mut conn) = self.shared.connections.get_mut(&conn_id) {
+                conn.remote_guid_prefix = Some(synthetic_guid);
+            }
+        }
+
+        let conn_shared = Arc::clone(&self.shared);
+        let _ = thread::Builder::new()
+            .name(format!("tcp_conn_reverse_{}", conn_id))
+            .stack_size(128 * 1024)
+            .spawn(move || {
+                read_loop(
+                    stream,
+                    conn_id,
+                    conn_shared,
+                    terminated,
+                    shutdown,
+                    error_on_exit,
+                    idle_timeout,
+                );
+            });
+
+        info!(
+            "TcpMuxListener: adopted reverse-channel stream (peer={:?}, conn={})",
+            peer_listen_addr, conn_id
+        );
+        conn_id
     }
 
     /// Accept one connection from the listener and spawn its read thread.
@@ -686,7 +919,28 @@ pub(crate) fn read_loop(
                 let state = shared.connections.get(&conn_id).map(|e| e.state);
                 match state {
                     Some(ConnectionState::AwaitingFirstMessage) => {
-                        shared.handle_first_message(&mut stream, conn_id, &msg);
+                        match shared.handle_first_message(&mut stream, conn_id, &msg) {
+                            FirstMessageOutcome::Continue => {}
+                            FirstMessageOutcome::HandoffToSenderAsControl { key_addr } => {
+                                // Move stream out of this read loop and
+                                // into the sender cache. The TCP socket
+                                // stays alive because sender now owns it
+                                // (this thread drops its Box but the one
+                                // passed to register_incoming_control keeps
+                                // the fd open).
+                                if let Some(sender) = shared.sender.get() {
+                                    sender.register_incoming_control(key_addr, stream);
+                                } else {
+                                    warn!(
+                                        "TcpMuxListener: PEER_HELLO_REVERSE but sender \
+                                         hook missing; dropping connection"
+                                    );
+                                }
+                                // Remove the connection entry and exit the loop.
+                                shared.remove_connection_inner(conn_id);
+                                return;
+                            }
+                        }
                     }
                     Some(ConnectionState::Control) => {
                         shared.handle_control_frame(&mut stream, conn_id, &msg);
