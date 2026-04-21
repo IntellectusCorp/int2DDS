@@ -12,7 +12,7 @@ from int2dds.exceptions import check_ret
 if TYPE_CHECKING:
     from int2dds.core.publisher import Publisher
     from int2dds.core.subscriber import Subscriber
-    from int2dds.core.topic import Topic
+    from int2dds.core.topic import ContentFilteredTopic, Topic
     from int2dds.types.base import DdsType
 
 T = TypeVar("T", bound="DdsType")
@@ -126,6 +126,31 @@ class DomainParticipant:
         from int2dds.core.topic import Topic
 
         return Topic(self, topic_name, type_class, qos)
+
+    def create_contentfilteredtopic(
+        self,
+        topic_name: str,
+        related_topic: Topic[T],
+        filter_expression: str,
+        expression_parameters: list[str] | None = None,
+    ) -> ContentFilteredTopic[T]:
+        """
+        Create a ContentFilteredTopic that filters data using a SQL-92 expression.
+
+        Args:
+            topic_name: Name for the filtered topic
+            related_topic: The original Topic to filter
+            filter_expression: SQL-92 filter (e.g., "color = %0")
+            expression_parameters: Parameter values (e.g., ["RED"])
+
+        Returns:
+            A new ContentFilteredTopic instance
+        """
+        from int2dds.core.topic import ContentFilteredTopic
+
+        return ContentFilteredTopic(
+            self, topic_name, related_topic, filter_expression, expression_parameters
+        )
 
     def assert_liveliness(self) -> None:
         """

@@ -2259,6 +2259,16 @@ impl<Foo: DdsType> DataReader<Foo> {
 
         self.sort_changes_by_timestamp(&mut changes)?;
 
+        // Get ContentFilteredTopic expression for serialized path filtering
+        let (cft_expression, cft_parameters) = if let Some(cft) = &self.content_filtered_topic {
+            let cft = cft
+                .upgrade()
+                .ok_or(DdsError::Error("ContentFilteredTopic is deleted".to_string()))?;
+            (Some(cft.parsed_expression.clone()), cft.get_expression_parameters()?)
+        } else {
+            (None, Vec::new())
+        };
+
         let instance_infos = self.get_instance_infos()?;
 
         for change in changes.iter() {
@@ -2294,6 +2304,20 @@ impl<Foo: DdsType> DataReader<Foo> {
             };
 
             let serialized_data = Arc::from(change.data_value());
+
+            // ContentFilteredTopic filter for serialized path
+            if let Some(cft_expr) = &cft_expression {
+                if has_valid_data {
+                    if let Ok(deserialized) = self.type_support.deserialize(&serialized_data, None)
+                    {
+                        if let Ok(typed) = deserialized.downcast::<Foo>() {
+                            if let Ok(false) = cft_expr.evaluate(&*typed, &cft_parameters) {
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
 
             let sample_info = SampleInfo {
                 sample_state,
