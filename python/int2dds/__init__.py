@@ -8,7 +8,7 @@ try:
     from int2dds.core.participant import DomainParticipant
     from int2dds.core.publisher import DataWriter, Publisher
     from int2dds.core.subscriber import DataReader, Sample, Subscriber
-    from int2dds.core.topic import Topic
+    from int2dds.core.topic import ContentFilteredTopic, Topic
     from int2dds.core.qos import (
         DataReaderQos,
         DataWriterQos,
@@ -73,6 +73,7 @@ __all__ = [
     "DataWriter",
     "DataReader",
     "Topic",
+    "ContentFilteredTopic",
     "Sample",
     # QoS
     "DataWriterQos",
