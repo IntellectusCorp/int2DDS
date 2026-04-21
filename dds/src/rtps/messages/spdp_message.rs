@@ -27,7 +27,7 @@ use crate::{
 
 #[derive(Debug, Clone)]
 pub(crate) struct SpdpMessage {
-    rtps_message: Arc<RtpsMessage>,
+    rtps_message: Arc<RtpsMessage<'static>>,
 }
 
 impl SpdpMessage {
@@ -49,7 +49,7 @@ impl SpdpMessage {
         Ok(Self { rtps_message: Arc::new(rtps_message) })
     }
 
-    fn create_info_ts_submessage() -> Submessage {
+    fn create_info_ts_submessage() -> Submessage<'static> {
         let mut info_ts_header_flag = SubmessageHeaderFlag::new();
         info_ts_header_flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::INFO_TS);
         let info_ts_data = InfoTimestamp::new(Utc::now());
@@ -68,7 +68,7 @@ impl SpdpMessage {
         participant: Arc<Participant>,
         sequence_number: SequenceNumber,
         inline_qos_list: Option<ParameterList>,
-    ) -> RtpsResult<Submessage> {
+    ) -> RtpsResult<Submessage<'static>> {
         let mut data_header_flag = SubmessageHeaderFlag::new();
         data_header_flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::DATA);
         data_header_flag.add_flag(SubmessageFlagType::DataFlag, SubmessageId::DATA);
@@ -84,10 +84,12 @@ impl SpdpMessage {
             data.set_inline_qos_list(inline_qos_list);
         }
 
-        data.add_serialized_data(Self::create_serialized_data(participant)?);
+        data.add_serialized_data(SubmessagePayload::Owned(Self::create_serialized_data(
+            participant,
+        )?));
         let length = data.octets_to_next_header();
 
-        let submessage_body: SubmessageBody = SubmessageBody::Data(data);
+        let submessage_body: SubmessageBody<'static> = SubmessageBody::Data(data);
 
         let data_submessage = Submessage {
             header: SubmessageHeader::new(SubmessageId::DATA, data_header_flag.flag, length),
@@ -96,7 +98,7 @@ impl SpdpMessage {
         Ok(data_submessage)
     }
 
-    fn create_serialized_data(participant: Arc<Participant>) -> RtpsResult<SerializedData> {
+    fn create_serialized_data(participant: Arc<Participant>) -> RtpsResult<bytes::Bytes> {
         let domain_id = participant.domain_id();
         let participant_guid = participant.guid();
         let local_participant_proxy_data = participant.local_participant_proxy_data();
@@ -105,7 +107,10 @@ impl SpdpMessage {
         let entity_name = Some(local_participant_proxy_data.entity_name().to_string());
 
         // Use pre-computed locators from local_participant_proxy_data
-        let mut locators = Vec::new();
+        let mut locators = Vec::with_capacity(
+            local_participant_proxy_data.metatraffic_unicast_locator_list().len()
+                + local_participant_proxy_data.default_unicast_locator_list().len(),
+        );
 
         for locator in local_participant_proxy_data.metatraffic_unicast_locator_list() {
             locators.push((
@@ -132,7 +137,7 @@ impl SpdpMessage {
             entity_name,
             locators,
         ) {
-            Ok(bytes) => Ok(Arc::from(bytes)),
+            Ok(bytes) => Ok(bytes::Bytes::from(bytes)),
             Err(e) => {
                 log::error!("Error creating SPDP serialized data: {}", e);
 
@@ -143,7 +148,7 @@ impl SpdpMessage {
                     vendor_id,
                     true,
                 ) {
-                    Ok(bytes) => Ok(Arc::from(bytes)),
+                    Ok(bytes) => Ok(bytes::Bytes::from(bytes)),
                     Err(fallback_err) => Err(RtpsError::new(
                         RtpsErrorCode::SerializationError,
                         format!("Fallback SPDP creation also failed: {}", fallback_err),
@@ -153,7 +158,7 @@ impl SpdpMessage {
         }
     }
 
-    pub(crate) fn rtps_message(&self) -> Arc<RtpsMessage> {
+    pub(crate) fn rtps_message(&self) -> Arc<RtpsMessage<'static>> {
         self.rtps_message.clone()
     }
 }

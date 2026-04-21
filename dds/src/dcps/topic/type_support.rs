@@ -111,6 +111,22 @@ pub trait TypeSupport: Send + Sync + 'static {
         format: Option<&SerializationFormat>,
     ) -> DdsResult<Box<dyn Any>>;
 
+    /// Serialize into an existing buffer, reusing its capacity.
+    /// The buffer is cleared and filled with serialized data (including encapsulation header).
+    /// Default implementation delegates to `serialize()` (no buffer reuse).
+    /// Derive macro generates an optimized version that reuses the buffer's capacity.
+    fn serialize_into(
+        &self,
+        data: &dyn Any,
+        buffer: &mut Vec<u8>,
+        format: Option<&SerializationFormat>,
+    ) -> DdsResult<()> {
+        let serialized = self.serialize(data, format)?;
+        buffer.clear();
+        buffer.extend_from_slice(&serialized);
+        Ok(())
+    }
+
     // Key handling
     fn serialize_key(&self, data: &dyn Any) -> DdsResult<SerializedData>;
     fn deserialize_key(&self, serialized_key: &[u8]) -> DdsResult<Box<dyn Any + Send + Sync>>;

@@ -85,6 +85,10 @@ struct Args {
     /// History depth: 0 = keep-all, N = keep-last N
     #[arg(short = 'k', long, default_value_t = 1)]
     keep: i32,
+
+    /// Message size in bytes [publisher only, pads message to this size]
+    #[arg(short = 's', long)]
+    size: Option<usize>,
 }
 
 #[derive(DdsType)]
@@ -315,15 +319,20 @@ fn run_publisher(args: &Args) {
 
     let mut i = 1;
     loop {
-        let data = HelloWorldType {
-            index: i,
-            message: format!(
-                "[{:?}]HelloWorld_{}_d{}",
-                hostname::get().unwrap(),
-                reliability_str,
-                args.domain,
-            ),
-        };
+        let mut message = format!(
+            "[{:?}]HelloWorld_{}_d{}",
+            hostname::get().unwrap(),
+            reliability_str,
+            args.domain,
+        );
+        if let Some(target) = args.size {
+            if message.len() < target {
+                message.extend(std::iter::repeat('x').take(target - message.len()));
+            } else if message.len() > target {
+                message.truncate(target);
+            }
+        }
+        let data = HelloWorldType { index: i, message };
         writer.write(&data, InstanceHandle::NIL).unwrap();
         info!("Published {:?}", data);
         std::thread::sleep(std::time::Duration::from_millis(args.interval));
