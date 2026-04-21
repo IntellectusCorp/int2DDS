@@ -172,7 +172,13 @@ impl TcpTransportPlugin {
         // ensure_control short-circuits and send_keepalives skips it.
         sender.set_dead_peer_tx(dead_peer_tx);
 
-        let mux_thread_handle = if reachable {
+        // Always spawn the mux task — in asymmetric mode the underlying
+        // `TcpMuxListener` is `new_unbound` (no accept socket) so the
+        // task's accept loop is a no-op, but the task still runs its
+        // keepalive + orphan-pruning timer. Keeping the object lifecycle
+        // identical in both modes avoids sprinkling `if self.reachable`
+        // checks across the transport.
+        let mux_thread_handle = {
             let terminated_clone = terminated.clone();
             let sender_clone = sender.clone();
             let tls_config_clone = tls_config.clone();
@@ -192,14 +198,6 @@ impl TcpTransportPlugin {
                 })
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
             Some(handle)
-        } else {
-            // Asymmetric mode: no accept thread needed. `mux_listener` is
-            // dropped here, but `mux_shared` (an Arc clone) lives on in
-            // the plugin so reverse-channel streams can be adopted via
-            // the shared state's read-loop infrastructure.
-            drop(dead_peer_tx);
-            drop(mux_listener);
-            None
         };
 
         info!(
@@ -459,14 +457,11 @@ impl TcpMuxListeningLoopTask {
         );
 
         // Take the TCP listener socket for the blocking accept loop.
-        let listener = match self.mux_listener.take_listener() {
-            Some(l) => l,
-            None => {
-                return Err(io::Error::other(
-                    "[TcpMuxListeningLoopTask] Listener not initialized",
-                ))
-            }
-        };
+        // In asymmetric mode the underlying listener was created via
+        // `new_unbound`, so this returns None — we skip the accept loop
+        // but still run the timer thread so keepalive / orphan pruning
+        // stay active.
+        let listener_opt = self.mux_listener.take_listener();
 
         let shared = Arc::clone(&self.mux_listener.shared);
 
@@ -528,6 +523,23 @@ impl TcpMuxListeningLoopTask {
                 })
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         }
+
+        // If there is no accept socket (asymmetric mode), park this
+        // thread waiting for termination — the timer spawned above and
+        // any adopted reverse-channel read-loops continue running.
+        let listener = match listener_opt {
+            Some(l) => l,
+            None => {
+                info!(
+                    "[TcpMuxListeningLoopTask] No accept socket (asymmetric mode); \
+                     timer + adopted read-loops remain active"
+                );
+                while !self.terminated.load(Ordering::SeqCst) {
+                    thread::sleep(Duration::from_millis(200));
+                }
+                return Ok(());
+            }
+        };
 
         // ── Accept loop (this thread) ─────────────────────────────────────────
         let terminated = Arc::clone(&self.terminated);
