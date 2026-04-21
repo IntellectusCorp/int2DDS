@@ -163,6 +163,15 @@ impl TcpTransportPlugin {
         // moves the accepted stream into this sender's connection cache.
         mux_listener.set_sender(sender.clone());
 
+        // Dead-peer notification hook: every disconnect_peer call (send
+        // hot-path BrokenPipe, keepalive failure, self-connection cleanup)
+        // funnels through the sender's internal channel so the RTPS layer
+        // is signaled exactly once per peer drop. In asymmetric mode this
+        // is the *only* signal path — the keepalive timer cannot probe a
+        // peer once disconnect_peer wipes the port-0 control entry, since
+        // ensure_control short-circuits and send_keepalives skips it.
+        sender.set_dead_peer_tx(dead_peer_tx);
+
         let mux_thread_handle = if reachable {
             let terminated_clone = terminated.clone();
             let sender_clone = sender.clone();
@@ -174,7 +183,6 @@ impl TcpTransportPlugin {
                         mux_listener,
                         sender: sender_clone,
                         terminated: terminated_clone,
-                        dead_peer_tx,
                         tls_config: tls_config_clone,
                     };
                     if let Err(e) = task.run() {
@@ -428,7 +436,6 @@ struct TcpMuxListeningLoopTask {
     mux_listener: TcpMuxListener,
     sender: TcpSender,
     terminated: Arc<AtomicBool>,
-    dead_peer_tx: crossbeam_channel::Sender<SocketAddr>,
     /// Optional TLS configuration for accepting inbound TLS connections.
     tls_config: Option<Arc<TlsConfig>>,
 }
@@ -468,7 +475,6 @@ impl TcpMuxListeningLoopTask {
             let timer_shared = Arc::clone(&shared);
             let timer_terminated = Arc::clone(&self.terminated);
             let timer_sender = self.sender.clone();
-            let timer_dead_peer_tx = self.dead_peer_tx.clone();
             let orphan_check_interval =
                 (orphan_data_grace / 2).max(Duration::from_millis(100));
 
@@ -493,8 +499,9 @@ impl TcpMuxListeningLoopTask {
                                     "[TcpMuxListeningLoopTask] Dead peer via keepalive: {:?}",
                                     addr
                                 );
+                                // disconnect_peer fires dead_peer_tx internally,
+                                // so we don't try_send here — single source of truth.
                                 timer_sender.disconnect_peer(&addr);
-                                let _ = timer_dead_peer_tx.try_send(addr);
                             }
                         }
 

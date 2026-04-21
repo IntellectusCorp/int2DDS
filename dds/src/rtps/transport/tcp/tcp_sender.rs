@@ -67,6 +67,13 @@ pub(crate) struct TcpSender {
     /// listener to avoid spawning duplicate dial threads when the
     /// reachable peer repeats PORT_RESERVE while a dial is in flight.
     reverse_data_dialed: Arc<DashMap<(SocketAddr, u16), ()>>,
+    /// Channel to notify the RTPS layer (PeerMonitor) when a peer has
+    /// been disconnected by any send-path failure, not just keepalive.
+    /// Critical for asymmetric peers: once `disconnect_peer` clears the
+    /// port-0 control entry, `ensure_control` short-circuits all future
+    /// sends, so the keepalive loop has no connection left to probe —
+    /// without this explicit signal the RTPS proxy state leaks forever.
+    dead_peer_tx: std::sync::OnceLock<crossbeam_channel::Sender<SocketAddr>>,
 }
 
 // `Debug` by hand — `Box<dyn TcpStreamWrapper>` doesn't derive Debug.
@@ -144,6 +151,7 @@ impl TcpSender {
             tls_config,
             reverse_channels_dialed: Arc::new(DashMap::new()),
             reverse_data_dialed: Arc::new(DashMap::new()),
+            dead_peer_tx: std::sync::OnceLock::new(),
         })
     }
 
@@ -179,6 +187,13 @@ impl TcpSender {
 
     pub(crate) fn listener_port(&self) -> u16 {
         self.listener_port
+    }
+
+    /// Attach the dead-peer notification channel. Called once by the
+    /// plugin after it constructs both the sender and the channel.
+    /// Safe to call from any thread; subsequent calls are no-ops.
+    pub(crate) fn set_dead_peer_tx(&self, tx: crossbeam_channel::Sender<SocketAddr>) {
+        let _ = self.dead_peer_tx.set(tx);
     }
 
     fn get_write_timeout() -> Duration {
@@ -691,10 +706,30 @@ impl TcpSender {
     }
 
     pub(crate) fn disconnect_peer(&self, addr: &SocketAddr) {
+        let had_entry = self
+            .connections
+            .iter()
+            .any(|e| e.key().0 == *addr)
+            || self.peer_info.contains_key(addr);
+
         self.connections.retain(|key, _| key.0 != *addr);
         self.peer_info.remove(addr);
         self.keepalive_missed.remove(addr);
+        // Also clear reverse-channel guards so a future SPDP re-discovery
+        // can re-establish the 2-dial flow from scratch.
+        self.reverse_channels_dialed.remove(addr);
+        self.reverse_data_dialed.retain(|key, _| key.0 != *addr);
+
         debug!("TcpSender: Disconnected peer {:?}", addr);
+
+        // Signal the RTPS layer so PeerMonitor can unmatch RTPS proxies.
+        // We only emit if there was actually something to clean up, to
+        // avoid spurious events on idempotent disconnect_peer calls.
+        if had_entry {
+            if let Some(tx) = self.dead_peer_tx.get() {
+                let _ = tx.try_send(*addr);
+            }
+        }
     }
 
     /// Send keepalive on each outgoing control connection.
