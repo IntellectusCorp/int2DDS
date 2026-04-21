@@ -28,8 +28,8 @@ class HelloWorld:
     index: int = 0
     message: str = ""
 
-    def _serialize_cdr(self) -> bytes:
-        w = CdrWriter(extensibility=self._extensibility, xcdr2=False)
+    def _serialize_cdr(self, xcdr2: bool = True) -> bytes:
+        w = CdrWriter(extensibility=self._extensibility, xcdr2=xcdr2)
         w.write_u32(self.index)
         w.write_string(self.message)
         return w.to_bytes()
