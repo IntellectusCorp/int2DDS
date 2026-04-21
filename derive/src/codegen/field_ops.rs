@@ -219,10 +219,6 @@ fn gen_serialize_code(
         SerializationMethod::F64Array => {
             gen_array_serialize("serialize_f64_array", field_name, crate_path)
         }
-        SerializationMethod::DdsBytes => {
-            // DdsBytes derefs to &[u8], serialize as byte sequence
-            gen_sequence_serialize("serialize_byte_sequence", field_name, crate_path, bound)
-        }
         SerializationMethod::VecU8 => {
             gen_sequence_serialize("serialize_byte_sequence", field_name, crate_path, bound)
         }
@@ -539,38 +535,6 @@ fn gen_deserialize_code(
                 }
             } else {
                 quote! { compile_error!("Cannot determine array size for field"); }
-            }
-        }
-        SerializationMethod::DdsBytes => {
-            // DdsBytes: zero-copy via deserialize_shared_bytes
-            if let Some(max_len) = bound {
-                quote! {
-                    let #field_name: #field_type = match deserializer.deserialize_shared_bytes() {
-                        Ok(value) => {
-                            if value.len() > #max_len {
-                                return Err(#crate_path::dcps::core::error::DdsError::Error(
-                                    format!("Deserialized DdsBytes field '{}' length {} exceeds maximum {}",
-                                        stringify!(#field_name), value.len(), #max_len)
-                                ));
-                            }
-                            value
-                        },
-                        Err(#crate_path::serialize::cdr::CdrError::InsufficientData) => #crate_path::serialize::cdr::DdsBytes::default(),
-                        Err(e) => {
-                            return Err(#crate_path::dcps::core::error::DdsError::Error(e.to_string()));
-                        }
-                    };
-                }
-            } else {
-                quote! {
-                    let #field_name: #field_type = match deserializer.deserialize_shared_bytes() {
-                        Ok(value) => value,
-                        Err(#crate_path::serialize::cdr::CdrError::InsufficientData) => #crate_path::serialize::cdr::DdsBytes::default(),
-                        Err(e) => {
-                            return Err(#crate_path::dcps::core::error::DdsError::Error(e.to_string()));
-                        }
-                    };
-                }
             }
         }
         SerializationMethod::VecU8 => {

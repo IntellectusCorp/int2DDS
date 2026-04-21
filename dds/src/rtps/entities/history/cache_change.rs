@@ -222,28 +222,6 @@ impl CacheChange {
         self.data_payload = DataPayload::Shared(data);
     }
 
-    /// Return the shared backing for zero-copy deserialization of byte sequences.
-    ///
-    /// TEMPORARILY DISABLED (always returns `None`).
-    ///
-    /// The original purpose is to let `DdsBytes` fields reference a sub-slice
-    /// of the `CacheChange` payload without copying. The downstream plumbing
-    /// (`TypeSupport::deserialize_with_backing`, derive macro codegen,
-    /// `CdrDeserializer::set_shared_backing`, `DdsBytes::Shared`) is still wired
-    /// to `Option<Arc<Vec<u8>>>`, but `DataPayload::Shared` now holds
-    /// `bytes::Bytes` (changed to make non-fragmented / fragmented receive
-    /// paths zero-copy for `Vec<u8>` users). Since `DdsBytes` is scheduled to
-    /// be replaced wholesale by `bytes::Bytes` in a follow-up change, rather
-    /// than cascading the type through the old plumbing here we disconnect it
-    /// and let `DdsBytes` fall back to its owned/copy path until then.
-    ///
-    /// When the `DdsBytes` → `bytes::Bytes` migration lands, rewire this to
-    /// return the backing `Bytes` directly and thread it through the new
-    /// pipeline.
-    pub(crate) fn shared_backing(&self) -> Option<std::sync::Arc<Vec<u8>>> {
-        None
-    }
-
     pub(crate) fn source_timestamp(&self) -> Option<RtpsTime> {
         self.source_timestamp
     }

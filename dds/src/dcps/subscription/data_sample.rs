@@ -50,11 +50,7 @@ where
     pub fn data(&self) -> DdsResult<Foo> {
         match (self.change.as_ref(), self.type_support.as_ref()) {
             (Some(change), Some(ts)) => {
-                let any_box = ts.deserialize_with_backing(
-                    change.data_value(),
-                    change.shared_backing(),
-                    None,
-                )?;
+                let any_box = ts.deserialize(change.data_value(), None)?;
                 any_box
                     .downcast::<Foo>()
                     .map(|boxed| *boxed)
