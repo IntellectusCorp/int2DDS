@@ -408,16 +408,11 @@ impl<Foo: 'static + Clone + Debug> EnableChild for DataReader<Foo> {
         // Common: Connect datareader cache to RTPS reader cache
         {
             let reader_cache = rtps_reader.reader_cache();
-            reader_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?.set_datareader_cache(
-                Arc::downgrade(&self.datareader_cache)
-                    as Weak<
-                        Mutex<
-                            dyn DcpsHistoryCache<CacheChangeInputType = Arc<Mutex<CacheChange>>>
-                                + Send
-                                + Sync,
-                        >,
-                    >,
-            );
+            reader_cache
+                .lock()
+                .map_err(|e| DdsError::Error(e.to_string()))?
+                .set_datareader_cache(Arc::downgrade(&self.datareader_cache)
+                    as Weak<Mutex<dyn DcpsHistoryCache + Send + Sync>>);
         }
 
         Ok(())
@@ -1612,12 +1607,14 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                     log::debug!("Setting instance state to NOT_ALIVE_DISPOSED");
                     info.instance_state = InstanceStateKind::NOT_ALIVE_DISPOSED_INSTANCE_STATE;
                     if info.key.is_empty() && cache_change.is_some() {
-                        info.key = cache_change
-                            .as_ref()
-                            .ok_or(DdsError::Error(
-                                "CacheChange is not properly initialized".to_string(),
-                            ))?
-                            .data_value_arc();
+                        info.key = Arc::from(
+                            cache_change
+                                .as_ref()
+                                .ok_or(DdsError::Error(
+                                    "CacheChange is not properly initialized".to_string(),
+                                ))?
+                                .data_value(),
+                        );
                     }
 
                     let monitor_guard =
@@ -1650,12 +1647,14 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                     log::debug!("Setting instance state to NOT_ALIVE_NO_WRITERS");
                     info.instance_state = InstanceStateKind::NOT_ALIVE_NO_WRITERS_INSTANCE_STATE;
                     if info.key.is_empty() && cache_change.is_some() {
-                        info.key = cache_change
-                            .as_ref()
-                            .ok_or(DdsError::Error(
-                                "CacheChange is not properly initialized".to_string(),
-                            ))?
-                            .data_value_arc();
+                        info.key = Arc::from(
+                            cache_change
+                                .as_ref()
+                                .ok_or(DdsError::Error(
+                                    "CacheChange is not properly initialized".to_string(),
+                                ))?
+                                .data_value(),
+                        );
                     }
 
                     let monitor_guard =
@@ -2304,7 +2303,7 @@ impl<Foo: DdsType> DataReader<Foo> {
                 | ChangeKind::NotAliveDisposedUnregistered => false,
             };
 
-            let serialized_data = change.data_value_arc();
+            let serialized_data = Arc::from(change.data_value());
 
             // ContentFilteredTopic filter for serialized path
             if let Some(cft_expr) = &cft_expression {
@@ -2680,7 +2679,7 @@ impl<Foo: DdsType> DataReader<Foo> {
 
     fn change_to_data_sample(
         &self,
-        change: &CacheChange,
+        change: &Arc<CacheChange>,
         instance_handle: InstanceHandle,
         sample_state: SampleStateKind,
     ) -> DdsResult<DataSample<Foo>> {
@@ -2691,7 +2690,7 @@ impl<Foo: DdsType> DataReader<Foo> {
     /// Optimized version that accepts pre-fetched instance_infos to avoid repeated lock acquisition
     fn change_to_data_sample_with_infos(
         &self,
-        change: &CacheChange,
+        change: &Arc<CacheChange>,
         instance_handle: InstanceHandle,
         sample_state: SampleStateKind,
         cached_instance_infos: Option<&HashMap<InstanceHandle, InstanceInfo>>,
@@ -2704,8 +2703,8 @@ impl<Foo: DdsType> DataReader<Foo> {
             | ChangeKind::NotAliveDisposedUnregistered => false,
         };
 
-        // Deserialize the data
-        let data = if has_valid_data { Some(change.data_value_arc()) } else { None };
+        // Share the Arc<CacheChange> — zero-copy, just refcount increment.
+        let data = if has_valid_data { Some(Arc::clone(change)) } else { None };
 
         // Use cached instance_infos if provided, otherwise fetch
         let owned_instance_infos;
@@ -2719,8 +2718,7 @@ impl<Foo: DdsType> DataReader<Foo> {
 
         let info = instance_infos
             .get(&instance_handle)
-            .ok_or(DdsError::Error("Instance not found".to_string()))?
-            .clone();
+            .ok_or(DdsError::Error("Instance not found".to_string()))?;
 
         let sample_info = SampleInfo {
             sample_state,

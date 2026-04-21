@@ -40,6 +40,26 @@ impl Xcdr2Serializer {
         }
     }
 
+    /// Create XCDR serializer reusing an existing buffer (capacity preserved, content cleared)
+    pub fn reuse_buffer(
+        little_endian: bool,
+        extensibility: ExtensibilityKind,
+        mut buffer: Vec<u8>,
+    ) -> Self {
+        buffer.clear();
+        Self {
+            endianness: endianness_from_bool(little_endian),
+            buffer,
+            extensibility_kind: extensibility,
+            type_hash: None,
+        }
+    }
+
+    /// Consume the serializer and return the internal buffer (for ownership round-trip)
+    pub fn into_buffer(self) -> Vec<u8> {
+        self.buffer
+    }
+
     /// Create XCDR serializer with type hash for type safety
     pub fn with_type_hash(
         little_endian: bool,

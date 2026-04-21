@@ -11,6 +11,7 @@ use std::{fmt::Debug, marker::PhantomData, sync::Arc};
 
 use crate::{
     core::error::{DdsError, DdsResult},
+    rtps::entities::history::cache_change::CacheChange,
     topic::type_support::{DdsType, TypeSupport},
 };
 
@@ -18,23 +19,23 @@ use super::sample_info::SampleInfo;
 
 /// A data sample received from a DataReader.
 ///
-/// Contains the serialized data bytes, optional type support for deserialization,
-/// and associated sample metadata (SampleInfo).
+/// Holds the original `Arc<CacheChange>` from the reader history so the serialized
+/// payload is shared without copying.  Deserialization happens lazily when the
+/// user calls `data()`.
 pub struct DataSample<Foo> {
-    data: Option<Arc<[u8]>>,
+    change: Option<Arc<CacheChange>>,
     type_support: Option<Arc<dyn TypeSupport>>,
     pub(crate) sample_info: SampleInfo,
     phantom: PhantomData<fn() -> Foo>,
 }
 
 impl<Foo> DataSample<Foo> {
-    /// Create a new DataSample without type support (uses default TypeSupport for deserialization)
     pub(crate) fn new(
-        data: Option<Arc<[u8]>>,
+        change: Option<Arc<CacheChange>>,
         sample_info: SampleInfo,
         type_support: Option<Arc<dyn TypeSupport>>,
     ) -> Self {
-        Self { data, type_support, sample_info, phantom: PhantomData }
+        Self { change, type_support, sample_info, phantom: PhantomData }
     }
 }
 
@@ -47,19 +48,15 @@ where
     /// If a type support was provided during construction, it will be used for
     /// deserialization. Otherwise, falls back to the default TypeSupport.
     pub fn data(&self) -> DdsResult<Foo> {
-        match (self.data.as_ref(), self.type_support.as_ref()) {
-            (Some(data), Some(ts)) => {
-                // Use the registered TypeSupport for deserialization
-                let any_box = ts.deserialize(data.as_ref(), None)?;
+        match (self.change.as_ref(), self.type_support.as_ref()) {
+            (Some(change), Some(ts)) => {
+                let any_box = ts.deserialize(change.data_value(), None)?;
                 any_box
                     .downcast::<Foo>()
                     .map(|boxed| *boxed)
                     .map_err(|_| DdsError::Error("Type downcast failed".to_string()))
             }
-            (Some(data), None) => {
-                // Fallback: use default TypeSupport (backward compatibility)
-                Ok(Foo::deserialize(data.as_ref())?)
-            }
+            (Some(change), None) => Ok(Foo::deserialize(change.data_value())?),
             (None, _) => Err(DdsError::NoData),
         }
     }
@@ -74,7 +71,7 @@ where
 impl<Foo> Clone for DataSample<Foo> {
     fn clone(&self) -> Self {
         Self {
-            data: self.data.clone(),
+            change: self.change.clone(),
             type_support: self.type_support.clone(),
             sample_info: self.sample_info.clone(),
             phantom: PhantomData,
@@ -85,7 +82,10 @@ impl<Foo> Clone for DataSample<Foo> {
 impl<Foo> Debug for DataSample<Foo> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DataSample")
-            .field("data", &self.data.as_ref().map(|d| format!("[{} bytes]", d.len())))
+            .field(
+                "data",
+                &self.change.as_ref().map(|c| format!("[{} bytes]", c.data_value().len())),
+            )
             .field("has_type_support", &self.type_support.is_some())
             .field("sample_info", &self.sample_info)
             .finish()
@@ -94,8 +94,12 @@ impl<Foo> Debug for DataSample<Foo> {
 
 impl<Foo> PartialEq for DataSample<Foo> {
     fn eq(&self, other: &Self) -> bool {
-        // Compare data and sample_info, ignore type_support (it's just a helper)
-        self.data == other.data && self.sample_info == other.sample_info
+        let data_eq = match (self.change.as_ref(), other.change.as_ref()) {
+            (Some(a), Some(b)) => a.data_value() == b.data_value(),
+            (None, None) => true,
+            _ => false,
+        };
+        data_eq && self.sample_info == other.sample_info
     }
 }
 

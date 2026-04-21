@@ -37,7 +37,8 @@ use crate::{
         common::guid::Guid,
         entities::{
             history::{
-                cache_change::CacheChange, history_cache::HistoryCache as rtps_history_cache,
+                cache_change::CacheChange, cache_change_pool::CacheChangePool,
+                history_cache::HistoryCache as rtps_history_cache,
             },
             writer::{StatefulWriter, Writer},
         },
@@ -59,11 +60,10 @@ pub(crate) struct DataWriterHistoryCache<Foo> {
     max_blocking_time: Duration,
     has_key: bool,
     lifespan_timers: Arc<Mutex<HashMap<Guid, TimerId>>>, // writer_guid -> timer_id
+    pool: CacheChangePool,
 }
 
 impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
-    type CacheChangeInputType = Arc<CacheChange>;
-
     // Returns a reference to the list of CacheChanges.
     fn get_changes(&self) -> &Vec<Arc<CacheChange>> {
         &self.changes
@@ -101,8 +101,9 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
         self.lifespan_timers.clone()
     }
 
-    // Adds the given CacheChange to the history vector and map,
-    // and returns any CacheChange that was removed during space allocation before adding.
+    // Adds the given CacheChange to the history vector and map.
+    // Always returns Ok(None) — evicted changes are released directly to the pool
+    // rather than returned to the caller.
     fn add_change_with_cleanup(
         &mut self,
         a_change: Arc<CacheChange>,
@@ -140,6 +141,12 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
 
         let removed = self.ensure_capacity(a_change.instance_handle())?;
 
+        // Release evicted change back to pool for buffer reuse.
+        // Consume the Arc by value so Arc::try_unwrap succeeds (refcount == 1).
+        if let Some(evicted) = removed {
+            self.try_release_evicted(evicted);
+        }
+
         if lifespan_duration.is_some() {
             self.insert_change_sorted(a_change.clone());
         } else {
@@ -149,7 +156,10 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
         self.add_change_to_rtps_writer_cache(a_change)?;
 
         debug!("add_change_with_cleanup completed");
-        Ok(removed)
+
+        // Writer-side callers never use the removed value
+        // unlike DataReaderHistoryCache, which needs it to sync the RTPS history
+        Ok(None)
     }
 
     // Removes the given CacheChange from the history vector and map.
@@ -301,6 +311,33 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
             max_blocking_time: reliability_qos.max_blocking_time,
             has_key,
             lifespan_timers: Arc::new(Mutex::new(HashMap::new())),
+            pool: {
+                let pool_size = match history_qos.kind {
+                    HistoryQosPolicyKind::KeepLast(depth) => {
+                        if has_key {
+                            // Instance count unknown at creation — pre-allocate for 1 instance
+                            depth as usize
+                        } else {
+                            depth as usize
+                        }
+                    }
+                    HistoryQosPolicyKind::KeepAll => 32,
+                };
+                CacheChangePool::with_capacity(pool_size)
+            },
+        }
+    }
+
+    /// Acquire a CacheChange from the pool (capacity preserved from previous use).
+    pub(crate) fn acquire_change(&mut self) -> CacheChange {
+        self.pool.acquire()
+    }
+
+    /// Try to release an evicted Arc<CacheChange> back to the pool.
+    /// Returns the change to the pool only if Arc refcount is 1.
+    fn try_release_evicted(&mut self, evicted: Arc<CacheChange>) {
+        if let Ok(change) = Arc::try_unwrap(evicted) {
+            self.pool.release(change);
         }
     }
 
@@ -409,7 +446,8 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
 
     // Removes and returns the oldest change from all instances.
     fn remove_oldest_change_of_all(&mut self) -> DdsResult<Arc<CacheChange>> {
-        let oldest_change = self.get_changes().iter().min_by_key(|c| c.sequence_number()).cloned();
+        // The oldest change is always at index 0.
+        let oldest_change = self.get_changes().first().cloned();
         match oldest_change {
             Some(change) => {
                 self.remove_change(change.clone())?;
@@ -553,7 +591,7 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
             let rtps_writer_cache = rtps_writer.writer_cache();
             let cache_binding = rtps_writer_cache.lock();
             if let Ok(mut cache_guard) = cache_binding {
-                let res = cache_guard.add_change(a_change);
+                let res = cache_guard.add_change(a_change, &*rtps_writer);
                 if res.is_ok() {
                     Ok(())
                 } else {
@@ -622,7 +660,7 @@ mod tests {
             Guid::UNKNOWN,
             handle,
             SequenceNumber::from_i64(seq),
-            Arc::from(vec![]),
+            vec![],
             None,
         ))
     }
@@ -1295,6 +1333,7 @@ mod tests {
             max_blocking_time: Duration::from_millis(100),
             has_key: true,
             lifespan_timers: Arc::new(Mutex::new(HashMap::new())),
+            pool: CacheChangePool::new(),
         };
 
         // Act
@@ -1336,6 +1375,7 @@ mod tests {
             max_blocking_time: Duration::from_millis(100),
             has_key: true,
             lifespan_timers: Arc::new(Mutex::new(HashMap::new())),
+            pool: CacheChangePool::new(),
         };
 
         // Act

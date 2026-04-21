@@ -24,7 +24,7 @@ use crate::rtps::{
 pub(crate) struct SubmessageCreator;
 
 impl SubmessageCreator {
-    pub(crate) fn create_info_ts_submessage(timestamp: DateTime<Utc>) -> Submessage {
+    pub(crate) fn create_info_ts_submessage(timestamp: DateTime<Utc>) -> Submessage<'static> {
         let mut info_ts_header_flag = SubmessageHeaderFlag::new();
         info_ts_header_flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::INFO_TS);
         let info_ts_data = InfoTimestamp::new(timestamp);
@@ -39,7 +39,7 @@ impl SubmessageCreator {
         }
     }
 
-    pub(crate) fn create_info_dst_submessage(prefix: GuidPrefix) -> Submessage {
+    pub(crate) fn create_info_dst_submessage(prefix: GuidPrefix) -> Submessage<'static> {
         let mut info_dst_header_flag = SubmessageHeaderFlag::new();
         info_dst_header_flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::INFO_DST);
         let info_dst_data = InfoDestination::new(prefix);
@@ -62,7 +62,7 @@ impl SubmessageCreator {
         last_sn: SequenceNumber,
         final_flag: bool,
         liveliness_flag: bool,
-    ) -> Result<Submessage, Box<dyn std::error::Error>> {
+    ) -> Result<Submessage<'static>, Box<dyn std::error::Error>> {
         let mut data_header_flag = SubmessageHeaderFlag::new();
         data_header_flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::HEARTBEAT);
         if liveliness_flag {
@@ -92,7 +92,7 @@ impl SubmessageCreator {
         acknack_count: u32,
         bitmap_base: SequenceNumber,
         is_preemptive: bool,
-    ) -> Result<Submessage, Box<dyn std::error::Error>> {
+    ) -> Result<Submessage<'static>, Box<dyn std::error::Error>> {
         let mut data_header_flag = SubmessageHeaderFlag::new();
         data_header_flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::ACKNACK);
 
@@ -127,7 +127,7 @@ impl SubmessageCreator {
         reader_entity_id: EntityId,
         writer_entity_id: EntityId,
         gap_list: &mut Vec<SequenceNumber>,
-    ) -> Result<Submessage, Box<dyn std::error::Error>> {
+    ) -> Result<Submessage<'static>, Box<dyn std::error::Error>> {
         if gap_list.is_empty() {
             return Err(Box::new(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -163,7 +163,7 @@ impl SubmessageCreator {
         writer_entity_id: EntityId,
         gap_start: SequenceNumber,
         gap_end: SequenceNumber,
-    ) -> Result<Submessage, Box<dyn std::error::Error>> {
+    ) -> Result<Submessage<'static>, Box<dyn std::error::Error>> {
         let mut data_header_flag = SubmessageHeaderFlag::new();
         data_header_flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::GAP);
 
@@ -195,7 +195,7 @@ impl SubmessageCreator {
         writer_sn: SequenceNumber,
         fragment_number_state: FragmentNumberSet,
         nackfrag_count: u32,
-    ) -> Result<Submessage, Box<dyn std::error::Error>> {
+    ) -> Result<Submessage<'static>, Box<dyn std::error::Error>> {
         let mut nackfrag_header_flag = SubmessageHeaderFlag::new();
         nackfrag_header_flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::NACK_FRAG);
 
@@ -224,7 +224,8 @@ impl SubmessageCreator {
     ) -> (SequenceNumber, SequenceNumberSet) {
         let gap_start = gap_list[0];
         let mut bitmap_base = gap_start + 1;
-        let mut sn_after_base: Vec<SequenceNumber> = Vec::new();
+        let mut sn_after_base: Vec<SequenceNumber> =
+            Vec::with_capacity(gap_list.len().saturating_sub(1).min(256));
         let mut processed = 0;
 
         for (i, sn) in gap_list.iter().enumerate().skip(1) {
