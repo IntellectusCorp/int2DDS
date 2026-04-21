@@ -211,7 +211,6 @@ pub struct Xcdr2Deserializer<'a> {
     /// Whether the data uses XCDR2 encoding (affects alignment rules)
     /// XCDR2 limits maximum alignment to 4 bytes, while XCDR1 allows 8 bytes
     is_xcdr2: bool,
-    pub(super) shared_backing: Option<std::sync::Arc<Vec<u8>>>,
 }
 
 impl<'a> Xcdr2Deserializer<'a> {
@@ -219,14 +218,7 @@ impl<'a> Xcdr2Deserializer<'a> {
     pub fn new(data: &'a [u8]) -> Result<Self, CdrError> {
         let (endianness, header_size, is_xcdr2) = parse_encapsulation_header(data)?;
 
-        Ok(Self {
-            endianness,
-            data: &data[header_size..],
-            position: 0,
-            header_size,
-            is_xcdr2,
-            shared_backing: None,
-        })
+        Ok(Self { endianness, data: &data[header_size..], position: 0, header_size, is_xcdr2 })
     }
 
     /// Create deserializer without encapsulation header
@@ -238,12 +230,7 @@ impl<'a> Xcdr2Deserializer<'a> {
             position: 0,
             header_size: 0,
             is_xcdr2: true, // Default to XCDR2 behavior
-            shared_backing: None,
         }
-    }
-
-    pub fn set_shared_backing(&mut self, backing: std::sync::Arc<Vec<u8>>) {
-        self.shared_backing = Some(backing);
     }
 
     /// Align position to boundary (accounting for removed header)

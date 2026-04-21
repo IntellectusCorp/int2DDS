@@ -88,7 +88,6 @@ pub struct CdrDeserializer<'a> {
     pub(super) endianness: Endianness,
     pub(super) data: &'a [u8],
     pub(super) position: usize,
-    pub(super) shared_backing: Option<std::sync::Arc<Vec<u8>>>,
 }
 
 impl<'a> CdrDeserializer<'a> {
@@ -111,22 +110,12 @@ impl<'a> CdrDeserializer<'a> {
             endianness,
             data: &data[4..], // Skip encapsulation header
             position: 0,
-            shared_backing: None,
         })
     }
 
     /// Create deserializer without encapsulation header
     pub fn new_without_header(data: &'a [u8], little_endian: bool) -> Self {
-        Self {
-            endianness: endianness_from_bool(little_endian),
-            data,
-            position: 0,
-            shared_backing: None,
-        }
-    }
-
-    pub fn set_shared_backing(&mut self, backing: std::sync::Arc<Vec<u8>>) {
-        self.shared_backing = Some(backing);
+        Self { endianness: endianness_from_bool(little_endian), data, position: 0 }
     }
 
     /// Align position to boundary

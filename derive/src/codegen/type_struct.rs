@@ -469,10 +469,6 @@ fn quote_deserialize_impl(
         fn deserialize(&self, data: &[u8], format: Option<&#crate_path::dcps::topic::type_support::SerializationFormat>) -> #crate_path::dcps::core::error::DdsResult<Box<dyn std::any::Any>> {
             #builtin_pl_cdr_fallback
 
-            self.deserialize_with_backing(data, None, format)
-        }
-
-        fn deserialize_with_backing(&self, data: &[u8], shared_backing: Option<std::sync::Arc<Vec<u8>>>, format: Option<&#crate_path::dcps::topic::type_support::SerializationFormat>) -> #crate_path::dcps::core::error::DdsResult<Box<dyn std::any::Any>> {
             let resolved_format = match format {
                 Some(f) => f.clone(),
                 None => {
@@ -485,9 +481,6 @@ fn quote_deserialize_impl(
 
                     let mut deserializer = CdrDeserializer::new(data)
                         .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
-                    if let Some(backing) = shared_backing.clone() {
-                        deserializer.set_shared_backing(backing);
-                    }
 
                     #cdr_field_deserialization
 
@@ -514,9 +507,6 @@ fn quote_deserialize_impl(
                         // Try 1: Standard XCDR2 delimited format (single DHEADER for entire struct)
                         let mut delimited_deserializer = Xcdr2Deserializer::new(data)
                             .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
-                        if let Some(ref backing) = shared_backing {
-                            delimited_deserializer.set_shared_backing(backing.clone());
-                        }
 
                         match (|| -> #crate_path::dcps::core::error::DdsResult<#full_type> {
                             let (object_size, start_position) = delimited_deserializer
@@ -542,9 +532,6 @@ fn quote_deserialize_impl(
                         // Try 2: Per-field DHEADER format (interoperability fallback)
                         let mut compat_deserializer = Xcdr2Deserializer::new(data)
                             .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
-                        if let Some(ref backing) = shared_backing {
-                            compat_deserializer.set_shared_backing(backing.clone());
-                        }
 
                         match (|| -> #crate_path::dcps::core::error::DdsResult<#full_type> {
                             let value = parse_body_per_field_dheader(&mut compat_deserializer)?;
@@ -566,9 +553,6 @@ fn quote_deserialize_impl(
                     // Try 3: Fallback - no delimiters
                     let mut fallback_deserializer = Xcdr2Deserializer::new(data)
                         .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
-                    if let Some(ref backing) = shared_backing {
-                        fallback_deserializer.set_shared_backing(backing.clone());
-                    }
 
                     let result = parse_body(&mut fallback_deserializer)?;
                     Ok(Box::new(result))
