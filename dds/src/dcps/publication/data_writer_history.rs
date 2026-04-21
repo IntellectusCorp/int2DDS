@@ -446,7 +446,8 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
 
     // Removes and returns the oldest change from all instances.
     fn remove_oldest_change_of_all(&mut self) -> DdsResult<Arc<CacheChange>> {
-        let oldest_change = self.get_changes().iter().min_by_key(|c| c.sequence_number()).cloned();
+        // The oldest change is always at index 0.
+        let oldest_change = self.get_changes().first().cloned();
         match oldest_change {
             Some(change) => {
                 self.remove_change(change.clone())?;

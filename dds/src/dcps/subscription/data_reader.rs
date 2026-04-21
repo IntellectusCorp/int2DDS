@@ -2694,8 +2694,7 @@ impl<Foo: DdsType> DataReader<Foo> {
 
         let info = instance_infos
             .get(&instance_handle)
-            .ok_or(DdsError::Error("Instance not found".to_string()))?
-            .clone();
+            .ok_or(DdsError::Error("Instance not found".to_string()))?;
 
         let sample_info = SampleInfo {
             sample_state,
