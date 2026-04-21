@@ -74,6 +74,7 @@ ffi.cdef("""
     typedef struct Int2DdsDataWriter Int2DdsDataWriter;
     typedef struct Int2DdsDataReader Int2DdsDataReader;
     typedef struct Int2DdsTopic Int2DdsTopic;
+    typedef struct Int2DdsContentFilteredTopic Int2DdsContentFilteredTopic;
     typedef struct Int2DdsWaitSet Int2DdsWaitSet;
     typedef struct Int2DdsGuardCondition Int2DdsGuardCondition;
     typedef struct Int2DdsStatusCondition Int2DdsStatusCondition;
@@ -164,6 +165,34 @@ ffi.cdef("""
         Int2DdsTopic **topic_out
     );
     Int2DdsRet int2dds_delete_topic(Int2DdsTopic *topic);
+
+    /* Topic with key field metadata */
+    Int2DdsRet int2dds_create_topic_keyed_with_key_fields(
+        const Int2DdsParticipant *participant,
+        const char *topic_name,
+        const char *dds_type_name,
+        int32_t extensibility,
+        bool has_key,
+        const Int2DdsTopicQos *qos,
+        const uint32_t *field_indices,
+        const uint32_t *field_types,
+        size_t field_count,
+        Int2DdsTopic **topic_out
+    );
+    /* Topic with full field descriptors for CFT reader-side filtering */
+    Int2DdsRet int2dds_create_topic_with_field_descriptors(
+        const Int2DdsParticipant *participant,
+        const char *topic_name,
+        const char *dds_type_name,
+        int32_t extensibility,
+        bool has_key,
+        const Int2DdsTopicQos *qos,
+        const char **field_names,
+        const uint32_t *field_types,
+        const bool *field_is_key,
+        size_t field_count,
+        Int2DdsTopic **topic_out
+    );
     Int2DdsRet int2dds_topic_get_name(
         const Int2DdsTopic *topic,
         char *name_out,
@@ -173,6 +202,28 @@ ffi.cdef("""
         const Int2DdsTopic *topic,
         char *type_name_out,
         size_t type_name_size
+    );
+
+    /* ContentFilteredTopic */
+    Int2DdsRet int2dds_create_contentfilteredtopic(
+        const Int2DdsParticipant *participant,
+        const char *topic_name,
+        const Int2DdsTopic *related_topic,
+        const char *filter_expression,
+        const char **expression_parameters,
+        size_t expression_parameters_count,
+        Int2DdsContentFilteredTopic **cft_out
+    );
+    Int2DdsRet int2dds_delete_contentfilteredtopic(
+        Int2DdsContentFilteredTopic *cft
+    );
+
+    /* DataReader with ContentFilteredTopic */
+    Int2DdsRet int2dds_create_datareader_cft(
+        const Int2DdsSubscriber *subscriber,
+        const Int2DdsContentFilteredTopic *cft,
+        const Int2DdsDataReaderQos *qos,
+        Int2DdsDataReader **reader_out
     );
 
     /* DataWriter */
@@ -814,6 +865,16 @@ ffi.cdef("""
         Int2DdsDataReader *reader,
         const Int2DdsDataReaderListener *listener,
         uint32_t mask
+    );
+
+    /* DataReader with ContentFilteredTopic and Listener */
+    Int2DdsRet int2dds_create_datareader_cft_with_listener(
+        const Int2DdsSubscriber *subscriber,
+        const Int2DdsContentFilteredTopic *cft,
+        const Int2DdsDataReaderQos *qos,
+        const Int2DdsDataReaderListener *listener,
+        uint32_t mask,
+        Int2DdsDataReader **reader_out
     );
 """)
 

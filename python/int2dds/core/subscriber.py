@@ -20,7 +20,7 @@ from int2dds.exceptions import INT2DDS_RET_NO_DATA, check_ret
 if TYPE_CHECKING:
     from int2dds.core.participant import DomainParticipant
     from int2dds.core.qos import DataReaderQos
-    from int2dds.core.topic import Topic
+    from int2dds.core.topic import ContentFilteredTopic, Topic
     from int2dds.types.base import DdsType
 
 T = TypeVar("T", bound="DdsType")
@@ -71,16 +71,16 @@ class Subscriber:
 
     def create_datareader(
         self,
-        topic: Topic[T],
+        topic: Topic[T] | ContentFilteredTopic[T],
         qos: DataReaderQos | None = None,
         listener: DataReaderListener | None = None,
         status_mask: int | None = None,
     ) -> DataReader[T]:
         """
-        Create a DataReader for the given topic.
+        Create a DataReader for the given topic or content-filtered topic.
 
         Args:
-            topic: The topic to read from
+            topic: The topic or ContentFilteredTopic to read from
             qos: Optional QoS settings
             listener: Optional listener for event callbacks
             status_mask: Bitmask of statuses to listen for
@@ -137,7 +137,7 @@ class DataReader(Generic[T]):
     def __init__(
         self,
         subscriber: Subscriber,
-        topic: Topic[T],
+        topic: Topic[T] | ContentFilteredTopic[T],
         qos: DataReaderQos | None = None,
         listener: DataReaderListener | None = None,
         status_mask: int | None = None,
@@ -213,22 +213,40 @@ class DataReader(Generic[T]):
 
         reader_ptr = ffi.new("Int2DdsDataReader **")
 
+        from int2dds.core.topic import ContentFilteredTopic
+        is_cft = isinstance(topic, ContentFilteredTopic)
+
         if listener is not None:
             mask = status_mask if status_mask is not None else STATUS_MASK_ALL
             c_listener, ctx_id = _create_reader_listener_struct(listener, self)
-            check_ret(
-                lib.int2dds_create_datareader_with_listener(
-                    subscriber._handle, topic._handle, qos_ptr,
-                    c_listener, mask, reader_ptr
+            if is_cft:
+                check_ret(
+                    lib.int2dds_create_datareader_cft_with_listener(
+                        subscriber._handle, topic._handle, qos_ptr,
+                        c_listener, mask, reader_ptr
+                    )
                 )
-            )
+            else:
+                check_ret(
+                    lib.int2dds_create_datareader_with_listener(
+                        subscriber._handle, topic._handle, qos_ptr,
+                        c_listener, mask, reader_ptr
+                    )
+                )
             self._listener_ctx_id = ctx_id
         else:
-            check_ret(
-                lib.int2dds_create_datareader(
-                    subscriber._handle, topic._handle, qos_ptr, reader_ptr
+            if is_cft:
+                check_ret(
+                    lib.int2dds_create_datareader_cft(
+                        subscriber._handle, topic._handle, qos_ptr, reader_ptr
+                    )
                 )
-            )
+            else:
+                check_ret(
+                    lib.int2dds_create_datareader(
+                        subscriber._handle, topic._handle, qos_ptr, reader_ptr
+                    )
+                )
 
         self._handle = reader_ptr[0]
 
