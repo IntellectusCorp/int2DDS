@@ -19,15 +19,6 @@ from typing import ClassVar, List
 from int2dds.cdr import CdrReader, CdrWriter, Extensibility
 from int2dds.cdr.writer import CdrKeyWriter
 
-# Module-level flag to control encoding (set by shapes_demo.py based on -x option)
-_use_xcdr2: bool = True
-
-
-def set_encoding(xcdr2: bool) -> None:
-    """Set the CDR encoding mode for ShapeType serialization."""
-    global _use_xcdr2
-    _use_xcdr2 = xcdr2
-
 
 @dataclass
 class ShapeType:
@@ -43,9 +34,9 @@ class ShapeType:
     shapesize: int = 20
     additional_payload_size: bytes = b""
 
-    def _serialize_cdr(self) -> bytes:
-        w = CdrWriter(extensibility=self._extensibility, xcdr2=_use_xcdr2)
-        if _use_xcdr2:
+    def _serialize_cdr(self, xcdr2: bool = True) -> bytes:
+        w = CdrWriter(extensibility=self._extensibility, xcdr2=xcdr2)
+        if xcdr2:
             with w.dheader():
                 w.write_string(self.color)
                 w.write_i32(self.x)

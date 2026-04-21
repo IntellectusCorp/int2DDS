@@ -29,7 +29,7 @@ os.environ["INT2DDS_LOG_TYPE"] = "none"
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from shape_type import ShapeType, set_encoding
+from shape_type import ShapeType
 from int2dds import (
     DataReaderQos,
     Deadline,
@@ -465,9 +465,6 @@ def run_subscriber(args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = parse_args()
-
-    # Set CDR encoding based on -x option (must be before any serialization)
-    set_encoding(xcdr2=(args.x == 2))
 
     if not args.publisher and not args.subscriber:
         print("Error: specify -P (publisher) or -S (subscriber)", file=sys.stderr)
