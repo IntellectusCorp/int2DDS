@@ -2679,8 +2679,7 @@ impl<Foo: DdsType> DataReader<Foo> {
             | ChangeKind::NotAliveDisposedUnregistered => false,
         };
 
-        // Share the Arc<CacheChange> — zero-copy, just refcount increment.
-        let data = if has_valid_data { Some(Arc::clone(change)) } else { None };
+        let data = if has_valid_data { Some(change.data_bytes()) } else { None };
 
         // Use cached instance_infos if provided, otherwise fetch
         let owned_instance_infos;

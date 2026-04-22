@@ -9,21 +9,17 @@
 
 use std::{fmt::Debug, marker::PhantomData, sync::Arc};
 
+use bytes::Bytes;
+
 use crate::{
     core::error::{DdsError, DdsResult},
-    rtps::entities::history::cache_change::CacheChange,
     topic::type_support::{DdsType, TypeSupport},
 };
 
 use super::sample_info::SampleInfo;
 
-/// A data sample received from a DataReader.
-///
-/// Holds the original `Arc<CacheChange>` from the reader history so the serialized
-/// payload is shared without copying.  Deserialization happens lazily when the
-/// user calls `data()`.
 pub struct DataSample<Foo> {
-    change: Option<Arc<CacheChange>>,
+    data: Option<Bytes>, // Raw serialized data as received from the RTPS layer
     type_support: Option<Arc<dyn TypeSupport>>,
     pub(crate) sample_info: SampleInfo,
     phantom: PhantomData<fn() -> Foo>,
@@ -31,11 +27,11 @@ pub struct DataSample<Foo> {
 
 impl<Foo> DataSample<Foo> {
     pub(crate) fn new(
-        change: Option<Arc<CacheChange>>,
+        data: Option<Bytes>,
         sample_info: SampleInfo,
         type_support: Option<Arc<dyn TypeSupport>>,
     ) -> Self {
-        Self { change, type_support, sample_info, phantom: PhantomData }
+        Self { data, type_support, sample_info, phantom: PhantomData }
     }
 }
 
@@ -43,20 +39,18 @@ impl<Foo> DataSample<Foo>
 where
     Foo: DdsType,
 {
-    /// Deserialize and return the data value.
-    ///
-    /// If a type support was provided during construction, it will be used for
-    /// deserialization. Otherwise, falls back to the default TypeSupport.
     pub fn data(&self) -> DdsResult<Foo> {
-        match (self.change.as_ref(), self.type_support.as_ref()) {
-            (Some(change), Some(ts)) => {
-                let any_box = ts.deserialize(change.data_value(), None)?;
+        match (self.data.as_ref(), self.type_support.as_ref()) {
+            // Use the user-provided TypeSupport when available, then downcast.
+            (Some(bytes), Some(ts)) => {
+                let any_box = ts.deserialize(bytes.as_ref(), None)?;
                 any_box
                     .downcast::<Foo>()
                     .map(|boxed| *boxed)
                     .map_err(|_| DdsError::Error("Type downcast failed".to_string()))
             }
-            (Some(change), None) => Ok(Foo::deserialize(change.data_value())?),
+            // Fall back to the static DdsType impl when no TypeSupport is attached.
+            (Some(bytes), None) => Ok(Foo::deserialize(bytes.as_ref())?),
             (None, _) => Err(DdsError::NoData),
         }
     }
@@ -66,12 +60,12 @@ where
     }
 }
 
-// Manual implementations for traits that can't be derived due to Arc<dyn TypeSupport>
+// Manual impls: Arc<dyn TypeSupport> blocks `derive`.
 
 impl<Foo> Clone for DataSample<Foo> {
     fn clone(&self) -> Self {
         Self {
-            change: self.change.clone(),
+            data: self.data.clone(),
             type_support: self.type_support.clone(),
             sample_info: self.sample_info.clone(),
             phantom: PhantomData,
@@ -82,10 +76,7 @@ impl<Foo> Clone for DataSample<Foo> {
 impl<Foo> Debug for DataSample<Foo> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DataSample")
-            .field(
-                "data",
-                &self.change.as_ref().map(|c| format!("[{} bytes]", c.data_value().len())),
-            )
+            .field("data", &self.data.as_ref().map(|b| format!("[{} bytes]", b.len())))
             .field("has_type_support", &self.type_support.is_some())
             .field("sample_info", &self.sample_info)
             .finish()
@@ -94,8 +85,8 @@ impl<Foo> Debug for DataSample<Foo> {
 
 impl<Foo> PartialEq for DataSample<Foo> {
     fn eq(&self, other: &Self) -> bool {
-        let data_eq = match (self.change.as_ref(), other.change.as_ref()) {
-            (Some(a), Some(b)) => a.data_value() == b.data_value(),
+        let data_eq = match (self.data.as_ref(), other.data.as_ref()) {
+            (Some(a), Some(b)) => a.as_ref() == b.as_ref(),
             (None, None) => true,
             _ => false,
         };

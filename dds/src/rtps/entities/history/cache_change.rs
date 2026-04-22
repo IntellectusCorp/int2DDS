@@ -203,6 +203,15 @@ impl CacheChange {
         self.data_payload.as_slice()
     }
 
+    pub(crate) fn data_bytes(&self) -> Bytes {
+        match &self.data_payload {
+            // Shared payload: refcount bump, no allocation.
+            DataPayload::Shared(b) => b.clone(),
+            // Owned payload: copy into a fresh Bytes (writer-side path).
+            DataPayload::Owned(v) => Bytes::copy_from_slice(v),
+        }
+    }
+
     /// Mutable access to the owned Vec buffer.
     /// Used by writer serialization and non-fragmented reader reception.
     pub(crate) fn data_mut(&mut self) -> &mut Vec<u8> {
