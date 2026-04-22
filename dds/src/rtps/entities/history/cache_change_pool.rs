@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use super::cache_change::CacheChange;
 
 /// LIFO pool for reusing CacheChange objects (and their internal Vec<u8> capacity).
@@ -26,8 +28,17 @@ impl CacheChangePool {
         self.free_changes.pop().unwrap_or_else(CacheChange::empty)
     }
 
-    /// Return a CacheChange to the pool for reuse.P
+    /// Return a CacheChange to the pool for reuse.
     pub(crate) fn release(&mut self, change: CacheChange) {
         self.free_changes.push(change);
+    }
+
+    // Unwrap the Arc if this is the last reference, then return the inner
+    // CacheChange to the pool. Any remaining clone (DCPS instance map, etc.)
+    // makes try_unwrap fail, in which case we drop normally.
+    pub(crate) fn try_release(&mut self, evicted: Arc<CacheChange>) {
+        if let Ok(change) = Arc::try_unwrap(evicted) {
+            self.release(change);
+        }
     }
 }
