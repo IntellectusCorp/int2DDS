@@ -166,11 +166,10 @@ impl SendingTask {
                 Ok(())
             }
 
-            MessageType::UserUnsentChanges(writer_entity_id) => {
-                user_logic.send_unsent_changes(writer_entity_id)?;
-                Ok(())
-            }
-
+            // MessageType::UserUnsentChanges(writer_entity_id) => {
+            //     user_logic.send_unsent_changes(writer_entity_id)?;
+            //     Ok(())
+            // }
             MessageType::UserRequestedChanges(writer_entity_id, remote_reader_guid) => {
                 user_logic.send_requested_changes(writer_entity_id, remote_reader_guid)?;
                 Ok(())

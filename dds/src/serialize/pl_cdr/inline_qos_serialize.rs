@@ -46,7 +46,7 @@ impl InlineQosSerializer {
         // Use buffer pool for inline QoS serialization
         let mut buffer = PooledBuffer::with_capacity(estimated_capacity);
 
-        for param in &params {
+        for param in params {
             if param.parameter_id() == ParameterId::PidSentinel {
                 break;
             }

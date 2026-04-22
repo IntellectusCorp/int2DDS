@@ -1,3 +1,5 @@
+use bytes::Bytes;
+
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::entities::entity::Entity;
 use crate::rtps::entities::participant::Participant;
@@ -76,7 +78,7 @@ impl UserUnicastListeningTask {
                             let _ = poll.registry().deregister(listener.socket());
                             return Ok(());
                         }
-                        self.process_rtps_message(&buffer, from_addr);
+                        self.process_rtps_message(buffer, from_addr);
                     }
                 }
             }
@@ -101,7 +103,7 @@ impl UserUnicastListeningTask {
                         debug!("Detected global termination flag, user unicast channel listening terminating...");
                         return Ok(());
                     }
-                    self.process_rtps_message(&msg.data, msg.source);
+                    self.process_rtps_message(Bytes::from(msg.data), msg.source);
                 }
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                     if participant.is_terminated() {
@@ -117,11 +119,8 @@ impl UserUnicastListeningTask {
         }
     }
 
-    fn process_rtps_message(&mut self, buffer: &[u8], from_addr: SocketAddr) {
-        use bytes::Bytes;
-
+    fn process_rtps_message(&mut self, bytes: Bytes, from_addr: SocketAddr) {
         let mut message_receiver = MessageReceiver::new(self.guid_prefix, &from_addr);
-        let bytes = Bytes::copy_from_slice(buffer);
         let rtps_message = message_receiver.init(&bytes);
         if rtps_message.is_err() {
             error!("Failed to parse RTPS message from {:?}", from_addr);

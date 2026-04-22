@@ -132,7 +132,8 @@ impl TcpTransportPlugin {
             log::info!(
                 "[TcpTransportPlugin] Asymmetric mode (INT2DDS_TCP_REACHABLE=false): \
                  skipping TCP accept bind, outbound-only (domain={}, pid={})",
-                domain_id, participant_id
+                domain_id,
+                participant_id
             );
             (
                 TcpMuxListener::new_unbound(
@@ -269,13 +270,12 @@ impl TcpTransportPlugin {
             if let std::net::IpAddr::V4(v4) = public_addr.ip() {
                 log::info!(
                     "[TcpTransportPlugin] WAN mode: advertising public address {} instead of :{}",
-                    public_addr, self.listener_port
+                    public_addr,
+                    self.listener_port
                 );
                 return vec![Locator::from_tcp_v4(v4, public_addr.port() as u32)];
             }
-            log::warn!(
-                "[TcpTransportPlugin] Public address is not IPv4, falling back to LAN NICs"
-            );
+            log::warn!("[TcpTransportPlugin] Public address is not IPv4, falling back to LAN NICs");
         }
         let mut locators = Vec::new();
         for ip_str in &self.working_ips {
@@ -320,15 +320,13 @@ impl TcpTransportPlugin {
                     self.terminated.clone(),
                     idle_timeout,
                 );
-                log::info!(
-                    "[TcpTransportPlugin] Reverse channel established to {:?}",
-                    peer_addr
-                );
+                log::info!("[TcpTransportPlugin] Reverse channel established to {:?}", peer_addr);
             }
             Err(e) => {
                 log::warn!(
                     "[TcpTransportPlugin] Reverse channel dial to {:?} failed: {}",
-                    peer_addr, e
+                    peer_addr,
+                    e
                 );
                 self.sender.clear_reverse_channel_dialed(peer_addr);
             }
@@ -470,8 +468,7 @@ impl TcpMuxListeningLoopTask {
             let timer_shared = Arc::clone(&shared);
             let timer_terminated = Arc::clone(&self.terminated);
             let timer_sender = self.sender.clone();
-            let orphan_check_interval =
-                (orphan_data_grace / 2).max(Duration::from_millis(100));
+            let orphan_check_interval = (orphan_data_grace / 2).max(Duration::from_millis(100));
 
             thread::Builder::new()
                 .name("tcp_mux_timer".to_string())
@@ -573,10 +570,7 @@ impl TcpMuxListeningLoopTask {
                                 }
                             },
                             Err(e) => {
-                                warn!(
-                                    "[TcpMuxListeningLoopTask] TLS server config error: {:?}",
-                                    e
-                                );
+                                warn!("[TcpMuxListeningLoopTask] TLS server config error: {:?}", e);
                                 continue;
                             }
                         },
@@ -753,7 +747,7 @@ mod tls_tests {
     use tempfile::NamedTempFile;
 
     use crate::infrastructure::qos_policy::PropertyQosPolicy;
-    use crate::rtps::transport::tcp::stream_wrapper::{accept_tls, wrap_stream};
+    use crate::rtps::transport::tcp::stream_wrapper::accept_tls;
     use crate::rtps::transport::tcp::tcp_mux_listener::TcpMuxListener;
     use crate::rtps::transport::tcp::tcp_sender::TcpSender;
     use crate::rtps::transport::tcp::tls::TlsConfig;
@@ -810,12 +804,7 @@ mod tls_tests {
                         };
                         match accept_tls(tcp, server_cfg) {
                             Ok(stream) => {
-                                listener.accept_connection(
-                                    stream,
-                                    addr,
-                                    terminated.clone(),
-                                    idle,
-                                );
+                                listener.accept_connection(stream, addr, terminated.clone(), idle);
                             }
                             Err(e) => {
                                 log::warn!("[tls_test] TLS accept failed: {:?}", e);
@@ -824,8 +813,7 @@ mod tls_tests {
                     }
                     Err(ref e)
                         if e.kind() == std::io::ErrorKind::WouldBlock
-                            || e.kind() == std::io::ErrorKind::TimedOut =>
-                    {}
+                            || e.kind() == std::io::ErrorKind::TimedOut => {}
                     Err(_) => break,
                 }
             }
@@ -856,8 +844,7 @@ mod tls_tests {
             format!("127.0.0.1:{}", server_port).parse().unwrap();
 
         let terminated = Arc::new(AtomicBool::new(false));
-        let _accept_thread =
-            spawn_tls_accept_loop(listener, tls.clone(), terminated.clone());
+        let _accept_thread = spawn_tls_accept_loop(listener, tls.clone(), terminated.clone());
 
         // TLS-enabled sender, same domain/participant so logical port matches.
         let sender = TcpSender::new_with_tls(

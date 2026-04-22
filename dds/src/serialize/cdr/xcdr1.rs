@@ -29,6 +29,17 @@ impl CdrSerializer {
         }
     }
 
+    /// Create CDR serializer reusing an existing buffer (capacity preserved, content cleared)
+    pub fn reuse_buffer(little_endian: bool, mut buffer: Vec<u8>) -> Self {
+        buffer.clear();
+        Self { endianness: endianness_from_bool(little_endian), buffer, header_size: 0 }
+    }
+
+    /// Consume the serializer and return the internal buffer (for ownership round-trip)
+    pub fn into_buffer(self) -> Vec<u8> {
+        self.buffer
+    }
+
     /// Write CDR encapsulation header
     pub fn write_encapsulation_header(&mut self) -> Result<(), CdrError> {
         // CDR encapsulation identifier

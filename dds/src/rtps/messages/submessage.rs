@@ -23,12 +23,12 @@ use crate::rtps::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Submessage {
+pub(crate) struct Submessage<'a> {
     pub(crate) header: SubmessageHeader,
-    pub(crate) body: SubmessageBody,
+    pub(crate) body: SubmessageBody<'a>,
 }
 
-impl Submessage {
+impl Submessage<'static> {
     pub(crate) fn read_from_buffer(
         message_receiver: &mut MessageReceiver,
         all_submessages_bytes: &mut Bytes,
@@ -183,7 +183,7 @@ impl Submessage {
     }
 }
 
-impl<C: Context> Writable<C> for Submessage {
+impl<C: Context> Writable<C> for Submessage<'_> {
     fn write_to<T: ?Sized + Writer<C>>(&self, writer: &mut T) -> Result<(), C::Error> {
         let Submessage { header, body, .. } = self;
         writer.write_value(header)?;

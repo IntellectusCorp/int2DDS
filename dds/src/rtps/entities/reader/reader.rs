@@ -44,9 +44,7 @@ pub(crate) trait Reader: Entity + Endpoint + Debug + Any {
     fn as_any_mut(&mut self) -> &mut dyn Any;
     fn set_datareader_cache(
         &mut self,
-        datareader_cache: Weak<
-            Mutex<dyn HistoryCache<CacheChangeInputType = Arc<Mutex<CacheChange>>> + Send + Sync>,
-        >,
+        datareader_cache: Weak<Mutex<dyn HistoryCache + Send + Sync>>,
     ) -> RtpsResult<()>;
     fn set_subscription_builtin_topic_data(
         &self,

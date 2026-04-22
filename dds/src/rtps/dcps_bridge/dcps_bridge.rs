@@ -278,7 +278,7 @@ impl DcpsBridge {
                 65000,
                 f,
                 publication_builtin_topic_data.clone(),
-                self.participant.guid(),
+                Arc::downgrade(&self.participant),
             );
             writer = Some(Arc::new(_writer));
         } else {
@@ -294,7 +294,7 @@ impl DcpsBridge {
                 65000,
                 f,
                 publication_builtin_topic_data.clone(),
-                self.participant.guid(),
+                Arc::downgrade(&self.participant),
             );
             writer = Some(Arc::new(_writer));
         }
@@ -307,7 +307,7 @@ impl DcpsBridge {
 
         let change = self.participant.sedp_builtin_publications_writer().new_change(
             ChangeKind::Alive,
-            Arc::from(payload.to_vec()),
+            payload.to_vec(),
             InstanceHandle::NIL,
             Some(RtpsTime::now()),
         );
@@ -318,7 +318,7 @@ impl DcpsBridge {
             .writer_cache()
             .lock()
             .unwrap()
-            .add_change(cache_change.clone());
+            .add_change_builtin(cache_change.clone());
 
         self.participant
             .remote_publications()
@@ -461,7 +461,7 @@ impl DcpsBridge {
 
         let change = self.participant.sedp_builtin_subscriptions_writer().new_change(
             ChangeKind::Alive,
-            payload,
+            payload.to_vec(),
             InstanceHandle::NIL,
             Some(RtpsTime::now()),
         );
@@ -472,7 +472,7 @@ impl DcpsBridge {
             .writer_cache()
             .lock()
             .unwrap()
-            .add_change(cache_change.clone());
+            .add_change_builtin(cache_change.clone());
 
         self.participant
             .remote_subscriptions()
@@ -678,7 +678,7 @@ impl DcpsBridge {
 
         let change = self.participant.sedp_builtin_subscriptions_writer().new_change(
             ChangeKind::Alive,
-            payload,
+            payload.to_vec(),
             InstanceHandle::NIL,
             Some(RtpsTime::now()),
         );
@@ -694,7 +694,7 @@ impl DcpsBridge {
                     format!("Failed to lock history cache: {}", e),
                 )
             })?
-            .add_change(cache_change.clone());
+            .add_change_builtin(cache_change.clone());
 
         self.send_sedp_message_and_match(
             cache_change,
@@ -750,7 +750,7 @@ impl DcpsBridge {
 
         let change = self.participant.sedp_builtin_publications_writer().new_change(
             ChangeKind::Alive,
-            Arc::from(payload.to_vec()),
+            payload.to_vec(),
             InstanceHandle::NIL,
             Some(RtpsTime::now()),
         );
@@ -766,7 +766,7 @@ impl DcpsBridge {
                     format!("Failed to lock history cache: {}", e),
                 )
             })?
-            .add_change(cache_change.clone());
+            .add_change_builtin(cache_change.clone());
 
         self.send_sedp_message_and_match(
             cache_change,
@@ -1043,16 +1043,16 @@ mod tests {
             debug!("writer: {:?}", writer);
             for i in 0..1000 {
                 let hello_world = HelloWorld { index: i, message: "p Hello, world!".to_string() };
-                let payload = hello_world.serialize().unwrap();
+                let payload = hello_world.serialize().unwrap().to_vec();
                 let change = writer.new_change(
                     ChangeKind::Alive,
-                    Arc::from(payload),
+                    payload,
                     InstanceHandle::NIL,
                     Some(RtpsTime::now()),
                 );
                 match writer.writer_cache().lock() {
                     Ok(mut writer_cache) => {
-                        let _ = writer_cache.add_change(Arc::new(change));
+                        let _ = writer_cache.add_change_builtin(Arc::new(change));
                     }
                     Err(e) => {
                         log::error!("writer_cache lock error: {:?}", e);

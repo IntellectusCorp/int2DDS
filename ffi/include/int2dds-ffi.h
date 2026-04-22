@@ -183,6 +183,11 @@ typedef struct Int2DdsCondition Int2DdsCondition;
 typedef struct Int2DdsConditionSeq Int2DdsConditionSeq;
 
 /**
+ * Opaque handle to a ContentFilteredTopic
+ */
+typedef struct Int2DdsContentFilteredTopic Int2DdsContentFilteredTopic;
+
+/**
  * Opaque handle to a DataReader
  */
 typedef struct Int2DdsDataReader Int2DdsDataReader;
@@ -993,6 +998,21 @@ Int2DdsRet int2dds_create_participant(const struct Int2DdsParticipantFactory *_f
                                       struct Int2DdsParticipant **participant_out);
 
 /**
+ * Create a DomainParticipant using a QoS profile path
+ *
+ * # Safety
+ * - `name` must be a valid null-terminated C string or null
+ * - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
+ * - `participant_out` must be a valid pointer to a null pointer
+ * - The returned participant must be freed with `int2dds_delete_participant`
+ */
+Int2DdsRet int2dds_create_participant_with_profile(const struct Int2DdsParticipantFactory *_factory,
+                                                   const char *name,
+                                                   int32_t domain_id,
+                                                   const char *qos_path,
+                                                   struct Int2DdsParticipant **participant_out);
+
+/**
  * Delete a DomainParticipant
  *
  * # Safety
@@ -1055,6 +1075,19 @@ Int2DdsRet int2dds_create_publisher(const struct Int2DdsParticipant *participant
 Int2DdsRet int2dds_create_publisher_with_qos(const struct Int2DdsParticipant *participant,
                                              const struct Int2DdsPublisherQos *qos,
                                              struct Int2DdsPublisher **publisher_out);
+
+/**
+ * Create a Publisher using a QoS profile path
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
+ * - `publisher_out` must be a valid pointer to a null pointer
+ * - The returned publisher must be freed with `int2dds_delete_publisher`
+ */
+Int2DdsRet int2dds_create_publisher_with_profile(const struct Int2DdsParticipant *participant,
+                                                 const char *qos_path,
+                                                 struct Int2DdsPublisher **publisher_out);
 
 /**
  * Set QoS on a Publisher
@@ -1154,6 +1187,41 @@ Int2DdsRet int2dds_create_datawriter_with_listener(const struct Int2DdsPublisher
                                                    const struct Int2DdsDataWriterListener *listener,
                                                    uint32_t mask,
                                                    struct Int2DdsDataWriter **writer_out);
+
+/**
+ * Create a DataWriter using a QoS profile path
+ *
+ * # Safety
+ * - `publisher` must be a valid publisher
+ * - `topic` must be a valid topic
+ * - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
+ * - `writer_out` must be a valid pointer to a null pointer
+ * - The returned writer must be freed with `int2dds_delete_datawriter`
+ */
+Int2DdsRet int2dds_create_datawriter_with_profile(const struct Int2DdsPublisher *publisher,
+                                                  const struct Int2DdsTopic *topic,
+                                                  const char *qos_path,
+                                                  struct Int2DdsDataWriter **writer_out);
+
+/**
+ * Create a DataWriter with listener callbacks using a QoS profile path
+ *
+ * # Safety
+ * - `publisher` must be a valid publisher
+ * - `topic` must be a valid topic
+ * - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
+ * - `listener` can be null for no listener
+ * - `mask` specifies which status changes trigger callbacks
+ * - `writer_out` must be a valid pointer to a null pointer
+ * - The returned writer must be freed with `int2dds_delete_datawriter`
+ * - Listener callbacks must be thread-safe and remain valid until writer is deleted
+ */
+Int2DdsRet int2dds_create_datawriter_with_profile_and_listener(const struct Int2DdsPublisher *publisher,
+                                                               const struct Int2DdsTopic *topic,
+                                                               const char *qos_path,
+                                                               const struct Int2DdsDataWriterListener *listener,
+                                                               uint32_t mask,
+                                                               struct Int2DdsDataWriter **writer_out);
 
 /**
  * Set or update the listener for a DataWriter
@@ -2136,6 +2204,19 @@ Int2DdsRet int2dds_create_subscriber_with_qos(const struct Int2DdsParticipant *p
                                               struct Int2DdsSubscriber **subscriber_out);
 
 /**
+ * Create a Subscriber using a QoS profile path
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
+ * - `subscriber_out` must be a valid pointer to a null pointer
+ * - The returned subscriber must be freed with `int2dds_delete_subscriber`
+ */
+Int2DdsRet int2dds_create_subscriber_with_profile(const struct Int2DdsParticipant *participant,
+                                                  const char *qos_path,
+                                                  struct Int2DdsSubscriber **subscriber_out);
+
+/**
  * Set QoS on a Subscriber
  *
  * # Safety
@@ -2201,6 +2282,76 @@ Int2DdsRet int2dds_create_datareader_with_listener(const struct Int2DdsSubscribe
                                                    const struct Int2DdsDataReaderListener *listener,
                                                    uint32_t mask,
                                                    struct Int2DdsDataReader **reader_out);
+
+/**
+ * Create a DataReader using a QoS profile path
+ *
+ * # Safety
+ * - `subscriber` must be a valid subscriber
+ * - `topic` must be a valid topic
+ * - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
+ * - `reader_out` must be a valid pointer to a null pointer
+ * - The returned reader must be freed with `int2dds_delete_datareader`
+ */
+Int2DdsRet int2dds_create_datareader_with_profile(const struct Int2DdsSubscriber *subscriber,
+                                                  const struct Int2DdsTopic *topic,
+                                                  const char *qos_path,
+                                                  struct Int2DdsDataReader **reader_out);
+
+/**
+ * Create a DataReader with listener callbacks using a QoS profile path
+ *
+ * # Safety
+ * - `subscriber` must be a valid subscriber
+ * - `topic` must be a valid topic
+ * - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
+ * - `listener` can be null for no listener
+ * - `mask` specifies which status changes trigger callbacks
+ * - `reader_out` must be a valid pointer to a null pointer
+ * - The returned reader must be freed with `int2dds_delete_datareader`
+ * - Listener callbacks must be thread-safe and remain valid until reader is deleted
+ */
+Int2DdsRet int2dds_create_datareader_with_profile_and_listener(const struct Int2DdsSubscriber *subscriber,
+                                                               const struct Int2DdsTopic *topic,
+                                                               const char *qos_path,
+                                                               const struct Int2DdsDataReaderListener *listener,
+                                                               uint32_t mask,
+                                                               struct Int2DdsDataReader **reader_out);
+
+/**
+ * Create a DataReader using a ContentFilteredTopic
+ *
+ * # Safety
+ * - `subscriber` must be a valid subscriber
+ * - `cft` must be a valid ContentFilteredTopic
+ * - `qos` can be null for default QoS
+ * - `reader_out` must be a valid pointer to a null pointer
+ * - The returned reader must be freed with `int2dds_delete_datareader`
+ */
+Int2DdsRet int2dds_create_datareader_cft(const struct Int2DdsSubscriber *subscriber,
+                                         const struct Int2DdsContentFilteredTopic *cft,
+                                         const struct Int2DdsDataReaderQos *qos,
+                                         struct Int2DdsDataReader **reader_out);
+
+/**
+ * Create a DataReader using a ContentFilteredTopic with listener callbacks
+ *
+ * # Safety
+ * - `subscriber` must be a valid subscriber
+ * - `cft` must be a valid ContentFilteredTopic
+ * - `qos` can be null for default QoS
+ * - `listener` can be null for no listener
+ * - `mask` specifies which status changes trigger callbacks
+ * - `reader_out` must be a valid pointer to a null pointer
+ * - The returned reader must be freed with `int2dds_delete_datareader`
+ * - Listener callbacks must be thread-safe and remain valid until reader is deleted
+ */
+Int2DdsRet int2dds_create_datareader_cft_with_listener(const struct Int2DdsSubscriber *subscriber,
+                                                       const struct Int2DdsContentFilteredTopic *cft,
+                                                       const struct Int2DdsDataReaderQos *qos,
+                                                       const struct Int2DdsDataReaderListener *listener,
+                                                       uint32_t mask,
+                                                       struct Int2DdsDataReader **reader_out);
 
 /**
  * Set or update the listener for a DataReader
@@ -2579,6 +2730,29 @@ Int2DdsRet int2dds_create_topic_keyed(const struct Int2DdsParticipant *participa
                                       struct Int2DdsTopic **topic_out);
 
 /**
+ * Create a Topic using a QoS profile path
+ *
+ * Same as `int2dds_create_topic_keyed` but uses a QoS profile path instead of a QoS handle.
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `topic_name` must be a valid null-terminated C string
+ * - `dds_type_name` must be a valid null-terminated C string (DDS registration name)
+ * - `extensibility`: 0 = Final, 1 = Appendable, 2 = Mutable
+ * - `has_key`: whether the data type has key fields
+ * - `qos_path` must be a valid null-terminated UTF-8 string (e.g. "Library::Profile")
+ * - `topic_out` must be a valid pointer to a null pointer
+ * - The returned topic must be freed with `int2dds_delete_topic`
+ */
+Int2DdsRet int2dds_create_topic_with_profile(const struct Int2DdsParticipant *participant,
+                                             const char *topic_name,
+                                             const char *dds_type_name,
+                                             int32_t extensibility,
+                                             bool has_key,
+                                             const char *qos_path,
+                                             struct Int2DdsTopic **topic_out);
+
+/**
  * Create a Topic with type information for DDS-XTypes discovery
  *
  * Creates a topic using a pre-built `Int2DdsTypeInfo` which provides
@@ -2654,6 +2828,89 @@ Int2DdsRet int2dds_topic_get_name(const struct Int2DdsTopic *topic,
 Int2DdsRet int2dds_topic_get_type_name(const struct Int2DdsTopic *topic,
                                        char *type_name_out,
                                        uintptr_t type_name_size);
+
+/**
+ * Create a ContentFilteredTopic
+ *
+ * Creates a content-filtered topic that filters data based on a SQL-like expression.
+ * The filter expression uses SQL-92 syntax with parameters referenced as %0, %1, etc.
+ *
+ * # Safety
+ * - `participant` must be a valid participant
+ * - `topic_name` must be a valid null-terminated C string
+ * - `related_topic` must be a valid topic created on the same participant
+ * - `filter_expression` must be a valid null-terminated C string (e.g., "color = %0")
+ * - `expression_parameters` must be a valid array of null-terminated C strings, or null if count is 0
+ * - `expression_parameters_count` is the number of parameters
+ * - `cft_out` must be a valid pointer to a null pointer
+ * - The returned ContentFilteredTopic must be freed with `int2dds_delete_contentfilteredtopic`
+ */
+Int2DdsRet int2dds_create_contentfilteredtopic(const struct Int2DdsParticipant *participant,
+                                               const char *topic_name,
+                                               const struct Int2DdsTopic *related_topic,
+                                               const char *filter_expression,
+                                               const char *const *expression_parameters,
+                                               uintptr_t expression_parameters_count,
+                                               struct Int2DdsContentFilteredTopic **cft_out);
+
+/**
+ * Delete a ContentFilteredTopic
+ *
+ * # Safety
+ * - `cft` must be a valid ContentFilteredTopic created by `int2dds_create_contentfilteredtopic`
+ * - `cft` must not be used after this call
+ * - All DataReaders using this ContentFilteredTopic must be deleted first
+ */
+Int2DdsRet int2dds_delete_contentfilteredtopic(struct Int2DdsContentFilteredTopic *cft);
+
+/**
+ * Create a Topic with key field metadata for compute_key() support.
+ *
+ * Same as int2dds_create_topic_keyed but additionally accepts key field
+ * descriptors that enable instance handle computation from CDR data.
+ * This is needed when the remote publisher does not include KEY_HASH
+ * in inline QoS (e.g., CoreDX).
+ *
+ * # Safety
+ * - Same as int2dds_create_topic_keyed
+ * - field_indices/field_types must point to field_count elements, or be null if field_count is 0
+ */
+Int2DdsRet int2dds_create_topic_keyed_with_key_fields(const struct Int2DdsParticipant *participant,
+                                                      const char *topic_name,
+                                                      const char *dds_type_name,
+                                                      int32_t extensibility,
+                                                      bool has_key,
+                                                      const struct Int2DdsTopicQos *qos,
+                                                      const uint32_t *field_indices,
+                                                      const uint32_t *field_types,
+                                                      uintptr_t field_count,
+                                                      struct Int2DdsTopic **topic_out);
+
+/**
+ * Create a Topic with full field descriptors for reader-side CFT filtering.
+ *
+ * Extends int2dds_create_topic_keyed_with_key_fields by also providing
+ * all field metadata (name, type) needed for get_field_value() support.
+ * This enables ContentFilteredTopic reader-side filtering in the serialized path.
+ *
+ * # Safety
+ * - Same as int2dds_create_topic_keyed
+ * - field_names: array of null-terminated C strings (field_count elements)
+ * - field_types: array of u32 type IDs (field_count elements)
+ * - field_is_key: array of bool (field_count elements)
+ * - field_count: number of fields
+ */
+Int2DdsRet int2dds_create_topic_with_field_descriptors(const struct Int2DdsParticipant *participant,
+                                                       const char *topic_name,
+                                                       const char *dds_type_name,
+                                                       int32_t extensibility,
+                                                       bool has_key,
+                                                       const struct Int2DdsTopicQos *qos,
+                                                       const char *const *field_names,
+                                                       const uint32_t *field_types,
+                                                       const bool *field_is_key,
+                                                       uintptr_t field_count,
+                                                       struct Int2DdsTopic **topic_out);
 
 /**
  * Create a new type info builder.

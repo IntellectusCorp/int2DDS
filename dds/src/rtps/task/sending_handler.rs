@@ -42,7 +42,7 @@ pub(crate) enum MessageType {
     // User traffic
     UserHeartbeatToOne(EntityId, Guid, bool),
     UserHeartbeatToAll(EntityId),
-    UserUnsentChanges(EntityId),
+    // UserUnsentChanges(EntityId),
     UserRequestedChanges(EntityId, Guid),
     UserAcknack(EntityId, Guid, bool, bool), // reader_entity_id, remote_writer_guid, final_flag, is_preemptive
     OnUserCacheChangeRemoval(bool, SequenceNumber, EntityId),
@@ -202,14 +202,14 @@ impl SendingHandler {
     pub(crate) fn push_message_and_wake(&self, message: MessageType) {
         match self.message_queue.lock() {
             Ok(mut queue_guard) => {
-                // Deduplication: skip if SendUnsentChanges for same EntityId already exists
-                if let MessageType::UserUnsentChanges(entity_id) = &message {
-                    if queue_guard.iter().any(
-                        |m| matches!(m, MessageType::UserUnsentChanges(eid) if eid == entity_id),
-                    ) {
-                        return; // Already queued, no need to add duplicate
-                    }
-                }
+                // // Deduplication: skip if SendUnsentChanges for same EntityId already exists
+                // if let MessageType::UserUnsentChanges(entity_id) = &message {
+                //     if queue_guard.iter().any(
+                //         |m| matches!(m, MessageType::UserUnsentChanges(eid) if eid == entity_id),
+                //     ) {
+                //         return; // Already queued, no need to add duplicate
+                //     }
+                // }
                 queue_guard.push(message);
             }
             Err(e) => {

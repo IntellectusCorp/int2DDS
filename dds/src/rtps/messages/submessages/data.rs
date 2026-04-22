@@ -6,11 +6,11 @@
 
 use bytes::Bytes;
 use speedy::{Context, Error, Readable, Writable, Writer};
-use std::{io, sync::Arc};
+use std::io;
 
 use crate::rtps::common::{
     parameters::ParameterList, rtps_error_code::RtpsResult, sequence::SequenceNumber,
-    types::SerializedData,
+    types::SubmessagePayload,
 };
 use crate::rtps::{
     common::{
@@ -22,17 +22,17 @@ use crate::rtps::{
 use crate::serialize::pl_cdr::InlineQosParser;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Data {
+pub(crate) struct Data<'a> {
     extra_flags: u16,
     pub reader_id: EntityId,
     pub writer_id: EntityId,
     pub writer_sn: SequenceNumber,
     inline_qos: Option<ParameterList>,
-    serialized_data: SerializedData,
+    serialized_data: SubmessagePayload<'a>,
     octets_to_inline_qos: u16,
 }
 
-impl Data {
+impl<'a> Data<'a> {
     pub(crate) fn new(reader_id: EntityId, writer_id: EntityId, writer_sn: SequenceNumber) -> Self {
         Self {
             extra_flags: 0,
@@ -40,7 +40,7 @@ impl Data {
             writer_id,
             writer_sn,
             inline_qos: None,
-            serialized_data: Arc::from(vec![]),
+            serialized_data: SubmessagePayload::default(),
             octets_to_inline_qos: 16,
         }
     }
@@ -49,8 +49,13 @@ impl Data {
         self.inline_qos.clone()
     }
 
-    pub(crate) fn serialized_data(&self) -> SerializedData {
-        self.serialized_data.clone()
+    pub(crate) fn serialized_data(&self) -> Bytes {
+        // Returns a refcount-bumped `Bytes` so receivers can retain the payload
+        // beyond the lifetime of this submessage without copying the data.
+        match &self.serialized_data {
+            SubmessagePayload::Owned(data) => data.clone(),
+            SubmessagePayload::Borrowed(data) => Bytes::copy_from_slice(data),
+        }
     }
 
     pub(crate) fn octets_to_next_header(&self) -> u16 {
@@ -73,7 +78,7 @@ impl Data {
         self.inline_qos = Some(param_list);
     }
 
-    pub(crate) fn add_serialized_data(&mut self, serialized_data: SerializedData) {
+    pub(crate) fn add_serialized_data(&mut self, serialized_data: SubmessagePayload<'a>) {
         self.serialized_data = serialized_data;
     }
 
@@ -166,11 +171,12 @@ impl Data {
             None
         };
 
-        let serialized_data: Arc<[u8]> = if data_flag || key_flag {
+        let serialized_data: SubmessagePayload<'static> = if data_flag || key_flag {
             let start_pos = cursor.position() as usize;
-            Arc::from(&buffer[start_pos..])
+            // Zero-copy slice of the original Bytes buffer (refcount bump only).
+            SubmessagePayload::Owned(buffer.slice(start_pos..))
         } else {
-            Arc::new([])
+            SubmessagePayload::Owned(Bytes::new())
         };
 
         Ok(Self {
@@ -185,7 +191,7 @@ impl Data {
     }
 }
 
-impl<C: Context> Writable<C> for Data {
+impl<C: Context> Writable<C> for Data<'_> {
     fn write_to<T: ?Sized + Writer<C>>(&self, writer: &mut T) -> Result<(), C::Error> {
         writer.write_u16(self.extra_flags)?;
         writer.write_u16(self.octets_to_inline_qos)?;
@@ -195,7 +201,7 @@ impl<C: Context> Writable<C> for Data {
         if let Some(ref inline_qos_list) = self.inline_qos {
             writer.write_value(inline_qos_list)?;
         }
-        writer.write_bytes(&self.serialized_data)?;
+        writer.write_bytes(self.serialized_data.as_slice())?;
 
         Ok(())
     }

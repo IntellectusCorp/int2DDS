@@ -1521,27 +1521,50 @@ impl SedpLogic {
         reader_entity_id: EntityId,
         writer_entity_id: EntityId,
     ) -> RtpsResult<()> {
-        let buffer = MessageCreator::create_data_msg(
-            cache_change,
+        let participant = self.get_upgraded_participant()?;
+        let mut send_buffer = participant
+            .wire_buffer_pool()
+            .lock()
+            .map_err(|_| {
+                RtpsError::new(RtpsErrorCode::LockError, "Failed to lock wire buffer pool")
+            })?
+            .acquire();
+        let result = MessageCreator::create_data_msg(
+            &cache_change,
             remote_guid,
             reader_entity_id,
             writer_entity_id,
             None, // No heartbeat
             true, // Use inline QoS (default)
             None, // No content filter for SEDP messages
+            &mut send_buffer,
         );
 
-        match buffer {
-            Ok(buffer) => {
-                self.send_to_participant_metatraffic_locators(&buffer, remote_guid, "data")?
+        match result {
+            Ok(()) => {
+                self.send_to_participant_metatraffic_locators(&send_buffer, remote_guid, "data")?
             }
             Err(e) => {
+                participant
+                    .wire_buffer_pool()
+                    .lock()
+                    .map_err(|_| {
+                        RtpsError::new(RtpsErrorCode::LockError, "Failed to lock wire buffer pool")
+                    })?
+                    .release(send_buffer);
                 return Err(RtpsError::new(
                     RtpsErrorCode::SerializationError,
                     format!("Failed to create SEDP DATA message: {}", e),
                 ));
             }
         };
+        participant
+            .wire_buffer_pool()
+            .lock()
+            .map_err(|_| {
+                RtpsError::new(RtpsErrorCode::LockError, "Failed to lock wire buffer pool")
+            })?
+            .release(send_buffer);
 
         Ok(())
     }
@@ -1633,20 +1656,28 @@ impl SedpLogic {
         }
 
         for remote_guid in remote_guid_list {
-            let buffer = MessageCreator::create_data_msg(
-                cache_change.clone(),
+            let mut send_buffer = participant
+                .wire_buffer_pool()
+                .lock()
+                .map_err(|_| {
+                    RtpsError::new(RtpsErrorCode::LockError, "Failed to lock wire buffer pool")
+                })?
+                .acquire();
+            let result = MessageCreator::create_data_msg(
+                &cache_change,
                 remote_guid,
                 remote_guid.entity_id(),
                 builtin_writer_guid.entity_id(),
                 None, // No heartbeat
                 true, // Use inline QoS (default)
                 None, // No content filter for termination messages
+                &mut send_buffer,
             );
 
-            match buffer {
-                Ok(buffer) => {
+            match result {
+                Ok(()) => {
                     if let Err(e) = self.send_to_participant_metatraffic_locators(
-                        &buffer,
+                        &send_buffer,
                         remote_guid,
                         "termination",
                     ) {
@@ -1657,6 +1688,13 @@ impl SedpLogic {
                     warn!("Failed to create SEDP DATA (termination) message: {:?}", e);
                 }
             };
+            participant
+                .wire_buffer_pool()
+                .lock()
+                .map_err(|_| {
+                    RtpsError::new(RtpsErrorCode::LockError, "Failed to lock wire buffer pool")
+                })?
+                .release(send_buffer);
         }
         Ok(())
     }
@@ -2000,7 +2038,7 @@ impl UnicastMessageProcessor for SedpLogic {
                         writer_guid,
                         instance_handle,
                         data.writer_sn,
-                        serialized_data,
+                        serialized_data.to_vec(),
                         message_receiver.get_source_timestamp(),
                     );
 
@@ -2038,7 +2076,7 @@ impl UnicastMessageProcessor for SedpLogic {
                         writer_guid,
                         instance_handle,
                         data.writer_sn,
-                        serialized_data,
+                        serialized_data.to_vec(),
                         message_receiver.get_source_timestamp(),
                     );
 

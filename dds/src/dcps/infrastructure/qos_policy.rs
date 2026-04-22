@@ -1026,7 +1026,7 @@ impl QosPolicy for EntityFactoryQosPolicy {
 ///         qos_policy::{ReliabilityQosPolicy, ReliabilityQosPolicyKind},
 ///         status::StatusMask,
 ///     },
-///     publication::qos::{DataWriterQos, PublisherQos, PUBLISHER_QOS_DEFAULT},
+///     publication::qos::{DataWriterQos, PublisherQos},
 ///     subscription::qos::SubscriberQos,
 /// #     domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
 /// #     topic::{qos::TopicQos, type_support::DdsType},
@@ -1042,7 +1042,7 @@ impl QosPolicy for EntityFactoryQosPolicy {
 /// # let topic = participant.create_topic::<HelloWorldType>("topic", "HelloWorld", TopicQos::default(), None, StatusMask::default()).unwrap();
 ///
 /// // Publisher in partitions A, B, C
-/// let mut publisher_qos = PUBLISHER_QOS_DEFAULT;
+/// let mut publisher_qos = PublisherQos::default();
 /// publisher_qos.partition.name.push("partition_A".to_string());
 /// publisher_qos.partition.name.push("partition_B".to_string());
 /// publisher_qos.partition.name.push("partition_C".to_string());

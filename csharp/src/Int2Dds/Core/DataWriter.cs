@@ -91,6 +91,44 @@ namespace Int2Dds.Core
         }
 
         /// <summary>
+        /// Creates a new DataWriter using a QoS profile path.
+        /// Normally called via Publisher.CreateDataWriterWithProfile.
+        /// </summary>
+        internal DataWriter(Publisher publisher, Topic<T> topic, string qosPath,
+            IDataWriterListener listener = null, uint statusMask = 0)
+        {
+            _topic = topic;
+            _xcdr2 = false;
+
+            if (listener != null)
+            {
+                unsafe
+                {
+                    var (nativeListener, contextHandle) = ListenerRegistry.CreateWriterListener(listener, this);
+                    _listenerContextHandle = contextHandle;
+                    try
+                    {
+                        ReturnCodeHelper.CheckReturn(
+                            NativeMethods.int2dds_create_datawriter_with_profile_and_listener(
+                                publisher.Handle, topic.Handle, qosPath, &nativeListener, statusMask, out _handle));
+                    }
+                    catch
+                    {
+                        ListenerRegistry.FreeListener(_listenerContextHandle);
+                        _listenerContextHandle = IntPtr.Zero;
+                        throw;
+                    }
+                }
+            }
+            else
+            {
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_create_datawriter_with_profile(
+                        publisher.Handle, topic.Handle, qosPath, out _handle));
+            }
+        }
+
+        /// <summary>
         /// Gets the native handle. For internal use.
         /// </summary>
         internal IntPtr Handle => _handle;
