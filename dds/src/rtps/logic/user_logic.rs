@@ -1553,13 +1553,20 @@ impl UnicastMessageProcessor for UserLogic {
         }
 
         for reader in matched_readers {
-            let mut change = CacheChange::new(
+            let mut change = match reader.reader_cache().lock() {
+                Ok(mut cache) => cache.acquire_change(),
+                Err(_) => {
+                    return Err(RtpsError::new(
+                        RtpsErrorCode::LockError,
+                        "Failed to acquire reader cache lock",
+                    ));
+                }
+            };
+            change.reset(
                 ChangeKind::Alive,
                 remote_writer_guid,
                 InstanceHandle::NIL,
                 data.writer_sn,
-                Vec::new(),
-                // inline_qos,
                 message_receiver.get_source_timestamp(),
             );
             // Zero-copy share of the socket buffer: `data.serialized_data()`
@@ -2082,19 +2089,9 @@ impl UnicastMessageProcessor for UserLogic {
                     ));
                 }
 
-                let assembled_vec = buffer.assemble();
+                let shared_payload = bytes::Bytes::from(buffer.assemble());
 
-                // Multi-reader: wrap in `Bytes` for zero-copy sharing
-                // Single-reader: move Vec directly into CacheChange
-                let mut owned_payload = None;
-                let shared_payload = if matched_readers.len() > 1 {
-                    Some(bytes::Bytes::from(assembled_vec))
-                } else {
-                    owned_payload = Some(assembled_vec);
-                    None
-                };
-
-                for (_reader_idx, reader) in matched_readers.iter().enumerate() {
+                for reader in matched_readers.iter() {
                     let mut ownership_strength = None;
                     if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>()
                     {
@@ -2110,22 +2107,18 @@ impl UnicastMessageProcessor for UserLogic {
                         }
                     }
 
-                    let mut assembled_change = CacheChange::new(
+                    let mut assembled_change = match reader.reader_cache().lock() {
+                        Ok(mut cache) => cache.acquire_change(),
+                        Err(_) => continue,
+                    };
+                    assembled_change.reset(
                         ChangeKind::Alive,
                         remote_writer_guid,
                         InstanceHandle::NIL,
                         data_frag.writer_sn,
-                        Vec::new(),
                         assembled_timestamp,
                     );
-                    if let Some(ref shared) = shared_payload {
-                        // Multi-reader: share via `Bytes` clone (refcount bump, 0 copy)
-                        assembled_change.set_shared_payload(shared.clone());
-                    } else if let Some(vec) = owned_payload.take() {
-                        // Single reader: move Vec directly (0 copy)
-                        assembled_change.set_owned_payload(vec);
-                    }
-
+                    assembled_change.set_shared_payload(shared_payload.clone());
                     assembled_change.set_ownership_strength(ownership_strength);
 
                     let _ = self.deliver_change_to_reader(
