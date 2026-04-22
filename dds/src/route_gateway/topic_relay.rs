@@ -59,6 +59,12 @@ pub struct TopicRelay {
     local_writer: Arc<DataWriter<DynamicData>>,
     remote_reader: Arc<DataReader<DynamicData>>,
     remote_writer: Arc<DataWriter<DynamicData>>,
+    // Own writer handles on each side. Used to drop self-reflected samples:
+    // a participant's writer on a given topic self-matches that participant's
+    // reader on the same topic, so without filtering, every forwarded sample
+    // loops back and bounces across the gateway indefinitely.
+    local_writer_handle: InstanceHandle,
+    remote_writer_handle: InstanceHandle,
 }
 
 impl TopicRelay {
@@ -130,12 +136,17 @@ impl TopicRelay {
             StatusMask::default(),
         )?);
 
+        let local_writer_handle = local_writer.get_instance_handle()?;
+        let remote_writer_handle = remote_writer.get_instance_handle()?;
+
         Ok(Self {
             topic_name: topic_name.to_string(),
             local_reader,
             local_writer,
             remote_reader,
             remote_writer,
+            local_writer_handle,
+            remote_writer_handle,
         })
     }
 
@@ -144,11 +155,16 @@ impl TopicRelay {
         &self.topic_name
     }
 
-    /// Take all available samples from `from` and write them to `to`.
-    /// Returns the number of forwarded samples.
+    /// Take all available samples from `from` and write them to `to`,
+    /// dropping any sample produced by `sibling_writer_handle` — that is,
+    /// the writer living in the same participant as `from`. Without this
+    /// filter, the bidirectional relay would re-forward every sample it
+    /// just emitted, because a participant's writer on a given topic
+    /// self-matches that same participant's reader.
     fn forward(
         from: &DataReader<DynamicData>,
         to: &DataWriter<DynamicData>,
+        sibling_writer_handle: InstanceHandle,
     ) -> DdsResult<usize> {
         let samples = match from.take(
             i32::MAX,
@@ -163,6 +179,9 @@ impl TopicRelay {
 
         let mut count = 0;
         for sample in samples.iter() {
+            if sample.sample_info().publication_handle == sibling_writer_handle {
+                continue;
+            }
             if let Ok(data) = sample.data() {
                 to.write(&data, InstanceHandle::NIL)?;
                 count += 1;
@@ -173,12 +192,12 @@ impl TopicRelay {
 
     /// Forward all available LocalNode samples to RemoteNode.
     pub fn forward_local_to_remote(&self) -> DdsResult<usize> {
-        Self::forward(&self.local_reader, &self.remote_writer)
+        Self::forward(&self.local_reader, &self.remote_writer, self.local_writer_handle)
     }
 
     /// Forward all available RemoteNode samples to LocalNode.
     pub fn forward_remote_to_local(&self) -> DdsResult<usize> {
-        Self::forward(&self.remote_reader, &self.local_writer)
+        Self::forward(&self.remote_reader, &self.local_writer, self.remote_writer_handle)
     }
 
     /// Run one bidirectional forwarding pass.
