@@ -73,6 +73,8 @@ pub enum TransportErrorCode {
     // ── 760: TCP internal channel ───────────────────────────────────────
     /// Internal channel (discovery or user-data) is full; message dropped.
     TcpChannelFull = 760,
+    /// Reverse data channel requested but not yet registered — retry on next send cycle.
+    TcpReverseChannelPending = 761,
 
     // ── 770: TCP listener / accept ─────────────────────────────────────
     /// Incoming TCP accept() failed (fd exhaustion, permission, etc.).
@@ -126,7 +128,7 @@ impl TransportErrorCode {
             | Self::TcpControlInvalidPort
             | Self::TcpControlInvalidCookie => io::ErrorKind::InvalidData,
 
-            Self::TcpChannelFull => io::ErrorKind::WouldBlock,
+            Self::TcpChannelFull | Self::TcpReverseChannelPending => io::ErrorKind::WouldBlock,
 
             Self::TcpAcceptFailed => io::ErrorKind::ConnectionAborted,
             Self::TcpReadError => io::ErrorKind::ConnectionReset,
@@ -164,6 +166,7 @@ impl TransportErrorCode {
             Self::TcpControlInvalidCookie => "TCP PORT_BIND invalid cookie",
 
             Self::TcpChannelFull => "TCP internal channel full",
+            Self::TcpReverseChannelPending => "TCP reverse data channel pending",
 
             Self::TcpAcceptFailed => "TCP accept failed",
             Self::TcpReadError => "TCP read error on accepted connection",

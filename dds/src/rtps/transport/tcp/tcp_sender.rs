@@ -464,7 +464,7 @@ impl TcpSender {
         if physical_addr.port() == 0 {
             self.request_reverse_data(physical_addr, logical_port);
             return Err(transport_io_error(
-                TransportErrorCode::TcpConnectionRefused,
+                TransportErrorCode::TcpReverseChannelPending,
                 format!(
                     "Reverse data channel pending for asymmetric peer {:?}:{}",
                     physical_addr, logical_port
