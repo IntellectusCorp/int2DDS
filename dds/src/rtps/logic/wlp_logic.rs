@@ -522,8 +522,7 @@ impl WlpLogic {
             for remote_data in remote_datas_guard.iter() {
                 if remote_data.participant_guid().prefix() == remote_prefix {
                     for locator in remote_data.metatraffic_unicast_locator_list() {
-                        let _ =
-                            self.transport.send(&buffer, &SendTarget::SEDPDiscovery(locator));
+                        let _ = self.transport.send(&buffer, &SendTarget::SEDPDiscovery(locator));
                     }
                     break;
                 }
@@ -560,7 +559,7 @@ impl WlpLogic {
 
         let cache_change = Arc::new(writer.new_change(
             ChangeKind::Alive,
-            Arc::from(payload.to_vec()),
+            payload.to_vec(),
             InstanceHandle::NIL,
             Some(RtpsTime::now()),
         ));
@@ -573,7 +572,7 @@ impl WlpLogic {
                     log::warn!("Failed to remove old change: {}", e);
                 }
             }
-            if let Err(e) = cache_guard.add_change(cache_change.clone()) {
+            if let Err(e) = cache_guard.add_change_builtin(cache_change.clone()) {
                 log::warn!("Failed to add liveliness change to cache: {}, continuing to send heartbeat anyway", e);
                 // Don't return - continue to send heartbeat even if cache add fails
             }
@@ -581,6 +580,8 @@ impl WlpLogic {
             log::warn!("Failed to lock writer cache in send_liveliness_once, continuing to send heartbeat anyway");
             // Don't return - continue to send heartbeat even if cache lock fails
         }
+
+        let participant = self.get_upgraded_participant()?;
 
         for reader_proxy in proxies_guard.iter() {
             // Get heartbeat info to include in the same RTPS message as Data
@@ -605,29 +606,41 @@ impl WlpLogic {
                 );
                 info
             };
-
-            let buffer = match MessageCreator::create_data_msg(
-                cache_change.clone(),
+            let mut send_buffer = match participant.wire_buffer_pool().lock() {
+                Ok(mut pool) => pool.acquire(),
+                Err(_) => {
+                    log::warn!("Failed to lock wire buffer pool");
+                    continue; // Skip this reader proxy
+                }
+            };
+            let result = MessageCreator::create_data_msg(
+                &cache_change,
                 reader_proxy.remote_reader_guid(),
                 EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_READER,
                 EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_WRITER,
                 heartbeat_info, // Include heartbeat in the same message
                 false,
                 None,
-            ) {
-                Ok(buf) => buf,
-                Err(e) => {
-                    log::warn!("Failed to create P2P DATA message: {:?}", e);
-                    continue; // Skip this reader proxy
+                &mut send_buffer,
+            );
+
+            if let Err(e) = result {
+                log::warn!("Failed to create P2P DATA message: {:?}", e);
+                if let Ok(mut pool) = participant.wire_buffer_pool().lock() {
+                    pool.release(send_buffer);
                 }
-            };
+                continue; // Skip this reader proxy
+            }
 
             for locator in reader_proxy.unicast_locator_list() {
                 if let Err(e) =
-                    self.transport.send(&buffer, &SendTarget::SEDPDiscovery(&locator))
+                    self.transport.send(&send_buffer, &SendTarget::SEDPDiscovery(&locator))
                 {
                     log::warn!("Failed to send P2P DATA message: {:?}", e);
                 }
+            }
+            if let Ok(mut pool) = participant.wire_buffer_pool().lock() {
+                pool.release(send_buffer);
             }
         }
         writer.increase_heartbeat_count();
@@ -1308,7 +1321,7 @@ impl UnicastMessageProcessor for WlpLogic {
             let payload = Some(data.serialized_data());
 
             match payload {
-                Some(payload) => match ParticipantMessageData::from_serialized_data(payload) {
+                Some(payload) => match ParticipantMessageData::from_serialized_data(&payload) {
                     Ok(pmd) => {
                         return self.handle_liveliness_message(
                             pmd,
@@ -1478,33 +1491,47 @@ impl UnicastMessageProcessor for WlpLogic {
                 ))
             };
 
+            let participant = self.get_upgraded_participant()?;
             for reader_proxy in proxies_guard.iter() {
                 // Get heartbeat info to include in the same RTPS message as Data
-                let buffer = match MessageCreator::create_data_msg(
-                    change.clone(),
+                let mut send_buffer = match participant.wire_buffer_pool().lock() {
+                    Ok(mut pool) => pool.acquire(),
+                    Err(_) => {
+                        warn!("[WLP] Failed to lock wire buffer pool");
+                        continue; // Skip this reader_proxy
+                    }
+                };
+                let result = MessageCreator::create_data_msg(
+                    &change,
                     reader_proxy.remote_reader_guid(),
                     EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_READER,
                     EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_WRITER,
                     heartbeat_info, // Include heartbeat in the same message
                     false,
                     None,
-                ) {
-                    Ok(buf) => buf,
-                    Err(e) => {
-                        warn!("[WLP] Failed to create DATA message for reader_proxy: {:?}", e);
-                        continue; // Skip this reader_proxy and process next reader_proxy
+                    &mut send_buffer,
+                );
+
+                if let Err(e) = result {
+                    warn!("[WLP] Failed to create DATA message for reader_proxy: {:?}", e);
+                    if let Ok(mut pool) = participant.wire_buffer_pool().lock() {
+                        pool.release(send_buffer);
                     }
-                };
+                    continue; // Skip this reader_proxy and process next reader_proxy
+                }
 
                 for locator in reader_proxy.unicast_locator_list() {
                     if let Err(e) =
-                        self.transport.send(&buffer, &SendTarget::SEDPDiscovery(&locator))
+                        self.transport.send(&send_buffer, &SendTarget::SEDPDiscovery(&locator))
                     {
                         warn!(
                             "[WLP] Failed to send DATA message to locator {:?}: {:?}",
                             locator, e
                         );
                     }
+                }
+                if let Ok(mut pool) = participant.wire_buffer_pool().lock() {
+                    pool.release(send_buffer);
                 }
             }
             writer.increase_heartbeat_count();

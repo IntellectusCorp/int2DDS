@@ -10,14 +10,20 @@ use std::env;
 use std::net::UdpSocket as StdUdpSocket;
 
 use crate::rtps::common::locator::{Locator, MULTICAST_IP};
+use crate::rtps::transport::udp::recv_arena::{
+    RecvArena, DEFAULT_RECV_ARENA_CHUNK_BYTES, MAX_UDP_PACKET_BYTES,
+};
 
-const MAX_MESSAGE_SIZE: usize = 64 * 1024; // This is max we can get from UDP.
+// One arena per listener; reused across every incoming datagram on this socket.
+fn new_recv_arena() -> RecvArena {
+    RecvArena::new(DEFAULT_RECV_ARENA_CHUNK_BYTES, MAX_UDP_PACKET_BYTES)
+}
 
 #[derive(Debug)]
 pub(crate) struct UdpListener {
     port: u16,
     socket: Option<mio::net::UdpSocket>,
-    recv_buffer: Box<[u8; MAX_MESSAGE_SIZE]>,
+    recv_arena: RecvArena,
 }
 
 impl Drop for UdpListener {
@@ -56,7 +62,7 @@ impl UdpListener {
             mio::net::UdpSocket::from_std(std_socket)
         };
 
-        Ok(Self { socket: Some(socket), port, recv_buffer: Box::new([0; MAX_MESSAGE_SIZE]) })
+        Ok(Self { socket: Some(socket), port, recv_arena: new_recv_arena() })
     }
 
     pub(crate) fn port(&self) -> u16 {
@@ -176,7 +182,7 @@ impl UdpListener {
         //     });
         // }
 
-        Ok(Self { socket: Some(socket), port, recv_buffer: Box::new([0; MAX_MESSAGE_SIZE]) })
+        Ok(Self { socket: Some(socket), port, recv_arena: new_recv_arena() })
     }
 
     pub(crate) fn socket(&mut self) -> &mut mio::net::UdpSocket {
@@ -184,16 +190,22 @@ impl UdpListener {
     }
 
     pub(crate) fn get_message(&mut self) -> Option<(Bytes, SocketAddr)> {
-        match self.socket.as_mut().unwrap().recv_from(&mut self.recv_buffer[..]) {
+        // Reserve a slot inside the arena's current chunk; this is the buffer recv_from writes into.
+        let slot = self.recv_arena.reserve_packet_slot();
+        match self.socket.as_mut().unwrap().recv_from(slot) {
             Ok((nbytes, sender)) => {
-                Some((Bytes::copy_from_slice(&self.recv_buffer[..nbytes]), sender))
+                // Freeze only the bytes actually written; the zero-filled tail is truncated so the next reservation can reuse the capacity.
+                let bytes = self.recv_arena.commit_received_packet(nbytes);
+                Some((bytes, sender))
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // Break if there's nothing more to read
+                // Nothing to read; give back the slot so idle polls don't accumulate dead tails.
+                self.recv_arena.release_unused_slot();
                 None
             }
             Err(e) => {
                 error!("UDPListener::get_message failed: {e:?}");
+                self.recv_arena.release_unused_slot();
                 None
             }
         }

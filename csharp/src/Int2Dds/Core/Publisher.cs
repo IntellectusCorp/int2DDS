@@ -74,6 +74,16 @@ namespace Int2Dds.Core
         }
 
         /// <summary>
+        /// Creates a new Publisher using a QoS profile path.
+        /// Normally called via DomainParticipant.CreatePublisherWithProfile.
+        /// </summary>
+        internal Publisher(DomainParticipant participant, string qosPath)
+        {
+            ReturnCodeHelper.CheckReturn(
+                NativeMethods.int2dds_create_publisher_with_profile(participant.Handle, qosPath, out _handle));
+        }
+
+        /// <summary>
         /// Gets the native handle. For internal use by other Core types.
         /// </summary>
         internal IntPtr Handle => _handle;
@@ -93,6 +103,23 @@ namespace Int2Dds.Core
         {
             if (_disposed) throw new ObjectDisposedException(GetType().Name);
             return new DataWriter<T>(this, topic, qos, listener, statusMask);
+        }
+
+        /// <summary>
+        /// Creates a DataWriter using a QoS profile path (e.g. "Library::Profile").
+        /// </summary>
+        /// <typeparam name="T">The DDS data type.</typeparam>
+        /// <param name="topic">The topic to write to.</param>
+        /// <param name="qosPath">QoS profile path (e.g. "MyLibrary::MyProfile").</param>
+        /// <param name="listener">Optional listener for event callbacks.</param>
+        /// <param name="statusMask">Bitmask of statuses to listen for.</param>
+        /// <returns>A new DataWriter instance.</returns>
+        public DataWriter<T> CreateDataWriterWithProfile<T>(Topic<T> topic, string qosPath,
+            IDataWriterListener listener = null, uint statusMask = 0)
+            where T : class, IDdsType, new()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            return new DataWriter<T>(this, topic, qosPath, listener, statusMask);
         }
 
         /// <summary>

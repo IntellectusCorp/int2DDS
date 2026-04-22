@@ -106,6 +106,44 @@ namespace Int2Dds.Core
         }
 
         /// <summary>
+        /// Creates a new DataReader using a QoS profile path.
+        /// Normally called via Subscriber.CreateDataReaderWithProfile.
+        /// </summary>
+        internal DataReader(Subscriber subscriber, Topic<T> topic, string qosPath,
+            IDataReaderListener? listener = null, uint statusMask = 0)
+        {
+            _topic = topic;
+            _buffer = ArrayPool<byte>.Shared.Rent(DefaultBufferSize);
+
+            if (listener != null)
+            {
+                unsafe
+                {
+                    var (nativeListener, contextHandle) = ListenerRegistry.CreateReaderListener(listener, this);
+                    _listenerContextHandle = contextHandle;
+                    try
+                    {
+                        ReturnCodeHelper.CheckReturn(
+                            NativeMethods.int2dds_create_datareader_with_profile_and_listener(
+                                subscriber.Handle, topic.Handle, qosPath, &nativeListener, statusMask, out _handle));
+                    }
+                    catch
+                    {
+                        ListenerRegistry.FreeListener(_listenerContextHandle);
+                        _listenerContextHandle = IntPtr.Zero;
+                        throw;
+                    }
+                }
+            }
+            else
+            {
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_create_datareader_with_profile(
+                        subscriber.Handle, topic.Handle, qosPath, out _handle));
+            }
+        }
+
+        /// <summary>
         /// Gets the native handle. For internal use.
         /// </summary>
         internal IntPtr Handle => _handle;

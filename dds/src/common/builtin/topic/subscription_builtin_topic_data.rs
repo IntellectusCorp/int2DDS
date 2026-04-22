@@ -281,7 +281,7 @@ impl SubscriptionBuiltinTopicData {
         ]
     }
 
-    pub fn from_serialized_data(data: SerializedData) -> Result<Self, String> {
+    pub fn from_serialized_data(data: &[u8]) -> Result<Self, String> {
         use crate::serialize::pl_cdr::ParsedBuiltinTopicData;
 
         macro_rules! assign_optional {
