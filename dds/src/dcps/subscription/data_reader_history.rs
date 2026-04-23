@@ -473,19 +473,18 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
             change_kind,
             ChangeKind::NotAliveUnregistered | ChangeKind::NotAliveDisposedUnregistered
         ) {
-            self.remove_writer_from_owner_candidates(cache_change.writer_guid(), true)?;
+            self.remove_writer_from_owner_candidates(cache_change.writer_guid(), true, false)?;
         }
 
         Ok(())
     }
 
-    // Removes the writer from owner candidates. When update_state is true and
-    // an instance ends up with no candidates left, transitions that instance to
-    // NOT_ALIVE_NO_WRITERS; when false, only the candidate list is updated.
+    // Removes the writer from owner candidates.
     pub(crate) fn remove_writer_from_owner_candidates(
         &self,
         remote_writer_guid: Guid,
-        update_state: bool,
+        update_state: bool, // should update instance state to NOT_ALIVE_NO_WRITERS if no candidates left
+        synthesize_notification: bool, // should data reader create an invalid-data sample
     ) -> DdsResult<()> {
         debug!("Removing writer {:?} from owner candidates", remote_writer_guid);
         for mut entry in self.owner_candidates.iter_mut() {
@@ -495,14 +494,18 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
             if writers.is_empty() {
                 debug!("No writers left for instance {:?}", *entry.key());
                 if update_state {
-                    self.data_reader
+                    let data_reader = self
+                        .data_reader
                         .upgrade()
-                        .ok_or(DdsError::Error("DataReader has been dropped".to_string()))?
-                        .update_instance_state(
-                            *entry.key(),
-                            InstanceStateKind::NOT_ALIVE_NO_WRITERS_INSTANCE_STATE,
-                            None,
-                        )?;
+                        .ok_or(DdsError::Error("DataReader has been dropped".to_string()))?;
+                    data_reader.update_instance_state(
+                        *entry.key(),
+                        InstanceStateKind::NOT_ALIVE_NO_WRITERS_INSTANCE_STATE,
+                        None,
+                    )?;
+                    if synthesize_notification {
+                        data_reader.mark_pending_notification(*entry.key())?;
+                    }
                 }
             } else {
                 debug!("Now the owner is {:?}", writers.first());
@@ -523,7 +526,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
 
         let current_owner = self.get_owner_of_instance(instance_handle);
         if let Some(owner_guid) = current_owner {
-            self.remove_writer_from_owner_candidates(owner_guid, false)?;
+            self.remove_writer_from_owner_candidates(owner_guid, false, false)?;
         }
 
         Ok(())
