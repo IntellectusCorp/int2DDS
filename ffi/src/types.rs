@@ -26,7 +26,7 @@ use int2dds::{
         data_reader::DataReader, qos::DataReaderQos, sample_info::SampleInfo,
         subscriber::Subscriber,
     },
-    topic::topic::Topic,
+    topic::{content_filtered_topic::ContentFilteredTopic, topic::Topic},
 };
 
 use crate::data::Int2DdsData;
@@ -68,6 +68,12 @@ pub struct Int2DdsDataReader {
 /// Opaque handle to a Topic
 pub struct Int2DdsTopic {
     pub(crate) inner: Arc<Topic>,
+    pub(crate) type_name: String,
+}
+
+/// Opaque handle to a ContentFilteredTopic
+pub struct Int2DdsContentFilteredTopic {
+    pub(crate) inner: ContentFilteredTopic,
     pub(crate) type_name: String,
 }
 
@@ -173,6 +179,8 @@ unsafe impl Send for Int2DdsDataReader {}
 unsafe impl Sync for Int2DdsDataReader {}
 unsafe impl Send for Int2DdsTopic {}
 unsafe impl Sync for Int2DdsTopic {}
+unsafe impl Send for Int2DdsContentFilteredTopic {}
+unsafe impl Sync for Int2DdsContentFilteredTopic {}
 unsafe impl Send for Int2DdsWaitSet {}
 unsafe impl Sync for Int2DdsWaitSet {}
 unsafe impl Send for Int2DdsGuardCondition {}

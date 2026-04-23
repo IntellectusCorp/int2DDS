@@ -8,7 +8,10 @@ use crate::rtps::common::time::RtpsTime;
 use bytes::Bytes;
 use speedy::{Context, Error, Readable, Writable, Writer};
 use std::time::Instant;
-use std::{collections::HashSet, io, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashSet},
+    io,
+};
 
 use crate::rtps::{
     common::{
@@ -16,7 +19,7 @@ use crate::rtps::{
         parameters::ParameterList,
         rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
         sequence::{FragmentNumber, SequenceNumber},
-        types::SerializedData,
+        types::SubmessagePayload,
     },
     messages::submessage_header::SubmessageHeader,
 };
@@ -25,7 +28,7 @@ const EXTRA_FLAGS: u16 = 0; // 9.4.5.3.2 - extraFlags
 const OCTETS_TO_INLINE_QOS: u16 = 28; // 9.4.5.3.3 - octetsToInlineQos
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DataFrag {
+pub(crate) struct DataFrag<'a> {
     pub reader_id: EntityId,
     pub writer_id: EntityId,
     pub writer_sn: SequenceNumber,
@@ -34,10 +37,10 @@ pub(crate) struct DataFrag {
     pub fragment_size: u16, // fragmentSize is the unit size determined by Writer when splitting the sample. This value must always be the same for the same Writer and the same sample
     pub sample_size: u32,
     inline_qos: Option<ParameterList>,
-    serialized_data: SerializedData,
+    serialized_data: SubmessagePayload<'a>,
 }
 
-impl DataFrag {
+impl<'a> DataFrag<'a> {
     pub(crate) fn new(
         reader_id: EntityId,
         writer_id: EntityId,
@@ -56,11 +59,11 @@ impl DataFrag {
             fragment_size,
             sample_size,
             inline_qos: None,
-            serialized_data: Arc::from(vec![]),
+            serialized_data: SubmessagePayload::default(),
         }
     }
 
-    pub(crate) fn add_serialized_data(&mut self, serialized_data: SerializedData) {
+    pub(crate) fn add_serialized_data(&mut self, serialized_data: SubmessagePayload<'a>) {
         self.serialized_data = serialized_data;
     }
 
@@ -83,8 +86,15 @@ impl DataFrag {
          + self.serialized_data.len() as u16
     }
 
-    pub(crate) fn serialized_data(&self) -> &[u8] {
-        &self.serialized_data
+    /// Return the payload as `Bytes` for zero-copy sub-slicing on the receive path.
+    ///
+    /// Returns `None` if the payload is `Borrowed` (only happens on the send
+    /// path, where the caller would not need shared ownership anyway).
+    pub(crate) fn serialized_bytes(&self) -> Option<Bytes> {
+        match &self.serialized_data {
+            SubmessagePayload::Owned(b) => Some(b.clone()),
+            SubmessagePayload::Borrowed(_) => None,
+        }
     }
 
     pub(crate) fn deserialize(
@@ -181,9 +191,12 @@ impl DataFrag {
             ));
         }
 
-        // truncate padding bytes - only keep actual fragment data
+        // truncate padding bytes - only keep actual fragment data.
+        // `serialized_data_bytes` is already a `Bytes` obtained via
+        // `buffer.slice(start_pos..)`, so slicing it further is a zero-copy
+        // refcount bump on the same backing allocation.
         let actual_len = std::cmp::min(serialized_data_bytes.len(), expected_data_size);
-        let serialized_data = Arc::from(serialized_data_bytes[..actual_len].to_vec());
+        let serialized_data = SubmessagePayload::Owned(serialized_data_bytes.slice(..actual_len));
 
         Ok(Self {
             reader_id,
@@ -199,7 +212,7 @@ impl DataFrag {
     }
 }
 
-impl<C: Context> Writable<C> for DataFrag {
+impl<C: Context> Writable<C> for DataFrag<'_> {
     fn write_to<T: ?Sized + Writer<C>>(&self, writer: &mut T) -> Result<(), C::Error> {
         writer.write_u16(EXTRA_FLAGS)?;
         writer.write_u16(OCTETS_TO_INLINE_QOS)?;
@@ -213,7 +226,7 @@ impl<C: Context> Writable<C> for DataFrag {
         if let Some(ref inline_qos) = self.inline_qos {
             writer.write_value(inline_qos)?;
         }
-        writer.write_bytes(self.serialized_data.as_ref())?;
+        writer.write_bytes(self.serialized_data.as_slice())?;
 
         Ok(())
     }
@@ -224,7 +237,7 @@ impl<C: Context> Writable<C> for DataFrag {
 pub(crate) struct FragmentBuffer {
     pub sequence_number: SequenceNumber,
     pub total_size: u32,
-    pub payload: Vec<u8>,
+    pub fragments: BTreeMap<u32, Bytes>,
     pub received_fragments: HashSet<u32>,
     pub total_fragments: u32,
     pub fragment_size: u16,
@@ -247,8 +260,8 @@ impl FragmentBuffer {
         Self {
             sequence_number,
             total_size,
-            payload: vec![0u8; total_size as usize],
-            received_fragments: std::collections::HashSet::new(),
+            fragments: BTreeMap::new(),
+            received_fragments: HashSet::new(),
             total_fragments,
             fragment_size,
             source_timestamp: None,
@@ -265,27 +278,39 @@ impl FragmentBuffer {
         self.received_fragments.insert(fragment_num);
     }
 
-    pub(crate) fn copy_fragment_data(&mut self, fragment_num: u32, data: &[u8]) -> bool {
-        // Calculate fragment_offset: (fragment_num - 1) * fragment_size
-        let fragment_offset = ((fragment_num - 1) * self.fragment_size as u32) as usize;
-
-        let actual_data_size = data.len();
-
-        // For the last fragment, adjust to actual data size
-        let max_available_size = self.payload.len() - fragment_offset;
-        let copy_size = std::cmp::min(actual_data_size, max_available_size);
-        let payload_end = fragment_offset + copy_size;
-
-        let payload_ok = payload_end <= self.payload.len();
-
-        if payload_ok {
-            self.payload[fragment_offset..payload_end].copy_from_slice(&data[..copy_size]);
-            self.received_fragments.insert(fragment_num);
-            self.last_updated = Instant::now();
-            true
-        } else {
-            false
+    /// Store a fragment's payload without copying.
+    ///
+    /// `data` is a `Bytes` sub-slice of the original socket buffer; inserting
+    /// it into the `BTreeMap` is a refcount bump, not a data copy. Returns
+    /// `false` if the fragment number or size is invalid.
+    pub(crate) fn copy_fragment_data(&mut self, fragment_num: u32, data: Bytes) -> bool {
+        if fragment_num == 0 || fragment_num > self.total_fragments {
+            return false;
         }
+
+        // Validate fragment data size
+        let expected_max = self.fragment_size as usize;
+        let remaining =
+            self.total_size as usize - ((fragment_num - 1) * self.fragment_size as u32) as usize;
+        let expected_size = std::cmp::min(expected_max, remaining);
+        if data.len() > expected_size {
+            return false;
+        }
+
+        self.fragments.insert(fragment_num, data);
+        self.received_fragments.insert(fragment_num);
+        self.last_updated = Instant::now();
+        true
+    }
+
+    /// Assemble all fragments into a contiguous Vec.
+    /// BTreeMap iteration is sorted by key (fragment_num), guaranteeing correct order.
+    pub(crate) fn assemble(self) -> Vec<u8> {
+        let mut result = Vec::with_capacity(self.total_size as usize);
+        for (_num, data) in self.fragments {
+            result.extend_from_slice(&data);
+        }
+        result
     }
 }
 
@@ -299,7 +324,7 @@ mod tests {
 
     use speedy::{Endianness, Writable};
 
-    fn create_dummy_datafrag() -> DataFrag {
+    fn create_dummy_datafrag() -> DataFrag<'static> {
         DataFrag {
             reader_id: EntityId::new([0x01, 0x00, 0x00], EntityKind::USER_DEFINED_READER_NO_KEY),
             writer_id: EntityId::new([0x02, 0x00, 0x00], EntityKind::USER_DEFINED_WRITER_NO_KEY),
@@ -309,7 +334,7 @@ mod tests {
             fragment_size: 1,
             sample_size: 2,
             inline_qos: None,
-            serialized_data: Arc::from(vec![0 as u8]),
+            serialized_data: SubmessagePayload::Owned(Bytes::from_static(&[0u8])),
         }
     }
 
@@ -341,7 +366,7 @@ mod tests {
         assert_eq!(datafrag.fragment_size, deserialized.fragment_size);
         assert_eq!(datafrag.sample_size, deserialized.sample_size);
         assert_eq!(datafrag.inline_qos, deserialized.inline_qos);
-        assert_eq!(&datafrag.serialized_data[..], &deserialized.serialized_data[..]);
+        assert_eq!(datafrag.serialized_data.as_slice(), deserialized.serialized_data.as_slice());
     }
 
     #[test]
@@ -368,7 +393,7 @@ mod tests {
         datafrag.sample_size = 3;
 
         // serialized data of 7 bytes when only 3 (+3 padding max) are expected
-        datafrag.serialized_data = Arc::from(vec![1, 2, 3, 4, 5, 6, 7]);
+        datafrag.serialized_data = SubmessagePayload::Owned(Bytes::from(vec![1, 2, 3, 4, 5, 6, 7]));
 
         let buffer = datafrag.write_to_vec_with_ctx(Endianness::BigEndian).unwrap();
 

@@ -5,7 +5,7 @@ use std::{
     fmt::Debug,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, Weak,
     },
     thread,
 };
@@ -39,7 +39,7 @@ use crate::{
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
             sequence::SequenceNumber,
             time::{RtpsDuration, RtpsTime},
-            types::{ChangeKind, SerializedData, TopicKind},
+            types::{ChangeKind, TopicKind},
         },
         entities::{
             endpoint::Endpoint,
@@ -53,6 +53,8 @@ use crate::{
     },
     utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
 };
+
+use crate::rtps::entities::participant::Participant;
 
 use super::{reader_proxy::ReaderProxy, Writer};
 
@@ -93,7 +95,7 @@ impl StatefulWriter {
         data_max_size_serialized: i32,
         callback: Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>,
         publication_builtin_topic_data: PublicationBuiltinTopicData,
-        participant_guid: Guid,
+        participant: Weak<Participant>,
     ) -> Self {
         let writer_reliability_extension =
             *publication_builtin_topic_data.writer_reliability_extension();
@@ -109,10 +111,7 @@ impl StatefulWriter {
             periodic_heartbeat_timer_id: TimerId::PeriodicHeartbeat { entity_id: guid.entity_id() },
             data_max_size_serialized,
             matched_readers: Arc::new(Mutex::new(Vec::new())),
-            writer_cache: Arc::new(Mutex::new(WriterHistoryCache::new(
-                participant_guid,
-                endpoint_id,
-            ))),
+            writer_cache: Arc::new(Mutex::new(WriterHistoryCache::new(participant, endpoint_id))),
             heartbeat_count: Arc::new(Mutex::new(1)),
             callback: Arc::new(Mutex::new(callback)),
             publication_builtin_topic_data: Arc::new(Mutex::new(publication_builtin_topic_data)),
@@ -370,10 +369,9 @@ impl StatefulWriter {
         seq_num: SequenceNumber,
     ) -> bool {
         match matched_readers.lock() {
-            Ok(readers) => readers
-                .iter()
-                .filter(|p| p.subscription_builtin_topic_data().is_reliable())
-                .all(|p| p.max_acked_sn() >= seq_num),
+            Ok(readers) => {
+                readers.iter().filter(|p| p.is_reliable()).all(|p| p.max_acked_sn() >= seq_num)
+            }
             Err(e) => {
                 error!("Failed to acquire matched_readers lock: {}", e);
                 false
@@ -512,7 +510,7 @@ impl Writer for StatefulWriter {
     fn new_change(
         &self,
         kind: ChangeKind,
-        data: SerializedData,
+        data: Vec<u8>,
         // inline_qos: ParameterList,
         handle: InstanceHandle,
         source_timestamp: Option<RtpsTime>,
@@ -557,7 +555,7 @@ impl Writer for StatefulWriter {
         kind: ChangeKind,
         handle: InstanceHandle,
         source_timestamp: Option<RtpsTime>,
-        data_fn: Box<dyn FnOnce(Guid, SequenceNumber) -> SerializedData + '_>,
+        data_fn: Box<dyn FnOnce(Guid, SequenceNumber) -> Vec<u8> + '_>,
     ) -> CacheChange {
         let last_change_sequence_number = match self.last_change_sequence_number.lock() {
             Ok(mut last_change_sequence_number) => {
@@ -618,6 +616,19 @@ impl Writer for StatefulWriter {
 
     fn nack_suppression_duration(&self) -> RtpsDuration {
         RtpsDuration::from(self.writer_reliability_extension.nack_suppression_duration)
+    }
+
+    fn allocate_sequence_number(&self) -> SequenceNumber {
+        match self.last_change_sequence_number.lock() {
+            Ok(mut seq) => {
+                *seq += 1;
+                *seq
+            }
+            Err(e) => {
+                error!("Failed to acquire last_change_sequence_number lock: {}", e);
+                SequenceNumber::UNKNOWN
+            }
+        }
     }
 
     fn push_mode(&self) -> bool {
@@ -726,7 +737,7 @@ impl Writer for StatefulWriter {
         reader_guid: Guid,
     ) -> RtpsResult<SubscriptionBuiltinTopicData> {
         if let Some(reader) = self.matched_reader_lookup(reader_guid) {
-            Ok(reader.subscription_builtin_topic_data())
+            Ok(reader.subscription_builtin_topic_data().clone())
         } else {
             Err(RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, ""))
         }
@@ -818,7 +829,7 @@ mod tests {
             65000,
             None,
             PublicationBuiltinTopicData::default(),
-            Guid::new([0; 12], EntityId::PARTICIPANT),
+            Weak::new(),
         );
 
         let remote_reader_guid =
@@ -889,7 +900,7 @@ mod tests {
             65000,
             None,
             PublicationBuiltinTopicData::default(),
-            Guid::new([0; 12], EntityId::PARTICIPANT),
+            Weak::new(),
         );
 
         let remote_reader_guid =

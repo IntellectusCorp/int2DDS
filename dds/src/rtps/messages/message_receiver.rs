@@ -52,8 +52,8 @@ use std::sync::Arc;
 pub enum TypedSubmessage<'a> {
     Heartbeat(&'a SubmessageHeader, &'a Heartbeat),
     AckNack(&'a SubmessageHeader, &'a AckNack),
-    Data(&'a SubmessageHeader, &'a Data),
-    DataFrag(&'a SubmessageHeader, &'a DataFrag),
+    Data(&'a SubmessageHeader, &'a Data<'static>),
+    DataFrag(&'a SubmessageHeader, &'a DataFrag<'static>),
     NackFrag(&'a SubmessageHeader, &'a NackFrag),
     Gap(&'a SubmessageHeader, &'a Gap),
 }
@@ -70,7 +70,7 @@ pub(crate) struct MessageReceiver {
     multicast_reply_locator_list: Vec<Locator>,
     have_timestamp: bool,
     timestamp: RtpsTime,
-    rtps_message: Option<Arc<RtpsMessage>>,
+    rtps_message: Option<Arc<RtpsMessage<'static>>>,
     sender_addr: SocketAddr, // for extended discovery message
 }
 
@@ -141,11 +141,11 @@ impl MessageReceiver {
         info_reply_header: &SubmessageHeader,
         info_reply: &InfoReply,
     ) {
-        self.unicast_reply_locator_list = info_reply.unicast_locator_list();
+        self.unicast_reply_locator_list = info_reply.unicast_locator_list().to_vec();
         if let Some(true) = info_reply_header.multicast_flag() {
-            self.multicast_reply_locator_list = info_reply.multicast_locator_list();
+            self.multicast_reply_locator_list = info_reply.multicast_locator_list().to_vec();
         } else {
-            self.multicast_reply_locator_list = Vec::new();
+            self.multicast_reply_locator_list.clear();
         }
     }
 
@@ -157,9 +157,10 @@ impl MessageReceiver {
         info_reply_ip4: &InfoReplyIp4,
     ) {
         if let Some(endianness) = info_reply_ip4_header.endianness_flag() {
-            self.unicast_reply_locator_list =
-                vec![info_reply_ip4.unicast_locator().to_locator(endianness)];
-            self.multicast_reply_locator_list = Vec::new();
+            self.unicast_reply_locator_list.clear();
+            self.unicast_reply_locator_list
+                .push(info_reply_ip4.unicast_locator().to_locator(endianness));
+            self.multicast_reply_locator_list.clear();
             if let Some(locator) = info_reply_ip4.multicast_locator() {
                 self.multicast_reply_locator_list.push(locator.to_locator(endianness));
             }
@@ -172,8 +173,10 @@ impl MessageReceiver {
         self.source_guid_prefix = info_source.guid_prefix();
         self.source_version = info_source.protocol_version();
         self.source_vendor_id = info_source.vendor_id();
-        self.unicast_reply_locator_list = vec![LOCATOR_INVALID];
-        self.multicast_reply_locator_list = vec![LOCATOR_INVALID];
+        self.unicast_reply_locator_list.clear();
+        self.unicast_reply_locator_list.push(LOCATOR_INVALID);
+        self.multicast_reply_locator_list.clear();
+        self.multicast_reply_locator_list.push(LOCATOR_INVALID);
         self.have_timestamp = false
     }
 
@@ -200,7 +203,7 @@ impl MessageReceiver {
         }
     }
 
-    pub(crate) fn init(&mut self, buffer: &Bytes) -> RtpsResult<Arc<RtpsMessage>> {
+    pub(crate) fn init(&mut self, buffer: &Bytes) -> RtpsResult<Arc<RtpsMessage<'static>>> {
         if buffer.len() < RTPS_HEADER_LENGTH as usize {
             return Err(RtpsError::new(
                 RtpsErrorCode::BufferTooShortForRtpsHeader,
@@ -608,10 +611,10 @@ impl MessageReceiver {
         &self,
         reader_entity_id: EntityId,
         writer_entity_id: EntityId,
-    ) -> Option<Arc<[u8]>> {
+    ) -> Option<bytes::Bytes> {
         if let Some(rtps_message) = &self.rtps_message {
             let mut visited: bool = false;
-            let mut payload: Option<Arc<[u8]>> = None;
+            let mut payload: Option<bytes::Bytes> = None;
             for submessage in &rtps_message.submessages {
                 if let SubmessageBody::Data(data) = &submessage.body {
                     if data.reader_id == reader_entity_id && data.writer_id == writer_entity_id {
@@ -629,7 +632,11 @@ impl MessageReceiver {
     }
 
     pub(crate) fn parse_submessages(&self) -> Vec<TypedSubmessage<'_>> {
-        let mut submessages: Vec<TypedSubmessage> = Vec::new();
+        let mut submessages: Vec<TypedSubmessage> = if let Some(rtps_message) = &self.rtps_message {
+            Vec::with_capacity(rtps_message.submessages.len())
+        } else {
+            Vec::new()
+        };
         if let Some(rtps_message) = &self.rtps_message {
             for submessage in &rtps_message.submessages {
                 match &submessage.body {
