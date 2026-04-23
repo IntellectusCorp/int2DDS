@@ -37,6 +37,6 @@ pub mod auto_relay;
 pub mod config;
 pub mod topic_relay;
 
-pub use auto_relay::{AutoRelay, TopicFilter};
-pub use config::{AutoRelayConfig, NodeConfig, RouteGatewayConfig};
-pub use topic_relay::TopicRelay;
+pub use auto_relay::{AutoRelay, QosResolver, TopicFilter};
+pub use config::{AutoRelayConfig, NodeConfig, RouteGatewayConfig, TopicRelayRule};
+pub use topic_relay::{TopicRelay, TopicRelayQos};

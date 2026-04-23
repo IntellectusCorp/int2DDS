@@ -30,17 +30,47 @@ use crate::{
     xtypes::{DynamicData, TypeObject},
 };
 
-fn relay_reader_qos() -> DataReaderQos {
+/// Built-in fallback DataReaderQos used when the gateway config supplies no
+/// override. `KEEP_ALL` is preferred over the library default `KEEP_LAST(1)`
+/// so a momentary relay stall does not silently drop samples; every other
+/// policy stays on its type default.
+pub fn default_relay_reader_qos() -> DataReaderQos {
     DataReaderQos {
         history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
         ..Default::default()
     }
 }
 
-fn relay_writer_qos() -> DataWriterQos {
+/// Built-in fallback DataWriterQos. See [`default_relay_reader_qos`].
+pub fn default_relay_writer_qos() -> DataWriterQos {
     DataWriterQos {
         history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
         ..Default::default()
+    }
+}
+
+/// The four QoS objects a [`TopicRelay`] installs on its endpoints.
+///
+/// Each side of the relay is an independent DDS endpoint and takes its own
+/// QoS; SEDP matching with local pub/sub happens per side. Reader-side and
+/// writer-side QoS can differ freely (this mirrors the RTI Routing Service
+/// `<input>` / `<output>` model).
+#[derive(Debug, Clone)]
+pub struct TopicRelayQos {
+    pub local_reader: DataReaderQos,
+    pub local_writer: DataWriterQos,
+    pub remote_reader: DataReaderQos,
+    pub remote_writer: DataWriterQos,
+}
+
+impl Default for TopicRelayQos {
+    fn default() -> Self {
+        Self {
+            local_reader: default_relay_reader_qos(),
+            local_writer: default_relay_writer_qos(),
+            remote_reader: default_relay_reader_qos(),
+            remote_writer: default_relay_writer_qos(),
+        }
     }
 }
 
@@ -78,6 +108,19 @@ impl TopicRelay {
         topic_name: &str,
         type_object: TypeObject,
     ) -> DdsResult<Self> {
+        Self::new_with_qos(local, remote, topic_name, type_object, TopicRelayQos::default())
+    }
+
+    /// Create a TopicRelay with explicit per-endpoint QoS. Use this when
+    /// local pub/sub requires non-default policies (RELIABLE, TRANSIENT_LOCAL,
+    /// ownership, deadline, etc.) so SEDP actually matches.
+    pub fn new_with_qos(
+        local: &DomainParticipant,
+        remote: &DomainParticipant,
+        topic_name: &str,
+        type_object: TypeObject,
+        qos: TopicRelayQos,
+    ) -> DdsResult<Self> {
         let local_type_support =
             Arc::new(local.create_dynamic_type_from_type_object(type_object.clone())?);
         let remote_type_support =
@@ -110,28 +153,28 @@ impl TopicRelay {
         let local_reader = Arc::new(local_subscriber.create_datareader_dynamic(
             &local_topic,
             local_type_support.clone(),
-            relay_reader_qos(),
+            qos.local_reader,
             None,
             StatusMask::default(),
         )?);
         let local_writer = Arc::new(local_publisher.create_datawriter_dynamic(
             &local_topic,
             local_type_support,
-            relay_writer_qos(),
+            qos.local_writer,
             None,
             StatusMask::default(),
         )?);
         let remote_reader = Arc::new(remote_subscriber.create_datareader_dynamic(
             &remote_topic,
             remote_type_support.clone(),
-            relay_reader_qos(),
+            qos.remote_reader,
             None,
             StatusMask::default(),
         )?);
         let remote_writer = Arc::new(remote_publisher.create_datawriter_dynamic(
             &remote_topic,
             remote_type_support,
-            relay_writer_qos(),
+            qos.remote_writer,
             None,
             StatusMask::default(),
         )?);

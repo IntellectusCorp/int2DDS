@@ -36,6 +36,8 @@ use std::{
 };
 
 use clap::Parser;
+use std::sync::Arc as StdArc;
+
 use int2dds::{
     common::{
         env::{set_console_log_level, set_log_type},
@@ -43,7 +45,7 @@ use int2dds::{
     },
     domain::domain_participant_factory::DomainParticipantFactory,
     infrastructure::status::StatusMask,
-    route_gateway::{AutoRelay, RouteGatewayConfig, TopicFilter},
+    route_gateway::{AutoRelay, QosResolver, RouteGatewayConfig, TopicFilter},
 };
 
 #[derive(Parser, Debug)]
@@ -80,7 +82,20 @@ fn main() {
         cfg.remote.initial_peers
     );
     println!("  auto_relay filter: {}", cfg.auto_relay.filter);
+    println!(
+        "  qos rules: {} override(s), defaults L-R/L-W/R-R/R-W = [{:?}/{:?}/{:?}/{:?}]",
+        cfg.topic_relays.len(),
+        cfg.auto_relay.default_local_reader_qos,
+        cfg.auto_relay.default_local_writer_qos,
+        cfg.auto_relay.default_remote_reader_qos,
+        cfg.auto_relay.default_remote_writer_qos,
+    );
     println!("  poll period: {} ms", cfg.poll_period_ms);
+
+    let qos_resolver = StdArc::new(
+        QosResolver::from_config(&cfg.auto_relay, &cfg.topic_relays)
+            .unwrap_or_else(|e| panic!("Invalid QoS configuration: {:?}", e)),
+    );
 
     let factory = DomainParticipantFactory::get_instance();
 
@@ -106,10 +121,11 @@ fn main() {
             .expect("Failed to create RemoteNode participant"),
     );
 
-    let auto = AutoRelay::new(
+    let auto = AutoRelay::with_qos(
         local_node,
         remote_node,
         TopicFilter::new(cfg.auto_relay.filter.clone()),
+        qos_resolver,
     )
     .expect("Failed to create AutoRelay");
 
