@@ -215,8 +215,8 @@ impl WriterProxy {
         self.remote_writer_guid
     }
 
-    pub(crate) fn unicast_locator_list(&self) -> Vec<Locator> {
-        self.unicast_locator_list.clone()
+    pub(crate) fn unicast_locator_list(&self) -> &[Locator] {
+        &self.unicast_locator_list
     }
 
     pub(crate) fn increment_expected_sn(&mut self) {

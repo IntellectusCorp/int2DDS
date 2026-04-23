@@ -24,15 +24,9 @@ use crate::{
 pub struct ReaderHistoryCache {
     owner_id: EntityId,
     changes: Vec<Arc<CacheChange>>,
-    datareader_cache: Option<
-        Weak<
-            Mutex<
-                dyn dcps_history_cache<CacheChangeInputType = Arc<Mutex<CacheChange>>>
-                    + Send
-                    + Sync,
-            >,
-        >,
-    >, // Builtin endpoints do not have associated DDS entity at the moment, optional for now.
+    // Builtin endpoints do not have associated DDS entity at the moment, optional for now.
+    // Use dyn trait object to erase the type parameter.
+    datareader_cache: Option<Weak<Mutex<dyn dcps_history_cache + Send + Sync>>>,
 }
 
 impl HistoryCache for ReaderHistoryCache {
@@ -85,15 +79,7 @@ impl HistoryCache for ReaderHistoryCache {
 impl ReaderHistoryCache {
     pub(crate) fn new(
         owner_id: EntityId,
-        datareader_cache: Option<
-            Arc<
-                Mutex<
-                    dyn dcps_history_cache<CacheChangeInputType = Arc<Mutex<CacheChange>>>
-                        + Send
-                        + Sync,
-                >,
-            >,
-        >,
+        datareader_cache: Option<Arc<Mutex<dyn dcps_history_cache + Send + Sync>>>,
     ) -> Self {
         Self {
             owner_id,
@@ -115,53 +101,45 @@ impl ReaderHistoryCache {
 
     pub(crate) fn set_datareader_cache(
         &mut self,
-        datareader_cache: Weak<
-            Mutex<
-                dyn dcps_history_cache<CacheChangeInputType = Arc<Mutex<CacheChange>>>
-                    + Send
-                    + Sync,
-            >,
-        >,
+        datareader_cache: Weak<Mutex<dyn dcps_history_cache + Send + Sync>>,
     ) {
         self.datareader_cache = Some(datareader_cache);
     }
 
     /// Add CacheChange to ReaderHistoryCache.
-    /// This takes mutex-wrapped CacheChange as input to set instance handle before making it immutable on the DataReader's side.
-    pub(crate) fn add_change(&mut self, a_change: CacheChange) -> RtpsResult<Arc<CacheChange>> {
+    /// Mutates the change via DataReaderHistoryCache (instance handle, reception timestamp),
+    /// then wraps in Arc once and shares between RTPS and DCPS histories. Zero deep copies.
+    pub(crate) fn add_change(&mut self, mut a_change: CacheChange) -> RtpsResult<Arc<CacheChange>> {
         if let Some(datareader_cache_weak) = &self.datareader_cache {
             if let Some(datareader_cache_arc) = datareader_cache_weak.upgrade() {
-                // This can be modified by DataReader so wrap with mutex first.
-                let mutex_wrapped = Arc::new(Mutex::new(a_change));
+                let mut datareader_cache = datareader_cache_arc.lock().map_err(|_| {
+                    RtpsError::new(
+                        RtpsErrorCode::LockError,
+                        "Failed to acquire DataReader cache lock",
+                    )
+                })?;
 
-                let removed_cache: Option<Arc<CacheChange>> = match datareader_cache_arc.lock() {
-                    Ok(mut datareader_cache) => {
-                        // Add change to DataReaderHistoryCache
-                        // DDS DataReaderHistoryCache may evict old changes according to History & Resource Limits QoS
-                        datareader_cache
-                            .add_change_with_cleanup(mutex_wrapped.clone())
-                            .map_err(|e| RtpsError::new(RtpsErrorCode::DdsError, e.to_string()))?
-                    }
-                    Err(_) => {
-                        return Err(RtpsError::new(
-                            RtpsErrorCode::LockError,
-                            "Failed to acquire DataReader cache lock",
-                        ));
-                    }
-                };
+                // Mutate the change before making it immutable
+                datareader_cache
+                    .add_info_to_cache_change(&mut a_change)
+                    .map_err(|e| RtpsError::new(RtpsErrorCode::DdsError, e.to_string()))?;
 
-                // If DataReaderHistoryCache evicted a CacheChange, remove it from RTPS ReaderHistoryCache as well
-                if let Some(removed_change) = removed_cache {
+                // Wrap in Arc once — no deep copy
+                let shared = Arc::new(a_change);
+
+                // Insert into DataReaderHistoryCache (Arc::clone only)
+                let removed = datareader_cache
+                    .add_change_with_cleanup(Arc::clone(&shared))
+                    .map_err(|e| RtpsError::new(RtpsErrorCode::DdsError, e.to_string()))?;
+
+                // Insert into RTPS ReaderHistoryCache (Arc::clone only)
+                self.changes.push(Arc::clone(&shared));
+
+                if let Some(removed_change) = removed {
                     self.remove_change(removed_change)?;
                 }
 
-                let change_guard = mutex_wrapped.lock().map_err(|_| {
-                    RtpsError::new(RtpsErrorCode::LockError, "Failed to lock CacheChange")
-                })?;
-                let immutable_change = Arc::new(change_guard.clone());
-
-                self.changes.push(immutable_change.clone());
-                return Ok(immutable_change);
+                return Ok(shared);
             }
         }
 
@@ -173,9 +151,9 @@ impl ReaderHistoryCache {
                 self.changes.remove(0);
             }
 
-            let immutable_change = Arc::new(a_change);
-            self.changes.push(immutable_change.clone());
-            Ok(immutable_change)
+            let shared = Arc::new(a_change);
+            self.changes.push(Arc::clone(&shared));
+            Ok(shared)
         } else {
             // Non-builtin endpoint must have DataReader cache
             Err(RtpsError::new(

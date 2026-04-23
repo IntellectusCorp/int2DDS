@@ -3,7 +3,7 @@
 
 use std::{
     fmt::Debug,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
 };
 
 use log::{debug, error};
@@ -32,7 +32,7 @@ use crate::{
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
             sequence::SequenceNumber,
             time::{RtpsDuration, RtpsTime},
-            types::{ChangeKind, SerializedData, TopicKind},
+            types::{ChangeKind, TopicKind},
         },
         entities::{
             endpoint::Endpoint,
@@ -41,6 +41,8 @@ use crate::{
         },
     },
 };
+
+use crate::rtps::entities::participant::Participant;
 
 use super::{reader_locator::ReaderLocator, Writer};
 
@@ -83,7 +85,7 @@ impl StatelessWriter {
         data_max_size_serialized: i32,
         callback: Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>,
         publication_builtin_topic_data: PublicationBuiltinTopicData,
-        participant_guid: Guid,
+        participant: Weak<Participant>,
     ) -> Self {
         // in:attribute_values
         // 8.4.7.1.1 & 8.4.7.1.2 & 8.4.7.2.1
@@ -105,10 +107,7 @@ impl StatelessWriter {
             heartbeat_period,
             data_max_size_serialized,
             reader_locators: Arc::new(Mutex::new(Vec::new())),
-            writer_cache: Arc::new(Mutex::new(WriterHistoryCache::new(
-                participant_guid,
-                endpoint_id,
-            ))),
+            writer_cache: Arc::new(Mutex::new(WriterHistoryCache::new(participant, endpoint_id))),
             callback: Arc::new(Mutex::new(callback)),
             publication_builtin_topic_data: Arc::new(Mutex::new(publication_builtin_topic_data)),
             publication_matched_status: Arc::new(Mutex::new(PublicationMatchedStatus::default())),
@@ -260,7 +259,7 @@ impl Writer for StatelessWriter {
     fn new_change(
         &self,
         kind: ChangeKind,
-        data: SerializedData,
+        data: Vec<u8>,
         // inline_qos: ParameterList,
         handle: InstanceHandle,
         source_timestamp: Option<RtpsTime>,
@@ -305,7 +304,7 @@ impl Writer for StatelessWriter {
         kind: ChangeKind,
         handle: InstanceHandle,
         source_timestamp: Option<RtpsTime>,
-        data_fn: Box<dyn FnOnce(Guid, SequenceNumber) -> SerializedData + '_>,
+        data_fn: Box<dyn FnOnce(Guid, SequenceNumber) -> Vec<u8> + '_>,
     ) -> CacheChange {
         let last_change_sequence_number = match self.last_change_sequence_number.lock() {
             Ok(mut last_change_sequence_number) => {
@@ -366,6 +365,19 @@ impl Writer for StatelessWriter {
 
     fn nack_suppression_duration(&self) -> RtpsDuration {
         self.nack_suppression_duration
+    }
+
+    fn allocate_sequence_number(&self) -> SequenceNumber {
+        match self.last_change_sequence_number.lock() {
+            Ok(mut seq) => {
+                *seq += 1;
+                *seq
+            }
+            Err(e) => {
+                log::error!("Failed to acquire last_change_sequence_number lock: {}", e);
+                SequenceNumber::UNKNOWN
+            }
+        }
     }
 
     fn push_mode(&self) -> bool {
@@ -441,7 +453,7 @@ impl Writer for StatelessWriter {
         reader_guid: Guid,
     ) -> RtpsResult<SubscriptionBuiltinTopicData> {
         if let Some(reader) = self.matched_reader_lookup(reader_guid) {
-            Ok(reader.subscription_builtin_topic_data())
+            Ok(reader.subscription_builtin_topic_data().clone())
         } else {
             Err(RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, ""))
         }
