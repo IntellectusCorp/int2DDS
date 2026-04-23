@@ -732,15 +732,15 @@ impl TcpSender {
         }
     }
 
-    /// Send keepalive on each outgoing control connection.
+    /// Execute one keepalive cycle: send on each outgoing control connection and
+    /// evict peers whose keepalive budget is exhausted or whose send failed.
     /// ACK waiting is offloaded to a spawned thread so the mux loop is never blocked.
-    /// Returns list of peer addresses that have exceeded max missed keepalives.
-    pub(crate) fn send_keepalives(&self) -> Vec<SocketAddr> {
+    /// Dead peers are disconnected in-place (which also fires `dead_peer_tx`).
+    pub(crate) fn execute_keepalives(&self) {
         let max_missed: u32 = crate::common::env::get_tcp_keepalive_max_misses();
 
         let ack_timeout = Duration::from_millis(crate::common::env::get_tcp_keepalive_timeout_ms());
 
-        let mut dead_peers = Vec::new();
         let control_peers: Vec<SocketAddr> = self
             .connections
             .iter()
@@ -753,7 +753,7 @@ impl TcpSender {
 
             if missed >= max_missed {
                 warn!("TcpSender: Peer {:?} missed {} keepalives", peer_addr, missed);
-                dead_peers.push(peer_addr);
+                self.disconnect_peer(&peer_addr);
                 continue;
             }
 
@@ -767,7 +767,6 @@ impl TcpSender {
             if let Err(e) = write_framed_message(&mut stream, &ControlMsg::Keepalive.to_bytes()) {
                 warn!("TcpSender: Keepalive send failed to {:?}: {:?}", peer_addr, e);
                 self.disconnect_peer(&peer_addr);
-                dead_peers.push(peer_addr);
                 continue;
             }
 
@@ -797,8 +796,6 @@ impl TcpSender {
                 })
                 .ok();
         }
-
-        dead_peers
     }
 
     /// Prune outgoing data connections whose control connection is missing.

@@ -170,7 +170,7 @@ impl TcpTransportPlugin {
         // is signaled exactly once per peer drop. In asymmetric mode this
         // is the *only* signal path — the keepalive timer cannot probe a
         // peer once disconnect_peer wipes the port-0 control entry, since
-        // ensure_control short-circuits and send_keepalives skips it.
+        // ensure_control short-circuits and execute_keepalives skips it.
         sender.set_dead_peer_tx(dead_peer_tx);
 
         // Always spawn the mux task — in asymmetric mode the underlying
@@ -485,16 +485,7 @@ impl TcpMuxListeningLoopTask {
 
                         if last_keepalive.elapsed() >= keepalive_interval {
                             last_keepalive = Instant::now();
-                            let dead_addrs = timer_sender.send_keepalives();
-                            for addr in dead_addrs {
-                                warn!(
-                                    "[TcpMuxListeningLoopTask] Dead peer via keepalive: {:?}",
-                                    addr
-                                );
-                                // disconnect_peer fires dead_peer_tx internally,
-                                // so we don't try_send here — single source of truth.
-                                timer_sender.disconnect_peer(&addr);
-                            }
+                            timer_sender.execute_keepalives();
                         }
 
                         if last_orphan.elapsed() >= orphan_check_interval {
