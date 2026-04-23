@@ -4,7 +4,7 @@
 //! endpoints (SPDP and SEDP readers/writers) used in the RTPS discovery protocol.
 //! These endpoints handle participant, publication, and subscription discovery.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use log::debug;
 
@@ -97,7 +97,7 @@ impl BuiltinEndpoints {
             1024,
             None,
             PublicationBuiltinTopicData::default(),
-            participant_guid,
+            Weak::new(),
         );
         let sedp_publications_reader = StatefulReader::new(
             Guid::new(participant_guid.prefix(), EntityId::SEDP_BUILTIN_PUBLICATIONS_READER),
@@ -122,7 +122,7 @@ impl BuiltinEndpoints {
             1024,
             None,
             PublicationBuiltinTopicData::default(),
-            participant_guid,
+            Weak::new(),
         );
         let sedp_subscriptions_reader = StatefulReader::new(
             Guid::new(participant_guid.prefix(), EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_READER),
@@ -149,7 +149,7 @@ impl BuiltinEndpoints {
             1024,
             None,
             PublicationBuiltinTopicData::default(),
-            participant_guid,
+            Weak::new(),
         );
         let sedp_topics_reader = StatefulReader::new(
             Guid::new(participant_guid.prefix(), EntityId::SEDP_BUILTIN_TOPICS_READER),
@@ -178,7 +178,7 @@ impl BuiltinEndpoints {
             1024,
             None,
             PublicationBuiltinTopicData::default(),
-            participant_guid,
+            Weak::new(),
         );
         let builtin_participant_message_reader = StatefulReader::new(
             Guid::new(participant_guid.prefix(), EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_READER),

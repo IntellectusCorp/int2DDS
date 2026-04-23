@@ -30,8 +30,6 @@ use crate::{
 };
 
 pub(crate) trait HistoryCache {
-    type CacheChangeInputType;
-
     fn get_changes(&self) -> &Vec<Arc<CacheChange>>;
     fn get_changes_mut(&mut self) -> &mut Vec<Arc<CacheChange>>;
     fn get_instance_map(
@@ -46,8 +44,15 @@ pub(crate) trait HistoryCache {
     }
     fn add_change_with_cleanup(
         &mut self,
-        a_change: Self::CacheChangeInputType,
+        a_change: Arc<CacheChange>,
     ) -> DdsResult<Option<Arc<CacheChange>>>; // Returns removed CacheChange while ensuring capacity
+
+    /// Mutate a CacheChange before making it immutable (set instance handle, reception timestamp, etc.)
+    /// Default: no-op. Only DataReaderHistoryCache overrides this.
+    fn add_info_to_cache_change(&mut self, _change: &mut CacheChange) -> DdsResult<()> {
+        Ok(())
+    }
+
     fn remove_change(&mut self, a_change: Arc<CacheChange>) -> DdsResult<()>;
     fn ensure_capacity(
         &mut self,

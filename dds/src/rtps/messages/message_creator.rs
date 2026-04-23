@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use log::{debug, info};
+use smallvec::SmallVec;
 use speedy::{Endianness, Writable};
 
 use crate::rtps::{
@@ -18,7 +19,7 @@ use crate::rtps::{
         parameters::{Parameter, ParameterId, ParameterList, StatusInfo},
         rtps_error_code::RtpsResult,
         sequence::{FragmentNumberSet, SequenceNumber},
-        types::{ChangeKind, SerializedData},
+        types::{ChangeKind, SubmessagePayload},
     },
     entities::{entity::Entity, history::cache_change::CacheChange, participant::Participant},
     messages::{
@@ -38,7 +39,9 @@ use crate::rtps::{
 pub(crate) struct MessageCreator {}
 
 impl MessageCreator {
-    pub(crate) fn create_spdp_msg(participant: Arc<Participant>) -> RtpsResult<Arc<RtpsMessage>> {
+    pub(crate) fn create_spdp_msg(
+        participant: Arc<Participant>,
+    ) -> RtpsResult<Arc<RtpsMessage<'static>>> {
         let (participant_guid, _) = {
             let local_participant_data = participant.local_participant_proxy_data();
             (
@@ -57,7 +60,7 @@ impl MessageCreator {
 
     pub(crate) fn create_spdp_msg_with_inline_qos(
         participant: Arc<Participant>,
-    ) -> RtpsResult<Arc<RtpsMessage>> {
+    ) -> RtpsResult<Arc<RtpsMessage<'static>>> {
         let mut param_list = ParameterList::default();
         let key_hash = participant.guid().to_bytes();
         param_list.add_parameter(Self::create_key_hash_parameter(&key_hash));
@@ -138,14 +141,15 @@ impl MessageCreator {
     }
 
     pub(crate) fn create_data_msg(
-        cache_change: Arc<CacheChange>,
+        cache_change: &CacheChange,
         remote_guid: Guid,
         reader_entity_id: EntityId,
         writer_entity_id: EntityId,
         heartbeat_info: Option<(u32, SequenceNumber, SequenceNumber, bool, bool)>,
-        use_inline_qos: bool, // TODO: Can be changed to Vec<Parameter> in the future
+        use_inline_qos: bool,
         content_filter_info: Option<ContentFilterInfo>,
-    ) -> Result<Arc<Vec<u8>>, Box<dyn std::error::Error>> {
+        send_buffer: &mut Vec<u8>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         debug!("Creating RTPS message from cache change: {:?}", cache_change);
 
         let mut rtps_message = RtpsMessage::new(Header::new(cache_change.writer_guid().prefix()));
@@ -216,7 +220,7 @@ impl MessageCreator {
             }
         }
 
-        data.add_serialized_data(cache_change.data_value_arc());
+        data.add_serialized_data(SubmessagePayload::Borrowed(cache_change.data_value()));
         let data_submessage = Submessage {
             header: SubmessageHeader::new(
                 SubmessageId::DATA,
@@ -244,16 +248,16 @@ impl MessageCreator {
             rtps_message.add_submessage(heartbeat_submessage);
         }
 
-        // Serialize the complete RTPS message
-        match rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian) {
-            Ok(buffer) => Ok(Arc::new(buffer)),
-            Err(e) => Err(Box::new(e)),
-        }
+        // Serialize directly into the reusable Vec via its `Write` impl.
+        // Avoids the `bytes_needed` pre-pass and the zero-fill from `resize(_, 0)`.
+        send_buffer.clear();
+        rtps_message.write_to_stream_with_ctx(Endianness::LittleEndian, &mut *send_buffer)?;
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn create_data_frag_msg(
-        cache_change: Arc<CacheChange>,
+        cache_change: &CacheChange,
         remote_guid: Guid,
         reader_entity_id: EntityId,
         writer_entity_id: EntityId,
@@ -261,10 +265,11 @@ impl MessageCreator {
         fragments_in_submessage: u16,
         fragment_size: u16,
         sample_size: u32,
-        fragment_data: SerializedData,
+        fragment_data: &[u8],
         heartbeat_info: Option<(u32, SequenceNumber, SequenceNumber, bool, bool)>,
         timestamp: DateTime<Utc>,
-    ) -> Result<Arc<Vec<u8>>, Box<dyn std::error::Error>> {
+        send_buffer: &mut Vec<u8>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut rtps_message = RtpsMessage::new(Header::new(cache_change.writer_guid().prefix()));
 
         rtps_message
@@ -285,8 +290,7 @@ impl MessageCreator {
             sample_size,
         );
 
-        // Zero-copy: directly use the Arc<[u8]> fragment data
-        data_frag.add_serialized_data(fragment_data);
+        data_frag.add_serialized_data(SubmessagePayload::Borrowed(fragment_data));
 
         let data_frag_submessage = Submessage {
             header: SubmessageHeader::new(
@@ -315,11 +319,10 @@ impl MessageCreator {
             rtps_message.add_submessage(heartbeat_submessage);
         }
 
-        // Serialize the complete RTPS message
-        match rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian) {
-            Ok(buffer) => Ok(Arc::new(buffer)),
-            Err(e) => Err(Box::new(e)),
-        }
+        // Serialize directly into the reusable Vec via its `Write` impl.
+        send_buffer.clear();
+        rtps_message.write_to_stream_with_ctx(Endianness::LittleEndian, &mut *send_buffer)?;
+        Ok(())
     }
 
     pub(crate) fn create_gap_msg_consecutive(
@@ -353,7 +356,7 @@ impl MessageCreator {
         writer_entity_id: EntityId,
         gap_list: &mut Vec<SequenceNumber>,
     ) -> Result<Vec<Arc<Vec<u8>>>, Box<dyn std::error::Error>> {
-        let mut gap_rtps_messages = Vec::new();
+        let mut gap_rtps_messages = Vec::with_capacity(gap_list.len());
         gap_list.sort();
 
         while !gap_list.is_empty() {
@@ -425,11 +428,11 @@ impl MessageCreator {
 
     /// Create KeyHash inline QoS parameter
     pub(crate) fn create_key_hash_parameter(key_hash: &[u8; 16]) -> Parameter {
-        Parameter::new(ParameterId::PidKeyHash, key_hash.to_vec())
+        Parameter::new(ParameterId::PidKeyHash, SmallVec::from_slice(key_hash))
     }
 
     /// Create StatusInfo inline QoS parameter
     pub(crate) fn create_status_info_parameter(flags: &[u8; 4]) -> Parameter {
-        Parameter::new(ParameterId::PidStatusInfo, flags.to_vec())
+        Parameter::new(ParameterId::PidStatusInfo, SmallVec::from_slice(flags))
     }
 }

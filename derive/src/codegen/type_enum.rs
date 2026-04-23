@@ -44,10 +44,10 @@ pub fn derive_enum_impl(
         }
     };
 
-    // Resolve extensibility for unions (defaults to Final if unspecified).
-    // C-style enums have no extensibility but the helper still emits the
-    // hardcoded Final variant via this value.
-    let union_extensibility = type_config.extensibility.unwrap_or(ExtensibilityKind::Final);
+    // Resolve extensibility for unions (defaults to Appendable per XTypes spec
+    // when unspecified). C-style enums have no extensibility but the helper
+    // still emits the hardcoded Final variant via this value.
+    let union_extensibility = type_config.extensibility.unwrap_or(ExtensibilityKind::Appendable);
 
     // Generate TypeSupport trait implementation for enum/union
     let type_support_impl = generate_enum_type_support_impl(
