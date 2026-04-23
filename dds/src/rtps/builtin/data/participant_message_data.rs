@@ -91,8 +91,8 @@ impl ParticipantMessageData {
         self.kind == ParticipantMessageDataKind::MANUAL_LIVELINESS_UPDATE
     }
 
-    pub(crate) fn from_serialized_data(data: SerializedData) -> Result<Self, String> {
-        let bytes = data.as_ref();
+    pub(crate) fn from_serialized_data(data: &[u8]) -> Result<Self, String> {
+        let bytes = data;
 
         // Minimum size: 4 (header) + 12 (GuidPrefix) + 4 (kind) + 4 (data length) = 24 bytes
         if bytes.len() < 24 {

@@ -25,7 +25,7 @@ impl CdrSerializer {
             endianness: endianness_from_bool(little_endian),
             buffer: Vec::new(),
             header_size: 0,
-            extensibility: ExtensibilityKind::Final,
+            extensibility: ExtensibilityKind::Appendable,
         }
     }
 
@@ -43,10 +43,27 @@ impl CdrSerializer {
             endianness: endianness_from_bool(little_endian),
             buffer: Vec::with_capacity(capacity),
             header_size: 0,
-            extensibility: ExtensibilityKind::Final,
+            extensibility: ExtensibilityKind::Appendable,
         }
     }
 
+    /// Create CDR serializer reusing an existing buffer (capacity preserved, content cleared)
+    pub fn reuse_buffer(little_endian: bool, mut buffer: Vec<u8>) -> Self {
+        buffer.clear();
+        Self {
+            endianness: endianness_from_bool(little_endian),
+            buffer,
+            header_size: 0,
+            extensibility: ExtensibilityKind::Appendable,
+        }
+    }
+
+    /// Consume the serializer and return the internal buffer (for ownership round-trip)
+    pub fn into_buffer(self) -> Vec<u8> {
+        self.buffer
+    }
+
+    /// Write CDR encapsulation header
     pub fn write_encapsulation_header(&mut self) -> Result<(), CdrError> {
         let encap_id = match (self.extensibility, self.endianness) {
             (ExtensibilityKind::Mutable, Endianness::LittleEndian) => 0x0003u16,

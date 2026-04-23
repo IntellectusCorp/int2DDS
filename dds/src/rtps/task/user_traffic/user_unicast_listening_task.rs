@@ -1,3 +1,5 @@
+use bytes::Bytes;
+
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::entities::entity::Entity;
 use crate::rtps::entities::participant::Participant;
@@ -127,7 +129,7 @@ impl UserUnicastListeningTask {
             }
 
             // Collect messages first to avoid borrow checker issues
-            let mut messages_to_process: Vec<(Vec<u8>, SocketAddr)> = Vec::new();
+            let mut messages_to_process: Vec<(Bytes, SocketAddr)> = Vec::new();
 
             for event in events.iter() {
                 // Handle UDP events
@@ -147,7 +149,7 @@ impl UserUnicastListeningTask {
                                 return Ok(());
                             }
 
-                            messages_to_process.push((buffer.to_vec(), from_addr));
+                            messages_to_process.push((buffer, from_addr));
                         }
                     }
                 }
@@ -182,7 +184,7 @@ impl UserUnicastListeningTask {
                                 match tcp_listener.read_framed_message(&addr) {
                                     Ok(Some(buffer)) => {
                                         info!("[UserUnicast] Received TCP message from {:?}, {} bytes", addr, buffer.len());
-                                        messages_to_process.push((buffer, addr));
+                                        messages_to_process.push((Bytes::from(buffer), addr));
                                         // Continue reading more messages
                                     }
                                     Ok(None) => {
@@ -229,14 +231,14 @@ impl UserUnicastListeningTask {
                     if participant.is_terminated() {
                         return Ok(());
                     }
-                    messages_to_process.push((buffer.to_vec(), from_addr));
+                    messages_to_process.push((buffer, from_addr));
                     shm_had_data = true;
                 }
             }
 
             // Process all collected messages
-            for (buffer, from_addr) in messages_to_process {
-                self.process_rtps_message(&buffer, from_addr);
+            for (bytes, from_addr) in messages_to_process {
+                self.process_rtps_message(bytes, from_addr);
             }
 
             // If SHM enabled but no data, yield CPU briefly to avoid 100% usage
@@ -246,11 +248,8 @@ impl UserUnicastListeningTask {
         }
     }
 
-    fn process_rtps_message(&mut self, buffer: &[u8], from_addr: SocketAddr) {
-        use bytes::Bytes;
-
+    fn process_rtps_message(&mut self, bytes: Bytes, from_addr: SocketAddr) {
         let mut message_receiver = MessageReceiver::new(self.guid_prefix, &from_addr);
-        let bytes = Bytes::copy_from_slice(buffer);
         let rtps_message = message_receiver.init(&bytes);
         if rtps_message.is_err() {
             error!("Failed to parse RTPS message from {:?}", from_addr);

@@ -1,12 +1,17 @@
 use std::convert::TryInto;
 
+use smallvec::SmallVec;
+
 use crate::{
     common::instance_handle::InstanceHandle,
     infrastructure::qos_policy::{DataRepresentationId, DataRepresentationQosPolicy},
     rtps::common::parameters::{Parameter, ParameterId, ParameterList, StatusInfo},
 };
 
-fn make_parameter(id: ParameterId, value: Vec<u8>) -> Parameter {
+fn make_parameter<V>(id: ParameterId, value: V) -> Parameter
+where
+    V: Into<SmallVec<[u8; 16]>>,
+{
     Parameter::new(id, value)
 }
 
@@ -75,7 +80,10 @@ impl InlineQosParameters for ParameterList {
 
     fn set_key_hash(&mut self, key_hash: InstanceHandle) {
         self.retain_parameters(|p| p.parameter_id() != ParameterId::PidKeyHash);
-        self.add_parameter(make_parameter(ParameterId::PidKeyHash, key_hash.value().to_vec()));
+        self.add_parameter(make_parameter(
+            ParameterId::PidKeyHash,
+            SmallVec::from_slice(key_hash.value()),
+        ));
     }
 
     fn get_status_info(&self) -> Option<StatusInfo> {
@@ -92,7 +100,7 @@ impl InlineQosParameters for ParameterList {
         self.retain_parameters(|p| p.parameter_id() != ParameterId::PidStatusInfo);
         self.add_parameter(make_parameter(
             ParameterId::PidStatusInfo,
-            status_info.to_bytes().to_vec(),
+            SmallVec::from_slice(&status_info.to_bytes()),
         ));
     }
 
@@ -107,7 +115,7 @@ impl InlineQosParameters for ParameterList {
 
     fn set_expects_inline_qos(&mut self, expects: bool) {
         self.retain_parameters(|p| p.parameter_id() != ParameterId::PidExpectsInlineQos);
-        let value = if expects { vec![1] } else { vec![0] };
+        let value = if expects { SmallVec::from_slice(&[1]) } else { SmallVec::from_slice(&[0]) };
         self.add_parameter(make_parameter(ParameterId::PidExpectsInlineQos, value));
     }
 
@@ -124,7 +132,7 @@ impl InlineQosParameters for ParameterList {
         self.retain_parameters(|p| p.parameter_id() != ParameterId::PidGroupSeqNum);
         self.add_parameter(make_parameter(
             ParameterId::PidGroupSeqNum,
-            seq_num.to_le_bytes().to_vec(),
+            SmallVec::from_slice(&seq_num.to_le_bytes()),
         ));
     }
 

@@ -1,3 +1,5 @@
+use bytes::Bytes;
+
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult};
 use crate::rtps::entities::entity::Entity;
@@ -110,7 +112,7 @@ impl DiscoveryUnicastListeningTask {
             }
 
             // Collect messages first to avoid borrow checker issues
-            let mut messages_to_process: Vec<(Vec<u8>, SocketAddr)> = Vec::new();
+            let mut messages_to_process: Vec<(Bytes, SocketAddr)> = Vec::new();
 
             for event in events.iter() {
                 debug!(
@@ -138,7 +140,7 @@ impl DiscoveryUnicastListeningTask {
                                 return Ok(());
                             }
 
-                            messages_to_process.push((buffer.to_vec(), from_addr));
+                            messages_to_process.push((buffer, from_addr));
                         }
                     }
                 }
@@ -170,7 +172,7 @@ impl DiscoveryUnicastListeningTask {
                                 match tcp_listener.read_framed_message(&addr) {
                                     Ok(Some(buffer)) => {
                                         info!("[DiscoveryUnicast] Received TCP message from {:?}, {} bytes", addr, buffer.len());
-                                        messages_to_process.push((buffer, addr));
+                                        messages_to_process.push((Bytes::from(buffer), addr));
                                         // Continue reading more messages
                                     }
                                     Ok(None) => {
@@ -211,17 +213,14 @@ impl DiscoveryUnicastListeningTask {
             }
 
             // Process all collected messages
-            for (buffer, from_addr) in messages_to_process {
-                let _ = self.process_rtps_message(&buffer, from_addr);
+            for (bytes, from_addr) in messages_to_process {
+                let _ = self.process_rtps_message(bytes, from_addr);
             }
         }
     }
 
-    fn process_rtps_message(&mut self, buffer: &[u8], from_addr: SocketAddr) -> RtpsResult<()> {
-        use bytes::Bytes;
-
+    fn process_rtps_message(&mut self, bytes: Bytes, from_addr: SocketAddr) -> RtpsResult<()> {
         let mut message_receiver = MessageReceiver::new(self.guid_prefix, &from_addr);
-        let bytes = Bytes::copy_from_slice(buffer);
         let rtps_message = message_receiver.init(&bytes)?;
 
         // Ignore messages sent by myself
