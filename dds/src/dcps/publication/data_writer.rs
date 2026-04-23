@@ -746,7 +746,10 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                 Some(timestamp.into()),
                 Box::new(move |guid, seq| {
                     on_identity_assigned(data, guid, seq);
-                    type_support.serialize(data as &dyn Any, Some(&format)).unwrap_or_default()
+                    type_support
+                        .serialize(data as &dyn Any, Some(&format))
+                        .unwrap_or_default()
+                        .to_vec()
                 }),
             );
             seq_num = change.sequence_number();
@@ -779,8 +782,6 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             Self::resolve_serialization_format(&qos.data_representation.value, extensibility)?
         };
 
-        let serialized_data = self.type_support.serialize(data as &dyn Any, Some(&format))?;
-
         let key_info = if self.type_support.is_compute_key_provided() {
             let serialized_key = self.type_support.serialize_key(data as &dyn Any)?;
             let computed_handle = self.type_support.compute_key(data as &dyn Any);
@@ -791,9 +792,10 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
 
         let (instance_handle, _) = self.resolve_write_instance(key_info, handle, timestamp)?;
 
-        let seq_num = self.add_change(
+        let seq_num = self.add_change_pooled(
             ChangeKind::Alive,
-            serialized_data,
+            data as &dyn Any,
+            &format,
             instance_handle,
             Some(timestamp.into()),
         )?;
@@ -834,7 +836,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         self.is_enabled()?;
         Self::validate_timestamp(&timestamp)?;
 
-        let data: SerializedData = Arc::from(serialized_data);
+        let data: Vec<u8> = serialized_data.to_vec();
 
         let key_info = match serialized_key {
             Some(key_bytes) if !key_bytes.is_empty() => {
@@ -1170,26 +1172,56 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
     fn add_change(
         &self,
         kind: ChangeKind,
-        data: SerializedData,
-        // inline_qos: ParameterList,
+        data: Vec<u8>,
         handle: InstanceHandle,
         source_timestamp: Option<RtpsTime>,
     ) -> DdsResult<SequenceNumber> {
         let seq_num;
         {
             let rtps_writer = self.get_rtps_writer()?;
-            let change = rtps_writer.new_change(
-                kind,
-                data,
-                // ParameterList::default(),
-                handle,
-                source_timestamp,
-            );
+            let change = rtps_writer.new_change(kind, data, handle, source_timestamp);
             seq_num = change.sequence_number();
             let mut datawriter_cache =
                 self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
             datawriter_cache.add_change_with_cleanup(Arc::new(change))?;
         }
+        Ok(seq_num)
+    }
+
+    /// Pool-based add_change: acquire from pool → reset → serialize_into → add to history.
+    /// Avoids per-write heap allocation by reusing CacheChange and its internal buffer.
+    fn add_change_pooled(
+        &self,
+        kind: ChangeKind,
+        data: &dyn Any,
+        format: &SerializationFormat,
+        handle: InstanceHandle,
+        source_timestamp: Option<RtpsTime>,
+    ) -> DdsResult<SequenceNumber> {
+        let rtps_writer = self.get_rtps_writer()?;
+
+        // 1. Acquire from pool (fast: Vec::pop)
+        let mut change = {
+            let mut cache =
+                self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            cache.acquire_change()
+        };
+
+        // 2. Allocate sequence number
+        let seq_num = rtps_writer.allocate_sequence_number();
+
+        // 3. Reset metadata + serialize into reused buffer
+        change.reset(kind, rtps_writer.guid(), handle, seq_num, source_timestamp);
+        self.type_support.serialize_into(data, change.data_mut(), Some(format))?;
+        change.apply_fragmentation(rtps_writer.data_max_size_serialized() as usize);
+
+        // 4. Add to history (may evict → release back to pool)
+        {
+            let mut cache =
+                self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            cache.add_change_with_cleanup(Arc::new(change))?;
+        }
+
         Ok(seq_num)
     }
 
@@ -1583,7 +1615,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
 
         self.add_change(
             ChangeKind::NotAliveDisposed,
-            serialized_key,
+            serialized_key.to_vec(),
             resolved_handle,
             Some(timestamp.into()),
         )?;
@@ -1630,7 +1662,12 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                 ChangeKind::NotAliveUnregistered
             };
 
-        self.add_change(change_kind, serialized_key, resolved_handle, Some(timestamp.into()))?;
+        self.add_change(
+            change_kind,
+            serialized_key.to_vec(),
+            resolved_handle,
+            Some(timestamp.into()),
+        )?;
 
         self.update_liveliness()?;
 

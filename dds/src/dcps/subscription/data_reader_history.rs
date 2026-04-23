@@ -84,8 +84,6 @@ pub(crate) struct DataReaderHistoryCache<Foo> {
 }
 
 impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> {
-    type CacheChangeInputType = Arc<Mutex<CacheChange>>;
-
     // Returns a reference to the list of CacheChanges.
     fn get_changes(&self) -> &Vec<Arc<CacheChange>> {
         &self.changes
@@ -171,58 +169,19 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
     // and returns any CacheChange that was removed during space allocation before adding.
     fn add_change_with_cleanup(
         &mut self,
-        a_change: Arc<Mutex<CacheChange>>,
+        immutable_change: Arc<CacheChange>,
     ) -> DdsResult<Option<Arc<CacheChange>>> {
-        let data_reader = self
-            .data_reader
-            .upgrade()
-            .ok_or(DdsError::Error("DataReader has been dropped".to_string()))?;
-
-        let mut cache_change_guard = a_change.lock().map_err(|e| {
-            DdsError::Error(format!(
-                "Failed to acquire CacheChange lock while adding change: {}",
-                e
-            ))
-        })?;
-
-        // Set instance handle to the original data delivered from RTPS layer if key to be computed
-        // This key computing not to be handled in RTPS layer because it does not know about DataReader's type support
-        let instance_handle = data_reader.fallback_instance_handle(&cache_change_guard)?;
-        cache_change_guard.set_instance_handle(instance_handle);
-
-        self.add_to_owner_candidate_if_new(
-            cache_change_guard.instance_handle(),
-            cache_change_guard.ownership_strength().unwrap_or(0),
-            cache_change_guard.writer_guid(),
-        )?;
-
-        cache_change_guard.set_reception_timestamp(RtpsTime::now());
-
-        // This CacheChange is now immutable, we can safely create a new Arc
-        // RTPS history and DataReader history now have separate Arc<CacheChange> instances with identical data
-        // after both RTPS and DCPS layers made their respective modifications to reach the same final state.
-        let immutable_change = Arc::new(cache_change_guard.clone());
         let writer_guid = immutable_change.writer_guid();
 
-        drop(cache_change_guard);
+        // Ensure ownership candidate is registered before checking instance state
+        self.add_to_owner_candidate_if_new(
+            immutable_change.instance_handle(),
+            immutable_change.ownership_strength().unwrap_or(0),
+            immutable_change.writer_guid(),
+        )?;
 
-        // Check ownership
-        // if immutable_change.instance_handle().is_nil() {
-        //     if !self.is_writer_owner_of_instance(
-        //         immutable_change.writer_guid(),
-        //         immutable_change.instance_handle(),
-        //     )? {
-        //         debug!(
-        //             "Rejecting change, writer {:?} is not owner of instance (which is the whole non keyed topic)",
-        //             immutable_change.writer_guid()
-        //         );
-        //         return Err(DdsError::IllegalOperation);
-        //     }
-        // }
         // Check ownership & update instance state
-        // else {
         self.update_instance_state(&immutable_change)?;
-        // }
 
         // Check lifespan qos
         let lifespan_duration =
@@ -253,7 +212,6 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
         }
         // end lifespan
 
-        // Since original data's instance handle is already renewed, can drop the lock now
         let removed_change = self.ensure_capacity(immutable_change.instance_handle())?;
 
         self.add_change_to_instance_map(immutable_change.clone())?;
@@ -264,6 +222,19 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
         }
 
         Ok(removed_change)
+    }
+
+    fn add_info_to_cache_change(&mut self, change: &mut CacheChange) -> DdsResult<()> {
+        let data_reader = self
+            .data_reader
+            .upgrade()
+            .ok_or(DdsError::Error("DataReader has been dropped".to_string()))?;
+
+        let instance_handle = data_reader.fallback_instance_handle(change)?;
+        change.set_instance_handle(instance_handle);
+        change.set_reception_timestamp(RtpsTime::now());
+
+        Ok(())
     }
 
     // Removes the given CacheChange from the history vector and map.
@@ -759,33 +730,33 @@ mod tests {
     }
 
     // Helper function to create a test CacheChange
-    fn create_change_with_key(seq: i64, handle: InstanceHandle) -> Arc<Mutex<CacheChange>> {
-        Arc::new(Mutex::new(CacheChange::new(
+    fn create_change_with_key(seq: i64, handle: InstanceHandle) -> Arc<CacheChange> {
+        Arc::new(CacheChange::new(
             ChangeKind::Alive,
             Guid::new([1; 12], EntityId::new([0, 0, 1], EntityKind::USER_DEFINED_WRITER_WITH_KEY)),
             handle,
             SequenceNumber::from_i64(seq),
-            Arc::from(vec![
+            vec![
                 0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0, 20,
                 0, 0, 0, 0, 0, 0, 0,
-            ]),
+            ],
             Some(RtpsTime::now()),
-        )))
+        ))
     }
 
     // Helper function to create a test CacheChange
-    fn create_change_no_key(seq: i64, handle: InstanceHandle) -> Arc<Mutex<CacheChange>> {
-        Arc::new(Mutex::new(CacheChange::new(
+    fn create_change_no_key(seq: i64, handle: InstanceHandle) -> Arc<CacheChange> {
+        Arc::new(CacheChange::new(
             ChangeKind::Alive,
             Guid::new([1; 12], EntityId::new([0, 0, 1], EntityKind::USER_DEFINED_WRITER_NO_KEY)),
             handle,
             SequenceNumber::from_i64(seq),
-            Arc::from(vec![
+            vec![
                 0, 1, 0, 0, 92, 0, 0, 0, 12, 0, 0, 0, 72, 101, 108, 108, 111, 32, 119, 111, 114,
                 108, 100, 0,
-            ]),
+            ],
             Some(RtpsTime::now()),
-        )))
+        ))
     }
 
     fn create_with_key_datareader(data_reader_qos: DataReaderQos) -> DataReader<ShapeType> {
@@ -1148,10 +1119,10 @@ mod tests {
                 writer_1.clone(),
                 instance_a, // different instance
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 Some(RtpsTime::now()),
             );
 
@@ -1160,35 +1131,30 @@ mod tests {
                 writer_1.clone(),
                 instance_b, // different instance
                 SequenceNumber::from_i64(2),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 Some(RtpsTime::now()),
             );
 
-            assert!(datareader_cache
-                .add_change_with_cleanup(Arc::new(Mutex::new(change_a.clone())))
-                .is_ok());
-            assert!(datareader_cache
-                .add_change_with_cleanup(Arc::new(Mutex::new(change_b.clone())))
-                .is_ok());
+            assert!(datareader_cache.add_change_with_cleanup(Arc::new(change_a.clone())).is_ok());
+            assert!(datareader_cache.add_change_with_cleanup(Arc::new(change_b.clone())).is_ok());
 
             let change_c = CacheChange::new(
                 ChangeKind::Alive,
                 writer_1.clone(),
                 instance_c, // different instance
                 SequenceNumber::from_i64(3),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 Some(RtpsTime::now()),
             );
 
             // Currently adding instance C should result in an error
-            let result =
-                datareader_cache.add_change_with_cleanup(Arc::new(Mutex::new(change_c.clone())));
+            let result = datareader_cache.add_change_with_cleanup(Arc::new(change_c.clone()));
             assert!(matches!(result, Err(DdsError::OutOfResources)));
 
             // Make instance A enter NOT_ALIVE_NO_WRITERS state
@@ -1197,16 +1163,16 @@ mod tests {
                 writer_1.clone(),
                 instance_a,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 Some(RtpsTime::now()),
             );
 
             // Writer A unregisters instance A
             assert!(datareader_cache
-                .add_change_with_cleanup(Arc::new(Mutex::new(change_a_unregister.clone())))
+                .add_change_with_cleanup(Arc::new(change_a_unregister.clone()))
                 .is_ok());
 
             // Data reader took all the samples from instance A
@@ -1214,9 +1180,7 @@ mod tests {
             assert!(datareader_cache.remove_change(Arc::new(change_a_unregister)).is_ok());
 
             // Now adding instance C should succeed via remove_unused_instance
-            assert!(datareader_cache
-                .add_change_with_cleanup(Arc::new(Mutex::new(change_c)))
-                .is_ok());
+            assert!(datareader_cache.add_change_with_cleanup(Arc::new(change_c)).is_ok());
 
             let changes = datareader_cache.get_changes();
             assert_eq!(changes.len(), 2);
@@ -1338,10 +1302,10 @@ mod tests {
                 writer_1.clone(),
                 instance_a, // different instance
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 None,
             );
 
@@ -1350,10 +1314,10 @@ mod tests {
                 writer_1.clone(),
                 instance_b, // different instance
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 None,
             );
 
@@ -1361,13 +1325,9 @@ mod tests {
             change_b.set_ownership_strength(Some(0));
 
             // Add owner candidates
-            datareader_cache
-                .add_change_with_cleanup(Arc::new(Mutex::new(change_a.clone())))
-                .unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_a.clone())).unwrap();
 
-            datareader_cache
-                .add_change_with_cleanup(Arc::new(Mutex::new(change_b.clone())))
-                .unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_b.clone())).unwrap();
 
             // Check ownership
             let is_owner_a = datareader_cache
@@ -1411,10 +1371,10 @@ mod tests {
                 writer_a.clone(), // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 None,
             );
 
@@ -1423,23 +1383,19 @@ mod tests {
                 writer_b.clone(), // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 None,
             );
 
             change_a.set_ownership_strength(Some(0));
             change_b.set_ownership_strength(Some(0));
 
-            datareader_cache
-                .add_change_with_cleanup(Arc::new(Mutex::new(change_a.clone())))
-                .unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_a.clone())).unwrap();
 
-            datareader_cache
-                .add_change_with_cleanup(Arc::new(Mutex::new(change_b.clone())))
-                .unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_b.clone())).unwrap();
 
             // Check ownership
             let is_owner_a = datareader_cache
@@ -1480,10 +1436,10 @@ mod tests {
                 writer_a.clone(), // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 Some(RtpsTime::now()),
             );
 
@@ -1492,19 +1448,17 @@ mod tests {
                 writer_b.clone(), // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 Some(RtpsTime::now()),
             );
 
             // Before writer b writes, writer a is the owner
             change_a.set_ownership_strength(Some(20)); // Weaker strength
 
-            datareader_cache
-                .add_change_with_cleanup(Arc::new(Mutex::new(change_a.clone())))
-                .unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_a.clone())).unwrap();
 
             let is_owner_a = datareader_cache
                 .is_writer_owner_of_instance(change_a.writer_guid(), change_a.instance_handle())
@@ -1512,9 +1466,7 @@ mod tests {
             assert!(is_owner_a);
 
             change_b.set_ownership_strength(Some(30)); // Stronger strength
-            datareader_cache
-                .add_change_with_cleanup(Arc::new(Mutex::new(change_b.clone())))
-                .unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_b.clone())).unwrap();
 
             // Now b is the owner
             let is_owner_b = datareader_cache
@@ -1557,11 +1509,11 @@ mod tests {
                 writer_a.clone(), // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 0, 0, 0, 0, 52, 0, 0, 0, 72, 101, 108, 108, 111, 87, 111, 114, 108,
                     100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 Some(RtpsTime::now()),
             );
 
@@ -1570,20 +1522,18 @@ mod tests {
                 writer_b.clone(), // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 0, 0, 0, 0, 52, 0, 0, 0, 72, 101, 108, 108, 111, 87, 111, 114, 108,
                     100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 Some(RtpsTime::now()),
             );
 
             // Before writer b writes, writer a is the owner
             change_a.set_ownership_strength(Some(20)); // Weaker strength
 
-            datareader_cache
-                .add_change_with_cleanup(Arc::new(Mutex::new(change_a.clone())))
-                .unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_a.clone())).unwrap();
 
             let is_owner_a = datareader_cache
                 .is_writer_owner_of_instance(change_a.writer_guid(), change_a.instance_handle())
@@ -1591,9 +1541,7 @@ mod tests {
             assert!(is_owner_a);
 
             change_b.set_ownership_strength(Some(30)); // Stronger strength
-            datareader_cache
-                .add_change_with_cleanup(Arc::new(Mutex::new(change_b.clone())))
-                .unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_b.clone())).unwrap();
 
             // Now b is the owner
             let is_owner_b = datareader_cache
@@ -1636,7 +1584,7 @@ mod tests {
                 writer_a.clone(), // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![1, 2, 3]),
+                vec![1, 2, 3],
                 None,
             );
 
@@ -1645,16 +1593,14 @@ mod tests {
                 writer_b.clone(), // different writer
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![1, 2, 3]),
+                vec![1, 2, 3],
                 None,
             );
 
             // Before writer b writes, writer a is the owner
             change_a.set_ownership_strength(Some(20)); // Weaker strength
 
-            datareader_cache
-                .add_change_with_cleanup(Arc::new(Mutex::new(change_a.clone())))
-                .unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_a.clone())).unwrap();
 
             let is_owner_a = datareader_cache
                 .is_writer_owner_of_instance(change_a.writer_guid(), change_a.instance_handle())
@@ -1662,9 +1608,7 @@ mod tests {
             assert!(is_owner_a);
 
             change_b.set_ownership_strength(Some(30)); // Stronger strength
-            datareader_cache
-                .add_change_with_cleanup(Arc::new(Mutex::new(change_b.clone())))
-                .unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_b.clone())).unwrap();
 
             // Now b is the owner
             let is_owner_b = datareader_cache
@@ -1678,12 +1622,12 @@ mod tests {
                 writer_a.clone(), // different writer
                 instance_handle,
                 SequenceNumber::from_i64(2),
-                Arc::from(vec![]),
+                vec![],
                 None,
             );
             change_a_2.set_ownership_strength(Some(20));
 
-            let res = datareader_cache.add_change_with_cleanup(Arc::new(Mutex::new(change_a_2)));
+            let res = datareader_cache.add_change_with_cleanup(Arc::new(change_a_2));
             assert!(matches!(res, Err(DdsError::IllegalOperation)));
         }
 
@@ -1715,7 +1659,7 @@ mod tests {
                 writer_a.clone(), // different writer
                 InstanceHandle::NIL,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![1, 2, 3]),
+                vec![1, 2, 3],
                 None,
             );
 
@@ -1724,16 +1668,14 @@ mod tests {
                 writer_b.clone(), // different writer
                 InstanceHandle::NIL,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![1, 2, 3]),
+                vec![1, 2, 3],
                 None,
             );
 
             // Before writer b writes, writer a is the owner
             change_a.set_ownership_strength(Some(20)); // Weaker strength
 
-            datareader_cache
-                .add_change_with_cleanup(Arc::new(Mutex::new(change_a.clone())))
-                .unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_a.clone())).unwrap();
 
             let is_owner_a = datareader_cache
                 .is_writer_owner_of_instance(change_a.writer_guid(), change_a.instance_handle())
@@ -1741,9 +1683,7 @@ mod tests {
             assert!(is_owner_a);
 
             change_b.set_ownership_strength(Some(30)); // Stronger strength
-            datareader_cache
-                .add_change_with_cleanup(Arc::new(Mutex::new(change_b.clone())))
-                .unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_b.clone())).unwrap();
 
             // Now b is the owner
             let is_owner_b = datareader_cache
@@ -1757,12 +1697,12 @@ mod tests {
                 writer_a.clone(), // different writer
                 instance_handle,
                 SequenceNumber::from_i64(2),
-                Arc::from(vec![]),
+                vec![],
                 None,
             );
             change_a_2.set_ownership_strength(Some(20));
 
-            let res = datareader_cache.add_change_with_cleanup(Arc::new(Mutex::new(change_a_2)));
+            let res = datareader_cache.add_change_with_cleanup(Arc::new(change_a_2));
             assert!(matches!(res, Err(DdsError::IllegalOperation)));
         }
 
@@ -1790,15 +1730,15 @@ mod tests {
                 writer_guid.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 None,
             );
 
             change.set_ownership_strength(Some(20));
-            datareader_cache.add_change_with_cleanup(Arc::new(Mutex::new(change.clone()))).unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change.clone())).unwrap();
 
             let is_owner = datareader_cache
                 .is_writer_owner_of_instance(change.writer_guid(), change.instance_handle())
@@ -1811,14 +1751,12 @@ mod tests {
                 writer_guid.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![]),
+                vec![],
                 None,
             );
 
             change_disposed.set_ownership_strength(Some(20));
-            datareader_cache
-                .add_change_with_cleanup(Arc::new(Mutex::new(change_disposed.clone())))
-                .unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_disposed.clone())).unwrap();
 
             // Verify instance state is NOT_ALIVE_DISPOSED
             let instance_info = data_reader.get_instance_infos().unwrap();
@@ -1853,10 +1791,10 @@ mod tests {
                 writer_a.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 None,
             );
 
@@ -1865,23 +1803,19 @@ mod tests {
                 writer_b.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 None,
             );
 
             // Before writer b writes, writer a is the owner
             change_a.set_ownership_strength(Some(20)); // Weaker strength
-            datareader_cache
-                .add_change_with_cleanup(Arc::new(Mutex::new(change_a.clone())))
-                .unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_a.clone())).unwrap();
 
             change_b.set_ownership_strength(Some(30)); // Stronger strength
-            datareader_cache
-                .add_change_with_cleanup(Arc::new(Mutex::new(change_b.clone())))
-                .unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_b.clone())).unwrap();
 
             // B is the owner
             let is_owner_a = datareader_cache
@@ -1899,14 +1833,13 @@ mod tests {
                 writer_a.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![]),
+                vec![],
                 None,
             );
             change_disposed.set_ownership_strength(Some(20));
 
             // Non owner cannot dispose the instance
-            let res =
-                datareader_cache.add_change_with_cleanup(Arc::new(Mutex::new(change_disposed)));
+            let res = datareader_cache.add_change_with_cleanup(Arc::new(change_disposed));
             assert!(matches!(res, Err(DdsError::IllegalOperation)));
 
             // Verify instance state is still ALIVE
@@ -1939,15 +1872,15 @@ mod tests {
                 writer_guid.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 None,
             );
 
             change.set_ownership_strength(Some(20));
-            datareader_cache.add_change_with_cleanup(Arc::new(Mutex::new(change.clone()))).unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change.clone())).unwrap();
 
             let is_owner = datareader_cache
                 .is_writer_owner_of_instance(change.writer_guid(), change.instance_handle())
@@ -1960,14 +1893,12 @@ mod tests {
                 writer_guid.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(2),
-                Arc::from(vec![]),
+                vec![],
                 None,
             );
 
             change_disposed.set_ownership_strength(Some(20));
-            datareader_cache
-                .add_change_with_cleanup(Arc::new(Mutex::new(change_disposed.clone())))
-                .unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_disposed.clone())).unwrap();
 
             // Verify instance state is NOT_ALIVE_DISPOSED
             let instance_info = data_reader.get_instance_infos().unwrap();
@@ -1979,17 +1910,15 @@ mod tests {
                 writer_guid.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(3),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 None,
             );
 
             change_2.set_ownership_strength(Some(20));
-            datareader_cache
-                .add_change_with_cleanup(Arc::new(Mutex::new(change_2.clone())))
-                .unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_2.clone())).unwrap();
 
             // Verify instance state is ALIVE
             let instance_info = data_reader.get_instance_infos().unwrap();
@@ -2021,15 +1950,15 @@ mod tests {
                 writer_guid.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 None,
             );
 
             change.set_ownership_strength(Some(20));
-            datareader_cache.add_change_with_cleanup(Arc::new(Mutex::new(change.clone()))).unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change.clone())).unwrap();
 
             let is_owner = datareader_cache
                 .is_writer_owner_of_instance(change.writer_guid(), change.instance_handle())
@@ -2042,14 +1971,12 @@ mod tests {
                 writer_guid.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(2),
-                Arc::from(vec![]),
+                vec![],
                 None,
             );
 
             change_disposed.set_ownership_strength(Some(20));
-            datareader_cache
-                .add_change_with_cleanup(Arc::new(Mutex::new(change_disposed.clone())))
-                .unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_disposed.clone())).unwrap();
 
             // Verify instance state is NOT_ALIVE_DISPOSED
             let instance_info = data_reader.get_instance_infos().unwrap();
@@ -2067,16 +1994,15 @@ mod tests {
                 writer_b.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 None,
             );
 
             change_2.set_ownership_strength(Some(10));
-            let res =
-                datareader_cache.add_change_with_cleanup(Arc::new(Mutex::new(change_2.clone())));
+            let res = datareader_cache.add_change_with_cleanup(Arc::new(change_2.clone()));
             assert!(res.is_err());
 
             // Verify instance state is still NOT_ALIVE_DISPOSED
@@ -2109,15 +2035,15 @@ mod tests {
                 writer_guid.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 None,
             );
 
             change.set_ownership_strength(Some(20));
-            datareader_cache.add_change_with_cleanup(Arc::new(Mutex::new(change.clone()))).unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change.clone())).unwrap();
 
             let is_owner = datareader_cache
                 .is_writer_owner_of_instance(change.writer_guid(), change.instance_handle())
@@ -2130,14 +2056,12 @@ mod tests {
                 writer_guid.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(2),
-                Arc::from(vec![]),
+                vec![],
                 None,
             );
 
             change_disposed.set_ownership_strength(Some(10));
-            datareader_cache
-                .add_change_with_cleanup(Arc::new(Mutex::new(change_disposed.clone())))
-                .unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_disposed.clone())).unwrap();
 
             // Verify instance state is NOT_ALIVE_DISPOSED
             let instance_info = data_reader.get_instance_infos().unwrap();
@@ -2155,16 +2079,15 @@ mod tests {
                 writer_b.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 None,
             );
 
             change_2.set_ownership_strength(Some(5));
-            let res =
-                datareader_cache.add_change_with_cleanup(Arc::new(Mutex::new(change_2.clone())));
+            let res = datareader_cache.add_change_with_cleanup(Arc::new(change_2.clone()));
             assert!(res.is_ok());
 
             // Verify instance state is ALIVE now
@@ -2200,10 +2123,10 @@ mod tests {
                 writer_a.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 None,
             );
 
@@ -2212,23 +2135,19 @@ mod tests {
                 writer_b.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 None,
             );
 
             // Before writer b writes, writer a is the owner
             change_a.set_ownership_strength(Some(20)); // Weaker strength
-            datareader_cache
-                .add_change_with_cleanup(Arc::new(Mutex::new(change_a.clone())))
-                .unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_a.clone())).unwrap();
 
             change_b.set_ownership_strength(Some(30)); // Stronger strength
-            datareader_cache
-                .add_change_with_cleanup(Arc::new(Mutex::new(change_b.clone())))
-                .unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_b.clone())).unwrap();
 
             // B is the owner
             let is_owner_a = datareader_cache
@@ -2246,13 +2165,12 @@ mod tests {
                 writer_b.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(2),
-                Arc::from(vec![]),
+                vec![],
                 None,
             );
             change_unregistered.set_ownership_strength(Some(30));
 
-            let res =
-                datareader_cache.add_change_with_cleanup(Arc::new(Mutex::new(change_unregistered)));
+            let res = datareader_cache.add_change_with_cleanup(Arc::new(change_unregistered));
             assert!(res.is_ok());
 
             // Now writer A is the owner
@@ -2294,10 +2212,10 @@ mod tests {
                 writer_a.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 None,
             );
 
@@ -2306,23 +2224,19 @@ mod tests {
                 writer_b.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(1),
-                Arc::from(vec![
+                vec![
                     0, 1, 0, 0, 5, 0, 0, 0, 66, 76, 85, 69, 0, 0, 0, 0, 160, 0, 0, 0, 3, 0, 0, 0,
                     20, 0, 0, 0, 0, 0, 0, 0,
-                ]),
+                ],
                 None,
             );
 
             // Before writer b writes, writer a is the owner
             change_a.set_ownership_strength(Some(20)); // Weaker strength
-            datareader_cache
-                .add_change_with_cleanup(Arc::new(Mutex::new(change_a.clone())))
-                .unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_a.clone())).unwrap();
 
             change_b.set_ownership_strength(Some(30)); // Stronger strength
-            datareader_cache
-                .add_change_with_cleanup(Arc::new(Mutex::new(change_b.clone())))
-                .unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_b.clone())).unwrap();
 
             // B is the owner
             let is_owner_a = datareader_cache
@@ -2340,7 +2254,7 @@ mod tests {
                 writer_a.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(2),
-                Arc::from(vec![]),
+                vec![],
                 None,
             );
 
@@ -2349,16 +2263,16 @@ mod tests {
                 writer_b.clone(),
                 instance_handle,
                 SequenceNumber::from_i64(2),
-                Arc::from(vec![]),
+                vec![],
                 None,
             );
             change_unregistered_a.set_ownership_strength(Some(20));
             change_unregistered_b.set_ownership_strength(Some(30));
 
-            let res = datareader_cache
-                .add_change_with_cleanup(Arc::new(Mutex::new(change_unregistered_a.clone())));
-            let res_b = datareader_cache
-                .add_change_with_cleanup(Arc::new(Mutex::new(change_unregistered_b.clone())));
+            let res =
+                datareader_cache.add_change_with_cleanup(Arc::new(change_unregistered_a.clone()));
+            let res_b =
+                datareader_cache.add_change_with_cleanup(Arc::new(change_unregistered_b.clone()));
 
             assert!(res.is_ok());
             assert!(res_b.is_ok());

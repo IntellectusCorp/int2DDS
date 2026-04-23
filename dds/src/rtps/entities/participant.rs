@@ -56,6 +56,7 @@ use crate::{
             entity::Entity,
             history::history_cache::HistoryCache,
             reader::{Reader, ReaderStore, StatefulReader, StatelessReader},
+            wire_buffer_pool::WireBufferPool,
             writer::{StatefulWriter, StatelessWriter, Writer, WriterStore},
         },
         logic::{
@@ -103,6 +104,7 @@ pub struct Participant {
     liveliness_monitor: Arc<Mutex<Option<LivelinessMonitor>>>,
     working_ips: Vec<String>,
     terminated: Arc<AtomicBool>,
+    wire_buffer_pool: Arc<Mutex<WireBufferPool>>,
 }
 impl Debug for Participant {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -174,6 +176,7 @@ impl Participant {
             working_ips,
             terminated: Arc::new(AtomicBool::new(false)),
             liveliness_monitor: Arc::new(Mutex::new(None)),
+            wire_buffer_pool: Arc::new(Mutex::new(WireBufferPool::new())),
         }
     }
 
@@ -533,7 +536,7 @@ impl Participant {
                 let payload = publication_builtin_topic_data.to_serialized_data();
                 let a_cache_change = self.sedp_builtin_publications_writer().new_change(
                     ChangeKind::NotAliveDisposedUnregistered,
-                    payload,
+                    payload.to_vec(),
                     InstanceHandle::from_guid(&writer_guid),
                     Some(RtpsTime::now()),
                 );
@@ -552,7 +555,7 @@ impl Participant {
                         for cache in writer_cache.get_changes() {
                             if let Ok(publication_builtin_topic_data) =
                                 PublicationBuiltinTopicData::from_serialized_data(
-                                    cache.data_value_arc(),
+                                    cache.data_value(),
                                 )
                             {
                                 if publication_builtin_topic_data.endpoint_guid() == writer_guid {
@@ -616,7 +619,7 @@ impl Participant {
                 let payload = subscription_builtin_topic_data.to_serialized_data();
                 let a_cache_change = self.sedp_builtin_subscriptions_writer().new_change(
                     ChangeKind::NotAliveDisposedUnregistered,
-                    payload,
+                    payload.to_vec(),
                     InstanceHandle::from_guid(&reader_guid),
                     Some(RtpsTime::now()),
                 );
@@ -634,7 +637,7 @@ impl Participant {
                         for cache in writer_cache.get_changes() {
                             if let Ok(subscription_builtin_topic_data) =
                                 SubscriptionBuiltinTopicData::from_serialized_data(
-                                    cache.data_value_arc(),
+                                    cache.data_value(),
                                 )
                             {
                                 if subscription_builtin_topic_data.endpoint_guid() == reader_guid {
@@ -869,7 +872,7 @@ impl Participant {
             let payload = subscription_builtin_topic_data.unwrap().to_serialized_data();
             let a_cache_change = self.sedp_builtin_subscriptions_writer().new_change(
                 ChangeKind::NotAliveDisposedUnregistered,
-                payload,
+                payload.to_vec(),
                 InstanceHandle::from_guid(&reader.guid()),
                 Some(RtpsTime::now()),
             );
@@ -908,7 +911,7 @@ impl Participant {
             let payload = publication_builtin_topic_data.unwrap().to_serialized_data();
             let a_cache_change = self.sedp_builtin_publications_writer().new_change(
                 ChangeKind::NotAliveDisposedUnregistered,
-                payload,
+                payload.to_vec(),
                 InstanceHandle::from_guid(&writer.guid()),
                 Some(RtpsTime::now()),
             );
@@ -1176,6 +1179,10 @@ impl Participant {
             self.sedp_logic.get().expect("sedp_logic not set").clone(),
             self.user_logic.get().expect("user_logic not set").clone(),
         )
+    }
+
+    pub(crate) fn wire_buffer_pool(&self) -> &Mutex<WireBufferPool> {
+        &self.wire_buffer_pool
     }
 
     /// Initialize all logic instances. Must be called immediately after creating Participant.

@@ -18,10 +18,10 @@ use crate::rtps::messages::submessages::{
     pad::Pad,
 };
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SubmessageBody {
+pub(crate) enum SubmessageBody<'a> {
     AckNack(AckNack),
-    Data(Data),
-    DataFrag(DataFrag),
+    Data(Data<'a>),
+    DataFrag(DataFrag<'a>),
     Gap(Gap),
     Heartbeat(Heartbeat),
     HeartbeatFrag(HeartbeatFrag),
@@ -34,7 +34,7 @@ pub(crate) enum SubmessageBody {
     Pad(Pad),
 }
 
-impl<C: Context> Writable<C> for SubmessageBody {
+impl<C: Context> Writable<C> for SubmessageBody<'_> {
     fn write_to<T: ?Sized + Writer<C>>(&self, writer: &mut T) -> Result<(), C::Error> {
         let _ = match self {
             SubmessageBody::AckNack(m) => writer.write_value(&m),
@@ -55,9 +55,9 @@ impl<C: Context> Writable<C> for SubmessageBody {
     }
 }
 
-impl<'a, C: Context> Readable<'a, C> for SubmessageBody {
-    fn read_from<R: Reader<'a, C>>(reader: &mut R) -> Result<Self, C::Error> {
-        let body = reader.read_value::<SubmessageBody>()?;
+impl<'de, C: Context> Readable<'de, C> for SubmessageBody<'static> {
+    fn read_from<R: Reader<'de, C>>(reader: &mut R) -> Result<Self, C::Error> {
+        let body = reader.read_value::<SubmessageBody<'static>>()?;
         Ok(body)
     }
 }

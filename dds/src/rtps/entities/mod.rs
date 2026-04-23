@@ -25,4 +25,5 @@ pub(crate) mod history;
 pub(crate) mod participant;
 pub(crate) mod qos;
 pub(crate) mod reader;
+pub(crate) mod wire_buffer_pool;
 pub(crate) mod writer;
