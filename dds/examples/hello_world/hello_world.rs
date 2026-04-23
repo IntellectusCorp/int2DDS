@@ -246,7 +246,7 @@ fn run_publisher(args: &Args) {
     let topic = participant
         .create_topic::<HelloWorldType>(
             &args.topic,
-            "HelloWorld",
+            "HelloWorldType",
             TopicQos::default(),
             None,
             StatusMask::default(),
@@ -356,7 +356,7 @@ fn run_subscriber(args: &Args) {
     let topic = participant
         .create_topic::<HelloWorldType>(
             &args.topic,
-            "HelloWorld",
+            "HelloWorldType",
             TopicQos::default(),
             None,
             StatusMask::default(),
