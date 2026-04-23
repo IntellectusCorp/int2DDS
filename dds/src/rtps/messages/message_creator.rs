@@ -168,7 +168,9 @@ impl MessageCreator {
             ChangeKind::NotAliveDisposed
             | ChangeKind::NotAliveUnregistered
             | ChangeKind::NotAliveDisposedUnregistered => {
-                data_header_flag.add_flag(SubmessageFlagType::KeyFlag, SubmessageId::DATA);
+                if !cache_change.data_value().is_empty() {
+                    data_header_flag.add_flag(SubmessageFlagType::KeyFlag, SubmessageId::DATA);
+                }
             }
         }
 
