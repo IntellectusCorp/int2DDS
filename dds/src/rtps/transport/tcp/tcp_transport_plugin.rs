@@ -568,7 +568,7 @@ impl TcpMuxListeningLoopTask {
                         None => wrap_stream(tcp),
                     };
 
-                    let _ = stream.set_nodelay(true);
+                    let _ = stream.set_nodelay(crate::common::env::get_tcp_nodelay());
 
                     self.mux_listener.accept_connection(
                         stream,
