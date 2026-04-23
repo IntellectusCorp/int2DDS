@@ -292,7 +292,7 @@ fn find_all_key_fields(
 fn quote_serialize_impl(
     _name: &syn::Ident,
     cdr_field_serialization: &proc_macro2::TokenStream,
-    xcdr_field_serialization: &proc_macro2::TokenStream,
+    _xcdr_field_serialization: &proc_macro2::TokenStream,
     crate_path: &proc_macro2::TokenStream,
     gc: &GenCtx,
 ) -> proc_macro2::TokenStream {
@@ -316,38 +316,15 @@ fn quote_serialize_impl(
                         let bytes = serializer.into_bytes();
                         Ok(std::sync::Arc::from(bytes.into_boxed_slice()))
                     },
-                    #crate_path::dcps::topic::type_support::SerializationFormat::Xcdr { extensibility_kind, use_delimiters } => {
+                    #crate_path::dcps::topic::type_support::SerializationFormat::Xcdr { extensibility_kind, .. } => {
                         use #crate_path::serialize::{xcdr::Xcdr2Serializer, BufferManager};
-                        use #crate_path::serialize::cdr::{PrimitiveSerialize, StringSerialize, ArraySerialize, SequenceSerialize};
+                        use #crate_path::serialize::xcdr::XcdrSerialize;
 
-                        let effective_extensibility = *extensibility_kind;
-                        let use_delimiters = *use_delimiters;
-                        let mut serializer = Xcdr2Serializer::with_capacity(true, effective_extensibility, 64);
+                        let mut serializer = Xcdr2Serializer::with_capacity(true, *extensibility_kind, 64);
                         serializer.write_encapsulation_header()
                             .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
-
-                        let size_pos = if use_delimiters {
-                            Some(
-                                serializer
-                                    .begin_struct()
-                                    .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(
-                                        e.to_string(),
-                                    ))?,
-                            )
-                        } else {
-                            None
-                        };
-
-                        #xcdr_field_serialization
-
-                        if let Some(size_pos) = size_pos {
-                            serializer
-                                .end_struct(size_pos)
-                                .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(
-                                    e.to_string(),
-                                ))?;
-                        }
-
+                        XcdrSerialize::serialize_xcdr(typed_data, &mut serializer)
+                            .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
                         let bytes = serializer.into_bytes();
                         Ok(std::sync::Arc::from(bytes.into_boxed_slice()))
                     }
@@ -364,8 +341,8 @@ fn quote_deserialize_impl(
     _name: &syn::Ident,
     extensibility: Option<ExtensibilityKind>,
     cdr_field_deserialization: &proc_macro2::TokenStream,
-    xcdr_field_deserialization: &proc_macro2::TokenStream,
-    xcdr_field_deserialization_per_field_dheader: &proc_macro2::TokenStream,
+    _xcdr_field_deserialization: &proc_macro2::TokenStream,
+    _xcdr_field_deserialization_per_field_dheader: &proc_macro2::TokenStream,
     crate_path: &proc_macro2::TokenStream,
     gc: &GenCtx,
 ) -> proc_macro2::TokenStream {
@@ -440,76 +417,14 @@ fn quote_deserialize_impl(
 
                     Ok(Box::new(result))
                 },
-                #crate_path::dcps::topic::type_support::SerializationFormat::Xcdr { use_delimiters, .. } => {
-                    use #crate_path::serialize::xcdr::Xcdr2Deserializer;
+                #crate_path::dcps::topic::type_support::SerializationFormat::Xcdr { .. } => {
+                    use #crate_path::serialize::xcdr::{Xcdr2Deserializer, XcdrDeserialize};
 
-                    let use_delimiters = *use_delimiters;
-
-                    // Standard XCDR2 deserialization (single DHEADER for struct)
-                    let mut parse_body = |mut deserializer: &mut Xcdr2Deserializer<'_>| -> #crate_path::dcps::core::error::DdsResult<#full_type> {
-                        #xcdr_field_deserialization
-                        Ok(result)
-                    };
-
-                    // Alternative deserialization with per-field DHEADER (for interoperability)
-                    let mut parse_body_per_field_dheader = |mut deserializer: &mut Xcdr2Deserializer<'_>| -> #crate_path::dcps::core::error::DdsResult<#full_type> {
-                        #xcdr_field_deserialization_per_field_dheader
-                        Ok(result)
-                    };
-
-                    if use_delimiters {
-                        // Try 1: Standard XCDR2 delimited format (single DHEADER for entire struct)
-                        let mut delimited_deserializer = Xcdr2Deserializer::new(data)
-                            .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
-
-                        match (|| -> #crate_path::dcps::core::error::DdsResult<#full_type> {
-                            let (object_size, start_position) = delimited_deserializer
-                                .begin_struct()
-                                .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
-                            let value = parse_body(&mut delimited_deserializer)?;
-                            delimited_deserializer
-                                .end_struct(object_size, start_position)
-                                .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
-                            Ok(value)
-                        })() {
-                            Ok(result) => {
-                                return Ok(Box::new(result));
-                            }
-                            Err(err) => {
-                                log::debug!(
-                                    "XCDR2 delimited path failed ({}); trying per-field DHEADER mode",
-                                    err
-                                );
-                            }
-                        }
-
-                        // Try 2: Per-field DHEADER format (interoperability fallback)
-                        let mut compat_deserializer = Xcdr2Deserializer::new(data)
-                            .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
-
-                        match (|| -> #crate_path::dcps::core::error::DdsResult<#full_type> {
-                            let value = parse_body_per_field_dheader(&mut compat_deserializer)?;
-                            Ok(value)
-                        })() {
-                            Ok(result) => {
-                                log::debug!("XCDR2 per-field DHEADER mode succeeded");
-                                return Ok(Box::new(result));
-                            }
-                            Err(err) => {
-                                log::debug!(
-                                    "XCDR2 per-field DHEADER path failed ({}); trying without delimiters",
-                                    err
-                                );
-                            }
-                        }
-                    }
-
-                    // Try 3: Fallback - no delimiters
-                    let mut fallback_deserializer = Xcdr2Deserializer::new(data)
+                    let mut deserializer = Xcdr2Deserializer::new(data)
                         .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
-
-                    let result = parse_body(&mut fallback_deserializer)?;
-                    Ok(Box::new(result))
+                    let value = <#full_type as XcdrDeserialize>::deserialize_xcdr(&mut deserializer)
+                        .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+                    Ok(Box::new(value))
                 }
             }
         }
