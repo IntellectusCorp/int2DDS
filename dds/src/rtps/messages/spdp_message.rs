@@ -22,7 +22,7 @@ use crate::{
             submessages::{data::Data, info::InfoTimestamp},
         },
     },
-    serialize::pl_cdr::{discovery_helpers, RtpsMessageBuilder},
+    serialize::pl_cdr::{discovery_helpers, InlineQosParameters, RtpsMessageBuilder},
 };
 
 #[derive(Debug, Clone)]
@@ -69,9 +69,17 @@ impl SpdpMessage {
         sequence_number: SequenceNumber,
         inline_qos_list: Option<ParameterList>,
     ) -> RtpsResult<Submessage<'static>> {
+        let is_status_info = inline_qos_list
+            .as_ref()
+            .and_then(|pl| pl.get_status_info())
+            .map(|status_info| status_info.disposed() || status_info.unregistered())
+            .unwrap_or(false);
+
         let mut data_header_flag = SubmessageHeaderFlag::new();
         data_header_flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::DATA);
-        data_header_flag.add_flag(SubmessageFlagType::DataFlag, SubmessageId::DATA);
+        if !is_status_info {
+            data_header_flag.add_flag(SubmessageFlagType::DataFlag, SubmessageId::DATA);
+        }
 
         let mut data = Data::new(
             EntityId::SPDP_BUILTIN_PARTICIPANT_READER,
@@ -84,9 +92,11 @@ impl SpdpMessage {
             data.set_inline_qos_list(inline_qos_list);
         }
 
-        data.add_serialized_data(SubmessagePayload::Owned(Self::create_serialized_data(
-            participant,
-        )?));
+        if !is_status_info {
+            data.add_serialized_data(SubmessagePayload::Owned(Self::create_serialized_data(
+                participant,
+            )?));
+        }
         let length = data.octets_to_next_header();
 
         let submessage_body: SubmessageBody<'static> = SubmessageBody::Data(data);
