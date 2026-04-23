@@ -498,6 +498,7 @@ impl Socket {
         if let Ok(Some(ip)) = crate::common::int2dds_feature_ffi::get_working_ip() {
             // int2DDS-feature enabled
             if is_network_specified {
+                log::debug!("Using int2DDS-feature specified IP: {}", ip);
                 ips.push(ip);
                 from_feature = true;
             } else {
@@ -518,6 +519,7 @@ impl Socket {
                 for iface in ifaces {
                     if !iface.ip().is_loopback() {
                         ips.push(iface.ip().to_string());
+                        log::debug!("Adding IP from NIC: {}", iface.ip());
                     }
                 }
             }
@@ -532,6 +534,8 @@ impl Socket {
         if ips.is_empty() || should_add_loopback {
             ips.push("127.0.0.1".to_string());
         }
+
+        log::debug!("Working IPs determined: {:?}, from_feature: {}", ips, from_feature);
 
         Ok(WorkingIps { ips, from_feature })
     }
@@ -554,9 +558,11 @@ impl Socket {
             self.working_ips.ips.len() == 1 && self.working_ips.ips[0] == "127.0.0.1";
         if only_loopback {
             // No physical NIC available, 0.0.0.0 has no interface to route through
+            log::debug!("Only loopback interface is available, binding sender to 127.0.0.1");
             "127.0.0.1".to_string()
         } else {
             // 0.0.0.0 allows unicast to reach any subnet via OS routing table
+            log::debug!("Binding sender to 0.0.0.0");
             "0.0.0.0".to_string()
         }
     }
@@ -568,6 +574,10 @@ impl Socket {
     fn get_sender_multicast_if_addr(&self) -> String {
         // From int2DDS-feature: use the feature-specified IP directly
         if self.working_ips.from_feature {
+            log::debug!(
+                "Using int2DDS-feature specified multicast interface IP: {}",
+                self.working_ips.ips[0]
+            );
             return self.working_ips.ips[0].clone();
         }
 
@@ -579,18 +589,26 @@ impl Socket {
         {
             let ip = addr.ip().to_string();
             if ip != "127.0.0.1" && ip != "0.0.0.0" {
+                log::debug!("Resolved default outgoing multicast interface IP: {}", ip);
                 return ip;
             }
         }
 
         // No default route (e.g. direct Ethernet without gateway):
         // pick the first non-loopback IP from working_ips
-        self.working_ips
+        let chosen_ip = self
+            .working_ips
             .ips
             .iter()
             .find(|ip| ip.as_str() != "127.0.0.1")
             .cloned()
-            .unwrap_or_else(|| "127.0.0.1".to_string()) // Fallback to loopback if no other IPs are available
+            .unwrap_or_else(|| {
+                log::debug!("No suitable multicast interface found, using loopback");
+                "127.0.0.1".to_string()
+            }); // Fallback to loopback if no other IPs are available
+
+        log::debug!("Using multicast interface IP chosen from working IPs: {}", chosen_ip);
+        chosen_ip
     }
 }
 

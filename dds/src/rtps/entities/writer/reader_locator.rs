@@ -97,8 +97,8 @@ impl ReaderLocator {
             .unwrap_or(SequenceNumber::UNKNOWN)
     }
 
-    pub(crate) fn requested_changes(&self) -> Vec<SequenceNumber> {
-        self.requested_changes.clone()
+    pub(crate) fn requested_changes(&self) -> &[SequenceNumber] {
+        &self.requested_changes
     }
 
     pub(crate) fn requested_changes_set(&mut self, req_seq_num_set: Vec<SequenceNumber>) {
@@ -115,8 +115,8 @@ impl ReaderLocator {
         self.remote_entity_id
     }
 
-    pub(crate) fn subscription_builtin_topic_data(&self) -> SubscriptionBuiltinTopicData {
-        self.subscription_builtin_topic_data.clone()
+    pub(crate) fn subscription_builtin_topic_data(&self) -> &SubscriptionBuiltinTopicData {
+        &self.subscription_builtin_topic_data
     }
 
     pub(crate) fn set_subscription_builtin_topic_data(

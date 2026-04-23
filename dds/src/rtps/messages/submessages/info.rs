@@ -84,12 +84,12 @@ pub(crate) struct InfoReply {
 }
 
 impl InfoReply {
-    pub(crate) fn unicast_locator_list(&self) -> Vec<Locator> {
-        self.unicast_locator_list.clone()
+    pub(crate) fn unicast_locator_list(&self) -> &[Locator] {
+        &self.unicast_locator_list
     }
 
-    pub(crate) fn multicast_locator_list(&self) -> Vec<Locator> {
-        self.multicast_locator_list.clone()
+    pub(crate) fn multicast_locator_list(&self) -> &[Locator] {
+        &self.multicast_locator_list
     }
 
     pub(crate) fn deserialize(
@@ -103,9 +103,9 @@ impl InfoReply {
             .endianness_flag()
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::UnsupportedSubmessageType, None))?;
 
-        let mut unicast_locator_list: Vec<Locator> = Vec::new();
         let num_locators = u32::read_from_stream_unbuffered_with_ctx(endianness, &mut cursor)
             .map_err(map_speedy_err)?;
+        let mut unicast_locator_list: Vec<Locator> = Vec::with_capacity(num_locators as usize);
         for _i in 0..num_locators {
             let locator = Locator::read_from_stream_unbuffered_with_ctx(endianness, &mut cursor)
                 .map_err(map_speedy_err)?;
@@ -120,6 +120,7 @@ impl InfoReply {
         {
             let num_locators = u32::read_from_stream_unbuffered_with_ctx(endianness, &mut cursor)
                 .map_err(map_speedy_err)?;
+            multicast_locator_list = Vec::with_capacity(num_locators as usize);
             for _i in 0..num_locators {
                 let locator =
                     Locator::read_from_stream_unbuffered_with_ctx(endianness, &mut cursor)

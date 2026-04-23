@@ -29,7 +29,7 @@ use crate::{
             rtps_error_code::RtpsResult,
             sequence::SequenceNumber,
             time::{RtpsDuration, RtpsTime},
-            types::{ChangeKind, SerializedData},
+            types::ChangeKind,
         },
         entities::{
             endpoint::Endpoint,
@@ -46,7 +46,7 @@ pub(crate) trait Writer: Entity + Endpoint + Debug + Any {
     fn new_change(
         &self,
         kind: ChangeKind,
-        data: SerializedData,
+        data: Vec<u8>,
         // inline_qos: ParameterList,
         handle: InstanceHandle,
         source_timestamp: Option<RtpsTime>,
@@ -59,8 +59,11 @@ pub(crate) trait Writer: Entity + Endpoint + Debug + Any {
         kind: ChangeKind,
         handle: InstanceHandle,
         source_timestamp: Option<RtpsTime>,
-        data_fn: Box<dyn FnOnce(Guid, SequenceNumber) -> SerializedData + '_>,
+        data_fn: Box<dyn FnOnce(Guid, SequenceNumber) -> Vec<u8> + '_>,
     ) -> CacheChange;
+
+    /// Allocate and return the next sequence number without creating a CacheChange.
+    fn allocate_sequence_number(&self) -> SequenceNumber;
 
     fn push_mode(&self) -> bool;
     fn heartbeat_period(&self) -> RtpsDuration;
