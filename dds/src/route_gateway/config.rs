@@ -8,6 +8,7 @@ use std::{fs, path::Path};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    config::json::QosProvider,
     core::error::{DdsError, DdsResult},
     domain::qos::DomainParticipantQos,
     infrastructure::qos_policy::PropertyQosPolicy,
@@ -82,11 +83,58 @@ impl NodeConfig {
     }
 }
 
-/// Topic filter applied to AutoRelay. Defaults to "*".
+/// AutoRelay configuration.
+///
+/// `filter` restricts which topic names are relayed (default: "*").
+///
+/// The remaining fields configure QoS for the DataReader/DataWriter pairs
+/// that each [`super::topic_relay::TopicRelay`] creates on the LAN and WAN
+/// participants. Without these, the gateway falls back to library defaults
+/// (History = KEEP_ALL on both sides, all other policies are
+/// `Default::default()`). Mismatched policies (e.g. a local publisher using
+/// RELIABLE + TRANSIENT_LOCAL while the gateway reader stays on the defaults)
+/// cause SEDP to reject the match, silently dropping samples. These fields
+/// let operators align the relay's endpoints with the local pub/sub.
+///
+/// QoS values are profile path strings (e.g. `"Lib::Profile"` or
+/// `"Lib::Profile::QosName"`) resolved through [`QosProvider`]. Profiles can
+/// be supplied inline via `qos_profiles` or loaded from an external file via
+/// `qos_profiles_file`; both may be used together.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutoRelayConfig {
     #[serde(default = "default_filter")]
     pub filter: String,
+
+    /// Path to an external `qos_profiles.json` file (same format as
+    /// [`QosProvider`] accepts). Loaded before `qos_profiles`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qos_profiles_file: Option<String>,
+
+    /// Inline QoS profile definitions. Accepts the same shape as a JSON file
+    /// passed to [`QosProvider::load_json`] — either a single `QosLibrary`
+    /// object or a `{ "libraries": { ... } }` wrapper.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qos_profiles: Option<serde_json::Value>,
+
+    /// Default QoS profile path applied to the LAN-side DataReader of every
+    /// auto-discovered relay. Overridden by matching `topic_relays` rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_local_reader_qos: Option<String>,
+
+    /// Default QoS profile path applied to the LAN-side DataWriter of every
+    /// auto-discovered relay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_local_writer_qos: Option<String>,
+
+    /// Default QoS profile path applied to the WAN-side DataReader of every
+    /// auto-discovered relay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_remote_reader_qos: Option<String>,
+
+    /// Default QoS profile path applied to the WAN-side DataWriter of every
+    /// auto-discovered relay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_remote_writer_qos: Option<String>,
 }
 
 fn default_filter() -> String {
@@ -95,8 +143,60 @@ fn default_filter() -> String {
 
 impl Default for AutoRelayConfig {
     fn default() -> Self {
-        Self { filter: default_filter() }
+        Self {
+            filter: default_filter(),
+            qos_profiles_file: None,
+            qos_profiles: None,
+            default_local_reader_qos: None,
+            default_local_writer_qos: None,
+            default_remote_reader_qos: None,
+            default_remote_writer_qos: None,
+        }
     }
+}
+
+impl AutoRelayConfig {
+    /// Build a [`QosProvider`] from `qos_profiles_file` and `qos_profiles`.
+    /// External file is loaded first, then the inline block is merged on top
+    /// (inline wins on library-name collisions).
+    pub fn build_qos_provider(&self) -> DdsResult<QosProvider> {
+        let mut provider = QosProvider::new();
+        if let Some(path) = &self.qos_profiles_file {
+            provider.load_file(Path::new(path))?;
+        }
+        if let Some(value) = &self.qos_profiles {
+            let raw = serde_json::to_string(value).map_err(|e| {
+                DdsError::Error(format!("failed to re-serialize qos_profiles: {e}"))
+            })?;
+            provider.load_json(&raw)?;
+        }
+        Ok(provider)
+    }
+}
+
+/// Per-topic QoS override rule.
+///
+/// The first rule whose `topic_pattern` matches a newly discovered topic is
+/// applied. Each of the four QoS fields is optional: when unset, the matching
+/// `default_*_qos` from [`AutoRelayConfig`] is used, and when that is also
+/// unset, the built-in fallback applies. Patterns follow the same glob syntax
+/// as [`super::auto_relay::TopicFilter`]: `"*"` matches all, a single trailing
+/// `*` is a prefix match (e.g. `"sensor/*"`), anything else is exact.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TopicRelayRule {
+    pub topic_pattern: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_reader_qos: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_writer_qos: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_reader_qos: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_writer_qos: Option<String>,
 }
 
 /// Top-level Route Gateway configuration file format.
@@ -106,6 +206,9 @@ pub struct RouteGatewayConfig {
     pub remote: NodeConfig,
     #[serde(default)]
     pub auto_relay: AutoRelayConfig,
+    /// Per-topic QoS override rules. Evaluated in order; the first match wins.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub topic_relays: Vec<TopicRelayRule>,
     /// Polling period in milliseconds. Default: 50ms.
     #[serde(default = "default_poll_period_ms")]
     pub poll_period_ms: u64,
@@ -218,6 +321,78 @@ mod tests {
         assert_eq!(qos.property.get("int2dds.tls.key_file"), Some("/etc/ssl/key.pem"));
         assert_eq!(qos.property.get("int2dds.tls.server_name"), Some("gw.example.com"));
         assert_eq!(qos.property.get("int2dds.tls.verify_peer"), Some("true"));
+    }
+
+    #[test]
+    fn parses_qos_override_fields() {
+        let json = r#"{
+            "local":  { "domain_id": 0, "transport": "udp" },
+            "remote": { "domain_id": 1, "transport": "tcp", "initial_peers": ["1.2.3.4:7400"] },
+            "auto_relay": {
+                "filter": "*",
+                "qos_profiles": {
+                    "name": "GwLib",
+                    "qos_profiles": [
+                        {
+                            "name": "Reliable",
+                            "datareader_qos": { "reliability": { "kind": "RELIABLE_RELIABILITY_QOS" } },
+                            "datawriter_qos": { "reliability": { "kind": "RELIABLE_RELIABILITY_QOS" } }
+                        }
+                    ]
+                },
+                "default_local_reader_qos":  "GwLib::Reliable",
+                "default_local_writer_qos":  "GwLib::Reliable",
+                "default_remote_reader_qos": "GwLib::Reliable",
+                "default_remote_writer_qos": "GwLib::Reliable"
+            },
+            "topic_relays": [
+                {
+                    "topic_pattern": "sensor/*",
+                    "local_reader_qos":  "GwLib::Reliable",
+                    "remote_writer_qos": "GwLib::Reliable"
+                }
+            ]
+        }"#;
+        let cfg = RouteGatewayConfig::from_json(json).unwrap();
+        assert_eq!(cfg.auto_relay.default_local_reader_qos.as_deref(), Some("GwLib::Reliable"));
+        assert_eq!(cfg.topic_relays.len(), 1);
+        assert_eq!(cfg.topic_relays[0].topic_pattern, "sensor/*");
+        assert!(cfg.topic_relays[0].local_writer_qos.is_none());
+    }
+
+    #[test]
+    fn qos_provider_resolves_inline_profile() {
+        let json = r#"{
+            "local":  { "domain_id": 0, "transport": "udp" },
+            "remote": { "domain_id": 1, "transport": "tcp" },
+            "auto_relay": {
+                "qos_profiles": {
+                    "name": "GwLib",
+                    "qos_profiles": [{
+                        "name": "KeepAll",
+                        "datareader_qos": { "history": { "kind": "KEEP_ALL_HISTORY_QOS" } }
+                    }]
+                }
+            }
+        }"#;
+        let cfg = RouteGatewayConfig::from_json(json).unwrap();
+        let provider = cfg.auto_relay.build_qos_provider().unwrap();
+        let qos = provider
+            .get_datareader_qos("GwLib::KeepAll")
+            .expect("profile resolves");
+        matches!(qos.history.kind, crate::infrastructure::qos_policy::HistoryQosPolicyKind::KeepAll);
+    }
+
+    #[test]
+    fn defaults_empty_when_not_specified() {
+        let json = r#"{
+            "local":  { "domain_id": 0, "transport": "udp" },
+            "remote": { "domain_id": 1, "transport": "tcp" }
+        }"#;
+        let cfg = RouteGatewayConfig::from_json(json).unwrap();
+        assert!(cfg.auto_relay.default_local_reader_qos.is_none());
+        assert!(cfg.auto_relay.qos_profiles.is_none());
+        assert!(cfg.topic_relays.is_empty());
     }
 
     #[test]
