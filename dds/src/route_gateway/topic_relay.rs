@@ -204,11 +204,19 @@ impl TopicRelay {
     /// filter, the bidirectional relay would re-forward every sample it
     /// just emitted, because a participant's writer on a given topic
     /// self-matches that same participant's reader.
+    ///
+    /// Log output (enable via `--verbose` for debug lines):
+    ///   info : per-batch summary whenever `take` returned >0 samples
+    ///   debug: per-sample forwarding detail
+    ///   warn : take/write errors
     fn forward(
         from: &DataReader<DynamicData>,
         to: &DataWriter<DynamicData>,
         sibling_writer_handle: InstanceHandle,
+        topic_name: &str,
+        direction: &str,
     ) -> DdsResult<usize> {
+        let t_take = std::time::Instant::now();
         let samples = match from.take(
             i32::MAX,
             &[SampleStateKind::ANY_SAMPLE_STATE],
@@ -217,30 +225,88 @@ impl TopicRelay {
         ) {
             Ok(s) => s,
             Err(crate::core::error::DdsError::NoData) => return Ok(0),
-            Err(e) => return Err(e),
+            Err(e) => {
+                log::warn!("[relay:{} {}] take error: {:?}", topic_name, direction, e);
+                return Err(e);
+            }
         };
+        let take_elapsed = t_take.elapsed();
+        let took = samples.len();
 
+        let t_write = std::time::Instant::now();
         let mut count = 0;
+        let mut filtered = 0;
+        let mut data_err = 0;
         for sample in samples.iter() {
             if sample.sample_info().publication_handle == sibling_writer_handle {
+                filtered += 1;
                 continue;
             }
-            if let Ok(data) = sample.data() {
-                to.write(&data, InstanceHandle::NIL)?;
-                count += 1;
+            match sample.data() {
+                Ok(data) => match to.write(&data, InstanceHandle::NIL) {
+                    Ok(()) => {
+                        count += 1;
+                        log::debug!(
+                            "[relay:{} {}] fwd #{} pub_handle={:?}",
+                            topic_name,
+                            direction,
+                            count,
+                            sample.sample_info().publication_handle,
+                        );
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "[relay:{} {}] write error at {}/{}: {:?}",
+                            topic_name,
+                            direction,
+                            count + 1,
+                            took,
+                            e,
+                        );
+                        return Err(e);
+                    }
+                },
+                Err(_) => data_err += 1,
             }
+        }
+        let write_elapsed = t_write.elapsed();
+
+        if took > 0 {
+            log::info!(
+                "[relay:{} {}] took={} fwd={} filtered={} data_err={} t_take={:?} t_write={:?}",
+                topic_name,
+                direction,
+                took,
+                count,
+                filtered,
+                data_err,
+                take_elapsed,
+                write_elapsed,
+            );
         }
         Ok(count)
     }
 
     /// Forward all available LocalNode samples to RemoteNode.
     pub fn forward_local_to_remote(&self) -> DdsResult<usize> {
-        Self::forward(&self.local_reader, &self.remote_writer, self.local_writer_handle)
+        Self::forward(
+            &self.local_reader,
+            &self.remote_writer,
+            self.local_writer_handle,
+            &self.topic_name,
+            "L->R",
+        )
     }
 
     /// Forward all available RemoteNode samples to LocalNode.
     pub fn forward_remote_to_local(&self) -> DdsResult<usize> {
-        Self::forward(&self.remote_reader, &self.local_writer, self.remote_writer_handle)
+        Self::forward(
+            &self.remote_reader,
+            &self.local_writer,
+            self.remote_writer_handle,
+            &self.topic_name,
+            "R->L",
+        )
     }
 
     /// Run one bidirectional forwarding pass.
