@@ -55,7 +55,7 @@ use crate::{
     },
     core::{
         error::{DdsError, DdsResult},
-        time::Duration,
+        time::{Duration, Time},
     },
     infrastructure::{
         deadline_monitor::DeadlineMonitor,
@@ -517,6 +517,8 @@ impl<Foo: 'static + Clone + Debug> UpdateStatus for DataReader<Foo> {
                     if let Ok(datareader_cache) = self.datareader_cache.lock() {
                         datareader_cache.remove_writer_from_owner_candidates(
                             info.last_publication_handle().to_guid(),
+                            true,
+                            true,
                         )?;
                     }
                 }
@@ -1507,6 +1509,91 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         }
     }
 
+    // Mark synthetic invalid-data sample pending.
+    pub(crate) fn mark_pending_notification(
+        &self,
+        instance_handle: InstanceHandle,
+    ) -> DdsResult<()> {
+        let mut instance_infos =
+            self.instance_infos.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        if let Some(info) = instance_infos.get_mut(&instance_handle) {
+            info.pending_notification = true;
+        }
+        Ok(())
+    }
+
+    // Clear pending_notification after synthetic sample emitted.
+    pub(crate) fn clear_pending_notification(
+        &self,
+        instance_handle: InstanceHandle,
+    ) -> DdsResult<()> {
+        let mut instance_infos =
+            self.instance_infos.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        if let Some(info) = instance_infos.get_mut(&instance_handle) {
+            info.pending_notification = false;
+        }
+        Ok(())
+    }
+
+    // Drain pending synthetic notifications matching the filters; clears flags.
+    fn drain_pending_notifications(
+        &self,
+        instance_infos: &HashMap<InstanceHandle, InstanceInfo>,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+        instance_filter: Option<InstanceHandle>,
+        max: i32,
+    ) -> DdsResult<Vec<SampleInfo>> {
+        let mut synthetic_sample_infos = Vec::new();
+
+        if max <= 0 || !sample_states.matches(SampleStateKind::NOT_READ_SAMPLE_STATE) {
+            return Ok(synthetic_sample_infos);
+        }
+
+        for (instance_handle, info) in instance_infos.iter() {
+            if synthetic_sample_infos.len() as i32 >= max {
+                break;
+            }
+
+            if !info.pending_notification {
+                continue;
+            }
+
+            if matches!(instance_filter, Some(expected) if expected != *instance_handle) {
+                continue;
+            }
+
+            if !view_states.matches(info.view_state)
+                || !instance_states.matches(info.instance_state)
+            {
+                continue;
+            }
+
+            // Suppress synthetic on rebirth; only surface while still NOT_ALIVE_NO_WRITERS.
+            if info.instance_state != InstanceStateKind::NOT_ALIVE_NO_WRITERS_INSTANCE_STATE {
+                continue;
+            }
+
+            synthetic_sample_infos.push(SampleInfo {
+                sample_state: SampleStateKind::NOT_READ_SAMPLE_STATE,
+                view_state: info.view_state,
+                instance_state: info.instance_state,
+                disposed_generation_count: info.disposed_generation_count,
+                no_writers_generation_count: info.no_writers_generation_count,
+                sample_rank: 0,
+                generation_rank: 0,
+                absolute_generation_rank: 0,
+                source_timestamp: Time::now(),
+                instance_handle: *instance_handle,
+                publication_handle: InstanceHandle::NIL,
+                valid_data: false,
+            });
+            self.clear_pending_notification(*instance_handle)?;
+        }
+        Ok(synthetic_sample_infos)
+    }
+
     pub(crate) fn update_instance_state(
         &self,
         instance_handle: InstanceHandle,
@@ -1527,6 +1614,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
             instance_state: InstanceStateKind::ALIVE_INSTANCE_STATE,
             disposed_generation_count: 0,
             no_writers_generation_count: 0,
+            pending_notification: false,
         });
 
         // Update InstanceState based on change kind
@@ -1546,6 +1634,8 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                     log::trace!("Instance was previously NOT_ALIVE_NO_WRITERS, incrementing no_writers_generation_count to {}",
                                    info.no_writers_generation_count);
                     info.no_writers_generation_count += 1;
+                    // Drop pending synthetic; rebirth supersedes the prior transition.
+                    info.pending_notification = false;
                 }
 
                 // 2.2.2.5.1.8 Interpretation of the SampleInfo view_state
@@ -2253,11 +2343,9 @@ impl<Foo: DdsType> DataReader<Foo> {
 
         let mut changes = self.get_available_changes()?;
 
-        if changes.is_empty() {
-            return Err(DdsError::NoData);
+        if !changes.is_empty() {
+            self.sort_changes_by_timestamp(&mut changes)?;
         }
-
-        self.sort_changes_by_timestamp(&mut changes)?;
 
         // Get ContentFilteredTopic expression for serialized path filtering
         let (cft_expression, cft_parameters) = if let Some(cft) = &self.content_filtered_topic {
@@ -2286,6 +2374,7 @@ impl<Foo: DdsType> DataReader<Foo> {
                     instance_state: InstanceStateKind::ALIVE_INSTANCE_STATE,
                     disposed_generation_count: 0,
                     no_writers_generation_count: 0,
+                    pending_notification: false,
                 },
             };
 
@@ -2345,6 +2434,17 @@ impl<Foo: DdsType> DataReader<Foo> {
 
             result.push((serialized_data, sample_info));
             remaining -= 1;
+        }
+
+        for sample_info in self.drain_pending_notifications(
+            &instance_infos,
+            sample_states,
+            view_states,
+            instance_states,
+            None,
+            remaining,
+        )? {
+            result.push((Arc::from(Vec::new().as_slice()), sample_info));
         }
 
         for (_, sample_info) in &result {
@@ -2418,12 +2518,6 @@ impl<Foo: DdsType> DataReader<Foo> {
 
         let mut changes = self.get_available_changes()?;
         log::debug!("Available changes count: {}", changes.len());
-        // self.sort_changes_by_timestamp(&mut changes)?;
-
-        if changes.is_empty() {
-            log::debug!("NoData: no available changes");
-            return Err(DdsError::NoData);
-        }
 
         let (sample_states, view_states, instance_states) = if let Some(cond) = condition {
             log::debug!("Using condition masks");
@@ -2507,6 +2601,7 @@ impl<Foo: DdsType> DataReader<Foo> {
                     instance_state: InstanceStateKind::ALIVE_INSTANCE_STATE,
                     disposed_generation_count: 0,
                     no_writers_generation_count: 0,
+                    pending_notification: false,
                 },
             };
 
@@ -2565,6 +2660,17 @@ impl<Foo: DdsType> DataReader<Foo> {
                     continue;
                 }
             }
+        }
+
+        for sample_info in self.drain_pending_notifications(
+            &instance_infos,
+            sample_states,
+            view_states,
+            instance_states,
+            if exact { Some(handle) } else { None },
+            remaining_samples,
+        )? {
+            result_samples.push(DataSample::new(None, sample_info, None));
         }
 
         // 2.2.2.5.1.8 Interpretation of the SampleInfo view_state
@@ -2914,6 +3020,7 @@ impl<Foo: DdsType> DataReader<Foo> {
                     instance_state: InstanceStateKind::ALIVE_INSTANCE_STATE,
                     disposed_generation_count: 0,
                     no_writers_generation_count: 0,
+                    pending_notification: false,
                 },
             };
 
