@@ -1392,6 +1392,10 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         Ok(guard.get_changes().clone())
     }
 
+    pub fn has_cached_data(&self) -> DdsResult<bool> {
+        Ok(!self.get_available_changes()?.is_empty())
+    }
+
     pub(crate) fn get_change(
         &self,
         seq_num: SequenceNumber,
@@ -2264,7 +2268,11 @@ impl<Foo: DdsType> DataReader<Foo> {
             let cft = cft
                 .upgrade()
                 .ok_or(DdsError::Error("ContentFilteredTopic is deleted".to_string()))?;
-            (Some(cft.parsed_expression.clone()), cft.get_expression_parameters()?)
+            if cft.is_filter_enabled()? {
+                (Some(cft.get_parsed_expression()?), cft.get_expression_parameters()?)
+            } else {
+                (None, Vec::new())
+            }
         } else {
             (None, Vec::new())
         };
@@ -2312,6 +2320,9 @@ impl<Foo: DdsType> DataReader<Foo> {
                     {
                         if let Ok(typed) = deserialized.downcast::<Foo>() {
                             if let Ok(false) = cft_expr.evaluate(&*typed, &cft_parameters) {
+                                // Filtered-out samples should not remain in reader history,
+                                // otherwise later filter broadening/disable can replay stale data.
+                                self.remove_change(change.clone())?;
                                 continue;
                             }
                         }
@@ -2475,7 +2486,11 @@ impl<Foo: DdsType> DataReader<Foo> {
             let cft = cft
                 .upgrade()
                 .ok_or(DdsError::Error("ContentFilteredTopic is deleted".to_string()))?;
-            (Some(cft.parsed_expression.clone()), cft.get_expression_parameters()?)
+            if cft.is_filter_enabled()? {
+                (Some(cft.get_parsed_expression()?), cft.get_expression_parameters()?)
+            } else {
+                (None, Vec::new())
+            }
         } else {
             (None, Vec::new())
         };
@@ -2545,6 +2560,9 @@ impl<Foo: DdsType> DataReader<Foo> {
                                 "Skipping change {}: ContentFilteredTopic expression failed",
                                 idx
                             );
+                            // Filtered-out samples should not remain in reader history,
+                            // otherwise later filter broadening/disable can replay stale data.
+                            self.remove_change(change.clone())?;
                             continue;
                         }
                         log::trace!("Change {} passed ContentFilteredTopic", idx);

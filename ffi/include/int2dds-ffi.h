@@ -2496,6 +2496,17 @@ Int2DdsRet int2dds_datareader_get_qos(const struct Int2DdsDataReader *reader,
                                       struct Int2DdsDataReaderQos **qos_out);
 
 /**
+ * Check whether a DataReader currently has any cached samples.
+ *
+ * This is a level-triggered readiness check over the local reader cache.
+ *
+ * # Safety
+ * - `reader` must be a valid datareader
+ * - `has_data_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_datareader_has_data(const struct Int2DdsDataReader *reader, bool *has_data_out);
+
+/**
  * Delete a DataReader
  *
  * # Safety
@@ -2958,6 +2969,28 @@ Int2DdsRet int2dds_create_contentfilteredtopic(const struct Int2DdsParticipant *
  * - All DataReaders using this ContentFilteredTopic must be deleted first
  */
 Int2DdsRet int2dds_delete_contentfilteredtopic(struct Int2DdsContentFilteredTopic *cft);
+
+/**
+ * Update the expression parameters of an existing ContentFilteredTopic
+ *
+ * This updates only the parameter values for the current filter expression.
+ *
+ * # Safety
+ * - `cft` must be a valid ContentFilteredTopic created by `int2dds_create_contentfilteredtopic`
+ * - `expression_parameters` must be a valid array of null-terminated C strings, or null if count is 0
+ * - `expression_parameters_count` is the number of parameters
+ */
+Int2DdsRet int2dds_contentfilteredtopic_set_expression_parameters(struct Int2DdsContentFilteredTopic *cft,
+                                                                  const char *const *expression_parameters,
+                                                                  uintptr_t expression_parameters_count);
+
+Int2DdsRet int2dds_contentfilteredtopic_set_filter_expression(struct Int2DdsContentFilteredTopic *cft,
+                                                              const char *filter_expression,
+                                                              const char *const *expression_parameters,
+                                                              uintptr_t expression_parameters_count);
+
+Int2DdsRet int2dds_contentfilteredtopic_set_enabled(struct Int2DdsContentFilteredTopic *cft,
+                                                    bool enabled);
 
 /**
  * Create a Topic with key field metadata for compute_key() support.
