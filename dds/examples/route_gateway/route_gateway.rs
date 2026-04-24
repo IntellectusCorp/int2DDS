@@ -142,19 +142,50 @@ fn main() {
     let period = Duration::from_millis(cfg.poll_period_ms);
     let mut last_topic_count = 0usize;
 
+    // Forwarding heartbeat: every HEARTBEAT_EVERY, print a one-line summary
+    // so operators can tell whether forwarding is flowing or silent.
+    const HEARTBEAT_EVERY: Duration = Duration::from_secs(5);
+    let mut last_heartbeat = std::time::Instant::now();
+    let mut total_forwarded_since_last_hb: usize = 0;
+    let mut total_forwarded_lifetime: usize = 0;
+    let mut last_fwd_activity: Option<std::time::Instant> = None;
+
     println!("[Route Gateway] running. Press Ctrl-C to stop.\n");
     while !stop.load(Ordering::SeqCst) {
         if let Err(e) = auto.discover_once() {
             log::warn!("[Route Gateway] discover_once failed: {:?}", e);
         }
-        if let Err(e) = auto.forward_once() {
-            log::warn!("[Route Gateway] forward_once failed: {:?}", e);
+        match auto.forward_once() {
+            Ok(n) => {
+                if n > 0 {
+                    total_forwarded_since_last_hb += n;
+                    total_forwarded_lifetime += n;
+                    last_fwd_activity = Some(std::time::Instant::now());
+                }
+            }
+            Err(e) => log::warn!("[Route Gateway] forward_once failed: {:?}", e),
         }
 
         let count = auto.relay_count();
         if count != last_topic_count {
             println!("[Route Gateway] active topics ({}): {:?}", count, auto.active_topics());
             last_topic_count = count;
+        }
+
+        if last_heartbeat.elapsed() >= HEARTBEAT_EVERY {
+            let idle_str = match last_fwd_activity {
+                Some(t) => format!("{:?} ago", t.elapsed()),
+                None => "never".to_string(),
+            };
+            log::info!(
+                "[Route Gateway] heartbeat: topics={} fwd_5s={} fwd_total={} last_activity={}",
+                count,
+                total_forwarded_since_last_hb,
+                total_forwarded_lifetime,
+                idle_str,
+            );
+            total_forwarded_since_last_hb = 0;
+            last_heartbeat = std::time::Instant::now();
         }
 
         sleep(period);
