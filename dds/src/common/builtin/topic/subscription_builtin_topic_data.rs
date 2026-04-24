@@ -113,12 +113,20 @@ impl SubscriptionBuiltinTopicData {
         self.unicast_locator_list.push(locator);
     }
 
+    pub fn set_unicast_locator_list(&mut self, locators: Vec<Locator>) {
+        self.unicast_locator_list = locators;
+    }
+
     pub fn multicast_locator_list(&self) -> Vec<Locator> {
         self.multicast_locator_list.clone()
     }
 
     pub fn add_multicast_locator(&mut self, locator: Locator) {
         self.multicast_locator_list.push(locator);
+    }
+
+    pub fn set_multicast_locator_list(&mut self, locators: Vec<Locator>) {
+        self.multicast_locator_list = locators;
     }
 
     pub fn key(&self) -> &BuiltinTopicKey {
