@@ -97,13 +97,16 @@ fn generate_key_impls_from_fields(
 
     let serialize_key_impl = quote! {
         fn serialize_key(&self, data: &dyn std::any::Any) -> #crate_path::dcps::core::error::DdsResult<#crate_path::rtps::common::types::SerializedData> {
-            use #crate_path::serialize::xcdr::{Xcdr2Serializer, ExtensibilityKind, XcdrSerialize};
+            use #crate_path::serialize::cdr::{CdrSerialize, CdrSerializer};
             use #crate_path::serialize::BufferManager;
 
             if let Some(typed_data) = data.downcast_ref::<#full_type>() {
-                let mut serializer = Xcdr2Serializer::new(false, ExtensibilityKind::Final);
+                // Match regular serialize: little-endian CDR with encapsulation header
+                let mut serializer = CdrSerializer::with_capacity(true, 64);
+                serializer.write_encapsulation_header()
+                    .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
                 #(
-                    typed_data.#key_fields.serialize_xcdr(&mut serializer)
+                    #crate_path::serialize::cdr::CdrSerialize::serialize_cdr(&typed_data.#key_fields, &mut serializer)
                         .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(
                             format!("Failed to serialize field {}: {}", stringify!(#key_fields), e)
                         ))?;
@@ -121,13 +124,14 @@ fn generate_key_impls_from_fields(
 
     let deserialize_key_impl = quote! {
         fn deserialize_key(&self, serialized_key: &[u8]) -> #crate_path::dcps::core::error::DdsResult<Box<dyn std::any::Any + Send + Sync>> {
-            use #crate_path::serialize::xcdr::{Xcdr2Deserializer, XcdrDeserialize};
+            use #crate_path::serialize::cdr::{CdrDeserialize, CdrDeserializer};
 
-            let mut deserializer = Xcdr2Deserializer::new_without_header(serialized_key, false);
+            let mut deserializer = CdrDeserializer::new(serialized_key)
+                .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
             let mut key_holder = <#full_type as Default>::default();
 
             #(
-                key_holder.#key_fields = <#key_types>::deserialize_xcdr(&mut deserializer)
+                key_holder.#key_fields = <#key_types as #crate_path::serialize::cdr::CdrDeserialize>::deserialize_cdr(&mut deserializer)
                     .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(
                         format!("Failed to deserialize field {}: {}", stringify!(#key_fields), e)
                     ))?;

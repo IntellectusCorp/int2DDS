@@ -141,6 +141,9 @@ pub(crate) struct InstanceInfo {
     pub(crate) view_state: ViewStateKind,
     pub(crate) disposed_generation_count: i32,
     pub(crate) no_writers_generation_count: i32,
+    // Requests a synthetic invalid-data sample to surface a wire-less instance_state transition.
+    // This is set when a liveliness/SEDP-triggered state change (NOT_ALIVE_NO_WRITERS) has no wire sample.
+    pub(crate) pending_notification: bool,
 }
 
 #[cfg(test)]
