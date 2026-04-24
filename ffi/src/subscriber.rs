@@ -740,6 +740,32 @@ pub unsafe extern "C" fn int2dds_datareader_get_qos(
     INT2DDS_RET_OK
 }
 
+/// Check whether a DataReader currently has any cached samples.
+///
+/// This is a level-triggered readiness check over the local reader cache.
+///
+/// # Safety
+/// - `reader` must be a valid datareader
+/// - `has_data_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_has_data(
+    reader: *const Int2DdsDataReader,
+    has_data_out: *mut bool,
+) -> Int2DdsRet {
+    check_null!(reader);
+    check_null!(has_data_out);
+
+    let reader_ref = &*reader;
+
+    match reader_ref.inner.has_cached_data() {
+        Ok(has_data) => {
+            *has_data_out = has_data;
+            INT2DDS_RET_OK
+        }
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
 /// Delete a DataReader
 ///
 /// # Safety
