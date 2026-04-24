@@ -501,6 +501,127 @@ pub unsafe extern "C" fn int2dds_create_datareader_with_profile_and_listener(
     INT2DDS_RET_OK
 }
 
+/// Create a DataReader using a ContentFilteredTopic
+///
+/// # Safety
+/// - `subscriber` must be a valid subscriber
+/// - `cft` must be a valid ContentFilteredTopic
+/// - `qos` can be null for default QoS
+/// - `reader_out` must be a valid pointer to a null pointer
+/// - The returned reader must be freed with `int2dds_delete_datareader`
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_create_datareader_cft(
+    subscriber: *const Int2DdsSubscriber,
+    cft: *const Int2DdsContentFilteredTopic,
+    qos: *const Int2DdsDataReaderQos,
+    reader_out: *mut *mut Int2DdsDataReader,
+) -> Int2DdsRet {
+    check_null!(subscriber);
+    check_null!(cft);
+    check_null!(reader_out);
+
+    let subscriber_ref = &*subscriber;
+    let cft_ref = &*cft;
+
+    let reader_qos = if qos.is_null() {
+        int2dds::subscription::qos::DataReaderQos::default()
+    } else {
+        (*qos).inner.clone()
+    };
+
+    let reader = ffi_try!(subscriber_ref.inner.create_datareader::<Int2DdsData>(
+        &cft_ref.inner,
+        reader_qos,
+        None,
+        StatusMask::default()
+    ));
+
+    let reader_handle = Box::new(Int2DdsDataReader { inner: reader, listener: None });
+    *reader_out = Box::into_raw(reader_handle);
+
+    INT2DDS_RET_OK
+}
+
+/// Create a DataReader using a ContentFilteredTopic with listener callbacks
+///
+/// # Safety
+/// - `subscriber` must be a valid subscriber
+/// - `cft` must be a valid ContentFilteredTopic
+/// - `qos` can be null for default QoS
+/// - `listener` can be null for no listener
+/// - `mask` specifies which status changes trigger callbacks
+/// - `reader_out` must be a valid pointer to a null pointer
+/// - The returned reader must be freed with `int2dds_delete_datareader`
+/// - Listener callbacks must be thread-safe and remain valid until reader is deleted
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_create_datareader_cft_with_listener(
+    subscriber: *const Int2DdsSubscriber,
+    cft: *const Int2DdsContentFilteredTopic,
+    qos: *const Int2DdsDataReaderQos,
+    listener: *const Int2DdsDataReaderListener,
+    mask: u32,
+    reader_out: *mut *mut Int2DdsDataReader,
+) -> Int2DdsRet {
+    check_null!(subscriber);
+    check_null!(cft);
+    check_null!(reader_out);
+
+    let subscriber_ref = &*subscriber;
+    let cft_ref = &*cft;
+
+    let reader_qos = if qos.is_null() {
+        int2dds::subscription::qos::DataReaderQos::default()
+    } else {
+        (*qos).inner.clone()
+    };
+
+    let reader = ffi_try!(subscriber_ref.inner.create_datareader::<Int2DdsData>(
+        &cft_ref.inner,
+        reader_qos,
+        None,
+        StatusMask::from_bits_truncate(mask)
+    ));
+
+    let mut reader_handle = Box::new(Int2DdsDataReader { inner: reader, listener: None });
+
+    if !listener.is_null() {
+        let reader_ptr = &mut *reader_handle as *mut Int2DdsDataReader;
+        let ffi_listener = FfiDataReaderListener::new(*listener, reader_ptr);
+        let listener_arc = Arc::new(ffi_listener);
+
+        let listener_clone = listener_arc.clone()
+            as Arc<
+                dyn int2dds::subscription::data_reader_listener::DataReaderListener<
+                    Foo = Int2DdsData,
+                >,
+            >;
+        ffi_try!(reader_handle
+            .inner
+            .set_listener(Some(listener_clone), StatusMask::from_bits_truncate(mask)));
+
+        reader_handle.listener = Some(listener_arc.clone());
+
+        if mask & crate::status_condition::INT2DDS_STATUS_SUBSCRIPTION_MATCHED != 0 {
+            if let Ok(status) = reader_handle.inner.get_subscription_matched_status() {
+                if status.current_count() > 0 {
+                    listener_arc.on_subscription_matched(&reader_handle.inner, &status);
+                }
+            }
+        }
+        if mask & crate::status_condition::INT2DDS_STATUS_REQUESTED_INCOMPATIBLE_QOS != 0 {
+            if let Ok(status) = reader_handle.inner.get_requested_incompatible_qos_status() {
+                if status.total_count() > 0 {
+                    listener_arc.on_requested_incompatible_qos(&reader_handle.inner, &status);
+                }
+            }
+        }
+    }
+
+    *reader_out = Box::into_raw(reader_handle);
+
+    INT2DDS_RET_OK
+}
+
 /// Set or update the listener for a DataReader
 ///
 /// # Safety

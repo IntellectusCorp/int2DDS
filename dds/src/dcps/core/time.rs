@@ -297,7 +297,7 @@ where
     }
 }
 
-// u32 필드 역직렬화
+// deserialize a u32 field
 fn deserialize_duration_field_u32<'de, D>(deserializer: D) -> Result<u32, D::Error>
 where
     D: Deserializer<'de>,
@@ -319,7 +319,7 @@ where
     }
 }
 
-// 직렬화 (무한 값은 상수 문자열로, 일반 값은 숫자로)
+// serialize (infinite values as constant strings, regular values as numbers)
 fn serialize_duration_sec<S>(sec: &i32, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
