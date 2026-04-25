@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::DashMap;
-use log::{debug, info, warn};
+use log::{debug, warn};
 use socket2::{Domain, Protocol, SockAddr, Socket as Socket2, Type};
 
 use crate::rtps::common::guid::GuidPrefix;
@@ -57,22 +57,8 @@ pub(crate) struct TcpSender {
     /// TLS configuration for outbound connections. When `Some`, every
     /// newly-opened TCP socket is wrapped with TLS via `connect_tls`.
     tls_config: Option<Arc<TlsConfig>>,
-    /// Set of peers for which an asymmetric host has already dialed a
-    /// reverse channel, so the plugin does not repeatedly open them for
-    /// the same peer on every SPDP tick. Managed by the plugin via
-    /// `reverse_channels_dialed()`.
-    reverse_channels_dialed: Arc<DashMap<SocketAddr, ()>>,
-    /// Set of (peer, logical_port) pairs for which an asymmetric host
-    /// has already dialed a reverse DATA channel. Used by the mux
-    /// listener to avoid spawning duplicate dial threads when the
-    /// reachable peer repeats PORT_RESERVE while a dial is in flight.
-    reverse_data_dialed: Arc<DashMap<(SocketAddr, u16), ()>>,
     /// Channel to notify the RTPS layer (PeerMonitor) when a peer has
     /// been disconnected by any send-path failure, not just keepalive.
-    /// Critical for asymmetric peers: once `disconnect_peer` clears the
-    /// port-0 control entry, `ensure_control` short-circuits all future
-    /// sends, so the keepalive loop has no connection left to probe —
-    /// without this explicit signal the RTPS proxy state leaks forever.
     dead_peer_tx: std::sync::OnceLock<crossbeam_channel::Sender<SocketAddr>>,
 }
 
@@ -149,40 +135,8 @@ impl TcpSender {
             participant_id,
             listener_port,
             tls_config,
-            reverse_channels_dialed: Arc::new(DashMap::new()),
-            reverse_data_dialed: Arc::new(DashMap::new()),
             dead_peer_tx: std::sync::OnceLock::new(),
         })
-    }
-
-    /// Returns true if a reverse channel was already dialed for this
-    /// peer (so the plugin avoids redundant dials on SPDP retries).
-    /// The caller inserts into the set via `mark_reverse_channel_dialed`.
-    pub(crate) fn is_reverse_channel_dialed(&self, addr: &SocketAddr) -> bool {
-        self.reverse_channels_dialed.contains_key(addr)
-    }
-
-    pub(crate) fn mark_reverse_channel_dialed(&self, addr: SocketAddr) {
-        self.reverse_channels_dialed.insert(addr, ());
-    }
-
-    pub(crate) fn clear_reverse_channel_dialed(&self, addr: &SocketAddr) {
-        self.reverse_channels_dialed.remove(addr);
-    }
-
-    /// True when a reverse DATA dial is already in flight or has
-    /// succeeded for `(peer, logical_port)`. Used by the mux listener's
-    /// reverse-data dispatcher to debounce repeated PORT_RESERVE frames.
-    pub(crate) fn is_reverse_data_dialed(&self, peer: SocketAddr, logical_port: u16) -> bool {
-        self.reverse_data_dialed.contains_key(&(peer, logical_port))
-    }
-
-    pub(crate) fn mark_reverse_data_dialed(&self, peer: SocketAddr, logical_port: u16) {
-        self.reverse_data_dialed.insert((peer, logical_port), ());
-    }
-
-    pub(crate) fn clear_reverse_data_dialed(&self, peer: SocketAddr, logical_port: u16) {
-        self.reverse_data_dialed.remove(&(peer, logical_port));
     }
 
     pub(crate) fn listener_port(&self) -> u16 {
@@ -209,180 +163,6 @@ impl TcpSender {
     }
 
     // ========================================================================
-    // Incoming connection re-use (Connection Reversal for asymmetric peers)
-    // ========================================================================
-
-    /// Register a stream accepted by our mux listener as the control
-    /// connection for `peer_listener_addr`.
-    ///
-    /// Used when the remote peer is in asymmetric NAT mode and cannot be
-    /// dialed. The incoming control stream accepted from the asymmetric
-    /// peer is re-purposed as this sender's outbound path to that peer:
-    /// subsequent `ensure_control` calls for `peer_listener_addr` find
-    /// the registered stream in cache and skip the outbound `tcp_connect`
-    /// (which would fail since the peer has no listener).
-    ///
-    /// The caller is responsible for passing a cloned stream — the
-    /// original should remain owned by the listener's read thread so that
-    /// inbound framing continues to be consumed.
-    pub(crate) fn register_incoming_control(
-        &self,
-        peer_listener_addr: SocketAddr,
-        stream: Box<dyn TcpStreamWrapper>,
-    ) {
-        let key = (peer_listener_addr, CONTROL_LOGICAL_PORT);
-        if self.connections.insert(key, stream).is_some() {
-            debug!(
-                "TcpSender: replaced inbound control stream for asymmetric peer {:?}",
-                peer_listener_addr
-            );
-        } else {
-            info!(
-                "TcpSender: registered inbound control stream for asymmetric peer {:?}",
-                peer_listener_addr
-            );
-        }
-        // Also record peer_info so features like keepalive can find this peer.
-        self.peer_info
-            .insert(peer_listener_addr, PeerInfo { control_addr: peer_listener_addr });
-    }
-
-    /// Register a data-channel stream accepted by our mux listener for an
-    /// asymmetric peer. `logical_port` is the port the peer expects us to
-    /// use for this stream (set via PORT_BIND).
-    pub(crate) fn register_incoming_data(
-        &self,
-        peer_listener_addr: SocketAddr,
-        logical_port: u16,
-        stream: Box<dyn TcpStreamWrapper>,
-    ) {
-        debug_assert_ne!(logical_port, CONTROL_LOGICAL_PORT);
-        let key = (peer_listener_addr, logical_port);
-        if self.connections.insert(key, stream).is_some() {
-            debug!(
-                "TcpSender: replaced inbound data stream for asymmetric peer {:?}:{}",
-                peer_listener_addr, logical_port
-            );
-        } else {
-            info!(
-                "TcpSender: registered inbound data stream for asymmetric peer {:?}:{}",
-                peer_listener_addr, logical_port
-            );
-        }
-        // Clear the reverse-data dial guard: future losses of this
-        // (peer, port) stream should be allowed to trigger a fresh dial.
-        self.clear_reverse_data_dialed(peer_listener_addr, logical_port);
-    }
-
-    /// Open an additional outbound TCP connection to `physical_addr` and
-    /// hand it over to the remote side as its reverse send channel.
-    ///
-    /// Used by asymmetric (NAT-behind) hosts to implement connection
-    /// reversal: they open two physical TCP connections per peer — one
-    /// for their own sending (via `ensure_control`) and one as a
-    /// "reverse" channel the reachable peer uses for its sending. The
-    /// stream returned here belongs to the listener side (this host's
-    /// mux listener must adopt it and run a read loop, since the remote
-    /// peer will write to it).
-    ///
-    /// This method only performs the dial + PEER_HELLO_REVERSE exchange;
-    /// the caller is responsible for handing the returned stream to the
-    /// local mux listener (see `TcpMuxListener::adopt_inbound_stream`).
-    pub(crate) fn dial_reverse_channel(
-        &self,
-        physical_addr: &SocketAddr,
-        marker_locator_port: u16,
-    ) -> io::Result<Box<dyn TcpStreamWrapper>> {
-        let mut stream = self.tcp_connect(physical_addr)?;
-
-        let local_ip: std::net::Ipv4Addr =
-            self.working_ip.parse().unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
-        let locator = encode_locator(local_ip, marker_locator_port);
-        let hello = ControlMsg::PeerHelloReverse { locator };
-        write_framed_message(&mut stream, &hello.to_bytes()).map_err(|e| {
-            Self::wrap_raw_io_error(
-                e,
-                TransportErrorCode::TcpHandshakeHelloFailed,
-                physical_addr,
-            )
-        })?;
-
-        let resp = self.read_control_response(&mut stream).map_err(|e| {
-            Self::wrap_raw_io_error(
-                e,
-                TransportErrorCode::TcpHandshakeHelloFailed,
-                physical_addr,
-            )
-        })?;
-        if resp.to_bytes()[0] != MSG_PEER_HELLO_ACK {
-            return Err(transport_io_error(
-                TransportErrorCode::TcpHandshakeHelloFailed,
-                format!(
-                    "Expected PEER_HELLO_ACK after PEER_HELLO_REVERSE, got {}",
-                    resp.type_name()
-                ),
-            ));
-        }
-
-        info!(
-            "TcpSender: reverse channel dialed to {:?} (marker_port={})",
-            physical_addr, marker_locator_port
-        );
-        Ok(stream)
-    }
-
-    /// Open an additional outbound TCP connection to `physical_addr` and
-    /// hand it over to the remote side as its reverse user-data send
-    /// channel for `logical_port`. Counterpart to `dial_reverse_channel`
-    /// but at the PORT_BIND stage — used after the asymmetric host sees
-    /// a PORT_RESERVE arrive on an already-established reverse control
-    /// stream. The caller is responsible for adopting the returned
-    /// stream on the local mux listener as an Active data connection.
-    pub(crate) fn dial_reverse_data_channel(
-        &self,
-        physical_addr: &SocketAddr,
-        marker_locator_port: u16,
-        logical_port: u16,
-    ) -> io::Result<Box<dyn TcpStreamWrapper>> {
-        let mut stream = self.tcp_connect(physical_addr)?;
-
-        let local_ip: std::net::Ipv4Addr =
-            self.working_ip.parse().unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
-        let locator = encode_locator(local_ip, marker_locator_port);
-        let bind = ControlMsg::PortBindReverse { locator, logical_port };
-        write_framed_message(&mut stream, &bind.to_bytes()).map_err(|e| {
-            Self::wrap_raw_io_error(
-                e,
-                TransportErrorCode::TcpHandshakeBindFailed,
-                physical_addr,
-            )
-        })?;
-
-        let resp = self.read_control_response(&mut stream).map_err(|e| {
-            Self::wrap_raw_io_error(
-                e,
-                TransportErrorCode::TcpHandshakeBindFailed,
-                physical_addr,
-            )
-        })?;
-        if resp.to_bytes()[0] != MSG_PORT_BIND_ACK {
-            return Err(transport_io_error(
-                TransportErrorCode::TcpHandshakeBindFailed,
-                format!(
-                    "Expected PORT_BIND_ACK after PORT_BIND_REVERSE, got {}",
-                    resp.type_name()
-                ),
-            ));
-        }
-
-        info!(
-            "TcpSender: reverse data channel dialed to {:?} (port={}, marker_port={})",
-            physical_addr, logical_port, marker_locator_port
-        );
-        Ok(stream)
-    }
-
-    // ========================================================================
     // 3-Step Handshake
     // ========================================================================
 
@@ -391,18 +171,6 @@ impl TcpSender {
         let key = (*physical_addr, CONTROL_LOGICAL_PORT);
         if self.connections.contains_key(&key) {
             return Ok(());
-        }
-        // Asymmetric peer marker: a locator with port 0 means the peer has
-        // no listener and we must wait for them to dial us. Never attempt
-        // an outbound `tcp_connect` to port 0 — it would just fail.
-        if physical_addr.port() == 0 {
-            return Err(transport_io_error(
-                TransportErrorCode::TcpConnectionRefused,
-                format!(
-                    "Asymmetric peer {:?} not yet connected (no inbound stream cached)",
-                    physical_addr
-                ),
-            ));
         }
         self.ensure_control_inner(physical_addr, key).map_err(|e| {
             Self::wrap_raw_io_error(e, TransportErrorCode::TcpHandshakeHelloFailed, physical_addr)
@@ -454,62 +222,7 @@ impl TcpSender {
             return Ok(());
         }
 
-        // Asymmetric-peer path: the peer has no listener, so we cannot
-        // dial a PORT_BIND ourselves. Send PORT_RESERVE on the adopted
-        // reverse control (fire-and-forget — the asymmetric peer reads
-        // it, recognises the reverse-control state, and dials the data
-        // channel back to us tagged with PORT_BIND_REVERSE). Return Err
-        // so the upper layer's next send cycle retries; by then the
-        // reverse data stream should be registered in the cache.
-        if physical_addr.port() == 0 {
-            self.request_reverse_data(physical_addr, logical_port);
-            return Err(transport_io_error(
-                TransportErrorCode::TcpReverseChannelPending,
-                format!(
-                    "Reverse data channel pending for asymmetric peer {:?}:{}",
-                    physical_addr, logical_port
-                ),
-            ));
-        }
-
         self.ensure_data_inner(physical_addr, logical_port, key)
-    }
-
-    /// Send PORT_RESERVE on the existing reverse control stream for this
-    /// asymmetric peer. Fire-and-forget — no PORT_RESERVE_ACK is read
-    /// because the asymmetric peer will not issue a cookie; instead it
-    /// dials a PORT_BIND_REVERSE connection in response.
-    fn request_reverse_data(&self, physical_addr: &SocketAddr, logical_port: u16) {
-        let control_key = (*physical_addr, CONTROL_LOGICAL_PORT);
-        let mut control_stream = match self
-            .connections
-            .get(&control_key)
-            .and_then(|s| s.try_clone_box().ok())
-        {
-            Some(s) => s,
-            None => {
-                debug!(
-                    "TcpSender: reverse PORT_RESERVE skipped — no control stream for {:?}",
-                    physical_addr
-                );
-                return;
-            }
-        };
-
-        let reserve = ControlMsg::PortReserve { logical_port };
-        if let Err(e) = write_framed_message(&mut control_stream, &reserve.to_bytes()) {
-            warn!(
-                "TcpSender: reverse PORT_RESERVE write failed for {:?}:{} — {:?}",
-                physical_addr, logical_port, e
-            );
-            // Drop the broken control so the next SPDP tick can rebuild.
-            self.disconnect_peer(physical_addr);
-        } else {
-            debug!(
-                "TcpSender: reverse PORT_RESERVE sent to {:?} (port={})",
-                physical_addr, logical_port
-            );
-        }
     }
 
     fn ensure_data_inner(
@@ -715,10 +428,6 @@ impl TcpSender {
         self.connections.retain(|key, _| key.0 != *addr);
         self.peer_info.remove(addr);
         self.keepalive_missed.remove(addr);
-        // Also clear reverse-channel guards so a future SPDP re-discovery
-        // can re-establish the 2-dial flow from scratch.
-        self.reverse_channels_dialed.remove(addr);
-        self.reverse_data_dialed.retain(|key, _| key.0 != *addr);
 
         debug!("TcpSender: Disconnected peer {:?}", addr);
 

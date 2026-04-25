@@ -19,8 +19,6 @@
 //! | 0x08 | KEEPALIVE        | Either           | (empty)                    |
 //! | 0x09 | KEEPALIVE_ACK    | Either           | (empty)                    |
 //! | 0x0A | ERROR            | Server → Client  | 1B operation + 2B code + 2B len + string  |
-//! | 0x0B | PEER_HELLO_REVERSE | Asym → Reachable | 16B dialer_locator       |
-//! | 0x0C | PORT_BIND_REVERSE  | Asym → Reachable | 16B dialer_locator + 2B logical_port (BE) |
 //!
 //! ## ERROR Operation Field
 //!
@@ -48,18 +46,6 @@ pub(crate) const MSG_PORT_BIND_ACK: u8 = 0x06;
 pub(crate) const MSG_KEEPALIVE: u8 = 0x08;
 pub(crate) const MSG_KEEPALIVE_ACK: u8 = 0x09;
 pub(crate) const MSG_ERROR: u8 = 0x0A;
-/// Asymmetric (connection reversal) hello: the dialer opens a TCP
-/// connection FOR the acceptor. After PEER_HELLO_ACK, ownership of the
-/// socket "flips" — the acceptor writes, the dialer reads. Used by hosts
-/// behind NAT to hand a send channel back to the reachable peer.
-pub(crate) const MSG_PEER_HELLO_REVERSE: u8 = 0x0B;
-/// Asymmetric data-channel reversal: the dialer opens a TCP connection
-/// FOR the acceptor to use as its send socket for the given logical port.
-/// Played by a host behind NAT after it receives PORT_RESERVE_ACK on its
-/// existing reverse control channel — instead of the reachable peer dialing
-/// the data connection (impossible across inbound NAT), the asymmetric peer
-/// dials it and tags it with this message.
-pub(crate) const MSG_PORT_BIND_REVERSE: u8 = 0x0C;
 
 // ─── Locator Encoding ───────────────────────────────────────────────────────
 
@@ -90,17 +76,6 @@ pub(crate) enum ControlMsg {
     /// Client announces its listener address.
     PeerHello { locator: [u8; 16] },
 
-    /// Connection-reversal hello: the dialer hands this TCP connection
-    /// over to the acceptor as a reverse send channel (the acceptor will
-    /// write on it, the dialer will read). Used by asymmetric (NAT-behind)
-    /// peers that cannot be dialed — they open both connections outbound,
-    /// tagging the second one as reverse.
-    ///
-    /// The embedded `locator` is the dialer's own marker address
-    /// (typically ip:0) so the acceptor can key its sender cache by the
-    /// same address the upper layer uses for this peer.
-    PeerHelloReverse { locator: [u8; 16] },
-
     /// Server acknowledges peer hello.
     PeerHelloAck,
 
@@ -112,14 +87,6 @@ pub(crate) enum ControlMsg {
 
     /// Client binds a data connection using a previously issued cookie.
     PortBind { cookie: [u8; 16] },
-
-    /// Connection-reversal data bind: the dialer hands this TCP connection
-    /// over to the acceptor as a reverse user-data send channel for
-    /// `logical_port`. The acceptor will write, the dialer will read.
-    /// The embedded `locator` is the dialer's marker address (typically
-    /// ip:0) so the acceptor keys its sender cache by the same address the
-    /// upper layer uses for this peer.
-    PortBindReverse { locator: [u8; 16], logical_port: u16 },
 
     /// Server confirms the data connection is bound.
     PortBindAck,
@@ -168,12 +135,6 @@ impl ControlMsg {
                 buf.extend_from_slice(locator);
                 buf
             }
-            ControlMsg::PeerHelloReverse { locator } => {
-                let mut buf = Vec::with_capacity(17);
-                buf.push(MSG_PEER_HELLO_REVERSE);
-                buf.extend_from_slice(locator);
-                buf
-            }
             ControlMsg::PeerHelloAck => vec![MSG_PEER_HELLO_ACK],
 
             ControlMsg::PortReserve { logical_port } => {
@@ -193,13 +154,6 @@ impl ControlMsg {
                 let mut buf = Vec::with_capacity(17);
                 buf.push(MSG_PORT_BIND);
                 buf.extend_from_slice(cookie);
-                buf
-            }
-            ControlMsg::PortBindReverse { locator, logical_port } => {
-                let mut buf = Vec::with_capacity(19);
-                buf.push(MSG_PORT_BIND_REVERSE);
-                buf.extend_from_slice(locator);
-                buf.extend_from_slice(&logical_port.to_be_bytes());
                 buf
             }
             ControlMsg::PortBindAck => vec![MSG_PORT_BIND_ACK],
@@ -240,17 +194,6 @@ impl ControlMsg {
                 locator.copy_from_slice(&payload[1..17]);
                 Ok(ControlMsg::PeerHello { locator })
             }
-            MSG_PEER_HELLO_REVERSE => {
-                if payload.len() < 17 {
-                    return Err(transport_io_error(
-                        TransportErrorCode::TcpControlProtocolError,
-                        "PeerHelloReverse too short",
-                    ));
-                }
-                let mut locator = [0u8; 16];
-                locator.copy_from_slice(&payload[1..17]);
-                Ok(ControlMsg::PeerHelloReverse { locator })
-            }
             MSG_PEER_HELLO_ACK => Ok(ControlMsg::PeerHelloAck),
 
             MSG_PORT_RESERVE => {
@@ -286,18 +229,6 @@ impl ControlMsg {
                 cookie.copy_from_slice(&payload[1..17]);
                 Ok(ControlMsg::PortBind { cookie })
             }
-            MSG_PORT_BIND_REVERSE => {
-                if payload.len() < 19 {
-                    return Err(transport_io_error(
-                        TransportErrorCode::TcpControlProtocolError,
-                        "PortBindReverse too short",
-                    ));
-                }
-                let mut locator = [0u8; 16];
-                locator.copy_from_slice(&payload[1..17]);
-                let logical_port = u16::from_be_bytes([payload[17], payload[18]]);
-                Ok(ControlMsg::PortBindReverse { locator, logical_port })
-            }
             MSG_PORT_BIND_ACK => Ok(ControlMsg::PortBindAck),
 
             MSG_KEEPALIVE => Ok(ControlMsg::Keepalive),
@@ -332,12 +263,10 @@ impl ControlMsg {
     pub(crate) fn type_name(&self) -> &'static str {
         match self {
             ControlMsg::PeerHello { .. } => "PEER_HELLO",
-            ControlMsg::PeerHelloReverse { .. } => "PEER_HELLO_REVERSE",
             ControlMsg::PeerHelloAck => "PEER_HELLO_ACK",
             ControlMsg::PortReserve { .. } => "PORT_RESERVE",
             ControlMsg::PortReserveAck { .. } => "PORT_RESERVE_ACK",
             ControlMsg::PortBind { .. } => "PORT_BIND",
-            ControlMsg::PortBindReverse { .. } => "PORT_BIND_REVERSE",
             ControlMsg::PortBindAck => "PORT_BIND_ACK",
             ControlMsg::Keepalive => "KEEPALIVE",
             ControlMsg::KeepaliveAck => "KEEPALIVE_ACK",
