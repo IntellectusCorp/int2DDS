@@ -41,6 +41,7 @@ namespace HelloWorldPublisher
             return new HelloWorld(r.ReadU32(), r.ReadString());
         }
 
-        public byte[] SerializeKey() => Array.Empty<byte>();
+        private static readonly byte[] s_emptyKey = new byte[0];
+        public byte[] SerializeKey() => s_emptyKey;
     }
 }
