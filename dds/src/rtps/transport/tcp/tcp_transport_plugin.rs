@@ -290,35 +290,29 @@ impl TcpMuxListeningLoopTask {
     fn run(&mut self) -> io::Result<()> {
         let keepalive_check_interval_ms = crate::common::env::get_tcp_keepalive_interval_ms();
         let incoming_idle_timeout_ms = crate::common::env::get_tcp_incoming_idle_timeout_ms();
-        let orphan_data_grace_ms = crate::common::env::get_tcp_orphan_data_grace_ms();
 
         let incoming_idle_timeout = Duration::from_millis(incoming_idle_timeout_ms);
-        let orphan_data_grace = Duration::from_millis(orphan_data_grace_ms);
         let keepalive_interval = Duration::from_millis(keepalive_check_interval_ms);
 
         info!(
             "[TcpMuxListeningLoopTask] Starting on port {} \
-             (incoming_idle_timeout={}ms, orphan_data_grace={}ms)",
+             (incoming_idle_timeout={}ms)",
             self.mux_listener.port(),
             incoming_idle_timeout_ms,
-            orphan_data_grace_ms,
         );
 
         // Take the TCP listener socket for the blocking accept loop.
         // When the peer has no inbound listener the underlying socket was
         // created via `new_unbound`, so this returns None — we skip the
         // accept loop but still run the timer thread so keepalive /
-        // orphan pruning stay active for outbound connections.
+        // outbound orphan pruning stay active.
         let listener_opt = self.mux_listener.take_listener();
 
-        let shared = Arc::clone(&self.mux_listener.shared);
-
-        // ── Timer thread: keepalive + orphan pruning ─────────────────────────
+        // ── Timer thread: keepalive + outbound orphan pruning ────────────────
         {
-            let timer_shared = Arc::clone(&shared);
             let timer_terminated = Arc::clone(&self.terminated);
             let timer_sender = self.sender.clone();
-            let orphan_check_interval = (orphan_data_grace / 2).max(Duration::from_millis(100));
+            let orphan_check_interval = Duration::from_millis(500);
 
             thread::Builder::new()
                 .name("tcp_mux_timer".to_string())
@@ -340,14 +334,6 @@ impl TcpMuxListeningLoopTask {
 
                         if last_orphan.elapsed() >= orphan_check_interval {
                             last_orphan = Instant::now();
-                            let pruned =
-                                timer_shared.prune_orphan_data_connections(orphan_data_grace);
-                            if pruned > 0 {
-                                warn!(
-                                    "[TcpMuxListeningLoopTask] Pruned {} orphan incoming",
-                                    pruned
-                                );
-                            }
                             let pruned = timer_sender.prune_orphan_connections();
                             if pruned > 0 {
                                 warn!(
