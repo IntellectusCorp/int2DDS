@@ -278,6 +278,10 @@ impl MessageReceiver {
 
                     match &submessage.body {
                         SubmessageBody::Data(data) => {
+                            if data.writer_id != EntityId::SPDP_BUILTIN_PARTICIPANT_WRITER {
+                                continue;
+                            }
+
                             inline_qos_params = data.inline_qos();
 
                             if log_on {
