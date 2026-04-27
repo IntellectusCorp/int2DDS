@@ -2,7 +2,6 @@
 // Licensed under the int2DDS license.
 
 using System;
-using System.Buffers.Binary;
 using System.Text;
 
 namespace Int2Dds.Cdr
@@ -16,11 +15,20 @@ namespace Int2Dds.Cdr
         private readonly byte[] _data;
         private int _pos;
 
+        public CdrKeyReader(byte[] data)
+        {
+            if (data == null) throw new ArgumentNullException(nameof(data));
+            _data = (byte[])data.Clone();
+            _pos = 0;
+        }
+
+#if !NET45
         public CdrKeyReader(ReadOnlySpan<byte> data)
         {
             _data = data.ToArray();
             _pos = 0;
         }
+#endif
 
         /// <summary>Number of bytes remaining.</summary>
         public int Remaining => Math.Max(0, _data.Length - _pos);
@@ -73,7 +81,7 @@ namespace Int2Dds.Cdr
         {
             Align(2);
             EnsureRemaining(2);
-            short value = BinaryPrimitives.ReadInt16BigEndian(_data.AsSpan(_pos));
+            short value = CdrBinaryHelper.ReadInt16BE(_data, _pos);
             _pos += 2;
             return value;
         }
@@ -82,7 +90,7 @@ namespace Int2Dds.Cdr
         {
             Align(2);
             EnsureRemaining(2);
-            ushort value = BinaryPrimitives.ReadUInt16BigEndian(_data.AsSpan(_pos));
+            ushort value = CdrBinaryHelper.ReadUInt16BE(_data, _pos);
             _pos += 2;
             return value;
         }
@@ -91,7 +99,7 @@ namespace Int2Dds.Cdr
         {
             Align(4);
             EnsureRemaining(4);
-            int value = BinaryPrimitives.ReadInt32BigEndian(_data.AsSpan(_pos));
+            int value = CdrBinaryHelper.ReadInt32BE(_data, _pos);
             _pos += 4;
             return value;
         }
@@ -100,7 +108,7 @@ namespace Int2Dds.Cdr
         {
             Align(4);
             EnsureRemaining(4);
-            uint value = BinaryPrimitives.ReadUInt32BigEndian(_data.AsSpan(_pos));
+            uint value = CdrBinaryHelper.ReadUInt32BE(_data, _pos);
             _pos += 4;
             return value;
         }
@@ -109,7 +117,7 @@ namespace Int2Dds.Cdr
         {
             Align(8);
             EnsureRemaining(8);
-            long value = BinaryPrimitives.ReadInt64BigEndian(_data.AsSpan(_pos));
+            long value = CdrBinaryHelper.ReadInt64BE(_data, _pos);
             _pos += 8;
             return value;
         }
@@ -118,7 +126,7 @@ namespace Int2Dds.Cdr
         {
             Align(8);
             EnsureRemaining(8);
-            ulong value = BinaryPrimitives.ReadUInt64BigEndian(_data.AsSpan(_pos));
+            ulong value = CdrBinaryHelper.ReadUInt64BE(_data, _pos);
             _pos += 8;
             return value;
         }

@@ -1,9 +1,12 @@
 using System;
+#if !NET45
 using System.Buffers;
+#endif
 using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Text;
 using Int2Dds.Conditions;
 using Int2Dds.Exceptions;
 using Int2Dds.Interop;
@@ -48,7 +51,7 @@ namespace Int2Dds.Core
             IDataReaderListener? listener = null, uint statusMask = 0)
         {
             _topic = topic;
-            _buffer = ArrayPool<byte>.Shared.Rent(DefaultBufferSize);
+            _buffer = RentBuffer(DefaultBufferSize);
 
             // Always create a QoS handle so that the native layer receives the
             // correct DataRepresentation default (XCDR1) even when the caller
@@ -113,33 +116,37 @@ namespace Int2Dds.Core
             IDataReaderListener? listener = null, uint statusMask = 0)
         {
             _topic = topic;
-            _buffer = ArrayPool<byte>.Shared.Rent(DefaultBufferSize);
+            _buffer = RentBuffer(DefaultBufferSize);
 
-            if (listener != null)
+            unsafe
             {
-                unsafe
+                var qosPathBytes = Encoding.UTF8.GetBytes(qosPath + '\0');
+                fixed (byte* pQos = qosPathBytes)
                 {
-                    var (nativeListener, contextHandle) = ListenerRegistry.CreateReaderListener(listener, this);
-                    _listenerContextHandle = contextHandle;
-                    try
+                    if (listener != null)
+                    {
+                        var (nativeListener, contextHandle) = ListenerRegistry.CreateReaderListener(listener, this);
+                        _listenerContextHandle = contextHandle;
+                        try
+                        {
+                            ReturnCodeHelper.CheckReturn(
+                                NativeMethods.int2dds_create_datareader_with_profile_and_listener(
+                                    subscriber.Handle, topic.Handle, pQos, &nativeListener, statusMask, out _handle));
+                        }
+                        catch
+                        {
+                            ListenerRegistry.FreeListener(_listenerContextHandle);
+                            _listenerContextHandle = IntPtr.Zero;
+                            throw;
+                        }
+                    }
+                    else
                     {
                         ReturnCodeHelper.CheckReturn(
-                            NativeMethods.int2dds_create_datareader_with_profile_and_listener(
-                                subscriber.Handle, topic.Handle, qosPath, &nativeListener, statusMask, out _handle));
-                    }
-                    catch
-                    {
-                        ListenerRegistry.FreeListener(_listenerContextHandle);
-                        _listenerContextHandle = IntPtr.Zero;
-                        throw;
+                            NativeMethods.int2dds_create_datareader_with_profile(
+                                subscriber.Handle, topic.Handle, pQos, out _handle));
                     }
                 }
-            }
-            else
-            {
-                ReturnCodeHelper.CheckReturn(
-                    NativeMethods.int2dds_create_datareader_with_profile(
-                        subscriber.Handle, topic.Handle, qosPath, out _handle));
             }
         }
 
@@ -265,7 +272,7 @@ namespace Int2Dds.Core
 
             var ret = NativeMethods.int2dds_take_serialized_batch(_handle, maxSamples, out var seqHandle);
             if (ret == ReturnCode.NoData)
-                return Array.Empty<(Sample<T>, SampleInfo)>();
+                return Int2Dds.Internal.EmptyArrayHolder<(Sample<T>, SampleInfo)>.Value;
             ReturnCodeHelper.CheckReturn(ret);
 
             try
@@ -290,7 +297,7 @@ namespace Int2Dds.Core
 
             var ret = NativeMethods.int2dds_read_serialized_batch(_handle, maxSamples, out var seqHandle);
             if (ret == ReturnCode.NoData)
-                return Array.Empty<(Sample<T>, SampleInfo)>();
+                return Int2Dds.Internal.EmptyArrayHolder<(Sample<T>, SampleInfo)>.Value;
             ReturnCodeHelper.CheckReturn(ret);
 
             try
@@ -802,7 +809,27 @@ namespace Int2Dds.Core
             }
 
             NativeMethods.int2dds_delete_datareader(_handle);
-            ArrayPool<byte>.Shared.Return(_buffer);
+            ReturnBuffer(_buffer);
+        }
+
+        // ArrayPool<byte>.Shared isn't available on net45 (System.Buffers namespace).
+        // On modern targets we use the pool to avoid GC pressure on hot reader paths;
+        // on net45 we just allocate, since the embedded scenarios using net45 are
+        // typically lower-throughput and we are committed to zero NuGet runtime deps.
+        private static byte[] RentBuffer(int size)
+        {
+#if NET45
+            return new byte[size];
+#else
+            return ArrayPool<byte>.Shared.Rent(size);
+#endif
+        }
+
+        private static void ReturnBuffer(byte[] buffer)
+        {
+#if !NET45
+            ArrayPool<byte>.Shared.Return(buffer);
+#endif
         }
 
         ~DataReader()

@@ -2,7 +2,6 @@
 // Licensed under the int2DDS license.
 
 using System;
-using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -109,7 +108,7 @@ namespace Int2Dds.Cdr
 
             if (padding == 0) return;
             EnsureCapacity(padding);
-            _buffer.AsSpan(_pos, padding).Clear();
+            Array.Clear(_buffer, _pos, padding);
             _pos += padding;
         }
 
@@ -158,9 +157,9 @@ namespace Int2Dds.Cdr
             Align(2);
             EnsureCapacity(2);
             if (_littleEndian)
-                BinaryPrimitives.WriteInt16LittleEndian(_buffer.AsSpan(_pos), value);
+                CdrBinaryHelper.WriteInt16LE(_buffer, _pos, value);
             else
-                BinaryPrimitives.WriteInt16BigEndian(_buffer.AsSpan(_pos), value);
+                CdrBinaryHelper.WriteInt16BE(_buffer, _pos, value);
             _pos += 2;
         }
 
@@ -170,9 +169,9 @@ namespace Int2Dds.Cdr
             Align(2);
             EnsureCapacity(2);
             if (_littleEndian)
-                BinaryPrimitives.WriteUInt16LittleEndian(_buffer.AsSpan(_pos), value);
+                CdrBinaryHelper.WriteUInt16LE(_buffer, _pos, value);
             else
-                BinaryPrimitives.WriteUInt16BigEndian(_buffer.AsSpan(_pos), value);
+                CdrBinaryHelper.WriteUInt16BE(_buffer, _pos, value);
             _pos += 2;
         }
 
@@ -182,9 +181,9 @@ namespace Int2Dds.Cdr
             Align(4);
             EnsureCapacity(4);
             if (_littleEndian)
-                BinaryPrimitives.WriteInt32LittleEndian(_buffer.AsSpan(_pos), value);
+                CdrBinaryHelper.WriteInt32LE(_buffer, _pos, value);
             else
-                BinaryPrimitives.WriteInt32BigEndian(_buffer.AsSpan(_pos), value);
+                CdrBinaryHelper.WriteInt32BE(_buffer, _pos, value);
             _pos += 4;
         }
 
@@ -194,9 +193,9 @@ namespace Int2Dds.Cdr
             Align(4);
             EnsureCapacity(4);
             if (_littleEndian)
-                BinaryPrimitives.WriteUInt32LittleEndian(_buffer.AsSpan(_pos), value);
+                CdrBinaryHelper.WriteUInt32LE(_buffer, _pos, value);
             else
-                BinaryPrimitives.WriteUInt32BigEndian(_buffer.AsSpan(_pos), value);
+                CdrBinaryHelper.WriteUInt32BE(_buffer, _pos, value);
             _pos += 4;
         }
 
@@ -206,9 +205,9 @@ namespace Int2Dds.Cdr
             Align(8);
             EnsureCapacity(8);
             if (_littleEndian)
-                BinaryPrimitives.WriteInt64LittleEndian(_buffer.AsSpan(_pos), value);
+                CdrBinaryHelper.WriteInt64LE(_buffer, _pos, value);
             else
-                BinaryPrimitives.WriteInt64BigEndian(_buffer.AsSpan(_pos), value);
+                CdrBinaryHelper.WriteInt64BE(_buffer, _pos, value);
             _pos += 8;
         }
 
@@ -218,9 +217,9 @@ namespace Int2Dds.Cdr
             Align(8);
             EnsureCapacity(8);
             if (_littleEndian)
-                BinaryPrimitives.WriteUInt64LittleEndian(_buffer.AsSpan(_pos), value);
+                CdrBinaryHelper.WriteUInt64LE(_buffer, _pos, value);
             else
-                BinaryPrimitives.WriteUInt64BigEndian(_buffer.AsSpan(_pos), value);
+                CdrBinaryHelper.WriteUInt64BE(_buffer, _pos, value);
             _pos += 8;
         }
 
@@ -257,7 +256,7 @@ namespace Int2Dds.Cdr
             WriteU32(cdrLen);
             EnsureCapacity(byteCount + 1);
             if (byteCount > 0)
-                Encoding.UTF8.GetBytes(s.AsSpan(), _buffer.AsSpan(_pos));
+                Encoding.UTF8.GetBytes(s, 0, s.Length, _buffer, _pos);
             _buffer[_pos + byteCount] = 0; // null terminator
             _pos += byteCount + 1;
         }
@@ -286,12 +285,23 @@ namespace Int2Dds.Cdr
         }
 
         /// <summary>Write raw bytes (no alignment, no length prefix).</summary>
+        public void WriteBytes(byte[] data)
+        {
+            if (data == null) return;
+            EnsureCapacity(data.Length);
+            Buffer.BlockCopy(data, 0, _buffer, _pos, data.Length);
+            _pos += data.Length;
+        }
+
+#if !NET45
+        /// <summary>Write raw bytes (no alignment, no length prefix).</summary>
         public void WriteBytes(ReadOnlySpan<byte> data)
         {
             EnsureCapacity(data.Length);
             data.CopyTo(_buffer.AsSpan(_pos));
             _pos += data.Length;
         }
+#endif
 
         /// <summary>Write an enum discriminant as a signed 32-bit integer.</summary>
         public void WriteEnum(int discriminant)
@@ -323,9 +333,9 @@ namespace Int2Dds.Cdr
             if (!_xcdr2) return; // XCDR1: no DHEADER
             uint objectSize = (uint)(_pos - token - 4);
             if (_littleEndian)
-                BinaryPrimitives.WriteUInt32LittleEndian(_buffer.AsSpan(token), objectSize);
+                CdrBinaryHelper.WriteUInt32LE(_buffer, token, objectSize);
             else
-                BinaryPrimitives.WriteUInt32BigEndian(_buffer.AsSpan(token), objectSize);
+                CdrBinaryHelper.WriteUInt32BE(_buffer, token, objectSize);
         }
 
         // ---- XCDR2 EMHEADER -------------------------------------------------
@@ -374,9 +384,9 @@ namespace Int2Dds.Cdr
         {
             uint dataLength = (uint)(_pos - token - 4);
             if (_littleEndian)
-                BinaryPrimitives.WriteUInt32LittleEndian(_buffer.AsSpan(token), dataLength);
+                CdrBinaryHelper.WriteUInt32LE(_buffer, token, dataLength);
             else
-                BinaryPrimitives.WriteUInt32BigEndian(_buffer.AsSpan(token), dataLength);
+                CdrBinaryHelper.WriteUInt32BE(_buffer, token, dataLength);
         }
 
         /// <summary>
