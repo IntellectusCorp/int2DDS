@@ -54,15 +54,11 @@ struct PeerConnectionGroup {
     control_conn: Option<ConnectionId>,
     discovery_conn: Option<ConnectionId>,
     user_data_conn: Option<ConnectionId>,
-    /// Set to `Some(when)` the moment `control_conn` transitions to None while
-    /// data connections still exist.  After the grace period expires,
-    /// `prune_orphan_data_connections` tears down the group.
-    control_lost_at: Option<Instant>,
 }
 
 impl PeerConnectionGroup {
     fn new() -> Self {
-        Self { control_conn: None, discovery_conn: None, user_data_conn: None, control_lost_at: None }
+        Self { control_conn: None, discovery_conn: None, user_data_conn: None }
     }
 
     fn all_conns(&self) -> Vec<ConnectionId> {
@@ -177,35 +173,6 @@ impl MuxListenerShared {
         stale.len()
     }
 
-    // ── Orphan data connection pruning ───────────────────────────────────────
-
-    /// Drop peer groups whose control connection has been gone for > `grace`.
-    pub(crate) fn prune_orphan_data_connections(&self, grace: Duration) -> usize {
-        let now = Instant::now();
-        let stale_guids: Vec<GuidPrefix> = {
-            let pc = self.peer_connections.lock().expect("peer_connections lock");
-            pc.iter()
-                .filter_map(|(guid, g)| match g.control_lost_at {
-                    Some(lost) if now.duration_since(lost) > grace && g.has_data_conns() => {
-                        Some(*guid)
-                    }
-                    _ => None,
-                })
-                .collect()
-        };
-
-        for guid in &stale_guids {
-            warn!(
-                "TcpMuxListener [{}]: Pruning orphan data connections for peer {:?}",
-                TransportErrorCode::TcpOrphanPruned,
-                guid
-            );
-            self.remove_peer(*guid);
-        }
-
-        stale_guids.len()
-    }
-
     // ── Connection / peer cleanup ────────────────────────────────────────────
 
     pub(crate) fn remove_peer(&self, guid: GuidPrefix) {
@@ -224,8 +191,7 @@ impl MuxListenerShared {
         if let Some(guid) = guid_opt {
             let mut pc = self.peer_connections.lock().expect("peer_connections lock");
             if let Some(group) = pc.get_mut(&guid) {
-                let was_control = group.control_conn == Some(conn_id);
-                if was_control {
+                if group.control_conn == Some(conn_id) {
                     group.control_conn = None;
                 }
                 if group.discovery_conn == Some(conn_id) {
@@ -233,12 +199,6 @@ impl MuxListenerShared {
                 }
                 if group.user_data_conn == Some(conn_id) {
                     group.user_data_conn = None;
-                }
-
-                // Start grace period if control just dropped but data conns remain.
-                if was_control && group.has_data_conns() && group.control_lost_at.is_none() {
-                    group.control_lost_at = Some(Instant::now());
-                    debug!("TcpMuxListener: control lost for {:?}, grace started", guid);
                 }
 
                 if group.all_conns().is_empty() {
@@ -620,10 +580,6 @@ impl TcpMuxListener {
         self.shared.prune_idle_connections(timeout)
     }
 
-    pub(crate) fn prune_orphan_data_connections(&self, grace: Duration) -> usize {
-        self.shared.prune_orphan_data_connections(grace)
-    }
-
     pub(crate) fn connection_count(&self) -> usize {
         self.shared.connection_count()
     }
@@ -861,7 +817,6 @@ mod tests {
         let mut group = PeerConnectionGroup::new();
         assert!(group.all_conns().is_empty());
         assert!(!group.has_data_conns());
-        assert!(group.control_lost_at.is_none());
 
         group.control_conn = Some(100);
         assert_eq!(group.all_conns().len(), 1);
@@ -871,90 +826,6 @@ mod tests {
         group.user_data_conn = Some(102);
         assert_eq!(group.all_conns().len(), 3);
         assert!(group.has_data_conns());
-    }
-
-    // ── Orphan grace-period tests (use fake groups, no real sockets) ──────────
-
-    fn install_fake_group(
-        listener: &TcpMuxListener,
-        guid: GuidPrefix,
-        ctrl: Option<ConnectionId>,
-        disc: Option<ConnectionId>,
-        user: Option<ConnectionId>,
-        control_lost_at: Option<Instant>,
-    ) {
-        listener
-            .shared
-            .peer_connections
-            .lock()
-            .expect("lock")
-            .insert(guid, PeerConnectionGroup { control_conn: ctrl, discovery_conn: disc, user_data_conn: user, control_lost_at });
-    }
-
-    #[test]
-    fn test_orphan_grace_keeps_data_during_window() {
-        let (listener, _) = make_listener();
-        let guid = [0xAAu8; 12];
-        install_fake_group(
-            &listener,
-            guid,
-            None,
-            Some(1001),
-            Some(1002),
-            Some(Instant::now()),
-        );
-
-        let pruned = listener.prune_orphan_data_connections(Duration::from_secs(60));
-        assert_eq!(pruned, 0);
-        assert!(
-            listener.shared.peer_connections.lock().unwrap().contains_key(&guid)
-        );
-    }
-
-    #[test]
-    fn test_orphan_grace_prunes_after_window() {
-        let (listener, _) = make_listener();
-        let guid = [0xBBu8; 12];
-        install_fake_group(
-            &listener,
-            guid,
-            None,
-            Some(2001),
-            Some(2002),
-            Some(Instant::now() - Duration::from_secs(10)),
-        );
-
-        let pruned = listener.prune_orphan_data_connections(Duration::from_secs(1));
-        assert_eq!(pruned, 1);
-        assert!(
-            !listener.shared.peer_connections.lock().unwrap().contains_key(&guid)
-        );
-    }
-
-    #[test]
-    fn test_orphan_grace_ignores_groups_with_alive_control() {
-        let (listener, _) = make_listener();
-        let guid = [0xCCu8; 12];
-        install_fake_group(&listener, guid, Some(3000), Some(3001), Some(3002), None);
-
-        let pruned = listener.prune_orphan_data_connections(Duration::from_nanos(0));
-        assert_eq!(pruned, 0);
-        assert!(
-            listener.shared.peer_connections.lock().unwrap().contains_key(&guid)
-        );
-    }
-
-    #[test]
-    fn test_orphan_grace_ignores_data_only_with_no_lost_marker() {
-        let (listener, _) = make_listener();
-        let guid = [0xDDu8; 12];
-        install_fake_group(&listener, guid, None, Some(4001), None, None);
-
-        let pruned = listener.prune_orphan_data_connections(Duration::from_nanos(0));
-        assert_eq!(pruned, 0);
-        assert!(
-            listener.shared.peer_connections.lock().unwrap().contains_key(&guid)
-        );
     }
 
     // ── Listener bind / accept ────────────────────────────────────────────────
