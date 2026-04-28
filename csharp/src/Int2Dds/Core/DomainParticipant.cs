@@ -202,7 +202,7 @@ namespace Int2Dds.Core
                     var handles = new InstanceHandle[(int)count];
                     for (var i = 0; i < (int)count; i++)
                     {
-                        handles[i] = new InstanceHandle(buffer, i * 16);
+                        handles[i] = new InstanceHandle(buffer.AsSpan(i * 16, 16));
                     }
                     return handles;
                 }

@@ -2,6 +2,7 @@
 // Licensed under the int2DDS license.
 
 using System;
+using System.Buffers.Binary;
 using System.Text;
 
 namespace Int2Dds.Cdr
@@ -54,7 +55,7 @@ namespace Int2Dds.Cdr
 
             if (padding == 0) return;
             EnsureCapacity(padding);
-            Array.Clear(_buffer, _pos, padding);
+            _buffer.AsSpan(_pos, padding).Clear();
             _pos += padding;
         }
 
@@ -82,7 +83,7 @@ namespace Int2Dds.Cdr
         {
             Align(2);
             EnsureCapacity(2);
-            CdrBinaryHelper.WriteInt16BE(_buffer, _pos, value);
+            BinaryPrimitives.WriteInt16BigEndian(_buffer.AsSpan(_pos), value);
             _pos += 2;
         }
 
@@ -90,7 +91,7 @@ namespace Int2Dds.Cdr
         {
             Align(2);
             EnsureCapacity(2);
-            CdrBinaryHelper.WriteUInt16BE(_buffer, _pos, value);
+            BinaryPrimitives.WriteUInt16BigEndian(_buffer.AsSpan(_pos), value);
             _pos += 2;
         }
 
@@ -98,7 +99,7 @@ namespace Int2Dds.Cdr
         {
             Align(4);
             EnsureCapacity(4);
-            CdrBinaryHelper.WriteInt32BE(_buffer, _pos, value);
+            BinaryPrimitives.WriteInt32BigEndian(_buffer.AsSpan(_pos), value);
             _pos += 4;
         }
 
@@ -106,7 +107,7 @@ namespace Int2Dds.Cdr
         {
             Align(4);
             EnsureCapacity(4);
-            CdrBinaryHelper.WriteUInt32BE(_buffer, _pos, value);
+            BinaryPrimitives.WriteUInt32BigEndian(_buffer.AsSpan(_pos), value);
             _pos += 4;
         }
 
@@ -114,7 +115,7 @@ namespace Int2Dds.Cdr
         {
             Align(8);
             EnsureCapacity(8);
-            CdrBinaryHelper.WriteInt64BE(_buffer, _pos, value);
+            BinaryPrimitives.WriteInt64BigEndian(_buffer.AsSpan(_pos), value);
             _pos += 8;
         }
 
@@ -122,7 +123,7 @@ namespace Int2Dds.Cdr
         {
             Align(8);
             EnsureCapacity(8);
-            CdrBinaryHelper.WriteUInt64BE(_buffer, _pos, value);
+            BinaryPrimitives.WriteUInt64BigEndian(_buffer.AsSpan(_pos), value);
             _pos += 8;
         }
 
@@ -183,22 +184,12 @@ namespace Int2Dds.Cdr
             WriteI32(discriminant);
         }
 
-        public void WriteBytes(byte[] data)
-        {
-            if (data == null) return;
-            EnsureCapacity(data.Length);
-            Buffer.BlockCopy(data, 0, _buffer, _pos, data.Length);
-            _pos += data.Length;
-        }
-
-#if !NET45
         public void WriteBytes(ReadOnlySpan<byte> data)
         {
             EnsureCapacity(data.Length);
             data.CopyTo(_buffer.AsSpan(_pos));
             _pos += data.Length;
         }
-#endif
 
         // ---- Output ---------------------------------------------------------
 

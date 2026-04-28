@@ -1,7 +1,5 @@
 using System;
-#if !NET45
 using System.Buffers;
-#endif
 using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.CompilerServices;
@@ -51,7 +49,7 @@ namespace Int2Dds.Core
             IDataReaderListener? listener = null, uint statusMask = 0)
         {
             _topic = topic;
-            _buffer = RentBuffer(DefaultBufferSize);
+            _buffer = ArrayPool<byte>.Shared.Rent(DefaultBufferSize);
 
             // Always create a QoS handle so that the native layer receives the
             // correct DataRepresentation default (XCDR1) even when the caller
@@ -116,7 +114,7 @@ namespace Int2Dds.Core
             IDataReaderListener? listener = null, uint statusMask = 0)
         {
             _topic = topic;
-            _buffer = RentBuffer(DefaultBufferSize);
+            _buffer = ArrayPool<byte>.Shared.Rent(DefaultBufferSize);
 
             unsafe
             {
@@ -809,27 +807,7 @@ namespace Int2Dds.Core
             }
 
             NativeMethods.int2dds_delete_datareader(_handle);
-            ReturnBuffer(_buffer);
-        }
-
-        // ArrayPool<byte>.Shared isn't available on net45 (System.Buffers namespace).
-        // On modern targets we use the pool to avoid GC pressure on hot reader paths;
-        // on net45 we just allocate, since the embedded scenarios using net45 are
-        // typically lower-throughput and we are committed to zero NuGet runtime deps.
-        private static byte[] RentBuffer(int size)
-        {
-#if NET45
-            return new byte[size];
-#else
-            return ArrayPool<byte>.Shared.Rent(size);
-#endif
-        }
-
-        private static void ReturnBuffer(byte[] buffer)
-        {
-#if !NET45
-            ArrayPool<byte>.Shared.Return(buffer);
-#endif
+            ArrayPool<byte>.Shared.Return(_buffer);
         }
 
         ~DataReader()
