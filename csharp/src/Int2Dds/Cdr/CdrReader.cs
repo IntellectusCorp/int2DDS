@@ -2,6 +2,7 @@
 // Licensed under the int2DDS license.
 
 using System;
+using System.Buffers.Binary;
 using System.Text;
 
 namespace Int2Dds.Cdr
@@ -33,13 +34,20 @@ namespace Int2Dds.Cdr
         /// <summary>
         /// Create a reader from a byte array, parsing the 4-byte encapsulation header.
         /// </summary>
-        public CdrReader(byte[] data)
+        public CdrReader(byte[] data) : this((ReadOnlySpan<byte>)data)
         {
-            if (data == null) throw new ArgumentNullException(nameof(data));
+        }
+
+        /// <summary>
+        /// Create a reader that parses the 4-byte encapsulation header to detect
+        /// endianness and XCDR version.
+        /// </summary>
+        public CdrReader(ReadOnlySpan<byte> data)
+        {
             if (data.Length < 4)
                 throw new CdrUnderflowException("Data too short for encapsulation header.");
 
-            _data = (byte[])data.Clone();
+            _data = data.ToArray();
 
             // Encapsulation header is always big-endian
             ushort encapId = (ushort)((_data[0] << 8) | _data[1]);
@@ -71,15 +79,6 @@ namespace Int2Dds.Cdr
             _pos = 4; // skip encapsulation header
         }
 
-#if !NET45
-        /// <summary>
-        /// Create a reader from a span, parsing the 4-byte encapsulation header.
-        /// </summary>
-        public CdrReader(ReadOnlySpan<byte> data) : this(data.ToArray())
-        {
-        }
-#endif
-
         /// <summary>
         /// Internal constructor for raw data without encapsulation header.
         /// </summary>
@@ -95,21 +94,10 @@ namespace Int2Dds.Cdr
         /// <summary>
         /// Create a reader from raw data (no encapsulation header).
         /// </summary>
-        public static CdrReader FromRaw(byte[] data, bool littleEndian = true, bool xcdr2 = true)
-        {
-            if (data == null) throw new ArgumentNullException(nameof(data));
-            return new CdrReader((byte[])data.Clone(), littleEndian, xcdr2);
-        }
-
-#if !NET45
-        /// <summary>
-        /// Create a reader from raw span data (no encapsulation header).
-        /// </summary>
         public static CdrReader FromRaw(ReadOnlySpan<byte> data, bool littleEndian = true, bool xcdr2 = true)
         {
             return new CdrReader(data.ToArray(), littleEndian, xcdr2);
         }
-#endif
 
         /// <summary>Number of bytes remaining to be read.</summary>
         public int Remaining => Math.Max(0, _data.Length - _pos);
@@ -169,8 +157,8 @@ namespace Int2Dds.Cdr
             Align(2);
             EnsureRemaining(2);
             short value = _littleEndian
-                ? CdrBinaryHelper.ReadInt16LE(_data, _pos)
-                : CdrBinaryHelper.ReadInt16BE(_data, _pos);
+                ? BinaryPrimitives.ReadInt16LittleEndian(_data.AsSpan(_pos))
+                : BinaryPrimitives.ReadInt16BigEndian(_data.AsSpan(_pos));
             _pos += 2;
             return value;
         }
@@ -181,8 +169,8 @@ namespace Int2Dds.Cdr
             Align(2);
             EnsureRemaining(2);
             ushort value = _littleEndian
-                ? CdrBinaryHelper.ReadUInt16LE(_data, _pos)
-                : CdrBinaryHelper.ReadUInt16BE(_data, _pos);
+                ? BinaryPrimitives.ReadUInt16LittleEndian(_data.AsSpan(_pos))
+                : BinaryPrimitives.ReadUInt16BigEndian(_data.AsSpan(_pos));
             _pos += 2;
             return value;
         }
@@ -193,8 +181,8 @@ namespace Int2Dds.Cdr
             Align(4);
             EnsureRemaining(4);
             int value = _littleEndian
-                ? CdrBinaryHelper.ReadInt32LE(_data, _pos)
-                : CdrBinaryHelper.ReadInt32BE(_data, _pos);
+                ? BinaryPrimitives.ReadInt32LittleEndian(_data.AsSpan(_pos))
+                : BinaryPrimitives.ReadInt32BigEndian(_data.AsSpan(_pos));
             _pos += 4;
             return value;
         }
@@ -205,8 +193,8 @@ namespace Int2Dds.Cdr
             Align(4);
             EnsureRemaining(4);
             uint value = _littleEndian
-                ? CdrBinaryHelper.ReadUInt32LE(_data, _pos)
-                : CdrBinaryHelper.ReadUInt32BE(_data, _pos);
+                ? BinaryPrimitives.ReadUInt32LittleEndian(_data.AsSpan(_pos))
+                : BinaryPrimitives.ReadUInt32BigEndian(_data.AsSpan(_pos));
             _pos += 4;
             return value;
         }
@@ -217,8 +205,8 @@ namespace Int2Dds.Cdr
             Align(8);
             EnsureRemaining(8);
             long value = _littleEndian
-                ? CdrBinaryHelper.ReadInt64LE(_data, _pos)
-                : CdrBinaryHelper.ReadInt64BE(_data, _pos);
+                ? BinaryPrimitives.ReadInt64LittleEndian(_data.AsSpan(_pos))
+                : BinaryPrimitives.ReadInt64BigEndian(_data.AsSpan(_pos));
             _pos += 8;
             return value;
         }
@@ -229,8 +217,8 @@ namespace Int2Dds.Cdr
             Align(8);
             EnsureRemaining(8);
             ulong value = _littleEndian
-                ? CdrBinaryHelper.ReadUInt64LE(_data, _pos)
-                : CdrBinaryHelper.ReadUInt64BE(_data, _pos);
+                ? BinaryPrimitives.ReadUInt64LittleEndian(_data.AsSpan(_pos))
+                : BinaryPrimitives.ReadUInt64BigEndian(_data.AsSpan(_pos));
             _pos += 8;
             return value;
         }
@@ -396,8 +384,8 @@ namespace Int2Dds.Cdr
             {
                 if (_pos + 4 > _data.Length) return false;
                 uint header = _littleEndian
-                    ? CdrBinaryHelper.ReadUInt32LE(_data, _pos)
-                    : CdrBinaryHelper.ReadUInt32BE(_data, _pos);
+                    ? BinaryPrimitives.ReadUInt32LittleEndian(_data.AsSpan(_pos))
+                    : BinaryPrimitives.ReadUInt32BigEndian(_data.AsSpan(_pos));
                 uint memberId = (header >> 16) & 0x3FFF;
                 return memberId == MemberIdSentinel;
             }

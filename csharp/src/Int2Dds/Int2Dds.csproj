@@ -23,14 +23,24 @@
     <InternalsVisibleTo Include="Int2Dds.Tests" />
   </ItemGroup>
 
-  <!-- Existing async/unsafe NuGets: NOT used on net45 (Async/ folder excluded; Unsafe usage replaced) -->
+  <!-- Async support: Microsoft.Bcl.AsyncInterfaces does not support net45.
+       Async/ folder is also excluded from the net45 build (see below). -->
   <ItemGroup Condition="'$(TargetFramework)' != 'net45'">
     <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="6.0.0" />
+  </ItemGroup>
+
+  <!-- System.Runtime.CompilerServices.Unsafe (used by InstanceHandle):
+       - net6.0+: built into the BCL, no NuGet needed.
+       - netstandard2.0/2.1: ships only as a NuGet (BCL has only the namespace shell).
+       - net45: 6.0.0 doesn't support net45; instead it comes in transitively as
+         4.5.3 via System.Memory below. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0' OR '$(TargetFramework)' == 'netstandard2.1'">
     <PackageReference Include="System.Runtime.CompilerServices.Unsafe" Version="6.0.0" />
   </ItemGroup>
 
-  <!-- Span<T>/Memory<T> for netstandard2.0 only (net45 uses byte[]-based fallbacks instead) -->
-  <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
+  <!-- Span<T> / Memory<T> / BinaryPrimitives: built-in on netstandard2.1+/.NET Core 3+,
+       NuGet on net45 + netstandard2.0. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net45' OR '$(TargetFramework)' == 'netstandard2.0'">
     <PackageReference Include="System.Memory" Version="4.5.5" />
   </ItemGroup>
 

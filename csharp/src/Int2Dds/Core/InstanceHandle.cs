@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 namespace Int2Dds.Core
@@ -18,28 +19,6 @@ namespace Int2Dds.Core
         public static readonly InstanceHandle Nil = default;
 
         /// <summary>
-        /// Creates an InstanceHandle from a 16-byte array.
-        /// </summary>
-        public InstanceHandle(byte[] bytes) : this(bytes, 0)
-        {
-        }
-
-        /// <summary>
-        /// Creates an InstanceHandle from 16 bytes within an array starting at offset.
-        /// </summary>
-        public InstanceHandle(byte[] bytes, int offset)
-        {
-            if (bytes == null) throw new ArgumentNullException(nameof(bytes));
-            if (offset < 0 || offset + 16 > bytes.Length)
-                throw new ArgumentException("InstanceHandle requires 16 bytes starting at offset.", nameof(offset));
-
-            // Platform-native byte order (matches the previous Unsafe.ReadUnaligned semantics).
-            _lo = BitConverter.ToInt64(bytes, offset);
-            _hi = BitConverter.ToInt64(bytes, offset + 8);
-        }
-
-#if !NET45
-        /// <summary>
         /// Creates an InstanceHandle from a 16-byte span.
         /// </summary>
         public InstanceHandle(ReadOnlySpan<byte> bytes)
@@ -47,12 +26,16 @@ namespace Int2Dds.Core
             if (bytes.Length < 16)
                 throw new ArgumentException("InstanceHandle requires exactly 16 bytes.", nameof(bytes));
 
-            var arr = new byte[16];
-            bytes.Slice(0, 16).CopyTo(arr);
-            _lo = BitConverter.ToInt64(arr, 0);
-            _hi = BitConverter.ToInt64(arr, 8);
+            _lo = Unsafe.ReadUnaligned<long>(ref MemoryMarshal.GetReference(bytes));
+            _hi = Unsafe.ReadUnaligned<long>(ref Unsafe.Add(ref MemoryMarshal.GetReference(bytes), 8));
         }
-#endif
+
+        /// <summary>
+        /// Creates an InstanceHandle from a 16-byte array.
+        /// </summary>
+        public InstanceHandle(byte[] bytes) : this(new ReadOnlySpan<byte>(bytes))
+        {
+        }
 
         /// <summary>
         /// Returns true if this handle is the nil handle (all zeros).
@@ -65,12 +48,11 @@ namespace Int2Dds.Core
         public byte[] ToByteArray()
         {
             var result = new byte[16];
-            Buffer.BlockCopy(BitConverter.GetBytes(_lo), 0, result, 0, 8);
-            Buffer.BlockCopy(BitConverter.GetBytes(_hi), 0, result, 8, 8);
+            Unsafe.WriteUnaligned(ref result[0], _lo);
+            Unsafe.WriteUnaligned(ref result[8], _hi);
             return result;
         }
 
-#if !NET45
         /// <summary>
         /// Writes this handle into a 16-byte span.
         /// </summary>
@@ -79,21 +61,19 @@ namespace Int2Dds.Core
             if (destination.Length < 16)
                 throw new ArgumentException("Destination must be at least 16 bytes.", nameof(destination));
 
-            ToByteArray().CopyTo(destination);
+            Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(destination), _lo);
+            Unsafe.WriteUnaligned(ref Unsafe.Add(ref MemoryMarshal.GetReference(destination), 8), _hi);
         }
-#endif
 
         /// <summary>
         /// Creates an InstanceHandle from a byte array. The array must be exactly 16 bytes.
         /// </summary>
         public static InstanceHandle FromBytes(byte[] bytes) => new InstanceHandle(bytes);
 
-#if !NET45
         /// <summary>
         /// Creates an InstanceHandle from a read-only span of bytes.
         /// </summary>
         public static InstanceHandle FromBytes(ReadOnlySpan<byte> bytes) => new InstanceHandle(bytes);
-#endif
 
         public bool Equals(InstanceHandle other) => _lo == other._lo && _hi == other._hi;
 
