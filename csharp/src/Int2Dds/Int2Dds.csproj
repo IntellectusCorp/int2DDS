@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFrameworks>net45;netstandard2.0;netstandard2.1;net6.0;net8.0</TargetFrameworks>
+    <TargetFrameworks>net45;net48;netstandard2.0;netstandard2.1;net6.0;net8.0;net10.0</TargetFrameworks>
     <ImplicitUsings>disable</ImplicitUsings>
     <RootNamespace>Int2Dds</RootNamespace>
     <AssemblyName>Int2Dds</AssemblyName>
@@ -14,8 +14,8 @@
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
   </PropertyGroup>
 
-  <!-- net45: relax nullable to annotations only (no enforcement); attributes provided by PolySharp -->
-  <PropertyGroup Condition="'$(TargetFramework)' == 'net45'">
+  <!-- net45/net48: relax nullable to annotations only (no enforcement); attributes provided by PolySharp -->
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net45' OR '$(TargetFramework)' == 'net48'">
     <Nullable>annotations</Nullable>
   </PropertyGroup>
 
@@ -39,8 +39,8 @@
   </ItemGroup>
 
   <!-- Span<T> / Memory<T> / BinaryPrimitives: built-in on netstandard2.1+/.NET Core 3+,
-       NuGet on net45 + netstandard2.0. -->
-  <ItemGroup Condition="'$(TargetFramework)' == 'net45' OR '$(TargetFramework)' == 'netstandard2.0'">
+       NuGet on net45 + net48 + netstandard2.0. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net45' OR '$(TargetFramework)' == 'net48' OR '$(TargetFramework)' == 'netstandard2.0'">
     <PackageReference Include="System.Memory" Version="4.5.5" />
   </ItemGroup>
 
@@ -48,6 +48,13 @@
        PrivateAssets="all" ensures these do NOT propagate to consumers nor end up as runtime dependencies. -->
   <ItemGroup Condition="'$(TargetFramework)' == 'net45'">
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net45" Version="1.0.3" PrivateAssets="all" />
+    <PackageReference Include="PolySharp" Version="1.14.1" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!-- net48 build-time only: reference assemblies + C# 8 attribute polyfills.
+       Treated as "Modern netfx": AsyncInterfaces and Async/ folder are INCLUDED (unlike net45). -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net48" Version="1.0.3" PrivateAssets="all" />
     <PackageReference Include="PolySharp" Version="1.14.1" PrivateAssets="all" />
   </ItemGroup>
 
