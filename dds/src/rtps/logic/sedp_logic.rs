@@ -2028,10 +2028,13 @@ impl UnicastMessageProcessor for SedpLogic {
 
                 if let Ok(serialized_data) = writer_data.publication_builtin_topic_data.serialize()
                 {
+                    let instance_handle = InstanceHandle::from_guid(
+                        &writer_data.publication_builtin_topic_data.endpoint_guid(),
+                    );
                     let cache_change = CacheChange::new(
                         ChangeKind::Alive,
                         writer_guid,
-                        InstanceHandle::NIL,
+                        instance_handle,
                         data.writer_sn,
                         serialized_data.to_vec(),
                         message_receiver.get_source_timestamp(),
@@ -2062,10 +2065,13 @@ impl UnicastMessageProcessor for SedpLogic {
 
                 if let Ok(serialized_data) = reader_data.subscription_builtin_topic_data.serialize()
                 {
+                    let instance_handle = InstanceHandle::from_guid(
+                        &reader_data.subscription_builtin_topic_data.endpoint_guid(),
+                    );
                     let cache_change = CacheChange::new(
                         ChangeKind::Alive,
                         writer_guid,
-                        InstanceHandle::NIL,
+                        instance_handle,
                         data.writer_sn,
                         serialized_data.to_vec(),
                         message_receiver.get_source_timestamp(),
