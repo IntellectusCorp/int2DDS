@@ -536,9 +536,12 @@ fn test_liveliness_on_local_writer_delete() {
         "alive_count must drop to 0 after local writer deletion (alive={})",
         liveliness.alive_count()
     );
-    assert!(
-        liveliness.not_alive_count() >= 1,
-        "not_alive_count must be >= 1 after local writer deletion (not_alive={})",
+    // not_alive_count tracks writers that failed to assert liveliness.
+    // Normal deletion of an ALIVE writer must NOT increment not_alive_count.
+    assert_eq!(
+        liveliness.not_alive_count(),
+        0,
+        "deleting an ALIVE writer must keep not_alive_count unchanged (not_alive={})",
         liveliness.not_alive_count()
     );
 
@@ -680,7 +683,8 @@ fn test_liveliness_on_remote_writer_dispose() {
     assert_eq!(sub_matched.current_count(), 0);
     let liveliness = data_reader.get_liveliness_changed_status().unwrap();
     assert_eq!(liveliness.alive_count(), 0);
-    assert!(liveliness.not_alive_count() >= 1);
+    // Normal deletion of an ALIVE writer must not bump not_alive_count.
+    assert_eq!(liveliness.not_alive_count(), 0);
 
     // (5) Synthetic NOT_ALIVE_NO_WRITERS sample surfaces once.
     let synthetic = data_reader
@@ -781,7 +785,8 @@ fn test_liveliness_on_remote_participant_deleted() {
     assert_eq!(sub_matched.current_count(), 0);
     let liveliness = data_reader.get_liveliness_changed_status().unwrap();
     assert_eq!(liveliness.alive_count(), 0);
-    assert!(liveliness.not_alive_count() >= 1);
+    // Tearing down the writer participant is a normal deletion - no not_alive bump.
+    assert_eq!(liveliness.not_alive_count(), 0);
 
     participant_reader.delete_contained_entities().unwrap();
     factory.delete_participant(participant_reader).unwrap();
@@ -893,9 +898,135 @@ fn test_liveliness_lost_manual_by_participant() {
         "writer must have recovered (alive={})",
         liveliness.alive_count()
     );
+    // Reassert transitions NOT_ALIVE -> ALIVE: not_alive_count must drop back to 0.
+    assert_eq!(
+        liveliness.not_alive_count(),
+        0,
+        "reassert must clear not_alive_count (not_alive={})",
+        liveliness.not_alive_count()
+    );
+
+    // Phase 4: let the lease expire again so the writer is NOT_ALIVE, then
+    // delete it. Per DDS spec, normal deletion of an already-not-alive writer
+    // must decrement not_alive_count back to 0.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let liveliness = data_reader.get_liveliness_changed_status().unwrap();
+    assert!(
+        liveliness.not_alive_count() >= 1,
+        "writer must be not_alive again before delete (not_alive={})",
+        liveliness.not_alive_count()
+    );
+
+    publisher.delete_datawriter(data_writer).unwrap();
+    wait_for_reader_status(
+        &data_reader,
+        StatusMask::SUBSCRIPTION_MATCHED,
+        Duration::from_seconds(3),
+    )
+    .unwrap();
+    let liveliness = data_reader.get_liveliness_changed_status().unwrap();
+    assert_eq!(
+        data_reader.get_subscription_matched_status().unwrap().current_count(),
+        0,
+        "writer must be unmatched after deletion"
+    );
+    assert_eq!(liveliness.alive_count(), 0);
+    assert_eq!(
+        liveliness.not_alive_count(),
+        0,
+        "deleting a NOT_ALIVE writer must decrement not_alive_count back to 0 (not_alive={})",
+        liveliness.not_alive_count()
+    );
 
     participant_writer.delete_contained_entities().unwrap();
     factory.delete_participant(participant_writer).unwrap();
     participant_reader.delete_contained_entities().unwrap();
     factory.delete_participant(participant_reader).unwrap();
+}
+
+// Unmatch then a new compatible writer matches: alive_count must come back to 1
+// without leaving any phantom not_alive entry behind.
+#[test]
+fn test_liveliness_on_rematch() {
+    let domain_id = next_domain_id();
+    let factory = DomainParticipantFactory::get_instance();
+
+    let participant = factory
+        .create_participant(domain_id, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+
+    let topic = participant
+        .create_topic::<KeyedDataType>(
+            KeyedDataType::get_topic_name(),
+            KeyedDataType::get_type_name(),
+            TopicQos::default(),
+            None,
+            StatusMask::default(),
+        )
+        .unwrap();
+
+    let publisher =
+        participant.create_publisher(PublisherQos::default(), None, StatusMask::default()).unwrap();
+    let subscriber = participant
+        .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
+        .unwrap();
+
+    let data_reader = subscriber
+        .create_datareader::<KeyedDataType>(
+            &topic,
+            DataReaderQos::default(),
+            None,
+            StatusMask::default(),
+        )
+        .unwrap();
+
+    // (1) First writer matches.
+    let writer1 = publisher
+        .create_datawriter::<KeyedDataType>(
+            &topic,
+            DataWriterQos::default(),
+            None,
+            StatusMask::default(),
+        )
+        .unwrap();
+    wait_for_reader_status(
+        &data_reader,
+        StatusMask::SUBSCRIPTION_MATCHED,
+        Duration::from_seconds(3),
+    )
+    .unwrap();
+    let liveliness = data_reader.get_liveliness_changed_status().unwrap();
+    assert!(liveliness.alive_count() >= 1);
+    assert_eq!(liveliness.not_alive_count(), 0);
+
+    // (2) Delete writer1 -> unmatch.
+    publisher.delete_datawriter(writer1).unwrap();
+    wait_for_reader_status(&data_reader, StatusMask::LIVELINESS_CHANGED, Duration::from_seconds(3))
+        .unwrap();
+    let liveliness = data_reader.get_liveliness_changed_status().unwrap();
+    assert_eq!(liveliness.alive_count(), 0);
+    assert_eq!(liveliness.not_alive_count(), 0, "unmatch from ALIVE keeps not_alive at 0");
+
+    // (3) Second writer matches -> rematch.
+    let _writer2 = publisher
+        .create_datawriter::<KeyedDataType>(
+            &topic,
+            DataWriterQos::default(),
+            None,
+            StatusMask::default(),
+        )
+        .unwrap();
+    wait_for_reader_status(&data_reader, StatusMask::LIVELINESS_CHANGED, Duration::from_seconds(3))
+        .unwrap();
+    let liveliness = data_reader.get_liveliness_changed_status().unwrap();
+    assert!(liveliness.alive_count() >= 1, "rematch must bring alive back to 1");
+    assert_eq!(
+        liveliness.not_alive_count(),
+        0,
+        "rematch must not leave phantom not_alive entry (not_alive={})",
+        liveliness.not_alive_count()
+    );
+
+    participant.delete_contained_entities().unwrap();
+    factory.delete_participant(participant).unwrap();
 }
