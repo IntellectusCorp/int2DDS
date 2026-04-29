@@ -3,6 +3,7 @@
 //! This module provides a trait for handling participant discovery messages
 //! that can be implemented by both SPDP and SEDP logic components.
 
+use log::debug;
 use speedy::{Endianness, Writable};
 use std::sync::{Arc, Mutex};
 
@@ -56,6 +57,15 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
         &self,
         spdp_discovered_participant_data: SPDPDiscoveredParticipantData,
     ) -> RtpsResult<()> {
+        if spdp_discovered_participant_data.participant_guid().entity_id() != EntityId::PARTICIPANT
+        {
+            debug!(
+                "Received SPDP message with non-participant entity ID: {:?}. Ignoring.",
+                spdp_discovered_participant_data.participant_guid()
+            );
+            return Ok(());
+        }
+
         let participant = self.get_upgraded_participant()?;
 
         let participant_guid = spdp_discovered_participant_data.participant_guid();
