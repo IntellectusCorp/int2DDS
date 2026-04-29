@@ -1013,8 +1013,6 @@ impl Participant {
                     );
                     debug!("Current number of matched writer: {:?}", remote_writer_info.len());
                 }
-
-                stateless_reader.update_subscription_matched_status(-1, InstanceHandle::NIL);
             }
         }
 
