@@ -473,6 +473,12 @@ impl MessageReceiver {
                     }
                     spdp_data.set_participant_guid(*guid);
                 }
+                ParameterValue::EndpointGuid(guid) => {
+                    warn!(
+                        "Parameter {}: PID_ENDPOINT_GUID encountered on SPDP path, ignoring: {:?}",
+                        index, guid
+                    );
+                }
                 ParameterValue::BuiltinEndpointSet(endpoint_set) => {
                     if log_on {
                         debug!(
