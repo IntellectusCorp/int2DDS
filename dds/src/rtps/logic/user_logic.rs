@@ -1053,7 +1053,9 @@ impl UserLogic {
                 writer_proxy,
                 stateful_reader,
                 vec![],
-                SequenceNumber::from_i64(0),
+                // Use base=1 with an empty set for preemptive ACKNACK so foreign RTPS stacks
+                // don't reject the control packet as malformed before any user data exists.
+                SequenceNumber::from_i64(1),
                 false,
                 true,
             )?;
@@ -1870,8 +1872,8 @@ impl UnicastMessageProcessor for UserLogic {
             }
         }
 
-        if acknack.reader_sn_state.bitmap_base() == SequenceNumber::from_i64(0)
-            && acknack.reader_sn_state.num_bits() == 0
+        if acknack.reader_sn_state.num_bits() == 0
+            && acknack.reader_sn_state.bitmap_base().to_i64() <= 1
         {
             drop(reader_proxies);
             self.handle_preemptive_acknack_message(rtps_header, acknack)?;
