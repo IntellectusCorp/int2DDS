@@ -333,6 +333,7 @@ pub enum ParameterValue<'a> {
     ExpectsInlineQos(bool),
     ParticipantLeaseDuration(RtpsDuration),
     ParticipantGuid(Guid),
+    EndpointGuid(Guid),
     BuiltinEndpointSet(u32),
     EntityName(String),
     UserData(&'a [u8]),
