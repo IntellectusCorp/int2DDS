@@ -2065,11 +2065,6 @@ impl UnicastMessageProcessor for SedpLogic {
 
                 if let Ok(serialized_data) = writer_data.publication_builtin_topic_data.serialize()
                 {
-                    // In case of Route Gateway:
-                    // Key of DCPSPublication is the discovered endpoint GUID, so each
-                    // remote writer maps to a distinct DDS instance. Using NIL here
-                    // collapses every publication to one instance and lets KeepLast(1)
-                    // evict earlier samples (e.g. sensor) when a later one arrives.
                     let instance_handle = InstanceHandle::from_guid(
                         &writer_data.publication_builtin_topic_data.endpoint_guid(),
                     );
@@ -2107,7 +2102,6 @@ impl UnicastMessageProcessor for SedpLogic {
 
                 if let Ok(serialized_data) = reader_data.subscription_builtin_topic_data.serialize()
                 {
-                    // Same reasoning as DCPSPublication: key is the endpoint GUID.
                     let instance_handle = InstanceHandle::from_guid(
                         &reader_data.subscription_builtin_topic_data.endpoint_guid(),
                     );
