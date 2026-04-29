@@ -278,6 +278,10 @@ impl MessageReceiver {
 
                     match &submessage.body {
                         SubmessageBody::Data(data) => {
+                            if data.writer_id != EntityId::SPDP_BUILTIN_PARTICIPANT_WRITER {
+                                continue;
+                            }
+
                             inline_qos_params = data.inline_qos();
 
                             if log_on {
@@ -468,6 +472,12 @@ impl MessageReceiver {
                         debug!("Parameter {}: Setting participant GUID: {:?}", index, guid);
                     }
                     spdp_data.set_participant_guid(*guid);
+                }
+                ParameterValue::EndpointGuid(guid) => {
+                    warn!(
+                        "Parameter {}: PID_ENDPOINT_GUID encountered on SPDP path, ignoring: {:?}",
+                        index, guid
+                    );
                 }
                 ParameterValue::BuiltinEndpointSet(endpoint_set) => {
                     if log_on {

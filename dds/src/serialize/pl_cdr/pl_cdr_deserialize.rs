@@ -427,9 +427,13 @@ impl PlCdrParser {
                 let locator = self.parse_locator(data)?;
                 ParameterValue::Locator(locator)
             }
-            ParameterId::PidParticipantGuid | ParameterId::PidEndpointGuid => {
+            ParameterId::PidParticipantGuid => {
                 let guid = self.parse_guid(data)?;
                 ParameterValue::ParticipantGuid(guid)
+            }
+            ParameterId::PidEndpointGuid => {
+                let guid = self.parse_guid(data)?;
+                ParameterValue::EndpointGuid(guid)
             }
             ParameterId::PidParticipantLeaseDuration
             | ParameterId::PidDeadline

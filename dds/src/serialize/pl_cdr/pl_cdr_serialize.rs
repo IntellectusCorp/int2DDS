@@ -188,6 +188,9 @@ impl PlCdrSerializer {
             ParameterValue::ParticipantGuid(guid) => {
                 buffer.extend_from_slice(&guid.to_bytes());
             }
+            ParameterValue::EndpointGuid(guid) => {
+                buffer.extend_from_slice(&guid.to_bytes());
+            }
             ParameterValue::BuiltinEndpointSet(bes) => {
                 self.write_u32(&mut buffer, *bes);
             }
@@ -823,7 +826,7 @@ impl super::ParsedBuiltinTopicData {
         if let Some(guid) = &self.endpoint_guid {
             parameters.push(PlCdrParameter {
                 id: ParameterId::PidEndpointGuid,
-                value: ParameterValue::ParticipantGuid(*guid),
+                value: ParameterValue::EndpointGuid(*guid),
             });
         }
         if let Some(guid) = &self.participant_guid {
