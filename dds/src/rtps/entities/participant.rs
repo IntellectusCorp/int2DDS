@@ -528,12 +528,11 @@ impl Participant {
                 })
             };
 
-            if let Some((writer_guid, publication_builtin_topic_data)) = writer_info {
-                // Make payload (In case matched DDS requires payload in addition to inline QoS)
-                let payload = publication_builtin_topic_data.to_serialized_data();
+            if let Some((writer_guid, _)) = writer_info {
+                // Bare dispose: instance is identified by PID_KEY_HASH inline QoS only
                 let a_cache_change = self.sedp_builtin_publications_writer().new_change(
                     ChangeKind::NotAliveDisposedUnregistered,
-                    payload.to_vec(),
+                    Vec::new(),
                     InstanceHandle::from_guid(&writer_guid),
                     Some(RtpsTime::now()),
                 );
@@ -609,11 +608,11 @@ impl Participant {
                 })
             };
 
-            if let Some((reader_guid, subscription_builtin_topic_data)) = reader_info {
-                let payload = subscription_builtin_topic_data.to_serialized_data();
+            if let Some((reader_guid, _)) = reader_info {
+                // Bare dispose: instance is identified by PID_KEY_HASH inline QoS only
                 let a_cache_change = self.sedp_builtin_subscriptions_writer().new_change(
                     ChangeKind::NotAliveDisposedUnregistered,
-                    payload.to_vec(),
+                    Vec::new(),
                     InstanceHandle::from_guid(&reader_guid),
                     Some(RtpsTime::now()),
                 );
@@ -854,19 +853,10 @@ impl Participant {
     pub(crate) fn send_termination_message_on_shutdown(&self) -> RtpsResult<()> {
         // Send Data(r[UD]) messages
         for reader in self.rtps_reader_store.iter_all() {
-            let subscription_builtin_topic_data =
-                if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
-                    Some(stateful_reader.subscription_builtin_topic_data()?)
-                } else {
-                    reader.as_any().downcast_ref::<StatelessReader>().and_then(|stateless_reader| {
-                        stateless_reader.subscription_builtin_topic_data().ok()
-                    })
-                };
-
-            let payload = subscription_builtin_topic_data.unwrap().to_serialized_data();
+            // Bare dispose: instance is identified by PID_KEY_HASH inline QoS only
             let a_cache_change = self.sedp_builtin_subscriptions_writer().new_change(
                 ChangeKind::NotAliveDisposedUnregistered,
-                payload.to_vec(),
+                Vec::new(),
                 InstanceHandle::from_guid(&reader.guid()),
                 Some(RtpsTime::now()),
             );
@@ -893,19 +883,10 @@ impl Participant {
 
         // Send Data(w[UD]) messages
         for writer in self.rtps_writer_store.iter_all() {
-            let publication_builtin_topic_data =
-                if let Some(stateful_writer) = writer.as_any().downcast_ref::<StatefulWriter>() {
-                    Some(stateful_writer.publication_builtin_topic_data()?)
-                } else {
-                    writer.as_any().downcast_ref::<StatelessWriter>().and_then(|stateless_writer| {
-                        stateless_writer.publication_builtin_topic_data().ok()
-                    })
-                };
-
-            let payload = publication_builtin_topic_data.unwrap().to_serialized_data();
+            // Bare dispose: instance is identified by PID_KEY_HASH inline QoS only
             let a_cache_change = self.sedp_builtin_publications_writer().new_change(
                 ChangeKind::NotAliveDisposedUnregistered,
-                payload.to_vec(),
+                Vec::new(),
                 InstanceHandle::from_guid(&writer.guid()),
                 Some(RtpsTime::now()),
             );
@@ -1032,8 +1013,6 @@ impl Participant {
                     );
                     debug!("Current number of matched writer: {:?}", remote_writer_info.len());
                 }
-
-                stateless_reader.update_subscription_matched_status(-1, InstanceHandle::NIL);
             }
         }
 

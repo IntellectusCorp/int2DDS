@@ -1,4 +1,5 @@
 use crate::common::instance_handle::InstanceHandle;
+use crate::rtps::common::entity_kind::EntityKind;
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::types::DomainId;
 use crate::rtps::entities::entity::Entity;
@@ -114,6 +115,19 @@ impl DiscoveryMulticastListeningTask {
 
                         match participant_proxy_data {
                             Some((participant_proxy_data, inline_qos_params)) => {
+                                if participant_proxy_data
+                                    .participant_guid()
+                                    .entity_id()
+                                    .entity_kind()
+                                    != EntityKind::BUILT_IN_PARTICIPANT
+                                {
+                                    debug!(
+                                        "Received RTPS message with non-participant entity ID: {:?}. Ignoring.",
+                                        participant_proxy_data.participant_guid()
+                                    );
+                                    continue;
+                                }
+
                                 let spdp_logic = self
                                     .spdp_logic
                                     .as_ref()
