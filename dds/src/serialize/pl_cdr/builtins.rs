@@ -161,7 +161,7 @@ impl ParsedBuiltinTopicData {
     pub fn apply_parameter(&mut self, parameter: PlCdrParameter) -> Result<(), String> {
         match parameter.id {
             ParameterId::PidEndpointGuid => {
-                if let ParameterValue::ParticipantGuid(guid) = parameter.value {
+                if let ParameterValue::EndpointGuid(guid) = parameter.value {
                     self.key = Some(BuiltinTopicKey {
                         value: Self::convert_u8_to_i32_array(guid.prefix().to_owned()),
                     });
