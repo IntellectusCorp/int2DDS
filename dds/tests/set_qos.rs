@@ -239,7 +239,8 @@ fn test_liveliness_on_qos_change_incompatible() {
     assert_eq!(data_reader.get_subscription_matched_status().unwrap().current_count(), 0);
     let liveliness = data_reader.get_liveliness_changed_status().unwrap();
     assert_eq!(liveliness.alive_count(), 0);
-    assert!(liveliness.not_alive_count() >= 1);
+    // QoS-incompatible unmatch from ALIVE: must not bump not_alive_count.
+    assert_eq!(liveliness.not_alive_count(), 0);
 
     // Synthetic NOT_ALIVE_NO_WRITERS sample must surface once even though the
     // cache is empty.
