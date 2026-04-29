@@ -1318,16 +1318,10 @@ impl WlpLogic {
     }
 }
 
-/// Notify reader about liveliness change
-/// - `is_alive`: Current liveliness state (true = alive, false = not alive)
-/// - `was_alive`: Previous state if this is a transition, None if first discovery
-fn notify_reader_liveliness_changed(
-    reader: &Arc<dyn Reader + Send + Sync>,
-    guid: &Guid,
-    is_alive: bool,
-    was_alive: Option<bool>,
-) {
-    let (alive_change, not_alive_change) = match (was_alive, is_alive) {
+// Map (previous, current) liveliness states to LivelinessChangedStatus deltas.
+// `was_alive = None` means the writer is being observed for the first time.
+fn compute_liveliness_change(was_alive: Option<bool>, is_alive: bool) -> (i32, i32) {
+    match (was_alive, is_alive) {
         // First discovery of alive writer
         (None, true) => (1, 0),
         // First discovery of not-alive writer (shouldn't happen normally)
@@ -1338,7 +1332,16 @@ fn notify_reader_liveliness_changed(
         (Some(false), true) => (1, -1),
         // No change (shouldn't happen)
         (Some(true), true) | (Some(false), false) => (0, 0),
-    };
+    }
+}
+
+fn notify_reader_liveliness_changed(
+    reader: &Arc<dyn Reader + Send + Sync>,
+    guid: &Guid,
+    is_alive: bool,
+    was_alive: Option<bool>,
+) {
+    let (alive_change, not_alive_change) = compute_liveliness_change(was_alive, is_alive);
     reader.update_status(
         StatusKind::LIVELINESS_CHANGED,
         Some(Arc::new(LivelinessChangedStatus {
@@ -1593,5 +1596,37 @@ impl UnicastMessageProcessor for WlpLogic {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compute_liveliness_change;
+
+    // Transition matrix for LivelinessChangedStatus deltas.
+    #[test]
+    fn first_discovery_alive_increments_alive_only() {
+        assert_eq!(compute_liveliness_change(None, true), (1, 0));
+    }
+
+    #[test]
+    fn first_discovery_not_alive_increments_not_alive_only() {
+        assert_eq!(compute_liveliness_change(None, false), (0, 1));
+    }
+
+    #[test]
+    fn alive_to_not_alive_swaps_buckets() {
+        assert_eq!(compute_liveliness_change(Some(true), false), (-1, 1));
+    }
+
+    #[test]
+    fn not_alive_to_alive_swaps_buckets_back() {
+        assert_eq!(compute_liveliness_change(Some(false), true), (1, -1));
+    }
+
+    #[test]
+    fn no_state_change_yields_no_delta() {
+        assert_eq!(compute_liveliness_change(Some(true), true), (0, 0));
+        assert_eq!(compute_liveliness_change(Some(false), false), (0, 0));
     }
 }
