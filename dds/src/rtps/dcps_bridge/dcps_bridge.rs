@@ -271,6 +271,15 @@ impl DcpsBridge {
                 publication_builtin_topic_data.clone(),
             );
 
+        let writer = writer.ok_or_else(|| {
+            log::error!("writer is not set");
+            RtpsError::new(RtpsErrorCode::LockError, "Writer lock error")
+        })?;
+
+        let _ = self
+            .participant
+            .add_writer(&publication_builtin_topic_data.topic_name(), writer.clone());
+
         self.send_sedp_message_and_match(
             cache_change,
             publication_builtin_topic_data.topic_name().as_str(),
@@ -287,21 +296,10 @@ impl DcpsBridge {
                     .match_writer_with_subscription(writer.clone(), subscription_data)
                     .map(|_| false)
             },
-            writer.as_ref(),
+            Some(&writer),
         );
 
-        match writer {
-            Some(writer) => {
-                let _ = self
-                    .participant
-                    .add_writer(&publication_builtin_topic_data.topic_name(), writer.clone());
-                Ok(writer)
-            }
-            None => {
-                log::error!("writer is not set");
-                Err(RtpsError::new(RtpsErrorCode::LockError, "Writer lock error"))
-            }
-        }
+        Ok(writer)
     }
 
     pub(crate) fn get_participant(&self) -> Result<Participant, RtpsError> {
@@ -425,6 +423,15 @@ impl DcpsBridge {
                 subscription_builtin_topic_data.clone(),
             );
 
+        let reader = reader.ok_or_else(|| {
+            log::error!("Reader is not set");
+            RtpsError::new(RtpsErrorCode::LockError, "Reader lock error")
+        })?;
+
+        // Register the reader in the participant store BEFORE matching so that
+        // any liveliness/match notifications fired during cross-match can find it.
+        self.participant.add_reader(&subscription_builtin_topic_data.topic_name(), reader.clone());
+
         self.send_sedp_message_and_match(
             cache_change,
             subscription_builtin_topic_data.topic_name().as_str(),
@@ -440,20 +447,10 @@ impl DcpsBridge {
                 sedp_logic.match_reader_with_publication(reader.clone(), publication_data);
                 Ok(false)
             },
-            reader.as_ref(),
+            Some(&reader),
         );
 
-        match reader {
-            Some(reader) => {
-                self.participant
-                    .add_reader(&subscription_builtin_topic_data.topic_name(), reader.clone());
-                Ok(reader)
-            }
-            None => {
-                log::error!("Reader is not set");
-                Err(RtpsError::new(RtpsErrorCode::LockError, "Reader lock error"))
-            }
-        }
+        Ok(reader)
     }
 
     /// send sedp message to remote participants and match pending endpoints
