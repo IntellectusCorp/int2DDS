@@ -113,10 +113,7 @@ impl ConstDefault for DataReaderQos {
 
 impl Qos for DataReaderQos {
     fn check_unsupported_policies(&self) -> DdsResult<()> {
-        if self.user_data != UserDataQosPolicy::default()
-            // || self.durability.kind == DurabilityQosPolicyKind::Transient
-            // || self.durability.kind == DurabilityQosPolicyKind::Persistent
-            || self.latency_budget != LatencyBudgetQosPolicy::default()
+        if self.latency_budget != LatencyBudgetQosPolicy::default()
             // || self.liveliness != LivelinessQosPolicy::default()
             // || self.ownership != OwnershipQosPolicy::default()
             || self.time_based_filter != TimeBasedFilterQosPolicy::default()
