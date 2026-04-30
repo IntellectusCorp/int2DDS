@@ -1421,7 +1421,10 @@ mod tests {
         );
 
         // Remove mocked writer proxy
-        guard.participant.remove_unmatched_writer_from_reader(remote_writer_guid);
+        guard
+            .participant
+            .cleanup_remote_writer(remote_writer_guid, &test_topic_name.to_string())
+            .unwrap();
         assert!(
             stateful_reader.writer_proxies().lock().unwrap().is_empty(),
             "WriterProxy list should be empty after removal"
@@ -1486,7 +1489,10 @@ mod tests {
         );
 
         // Remove mocked reader locator
-        guard.participant.remove_unmatched_reader_from_writer(remote_reader_guid);
+        guard
+            .participant
+            .cleanup_remote_reader(remote_reader_guid, &test_topic_name.to_string())
+            .unwrap();
         assert!(
             stateless_writer.reader_locator().lock().unwrap().is_empty(),
             "ReaderLocator list should be empty after removal"
@@ -1555,7 +1561,10 @@ mod tests {
         );
 
         // Remove mocked reader proxy
-        guard.participant.remove_unmatched_reader_from_writer(remote_reader_guid);
+        guard
+            .participant
+            .cleanup_remote_reader(remote_reader_guid, &test_topic_name.to_string())
+            .unwrap();
         assert!(
             stateful_writer.reader_proxies().lock().unwrap().is_empty(),
             "MatchedReaders list should be empty after removal"
@@ -1671,7 +1680,10 @@ mod tests {
         );
 
         // Remove mocked reader proxy
-        guard.participant.remove_unmatched_reader_from_writer(remote_reader_guid_1);
+        guard
+            .participant
+            .cleanup_remote_reader(remote_reader_guid_1, &test_topic_name.to_string())
+            .unwrap();
         assert!(
             stateful_writer_1.reader_proxies().lock().unwrap().len() == 1,
             "Stateful writer 1's reader proxy list should contain 1 elements after removal"
