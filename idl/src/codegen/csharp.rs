@@ -1219,7 +1219,10 @@ impl<'a> CsGen<'a> {
         let key_fields: Vec<&ResolvedMember> = s.members.iter().filter(|m| m.is_key).collect();
 
         if key_fields.is_empty() {
-            self.line("public byte[] SerializeKey() => Array.Empty<byte>();");
+            // Cached zero-length array. Cannot use Array.Empty<byte>() because
+            // it requires .NET Framework 4.6+ (this binding also targets net45).
+            self.line("private static readonly byte[] s_emptyKey = new byte[0];");
+            self.line("public byte[] SerializeKey() => s_emptyKey;");
         } else {
             self.line("public byte[] SerializeKey()");
             self.line("{");
