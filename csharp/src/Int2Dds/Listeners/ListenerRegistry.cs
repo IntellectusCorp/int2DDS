@@ -55,7 +55,7 @@ namespace Int2Dds.Listeners
             public object Listener { get; }
             public object Entity { get; }
             public GCHandle GcHandle { get; }
-            public Delegate[] DelegateRefs { get; set; } = Array.Empty<Delegate>();
+            public Delegate[] DelegateRefs { get; set; } = Int2Dds.Internal.EmptyArrayHolder<Delegate>.Value;
 
             public ListenerContext(object listener, object entity)
             {
