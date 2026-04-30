@@ -300,6 +300,10 @@ impl Writer for SPDPbuiltinParticipantWriter {
     fn remove_matched_reader(&mut self, _reader_guid: Guid) -> RtpsResult<bool> {
         Ok(false)
     }
+
+    fn remove_all_matched_readers_with_prefix(&self, _prefix: GuidPrefix) -> RtpsResult<usize> {
+        Ok(0)
+    }
 }
 
 impl Endpoint for SPDPbuiltinParticipantWriter {
