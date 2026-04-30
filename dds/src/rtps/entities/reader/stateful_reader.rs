@@ -448,4 +448,26 @@ impl Reader for StatefulReader {
             Err(RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, ""))
         }
     }
+
+    fn remove_matched_writer(&mut self, writer_guid: Guid) -> RtpsResult<bool> {
+        let mut proxies = self
+            .matched_writers
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+        // Find the index of the writer proxy with the given writer_guid
+        let Some(idx) = proxies.iter().position(|proxy| proxy.remote_writer_guid() == writer_guid)
+        else {
+            return Ok(false);
+        };
+
+        // Remove the writer proxy at the found index
+        proxies.swap_remove(idx);
+        drop(proxies);
+
+        // Update subscription matched status
+        self.update_subscription_matched_status(-1, InstanceHandle::from_guid(&writer_guid));
+
+        Ok(true)
+    }
 }

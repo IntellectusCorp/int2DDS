@@ -187,4 +187,8 @@ impl Reader for SPDPBuiltinParticipantReader {
     ) -> RtpsResult<PublicationBuiltinTopicData> {
         Err(RtpsError::new(RtpsErrorCode::Unknown, "UnSupported"))
     }
+
+    fn remove_matched_writer(&mut self, _writer_guid: Guid) -> RtpsResult<bool> {
+        Ok(false)
+    }
 }

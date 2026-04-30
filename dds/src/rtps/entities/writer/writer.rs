@@ -89,6 +89,7 @@ pub(crate) trait Writer: Entity + Endpoint + Debug + Any {
         &self,
         reader_guid: Guid,
     ) -> RtpsResult<SubscriptionBuiltinTopicData>;
+    fn remove_matched_reader(&mut self, reader_guid: Guid) -> RtpsResult<bool>;
 
     //any
     fn as_any(&self) -> &dyn Any;
