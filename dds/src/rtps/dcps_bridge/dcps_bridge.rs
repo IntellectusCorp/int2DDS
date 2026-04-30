@@ -1784,7 +1784,10 @@ mod tests {
         );
 
         // This would remove 2 mocked reader proxies
-        guard.participant.remove_all_unmatched_endpoint_from_terminated_participant([5; 12]);
+        guard
+            .participant
+            .remove_all_unmatched_endpoint_from_terminated_participant([5; 12])
+            .unwrap();
 
         assert!(
             stateful_writer.reader_proxies().lock().unwrap().len() == 1,

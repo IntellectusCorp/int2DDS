@@ -2103,7 +2103,8 @@ impl UnicastMessageProcessor for SedpLogic {
                         || InstanceHandle::from_guid(&participant_proxy_data.participant_guid()),
                     );
 
-                participant.unmatch_with_remote_participant(&terminated_participant_guid.to_guid());
+                let _ = participant
+                    .unmatch_with_remote_participant(&terminated_participant_guid.to_guid());
             } else {
                 return self.handle_discovered_participant_data(participant_proxy_data.clone());
             }
