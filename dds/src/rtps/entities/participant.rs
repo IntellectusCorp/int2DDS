@@ -845,7 +845,6 @@ impl Participant {
         &self,
         writer_guid: Guid,
     ) -> RtpsResult<Vec<Arc<dyn Reader + Send + Sync>>> {
-        println!("find_readers_matched_with_remote_writer");
         let mut matched_readers: Vec<Arc<dyn Reader + Send + Sync>> = Vec::new();
 
         for reader in self.rtps_reader_store.iter_all() {
@@ -860,7 +859,6 @@ impl Participant {
                 }
             } else if let Some(stateless_reader) = reader.as_any().downcast_ref::<StatelessReader>()
             {
-                println!("stateless reader found, checking remote writer infos");
                 let remote_writer_infos_arc = stateless_reader.remote_writer_infos();
                 let remote_writer_infos = remote_writer_infos_arc.lock().map_err(|e| {
                     RtpsError::new(
@@ -872,10 +870,6 @@ impl Participant {
                 if remote_writer_infos.iter().any(|w| w.remote_writer_guid() == writer_guid) {
                     matched_readers.push(reader.clone());
                 }
-                println!(
-                    "matched readers length after checking stateless reader: {:?}",
-                    matched_readers.len()
-                );
             }
         }
 
