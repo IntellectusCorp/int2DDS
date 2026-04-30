@@ -61,19 +61,23 @@ namespace Int2Dds.Core
 
             unsafe
             {
-                if (name != null)
+                var qosPathBytes = Encoding.UTF8.GetBytes(qosPath + '\0');
+                fixed (byte* pQos = qosPathBytes)
                 {
-                    var nameBytes = Encoding.UTF8.GetBytes(name + '\0');
-                    fixed (byte* p = nameBytes)
+                    if (name != null)
+                    {
+                        var nameBytes = Encoding.UTF8.GetBytes(name + '\0');
+                        fixed (byte* p = nameBytes)
+                        {
+                            ReturnCodeHelper.CheckReturn(
+                                NativeMethods.int2dds_create_participant_with_profile(factory.Handle, p, domainId, pQos, out _handle));
+                        }
+                    }
+                    else
                     {
                         ReturnCodeHelper.CheckReturn(
-                            NativeMethods.int2dds_create_participant_with_profile(factory.Handle, p, domainId, qosPath, out _handle));
+                            NativeMethods.int2dds_create_participant_with_profile(factory.Handle, null, domainId, pQos, out _handle));
                     }
-                }
-                else
-                {
-                    ReturnCodeHelper.CheckReturn(
-                        NativeMethods.int2dds_create_participant_with_profile(factory.Handle, null, domainId, qosPath, out _handle));
                 }
             }
         }
