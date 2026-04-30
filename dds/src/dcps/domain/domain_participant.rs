@@ -55,6 +55,7 @@
 //! factory.delete_participant(participant).unwrap();
 //! ```
 
+use arc_swap::ArcSwap;
 use std::{
     collections::HashMap,
     fmt::Debug,
@@ -136,7 +137,8 @@ pub struct DomainParticipant {
     is_builtin: bool,
     guid: Arc<Guid>,
     domain_id: DomainId,
-    qos: Arc<Mutex<DomainParticipantQos>>,
+    qos: Arc<ArcSwap<DomainParticipantQos>>,
+    update_lock: Arc<Mutex<()>>,
     listener: Arc<RwLock<Option<Arc<dyn DomainParticipantListener>>>>,
     mask: Arc<RwLock<StatusMask>>,
     status_condition: Arc<Mutex<StatusCondition<DomainParticipantQos>>>,
@@ -368,7 +370,8 @@ impl DomainParticipant {
             is_builtin,
             guid: Arc::new(guid),
             domain_id,
-            qos: Arc::new(Mutex::new(qos)),
+            qos: Arc::new(ArcSwap::from_pointee(qos)),
+            update_lock: Arc::new(Mutex::new(())),
             listener: Arc::new(RwLock::new(listener)),
             mask: Arc::new(RwLock::new(mask)),
             status_condition: Arc::new(Mutex::new(StatusCondition::new(None))),

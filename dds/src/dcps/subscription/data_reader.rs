@@ -25,6 +25,7 @@
 //! - **Conditions**: Read, query, and status conditions for event-driven reading
 //! - **Status Notifications**: Callbacks for data available, subscription matched, etc.
 
+use arc_swap::ArcSwap;
 use std::{
     any::{Any, TypeId},
     cmp::Ordering as CmpOrdering,
@@ -163,7 +164,8 @@ pub struct DataReader<Foo> {
     // See also: DomainParticipant::get_builtin_subscriber()
     is_builtin: bool,
     guid: Guid,
-    qos: Arc<Mutex<DataReaderQos>>,
+    qos: Arc<ArcSwap<DataReaderQos>>,
+    update_lock: Arc<Mutex<()>>,
     listener: Arc<RwLock<Option<Arc<dyn DataReaderListener<Foo = Foo>>>>>,
     mask: Arc<RwLock<StatusMask>>,
     pub status_condition: Arc<Mutex<StatusCondition<DataReaderQos>>>,
@@ -196,7 +198,7 @@ impl<Foo> Debug for DataReader<Foo> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DataReader")
             .field("guid", &self.guid)
-            .field("qos", &self.qos.lock().unwrap())
+            .field("qos", &**self.qos.load())
             .field(
                 "listener",
                 &self.listener.read().unwrap().as_ref().map(|_| "Arc<dyn DataReaderListener>"),
@@ -234,6 +236,7 @@ impl<Foo: 'static + Clone + Debug> Clone for DataReader<Foo> {
             is_builtin: self.is_builtin,
             guid: self.guid,
             qos: self.qos.clone(),
+            update_lock: self.update_lock.clone(),
             listener: self.listener.clone(),
             mask: self.mask.clone(),
             status_condition: self.status_condition.clone(),
@@ -1858,7 +1861,8 @@ impl<Foo: DdsType> DataReader<Foo> {
         let mut reader = Self {
             is_builtin,
             guid,
-            qos: Arc::new(Mutex::new(qos.clone())),
+            qos: Arc::new(ArcSwap::from_pointee(qos.clone())),
+            update_lock: Arc::new(Mutex::new(())),
             listener: Arc::new(RwLock::new(listener)),
             mask: Arc::new(RwLock::new(mask)),
             status_condition: Arc::new(Mutex::new(StatusCondition::new(None))),

@@ -29,6 +29,8 @@ use std::{
     },
 };
 
+use arc_swap::ArcSwap;
+
 use log::debug;
 
 use crate::{
@@ -120,7 +122,10 @@ pub struct DataWriter<Foo> {
     // if needed (e.g., exposing built-in writers for diagnostics).
     is_builtin: bool,
     guid: Guid,
-    qos: Arc<Mutex<DataWriterQos>>,
+    qos: Arc<ArcSwap<DataWriterQos>>,
+    // Serializes set_qos so that (cache store + update_rtps_entity) executes
+    // as a unit. get_qos reads are lock-free via ArcSwap.
+    update_lock: Arc<Mutex<()>>,
     listener: Arc<RwLock<Option<Arc<dyn DataWriterListener<Foo = Foo>>>>>,
     mask: Arc<RwLock<StatusMask>>,
     status_condition: Arc<Mutex<StatusCondition<DataWriterQos>>>,
@@ -148,7 +153,7 @@ impl<Foo> Debug for DataWriter<Foo> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DataWriter")
             .field("guid", &self.guid)
-            .field("qos", &self.qos.lock().unwrap())
+            .field("qos", &**self.qos.load())
             .field(
                 "listener",
                 &self.listener.read().unwrap().as_ref().map(|_| "Arc<dyn DataWriterListener>"),
@@ -185,6 +190,7 @@ impl<Foo: 'static + Clone> Clone for DataWriter<Foo> {
             is_builtin: self.is_builtin,
             guid: self.guid,
             qos: self.qos.clone(),
+            update_lock: self.update_lock.clone(),
             listener: self.listener.clone(),
             mask: self.mask.clone(),
             status_condition: self.status_condition.clone(),
@@ -401,7 +407,8 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         let writer = Self {
             is_builtin,
             guid,
-            qos: Arc::new(Mutex::new(qos.clone())),
+            qos: Arc::new(ArcSwap::from_pointee(qos.clone())),
+            update_lock: Arc::new(Mutex::new(())),
             listener: Arc::new(RwLock::new(listener)),
             mask: Arc::new(RwLock::new(mask)),
             status_condition: Arc::new(Mutex::new(StatusCondition::new(None))),
@@ -721,7 +728,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         Self::validate_timestamp(&timestamp)?;
 
         let format = {
-            let qos = self.qos.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            let qos = self.qos.load();
             let extensibility = self.type_support.get_extensibility_kind();
             Self::resolve_serialization_format(&qos.data_representation.value, extensibility)?
         };
@@ -777,7 +784,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         Self::validate_timestamp(&timestamp)?;
 
         let format = {
-            let qos = self.qos.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            let qos = self.qos.load();
             let extensibility = self.type_support.get_extensibility_kind();
             Self::resolve_serialization_format(&qos.data_representation.value, extensibility)?
         };
