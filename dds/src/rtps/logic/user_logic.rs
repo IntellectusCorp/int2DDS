@@ -1312,6 +1312,16 @@ impl UserLogic {
     where
         T: IntoIterator<Item = &'a Locator>,
     {
+        let locators: Vec<&Locator> = locators.into_iter().collect();
+        let pick = |kind: fn(&Locator) -> bool, have_sender: bool| -> Option<Vec<&Locator>> {
+            (have_sender && locators.iter().any(|l| kind(l)))
+                .then(|| locators.iter().copied().filter(|l| kind(l)).collect())
+        };
+        let locators = pick(Locator::is_shm, self.shm_sender.is_some())
+            .or_else(|| pick(Locator::is_tcp, self.tcp_sender.is_some()))
+            .or_else(|| pick(Locator::is_udp, self.sender.is_some()))
+            .unwrap_or(locators);
+
         let mut is_sent = false;
         let mut last_error = None;
 
