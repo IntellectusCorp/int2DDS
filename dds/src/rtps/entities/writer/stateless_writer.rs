@@ -459,7 +459,7 @@ impl Writer for StatelessWriter {
         }
     }
 
-    fn remove_matched_reader(&mut self, reader_guid: Guid) -> RtpsResult<bool> {
+    fn remove_matched_reader(&self, reader_guid: Guid) -> RtpsResult<bool> {
         let mut locators = self
             .reader_locators
             .lock()

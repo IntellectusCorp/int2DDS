@@ -743,7 +743,7 @@ impl Writer for StatefulWriter {
         }
     }
 
-    fn remove_matched_reader(&mut self, reader_guid: Guid) -> RtpsResult<bool> {
+    fn remove_matched_reader(&self, reader_guid: Guid) -> RtpsResult<bool> {
         let mut proxies = self
             .matched_readers
             .lock()
