@@ -57,4 +57,6 @@ pub(crate) trait Reader: Entity + Endpoint + Debug + Any {
         &self,
         writer_guid: Guid,
     ) -> RtpsResult<PublicationBuiltinTopicData>;
+
+    fn remove_matched_writer(&mut self, writer_guid: Guid) -> RtpsResult<bool>;
 }

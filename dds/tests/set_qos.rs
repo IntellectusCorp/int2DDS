@@ -12,10 +12,7 @@ use int2dds::{
         core::{error::DdsError, time::Duration},
         domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
         infrastructure::{
-            qos_policy::{
-                DeadlineQosPolicy, HistoryQosPolicy, HistoryQosPolicyKind,
-                WriterDataLifecycleQosPolicy,
-            },
+            qos_policy::{DeadlineQosPolicy, HistoryQosPolicy, HistoryQosPolicyKind},
             status::StatusMask,
         },
         publication::qos::{DataWriterQos, PublisherQos},
@@ -178,9 +175,6 @@ fn test_liveliness_on_qos_change_incompatible() {
         participant.create_publisher(PublisherQos::default(), None, StatusMask::default()).unwrap();
     let writer_qos = DataWriterQos {
         deadline: DeadlineQosPolicy { period: Duration::from_millis(1000) },
-        writer_data_lifecycle: WriterDataLifecycleQosPolicy {
-            autodispose_unregistered_instances: false,
-        },
         history: HistoryQosPolicy {
             kind: HistoryQosPolicyKind::KeepLast(10),
             ..Default::default()

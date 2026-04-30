@@ -663,6 +663,34 @@ impl Participant {
         Ok(())
     }
 
+    pub(crate) fn cleanup_remote_writer(
+        &self,
+        writer_guid: Guid,
+        topic_name: &str,
+    ) -> RtpsResult<()> {
+        // Fire LIVELINESS_CHANGED first; it iterates reader's writer_proxies to find matches.
+        if writer_guid.entity_id().entity_kind().is_user_defined() {
+            if let Some(wlp_logic) = self.wlp_logic() {
+                let _ = wlp_logic.remove_remote_writer(writer_guid);
+            }
+        }
+
+        // Drop reader-side proxies and fire SUBSCRIPTION_MATCHED(-1).
+        self.remove_unmatched_writer_from_reader(writer_guid);
+
+        // Forget the discovery entry; drop the topic bucket if it became empty.
+        if let Some(mut entry) = self.remote_publications().get_mut(topic_name) {
+            entry.value_mut().remove(&writer_guid);
+
+            if entry.value().is_empty() {
+                drop(entry);
+                self.remote_publications().remove(topic_name);
+            }
+        }
+
+        Ok(())
+    }
+
     /// Iterate through all Readers in the Participant to find Readers matched with the Writer, then remove Writer Proxy
     pub(crate) fn remove_unmatched_writer_from_reader(&self, writer_guid: Guid) {
         for reader in self.rtps_reader_store.iter_all() {
@@ -817,6 +845,7 @@ impl Participant {
         &self,
         writer_guid: Guid,
     ) -> RtpsResult<Vec<Arc<dyn Reader + Send + Sync>>> {
+        println!("find_readers_matched_with_remote_writer");
         let mut matched_readers: Vec<Arc<dyn Reader + Send + Sync>> = Vec::new();
 
         for reader in self.rtps_reader_store.iter_all() {
@@ -831,6 +860,7 @@ impl Participant {
                 }
             } else if let Some(stateless_reader) = reader.as_any().downcast_ref::<StatelessReader>()
             {
+                println!("stateless reader found, checking remote writer infos");
                 let remote_writer_infos_arc = stateless_reader.remote_writer_infos();
                 let remote_writer_infos = remote_writer_infos_arc.lock().map_err(|e| {
                     RtpsError::new(
@@ -842,6 +872,10 @@ impl Participant {
                 if remote_writer_infos.iter().any(|w| w.remote_writer_guid() == writer_guid) {
                     matched_readers.push(reader.clone());
                 }
+                println!(
+                    "matched readers length after checking stateless reader: {:?}",
+                    matched_readers.len()
+                );
             }
         }
 

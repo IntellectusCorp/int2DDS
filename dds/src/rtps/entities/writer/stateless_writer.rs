@@ -458,6 +458,29 @@ impl Writer for StatelessWriter {
             Err(RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, ""))
         }
     }
+
+    fn remove_matched_reader(&mut self, reader_guid: Guid) -> RtpsResult<bool> {
+        let mut locators = self
+            .reader_locators
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+        // One reader can register multiple ReaderLocators (per NIC); drop them all.
+        let len_before = locators.len();
+        locators.retain(|locator| {
+            locator.guid_prefix() != reader_guid.prefix()
+                || locator.remote_entity_id() != reader_guid.entity_id()
+        });
+
+        if locators.len() == len_before {
+            return Ok(false);
+        }
+
+        drop(locators);
+        self.update_publication_matched_status(-1, InstanceHandle::from_guid(&reader_guid));
+
+        Ok(true)
+    }
 }
 
 impl Endpoint for StatelessWriter {

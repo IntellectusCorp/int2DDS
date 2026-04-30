@@ -449,4 +449,26 @@ impl Reader for StatelessReader {
             Err(RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, ""))
         }
     }
+
+    fn remove_matched_writer(&mut self, writer_guid: Guid) -> RtpsResult<bool> {
+        let mut writers = self
+            .matched_writers
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+        // Find the index of the writer to remove
+        let Some(idx) = writers.iter().position(|info| info.remote_writer_guid() == writer_guid)
+        else {
+            return Ok(false);
+        };
+
+        // Remove the writer from the matched writers list
+        writers.swap_remove(idx);
+        drop(writers);
+
+        // Update subscription matched status
+        self.update_subscription_matched_status(-1, InstanceHandle::from_guid(&writer_guid));
+
+        Ok(true)
+    }
 }
