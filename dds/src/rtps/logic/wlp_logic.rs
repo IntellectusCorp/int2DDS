@@ -525,7 +525,7 @@ impl WlpLogic {
                 Err(_) => continue,
             };
 
-            // metatraffic locator로 전송
+            // send via the metatraffic locator
             let remote_prefix = reader_proxy.remote_reader_guid().prefix();
             for remote_data in remote_datas_guard.iter() {
                 if remote_data.participant_guid().prefix() == remote_prefix {

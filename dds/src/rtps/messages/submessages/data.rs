@@ -19,7 +19,7 @@ use crate::rtps::{
     },
     messages::submessage_header::SubmessageHeader,
 };
-use crate::serialize::pl_cdr::InlineQosParser;
+use crate::serialize::pl_cdr::{InlineQosParameters, InlineQosParser};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Data<'a> {
@@ -189,6 +189,27 @@ impl<'a> Data<'a> {
         } else {
             SubmessagePayload::Owned(Bytes::new())
         };
+
+        // Validate flag combinations
+        let status_info = inline_qos.as_ref().and_then(|pl| pl.get_status_info());
+        let has_lifecycle = status_info
+            .map(|status_info| status_info.disposed() || status_info.unregistered())
+            .unwrap_or(false);
+        let can_have_key = status_info
+            .map(|si| si.disposed() || si.unregistered() || si.filtered())
+            .unwrap_or(false);
+        if data_flag && has_lifecycle {
+            return Err(RtpsError::new(
+                RtpsErrorCode::InvalidSubmessageHeader,
+                "DataFlag set with dispose/unregister StatusInfo",
+            ));
+        }
+        if key_flag && !can_have_key {
+            return Err(RtpsError::new(
+                RtpsErrorCode::InvalidSubmessageHeader,
+                "KeyFlag set without dispose/unregister/filtered StatusInfo",
+            ));
+        }
 
         Ok(Self {
             reader_id,
