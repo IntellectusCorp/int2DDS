@@ -297,7 +297,7 @@ impl Writer for SPDPbuiltinParticipantWriter {
         Err(RtpsError::new(RtpsErrorCode::Unknown, "UnSupported"))
     }
 
-    fn remove_matched_reader(&mut self, _reader_guid: Guid) -> RtpsResult<bool> {
+    fn remove_matched_reader(&self, _reader_guid: Guid) -> RtpsResult<bool> {
         Ok(false)
     }
 
