@@ -242,4 +242,28 @@ pub(crate) trait HistoryCache {
             Ok(false)
         }
     }
+
+    // Drops samples whose `source_timestamp + lifespan` has elapsed; called from
+    // read/take so expiration is enforced independently of the cleanup timer.
+    fn purge_expired_on_read(&mut self) -> DdsResult<()> {
+        let now = RtpsTime::now();
+        let mut to_remove = Vec::new();
+
+        for change in self.get_changes().iter() {
+            let Some(lifespan) = change.lifespan_duration() else { continue };
+            if lifespan.is_infinite() {
+                continue;
+            }
+            let Some(source_ts) = change.source_timestamp() else { continue };
+            let expiry = source_ts.add_nanos(lifespan.as_nanos().max(0) as u64);
+            if now >= expiry {
+                to_remove.push(change.clone());
+            }
+        }
+
+        for change in to_remove {
+            let _ = self.remove_change(change);
+        }
+        Ok(())
+    }
 }
