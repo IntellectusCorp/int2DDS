@@ -102,10 +102,16 @@ impl UdpListener {
         // Join multicast group on each working interface individually,
         // so multicast works regardless of OS default route availability.
         for ip in working_ips {
-            let addr: std::net::Ipv4Addr = ip.parse().unwrap();
-            socket.join_multicast_v4(&MULTICAST_IP, &addr).unwrap_or_else(|e| {
-                error!("Fail - join_multicast_v4 : {:?} {:?}", e, addr);
-            });
+            match ip.parse::<std::net::Ipv4Addr>() {
+                Ok(addr) => {
+                    socket.join_multicast_v4(&MULTICAST_IP, &addr).unwrap_or_else(|e| {
+                        error!("Fail - join_multicast_v4 : {:?} {:?}", e, addr);
+                    });
+                }
+                Err(e) => {
+                    log::warn!("Skipping non-IPv4 address: {} ({})", ip, e);
+                }
+            }
         }
 
         let addr: SocketAddr = format!("0.0.0.0:{}", port).parse().unwrap();
