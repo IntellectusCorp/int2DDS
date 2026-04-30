@@ -981,6 +981,34 @@ impl Participant {
         info!("Successfully unmatched with remote participant: {:?}", terminated_participant_guid);
     }
 
+    pub(crate) fn remove_remote_publication_by_guid(&self, writer_guid: Guid) {
+        self.remote_publications().retain(|topic_name, endpoints| {
+            let removed = endpoints.remove(&writer_guid).is_some();
+            let keep_topic = !endpoints.is_empty();
+            if removed && !keep_topic {
+                debug!(
+                    "Removed final remote publication entry for topic '{}' after writer termination",
+                    topic_name
+                );
+            }
+            keep_topic
+        });
+    }
+
+    pub(crate) fn remove_remote_subscription_by_guid(&self, reader_guid: Guid) {
+        self.remote_subscriptions().retain(|topic_name, endpoints| {
+            let removed = endpoints.remove(&reader_guid).is_some();
+            let keep_topic = !endpoints.is_empty();
+            if removed && !keep_topic {
+                debug!(
+                    "Removed final remote subscription entry for topic '{}' after reader termination",
+                    topic_name
+                );
+            }
+            keep_topic
+        });
+    }
+
     /// Function to remove all Remote Endpoints with the given GuidPrefix when Remote Participant terminates
     pub(crate) fn remove_all_unmatched_endpoint_from_terminated_participant(
         &self,
