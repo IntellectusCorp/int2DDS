@@ -298,11 +298,10 @@ impl WlpLogic {
 
         let participant = self.get_upgraded_participant()?;
 
-        Self::update_remote_liveliness(
+        Self::notify_readers_remote_writer_transition(
             participant.clone(),
             writer_guid,
-            self.remote_participants.clone(),
-            true,
+            LivelinessTransition::Match,
         );
 
         match self.liveliness_monitor.lock() {
@@ -350,6 +349,15 @@ impl WlpLogic {
     }
 
     pub(crate) fn remove_remote_writer(&self, writer_guid: Guid) -> RtpsResult<()> {
+        // Snapshot prior alive state to pick UnmatchAlive vs UnmatchNotAlive.
+        let was_alive = self
+            .remote_participants
+            .get(&writer_guid.prefix())
+            .and_then(|writers| {
+                writers.get(&writer_guid).map(|info| info.alive_state() == WriterAliveState::Alive)
+            })
+            .unwrap_or(true);
+
         if let Some(mut hash_map) = self.remote_participants.get_mut(&writer_guid.prefix()) {
             hash_map.remove(&writer_guid);
 
@@ -361,12 +369,12 @@ impl WlpLogic {
 
         let participant = self.get_upgraded_participant()?;
 
-        Self::update_remote_liveliness(
-            participant.clone(),
-            writer_guid,
-            self.remote_participants.clone(),
-            false,
-        );
+        let transition = if was_alive {
+            LivelinessTransition::UnmatchAlive
+        } else {
+            LivelinessTransition::UnmatchNotAlive
+        };
+        Self::notify_readers_remote_writer_transition(participant.clone(), writer_guid, transition);
 
         match self.liveliness_monitor.lock() {
             Ok(liveliness_monitor) => match liveliness_monitor.as_ref() {
@@ -1117,7 +1125,7 @@ impl WlpLogic {
             "[WLP] update_liveliness: No local writer found for guid={:?}, treating as REMOTE",
             guid
         );
-        Self::update_remote_liveliness(participant, guid, remote_participants, false);
+        Self::mark_remote_writer_lost(participant, guid, remote_participants);
         true
     }
 
@@ -1145,10 +1153,12 @@ impl WlpLogic {
                 guid
             );
             for reader in readers {
-                // is_alive=false means ALIVE->NOT_ALIVE, was_alive=Some(true)
-                // is_alive=true means NOT_ALIVE->ALIVE, was_alive=Some(false)
-                let was_alive = Some(!is_alive);
-                notify_reader_liveliness_changed(&reader, &guid, is_alive, was_alive);
+                let transition = if is_alive {
+                    LivelinessTransition::Recovered
+                } else {
+                    LivelinessTransition::Lost
+                };
+                notify_reader_liveliness_changed(&reader, &guid, transition);
             }
 
             if !is_alive {
@@ -1163,37 +1173,36 @@ impl WlpLogic {
         }
     }
 
-    fn update_remote_liveliness(
+    // ALIVE -> NOT_ALIVE for a remote writer; entry retained for reassert.
+    fn mark_remote_writer_lost(
         participant: Arc<Participant>,
         guid: Guid,
         remote_participants: Arc<DashMap<GuidPrefix, HashMap<Guid, WriterInfo>>>,
-        is_alive: bool,
     ) {
-        log::debug!("[WLP] update_remote_liveliness: guid={:?}, is_alive={}", guid, is_alive);
+        log::debug!("[WLP] mark_remote_writer_lost: guid={:?}", guid);
 
         if let Ok(readers) = participant.find_readers_matched_with_remote_writer(guid) {
-            log::info!(
-                "[WLP] update_remote_liveliness: Found {} readers matched with writer {:?}",
-                readers.len(),
-                guid
-            );
             for reader in readers {
-                let was_alive = Some(!is_alive);
-                notify_reader_liveliness_changed(&reader, &guid, is_alive, was_alive);
+                notify_reader_liveliness_changed(&reader, &guid, LivelinessTransition::Lost);
             }
 
-            if !is_alive {
-                let participant_prefix = guid.prefix();
-
-                if let Some(mut remote_writers) = remote_participants.get_mut(&participant_prefix) {
-                    if let Some(writer_info) = remote_writers.get_mut(&guid) {
-                        writer_info.set_not_alive();
-                        debug!(
-                            "[WLP] Writer {:?} set to NOT_ALIVE (participant kept for recovery)",
-                            guid
-                        );
-                    }
+            if let Some(mut remote_writers) = remote_participants.get_mut(&guid.prefix()) {
+                if let Some(writer_info) = remote_writers.get_mut(&guid) {
+                    writer_info.set_not_alive();
                 }
+            }
+        }
+    }
+
+    // Fan a Match/Unmatch transition out to readers matched with this writer.
+    fn notify_readers_remote_writer_transition(
+        participant: Arc<Participant>,
+        guid: Guid,
+        transition: LivelinessTransition,
+    ) {
+        if let Ok(readers) = participant.find_readers_matched_with_remote_writer(guid) {
+            for reader in readers {
+                notify_reader_liveliness_changed(&reader, &guid, transition);
             }
         }
     }
@@ -1209,8 +1218,12 @@ impl WlpLogic {
                 if let Ok(readers) = participant.find_readers_matched_with_local_writer(writer_guid)
                 {
                     for reader in readers {
-                        // Recovery: was NOT_ALIVE, now ALIVE
-                        notify_reader_liveliness_changed(&reader, writer_guid, true, Some(false));
+                        // Recovery: NOT_ALIVE -> ALIVE.
+                        notify_reader_liveliness_changed(
+                            &reader,
+                            writer_guid,
+                            LivelinessTransition::Recovered,
+                        );
                     }
                 }
             }
@@ -1298,8 +1311,7 @@ impl WlpLogic {
                             notify_reader_liveliness_changed(
                                 &reader,
                                 &writer_guid,
-                                true,
-                                Some(false),
+                                LivelinessTransition::Recovered,
                             );
                         }
                     }
@@ -1318,30 +1330,50 @@ impl WlpLogic {
     }
 }
 
-// Map (previous, current) liveliness states to LivelinessChangedStatus deltas.
-// `was_alive = None` means the writer is being observed for the first time.
-fn compute_liveliness_change(was_alive: Option<bool>, is_alive: bool) -> (i32, i32) {
-    match (was_alive, is_alive) {
-        // First discovery of alive writer
-        (None, true) => (1, 0),
-        // First discovery of not-alive writer (shouldn't happen normally)
-        (None, false) => (0, 1),
-        // ALIVE -> NOT_ALIVE transition
-        (Some(true), false) => (-1, 1),
-        // NOT_ALIVE -> ALIVE transition (recovery)
-        (Some(false), true) => (1, -1),
-        // No change (shouldn't happen)
-        (Some(true), true) | (Some(false), false) => (0, 0),
+// Reader-side state transition for a tracked writer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LivelinessTransition {
+    // None -> ALIVE: first observation.
+    Match,
+    // ALIVE -> NOT_ALIVE: lease expired.
+    Lost,
+    // NOT_ALIVE -> ALIVE: reasserted.
+    Recovered,
+    // ALIVE -> None: unmatch/delete while alive.
+    UnmatchAlive,
+    // NOT_ALIVE -> None: unmatch/delete while not alive.
+    UnmatchNotAlive,
+}
+
+impl LivelinessTransition {
+    pub(crate) fn deltas(self) -> (i32, i32) {
+        match self {
+            Self::Match => (1, 0),
+            Self::Lost => (-1, 1),
+            Self::Recovered => (1, -1),
+            Self::UnmatchAlive => (-1, 0),
+            Self::UnmatchNotAlive => (0, -1),
+        }
+    }
+
+    pub(crate) fn from_deltas(alive_change: i32, not_alive_change: i32) -> Option<Self> {
+        match (alive_change, not_alive_change) {
+            (1, 0) => Some(Self::Match),
+            (-1, 1) => Some(Self::Lost),
+            (1, -1) => Some(Self::Recovered),
+            (-1, 0) => Some(Self::UnmatchAlive),
+            (0, -1) => Some(Self::UnmatchNotAlive),
+            _ => None,
+        }
     }
 }
 
 fn notify_reader_liveliness_changed(
     reader: &Arc<dyn Reader + Send + Sync>,
     guid: &Guid,
-    is_alive: bool,
-    was_alive: Option<bool>,
+    transition: LivelinessTransition,
 ) {
-    let (alive_change, not_alive_change) = compute_liveliness_change(was_alive, is_alive);
+    let (alive_change, not_alive_change) = transition.deltas();
     reader.update_status(
         StatusKind::LIVELINESS_CHANGED,
         Some(Arc::new(LivelinessChangedStatus {
@@ -1601,32 +1633,33 @@ impl UnicastMessageProcessor for WlpLogic {
 
 #[cfg(test)]
 mod tests {
-    use super::compute_liveliness_change;
+    use super::LivelinessTransition;
 
     // Transition matrix for LivelinessChangedStatus deltas.
     #[test]
-    fn first_discovery_alive_increments_alive_only() {
-        assert_eq!(compute_liveliness_change(None, true), (1, 0));
+    fn match_increments_alive_only() {
+        assert_eq!(LivelinessTransition::Match.deltas(), (1, 0));
     }
 
     #[test]
-    fn first_discovery_not_alive_increments_not_alive_only() {
-        assert_eq!(compute_liveliness_change(None, false), (0, 1));
+    fn lost_swaps_alive_to_not_alive() {
+        assert_eq!(LivelinessTransition::Lost.deltas(), (-1, 1));
     }
 
     #[test]
-    fn alive_to_not_alive_swaps_buckets() {
-        assert_eq!(compute_liveliness_change(Some(true), false), (-1, 1));
+    fn recovered_swaps_not_alive_back_to_alive() {
+        assert_eq!(LivelinessTransition::Recovered.deltas(), (1, -1));
+    }
+
+    // Normal unmatch must NOT bump not_alive_count — see DDS spec
+    // LivelinessChangedStatus: not_alive_count tracks failed liveliness only.
+    #[test]
+    fn unmatch_alive_decrements_alive_only() {
+        assert_eq!(LivelinessTransition::UnmatchAlive.deltas(), (-1, 0));
     }
 
     #[test]
-    fn not_alive_to_alive_swaps_buckets_back() {
-        assert_eq!(compute_liveliness_change(Some(false), true), (1, -1));
-    }
-
-    #[test]
-    fn no_state_change_yields_no_delta() {
-        assert_eq!(compute_liveliness_change(Some(true), true), (0, 0));
-        assert_eq!(compute_liveliness_change(Some(false), false), (0, 0));
+    fn unmatch_not_alive_decrements_not_alive_only() {
+        assert_eq!(LivelinessTransition::UnmatchNotAlive.deltas(), (0, -1));
     }
 }
