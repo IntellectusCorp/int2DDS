@@ -1025,6 +1025,13 @@ impl SedpLogic {
                     })?
                     .retain(|writer_proxy| writer_proxy.remote_writer_guid() != endpoint_guid);
 
+                // Drop WLP tracking so LIVELINESS_CHANGED fires for the unmatch.
+                if endpoint_guid.entity_id().entity_kind().is_user_defined() {
+                    if let Some(wlp_logic) = self.get_upgraded_participant()?.wlp_logic() {
+                        let _ = wlp_logic.remove_remote_writer(endpoint_guid);
+                    }
+                }
+
                 reader.update_subscription_matched_status(
                     -1,
                     InstanceHandle::from_guid(&endpoint_guid),
@@ -1140,6 +1147,13 @@ impl SedpLogic {
                     .retain(|remote_writer_info| {
                         remote_writer_info.remote_writer_guid() != endpoint_guid
                     });
+
+                // Drop WLP tracking so LIVELINESS_CHANGED fires for the unmatch.
+                if endpoint_guid.entity_id().entity_kind().is_user_defined() {
+                    if let Some(wlp_logic) = self.get_upgraded_participant()?.wlp_logic() {
+                        let _ = wlp_logic.remove_remote_writer(endpoint_guid);
+                    }
+                }
 
                 reader.update_subscription_matched_status(
                     -1,

@@ -80,6 +80,7 @@ use crate::{
             history::{cache_change::CacheChange, history_cache::HistoryCache as _},
             reader::Reader as RtpsReader,
         },
+        logic::wlp_logic::LivelinessTransition,
     },
     subscription::{
         data_reader_history::{DataReaderHistoryCache, ReaderChangeId},
@@ -513,7 +514,20 @@ impl<Foo: 'static + Clone + Debug> UpdateStatus for DataReader<Foo> {
                     Arc::downcast::<LivelinessChangedStatus>(info.ok_or(DdsError::BadParameter)?)
                         .map_err(|_| DdsError::BadParameter)?;
 
-                if info.alive_count_change() == -1 && info.not_alive_count_change() == 1 {
+                let transition = LivelinessTransition::from_deltas(
+                    info.alive_count_change(),
+                    info.not_alive_count_change(),
+                );
+
+                // Lost / UnmatchAlive / UnmatchNotAlive.
+                if matches!(
+                    transition,
+                    Some(
+                        LivelinessTransition::Lost
+                            | LivelinessTransition::UnmatchAlive
+                            | LivelinessTransition::UnmatchNotAlive
+                    )
+                ) {
                     if let Ok(datareader_cache) = self.datareader_cache.lock() {
                         datareader_cache.remove_writer_from_owner_candidates(
                             info.last_publication_handle().to_guid(),
