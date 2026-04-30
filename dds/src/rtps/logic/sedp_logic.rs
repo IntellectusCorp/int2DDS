@@ -541,6 +541,11 @@ impl SedpLogic {
 
 /// Subscription Handling (Local Writer <-> Remote Reader)
 impl SedpLogic {
+    fn handle_remote_subscription_termination(&self, participant: &Participant, reader_guid: Guid) {
+        participant.remove_unmatched_reader_from_writer(reader_guid);
+        participant.remove_remote_subscription_by_guid(reader_guid);
+    }
+
     fn handle_subscription_builtin_topic_data(
         &self,
         subscription_builtin_topic_data: SubscriptionBuiltinTopicData,
@@ -564,17 +569,7 @@ impl SedpLogic {
                         .unwrap_or_else(|| InstanceHandle::from_guid(&endpoint_guid));
 
                     let reader_guid = InstanceHandle::to_guid(&terminated_reader_guid);
-                    participant.remove_unmatched_reader_from_writer(reader_guid);
-
-                    if let Some(mut entry) = participant.remote_subscriptions().get_mut(&topic_name)
-                    {
-                        entry.value_mut().remove(&reader_guid);
-
-                        if entry.value().is_empty() {
-                            drop(entry);
-                            participant.remote_subscriptions().remove(&topic_name);
-                        }
-                    }
+                    self.handle_remote_subscription_termination(&participant, reader_guid);
                     return Ok(());
                 }
             } else {
@@ -940,6 +935,17 @@ impl SedpLogic {
 
 /// Publication Handling (Local Reader <-> Remote Writer)
 impl SedpLogic {
+    fn handle_remote_publication_termination(&self, participant: &Participant, writer_guid: Guid) {
+        if writer_guid.entity_id().entity_kind().is_user_defined() {
+            if let Some(wlp_logic) = participant.wlp_logic() {
+                let _ = wlp_logic.remove_remote_writer(writer_guid);
+            }
+        }
+
+        participant.remove_unmatched_writer_from_reader(writer_guid);
+        participant.remove_remote_publication_by_guid(writer_guid);
+    }
+
     fn handle_publication_builtin_topic_data(
         &self,
         publication_builtin_topic_data: PublicationBuiltinTopicData,
@@ -962,23 +968,7 @@ impl SedpLogic {
                         .unwrap_or_else(|| InstanceHandle::from_guid(&endpoint_guid));
 
                     let writer_guid = InstanceHandle::to_guid(&terminated_writer_guid);
-                    if writer_guid.entity_id().entity_kind().is_user_defined() {
-                        if let Some(wlp_logic) = participant.wlp_logic() {
-                            let _ = wlp_logic.remove_remote_writer(writer_guid);
-                        }
-                    }
-
-                    participant.remove_unmatched_writer_from_reader(writer_guid);
-
-                    if let Some(mut entry) = participant.remote_publications().get_mut(&topic_name)
-                    {
-                        entry.value_mut().remove(&writer_guid);
-
-                        if entry.value().is_empty() {
-                            drop(entry);
-                            participant.remote_publications().remove(&topic_name);
-                        }
-                    }
+                    self.handle_remote_publication_termination(&participant, writer_guid);
                     return Ok(());
                 }
             } else {
@@ -2028,6 +2018,22 @@ impl UnicastMessageProcessor for SedpLogic {
             let payload = data.serialized_data();
 
             if data.writer_id == EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER {
+                let is_termination = inline_qos_params
+                    .as_ref()
+                    .and_then(|qos| qos.get_status_info())
+                    .is_some_and(|status| status.disposed() || status.unregistered());
+                if is_termination && payload.is_empty() {
+                    if let Some(terminated_writer_guid) =
+                        inline_qos_params.as_ref().and_then(|qos| qos.get_key_hash())
+                    {
+                        self.handle_remote_publication_termination(
+                            &participant,
+                            InstanceHandle::to_guid(&terminated_writer_guid),
+                        );
+                        return Ok(());
+                    }
+                }
+
                 let writer_data = SEDPMessage::<DiscoveredWriterData>::from_serialized_payload(
                     payload.as_ref(),
                     is_big_endian,
@@ -2065,6 +2071,22 @@ impl UnicastMessageProcessor for SedpLogic {
                     inline_qos_params,
                 );
             } else if data.writer_id == EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_WRITER {
+                let is_termination = inline_qos_params
+                    .as_ref()
+                    .and_then(|qos| qos.get_status_info())
+                    .is_some_and(|status| status.disposed() || status.unregistered());
+                if is_termination && payload.is_empty() {
+                    if let Some(terminated_reader_guid) =
+                        inline_qos_params.as_ref().and_then(|qos| qos.get_key_hash())
+                    {
+                        self.handle_remote_subscription_termination(
+                            &participant,
+                            InstanceHandle::to_guid(&terminated_reader_guid),
+                        );
+                        return Ok(());
+                    }
+                }
+
                 let reader_data = SEDPMessage::<DiscoveredReaderData>::from_serialized_payload(
                     payload.as_ref(),
                     is_big_endian,
