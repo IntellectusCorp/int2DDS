@@ -572,15 +572,9 @@ impl Participant {
 
         // Remove from store
         self.rtps_writer_store.remove(&topic_name, entity_id);
-        if let Some(mut entry) = self.remote_publications().get_mut(&topic_name) {
-            entry.value_mut().remove(&Guid::new(self.guid().prefix(), entity_id));
 
-            if entry.value().is_empty() {
-                drop(entry);
-                self.remote_publications().remove(&topic_name);
-            }
-        }
-
+        // Unmatch with intra participant readers
+        self.cleanup_remote_writer(Guid::new(self.guid().prefix(), entity_id), &topic_name)?;
         Ok(())
     }
 
@@ -651,14 +645,9 @@ impl Participant {
 
         // Remove from store
         self.rtps_reader_store.remove(&topic_name, entity_id);
-        if let Some(mut entry) = self.remote_subscriptions().get_mut(&topic_name) {
-            entry.value_mut().remove(&Guid::new(self.guid().prefix(), entity_id));
 
-            if entry.value().is_empty() {
-                drop(entry);
-                self.remote_subscriptions().remove(&topic_name);
-            }
-        }
+        // Unmatch with intra participant writers
+        self.cleanup_remote_reader(Guid::new(self.guid().prefix(), entity_id), &topic_name)?;
 
         Ok(())
     }
@@ -669,15 +658,15 @@ impl Participant {
         topic_name: &str,
     ) -> RtpsResult<()> {
         // Drop reader-side proxies and fire PUBLICATION_MATCHED(-1).
-        self.remove_unmatched_reader_from_writer(reader_guid);
+        self.remove_unmatched_reader_from_writer(reader_guid)?;
 
         // Forget the discovery entry; drop the topic bucket if it became empty.
-        if let Some(mut entry) = self.remote_subscriptions().get_mut(&topic_name) {
+        if let Some(mut entry) = self.remote_subscriptions().get_mut(topic_name) {
             entry.value_mut().remove(&reader_guid);
 
             if entry.value().is_empty() {
                 drop(entry);
-                self.remote_subscriptions().remove(&topic_name);
+                self.remote_subscriptions().remove(topic_name);
             }
         }
 
@@ -697,7 +686,7 @@ impl Participant {
         }
 
         // Drop reader-side proxies and fire SUBSCRIPTION_MATCHED(-1).
-        self.remove_unmatched_writer_from_reader(writer_guid);
+        self.remove_unmatched_writer_from_reader(writer_guid)?;
 
         // Forget the discovery entry; drop the topic bucket if it became empty.
         if let Some(mut entry) = self.remote_publications().get_mut(topic_name) {
@@ -883,11 +872,14 @@ impl Participant {
     }
 
     /// Method to remove all information about remote participant
-    pub(crate) fn unmatch_with_remote_participant(&self, terminated_participant_guid: &Guid) {
+    pub(crate) fn unmatch_with_remote_participant(
+        &self,
+        terminated_participant_guid: &Guid,
+    ) -> RtpsResult<()> {
         // Remove participant proxy
         if !self.remove_remote_participant_proxy_data(*terminated_participant_guid) {
             debug!("Remote participant not found, participant may have already been unmatched");
-            return;
+            return Ok(());
         }
 
         // Remove proxies from built-in endpoint
@@ -896,9 +888,10 @@ impl Participant {
         // Remove proxies from endpoint
         self.remove_all_unmatched_endpoint_from_terminated_participant(
             terminated_participant_guid.prefix(),
-        );
+        )?;
 
         info!("Successfully unmatched with remote participant: {:?}", terminated_participant_guid);
+        Ok(())
     }
 
     /// Function to remove all Remote Endpoints with the given GuidPrefix when Remote Participant terminates
