@@ -424,11 +424,11 @@ mod tests {
 
         let provider = QosProvider::from_json(json).unwrap();
 
-        // library 존재 확인
+        // verify library exists
         assert!(provider.get_library("TestLibrary").is_some());
         assert!(provider.get_library("NonExistent").is_none());
 
-        // 단일 QoS 조회
+        // look up the single QoS
         let qos = provider.get_datawriter_qos_internal("TestLibrary");
         assert!(qos.is_some());
     }
@@ -457,7 +457,7 @@ mod tests {
 
         let provider = QosProvider::from_json(json).unwrap();
 
-        // Library만 지정하면 seq의 첫 번째 QoS 반환
+        // when only the library is specified, return the first QoS in the seq
         let qos = provider.get_datawriter_qos_internal("TestLibrary");
         assert!(qos.is_some());
     }
@@ -480,11 +480,11 @@ mod tests {
 
         let provider = QosProvider::from_json(json).unwrap();
 
-        // profile 존재 확인
+        // verify profile exists
         assert!(provider.get_profile("TestLibrary", "DefaultProfile").is_some());
         assert!(provider.get_profile("TestLibrary", "NonExistent").is_none());
 
-        // profile 내 단일 QoS 조회
+        // look up the single QoS within the profile
         let qos = provider.get_datawriter_qos_internal("TestLibrary::DefaultProfile");
         assert!(qos.is_some());
     }
@@ -517,7 +517,7 @@ mod tests {
 
         let provider = QosProvider::from_json(json).unwrap();
 
-        // profile 내 Seq QoS 조회
+        // look up a Seq QoS within the profile
         let qos = provider.get_datareader_qos_internal("TestLibrary::MyProfile::Reader1");
         assert!(qos.is_some());
 
@@ -1032,7 +1032,7 @@ mod tests {
 
         let qos = provider.get_datawriter_qos_internal("TestLibrary::Profile1").unwrap();
 
-        // base_name 없이도 정상 동작
+        // works correctly even without base_name
         assert!(qos.reliability.is_some());
         assert!(qos.base_name.is_none());
     }

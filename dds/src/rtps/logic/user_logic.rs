@@ -2290,16 +2290,17 @@ impl UnicastMessageProcessor for UserLogic {
 
                 irrelevant_changes.extend(gap.gap_list.extract_numbers().iter());
 
-                // Flush buffered changes if expected_sn is affected
-                if irrelevant_changes.last().unwrap_or(&SequenceNumber::new(0, 0))
-                    >= &writer_proxy.expected_sn()
-                {
-                    writer_proxy.set_expected_sn(SequenceNumber::from_i64(
-                        irrelevant_changes.last().unwrap().to_i64() + 1,
-                    ));
+                // Flush buffered changes if expected_sn is affected.
+                if let Some(last) = irrelevant_changes.last() {
+                    if last >= &writer_proxy.expected_sn() {
+                        writer_proxy.set_expected_sn(SequenceNumber::from_i64(last.to_i64() + 1));
 
-                    let flushed_changes = writer_proxy.flush_buffered_changes();
-                    self.add_change_to_reader_cache_and_notify(stateful_reader, flushed_changes)?;
+                        let flushed_changes = writer_proxy.flush_buffered_changes();
+                        self.add_change_to_reader_cache_and_notify(
+                            stateful_reader,
+                            flushed_changes,
+                        )?;
+                    }
                 }
 
                 for seq_num in irrelevant_changes {

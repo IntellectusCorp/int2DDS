@@ -161,7 +161,18 @@ impl MessageCreator {
 
         let mut data_header_flag = SubmessageHeaderFlag::new();
         data_header_flag.add_flag(SubmessageFlagType::EndiannessFlag, SubmessageId::DATA);
-        data_header_flag.add_flag(SubmessageFlagType::DataFlag, SubmessageId::DATA);
+        match cache_change.kind() {
+            ChangeKind::Alive | ChangeKind::AliveFiltered => {
+                data_header_flag.add_flag(SubmessageFlagType::DataFlag, SubmessageId::DATA);
+            }
+            ChangeKind::NotAliveDisposed
+            | ChangeKind::NotAliveUnregistered
+            | ChangeKind::NotAliveDisposedUnregistered => {
+                if !cache_change.data_value().is_empty() {
+                    data_header_flag.add_flag(SubmessageFlagType::KeyFlag, SubmessageId::DATA);
+                }
+            }
+        }
 
         let mut data =
             Data::new(reader_entity_id, writer_entity_id, cache_change.sequence_number());
