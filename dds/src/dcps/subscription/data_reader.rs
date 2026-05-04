@@ -1390,7 +1390,10 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     pub(crate) fn get_available_changes(&self) -> DdsResult<Vec<Arc<CacheChange>>> {
         let datareader_cache = self.get_datareader_cache();
         let arc = datareader_cache?;
-        let guard = arc.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        let mut guard = arc.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        // Enforce Lifespan QoS at read time so expired samples are never returned,
+        // even if the periodic cleanup timer hasn't fired yet.
+        guard.purge_expired_on_read()?;
         Ok(guard.get_changes().clone())
     }
 
