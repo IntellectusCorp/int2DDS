@@ -272,12 +272,13 @@ mod tests {
     use crate::rtps::entities::participant::Participant;
     use crate::rtps::task::user_traffic::user_unicast_listening_task::UserUnicastListeningTask;
     use crate::rtps::transport::socket::Socket;
+    use crate::rtps::transport::TransportConfig;
 
     #[test]
     #[ignore]
     fn test_user_unicast_receive() {
         let domain_id: DomainId = 17;
-        let mut socket = Socket::new(domain_id); //domain_id 0
+        let mut socket = Socket::new(domain_id, TransportConfig::default()); //domain_id 0
         socket.create_socket();
         // When socket reset is needed
         let participant =
