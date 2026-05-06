@@ -135,6 +135,10 @@ impl TransportPlugin for UdpTransportPlugin {
         }
     }
 
+    fn can_handle(&self, locator: &Locator) -> bool {
+        locator.is_udp()
+    }
+
     fn advertised_metatraffic_unicast_locators(&self) -> Vec<Locator> {
         let port = PortManager::get_discovery_traffic_unicast_port(
             self.domain_id,

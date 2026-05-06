@@ -183,6 +183,11 @@ impl TransportPlugin for HybridTransportPlugin {
         }
     }
 
+    fn can_handle(&self, locator: &Locator) -> bool {
+        // Hybrid carries both UDP and TCP senders.
+        locator.is_udp() || locator.is_tcp()
+    }
+
     fn advertised_metatraffic_unicast_locators(&self) -> Vec<Locator> {
         let udp_port = PortManager::get_discovery_traffic_unicast_port(
             self.domain_id,

@@ -1090,9 +1090,7 @@ impl Participant {
         // Prefer initial_peers from PropertyQosPolicy; fall back to env var.
         let initial_peers = property
             .get("int2dds.initial_peers")
-            .map(|v| {
-                crate::common::env::parse_initial_peers(&v)
-            })
+            .map(|v| crate::common::env::parse_initial_peers(&v))
             .unwrap_or_else(crate::common::env::get_initial_peers);
         if !initial_peers.is_empty() {
             log::info!("Configured initial peers for SPDP: {:?}", initial_peers);

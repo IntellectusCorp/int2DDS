@@ -76,6 +76,16 @@ pub(crate) trait TransportPlugin: Send + Sync {
     /// The implementation decides *how* (multicast, TCP BIND, SHM write, etc.).
     fn send(&self, data: &[u8], target: &SendTarget) -> io::Result<()>;
 
+    /// True iff this plugin can route to `locator`.
+    ///
+    /// `UserLogic` uses this when a peer advertises multiple locator kinds
+    /// (e.g. SHM mode publishes both SHM and UDP) to filter to the highest-
+    /// priority kind the local transport can actually reach. Without this
+    /// check, a UDP-only local would attempt to send to a SHM-mode peer's
+    /// SHM locator and fail. Equivalent to PR #234's `have_sender` test,
+    /// expressed per-locator on the trait.
+    fn can_handle(&self, locator: &Locator) -> bool;
+
     /// Metatraffic (discovery) unicast locators this transport advertises to
     /// remote participants. Populated into the SPDP announcement.
     ///

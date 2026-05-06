@@ -1317,18 +1317,34 @@ impl UserLogic {
         }
     }
 
+    /// Send `buffer` via the highest-priority transport reachable on both
+    /// sides (SHM > TCP > UDP); a peer advertising multiple transports gets
+    /// a single copy. Associated fn so `&self`-less closures (e.g. the
+    /// NACK_FRAG timer) can route through the same path.
     fn send_rtps_message_to_locators<'a, T>(&self, locators: T, buffer: &[u8]) -> RtpsResult<()>
     where
         T: IntoIterator<Item = &'a Locator>,
     {
+        let locators: Vec<&Locator> = locators.into_iter().collect();
+
+        let pick = |is_kind: fn(&Locator) -> bool| -> Option<Vec<&Locator>> {
+            let v: Vec<&Locator> = locators
+                .iter()
+                .copied()
+                .filter(|l| is_kind(l) && self.transport.can_handle(l))
+                .collect();
+            (!v.is_empty()).then_some(v)
+        };
+        let locators: Vec<&Locator> = pick(Locator::is_shm)
+            .or_else(|| pick(Locator::is_tcp))
+            .or_else(|| pick(Locator::is_udp))
+            .unwrap_or(locators);
+
         let mut is_sent = false;
         let mut last_error = None;
-
         for locator in locators {
-            match self.transport.send(buffer, &SendTarget::UserData(&locator)) {
-                Ok(_) => {
-                    is_sent = true;
-                }
+            match self.transport.send(buffer, &SendTarget::UserData(locator)) {
+                Ok(_) => is_sent = true,
                 Err(e) => {
                     warn!("[UserLogic] Failed to send to locator {:?}: {:?}", locator, e);
                     match e.kind() {
@@ -1351,18 +1367,13 @@ impl UserLogic {
                 }
             }
         }
-
         if !is_sent {
-            if let Some(err) = last_error {
-                return Err(RtpsError::new(RtpsErrorCode::Io, err.to_string()));
+            return Err(if let Some(err) = last_error {
+                RtpsError::new(RtpsErrorCode::Io, err.to_string())
             } else {
-                return Err(RtpsError::new(
-                    RtpsErrorCode::InvalidEntityKind,
-                    "No valid locators found",
-                ));
-            }
+                RtpsError::new(RtpsErrorCode::InvalidEntityKind, "No valid locators found")
+            });
         }
-
         Ok(())
     }
 
@@ -1760,11 +1771,24 @@ impl UnicastMessageProcessor for UserLogic {
                                                 current_writer_proxy.nackfrag_count(),
                                                 acknack_info,
                                             ) {
-                                                for locator in
-                                                    current_writer_proxy.unicast_locator_list()
-                                                {
+                                                // Same SHM > TCP > UDP priority filter as
+                                                // send_rtps_message_to_locators, with can_handle
+                                                // guarding the local-side reachability.
+                                                let locs: Vec<&Locator> =
+                                                    current_writer_proxy.unicast_locator_list().iter().collect();
+                                                let try_kind = |is_kind: fn(&Locator) -> bool| -> Option<Vec<&Locator>> {
+                                                    let v: Vec<&Locator> = locs.iter().copied()
+                                                        .filter(|l| is_kind(l) && transport_clone.can_handle(l))
+                                                        .collect();
+                                                    (!v.is_empty()).then_some(v)
+                                                };
+                                                let chosen: Vec<&Locator> = try_kind(Locator::is_shm)
+                                                    .or_else(|| try_kind(Locator::is_tcp))
+                                                    .or_else(|| try_kind(Locator::is_udp))
+                                                    .unwrap_or(locs);
+                                                for locator in chosen {
                                                     let _ = transport_clone
-                                                        .send(&buffer, &SendTarget::UserData(&locator))
+                                                        .send(&buffer, &SendTarget::UserData(locator))
                                                         .map_err(|e| {
                                                             warn!("[UserLogic] Failed to send NACK_FRAG: {:?}", e);
                                                         });
