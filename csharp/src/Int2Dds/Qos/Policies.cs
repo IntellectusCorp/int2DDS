@@ -134,7 +134,7 @@ namespace Int2Dds.Qos
 
     public class UserData
     {
-        public byte[] Data { get; set; } = Array.Empty<byte>();
+        public byte[] Data { get; set; } = Int2Dds.Internal.EmptyArrayHolder<byte>.Value;
 
         public UserData() { }
         public UserData(byte[] data)
@@ -235,7 +235,7 @@ namespace Int2Dds.Qos
 
     public class Partition
     {
-        public string[] Names { get; set; } = Array.Empty<string>();
+        public string[] Names { get; set; } = Int2Dds.Internal.EmptyArrayHolder<string>.Value;
 
         public Partition() { }
         public Partition(string[] names)
