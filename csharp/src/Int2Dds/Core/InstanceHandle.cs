@@ -79,7 +79,16 @@ namespace Int2Dds.Core
 
         public override bool Equals(object? obj) => obj is InstanceHandle other && Equals(other);
 
-        public override int GetHashCode() => HashCode.Combine(_lo, _hi);
+        public override int GetHashCode()
+        {
+            unchecked
+            {
+                int hash = 17;
+                hash = hash * 31 + _lo.GetHashCode();
+                hash = hash * 31 + _hi.GetHashCode();
+                return hash;
+            }
+        }
 
         public static bool operator ==(InstanceHandle left, InstanceHandle right) => left.Equals(right);
 
