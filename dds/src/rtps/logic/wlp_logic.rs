@@ -212,7 +212,7 @@ impl WlpLogic {
                     let monitored_writers = self.monitored_writers.clone();
 
                     let callback = Arc::new(move |guid: Guid| {
-                        Self::update_liveliness(
+                        Self::on_lease_expiration(
                             participant.clone(),
                             guid,
                             asserting_writers.clone(),
@@ -305,7 +305,7 @@ impl WlpLogic {
                     let monitored_writers = self.monitored_writers.clone();
 
                     let callback = Arc::new(move |guid: Guid| {
-                        Self::update_liveliness(
+                        Self::on_lease_expiration(
                             participant.clone(),
                             guid,
                             asserting_writers.clone(),
@@ -1102,27 +1102,18 @@ impl WlpLogic {
         self.send_liveliness_heartbeat(true, true, Some(writer_guid), None)
     }
 
-    fn update_liveliness(
+    fn on_lease_expiration(
         participant: Arc<Participant>,
         guid: Guid,
         asserting_writers: Arc<DashMap<Guid, WriterInfo>>,
         monitored_writers: Arc<DashMap<GuidPrefix, HashMap<Guid, WriterInfo>>>,
     ) -> bool {
-        log::info!("[WLP] update_liveliness called: guid={:?}", guid);
-
-        // Local
-        if participant.find_writer_from_entity_id(guid.entity_id()).is_some() {
-            Self::mark_asserting_writer_lost(participant, guid, asserting_writers);
-            return false;
-        }
-
-        // Remote
-        log::info!(
-            "[WLP] update_liveliness: No local writer found for guid={:?}, treating as REMOTE",
-            guid
-        );
+        // Each handler is a no-op when guid is absent from its own map.
+        Self::mark_asserting_writer_lost(participant.clone(), guid, asserting_writers.clone());
         Self::mark_monitored_writer_lost(participant, guid, monitored_writers);
-        true
+
+        // Drop tracker only for non-asserting writers.
+        !asserting_writers.contains_key(&guid)
     }
 
     fn mark_asserting_writer_lost(
@@ -1130,28 +1121,16 @@ impl WlpLogic {
         guid: Guid,
         asserting_writers: Arc<DashMap<Guid, WriterInfo>>,
     ) {
-        if let Some(writer) = participant.find_writer_from_entity_id(guid.entity_id()) {
-            log::info!("[WLP] mark_asserting_writer_lost: Found LOCAL writer for guid={:?}", guid);
-            writer.update_status(StatusKind::LIVELINESS_LOST, None);
-            log::warn!(
-                "[WLP] mark_asserting_writer_lost: Returning early for LOCAL writer guid={:?} - readers will NOT be notified!",
-                guid
-            );
-        }
+        if let Some(mut writer_info) = asserting_writers.get_mut(&guid) {
+            writer_info.set_not_alive();
+            debug!("[WLP] Writer {:?} set to NOT_ALIVE (participant kept for recovery)", guid);
 
-        if let Ok(readers) = participant.find_readers_matched_with_local_writer(&guid) {
-            log::info!(
-                "[WLP] mark_asserting_writer_lost: Found {} readers matched with writer {:?}",
-                readers.len(),
-                guid
-            );
-            for reader in readers {
-                notify_reader_liveliness_changed(&reader, &guid, LivelinessTransition::Lost);
-            }
-
-            if let Some(mut writer_info) = asserting_writers.get_mut(&guid) {
-                writer_info.set_not_alive();
-                debug!("[WLP] Writer {:?} set to NOT_ALIVE (participant kept for recovery)", guid);
+            if let Some(writer) = participant.find_writer_from_entity_id(guid.entity_id()) {
+                log::info!(
+                    "[WLP] mark_asserting_writer_lost: Found LOCAL writer for guid={:?}",
+                    guid
+                );
+                writer.update_status(StatusKind::LIVELINESS_LOST, None);
             }
         }
     }
