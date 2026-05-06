@@ -374,6 +374,10 @@ fn test_synthetic_invalid_data_on_no_writers() {
     )
     .unwrap();
 
+    wait_for_reader_status(&data_reader, StatusMask::LIVELINESS_CHANGED, Duration::from_seconds(1))
+        .unwrap();
+    assert_eq!(data_reader.get_liveliness_changed_status().unwrap().alive_count(), 1);
+
     data_writer.write(&KeyedDataType::default(), InstanceHandle::NIL).unwrap();
     wait_for_reader_status(&data_reader, StatusMask::DATA_AVAILABLE, Duration::from_seconds(1))
         .unwrap();
@@ -387,13 +391,14 @@ fn test_synthetic_invalid_data_on_no_writers() {
             &[InstanceStateKind::ANY_INSTANCE_STATE],
         )
         .unwrap();
+
     assert_eq!(samples.len(), 1);
     assert!(samples[0].sample_info().valid_data);
 
     // Let the lease expire (we never call assert_liveliness) so the reader
-    // sees LIVELINESS_CHANGED, which is what marks the pending synthetic.
-    wait_for_reader_status(&data_reader, StatusMask::LIVELINESS_CHANGED, Duration::from_seconds(2))
+    wait_for_reader_status(&data_reader, StatusMask::LIVELINESS_CHANGED, Duration::from_seconds(1))
         .unwrap();
+    assert_eq!(data_reader.get_liveliness_changed_status().unwrap().alive_count(), 0);
 
     // Cache is empty, but the synthetic invalid-data sample must surface once.
     let synthetic = data_reader
