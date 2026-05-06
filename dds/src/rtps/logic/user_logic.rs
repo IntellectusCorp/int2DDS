@@ -1338,7 +1338,7 @@ impl UserLogic {
         let locators: Vec<&Locator> = pick(Locator::is_shm)
             .or_else(|| pick(Locator::is_tcp))
             .or_else(|| pick(Locator::is_udp))
-            .unwrap_or(locators);
+            .unwrap_or_default();
 
         let mut is_sent = false;
         let mut last_error = None;
