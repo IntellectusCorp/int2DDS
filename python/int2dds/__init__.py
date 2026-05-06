@@ -24,6 +24,7 @@ try:
         OwnershipStrength,
         Partition,
         ParticipantQos,
+        Property,
         PublisherQos,
         ReaderDataLifecycle,
         Reliability,

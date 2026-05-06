@@ -13,6 +13,10 @@ namespace Int2Dds.Interop
             [MarshalAs(UnmanagedType.LPUTF8Str)] string qos_path, out IntPtr participant_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_create_participant_with_qos(IntPtr factory, byte* name, int domain_id,
+            IntPtr qos, out IntPtr participant_out);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_delete_participant(IntPtr participant);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
