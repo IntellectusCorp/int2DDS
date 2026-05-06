@@ -47,7 +47,7 @@ pub(crate) struct ShmTransportPlugin {
 impl ShmTransportPlugin {
     pub(crate) fn new(
         domain_id: u32,
-        participant_id: u32,
+        mut participant_id: u32,
         bind_ip: String,
         multicast_if_ip: String,
         working_ips: Vec<String>,
@@ -55,15 +55,36 @@ impl ShmTransportPlugin {
         let udp_sender = UdpSender::new(bind_ip, multicast_if_ip)?;
         let shm_sender = ShmSender::new(domain_id)?;
 
-        // Create UDP listeners for discovery
+        // Create UDP listeners for discovery — multicast first (no per-participant
+        // collision since multicast ports are domain-wide).
         let discovery_mc_port = PortManager::get_discovery_traffic_multicast_port(domain_id);
-        let discovery_uc_port =
-            PortManager::get_discovery_traffic_unicast_port(domain_id, participant_id);
-        let user_uc_port = PortManager::get_user_traffic_unicast_port(domain_id, participant_id);
-
         let discovery_mc = UdpListener::new_multicast(discovery_mc_port, &working_ips).ok();
-        let discovery_uc = UdpListener::new(discovery_uc_port).ok();
-        let user_uc = UdpListener::new(user_uc_port).ok();
+
+        // Two SHM-mode processes on the same host would otherwise both bind
+        // their UDP unicast listeners to the same (domain_id, participant_id=0)
+        // port, the second `.ok()` would swallow `AddrInUse`, and discovery
+        // would silently fail. Mirror UdpTransportPlugin's retry loop:
+        // increment participant_id until discovery_uc binds. Listener stays
+        // bound to avoid a probe-and-release race.
+        let (discovery_uc, user_uc) = loop {
+            let disc_port =
+                PortManager::get_discovery_traffic_unicast_port(domain_id, participant_id);
+            let user_port = PortManager::get_user_traffic_unicast_port(domain_id, participant_id);
+            match UdpListener::new(disc_port) {
+                Ok(disc_listener) => {
+                    let user_listener = UdpListener::new(user_port).ok();
+                    break (Some(disc_listener), user_listener);
+                }
+                Err(_) => {
+                    log::info!(
+                        "[ShmTransportPlugin] Port {} in use, trying participant_id {}",
+                        disc_port,
+                        participant_id + 1
+                    );
+                    participant_id += 1;
+                }
+            }
+        };
         let shm_listener = ShmListener::new(domain_id).ok();
 
         // Create merged user unicast channel: UDP + SHM

@@ -49,7 +49,7 @@ pub(crate) struct HybridTransportPlugin {
 impl HybridTransportPlugin {
     pub(crate) fn new(
         domain_id: u32,
-        participant_id: u32,
+        mut participant_id: u32,
         bind_ip: String,
         multicast_if_ip: String,
         working_ips: Vec<String>,
@@ -57,18 +57,41 @@ impl HybridTransportPlugin {
     ) -> io::Result<Self> {
         let udp_sender = UdpSender::new(bind_ip.clone(), multicast_if_ip)?;
 
-        // Create UDP listeners
+        // Multicast first (domain-wide port, no per-participant collision).
         let discovery_mc_port = PortManager::get_discovery_traffic_multicast_port(domain_id);
-        let discovery_uc_port =
-            PortManager::get_discovery_traffic_unicast_port(domain_id, participant_id);
-        let user_uc_port = PortManager::get_user_traffic_unicast_port(domain_id, participant_id);
-
         let discovery_mc = UdpListener::new_multicast(discovery_mc_port, &working_ips).ok();
-        let discovery_uc = UdpListener::new(discovery_uc_port).ok();
-        let user_uc = UdpListener::new(user_uc_port).ok();
+
+        // UDP unicast: retry on AddrInUse with incremented participant_id, just
+        // like UdpTransportPlugin and ShmTransportPlugin. Without this, two
+        // Hybrid processes on the same host both bind (domain, pid=0)'s UDP
+        // unicast ports, the second `.ok()` swallows the conflict, and
+        // discovery silently fails. (TCP physical port is shared across
+        // participants via the mux listener — its collision is resolved
+        // separately by INT2DDS_TCP_PORT, not by participant_id.)
+        let (discovery_uc, user_uc) = loop {
+            let disc_port =
+                PortManager::get_discovery_traffic_unicast_port(domain_id, participant_id);
+            let user_port = PortManager::get_user_traffic_unicast_port(domain_id, participant_id);
+            match UdpListener::new(disc_port) {
+                Ok(disc_listener) => {
+                    let user_listener = UdpListener::new(user_port).ok();
+                    break (Some(disc_listener), user_listener);
+                }
+                Err(_) => {
+                    log::info!(
+                        "[HybridTransportPlugin] UDP port {} in use, trying participant_id {}",
+                        disc_port,
+                        participant_id + 1
+                    );
+                    participant_id += 1;
+                }
+            }
+        };
 
         // Create TCP plugin (handles its own mux listener thread).
-        // Pass working_ips so the TCP side can advertise per-NIC locators.
+        // Pass the final participant_id so TCP's identity matches UDP's.
+        // The TCP physical port itself is independent of participant_id —
+        // override via INT2DDS_TCP_PORT for multi-process on the same host.
         let tcp_plugin = TcpTransportPlugin::new(
             domain_id,
             participant_id,
