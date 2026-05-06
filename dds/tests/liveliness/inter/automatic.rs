@@ -76,6 +76,8 @@ fn unmatch_propagation_to_reader() {
     // Instance must exist before NO_WRITERS can surface.
     writer.write(&KeyedDataType::default(), InstanceHandle::NIL).unwrap();
 
+    std::thread::sleep(StdDuration::from_millis(500));
+
     s.publisher.delete_datawriter(writer).unwrap();
 
     wait_for_subscription_matched_count(&reader, 0, StdDuration::from_secs(3)).unwrap();
