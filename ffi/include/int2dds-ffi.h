@@ -1016,6 +1016,25 @@ Int2DdsRet int2dds_create_participant_with_profile(const struct Int2DdsParticipa
                                                    struct Int2DdsParticipant **participant_out);
 
 /**
+ * Create a DomainParticipant with the given QoS handle.
+ *
+ * The handle is cloned internally; the caller still owns `qos` and must
+ * destroy it with `int2dds_participant_qos_destroy`.
+ *
+ * # Safety
+ * - `name` must be a valid null-terminated C string or null
+ * - `qos` must be a valid QoS handle created by
+ *   `int2dds_participant_qos_create_default`
+ * - `participant_out` must be a valid pointer to a null pointer
+ * - The returned participant must be freed with `int2dds_delete_participant`
+ */
+Int2DdsRet int2dds_create_participant_with_qos(const struct Int2DdsParticipantFactory *_factory,
+                                               const char *name,
+                                               int32_t domain_id,
+                                               const struct Int2DdsParticipantQos *qos,
+                                               struct Int2DdsParticipant **participant_out);
+
+/**
  * Delete a DomainParticipant
  *
  * # Safety
