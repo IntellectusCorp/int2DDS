@@ -426,7 +426,7 @@ impl Participant {
 
         if writer.guid().entity_id().entity_kind().is_user_defined() {
             if let Some(wlp_logic) = self.wlp_logic.get() {
-                let _ = wlp_logic.add_local_writer(writer.guid(), liveliness);
+                let _ = wlp_logic.register_asserting_writer(writer.guid(), liveliness);
             }
         }
         Ok(())
@@ -509,7 +509,7 @@ impl Participant {
         if let Some(writer) = writer_arc {
             if writer.guid().entity_id().entity_kind().is_user_defined() {
                 if let Some(wlp_logic) = self.wlp_logic.get() {
-                    let _ = wlp_logic.remove_local_writer(writer.guid());
+                    let _ = wlp_logic.deregister_asserting_writer(writer.guid());
                 }
             }
 
@@ -573,11 +573,12 @@ impl Participant {
             }
         }
 
+        // Unmatch with intra participant readers
+        self.cleanup_remote_writer(Guid::new(self.guid().prefix(), entity_id), &topic_name)?;
+
         // Remove from store
         self.rtps_writer_store.remove(&topic_name, entity_id);
 
-        // Unmatch with intra participant readers
-        self.cleanup_remote_writer(Guid::new(self.guid().prefix(), entity_id), &topic_name)?;
         Ok(())
     }
 
@@ -684,7 +685,7 @@ impl Participant {
         // Fire LIVELINESS_CHANGED first; it iterates reader's writer_proxies to find matches.
         if writer_guid.entity_id().entity_kind().is_user_defined() {
             if let Some(wlp_logic) = self.wlp_logic() {
-                let _ = wlp_logic.remove_remote_writer(writer_guid);
+                let _ = wlp_logic.deregister_monitored_writer(writer_guid);
             }
         }
 
