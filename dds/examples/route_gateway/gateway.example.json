@@ -1,5 +1,4 @@
 {
-  "_comment_wan_support": "WAN transport supported: TCP only. Set remote.transport to 'tcp'.",
   "local": {
     "domain_id": 0,
     "transport": "udp"
@@ -7,19 +6,42 @@
   "remote": {
     "domain_id": 1,
     "transport": "tcp",
-    "_comment_initial_peers": "TCP physical port = 7400 + 250 * domain_id (domain 1 → 7650). Override with INT2DDS_TCP_PORT.",
-    "initial_peers": ["192.168.1.100:7650"],
-    "_comment_tls": "Remove the 'tls' block to use plain TCP. All three PEM paths are required when TLS is enabled.",
-    "tls": {
-      "ca_file":     "/etc/int2dds/ca.pem",
-      "cert_file":   "/etc/int2dds/cert.pem",
-      "key_file":    "/etc/int2dds/key.pem",
-      "server_name": "gateway.example.com",
-      "verify_peer": true
-    }
+    "initial_peers": [
+      "192.168.1.100:7650"
+    ]
   },
   "auto_relay": {
-    "filter": "*"
+    "filter": "*",
+    "qos_profiles": {
+      "name": "DemoQos",
+      "qos_profiles": [
+        {
+          "name": "BestEffort",
+          "datareader_qos": {
+            "reliability": {
+              "kind": "BEST_EFFORT_RELIABILITY_QOS"
+            },
+            "history": {
+              "kind": "KEEP_LAST_HISTORY_QOS",
+              "depth": 1
+            }
+          },
+          "datawriter_qos": {
+            "reliability": {
+              "kind": "BEST_EFFORT_RELIABILITY_QOS"
+            },
+            "history": {
+              "kind": "KEEP_LAST_HISTORY_QOS",
+              "depth": 1
+            }
+          }
+        }
+      ]
+    },
+    "default_local_reader_qos": "DemoQos::BestEffort",
+    "default_local_writer_qos": "DemoQos::BestEffort",
+    "default_remote_reader_qos": "DemoQos::BestEffort",
+    "default_remote_writer_qos": "DemoQos::BestEffort"
   },
   "poll_period_ms": 50
 }
