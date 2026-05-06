@@ -1541,7 +1541,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                     .ok_or(DdsError::Error("WLP not initialized".to_string()))?;
                 // Update Participant liveliness
                 let writer_guid = self.get_rtps_writer()?.guid();
-                match wlp.update_local_writer_liveliness(&writer_guid) {
+                match wlp.renew_asserting_writer(&writer_guid) {
                     Ok(()) => Ok(()),
                     Err(e) => Err(DdsError::Error(e.to_string())),
                 }

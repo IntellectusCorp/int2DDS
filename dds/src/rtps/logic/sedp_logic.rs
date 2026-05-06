@@ -715,7 +715,7 @@ impl SedpLogic {
         if writer_guid.entity_id().entity_kind().is_user_defined() {
             let participant = self.get_upgraded_participant()?;
             if let Some(wlp_logic) = participant.wlp_logic() {
-                let _ = wlp_logic.add_local_writer(writer_guid, writer.liveliness()?);
+                let _ = wlp_logic.register_asserting_writer(writer_guid, writer.liveliness()?);
             }
         }
 
@@ -994,7 +994,7 @@ impl SedpLogic {
                 // Fire LIVELINESS_CHANGED first; needs reader's matched list intact.
                 if endpoint_guid.entity_id().entity_kind().is_user_defined() {
                     if let Some(wlp_logic) = self.get_upgraded_participant()?.wlp_logic() {
-                        let _ = wlp_logic.remove_remote_writer(endpoint_guid);
+                        let _ = wlp_logic.deregister_monitored_writer(endpoint_guid);
                     }
                 }
 
@@ -1072,8 +1072,10 @@ impl SedpLogic {
         let writer_guid = endpoint_guid;
         if writer_guid.entity_id().entity_kind().is_user_defined() {
             if let Some(wlp_logic) = self.get_upgraded_participant()?.wlp_logic() {
-                let _ = wlp_logic
-                    .add_remote_writer(writer_guid, *publication_builtin_topic_data.liveliness());
+                let _ = wlp_logic.register_monitored_writer(
+                    writer_guid,
+                    *publication_builtin_topic_data.liveliness(),
+                );
             }
         }
 
@@ -1116,7 +1118,7 @@ impl SedpLogic {
                 // Fire LIVELINESS_CHANGED first; needs reader's matched list intact.
                 if endpoint_guid.entity_id().entity_kind().is_user_defined() {
                     if let Some(wlp_logic) = self.get_upgraded_participant()?.wlp_logic() {
-                        let _ = wlp_logic.remove_remote_writer(endpoint_guid);
+                        let _ = wlp_logic.deregister_monitored_writer(endpoint_guid);
                     }
                 }
 
@@ -1191,8 +1193,10 @@ impl SedpLogic {
         if writer_guid.entity_id().entity_kind().is_user_defined() {
             let participant = self.get_upgraded_participant()?;
             if let Some(wlp_logic) = participant.wlp_logic() {
-                let _ = wlp_logic
-                    .add_remote_writer(writer_guid, *publication_builtin_topic_data.liveliness());
+                let _ = wlp_logic.register_monitored_writer(
+                    writer_guid,
+                    *publication_builtin_topic_data.liveliness(),
+                );
             }
         }
 

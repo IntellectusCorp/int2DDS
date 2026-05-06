@@ -93,10 +93,10 @@ pub(crate) struct WlpLogic {
     participant: Weak<Participant>,
     sender: Arc<Mutex<Option<Arc<TransportSender>>>>,
     timer_handler: Arc<Mutex<TimerHandler>>,
-    // Local user-defined writers (GUID -> LivelinessQosPolicy)
-    local_writers: Arc<DashMap<Guid, WriterInfo>>,
-    // Remote user-defined writers (GUID -> LivelinessQosPolicy)
-    remote_participants: Arc<DashMap<GuidPrefix, HashMap<Guid, WriterInfo>>>,
+    // Writers whose liveliness this participant asserts (local data writers).
+    asserting_writers: Arc<DashMap<Guid, WriterInfo>>,
+    // Writers whose liveliness this participant monitors and fans out to readers (matched writers).
+    monitored_writers: Arc<DashMap<GuidPrefix, HashMap<Guid, WriterInfo>>>,
     min_lease_duration: Arc<Mutex<RtpsDuration>>,
     liveliness_monitor: Arc<Mutex<Option<LivelinessMonitor>>>,
 }
@@ -109,8 +109,8 @@ impl WlpLogic {
             participant: Arc::downgrade(&participant),
             sender: Arc::new(Mutex::new(Some(sender))),
             timer_handler,
-            local_writers: Arc::new(DashMap::new()),
-            remote_participants: Arc::new(DashMap::new()),
+            asserting_writers: Arc::new(DashMap::new()),
+            monitored_writers: Arc::new(DashMap::new()),
             min_lease_duration: Arc::new(Mutex::new(RtpsDuration::ZERO)),
             liveliness_monitor: Arc::new(Mutex::new(None)),
         }
@@ -137,28 +137,21 @@ impl WlpLogic {
 
 // Writer management (add/remove local and remote writers)
 impl WlpLogic {
-    pub(crate) fn add_local_writer(
+    pub(crate) fn register_asserting_writer(
         &self,
         writer_guid: Guid,
         liveliness: LivelinessQosPolicy,
     ) -> RtpsResult<()> {
         log::debug!(
-            "[WLP] add_local_writer: writer_guid={:?}, liveliness_kind={:?}, lease_duration={:?}",
+            "[WLP] register_asserting_writer: writer_guid={:?}, liveliness_kind={:?}, lease_duration={:?}",
             writer_guid,
             liveliness.kind,
             liveliness.lease_duration
         );
         let info = WriterInfo::new(liveliness);
-        self.local_writers.insert(writer_guid, info);
+        self.asserting_writers.insert(writer_guid, info);
 
         let participant = self.get_upgraded_participant()?;
-
-        Self::update_local_liveliness(
-            participant.clone(),
-            writer_guid,
-            self.local_writers.clone(),
-            true,
-        );
 
         if liveliness.kind == LivelinessQosPolicyKind::Automatic {
             match self.min_lease_duration.lock() {
@@ -187,21 +180,21 @@ impl WlpLogic {
                 match writer.reader_proxies().lock() {
                     Ok(proxies) => {
                         log::debug!(
-                            "[WLP] add_local_writer: writer_guid={:?}, reader_proxies count={}",
+                            "[WLP] register_asserting_writer: writer_guid={:?}, reader_proxies count={}",
                             writer_guid,
                             proxies.len()
                         );
                         if proxies.is_empty() {
                             // No readers yet, skip liveliness setup
                             log::warn!(
-                                    "[WLP] add_local_writer: SKIPPING liveliness registration for writer_guid={:?} - no readers matched yet!",
+                                    "[WLP] register_asserting_writer: SKIPPING liveliness registration for writer_guid={:?} - no readers matched yet!",
                                     writer_guid
                                 );
                             return Ok(());
                         }
                     }
                     Err(e) => {
-                        log::warn!("Failed to lock reader proxies in add_local_writer: {:?}, continuing anyway", e);
+                        log::warn!("Failed to lock reader proxies in register_asserting_writer: {:?}, continuing anyway", e);
                         // Continue to add writer to WLP even if lock fails
                         // Better to have false positive than miss liveliness
                     }
@@ -215,15 +208,15 @@ impl WlpLogic {
             Ok(mut liveliness_monitor) => {
                 if liveliness_monitor.is_none() {
                     let participant = participant.clone();
-                    let local_writers = self.local_writers.clone();
-                    let remote_participants = self.remote_participants.clone();
+                    let asserting_writers = self.asserting_writers.clone();
+                    let monitored_writers = self.monitored_writers.clone();
 
                     let callback = Arc::new(move |guid: Guid| {
                         Self::update_liveliness(
                             participant.clone(),
                             guid,
-                            local_writers.clone(),
-                            remote_participants.clone(),
+                            asserting_writers.clone(),
+                            monitored_writers.clone(),
                         )
                     });
 
@@ -233,7 +226,7 @@ impl WlpLogic {
                 match liveliness_monitor.as_ref() {
                     Some(liveliness_monitor) => {
                         log::info!(
-                                "[WLP] add_local_writer: Registering writer_guid={:?} to LivelinessMonitor, lease_duration={:?}",
+                                "[WLP] register_asserting_writer: Registering writer_guid={:?} to LivelinessMonitor, lease_duration={:?}",
                                 writer_guid, liveliness.lease_duration
                             );
                         liveliness_monitor.track_writer(&writer_guid, liveliness.lease_duration);
@@ -249,8 +242,8 @@ impl WlpLogic {
         }
     }
 
-    pub(crate) fn remove_local_writer(&self, writer_guid: Guid) -> RtpsResult<()> {
-        self.local_writers.remove(&writer_guid);
+    pub(crate) fn deregister_asserting_writer(&self, writer_guid: Guid) -> RtpsResult<()> {
+        self.asserting_writers.remove(&writer_guid);
 
         match self.liveliness_monitor.lock() {
             Ok(liveliness_monitor) => match liveliness_monitor.as_ref() {
@@ -258,7 +251,7 @@ impl WlpLogic {
                     liveliness_monitor.cancel_writer(writer_guid);
 
                     let has_automatic = self
-                        .local_writers
+                        .asserting_writers
                         .iter()
                         .any(|entry| entry.value().qos.kind == LivelinessQosPolicyKind::Automatic);
 
@@ -280,7 +273,7 @@ impl WlpLogic {
         }
     }
 
-    pub(crate) fn add_remote_writer(
+    pub(crate) fn register_monitored_writer(
         &self,
         writer_guid: Guid,
         liveliness: LivelinessQosPolicy,
@@ -288,12 +281,12 @@ impl WlpLogic {
         let prefix = writer_guid.prefix();
         let writer_info = WriterInfo::new(liveliness);
 
-        if let Some(mut writers) = self.remote_participants.get_mut(&prefix) {
+        if let Some(mut writers) = self.monitored_writers.get_mut(&prefix) {
             writers.insert(writer_guid, writer_info);
         } else {
             let mut new_map = HashMap::new();
             new_map.insert(writer_guid, writer_info);
-            self.remote_participants.insert(prefix, new_map);
+            self.monitored_writers.insert(prefix, new_map);
         }
 
         let participant = self.get_upgraded_participant()?;
@@ -308,15 +301,15 @@ impl WlpLogic {
             Ok(mut liveliness_monitor) => {
                 if liveliness_monitor.is_none() {
                     let participant = participant.clone();
-                    let local_writers = self.local_writers.clone();
-                    let remote_participants = self.remote_participants.clone();
+                    let asserting_writers = self.asserting_writers.clone();
+                    let monitored_writers = self.monitored_writers.clone();
 
                     let callback = Arc::new(move |guid: Guid| {
                         Self::update_liveliness(
                             participant.clone(),
                             guid,
-                            local_writers.clone(),
-                            remote_participants.clone(),
+                            asserting_writers.clone(),
+                            monitored_writers.clone(),
                         )
                     });
 
@@ -341,29 +334,32 @@ impl WlpLogic {
                 }
             }
             Err(e) => {
-                log::error!("Failed to lock liveliness monitor in add_remote_writer: {:?}", e);
+                log::error!(
+                    "Failed to lock liveliness monitor in register_monitored_writer: {:?}",
+                    e
+                );
                 // Return Ok to not fail remote writer addition, retry will happen on next update
                 Ok(())
             }
         }
     }
 
-    pub(crate) fn remove_remote_writer(&self, writer_guid: Guid) -> RtpsResult<()> {
+    pub(crate) fn deregister_monitored_writer(&self, writer_guid: Guid) -> RtpsResult<()> {
         // Snapshot prior alive state to pick UnmatchAlive vs UnmatchNotAlive.
         let was_alive = self
-            .remote_participants
+            .monitored_writers
             .get(&writer_guid.prefix())
             .and_then(|writers| {
                 writers.get(&writer_guid).map(|info| info.alive_state() == WriterAliveState::Alive)
             })
             .unwrap_or(true);
 
-        if let Some(mut hash_map) = self.remote_participants.get_mut(&writer_guid.prefix()) {
+        if let Some(mut hash_map) = self.monitored_writers.get_mut(&writer_guid.prefix()) {
             hash_map.remove(&writer_guid);
 
             if hash_map.is_empty() {
                 drop(hash_map);
-                self.remote_participants.remove(&writer_guid.prefix());
+                self.monitored_writers.remove(&writer_guid.prefix());
             }
         }
 
@@ -896,7 +892,7 @@ impl WlpLogic {
                         return Ok(());
                     }
                     if liveliness_flag {
-                        self.update_remote_writer_liveliness(remote_guid)?;
+                        self.mark_monitored_writer_alive(remote_guid)?;
 
                         let stateful_reader = readers
                             .iter()
@@ -1101,7 +1097,7 @@ impl WlpLogic {
     }
     // ManualByTopic
     pub(crate) fn assert_writer_liveliness(&self, writer_guid: Guid) -> RtpsResult<()> {
-        self.update_local_writer_liveliness(&writer_guid)?;
+        self.renew_asserting_writer(&writer_guid)?;
 
         self.send_liveliness_heartbeat(true, true, Some(writer_guid), None)
     }
@@ -1109,14 +1105,14 @@ impl WlpLogic {
     fn update_liveliness(
         participant: Arc<Participant>,
         guid: Guid,
-        local_writers: Arc<DashMap<Guid, WriterInfo>>,
-        remote_participants: Arc<DashMap<GuidPrefix, HashMap<Guid, WriterInfo>>>,
+        asserting_writers: Arc<DashMap<Guid, WriterInfo>>,
+        monitored_writers: Arc<DashMap<GuidPrefix, HashMap<Guid, WriterInfo>>>,
     ) -> bool {
         log::info!("[WLP] update_liveliness called: guid={:?}", guid);
 
         // Local
         if participant.find_writer_from_entity_id(guid.entity_id()).is_some() {
-            Self::update_local_liveliness(participant, guid, local_writers, false);
+            Self::mark_asserting_writer_lost(participant, guid, asserting_writers);
             return false;
         }
 
@@ -1125,61 +1121,48 @@ impl WlpLogic {
             "[WLP] update_liveliness: No local writer found for guid={:?}, treating as REMOTE",
             guid
         );
-        Self::mark_remote_writer_lost(participant, guid, remote_participants);
+        Self::mark_monitored_writer_lost(participant, guid, monitored_writers);
         true
     }
 
-    fn update_local_liveliness(
+    fn mark_asserting_writer_lost(
         participant: Arc<Participant>,
         guid: Guid,
-        local_writers: Arc<DashMap<Guid, WriterInfo>>,
-        is_alive: bool,
+        asserting_writers: Arc<DashMap<Guid, WriterInfo>>,
     ) {
         if let Some(writer) = participant.find_writer_from_entity_id(guid.entity_id()) {
-            if !is_alive {
-                log::info!("[WLP] update_liveliness: Found LOCAL writer for guid={:?}", guid);
-                writer.update_status(StatusKind::LIVELINESS_LOST, None);
-                log::warn!(
-                    "[WLP] update_liveliness: Returning early for LOCAL writer guid={:?} - readers will NOT be notified!",
-                    guid
-                );
-            }
+            log::info!("[WLP] mark_asserting_writer_lost: Found LOCAL writer for guid={:?}", guid);
+            writer.update_status(StatusKind::LIVELINESS_LOST, None);
+            log::warn!(
+                "[WLP] mark_asserting_writer_lost: Returning early for LOCAL writer guid={:?} - readers will NOT be notified!",
+                guid
+            );
         }
 
         if let Ok(readers) = participant.find_readers_matched_with_local_writer(&guid) {
             log::info!(
-                "[WLP] update_local_liveliness: Found {} readers matched with writer {:?}",
+                "[WLP] mark_asserting_writer_lost: Found {} readers matched with writer {:?}",
                 readers.len(),
                 guid
             );
             for reader in readers {
-                let transition = if is_alive {
-                    LivelinessTransition::Recovered
-                } else {
-                    LivelinessTransition::Lost
-                };
-                notify_reader_liveliness_changed(&reader, &guid, transition);
+                notify_reader_liveliness_changed(&reader, &guid, LivelinessTransition::Lost);
             }
 
-            if !is_alive {
-                if let Some(mut writer_info) = local_writers.get_mut(&guid) {
-                    writer_info.set_not_alive();
-                    debug!(
-                        "[WLP] Writer {:?} set to NOT_ALIVE (participant kept for recovery)",
-                        guid
-                    );
-                }
+            if let Some(mut writer_info) = asserting_writers.get_mut(&guid) {
+                writer_info.set_not_alive();
+                debug!("[WLP] Writer {:?} set to NOT_ALIVE (participant kept for recovery)", guid);
             }
         }
     }
 
     // ALIVE -> NOT_ALIVE for a remote writer; entry retained for reassert.
-    fn mark_remote_writer_lost(
+    fn mark_monitored_writer_lost(
         participant: Arc<Participant>,
         guid: Guid,
         remote_participants: Arc<DashMap<GuidPrefix, HashMap<Guid, WriterInfo>>>,
     ) {
-        log::debug!("[WLP] mark_remote_writer_lost: guid={:?}", guid);
+        log::debug!("[WLP] mark_monitored_writer_lost: guid={:?}", guid);
 
         if let Ok(readers) = participant.find_readers_matched_with_remote_writer(guid) {
             for reader in readers {
@@ -1207,8 +1190,8 @@ impl WlpLogic {
         }
     }
 
-    pub(crate) fn update_local_writer_liveliness(&self, writer_guid: &Guid) -> RtpsResult<()> {
-        if let Some(mut info) = self.local_writers.get_mut(writer_guid) {
+    pub(crate) fn renew_asserting_writer(&self, writer_guid: &Guid) -> RtpsResult<()> {
+        if let Some(mut info) = self.asserting_writers.get_mut(writer_guid) {
             let was_not_alive = info.alive_state() == WriterAliveState::NotAlive;
             info.set_alive();
 
@@ -1242,14 +1225,14 @@ impl WlpLogic {
     // Participant level liveliness renewal (all MANUAL_BY_PARTICIPANT writers)
     pub(crate) fn update_local_participant_liveliness(&self) -> RtpsResult<()> {
         let guids: Vec<Guid> = self
-            .local_writers
+            .asserting_writers
             .iter()
             .filter(|entry| entry.value().qos.kind == LivelinessQosPolicyKind::ManualByParticipant)
             .map(|entry| *entry.key())
             .collect();
 
         for guid in guids {
-            self.update_local_writer_liveliness(&guid)?;
+            self.renew_asserting_writer(&guid)?;
         }
 
         Ok(())
@@ -1264,7 +1247,7 @@ impl WlpLogic {
         let mut guids = Vec::new();
 
         if let Some(remote_writers) =
-            self.remote_participants.get_mut(&participant_message_data.participant_guid_prefix())
+            self.monitored_writers.get_mut(&participant_message_data.participant_guid_prefix())
         {
             for (guid, info) in remote_writers.iter() {
                 let should_update: bool = match message_kind {
@@ -1284,14 +1267,14 @@ impl WlpLogic {
         }
 
         for guid in guids {
-            self.update_remote_writer_liveliness(guid)?;
+            self.mark_monitored_writer_alive(guid)?;
         }
 
         Ok(())
     }
 
-    pub(crate) fn update_remote_writer_liveliness(&self, writer_guid: Guid) -> RtpsResult<()> {
-        if let Some(mut remote_writers) = self.remote_participants.get_mut(&writer_guid.prefix()) {
+    pub(crate) fn mark_monitored_writer_alive(&self, writer_guid: Guid) -> RtpsResult<()> {
+        if let Some(mut remote_writers) = self.monitored_writers.get_mut(&writer_guid.prefix()) {
             if let Some(info) = remote_writers.get_mut(&writer_guid) {
                 let was_not_alive = info.alive_state() == WriterAliveState::NotAlive;
                 info.set_alive();
