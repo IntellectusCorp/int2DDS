@@ -79,8 +79,15 @@ namespace Int2Dds.Core
         /// </summary>
         internal Subscriber(DomainParticipant participant, string qosPath)
         {
-            ReturnCodeHelper.CheckReturn(
-                NativeMethods.int2dds_create_subscriber_with_profile(participant.Handle, qosPath, out _handle));
+            unsafe
+            {
+                var qosPathBytes = Encoding.UTF8.GetBytes(qosPath + '\0');
+                fixed (byte* pQos = qosPathBytes)
+                {
+                    ReturnCodeHelper.CheckReturn(
+                        NativeMethods.int2dds_create_subscriber_with_profile(participant.Handle, pQos, out _handle));
+                }
+            }
         }
 
         /// <summary>

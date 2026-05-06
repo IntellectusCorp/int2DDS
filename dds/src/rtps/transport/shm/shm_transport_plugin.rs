@@ -144,6 +144,12 @@ impl TransportPlugin for ShmTransportPlugin {
         }
     }
 
+    fn can_handle(&self, locator: &Locator) -> bool {
+        // SHM plugin owns both a SHM ring buffer and a UDP fallback for
+        // non-SHM peers, so it claims both kinds.
+        locator.is_shm() || locator.is_udp()
+    }
+
     fn advertised_metatraffic_unicast_locators(&self) -> Vec<Locator> {
         let port = PortManager::get_discovery_traffic_unicast_port(
             self.domain_id,

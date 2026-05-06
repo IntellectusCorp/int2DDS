@@ -217,6 +217,10 @@ impl TransportPlugin for TcpTransportPlugin {
         }
     }
 
+    fn can_handle(&self, locator: &Locator) -> bool {
+        locator.is_tcp()
+    }
+
     fn advertised_metatraffic_unicast_locators(&self) -> Vec<Locator> {
         self.advertised_tcp_locators()
     }

@@ -50,7 +50,7 @@ namespace Int2Dds.Discovery
                     _handle, null, UIntPtr.Zero, out UIntPtr size);
 
                 if (ret == ReturnCode.NoData || (uint)size == 0)
-                    return Array.Empty<byte>();
+                    return Int2Dds.Internal.EmptyArrayHolder<byte>.Value;
 
                 // Some implementations return OK with size, some may require a buffer.
                 var buf = new byte[(uint)size];

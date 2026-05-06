@@ -1,5 +1,6 @@
 using System;
 using System.Reflection;
+using System.Text;
 using Int2Dds.Conditions;
 using Int2Dds.Exceptions;
 using Int2Dds.Interop;
@@ -100,31 +101,35 @@ namespace Int2Dds.Core
             _topic = topic;
             _xcdr2 = false;
 
-            if (listener != null)
+            unsafe
             {
-                unsafe
+                var qosPathBytes = Encoding.UTF8.GetBytes(qosPath + '\0');
+                fixed (byte* pQos = qosPathBytes)
                 {
-                    var (nativeListener, contextHandle) = ListenerRegistry.CreateWriterListener(listener, this);
-                    _listenerContextHandle = contextHandle;
-                    try
+                    if (listener != null)
+                    {
+                        var (nativeListener, contextHandle) = ListenerRegistry.CreateWriterListener(listener, this);
+                        _listenerContextHandle = contextHandle;
+                        try
+                        {
+                            ReturnCodeHelper.CheckReturn(
+                                NativeMethods.int2dds_create_datawriter_with_profile_and_listener(
+                                    publisher.Handle, topic.Handle, pQos, &nativeListener, statusMask, out _handle));
+                        }
+                        catch
+                        {
+                            ListenerRegistry.FreeListener(_listenerContextHandle);
+                            _listenerContextHandle = IntPtr.Zero;
+                            throw;
+                        }
+                    }
+                    else
                     {
                         ReturnCodeHelper.CheckReturn(
-                            NativeMethods.int2dds_create_datawriter_with_profile_and_listener(
-                                publisher.Handle, topic.Handle, qosPath, &nativeListener, statusMask, out _handle));
-                    }
-                    catch
-                    {
-                        ListenerRegistry.FreeListener(_listenerContextHandle);
-                        _listenerContextHandle = IntPtr.Zero;
-                        throw;
+                            NativeMethods.int2dds_create_datawriter_with_profile(
+                                publisher.Handle, topic.Handle, pQos, out _handle));
                     }
                 }
-            }
-            else
-            {
-                ReturnCodeHelper.CheckReturn(
-                    NativeMethods.int2dds_create_datawriter_with_profile(
-                        publisher.Handle, topic.Handle, qosPath, out _handle));
             }
         }
 
