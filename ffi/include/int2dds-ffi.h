@@ -988,6 +988,33 @@ Int2DdsRet int2dds_dynamic_sample_get_string(const uint8_t *bytes,
                                              uintptr_t *out_len);
 
 /**
+ * Sets the IPv4 multicast TTL fallback via the `INT2DDS_MULTICAST_TTL`
+ * environment variable.
+ *
+ * Used by `TransportConfig` only when a `DomainParticipantQos` does not carry an
+ * explicit `int2dds.transport.UDPv4.multicast_ttl` property entry, so explicit
+ * QoS settings always win.
+ *
+ * # Safety
+ * Call before the first `DomainParticipant` is created. Mutating process
+ * environment from threads other than the main one is undefined behavior on
+ * some platforms.
+ */
+Int2DdsRet int2dds_env_set_multicast_ttl(uint8_t ttl);
+
+/**
+ * Reads the current `INT2DDS_MULTICAST_TTL` env override.
+ *
+ * On success writes the parsed TTL into `*ttl_out` and sets `*has_value_out`
+ * to `true`. When the variable is unset, empty, or invalid (non-`u8`),
+ * `*has_value_out` is set to `false` and `*ttl_out` is left untouched.
+ *
+ * # Safety
+ * `ttl_out` and `has_value_out` must be valid, writable pointers.
+ */
+Int2DdsRet int2dds_env_get_multicast_ttl(uint8_t *ttl_out, bool *has_value_out);
+
+/**
  * Create a DomainParticipant
  *
  * # Safety

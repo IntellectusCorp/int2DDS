@@ -658,6 +658,11 @@ ffi.cdef("""
     );
     Int2DdsRet int2dds_participant_qos_destroy(Int2DdsParticipantQos *qos);
 
+    /* Environment-variable configuration helpers (process-wide, take effect
+       at next DomainParticipant creation). */
+    Int2DdsRet int2dds_env_set_multicast_ttl(uint8_t ttl);
+    Int2DdsRet int2dds_env_get_multicast_ttl(uint8_t *ttl_out, bool *has_value_out);
+
     /* WaitSet */
     Int2DdsRet int2dds_waitset_new(Int2DdsWaitSet **waitset_out);
     Int2DdsRet int2dds_waitset_wait(

@@ -43,15 +43,15 @@ impl TransportConfig {
                 Err(e) => {
                     log::warn!(
                         "[TransportConfig] invalid {} property value '{}': {}. \
-                         Falling back to default {}.",
+                         Falling back to env/default.",
                         PROP_MULTICAST_TTL,
                         v,
-                        e,
-                        DEFAULT_MULTICAST_TTL
+                        e
                     );
                     None
                 }
             })
+            .or_else(crate::common::env::get_multicast_ttl_override)
             .unwrap_or(DEFAULT_MULTICAST_TTL);
 
         Self { multicast_ttl }
@@ -62,8 +62,13 @@ impl TransportConfig {
 mod tests {
     use super::*;
 
+    fn clear_env() {
+        unsafe { std::env::remove_var("INT2DDS_MULTICAST_TTL") };
+    }
+
     #[test]
     fn default_when_property_missing() {
+        clear_env();
         assert_eq!(TransportConfig::default().multicast_ttl, DEFAULT_MULTICAST_TTL);
         assert_eq!(
             TransportConfig::from_property(&PropertyQosPolicy::default()).multicast_ttl,
@@ -73,6 +78,7 @@ mod tests {
 
     #[test]
     fn parses_valid_u8_values_including_boundaries() {
+        clear_env();
         for raw in ["0", "1", "32", "255"] {
             let mut p = PropertyQosPolicy::default();
             p.add_property(PROP_MULTICAST_TTL, raw, false);
@@ -86,6 +92,7 @@ mod tests {
 
     #[test]
     fn invalid_values_fall_back_to_default() {
+        clear_env();
         for bad in ["abc", "256", "-1", ""] {
             let mut p = PropertyQosPolicy::default();
             p.add_property(PROP_MULTICAST_TTL, bad, false);
