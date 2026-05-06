@@ -15,6 +15,7 @@ This document describes the environment variables available in int2dds. All envi
 | `INT2DDS_NETWORK_IP`                 | `--int2dds-network-ip`                 | Network IP address                         | auto                    |
 | `INT2DDS_USE_LOOPBACK_INTERFACE`     | `--int2dds-use-loopback-interface`     | Enable loopback interface                  | false                   |
 | `INT2DDS_UDP_SOCKET_BUFFER`          | `--int2dds-udp-socket-buffer`          | UDP socket buffer size (bytes)             | OS default              |
+| `INT2DDS_MULTICAST_TTL`              | `--int2dds-multicast-ttl`              | IPv4 multicast TTL fallback (0-255)        | 1                       |
 | `INT2DDS_EXTENDED_DISCOVERY`         | `--int2dds-extended-discovery`         | Enable extended discovery                  | false                   |
 | `INT2DDS_TCP_CONNECT_TIMEOUT`        | `--int2dds-tcp-connect-timeout`        | TCP connection timeout (ms)                | 5000                    |
 | `INT2DDS_TCP_WRITE_TIMEOUT`          | `--int2dds-tcp-write-timeout`          | TCP write timeout (ms)                     | 10000                   |
@@ -274,6 +275,57 @@ export INT2DDS_UDP_SOCKET_BUFFER=1048576
 cargo run --example hello_world -- --int2dds-udp-socket-buffer 1048576
 ```
 
+### INT2DDS_MULTICAST_TTL
+
+Sets the IPv4 multicast TTL (Time-To-Live) used when no explicit
+`int2dds.transport.UDPv4.multicast_ttl` `PropertyQosPolicy` entry is present.
+Explicit code or JSON-profile QoS settings always win over this fallback.
+
+| Value   | Description                                          |
+| ------- | ---------------------------------------------------- |
+| `0`     | Restricted to the local host (no network forwarding) |
+| `1`     | Same subnet only (default, RFC 1112 link-local)      |
+| `2-255` | Cross-router multicast hop limit                     |
+
+#### Resolution order
+
+1. `property.set_multicast_ttl(N)` (code) / JSON profile entry
+2. `INT2DDS_MULTICAST_TTL` env var (or `--int2dds-multicast-ttl` CLI flag)
+3. Default `1`
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_MULTICAST_TTL = "32"
+
+# CLI argument
+cargo run --example hello_world -- --int2dds-multicast-ttl 32
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_MULTICAST_TTL=32
+
+# CLI argument
+cargo run --example hello_world -- --int2dds-multicast-ttl 32
+```
+
+#### Language bindings
+
+```python
+from int2dds import env
+env.set_multicast_ttl(32)
+```
+
+```csharp
+Int2Dds.Core.Env.SetMulticastTtl(32);
+```
+
+The Rust core consumes the env var inside `TransportConfig::from_property` at
+participant creation, so the value must be set **before** the first
+`DomainParticipant` is created.
+
 ### INT2DDS_EXTENDED_DISCOVERY
 
 Controls the ability to send DDS discovery messages via extended discovery.
@@ -523,5 +575,6 @@ cargo run --example hello_world -- --int2dds-function-timing-log-path /var/log/f
 - [dds/src/common/env.rs](../../dds/src/common/env.rs) - Environment variable parsing and application
 - [dds/src/common/log.rs](../../dds/src/common/log.rs) - Logging configuration
 - [dds/src/rtps/transport/mod.rs](../../dds/src/rtps/transport/mod.rs) - Transport type definition
+- [dds/src/rtps/transport/transport_config.rs](../../dds/src/rtps/transport/transport_config.rs) - Multicast TTL resolution
 - [dds/src/rtps/transport/udp/udp_sender.rs](../../dds/src/rtps/transport/udp/udp_sender.rs) - UDP transport settings
 - [dds/src/rtps/transport/tcp/tcp_sender.rs](../../dds/src/rtps/transport/tcp/tcp_sender.rs) - TCP sender and connection management

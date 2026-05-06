@@ -61,6 +61,7 @@ try:
         DdsPreconditionNotMet,
         DdsTimeout,
     )
+    from int2dds import env
 except ImportError as e:
     import warnings
     warnings.warn(f"int2dds core modules not available: {e}")
@@ -113,4 +114,6 @@ __all__ = [
     "DdsNoData",
     "DdsInvalidArgument",
     "DdsPreconditionNotMet",
+    # Environment configuration
+    "env",
 ]
