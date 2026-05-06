@@ -95,3 +95,29 @@ fn unmatch_not_alive() {
     s.publisher.delete_datawriter(writer).unwrap();
     wait_for_liveliness_changed_state(&reader, 0, 0, StdDuration::from_secs(1)).unwrap();
 }
+
+#[test]
+fn sibling_kept_alive() {
+    // MBP: write() on any sibling on the writer participant renews the whole
+    // participant. Only A writes — B must stay alive across multiple lease
+    // windows.
+    let s = Scenario::inter();
+    let (wqos, rqos) = qos_pair();
+    let writer_a = s.create_writer(wqos.clone());
+    let _writer_b = s.create_writer(wqos);
+    let reader = s.create_reader(rqos);
+
+    writer_a.write(&KeyedDataType::default(), InstanceHandle::NIL).unwrap();
+    wait_for_liveliness_changed_state(&reader, 2, 0, StdDuration::from_secs(5)).unwrap();
+
+    for _ in 0..2 {
+        std::thread::sleep(StdDuration::from_millis(500));
+        writer_a.write(&KeyedDataType::default(), InstanceHandle::NIL).unwrap();
+        let status = reader.get_liveliness_changed_status().unwrap();
+        assert_eq!(
+            (status.alive_count(), status.not_alive_count()),
+            (2, 0),
+            "sibling B must never flip not_alive while A asserts"
+        );
+    }
+}

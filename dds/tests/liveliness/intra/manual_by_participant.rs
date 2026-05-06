@@ -92,6 +92,28 @@ fn unmatch_alive() {
 }
 
 #[test]
+fn sibling_kept_alive() {
+    // MBP semantics: write() on any writer of the participant renews lease
+    // for ALL MBP writers of that participant. Two writers, only A writes —
+    // both must remain alive.
+    let s = Scenario::intra();
+    let (wqos, rqos) = qos_pair();
+    let writer_a = s.create_writer(wqos.clone());
+    let _writer_b = s.create_writer(wqos);
+    let reader = s.create_reader(rqos);
+
+    writer_a.write(&KeyedDataType::default(), InstanceHandle::NIL).unwrap();
+    wait_for_liveliness_changed_state(&reader, 2, 0, StdDuration::from_secs(2)).unwrap();
+
+    for _ in 0..2 {
+        std::thread::sleep(StdDuration::from_millis(500));
+        writer_a.write(&KeyedDataType::default(), InstanceHandle::NIL).unwrap();
+    }
+    let status = reader.get_liveliness_changed_status().unwrap();
+    assert_eq!((status.alive_count(), status.not_alive_count()), (2, 0));
+}
+
+#[test]
 fn unmatch_not_alive() {
     let s = Scenario::intra();
     let (wqos, rqos) = qos_pair();

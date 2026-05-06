@@ -31,6 +31,7 @@ use int2dds::dcps::{
     subscription::{
         data_reader::DataReader,
         qos::{DataReaderQos, SubscriberQos},
+        sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind},
         subscriber::Subscriber,
     },
     topic::{qos::TopicQos, topic::Topic},
@@ -39,6 +40,7 @@ use int2dds::dcps::{
 use crate::common::*;
 
 pub struct Scenario {
+    pub writer_participant: DomainParticipant,
     pub publisher: Publisher,
     pub subscriber: Subscriber,
     writer_topic: Topic,
@@ -57,7 +59,13 @@ impl Scenario {
         let subscriber = participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        Self { publisher, subscriber, writer_topic: topic.clone(), reader_topic: topic }
+        Self {
+            writer_participant: participant,
+            publisher,
+            subscriber,
+            writer_topic: topic.clone(),
+            reader_topic: topic,
+        }
     }
 
     // Two participants on the same domain — exercises the SEDP dispose path.
@@ -88,7 +96,7 @@ impl Scenario {
         let subscriber = reader_participant
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
-        Self { publisher, subscriber, writer_topic, reader_topic }
+        Self { writer_participant, publisher, subscriber, writer_topic, reader_topic }
     }
 
     pub fn create_writer(&self, qos: DataWriterQos) -> DataWriter<KeyedDataType> {
@@ -131,6 +139,57 @@ fn make_topic(participant: &DomainParticipant) -> Topic {
             StatusMask::default(),
         )
         .unwrap()
+}
+
+// Poll until the reader's matched-publication count hits the target.
+pub fn wait_for_subscription_matched_count(
+    reader: &DataReader<KeyedDataType>,
+    target: i32,
+    deadline: std::time::Duration,
+) -> Result<(), String> {
+    let start = Instant::now();
+    loop {
+        let status = reader.get_subscription_matched_status().unwrap();
+        if status.current_count() == target {
+            return Ok(());
+        }
+        if start.elapsed() >= deadline {
+            return Err(format!(
+                "subscription_matched timed out: want {}, last seen {}",
+                target,
+                status.current_count()
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+// Poll take() until a sample with NOT_ALIVE_NO_WRITERS instance_state surfaces.
+pub fn wait_for_no_writers_sample(
+    reader: &DataReader<KeyedDataType>,
+    deadline: std::time::Duration,
+) -> Result<(), String> {
+    let start = Instant::now();
+    loop {
+        let samples = reader.take(
+            i32::MAX,
+            &[SampleStateKind::ANY_SAMPLE_STATE],
+            &[ViewStateKind::ANY_VIEW_STATE],
+            &[InstanceStateKind::NOT_ALIVE_NO_WRITERS_INSTANCE_STATE],
+        );
+        if let Ok(samples) = samples {
+            if samples.iter().any(|s| {
+                s.sample_info().instance_state
+                    == InstanceStateKind::NOT_ALIVE_NO_WRITERS_INSTANCE_STATE
+            }) {
+                return Ok(());
+            }
+        }
+        if start.elapsed() >= deadline {
+            return Err("NOT_ALIVE_NO_WRITERS sample never surfaced".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
 }
 
 // Poll until the reader's liveliness counts hit the target.
