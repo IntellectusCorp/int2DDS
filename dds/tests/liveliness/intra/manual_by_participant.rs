@@ -129,3 +129,22 @@ fn unmatch_not_alive() {
     s.publisher.delete_datawriter(writer).unwrap();
     wait_for_liveliness_changed_state(&reader, 0, 0, StdDuration::from_secs(2)).unwrap();
 }
+
+#[test]
+fn assert_keeps_alive() {
+    // participant.assert_liveliness() keeps MBP writers alive without write().
+    let s = Scenario::intra();
+    let (wqos, rqos) = qos_pair();
+    let _writer = s.create_writer(wqos);
+    let reader = s.create_reader(rqos);
+
+    s.writer_participant.assert_liveliness().unwrap();
+    wait_for_liveliness_changed_state(&reader, 1, 0, StdDuration::from_secs(2)).unwrap();
+
+    for _ in 0..3 {
+        std::thread::sleep(StdDuration::from_millis(500));
+        s.writer_participant.assert_liveliness().unwrap();
+    }
+    let status = reader.get_liveliness_changed_status().unwrap();
+    assert_eq!((status.alive_count(), status.not_alive_count()), (1, 0));
+}
