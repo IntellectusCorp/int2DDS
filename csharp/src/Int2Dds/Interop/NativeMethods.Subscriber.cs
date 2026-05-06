@@ -12,8 +12,8 @@ namespace Int2Dds.Interop
         internal static extern int int2dds_create_subscriber_with_qos(IntPtr participant, IntPtr qos, out IntPtr subscriber_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static extern int int2dds_create_subscriber_with_profile(IntPtr participant,
-            [MarshalAs(UnmanagedType.LPUTF8Str)] string qos_path, out IntPtr subscriber_out);
+        internal static unsafe extern int int2dds_create_subscriber_with_profile(IntPtr participant,
+            byte* qos_path, out IntPtr subscriber_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_subscriber_set_qos(IntPtr subscriber, IntPtr qos);
@@ -34,12 +34,12 @@ namespace Int2Dds.Interop
         internal static unsafe extern int int2dds_create_datareader_with_listener(IntPtr subscriber, IntPtr topic, IntPtr qos, NativeDataReaderListener* listener, uint mask, out IntPtr reader_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
-        internal static extern int int2dds_create_datareader_with_profile(IntPtr subscriber, IntPtr topic,
-            [MarshalAs(UnmanagedType.LPUTF8Str)] string qos_path, out IntPtr reader_out);
+        internal static unsafe extern int int2dds_create_datareader_with_profile(IntPtr subscriber, IntPtr topic,
+            byte* qos_path, out IntPtr reader_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static unsafe extern int int2dds_create_datareader_with_profile_and_listener(IntPtr subscriber, IntPtr topic,
-            [MarshalAs(UnmanagedType.LPUTF8Str)] string qos_path, NativeDataReaderListener* listener, uint mask, out IntPtr reader_out);
+            byte* qos_path, NativeDataReaderListener* listener, uint mask, out IntPtr reader_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static unsafe extern int int2dds_datareader_set_listener(IntPtr reader, NativeDataReaderListener* listener, uint mask);
