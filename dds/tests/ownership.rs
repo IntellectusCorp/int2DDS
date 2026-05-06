@@ -194,8 +194,8 @@ fn test_ownership_revoked_when_deadline_missed() {
 
 #[test]
 fn test_ownership_revoked_when_liveliness_lost() {
-    int2dds::common::env::set_log_type(int2dds::common::log::LogType::File);
-    int2dds::common::env::set_file_log_level(int2dds::common::log::LogLevel::Debug);
+    // int2dds::common::env::set_log_type(int2dds::common::log::LogType::File);
+    // int2dds::common::env::set_file_log_level(int2dds::common::log::LogLevel::Debug);
 
     let domain_id = next_domain_id();
     let factory = DomainParticipantFactory::get_instance();
