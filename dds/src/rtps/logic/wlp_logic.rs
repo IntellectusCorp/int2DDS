@@ -88,6 +88,33 @@ impl WriterInfo {
     }
 }
 
+// Smallest lease among writers of the given kind, or INFINITE if none match.
+pub(crate) fn min_lease_in_iter(
+    iter: impl Iterator<Item = WriterInfo>,
+    kind: LivelinessQosPolicyKind,
+) -> RtpsDuration {
+    iter.filter(|i| i.qos().kind == kind)
+        .map(|i| RtpsDuration::from(i.qos().lease_duration))
+        .fold(RtpsDuration::INFINITE, std::cmp::min)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum LeaseRefreshAction {
+    Stop,
+    Update(RtpsDuration),
+    NoChange,
+}
+
+pub(crate) fn decide_refresh_action(prev: RtpsDuration, new: RtpsDuration) -> LeaseRefreshAction {
+    if new.is_infinite() {
+        LeaseRefreshAction::Stop
+    } else if prev != new {
+        LeaseRefreshAction::Update(new)
+    } else {
+        LeaseRefreshAction::NoChange
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct WlpLogic {
     participant: Weak<Participant>,
@@ -97,7 +124,10 @@ pub(crate) struct WlpLogic {
     asserting_writers: Arc<DashMap<Guid, WriterInfo>>,
     // Writers whose liveliness this participant monitors and fans out to readers (matched writers).
     monitored_writers: Arc<DashMap<GuidPrefix, HashMap<Guid, WriterInfo>>>,
-    min_lease_duration: Arc<Mutex<RtpsDuration>>,
+    // Smallest lease among local Automatic writers.
+    min_automatic_lease: Arc<Mutex<RtpsDuration>>,
+    // Smallest lease among local ManualByParticipant writers.
+    min_manual_lease: Arc<Mutex<RtpsDuration>>,
     liveliness_monitor: Arc<Mutex<Option<LivelinessMonitor>>>,
 }
 
@@ -111,7 +141,8 @@ impl WlpLogic {
             timer_handler,
             asserting_writers: Arc::new(DashMap::new()),
             monitored_writers: Arc::new(DashMap::new()),
-            min_lease_duration: Arc::new(Mutex::new(RtpsDuration::ZERO)),
+            min_automatic_lease: Arc::new(Mutex::new(RtpsDuration::ZERO)),
+            min_manual_lease: Arc::new(Mutex::new(RtpsDuration::ZERO)),
             liveliness_monitor: Arc::new(Mutex::new(None)),
         }
     }
@@ -153,22 +184,22 @@ impl WlpLogic {
 
         let participant = self.get_upgraded_participant()?;
 
-        if liveliness.kind == LivelinessQosPolicyKind::Automatic {
-            match self.min_lease_duration.lock() {
-                Ok(mut min_lease_duration) => {
-                    let prev = *min_lease_duration;
-                    let new = liveliness.lease_duration;
+        // ManualByTopic does not send periodic messages.
+        if let Some(lease_field) = self.lease_field_for(liveliness.kind) {
+            let kind = liveliness.kind;
+            match lease_field.lock() {
+                Ok(mut min) => {
+                    let prev = *min;
+                    let new: RtpsDuration = liveliness.lease_duration.into();
                     if (prev.is_zero() || prev.is_infinite())
                         && !(new.is_zero() || new.is_infinite())
                     {
-                        *min_lease_duration = new.into();
-
-                        self.start_periodic_liveliness(*min_lease_duration)?;
+                        *min = new;
+                        self.start_periodic_liveliness(kind, *min)?;
                     } else {
-                        *min_lease_duration = std::cmp::min(*min_lease_duration, new.into());
-
-                        if prev != *min_lease_duration {
-                            self.update_automatic_lease_duration(*min_lease_duration)?;
+                        *min = std::cmp::min(*min, new);
+                        if prev != *min {
+                            self.update_periodic_lease_duration(kind, *min)?;
                         }
                     }
                 }
@@ -212,7 +243,7 @@ impl WlpLogic {
                     let monitored_writers = self.monitored_writers.clone();
 
                     let callback = Arc::new(move |guid: Guid| {
-                        Self::update_liveliness(
+                        Self::on_lease_expiration(
                             participant.clone(),
                             guid,
                             asserting_writers.clone(),
@@ -243,20 +274,17 @@ impl WlpLogic {
     }
 
     pub(crate) fn deregister_asserting_writer(&self, writer_guid: Guid) -> RtpsResult<()> {
-        self.asserting_writers.remove(&writer_guid);
+        // Need this writer's kind to recompute the min lease afterwards.
+        let removed_kind =
+            self.asserting_writers.remove(&writer_guid).map(|(_, info)| info.qos().kind);
 
         match self.liveliness_monitor.lock() {
             Ok(liveliness_monitor) => match liveliness_monitor.as_ref() {
                 Some(liveliness_monitor) => {
                     liveliness_monitor.cancel_writer(writer_guid);
 
-                    let has_automatic = self
-                        .asserting_writers
-                        .iter()
-                        .any(|entry| entry.value().qos.kind == LivelinessQosPolicyKind::Automatic);
-
-                    if !has_automatic {
-                        self.stop_periodic_liveliness()?;
+                    if let Some(kind) = removed_kind {
+                        self.refresh_lease_duration_after_deregister(kind)?;
                     }
 
                     Ok(())
@@ -305,7 +333,7 @@ impl WlpLogic {
                     let monitored_writers = self.monitored_writers.clone();
 
                     let callback = Arc::new(move |guid: Guid| {
-                        Self::update_liveliness(
+                        Self::on_lease_expiration(
                             participant.clone(),
                             guid,
                             asserting_writers.clone(),
@@ -398,11 +426,27 @@ impl WlpLogic {
         participant_message_data: Arc<ParticipantMessageData>,
     ) -> RtpsResult<()> {
         let logic_start_time = Instant::now();
-
         debug!("send_participant_message_data called, duration: {:?}", duration);
-        if let Err(e) = self.send_liveliness_once(&participant_message_data) {
-            error!("Failed to send liveliness: {}", e);
+
+        // Skip ManualByParticipant when no local writer is alive
+        let should_send = if participant_message_data.is_manual_liveliness() {
+            self.any_asserting_alive(LivelinessQosPolicyKind::ManualByParticipant)
+        } else {
+            true
+        };
+
+        debug!(
+            "should_send: {}, is_manual_liveliness: {}",
+            should_send,
+            participant_message_data.is_manual_liveliness()
+        );
+
+        if should_send {
+            if let Err(e) = self.send_liveliness_once(&participant_message_data) {
+                error!("Failed to send liveliness: {}", e);
+            }
         }
+
         let start_time = Instant::now();
         if duration > StdDuration::ZERO && duration < StdDuration::MAX {
             self.timer_sleep_and_send_message(
@@ -1015,14 +1059,60 @@ impl WlpLogic {
 
 // Liveliness assertion and update
 impl WlpLogic {
-    // Automatic
-    pub(crate) fn start_periodic_liveliness(&self, lease_duration: RtpsDuration) -> RtpsResult<()> {
+    // Returns None for ManualByTopic, which uses a different liveliness path.
+    fn lease_field_for(&self, kind: LivelinessQosPolicyKind) -> Option<&Arc<Mutex<RtpsDuration>>> {
+        match kind {
+            LivelinessQosPolicyKind::Automatic => Some(&self.min_automatic_lease),
+            LivelinessQosPolicyKind::ManualByParticipant => Some(&self.min_manual_lease),
+            LivelinessQosPolicyKind::ManualByTopic => None,
+        }
+    }
+
+    // True if any local writer of this kind is currently alive.
+    fn any_asserting_alive(&self, kind: LivelinessQosPolicyKind) -> bool {
+        self.asserting_writers.iter().any(|e| {
+            e.value().qos.kind == kind && e.value().alive_state() == WriterAliveState::Alive
+        })
+    }
+
+    // Smallest lease among local writers of this kind.
+    fn compute_min_lease(&self, kind: LivelinessQosPolicyKind) -> RtpsDuration {
+        min_lease_in_iter(self.asserting_writers.iter().map(|e| e.value().clone()), kind)
+    }
+
+    // Recompute min lease after a writer is removed and stop or update the loop.
+    fn refresh_lease_duration_after_deregister(
+        &self,
+        kind: LivelinessQosPolicyKind,
+    ) -> RtpsResult<()> {
+        let Some(lease_field) = self.lease_field_for(kind) else { return Ok(()) };
+
+        let new_min = self.compute_min_lease(kind);
+
+        let mut min = lease_field
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+        let prev = *min;
+        *min = new_min;
+        drop(min);
+
+        match decide_refresh_action(prev, new_min) {
+            LeaseRefreshAction::Stop => self.stop_periodic_liveliness(kind)?,
+            LeaseRefreshAction::Update(d) => self.update_periodic_lease_duration(kind, d)?,
+            LeaseRefreshAction::NoChange => {}
+        }
+        Ok(())
+    }
+
+    // Start the periodic send loop for the given kind.
+    pub(crate) fn start_periodic_liveliness(
+        &self,
+        kind: LivelinessQosPolicyKind,
+        lease_duration: RtpsDuration,
+    ) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
 
-        let data = ParticipantMessageData::new(
-            participant.guid().prefix(),
-            LivelinessQosPolicyKind::Automatic,
-        );
+        let data = ParticipantMessageData::new(participant.guid().prefix(), kind);
 
         if !lease_duration.is_infinite() {
             let handler = SendingHandler::get_instance(
@@ -1040,7 +1130,7 @@ impl WlpLogic {
         Ok(())
     }
 
-    pub(crate) fn stop_periodic_liveliness(&self) -> RtpsResult<()> {
+    pub(crate) fn stop_periodic_liveliness(&self, kind: LivelinessQosPolicyKind) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
         let handler = SendingHandler::get_instance(
             participant.clone(),
@@ -1048,21 +1138,19 @@ impl WlpLogic {
             None,
         );
 
-        handler.cancel_p2p_messages();
+        handler.cancel_p2p_messages_by_kind(kind.into());
 
         Ok(())
     }
 
-    pub(crate) fn update_automatic_lease_duration(
+    pub(crate) fn update_periodic_lease_duration(
         &self,
+        kind: LivelinessQosPolicyKind,
         lease_duration: RtpsDuration,
     ) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
 
-        let data = ParticipantMessageData::new(
-            participant.guid().prefix(),
-            LivelinessQosPolicyKind::Automatic,
-        );
+        let data = ParticipantMessageData::new(participant.guid().prefix(), kind);
 
         let handler = SendingHandler::get_instance(
             participant.clone(),
@@ -1070,7 +1158,8 @@ impl WlpLogic {
             None,
         );
 
-        handler.cancel_p2p_messages();
+        // Only this kind's entry is removed; the other kind keeps running.
+        handler.cancel_p2p_messages_by_kind(kind.into());
 
         if !lease_duration.is_infinite() {
             let send_period = lease_duration.to_std_duration() * 2 / 3;
@@ -1102,27 +1191,18 @@ impl WlpLogic {
         self.send_liveliness_heartbeat(true, true, Some(writer_guid), None)
     }
 
-    fn update_liveliness(
+    fn on_lease_expiration(
         participant: Arc<Participant>,
         guid: Guid,
         asserting_writers: Arc<DashMap<Guid, WriterInfo>>,
         monitored_writers: Arc<DashMap<GuidPrefix, HashMap<Guid, WriterInfo>>>,
     ) -> bool {
-        log::info!("[WLP] update_liveliness called: guid={:?}", guid);
-
-        // Local
-        if participant.find_writer_from_entity_id(guid.entity_id()).is_some() {
-            Self::mark_asserting_writer_lost(participant, guid, asserting_writers);
-            return false;
-        }
-
-        // Remote
-        log::info!(
-            "[WLP] update_liveliness: No local writer found for guid={:?}, treating as REMOTE",
-            guid
-        );
+        // Each handler is a no-op when guid is absent from its own map.
+        Self::mark_asserting_writer_lost(participant.clone(), guid, asserting_writers.clone());
         Self::mark_monitored_writer_lost(participant, guid, monitored_writers);
-        true
+
+        // Drop tracker only for non-asserting writers.
+        !asserting_writers.contains_key(&guid)
     }
 
     fn mark_asserting_writer_lost(
@@ -1130,28 +1210,16 @@ impl WlpLogic {
         guid: Guid,
         asserting_writers: Arc<DashMap<Guid, WriterInfo>>,
     ) {
-        if let Some(writer) = participant.find_writer_from_entity_id(guid.entity_id()) {
-            log::info!("[WLP] mark_asserting_writer_lost: Found LOCAL writer for guid={:?}", guid);
-            writer.update_status(StatusKind::LIVELINESS_LOST, None);
-            log::warn!(
-                "[WLP] mark_asserting_writer_lost: Returning early for LOCAL writer guid={:?} - readers will NOT be notified!",
-                guid
-            );
-        }
+        if let Some(mut writer_info) = asserting_writers.get_mut(&guid) {
+            writer_info.set_not_alive();
+            debug!("[WLP] Writer {:?} set to NOT_ALIVE (participant kept for recovery)", guid);
 
-        if let Ok(readers) = participant.find_readers_matched_with_local_writer(&guid) {
-            log::info!(
-                "[WLP] mark_asserting_writer_lost: Found {} readers matched with writer {:?}",
-                readers.len(),
-                guid
-            );
-            for reader in readers {
-                notify_reader_liveliness_changed(&reader, &guid, LivelinessTransition::Lost);
-            }
-
-            if let Some(mut writer_info) = asserting_writers.get_mut(&guid) {
-                writer_info.set_not_alive();
-                debug!("[WLP] Writer {:?} set to NOT_ALIVE (participant kept for recovery)", guid);
+            if let Some(writer) = participant.find_writer_from_entity_id(guid.entity_id()) {
+                log::info!(
+                    "[WLP] mark_asserting_writer_lost: Found LOCAL writer for guid={:?}",
+                    guid
+                );
+                writer.update_status(StatusKind::LIVELINESS_LOST, None);
             }
         }
     }
@@ -1616,7 +1684,9 @@ impl UnicastMessageProcessor for WlpLogic {
 
 #[cfg(test)]
 mod tests {
-    use super::LivelinessTransition;
+    use super::*;
+    use crate::dcps::core::time::Duration as DdsDuration;
+    use crate::dcps::infrastructure::qos_policy::{LivelinessQosPolicy, LivelinessQosPolicyKind};
 
     // Transition matrix for LivelinessChangedStatus deltas.
     #[test]
@@ -1644,5 +1714,57 @@ mod tests {
     #[test]
     fn unmatch_not_alive_decrements_not_alive_only() {
         assert_eq!(LivelinessTransition::UnmatchNotAlive.deltas(), (0, -1));
+    }
+
+    fn writer_info(kind: LivelinessQosPolicyKind, secs: i32) -> WriterInfo {
+        WriterInfo::new(LivelinessQosPolicy {
+            kind,
+            lease_duration: DdsDuration::from_seconds(secs),
+        })
+    }
+
+    #[test]
+    fn min_lease_empty_iter_returns_infinite() {
+        let infos: Vec<WriterInfo> = vec![];
+        assert_eq!(
+            min_lease_in_iter(infos.into_iter(), LivelinessQosPolicyKind::Automatic),
+            RtpsDuration::INFINITE
+        );
+    }
+
+    #[test]
+    fn min_lease_picks_smallest_of_same_kind() {
+        let infos = vec![
+            writer_info(LivelinessQosPolicyKind::Automatic, 5),
+            writer_info(LivelinessQosPolicyKind::Automatic, 2),
+            writer_info(LivelinessQosPolicyKind::Automatic, 7),
+        ];
+        assert_eq!(
+            min_lease_in_iter(infos.into_iter(), LivelinessQosPolicyKind::Automatic),
+            RtpsDuration::new(2, 0)
+        );
+    }
+
+    #[test]
+    fn min_lease_filters_by_kind() {
+        // Automatic 1s is shorter, but we ask for MBP — must skip the Automatic entry.
+        let infos = vec![
+            writer_info(LivelinessQosPolicyKind::Automatic, 1),
+            writer_info(LivelinessQosPolicyKind::ManualByParticipant, 5),
+            writer_info(LivelinessQosPolicyKind::ManualByParticipant, 3),
+        ];
+        assert_eq!(
+            min_lease_in_iter(infos.into_iter(), LivelinessQosPolicyKind::ManualByParticipant),
+            RtpsDuration::new(3, 0)
+        );
+    }
+
+    #[test]
+    fn min_lease_ignores_manual_by_topic() {
+        let infos = vec![writer_info(LivelinessQosPolicyKind::ManualByTopic, 1)];
+        assert_eq!(
+            min_lease_in_iter(infos.into_iter(), LivelinessQosPolicyKind::Automatic),
+            RtpsDuration::INFINITE
+        );
     }
 }
