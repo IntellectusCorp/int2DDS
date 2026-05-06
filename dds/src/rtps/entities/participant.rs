@@ -248,12 +248,15 @@ impl Participant {
                         .add_default_unicast_locator(Locator::from_tcp_v4(ip, user_port));
                 }
                 TransportType::SHM => {
-                    // metatraffic uses UDP, default uses SHM
+                    // metatraffic uses UDP. For default user-data, advertise both
                     local_participant_proxy_data.add_metatraffic_unicast_locator(
                         Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port),
                     );
                     local_participant_proxy_data
                         .add_default_unicast_locator(Locator::from_shm(&ip, user_port));
+                    local_participant_proxy_data.add_default_unicast_locator(
+                        Locator::from_ip_v4_addr_and_port(&ip, user_port),
+                    );
                 }
             }
         }

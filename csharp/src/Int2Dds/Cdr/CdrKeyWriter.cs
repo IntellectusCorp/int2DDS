@@ -158,7 +158,7 @@ namespace Int2Dds.Cdr
             WriteU32(cdrLen);
             EnsureCapacity(byteCount + 1);
             if (byteCount > 0)
-                Encoding.UTF8.GetBytes(s.AsSpan(), _buffer.AsSpan(_pos));
+                Encoding.UTF8.GetBytes(s, 0, s.Length, _buffer, _pos);
             _buffer[_pos + byteCount] = 0;
             _pos += byteCount + 1;
         }

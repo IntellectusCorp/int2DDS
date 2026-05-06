@@ -163,10 +163,10 @@ namespace Int2Dds.Tests
         }
 
         [Fact]
-        public void DataRepresentation_DefaultIsXcdr2()
+        public void DataRepresentation_DefaultIsXcdr1()
         {
             var dr = new DataRepresentation();
-            Assert.Equal(DataRepresentationKind.Xcdr2, dr.Kind);
+            Assert.Equal(DataRepresentationKind.Xcdr1, dr.Kind);
         }
     }
 }
