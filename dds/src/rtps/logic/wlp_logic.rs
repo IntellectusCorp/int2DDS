@@ -284,7 +284,7 @@ impl WlpLogic {
                     liveliness_monitor.cancel_writer(writer_guid);
 
                     if let Some(kind) = removed_kind {
-                        self.refresh_periodic_after_deregister(kind)?;
+                        self.refresh_lease_duration_after_deregister(kind)?;
                     }
 
                     Ok(())
@@ -1081,7 +1081,10 @@ impl WlpLogic {
     }
 
     // Recompute min lease after a writer is removed and stop or update the loop.
-    fn refresh_periodic_after_deregister(&self, kind: LivelinessQosPolicyKind) -> RtpsResult<()> {
+    fn refresh_lease_duration_after_deregister(
+        &self,
+        kind: LivelinessQosPolicyKind,
+    ) -> RtpsResult<()> {
         let Some(lease_field) = self.lease_field_for(kind) else { return Ok(()) };
 
         let new_min = self.compute_min_lease(kind);
