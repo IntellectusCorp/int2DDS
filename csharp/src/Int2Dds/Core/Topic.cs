@@ -94,9 +94,11 @@ namespace Int2Dds.Core
             {
                 var topicNameBytes = Encoding.UTF8.GetBytes(topicName + '\0');
                 var typeNameBytes = Encoding.UTF8.GetBytes(_typeName + '\0');
+                var qosPathBytes = Encoding.UTF8.GetBytes(qosPath + '\0');
 
                 fixed (byte* pTopicName = topicNameBytes)
                 fixed (byte* pTypeName = typeNameBytes)
+                fixed (byte* pQos = qosPathBytes)
                 {
                     ReturnCodeHelper.CheckReturn(
                         NativeMethods.int2dds_create_topic_with_profile(
@@ -105,7 +107,7 @@ namespace Int2Dds.Core
                             pTypeName,
                             (int)extensibility,
                             hasKey,
-                            qosPath,
+                            pQos,
                             out _handle));
                 }
             }

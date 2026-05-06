@@ -79,7 +79,10 @@ namespace Int2Dds.Core
         /// <summary>
         /// Reconstructs the source timestamp as a DateTimeOffset.
         /// </summary>
+        private static readonly DateTimeOffset UnixEpoch =
+            new DateTimeOffset(1970, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
         public DateTimeOffset SourceTimestamp =>
-            DateTimeOffset.UnixEpoch.AddSeconds(SourceTimestampSec).AddTicks(SourceTimestampNanosec / 100);
+            UnixEpoch.AddSeconds(SourceTimestampSec).AddTicks(SourceTimestampNanosec / 100);
     }
 }
