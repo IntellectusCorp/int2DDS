@@ -28,7 +28,7 @@ use crate::{
     rtps::{
         common::{
             entity_id::EntityId,
-            guid::Guid,
+            guid::{Guid, GuidPrefix},
             locator::Locator,
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
             time::RtpsDuration,
@@ -447,5 +447,56 @@ impl Reader for StatefulReader {
         } else {
             Err(RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, ""))
         }
+    }
+
+    fn remove_matched_writer(&self, writer_guid: Guid) -> RtpsResult<bool> {
+        let mut proxies = self
+            .matched_writers
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+        // Find the index of the writer proxy with the given writer_guid
+        let Some(idx) = proxies.iter().position(|proxy| proxy.remote_writer_guid() == writer_guid)
+        else {
+            debug!("Writer proxy with guid {:?} not found in matched writers", writer_guid);
+            return Ok(false);
+        };
+
+        // Remove the writer proxy at the found index
+        proxies.swap_remove(idx);
+        drop(proxies);
+
+        // Update subscription matched status
+        self.update_subscription_matched_status(-1, InstanceHandle::from_guid(&writer_guid));
+
+        debug!("Removed writer proxy with guid {:?} from matched writers", writer_guid);
+        Ok(true)
+    }
+
+    fn remove_all_matched_writers_with_prefix(&self, prefix: GuidPrefix) -> RtpsResult<usize> {
+        let mut writer_proxies = self
+            .matched_writers
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+        debug!(
+            "Before unmatching with writer, this reader had {:?} matched writer",
+            writer_proxies.len()
+        );
+        for writer_proxy in writer_proxies.iter() {
+            if writer_proxy.remote_writer_guid().prefix() == prefix {
+                self.update_subscription_matched_status(
+                    -1,
+                    InstanceHandle::from_guid(&writer_proxy.remote_writer_guid()),
+                );
+            }
+        }
+        let len_before = writer_proxies.len();
+        writer_proxies.retain(|writer_proxy| writer_proxy.remote_writer_guid().prefix() != prefix);
+        let removed = len_before - writer_proxies.len();
+
+        debug!("Removed all unmatched remote writers from participant: {:?}", prefix);
+        debug!("Current number of matched writer: {:?}", writer_proxies.len());
+        Ok(removed)
     }
 }

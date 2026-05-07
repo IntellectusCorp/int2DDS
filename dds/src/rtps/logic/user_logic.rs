@@ -1610,7 +1610,7 @@ impl UnicastMessageProcessor for UserLogic {
         }
 
         if let Some(wlp) = self.get_upgraded_participant()?.wlp_logic() {
-            wlp.update_remote_writer_liveliness(remote_writer_guid)?;
+            wlp.mark_monitored_writer_alive(remote_writer_guid)?;
         }
 
         Ok(())

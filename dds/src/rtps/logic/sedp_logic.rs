@@ -536,23 +536,14 @@ impl SedpLogic {
                     debug!("Received Data(r[UD])");
 
                     // Terminating endpoint provides GUID via KeyHash, but sometimes sends DATA message without SerializedData payload
-                    let terminated_reader_guid = inline_qos_params
-                        .get_key_hash()
-                        .unwrap_or_else(|| InstanceHandle::from_guid(&endpoint_guid));
+                    let terminated_reader_guid =
+                        if let Some(key_hash) = inline_qos_params.get_key_hash() {
+                            key_hash.to_guid()
+                        } else {
+                            endpoint_guid
+                        };
 
-                    participant.remove_unmatched_reader_from_writer(InstanceHandle::to_guid(
-                        &terminated_reader_guid,
-                    ));
-
-                    if let Some(mut entry) = participant.remote_subscriptions().get_mut(&topic_name)
-                    {
-                        entry.value_mut().remove(&endpoint_guid);
-
-                        if entry.value().is_empty() {
-                            drop(entry);
-                            participant.remote_subscriptions().remove(&topic_name);
-                        }
-                    }
+                    participant.cleanup_remote_reader(terminated_reader_guid, &topic_name)?;
                     return Ok(());
                 }
             } else {
@@ -724,7 +715,7 @@ impl SedpLogic {
         if writer_guid.entity_id().entity_kind().is_user_defined() {
             let participant = self.get_upgraded_participant()?;
             if let Some(wlp_logic) = participant.wlp_logic() {
-                let _ = wlp_logic.add_local_writer(writer_guid, writer.liveliness()?);
+                let _ = wlp_logic.register_asserting_writer(writer_guid, writer.liveliness()?);
             }
         }
 
@@ -934,31 +925,16 @@ impl SedpLogic {
                 // DISPOSED and UNREGISTERED status flags to be set
                 if status_info.disposed() || status_info.unregistered() {
                     debug!("Received Data(w[UD])");
+
                     // Terminating endpoint provides GUID via KeyHash, but sometimes sends DATA message without SerializedData payload
-                    let terminated_writer_guid = inline_qos_params
-                        .get_key_hash()
-                        .unwrap_or_else(|| InstanceHandle::from_guid(&endpoint_guid));
+                    let terminated_writer_guid =
+                        if let Some(key_hash) = inline_qos_params.get_key_hash() {
+                            InstanceHandle::to_guid(&key_hash)
+                        } else {
+                            endpoint_guid
+                        };
 
-                    let writer_guid = InstanceHandle::to_guid(&terminated_writer_guid);
-                    if writer_guid.entity_id().entity_kind().is_user_defined() {
-                        if let Some(wlp_logic) = participant.wlp_logic() {
-                            let _ = wlp_logic.remove_remote_writer(writer_guid);
-                        }
-                    }
-
-                    participant.remove_unmatched_writer_from_reader(InstanceHandle::to_guid(
-                        &terminated_writer_guid,
-                    ));
-
-                    if let Some(mut entry) = participant.remote_publications().get_mut(&topic_name)
-                    {
-                        entry.value_mut().remove(&endpoint_guid);
-
-                        if entry.value().is_empty() {
-                            drop(entry);
-                            participant.remote_publications().remove(&topic_name);
-                        }
-                    }
+                    participant.cleanup_remote_writer(terminated_writer_guid, &topic_name)?;
                     return Ok(());
                 }
             } else {
@@ -1014,6 +990,14 @@ impl SedpLogic {
                     "QoS changed for remote writer {:?}, now incompatible - removing matching",
                     endpoint_guid
                 );
+
+                // Fire LIVELINESS_CHANGED first; needs reader's matched list intact.
+                if endpoint_guid.entity_id().entity_kind().is_user_defined() {
+                    if let Some(wlp_logic) = self.get_upgraded_participant()?.wlp_logic() {
+                        let _ = wlp_logic.deregister_monitored_writer(endpoint_guid);
+                    }
+                }
+
                 reader
                     .writer_proxies()
                     .lock()
@@ -1088,8 +1072,10 @@ impl SedpLogic {
         let writer_guid = endpoint_guid;
         if writer_guid.entity_id().entity_kind().is_user_defined() {
             if let Some(wlp_logic) = self.get_upgraded_participant()?.wlp_logic() {
-                let _ = wlp_logic
-                    .add_remote_writer(writer_guid, *publication_builtin_topic_data.liveliness());
+                let _ = wlp_logic.register_monitored_writer(
+                    writer_guid,
+                    *publication_builtin_topic_data.liveliness(),
+                );
             }
         }
 
@@ -1128,6 +1114,14 @@ impl SedpLogic {
                     "QoS changed for remote writer {:?}, now incompatible - removing matching",
                     endpoint_guid
                 );
+
+                // Fire LIVELINESS_CHANGED first; needs reader's matched list intact.
+                if endpoint_guid.entity_id().entity_kind().is_user_defined() {
+                    if let Some(wlp_logic) = self.get_upgraded_participant()?.wlp_logic() {
+                        let _ = wlp_logic.deregister_monitored_writer(endpoint_guid);
+                    }
+                }
+
                 reader
                     .remote_writer_infos()
                     .lock()
@@ -1199,8 +1193,10 @@ impl SedpLogic {
         if writer_guid.entity_id().entity_kind().is_user_defined() {
             let participant = self.get_upgraded_participant()?;
             if let Some(wlp_logic) = participant.wlp_logic() {
-                let _ = wlp_logic
-                    .add_remote_writer(writer_guid, *publication_builtin_topic_data.liveliness());
+                let _ = wlp_logic.register_monitored_writer(
+                    writer_guid,
+                    *publication_builtin_topic_data.liveliness(),
+                );
             }
         }
 
@@ -2111,7 +2107,8 @@ impl UnicastMessageProcessor for SedpLogic {
                         || InstanceHandle::from_guid(&participant_proxy_data.participant_guid()),
                     );
 
-                participant.unmatch_with_remote_participant(&terminated_participant_guid.to_guid());
+                let _ = participant
+                    .unmatch_with_remote_participant(&terminated_participant_guid.to_guid());
             } else {
                 return self.handle_discovered_participant_data(participant_proxy_data.clone());
             }

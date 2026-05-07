@@ -22,7 +22,7 @@ use crate::{
     rtps::{
         common::{
             entity_id::EntityId,
-            guid::Guid,
+            guid::{Guid, GuidPrefix},
             locator::Locator,
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
             time::RtpsDuration,
@@ -448,5 +448,56 @@ impl Reader for StatelessReader {
         } else {
             Err(RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, ""))
         }
+    }
+
+    fn remove_matched_writer(&self, writer_guid: Guid) -> RtpsResult<bool> {
+        let mut writers = self
+            .matched_writers
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+        // Find the index of the writer to remove
+        let Some(idx) = writers.iter().position(|info| info.remote_writer_guid() == writer_guid)
+        else {
+            debug!("Writer proxy with guid {:?} not found in matched writers", writer_guid);
+            return Ok(false);
+        };
+
+        // Remove the writer from the matched writers list
+        writers.swap_remove(idx);
+        drop(writers);
+
+        // Update subscription matched status
+        self.update_subscription_matched_status(-1, InstanceHandle::from_guid(&writer_guid));
+
+        debug!("Removed writer proxy with guid {:?} from matched writers", writer_guid);
+        Ok(true)
+    }
+
+    fn remove_all_matched_writers_with_prefix(&self, prefix: GuidPrefix) -> RtpsResult<usize> {
+        let mut remote_writer_info = self
+            .matched_writers
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+        debug!(
+            "Before unmatching with writer, this reader had {:?} matched writer",
+            remote_writer_info.len()
+        );
+        for info in remote_writer_info.iter() {
+            if info.remote_writer_guid().prefix() == prefix {
+                self.update_subscription_matched_status(
+                    -1,
+                    InstanceHandle::from_guid(&info.remote_writer_guid()),
+                );
+            }
+        }
+        let len_before = remote_writer_info.len();
+        remote_writer_info.retain(|info| info.remote_writer_guid().prefix() != prefix);
+        let removed = len_before - remote_writer_info.len();
+
+        debug!("Removed all unmatched remote writers from participant: {:?}", prefix);
+        debug!("Current number of matched writer: {:?}", remote_writer_info.len());
+        Ok(removed)
     }
 }

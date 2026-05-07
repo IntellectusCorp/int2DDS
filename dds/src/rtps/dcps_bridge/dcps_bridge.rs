@@ -271,6 +271,15 @@ impl DcpsBridge {
                 publication_builtin_topic_data.clone(),
             );
 
+        let writer = writer.ok_or_else(|| {
+            log::error!("writer is not set");
+            RtpsError::new(RtpsErrorCode::LockError, "Writer lock error")
+        })?;
+
+        let _ = self
+            .participant
+            .add_writer(&publication_builtin_topic_data.topic_name(), writer.clone());
+
         self.send_sedp_message_and_match(
             cache_change,
             publication_builtin_topic_data.topic_name().as_str(),
@@ -287,21 +296,10 @@ impl DcpsBridge {
                     .match_writer_with_subscription(writer.clone(), subscription_data)
                     .map(|_| false)
             },
-            writer.as_ref(),
+            Some(&writer),
         );
 
-        match writer {
-            Some(writer) => {
-                let _ = self
-                    .participant
-                    .add_writer(&publication_builtin_topic_data.topic_name(), writer.clone());
-                Ok(writer)
-            }
-            None => {
-                log::error!("writer is not set");
-                Err(RtpsError::new(RtpsErrorCode::LockError, "Writer lock error"))
-            }
-        }
+        Ok(writer)
     }
 
     pub(crate) fn get_participant(&self) -> Result<Participant, RtpsError> {
@@ -425,6 +423,15 @@ impl DcpsBridge {
                 subscription_builtin_topic_data.clone(),
             );
 
+        let reader = reader.ok_or_else(|| {
+            log::error!("Reader is not set");
+            RtpsError::new(RtpsErrorCode::LockError, "Reader lock error")
+        })?;
+
+        // Register the reader in the participant store BEFORE matching so that
+        // any liveliness/match notifications fired during cross-match can find it.
+        self.participant.add_reader(&subscription_builtin_topic_data.topic_name(), reader.clone());
+
         self.send_sedp_message_and_match(
             cache_change,
             subscription_builtin_topic_data.topic_name().as_str(),
@@ -440,20 +447,10 @@ impl DcpsBridge {
                 sedp_logic.match_reader_with_publication(reader.clone(), publication_data);
                 Ok(false)
             },
-            reader.as_ref(),
+            Some(&reader),
         );
 
-        match reader {
-            Some(reader) => {
-                self.participant
-                    .add_reader(&subscription_builtin_topic_data.topic_name(), reader.clone());
-                Ok(reader)
-            }
-            None => {
-                log::error!("Reader is not set");
-                Err(RtpsError::new(RtpsErrorCode::LockError, "Reader lock error"))
-            }
-        }
+        Ok(reader)
     }
 
     /// send sedp message to remote participants and match pending endpoints
@@ -1435,7 +1432,10 @@ mod tests {
         );
 
         // Remove mocked writer proxy
-        guard.participant.remove_unmatched_writer_from_reader(remote_writer_guid);
+        guard
+            .participant
+            .cleanup_remote_writer(remote_writer_guid, &test_topic_name.to_string())
+            .unwrap();
         assert!(
             stateful_reader.writer_proxies().lock().unwrap().is_empty(),
             "WriterProxy list should be empty after removal"
@@ -1501,7 +1501,10 @@ mod tests {
         );
 
         // Remove mocked reader locator
-        guard.participant.remove_unmatched_reader_from_writer(remote_reader_guid);
+        guard
+            .participant
+            .cleanup_remote_reader(remote_reader_guid, &test_topic_name.to_string())
+            .unwrap();
         assert!(
             stateless_writer.reader_locator().lock().unwrap().is_empty(),
             "ReaderLocator list should be empty after removal"
@@ -1571,7 +1574,10 @@ mod tests {
         );
 
         // Remove mocked reader proxy
-        guard.participant.remove_unmatched_reader_from_writer(remote_reader_guid);
+        guard
+            .participant
+            .cleanup_remote_reader(remote_reader_guid, &test_topic_name.to_string())
+            .unwrap();
         assert!(
             stateful_writer.reader_proxies().lock().unwrap().is_empty(),
             "MatchedReaders list should be empty after removal"
@@ -1688,7 +1694,10 @@ mod tests {
         );
 
         // Remove mocked reader proxy
-        guard.participant.remove_unmatched_reader_from_writer(remote_reader_guid_1);
+        guard
+            .participant
+            .cleanup_remote_reader(remote_reader_guid_1, &test_topic_name.to_string())
+            .unwrap();
         assert!(
             stateful_writer_1.reader_proxies().lock().unwrap().len() == 1,
             "Stateful writer 1's reader proxy list should contain 1 elements after removal"
@@ -1790,7 +1799,10 @@ mod tests {
         );
 
         // This would remove 2 mocked reader proxies
-        guard.participant.remove_all_unmatched_endpoint_from_terminated_participant([5; 12]);
+        guard
+            .participant
+            .remove_all_unmatched_endpoint_from_terminated_participant([5; 12])
+            .unwrap();
 
         assert!(
             stateful_writer.reader_proxies().lock().unwrap().len() == 1,
