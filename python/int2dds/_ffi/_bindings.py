@@ -104,6 +104,13 @@ ffi.cdef("""
         int32_t domain_id,
         Int2DdsParticipant **participant_out
     );
+    Int2DdsRet int2dds_create_participant_with_qos(
+        const Int2DdsParticipantFactory *factory,
+        const char *name,
+        int32_t domain_id,
+        const Int2DdsParticipantQos *qos,
+        Int2DdsParticipant **participant_out
+    );
     Int2DdsRet int2dds_delete_participant(Int2DdsParticipant *participant);
     Int2DdsRet int2dds_participant_get_domain_id(
         const Int2DdsParticipant *participant,
@@ -639,7 +646,22 @@ ffi.cdef("""
         const uint8_t *data,
         size_t data_len
     );
+    Int2DdsRet int2dds_participant_qos_add_property(
+        Int2DdsParticipantQos *qos,
+        const char *name,
+        const char *value,
+        bool propagate
+    );
+    Int2DdsRet int2dds_participant_qos_set_multicast_ttl(
+        Int2DdsParticipantQos *qos,
+        uint8_t ttl
+    );
     Int2DdsRet int2dds_participant_qos_destroy(Int2DdsParticipantQos *qos);
+
+    /* Environment-variable configuration helpers (process-wide, take effect
+       at next DomainParticipant creation). */
+    Int2DdsRet int2dds_env_set_multicast_ttl(uint8_t ttl);
+    Int2DdsRet int2dds_env_get_multicast_ttl(uint8_t *ttl_out, bool *has_value_out);
 
     /* WaitSet */
     Int2DdsRet int2dds_waitset_new(Int2DdsWaitSet **waitset_out);

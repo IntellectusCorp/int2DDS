@@ -243,4 +243,45 @@ namespace Int2Dds.Qos
             Names = names;
         }
     }
+
+    /// <summary>
+    /// PropertyQosPolicy entries (DomainParticipant only).
+    /// The well-known name <c>int2dds.transport.UDPv4.multicast_ttl</c> configures
+    /// the IPv4 multicast TTL for the participant; use <see cref="SetMulticastTtl"/>
+    /// as a convenience.
+    /// </summary>
+    public class Property
+    {
+        public const string MulticastTtlName = "int2dds.transport.UDPv4.multicast_ttl";
+
+        public System.Collections.Generic.List<PropertyEntry> Entries { get; }
+            = new System.Collections.Generic.List<PropertyEntry>();
+
+        public Property() { }
+
+        public void Add(string name, string value, bool propagate = true)
+        {
+            Entries.Add(new PropertyEntry(name, value, propagate));
+        }
+
+        public void SetMulticastTtl(byte ttl)
+        {
+            Entries.RemoveAll(e => e.Name == MulticastTtlName);
+            Entries.Add(new PropertyEntry(MulticastTtlName, ttl.ToString(), false));
+        }
+    }
+
+    public sealed class PropertyEntry
+    {
+        public string Name { get; }
+        public string Value { get; }
+        public bool Propagate { get; }
+
+        public PropertyEntry(string name, string value, bool propagate = true)
+        {
+            Name = name;
+            Value = value;
+            Propagate = propagate;
+        }
+    }
 }

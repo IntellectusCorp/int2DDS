@@ -237,6 +237,12 @@ namespace Int2Dds.Interop
         internal static unsafe extern int int2dds_participant_qos_set_user_data(IntPtr qos, byte* data, UIntPtr data_len);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static unsafe extern int int2dds_participant_qos_add_property(IntPtr qos, byte* name, byte* value, [MarshalAs(UnmanagedType.I1)] bool propagate);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int int2dds_participant_qos_set_multicast_ttl(IntPtr qos, byte ttl);
+
+        [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_participant_qos_destroy(IntPtr qos);
 
         // ── Publisher QoS ───────────────────────────────────────────────────
