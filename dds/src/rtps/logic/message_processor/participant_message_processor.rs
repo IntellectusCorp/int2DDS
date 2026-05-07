@@ -405,7 +405,7 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
             if monitor.is_none() {
                 let participant = self.get_upgraded_participant()?;
                 let callback = Arc::new(move |participant_guid: Guid| {
-                    participant.unmatch_with_remote_participant(&participant_guid);
+                    let _ = participant.unmatch_with_remote_participant(&participant_guid);
                     true
                 });
                 *monitor = Some(LivelinessMonitor::new(callback));

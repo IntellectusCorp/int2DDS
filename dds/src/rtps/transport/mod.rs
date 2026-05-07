@@ -37,7 +37,10 @@ pub(crate) mod port_manager;
 pub(crate) mod shm;
 pub(crate) mod socket;
 pub(crate) mod tcp;
+pub(crate) mod transport_config;
 pub(crate) mod udp;
+
+pub(crate) use transport_config::TransportConfig;
 
 use std::env;
 use std::sync::OnceLock;

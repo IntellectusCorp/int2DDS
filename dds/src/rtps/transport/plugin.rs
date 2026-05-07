@@ -164,6 +164,7 @@ impl TransportPluginFactory {
         working_ips: Vec<String>,
         guid_prefix: GuidPrefix,
         tls_config: Option<std::sync::Arc<crate::rtps::transport::tcp::tls::TlsConfig>>,
+        transport_config: crate::rtps::transport::TransportConfig,
     ) -> io::Result<Box<dyn TransportPlugin>> {
         match transport_type {
             TransportType::UDP => {
@@ -174,6 +175,7 @@ impl TransportPluginFactory {
                     bind_ip,
                     multicast_if_ip,
                     working_ips,
+                    transport_config,
                 )?;
                 Ok(Box::new(plugin))
             }
@@ -198,6 +200,7 @@ impl TransportPluginFactory {
                     multicast_if_ip,
                     working_ips,
                     guid_prefix,
+                    transport_config,
                 )?;
                 Ok(Box::new(plugin))
             }
@@ -209,6 +212,7 @@ impl TransportPluginFactory {
                     bind_ip,
                     multicast_if_ip,
                     working_ips,
+                    transport_config,
                 )?;
                 Ok(Box::new(plugin))
             }

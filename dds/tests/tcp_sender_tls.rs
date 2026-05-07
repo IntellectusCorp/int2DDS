@@ -117,10 +117,10 @@ fn tls_config_produces_client_and_server_configs() {
 
     use int2dds::infrastructure::qos_policy::PropertyQosPolicy;
     let mut p = PropertyQosPolicy::default();
-    p.set("int2dds.tls.ca_file", b.ca_file.path().to_str().unwrap());
-    p.set("int2dds.tls.cert_file", b.cert_file.path().to_str().unwrap());
-    p.set("int2dds.tls.key_file", b.key_file.path().to_str().unwrap());
-    p.set("int2dds.tls.server_name", "localhost");
+    p.add_property("int2dds.tls.ca_file", b.ca_file.path().to_str().unwrap(), false);
+    p.add_property("int2dds.tls.cert_file", b.cert_file.path().to_str().unwrap(), false);
+    p.add_property("int2dds.tls.key_file", b.key_file.path().to_str().unwrap(), false);
+    p.add_property("int2dds.tls.server_name", "localhost", false);
 
     // The actual `TlsConfig` type is pub(crate); reach it through the
     // public-facing `Property` keys the Route Gateway binary uses.
@@ -129,8 +129,11 @@ fn tls_config_produces_client_and_server_configs() {
     //
     // Since `TlsConfig` itself is internal, this test ensures the
     // surrounding contract stays intact even as internals evolve.
-    assert_eq!(p.get("int2dds.tls.ca_file").map(|s| s.to_string()), Some(b.ca_file.path().to_str().unwrap().to_string()));
-    assert_eq!(p.get("int2dds.tls.server_name"), Some("localhost"));
+    assert_eq!(
+        p.find_property("int2dds.tls.ca_file").map(|s| s.to_string()),
+        Some(b.ca_file.path().to_str().unwrap().to_string())
+    );
+    assert_eq!(p.find_property("int2dds.tls.server_name"), Some("localhost"));
 }
 
 #[test]

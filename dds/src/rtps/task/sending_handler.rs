@@ -6,7 +6,9 @@ use std::time::{Duration as StdDuration, Instant};
 use log::{debug, error};
 use mio::Waker;
 
-use crate::rtps::builtin::data::participant_message_data::ParticipantMessageData;
+use crate::rtps::builtin::data::participant_message_data::{
+    ParticipantMessageData, ParticipantMessageDataKind,
+};
 use crate::rtps::builtin::data::spdp_discovered_participant_data::SPDPDiscoveredParticipantData;
 use crate::rtps::common::entity_id::EntityId;
 use crate::rtps::common::guid::{Guid, GuidPrefix};
@@ -289,9 +291,13 @@ impl SendingHandler {
         self.participant.upgrade().expect("Participant already dropped").wlp_logic()
     }
 
-    pub(crate) fn cancel_p2p_messages(&self) {
+    // Remove only entries of this kind; other kinds keep running.
+    pub(crate) fn cancel_p2p_messages_by_kind(&self, kind: ParticipantMessageDataKind) {
         if let Ok(mut queue) = self.message_queue.lock() {
-            queue.retain(|msg| !matches!(msg, MessageType::P2pData(_, _, _)));
+            queue.retain(|msg| match msg {
+                MessageType::P2pData(_, _, pmd) => pmd.kind() != kind,
+                _ => true,
+            });
         }
     }
 }

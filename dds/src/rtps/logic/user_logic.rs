@@ -518,7 +518,7 @@ impl UserLogic {
 
         if let Some(prefix) = disconnected_peer {
             let guid = Guid::new(prefix, EntityId::PARTICIPANT);
-            participant.unmatch_with_remote_participant(&guid);
+            let _ = participant.unmatch_with_remote_participant(&guid);
         }
 
         // Periodic heartbeat timer resuming when new changes are sent
@@ -1558,7 +1558,7 @@ impl UnicastMessageProcessor for UserLogic {
         }
 
         if let Some(wlp) = self.get_upgraded_participant()?.wlp_logic() {
-            wlp.update_remote_writer_liveliness(remote_writer_guid)?;
+            wlp.mark_monitored_writer_alive(remote_writer_guid)?;
         }
 
         Ok(())

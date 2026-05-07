@@ -603,11 +603,11 @@ mod tls_tests {
 
     fn tls_config_from_bundle(bundle: &Bundle, server_name: &str) -> Arc<TlsConfig> {
         let mut p = PropertyQosPolicy::default();
-        p.set("int2dds.tls.ca_file", bundle.ca_file.path().to_str().unwrap());
-        p.set("int2dds.tls.cert_file", bundle.cert_file.path().to_str().unwrap());
-        p.set("int2dds.tls.key_file", bundle.key_file.path().to_str().unwrap());
-        p.set("int2dds.tls.server_name", server_name);
-        p.set("int2dds.tls.verify_peer", "false");
+        p.add_property("int2dds.tls.ca_file", bundle.ca_file.path().to_str().unwrap(), false);
+        p.add_property("int2dds.tls.cert_file", bundle.cert_file.path().to_str().unwrap(), false);
+        p.add_property("int2dds.tls.key_file", bundle.key_file.path().to_str().unwrap(), false);
+        p.add_property("int2dds.tls.server_name", server_name, false);
+        p.add_property("int2dds.tls.verify_peer", "false", false);
         Arc::new(TlsConfig::from_property(&p).expect("parse ok").expect("config present"))
     }
 

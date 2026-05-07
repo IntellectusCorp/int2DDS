@@ -16,6 +16,7 @@ use crate::rtps::transport::shm::shm_listener::ShmListener;
 use crate::rtps::transport::shm::shm_sender::ShmSender;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 use crate::rtps::transport::udp::udp_sender::UdpSender;
+use crate::rtps::transport::TransportConfig;
 
 /// Channel buffer size for merged sources.
 const CHANNEL_BUFFER_SIZE: usize = 256;
@@ -51,8 +52,9 @@ impl ShmTransportPlugin {
         bind_ip: String,
         multicast_if_ip: String,
         working_ips: Vec<String>,
+        transport_config: TransportConfig,
     ) -> io::Result<Self> {
-        let udp_sender = UdpSender::new(bind_ip, multicast_if_ip)?;
+        let udp_sender = UdpSender::new(bind_ip, multicast_if_ip, transport_config)?;
         let shm_sender = ShmSender::new(domain_id)?;
 
         // Create UDP listeners for discovery — multicast first (no per-participant

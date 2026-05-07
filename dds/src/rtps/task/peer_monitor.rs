@@ -22,15 +22,8 @@ pub(crate) struct PeerMonitor {
 }
 
 impl PeerMonitor {
-    pub(crate) fn new(
-        participant: &Arc<Participant>,
-        dead_peer_rx: Receiver<SocketAddr>,
-    ) -> Self {
-        Self {
-            participant: Arc::downgrade(participant),
-            dead_peer_rx,
-            thread_handle: None,
-        }
+    pub(crate) fn new(participant: &Arc<Participant>, dead_peer_rx: Receiver<SocketAddr>) -> Self {
+        Self { participant: Arc::downgrade(participant), dead_peer_rx, thread_handle: None }
     }
 
     pub(crate) fn start(&mut self) {
@@ -50,7 +43,7 @@ impl PeerMonitor {
                                     prefix, dead_addr
                                 );
                                 let participant_guid = Guid::new(prefix, EntityId::PARTICIPANT);
-                                participant.unmatch_with_remote_participant(&participant_guid);
+                                let _ = participant.unmatch_with_remote_participant(&participant_guid);
                             }
                             None => {
                                 warn!(
@@ -72,7 +65,10 @@ impl PeerMonitor {
 
     /// Resolve the RTPS GuidPrefix of a dead peer from its SocketAddr by searching
     /// the SPDP discovered participant data for a matching locator (IP + port).
-    fn resolve_guid_prefix(participant: &Arc<Participant>, addr: &SocketAddr) -> Option<GuidPrefix> {
+    fn resolve_guid_prefix(
+        participant: &Arc<Participant>,
+        addr: &SocketAddr,
+    ) -> Option<GuidPrefix> {
         let ip = match addr {
             SocketAddr::V4(v4) => *v4.ip(),
             SocketAddr::V6(_) => return None,
