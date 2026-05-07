@@ -160,6 +160,7 @@ typedef enum Int2DdsQosPolicyId {
   DurabilityService = 22,
   DataRepresentation = 23,
   TypeConsistencyEnforcement = 24,
+  Property = 25,
 } Int2DdsQosPolicyId;
 
 /**
@@ -642,6 +643,8 @@ typedef struct Int2DdsSampleInfo {
 
 #define INT2DDS_RET_NULL_POINTER 100
 
+#define INT2DDS_RET_BUFFER_TOO_SMALL 101
+
 #define INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND 200
 
 #define INT2DDS_RET_DYNAMIC_TYPE_MISMATCH 201
@@ -985,6 +988,33 @@ Int2DdsRet int2dds_dynamic_sample_get_string(const uint8_t *bytes,
                                              uintptr_t *out_len);
 
 /**
+ * Sets the IPv4 multicast TTL fallback via the `INT2DDS_MULTICAST_TTL`
+ * environment variable.
+ *
+ * Used by `TransportConfig` only when a `DomainParticipantQos` does not carry an
+ * explicit `int2dds.transport.UDPv4.multicast_ttl` property entry, so explicit
+ * QoS settings always win.
+ *
+ * # Safety
+ * Call before the first `DomainParticipant` is created. Mutating process
+ * environment from threads other than the main one is undefined behavior on
+ * some platforms.
+ */
+Int2DdsRet int2dds_env_set_multicast_ttl(uint8_t ttl);
+
+/**
+ * Reads the current `INT2DDS_MULTICAST_TTL` env override.
+ *
+ * On success writes the parsed TTL into `*ttl_out` and sets `*has_value_out`
+ * to `true`. When the variable is unset, empty, or invalid (non-`u8`),
+ * `*has_value_out` is set to `false` and `*ttl_out` is left untouched.
+ *
+ * # Safety
+ * `ttl_out` and `has_value_out` must be valid, writable pointers.
+ */
+Int2DdsRet int2dds_env_get_multicast_ttl(uint8_t *ttl_out, bool *has_value_out);
+
+/**
  * Create a DomainParticipant
  *
  * # Safety
@@ -1011,6 +1041,25 @@ Int2DdsRet int2dds_create_participant_with_profile(const struct Int2DdsParticipa
                                                    int32_t domain_id,
                                                    const char *qos_path,
                                                    struct Int2DdsParticipant **participant_out);
+
+/**
+ * Create a DomainParticipant with the given QoS handle.
+ *
+ * The handle is cloned internally; the caller still owns `qos` and must
+ * destroy it with `int2dds_participant_qos_destroy`.
+ *
+ * # Safety
+ * - `name` must be a valid null-terminated C string or null
+ * - `qos` must be a valid QoS handle created by
+ *   `int2dds_participant_qos_create_default`
+ * - `participant_out` must be a valid pointer to a null pointer
+ * - The returned participant must be freed with `int2dds_delete_participant`
+ */
+Int2DdsRet int2dds_create_participant_with_qos(const struct Int2DdsParticipantFactory *_factory,
+                                               const char *name,
+                                               int32_t domain_id,
+                                               const struct Int2DdsParticipantQos *qos,
+                                               struct Int2DdsParticipant **participant_out);
 
 /**
  * Delete a DomainParticipant
@@ -2011,6 +2060,83 @@ Int2DdsRet int2dds_participant_qos_create_default(struct Int2DdsParticipantQos *
 Int2DdsRet int2dds_participant_qos_set_user_data(struct Int2DdsParticipantQos *qos,
                                                  const uint8_t *data,
                                                  uintptr_t data_len);
+
+/**
+ * Add or overwrite a text property by name (PropertyQosPolicy).
+ *
+ * # Safety
+ * `qos`, `name`, `value` must be valid non-null C strings.
+ */
+Int2DdsRet int2dds_participant_qos_add_property(struct Int2DdsParticipantQos *qos,
+                                                const char *name,
+                                                const char *value,
+                                                bool propagate);
+
+/**
+ * Add or overwrite a binary property by name (PropertyQosPolicy).
+ *
+ * # Safety
+ * `qos`, `name` must be valid non-null. `data` may be null when `data_len == 0`.
+ */
+Int2DdsRet int2dds_participant_qos_add_binary_property(struct Int2DdsParticipantQos *qos,
+                                                       const char *name,
+                                                       const uint8_t *data,
+                                                       uintptr_t data_len,
+                                                       bool propagate);
+
+/**
+ * Lookup a text property by name. The caller provides a `out_buf` of `out_cap`
+ * bytes; the value is written without a NUL terminator and `*out_len` is set to
+ * the number of bytes the value occupies. If the buffer is too small,
+ * `INT2DDS_RET_BUFFER_TOO_SMALL` is returned with `*out_len` populated so the
+ * caller can resize and retry.
+ *
+ * # Safety
+ * `qos`, `name`, `out_len` must be non-null. `out_buf` may be null only when
+ * `out_cap == 0` (size-probe call).
+ */
+Int2DdsRet int2dds_participant_qos_find_property(const struct Int2DdsParticipantQos *qos,
+                                                 const char *name,
+                                                 char *out_buf,
+                                                 uintptr_t out_cap,
+                                                 uintptr_t *out_len);
+
+/**
+ * Remove a text property by name.
+ *
+ * Returns `INT2DDS_RET_NO_DATA` when the name is not present.
+ *
+ * # Safety
+ * `qos`, `name` must be valid non-null.
+ */
+Int2DdsRet int2dds_participant_qos_remove_property(struct Int2DdsParticipantQos *qos,
+                                                   const char *name);
+
+/**
+ * Iterate text properties whose name starts with `prefix`. The callback
+ * receives NUL-terminated `name` and `value` borrowed for the call duration —
+ * callers must not retain the pointers. Returning a non-zero value from the
+ * callback aborts iteration early.
+ *
+ * # Safety
+ * `qos`, `prefix`, `cb` must be valid non-null. `user_data` is opaque.
+ */
+Int2DdsRet int2dds_participant_qos_get_properties_with_prefix(const struct Int2DdsParticipantQos *qos,
+                                                              const char *prefix,
+                                                              int32_t (*cb)(const char *name,
+                                                                            const char *value,
+                                                                            void *user_data),
+                                                              void *user_data);
+
+/**
+ * Convenience wrapper: set the IPv4 multicast TTL via the well-known
+ * `int2dds.transport.UDPv4.multicast_ttl` property.
+ *
+ * # Safety
+ * `qos` must be a valid QoS handle.
+ */
+Int2DdsRet int2dds_participant_qos_set_multicast_ttl(struct Int2DdsParticipantQos *qos,
+                                                     uint8_t ttl);
 
 /**
  * Destroy DomainParticipant QoS

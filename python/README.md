@@ -161,6 +161,28 @@ reader_qos = DataReaderQos(
 reader = sub.create_datareader(topic, qos=reader_qos)
 ```
 
+## Environment Configuration
+
+The `int2dds.env` module wraps the underlying `INT2DDS_*` environment variables
+the Rust core consults during participant creation. Mutate them **before**
+creating the first `DomainParticipant`.
+
+```python
+from int2dds import env, DomainParticipant
+
+# Equivalent to INT2DDS_MULTICAST_TTL=32 in the process environment.
+# Used as a fallback only when QoS does not set multicast_ttl explicitly.
+env.set_multicast_ttl(32)
+ttl = env.get_multicast_ttl()  # -> 32 or None
+
+with DomainParticipant(domain_id=0) as dp:
+    ...
+```
+
+For per-participant override, use `Property.set_multicast_ttl(...)` on
+`ParticipantQos.property` — explicit QoS always wins over the env var.
+See [docs/guide/env.md](../docs/guide/env.md) for the full env-var reference.
+
 ## API Reference
 
 ### DomainParticipant

@@ -2420,7 +2420,7 @@ mod tests {
             },
             sending_handler::SendingHandler,
         },
-        transport::socket::Socket,
+        transport::{socket::Socket, TransportConfig},
     };
     use crate::test_utils::unique_domain_id;
 
@@ -2435,7 +2435,7 @@ mod tests {
         env_logger::builder().filter_level(log::LevelFilter::Debug).init();
 
         let domain_id = unique_domain_id() as u32;
-        let mut socket = Socket::new(domain_id); //domain_id 0
+        let mut socket = Socket::new(domain_id, TransportConfig::default()); //domain_id 0
         socket.create_socket();
         let participant =
             Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ips()));
@@ -2487,7 +2487,7 @@ mod tests {
         env_logger::builder().filter_level(log::LevelFilter::Info).init();
 
         let domain_id = unique_domain_id() as u32;
-        let mut socket = Socket::new(domain_id); //domain_id 0
+        let mut socket = Socket::new(domain_id, TransportConfig::default()); //domain_id 0
         socket.create_socket();
         let participant =
             Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ips()));

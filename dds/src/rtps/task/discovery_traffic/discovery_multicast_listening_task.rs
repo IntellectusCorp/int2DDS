@@ -182,12 +182,13 @@ mod tests {
     use crate::rtps::entities::participant::Participant;
     use crate::rtps::task::discovery_traffic::discovery_multicast_listening_task::DiscoveryMulticastListeningTask;
     use crate::rtps::transport::socket::Socket;
+    use crate::rtps::transport::TransportConfig;
 
     #[test]
     #[ignore]
     fn test_discovery_multicast_receive() {
         let domain_id = 10;
-        let mut socket = Socket::new(domain_id); //domain_id 0
+        let mut socket = Socket::new(domain_id, TransportConfig::default()); //domain_id 0
         socket.create_socket();
         let participant =
             Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ips()));
