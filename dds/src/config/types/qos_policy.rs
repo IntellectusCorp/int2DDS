@@ -169,6 +169,44 @@ pub(crate) struct UserDataQosPolicy {
     pub(crate) value: String,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub(crate) struct PropertyQosPolicy {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) value: Option<Vec<PropertyEntry>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct PropertyEntry {
+    pub(crate) name: String,
+    pub(crate) value: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) propagate: Option<bool>,
+}
+
+impl From<PropertyQosPolicy> for qos_policy::PropertyQosPolicy {
+    fn from(external: PropertyQosPolicy) -> Self {
+        let mut internal = Self::default();
+        if let Some(entries) = external.value {
+            for e in entries {
+                internal.add_property(e.name, e.value, e.propagate.unwrap_or(true));
+            }
+        }
+        internal
+    }
+}
+
+impl From<qos_policy::PropertyQosPolicy> for PropertyQosPolicy {
+    fn from(internal: qos_policy::PropertyQosPolicy) -> Self {
+        let entries: Vec<PropertyEntry> = internal
+            .value
+            .into_iter()
+            .map(|p| PropertyEntry { name: p.name, value: p.value, propagate: Some(p.propagate) })
+            .collect();
+        Self { value: if entries.is_empty() { None } else { Some(entries) } }
+    }
+}
+
 impl From<UserDataQosPolicy> for qos_policy::UserDataQosPolicy {
     fn from(external: UserDataQosPolicy) -> Self {
         Self { value: external.value.into() }

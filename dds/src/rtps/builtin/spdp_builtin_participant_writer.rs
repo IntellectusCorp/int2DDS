@@ -296,6 +296,14 @@ impl Writer for SPDPbuiltinParticipantWriter {
     ) -> RtpsResult<SubscriptionBuiltinTopicData> {
         Err(RtpsError::new(RtpsErrorCode::Unknown, "UnSupported"))
     }
+
+    fn remove_matched_reader(&self, _reader_guid: Guid) -> RtpsResult<bool> {
+        Ok(false)
+    }
+
+    fn remove_all_matched_readers_with_prefix(&self, _prefix: GuidPrefix) -> RtpsResult<usize> {
+        Ok(0)
+    }
 }
 
 impl Endpoint for SPDPbuiltinParticipantWriter {

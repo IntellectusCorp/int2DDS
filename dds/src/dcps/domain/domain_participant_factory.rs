@@ -598,6 +598,7 @@ mod factory_test {
         let test_qos = DomainParticipantQos {
             user_data: UserDataQosPolicy::default(),
             entity_factory: EntityFactoryQosPolicy { autoenable_created_entities: false },
+            ..Default::default()
         };
         instance1.set_default_participant_qos(test_qos).unwrap();
 
