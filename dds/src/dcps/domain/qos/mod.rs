@@ -16,7 +16,7 @@ use crate::{
     core::error::{DdsError, DdsResult},
     infrastructure::{
         qos_kind::QosKind,
-        qos_policy::{EntityFactoryQosPolicy, Qos, UserDataQosPolicy},
+        qos_policy::{EntityFactoryQosPolicy, PropertyQosPolicy, Qos, UserDataQosPolicy},
     },
 };
 
@@ -26,6 +26,7 @@ pub const PARTICIPANT_QOS_DEFAULT: QosKind<DomainParticipantQos> = QosKind::Defa
 pub struct DomainParticipantQos {
     pub user_data: UserDataQosPolicy,
     pub entity_factory: EntityFactoryQosPolicy,
+    pub property: PropertyQosPolicy,
 }
 
 impl Qos for DomainParticipantQos {

@@ -16,7 +16,7 @@ namespace Int2Dds.Interop
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static unsafe extern int int2dds_create_topic_with_profile(IntPtr participant, byte* topic_name, byte* dds_type_name, int extensibility, [MarshalAs(UnmanagedType.U1)] bool has_key,
-            [MarshalAs(UnmanagedType.LPUTF8Str)] string qos_path, out IntPtr topic_out);
+            byte* qos_path, out IntPtr topic_out);
 
         [DllImport("int2dds_ffi", CallingConvention = CallingConvention.Cdecl)]
         internal static extern int int2dds_topic_set_qos(IntPtr topic, IntPtr qos);

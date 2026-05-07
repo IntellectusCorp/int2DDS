@@ -165,7 +165,7 @@ namespace Int2Dds.Conditions
             int ret = NativeMethods.int2dds_waitset_wait_ex(_handle, timeoutMs, out IntPtr seqHandle);
 
             if (ret == ReturnCode.Timeout)
-                return Array.Empty<Condition>();
+                return Int2Dds.Internal.EmptyArrayHolder<Condition>.Value;
 
             ReturnCodeHelper.CheckReturn(ret);
 

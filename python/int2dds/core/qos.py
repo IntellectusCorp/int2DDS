@@ -228,6 +228,29 @@ class Partition:
     names: list[str] = field(default_factory=list)
 
 
+@dataclass
+class Property:
+    """PropertyQosPolicy entries (DomainParticipant only).
+
+    Each entry is ``(name, value, propagate)``. The well-known name
+    ``int2dds.transport.UDPv4.multicast_ttl`` configures the IPv4
+    multicast TTL for the participant; use :meth:`set_multicast_ttl`
+    as a convenience.
+    """
+    entries: list[tuple[str, str, bool]] = field(default_factory=list)
+
+    def add(self, name: str, value: str, propagate: bool = True) -> None:
+        self.entries.append((name, value, propagate))
+
+    def set_multicast_ttl(self, ttl: int) -> None:
+        if not 0 <= ttl <= 255:
+            raise ValueError(f"multicast TTL must be in [0, 255], got {ttl}")
+        # Replace any prior multicast TTL entry to match the Rust helper semantics.
+        name = "int2dds.transport.UDPv4.multicast_ttl"
+        self.entries = [e for e in self.entries if e[0] != name]
+        self.entries.append((name, str(ttl), False))
+
+
 # ---------------------------------------------------------------------------
 # Composite QoS
 # ---------------------------------------------------------------------------
@@ -296,3 +319,4 @@ class SubscriberQos:
 @dataclass
 class ParticipantQos:
     user_data: UserData | None = None
+    property: Property | None = None

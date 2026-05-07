@@ -37,6 +37,7 @@ pub const INT2DDS_RET_NO_DATA: Int2DdsRet = 27;
 
 // Null pointer errors
 pub const INT2DDS_RET_NULL_POINTER: Int2DdsRet = 100;
+pub const INT2DDS_RET_BUFFER_TOO_SMALL: Int2DdsRet = 101;
 
 // Dynamic xtypes errors (200..=299 reserved for the dynamic surface; see docs/superpowers/specs/2026-04-09-ffi-xtypes-parity-roadmap.md principle P2)
 pub const INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND: Int2DdsRet = 200;
