@@ -51,6 +51,10 @@ pub fn init_from_env() {
 
     // - INT2DDS_MULTICAST_TTL: Set IPv4 multicast TTL fallback (0-255) when no PropertyQosPolicy entry is present - Default: OS default (1)
 
+    // - INT2DDS_EXTERNAL_ADDRESS: Public IPv4 advertised in SPDP for NAT/WAN traversal. Sockets still bind to local NICs.
+    // - INT2DDS_META_PORT: Pinned metatraffic unicast port; ignores domain_id when set, applies +2*pid offset for multi-participant.
+    // - INT2DDS_USER_PORT: Pinned user-traffic unicast port; ignores domain_id when set, applies +2*pid offset for multi-participant.
+
     apply_cli_args_to_env();
 
     setting_log();
@@ -225,6 +229,30 @@ fn apply_cli_args_to_env() {
                     .value_hint(ValueHint::Other),
             )
             .arg(
+                Arg::new("int2dds_external_address")
+                    .long("int2dds-external-address")
+                    .value_name("IPV4")
+                    .help("Public IPv4 advertised in SPDP for NAT/WAN traversal (bind unaffected)")
+                    .num_args(1)
+                    .value_hint(ValueHint::Other),
+            )
+            .arg(
+                Arg::new("int2dds_meta_port")
+                    .long("int2dds-meta-port")
+                    .value_name("PORT")
+                    .help("Pinned metatraffic unicast port; ignores domain_id when set")
+                    .num_args(1)
+                    .value_hint(ValueHint::Other),
+            )
+            .arg(
+                Arg::new("int2dds_user_port")
+                    .long("int2dds-user-port")
+                    .value_name("PORT")
+                    .help("Pinned user-traffic unicast port; ignores domain_id when set")
+                    .num_args(1)
+                    .value_hint(ValueHint::Other),
+            )
+            .arg(
                 Arg::new("int2dds_multicast_ttl")
                     .long("int2dds-multicast-ttl")
                     .value_name("TTL")
@@ -329,6 +357,18 @@ fn apply_cli_args_to_env() {
     if let Some(v) = matches.get_one::<String>("int2dds_multicast_ttl") {
         log::info!("Environment variable set: INT2DDS_MULTICAST_TTL = {}", v);
         unsafe { std::env::set_var("INT2DDS_MULTICAST_TTL", v) };
+    }
+    if let Some(v) = matches.get_one::<String>("int2dds_external_address") {
+        log::info!("Environment variable set: INT2DDS_EXTERNAL_ADDRESS = {}", v);
+        unsafe { std::env::set_var("INT2DDS_EXTERNAL_ADDRESS", v) };
+    }
+    if let Some(v) = matches.get_one::<String>("int2dds_meta_port") {
+        log::info!("Environment variable set: INT2DDS_META_PORT = {}", v);
+        unsafe { std::env::set_var("INT2DDS_META_PORT", v) };
+    }
+    if let Some(v) = matches.get_one::<String>("int2dds_user_port") {
+        log::info!("Environment variable set: INT2DDS_USER_PORT = {}", v);
+        unsafe { std::env::set_var("INT2DDS_USER_PORT", v) };
     }
 }
 
@@ -661,4 +701,41 @@ pub fn get_multicast_ttl_override() -> Option<u8> {
 pub fn set_multicast_ttl(ttl: u8) {
     log::info!("Environment variable set: INT2DDS_MULTICAST_TTL = {}", ttl);
     unsafe { std::env::set_var("INT2DDS_MULTICAST_TTL", ttl.to_string()) };
+}
+
+// Read the public IPv4 advertised in SPDP from `INT2DDS_EXTERNAL_ADDRESS`.
+pub fn get_external_address() -> Option<std::net::Ipv4Addr> {
+    let raw = std::env::var("INT2DDS_EXTERNAL_ADDRESS").ok().filter(|s| !s.is_empty())?;
+    match raw.parse::<std::net::Ipv4Addr>() {
+        Ok(ip) => Some(ip),
+        Err(e) => {
+            log::error!(
+                "Invalid INT2DDS_EXTERNAL_ADDRESS value '{}': {}. Falling back to default.",
+                raw,
+                e
+            );
+            None
+        }
+    }
+}
+
+// Read the pinned metatraffic unicast port from `INT2DDS_META_PORT`.
+pub fn get_meta_port_override() -> Option<u16> {
+    parse_port_env("INT2DDS_META_PORT")
+}
+
+// Read the pinned user-traffic unicast port from `INT2DDS_USER_PORT`.
+pub fn get_user_port_override() -> Option<u16> {
+    parse_port_env("INT2DDS_USER_PORT")
+}
+
+fn parse_port_env(name: &str) -> Option<u16> {
+    let raw = std::env::var(name).ok().filter(|s| !s.is_empty())?;
+    match raw.parse::<u16>() {
+        Ok(port) => Some(port),
+        Err(e) => {
+            log::error!("Invalid {} value '{}': {}. Falling back to default.", name, raw, e);
+            None
+        }
+    }
 }
