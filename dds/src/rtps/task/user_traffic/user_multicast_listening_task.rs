@@ -85,13 +85,14 @@ mod tests {
     use crate::rtps::entities::participant::Participant;
     use crate::rtps::task::user_traffic::user_multicast_listening_task::UserMulticastListeningTask;
     use crate::rtps::transport::socket::Socket;
+    use crate::rtps::transport::TransportConfig;
 
     #[test]
     #[ignore]
     fn test_user_multicast_receive() {
         let domain_id = 10;
-        let mut socket = Socket::new(domain_id); //domain_id 0
-                                                 // Create both sender and listener
+        let mut socket = Socket::new(domain_id, TransportConfig::default()); //domain_id 0
+                                                                             // Create both sender and listener
         socket.create_socket();
         let participant =
             Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ips()));
