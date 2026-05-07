@@ -25,6 +25,9 @@ This document describes the environment variables available in int2dds. All envi
 | `INT2DDS_THREAD_MONITORING_LOG_PATH` | `--int2dds-thread-monitoring-log-path` | Thread monitoring log path                 | ./thread_monitoring.log |
 | `INT2DDS_FUNCTION_TIMING`            | `--int2dds-function-timing`            | Enable function timing                     | false                   |
 | `INT2DDS_FUNCTION_TIMING_LOG_PATH`   | `--int2dds-function-timing-log-path`   | Function timing log path                   | ./function_timing.log   |
+| `INT2DDS_EXTERNAL_ADDRESS`           | `--int2dds-external-address`           | Public IPv4 advertised in SPDP (NAT/WAN)   | none                    |
+| `INT2DDS_META_PORT`                  | `--int2dds-meta-port`                  | Pinned metatraffic unicast port            | RTPS standard           |
+| `INT2DDS_USER_PORT`                  | `--int2dds-user-port`                  | Pinned user-traffic unicast port           | RTPS standard           |
 
 ---
 
@@ -449,6 +452,7 @@ Sets the initial peer list for SPDP unicast discovery. When set, SPDP messages a
 - The port must be the remote participant's **metatraffic unicast port** (discovery unicast port)
 - Port calculation: `7400 + (250 * domain_id) + 10 + (2 * participant_id)`
   - `participant_id` is assigned sequentially starting from 0 for each participant created on the same host
+- When the remote peer is behind NAT, point this at its `INT2DDS_EXTERNAL_ADDRESS:META_PORT` (see [NAT / WAN Traversal Settings](#nat--wan-traversal-settings))
 
 #### Configuration
 
@@ -467,6 +471,124 @@ export INT2DDS_INITIAL_PEERS="192.168.1.100:17410,192.168.1.100:17412"
 # CLI argument
 cargo run --example hello_world -- --int2dds-initial-peers "192.168.1.100:17410,192.168.1.100:17412"
 ```
+
+---
+
+## NAT / WAN Traversal Settings
+
+When two int2DDS hosts need to communicate across the public Internet (WAN)
+and at least one of them sits behind a NAT, the SPDP-advertised locator must
+carry the *publicly reachable* address rather than the local NIC IP. LAN-only
+deployments do not need any of these settings — the default behavior works.
+
+| Variable                    | Effect                                        |
+| --------------------------- | --------------------------------------------- |
+| `INT2DDS_EXTERNAL_ADDRESS`  | Replaces the IP advertised in SPDP locators   |
+| `INT2DDS_META_PORT`         | Pins the metatraffic unicast port             |
+| `INT2DDS_USER_PORT`         | Pins the user-traffic unicast port            |
+| `INT2DDS_INITIAL_PEERS`     | Sends SPDP via unicast to the listed peers    |
+
+Sockets still bind to the local NIC IP (or `0.0.0.0`); only the *advertised*
+address changes. When `INT2DDS_META_PORT` / `INT2DDS_USER_PORT` are set, the
+RTPS standard port formula is bypassed entirely and `domain_id` no longer
+affects the port — the value you provide is used directly for the first
+participant on the host.
+
+### INT2DDS_INITIAL_PEERS (required for WAN)
+
+SPDP defaults to multicast, which does not cross the public Internet. Each
+side must list the *other* side's `EXTERNAL_ADDRESS:META_PORT` so the initial
+discovery packet is sent via unicast. Without this, no participant data
+(DATA(p)) is ever exchanged. See the full description in
+[INT2DDS_INITIAL_PEERS](#int2dds_initial_peers).
+
+### INT2DDS_EXTERNAL_ADDRESS
+
+Public IPv4 advertised in unicast SPDP locators in place of every local NIC
+IP. When unset, every working NIC IP is advertised (default behavior).
+
+- Format: a single IPv4 address (e.g. `203.0.113.50`)
+- An invalid value is logged at error level and the default is used.
+
+### INT2DDS_META_PORT / INT2DDS_USER_PORT
+
+Pin the metatraffic and user-traffic unicast ports. When set, the RTPS
+standard formula `7400 + 250*domain_id + 10/11 + 2*pid` is replaced with:
+
+```
+metatraffic_port(pid) = INT2DDS_META_PORT + 2 * pid
+user_port(pid)        = INT2DDS_USER_PORT + 2 * pid
+```
+
+`pid` is the participant_id, assigned sequentially starting from 0 for each
+DomainParticipant created in the same process.
+
+#### Recommended: USER = META + 1
+
+Set `INT2DDS_USER_PORT = INT2DDS_META_PORT + 1`. This mirrors the RTPS
+standard offsets (`+10` for metatraffic, `+11` for user-traffic), so meta
+comes first and user immediately follows. With N participants on the host,
+every port used falls inside the single contiguous range:
+
+```
+[INT2DDS_META_PORT, INT2DDS_META_PORT + 2N - 1]
+```
+
+so a NAT router needs only **one range-forwarding rule**.
+
+### Example: AWS EC2 talking to a remote peer at `198.51.100.7`
+
+On the EC2 instance:
+
+```bash
+export INT2DDS_EXTERNAL_ADDRESS=3.34.X.Y
+export INT2DDS_META_PORT=55000
+export INT2DDS_USER_PORT=55001               # META + 1
+export INT2DDS_INITIAL_PEERS=198.51.100.7:55000   # remote peer's META port
+```
+
+Security Group inbound rule: allow UDP `55000-55001` (or `55000-55009` for
+up to 5 participants).
+
+### Example: Home/office router talking to a remote peer at `3.34.X.Y`
+
+```bash
+export INT2DDS_EXTERNAL_ADDRESS=203.0.113.50
+export INT2DDS_META_PORT=55000
+export INT2DDS_USER_PORT=55001
+export INT2DDS_INITIAL_PEERS=3.34.X.Y:55000       # remote peer's META port
+```
+
+NAT rule on the router (single host, single participant):
+
+```
+WAN 203.0.113.50:55000-55001 (UDP) -> LAN <private IP>:55000-55001
+```
+
+For N participants on the same host, widen the range to `55000` through
+`55000 + 2N - 1`.
+
+### Example: Multiple int2DDS processes on the same host
+
+Environment variables are per-OS-process. Two int2DDS programs on the same
+host read identical env values and would otherwise compete for the same port
+range. Give each program its own META/USER values:
+
+```bash
+# Process A
+export INT2DDS_META_PORT=55000
+export INT2DDS_USER_PORT=55001
+./my_app_a
+
+# Process B (same host, separate shell/script)
+export INT2DDS_META_PORT=56000
+export INT2DDS_USER_PORT=56001
+./my_app_b
+```
+
+Within a single process, multiple DomainParticipants are spaced automatically
+by `2 * pid`, so you only need to plan port ranges *between* processes.
+
 
 ---
 
