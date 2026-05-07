@@ -20,7 +20,7 @@
 //! ```
 
 use std::ffi::CStr;
-use std::os::raw::c_char;
+use std::os::raw::{c_char, c_void};
 
 use int2dds::{
     core::time::Duration,
@@ -1518,6 +1518,200 @@ pub unsafe extern "C" fn int2dds_participant_qos_set_user_data(
     INT2DDS_RET_OK
 }
 
+/// Add or overwrite a text property by name (PropertyQosPolicy).
+///
+/// # Safety
+/// `qos`, `name`, `value` must be valid non-null C strings.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_participant_qos_add_property(
+    qos: *mut Int2DdsParticipantQos,
+    name: *const c_char,
+    value: *const c_char,
+    propagate: bool,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(name);
+    check_null!(value);
+
+    let name = match CStr::from_ptr(name).to_str() {
+        Ok(s) => s.to_owned(),
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+    let value = match CStr::from_ptr(value).to_str() {
+        Ok(s) => s.to_owned(),
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    (*qos).inner.property.add_property(name, value, propagate);
+    INT2DDS_RET_OK
+}
+
+/// Add or overwrite a binary property by name (PropertyQosPolicy).
+///
+/// # Safety
+/// `qos`, `name` must be valid non-null. `data` may be null when `data_len == 0`.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_participant_qos_add_binary_property(
+    qos: *mut Int2DdsParticipantQos,
+    name: *const c_char,
+    data: *const u8,
+    data_len: usize,
+    propagate: bool,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(name);
+
+    let name = match CStr::from_ptr(name).to_str() {
+        Ok(s) => s.to_owned(),
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    let bytes = if data_len == 0 {
+        Vec::new()
+    } else {
+        check_null!(data);
+        std::slice::from_raw_parts(data, data_len).to_vec()
+    };
+
+    (*qos).inner.property.add_binary_property(name, bytes, propagate);
+    INT2DDS_RET_OK
+}
+
+/// Lookup a text property by name. The caller provides a `out_buf` of `out_cap`
+/// bytes; the value is written without a NUL terminator and `*out_len` is set to
+/// the number of bytes the value occupies. If the buffer is too small,
+/// `INT2DDS_RET_BUFFER_TOO_SMALL` is returned with `*out_len` populated so the
+/// caller can resize and retry.
+///
+/// # Safety
+/// `qos`, `name`, `out_len` must be non-null. `out_buf` may be null only when
+/// `out_cap == 0` (size-probe call).
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_participant_qos_find_property(
+    qos: *const Int2DdsParticipantQos,
+    name: *const c_char,
+    out_buf: *mut c_char,
+    out_cap: usize,
+    out_len: *mut usize,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(name);
+    check_null!(out_len);
+
+    let name = match CStr::from_ptr(name).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    match (*qos).inner.property.find_property(name) {
+        Some(value) => {
+            let bytes = value.as_bytes();
+            *out_len = bytes.len();
+            if bytes.len() > out_cap {
+                return INT2DDS_RET_BUFFER_TOO_SMALL;
+            }
+            if !bytes.is_empty() {
+                check_null!(out_buf);
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf as *mut u8, bytes.len());
+            }
+            INT2DDS_RET_OK
+        }
+        None => {
+            *out_len = 0;
+            INT2DDS_RET_NO_DATA
+        }
+    }
+}
+
+/// Remove a text property by name.
+///
+/// Returns `INT2DDS_RET_NO_DATA` when the name is not present.
+///
+/// # Safety
+/// `qos`, `name` must be valid non-null.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_participant_qos_remove_property(
+    qos: *mut Int2DdsParticipantQos,
+    name: *const c_char,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(name);
+
+    let name = match CStr::from_ptr(name).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    if (*qos).inner.property.remove_property(name).is_some() {
+        INT2DDS_RET_OK
+    } else {
+        INT2DDS_RET_NO_DATA
+    }
+}
+
+/// Iterate text properties whose name starts with `prefix`. The callback
+/// receives NUL-terminated `name` and `value` borrowed for the call duration —
+/// callers must not retain the pointers. Returning a non-zero value from the
+/// callback aborts iteration early.
+///
+/// # Safety
+/// `qos`, `prefix`, `cb` must be valid non-null. `user_data` is opaque.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_participant_qos_get_properties_with_prefix(
+    qos: *const Int2DdsParticipantQos,
+    prefix: *const c_char,
+    cb: Option<
+        unsafe extern "C" fn(
+            name: *const c_char,
+            value: *const c_char,
+            user_data: *mut c_void,
+        ) -> i32,
+    >,
+    user_data: *mut c_void,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(prefix);
+    let cb = match cb {
+        Some(f) => f,
+        None => return INT2DDS_RET_NULL_POINTER,
+    };
+
+    let prefix = match CStr::from_ptr(prefix).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    for property in (*qos).inner.property.get_properties_with_prefix(prefix) {
+        let name_c = match std::ffi::CString::new(property.name.as_bytes()) {
+            Ok(c) => c,
+            Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+        };
+        let value_c = match std::ffi::CString::new(property.value.as_bytes()) {
+            Ok(c) => c,
+            Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+        };
+        if cb(name_c.as_ptr(), value_c.as_ptr(), user_data) != 0 {
+            break;
+        }
+    }
+    INT2DDS_RET_OK
+}
+
+/// Convenience wrapper: set the IPv4 multicast TTL via the well-known
+/// `int2dds.transport.UDPv4.multicast_ttl` property.
+///
+/// # Safety
+/// `qos` must be a valid QoS handle.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_participant_qos_set_multicast_ttl(
+    qos: *mut Int2DdsParticipantQos,
+    ttl: u8,
+) -> Int2DdsRet {
+    check_null!(qos);
+    (*qos).inner.property.set_multicast_ttl(ttl);
+    INT2DDS_RET_OK
+}
+
 /// Destroy DomainParticipant QoS
 ///
 /// # Safety
@@ -1935,6 +2129,86 @@ mod tests {
 
             let ret = int2dds_publisher_qos_destroy(qos);
             assert_eq!(ret, INT2DDS_RET_OK);
+        }
+    }
+
+    #[test]
+    fn participant_property_qos_round_trip() {
+        unsafe extern "C" fn collect(
+            name: *const c_char,
+            value: *const c_char,
+            user_data: *mut c_void,
+        ) -> i32 {
+            let v = &mut *(user_data as *mut Vec<(String, String)>);
+            v.push((
+                CStr::from_ptr(name).to_string_lossy().into_owned(),
+                CStr::from_ptr(value).to_string_lossy().into_owned(),
+            ));
+            0
+        }
+
+        unsafe {
+            let mut qos: *mut Int2DdsParticipantQos = ptr::null_mut();
+            assert_eq!(int2dds_participant_qos_create_default(&mut qos as *mut _), INT2DDS_RET_OK);
+
+            assert_eq!(int2dds_participant_qos_set_multicast_ttl(qos, 32), INT2DDS_RET_OK);
+            assert_eq!(
+                (*qos).inner.property.find_property("int2dds.transport.UDPv4.multicast_ttl"),
+                Some("32")
+            );
+
+            let name = std::ffi::CString::new("vendor.us.int2.example").unwrap();
+            let value = std::ffi::CString::new("hello").unwrap();
+            assert_eq!(
+                int2dds_participant_qos_add_property(qos, name.as_ptr(), value.as_ptr(), true),
+                INT2DDS_RET_OK
+            );
+
+            let mut buf = [0u8; 16];
+            let mut out_len: usize = 0;
+            let ret = int2dds_participant_qos_find_property(
+                qos,
+                name.as_ptr(),
+                buf.as_mut_ptr() as *mut c_char,
+                buf.len(),
+                &mut out_len,
+            );
+            assert_eq!(ret, INT2DDS_RET_OK);
+            assert_eq!(&buf[..out_len], b"hello");
+
+            let mut probe_len: usize = 0;
+            let probe = int2dds_participant_qos_find_property(
+                qos,
+                name.as_ptr(),
+                ptr::null_mut(),
+                0,
+                &mut probe_len,
+            );
+            assert_eq!(probe, INT2DDS_RET_BUFFER_TOO_SMALL);
+            assert_eq!(probe_len, 5);
+
+            let prefix = std::ffi::CString::new("int2dds.transport.").unwrap();
+            let mut entries: Vec<(String, String)> = Vec::new();
+            assert_eq!(
+                int2dds_participant_qos_get_properties_with_prefix(
+                    qos,
+                    prefix.as_ptr(),
+                    Some(collect),
+                    &mut entries as *mut _ as *mut c_void,
+                ),
+                INT2DDS_RET_OK
+            );
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].0, "int2dds.transport.UDPv4.multicast_ttl");
+            assert_eq!(entries[0].1, "32");
+
+            assert_eq!(int2dds_participant_qos_remove_property(qos, name.as_ptr()), INT2DDS_RET_OK);
+            assert_eq!(
+                int2dds_participant_qos_remove_property(qos, name.as_ptr()),
+                INT2DDS_RET_NO_DATA
+            );
+
+            assert_eq!(int2dds_participant_qos_destroy(qos), INT2DDS_RET_OK);
         }
     }
 }

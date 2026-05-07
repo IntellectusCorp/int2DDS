@@ -277,13 +277,14 @@ mod tests {
     use crate::rtps::logic::spdp_logic::SpdpLogic;
     use crate::rtps::task::sending_handler::SendingHandler;
     use crate::rtps::transport::socket::Socket;
+    use crate::rtps::transport::TransportConfig;
     use crate::test_utils::unique_domain_id;
 
     #[test]
     #[ignore]
     fn test_send_spdp_multicast() {
         let domain_id = unique_domain_id() as u32;
-        let mut socket = Socket::new(domain_id);
+        let mut socket = Socket::new(domain_id, TransportConfig::default());
         socket.create_socket();
         let participant =
             Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ips()));

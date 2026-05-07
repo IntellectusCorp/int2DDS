@@ -11,6 +11,8 @@ examples/
 ├── hello_world/            # Basic pub-sub examples
 │   ├── hello_world_publisher.c
 │   ├── hello_world_subscriber.c
+│   ├── hello_world_with_ttl_publisher.c
+│   ├── hello_world_with_ttl_subscriber.c
 │   ├── waitset_publisher.c
 │   ├── waitset_subscriber.c
 │   ├── keyed_publisher.c
@@ -117,6 +119,27 @@ Terminal 2:
 ./hello_world_publisher --domain 10
 ./hello_world_subscriber --domain 10
 ```
+
+**Hello World with Multicast TTL**
+
+`hello_world_with_ttl_publisher` and `hello_world_with_ttl_subscriber` mirror
+the basic hello_world pair but apply `int2dds.transport.UDPv4.multicast_ttl`
+via `PropertyQosPolicy`. The `INT2DDS_MULTICAST_TTL` env var serves as a
+fallback when no QoS entry is set.
+
+```bash
+# Windows PowerShell
+$env:INT2DDS_MULTICAST_TTL = "32"
+./hello_world_with_ttl_subscriber
+./hello_world_with_ttl_publisher
+
+# Linux/macOS (Git Bash on Windows works the same)
+INT2DDS_MULTICAST_TTL=32 ./hello_world_with_ttl_subscriber
+INT2DDS_MULTICAST_TTL=32 ./hello_world_with_ttl_publisher
+```
+
+See [docs/guide/env.md](../../docs/guide/env.md#int2dds_multicast_ttl) for the
+full TTL configuration reference.
 
 ### Multiple Participant Example
 
