@@ -107,6 +107,7 @@ use crate::{
             entity::Entity as RtpsEntity, participant::Participant as RtpsParticipant,
             reader::Reader,
         },
+        transport::TransportConfig,
     },
     subscription::{
         qos::{DataReaderQos, SubscriberQos},
@@ -361,7 +362,8 @@ impl DomainParticipant {
         listener: Option<Arc<dyn DomainParticipantListener>>,
         mask: StatusMask,
     ) -> DdsResult<Self> {
-        let dcps_bridge = DcpsBridge::new(domain_id as u32);
+        let transport_config = TransportConfig::from_property(&qos.property);
+        let dcps_bridge = DcpsBridge::new(domain_id as u32, transport_config);
         let guid = dcps_bridge.get_participant().map_err(|e| DdsError::Error(e.message))?.guid();
 
         let mut participant = Self {

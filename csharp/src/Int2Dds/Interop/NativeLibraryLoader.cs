@@ -30,7 +30,7 @@ namespace Int2Dds.Interop
             {
                 try
                 {
-                    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                    if (IsWindows())
                     {
                         // On Windows, use SetDllDirectory or prepend to PATH
                         var currentPath = Environment.GetEnvironmentVariable("PATH") ?? "";
@@ -39,9 +39,7 @@ namespace Int2Dds.Interop
                     else
                     {
                         // On Linux/macOS, prepend to LD_LIBRARY_PATH / DYLD_LIBRARY_PATH
-                        var varName = RuntimeInformation.IsOSPlatform(OSPlatform.OSX)
-                            ? "DYLD_LIBRARY_PATH"
-                            : "LD_LIBRARY_PATH";
+                        var varName = IsMacOS() ? "DYLD_LIBRARY_PATH" : "LD_LIBRARY_PATH";
                         var currentPath = Environment.GetEnvironmentVariable(varName) ?? "";
                         Environment.SetEnvironmentVariable(varName, envPath + ":" + currentPath);
                     }
@@ -51,6 +49,33 @@ namespace Int2Dds.Interop
                     // Best effort - if we can't set the path, the user can set it manually
                 }
             }
+        }
+
+        // OS detection. RuntimeInformation/OSPlatform are .NET 4.7.1+ / netstandard2.0+ only;
+        // net45 falls back to the classic Environment.OSVersion.Platform check.
+        private static bool IsWindows()
+        {
+#if NET45
+            var p = Environment.OSVersion.Platform;
+            return p == PlatformID.Win32NT
+                || p == PlatformID.Win32S
+                || p == PlatformID.Win32Windows
+                || p == PlatformID.WinCE;
+#else
+            return RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+#endif
+        }
+
+        private static bool IsMacOS()
+        {
+#if NET45
+            // .NET Framework 4.5 reports macOS as PlatformID.Unix and lacks a clean
+            // detection path. The net45 deployment scenario for this library is embedded
+            // Windows; treat non-Windows as Linux-style to avoid a false DYLD path.
+            return false;
+#else
+            return RuntimeInformation.IsOSPlatform(OSPlatform.OSX);
+#endif
         }
     }
 }

@@ -43,6 +43,7 @@ namespace Int2Dds.Tests.Helpers
             return new HelloWorld(index, message);
         }
 
-        public byte[] SerializeKey() => Array.Empty<byte>();
+        private static readonly byte[] s_emptyKey = new byte[0];
+        public byte[] SerializeKey() => s_emptyKey;
     }
 }
