@@ -94,5 +94,5 @@ fn main() {
     println!("[Service] Press Ctrl+C to stop.");
 
     // Run the server and process incoming requests
-    server.r근ㄹㄹun_for(Duration::from_secs(60)).unwrap();
+    server.run().unwrap();
 }
