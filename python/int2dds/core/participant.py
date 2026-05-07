@@ -11,6 +11,7 @@ from int2dds.exceptions import check_ret
 
 if TYPE_CHECKING:
     from int2dds.core.publisher import Publisher
+    from int2dds.core.qos import ParticipantQos
     from int2dds.core.subscriber import Subscriber
     from int2dds.core.topic import ContentFilteredTopic, Topic
     from int2dds.types.base import DdsType
@@ -47,6 +48,29 @@ def _get_factory() -> _Factory:
     return _Factory()
 
 
+def _build_participant_qos_handle(qos: ParticipantQos) -> ffi.CData:
+    """Translate a Python :class:`ParticipantQos` into a native QoS handle.
+
+    Caller owns the returned handle and must destroy it with
+    ``lib.int2dds_participant_qos_destroy``.
+    """
+    qos_ptr = ffi.new("Int2DdsParticipantQos **")
+    check_ret(lib.int2dds_participant_qos_create_default(qos_ptr))
+    handle = qos_ptr[0]
+
+    if qos.user_data is not None and qos.user_data.data:
+        data_ptr = ffi.from_buffer(qos.user_data.data)
+        check_ret(lib.int2dds_participant_qos_set_user_data(
+            handle, data_ptr, len(qos.user_data.data)))
+
+    if qos.property is not None:
+        for name, value, propagate in qos.property.entries:
+            check_ret(lib.int2dds_participant_qos_add_property(
+                handle, name.encode(), value.encode(), propagate))
+
+    return handle
+
+
 class DomainParticipant:
     """
     DomainParticipant - the main entry point for DDS communication.
@@ -64,11 +88,17 @@ class DomainParticipant:
     Args:
         domain_id: The DDS domain to join (default 0)
         name: Optional name for the participant
+        qos: Optional ParticipantQos (e.g. to set multicast TTL via PropertyQosPolicy)
     """
 
     __slots__ = ("_handle", "_domain_id", "_closed")
 
-    def __init__(self, domain_id: int = 0, name: str | None = None) -> None:
+    def __init__(
+        self,
+        domain_id: int = 0,
+        name: str | None = None,
+        qos: ParticipantQos | None = None,
+    ) -> None:
         self._domain_id = domain_id
         self._closed = False
 
@@ -76,7 +106,16 @@ class DomainParticipant:
         name_c = ffi.new("char[]", name.encode()) if name else ffi.NULL
 
         participant_ptr = ffi.new("Int2DdsParticipant **")
-        check_ret(lib.int2dds_create_participant(factory.handle, name_c, domain_id, participant_ptr))
+        if qos is None:
+            check_ret(lib.int2dds_create_participant(
+                factory.handle, name_c, domain_id, participant_ptr))
+        else:
+            qos_handle = _build_participant_qos_handle(qos)
+            try:
+                check_ret(lib.int2dds_create_participant_with_qos(
+                    factory.handle, name_c, domain_id, qos_handle, participant_ptr))
+            finally:
+                lib.int2dds_participant_qos_destroy(qos_handle)
         self._handle = participant_ptr[0]
 
     @property
