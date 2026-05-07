@@ -240,7 +240,7 @@ fn apply_cli_args_to_env() {
                 Arg::new("int2dds_meta_port")
                     .long("int2dds-meta-port")
                     .value_name("PORT")
-                    .help("Pinned metatraffic unicast port; ignores domain_id when set")
+                    .help("Pinned metatraffic unicast port")
                     .num_args(1)
                     .value_hint(ValueHint::Other),
             )
@@ -248,7 +248,7 @@ fn apply_cli_args_to_env() {
                 Arg::new("int2dds_user_port")
                     .long("int2dds-user-port")
                     .value_name("PORT")
-                    .help("Pinned user-traffic unicast port; ignores domain_id when set")
+                    .help("Pinned user-traffic unicast port")
                     .num_args(1)
                     .value_hint(ValueHint::Other),
             )
