@@ -212,52 +212,74 @@ impl Participant {
         let user_port =
             PortManager::get_user_traffic_unicast_port(domain_id, participant_id) as u32;
 
+        // Env override replaces every NIC IP with a single advertised IP
+        if let Some(ext_ip) = crate::common::env::get_external_address() {
+            Self::add_locators_for_ip(
+                local_participant_proxy_data,
+                transport_type,
+                ext_ip,
+                metatraffic_port,
+                user_port,
+            );
+            return;
+        }
+
         for working_ip in working_ips {
             let Ok(ip) = Ipv4Addr::from_str(working_ip) else {
                 continue;
             };
+            Self::add_locators_for_ip(
+                local_participant_proxy_data,
+                transport_type,
+                ip,
+                metatraffic_port,
+                user_port,
+            );
+        }
+    }
 
-            match transport_type {
-                TransportType::UDP => {
-                    local_participant_proxy_data.add_metatraffic_unicast_locator(
-                        Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port),
-                    );
-                    local_participant_proxy_data.add_default_unicast_locator(
-                        Locator::from_ip_v4_addr_and_port(&ip, user_port),
-                    );
-                }
-                TransportType::TCP => {
-                    local_participant_proxy_data.add_metatraffic_unicast_locator(
-                        Locator::from_tcp_v4(ip, metatraffic_port),
-                    );
-                    local_participant_proxy_data
-                        .add_default_unicast_locator(Locator::from_tcp_v4(ip, user_port));
-                }
-                TransportType::Hybrid => {
-                    // Add both UDP and TCP locators
-                    local_participant_proxy_data.add_metatraffic_unicast_locator(
-                        Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port),
-                    );
-                    local_participant_proxy_data.add_default_unicast_locator(
-                        Locator::from_ip_v4_addr_and_port(&ip, user_port),
-                    );
-                    local_participant_proxy_data.add_metatraffic_unicast_locator(
-                        Locator::from_tcp_v4(ip, metatraffic_port),
-                    );
-                    local_participant_proxy_data
-                        .add_default_unicast_locator(Locator::from_tcp_v4(ip, user_port));
-                }
-                TransportType::SHM => {
-                    // metatraffic uses UDP. For default user-data, advertise both
-                    local_participant_proxy_data.add_metatraffic_unicast_locator(
-                        Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port),
-                    );
-                    local_participant_proxy_data
-                        .add_default_unicast_locator(Locator::from_shm(&ip, user_port));
-                    local_participant_proxy_data.add_default_unicast_locator(
-                        Locator::from_ip_v4_addr_and_port(&ip, user_port),
-                    );
-                }
+    fn add_locators_for_ip(
+        local_participant_proxy_data: &mut SPDPDiscoveredParticipantData,
+        transport_type: TransportType,
+        ip: Ipv4Addr,
+        metatraffic_port: u32,
+        user_port: u32,
+    ) {
+        match transport_type {
+            TransportType::UDP => {
+                local_participant_proxy_data.add_metatraffic_unicast_locator(
+                    Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port),
+                );
+                local_participant_proxy_data
+                    .add_default_unicast_locator(Locator::from_ip_v4_addr_and_port(&ip, user_port));
+            }
+            TransportType::TCP => {
+                local_participant_proxy_data
+                    .add_metatraffic_unicast_locator(Locator::from_tcp_v4(ip, metatraffic_port));
+                local_participant_proxy_data
+                    .add_default_unicast_locator(Locator::from_tcp_v4(ip, user_port));
+            }
+            TransportType::Hybrid => {
+                // Add both UDP and TCP locators
+                local_participant_proxy_data.add_metatraffic_unicast_locator(
+                    Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port),
+                );
+                local_participant_proxy_data
+                    .add_default_unicast_locator(Locator::from_ip_v4_addr_and_port(&ip, user_port));
+                local_participant_proxy_data
+                    .add_metatraffic_unicast_locator(Locator::from_tcp_v4(ip, metatraffic_port));
+                local_participant_proxy_data
+                    .add_default_unicast_locator(Locator::from_tcp_v4(ip, user_port));
+            }
+            TransportType::SHM => {
+                // metatraffic uses UDP. For default user-data, advertise both
+                local_participant_proxy_data.add_metatraffic_unicast_locator(
+                    Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port),
+                );
+                local_participant_proxy_data
+                    .add_default_unicast_locator(Locator::from_shm(&ip, user_port));
+                local_participant_proxy_data
+                    .add_default_unicast_locator(Locator::from_ip_v4_addr_and_port(&ip, user_port));
             }
         }
     }
