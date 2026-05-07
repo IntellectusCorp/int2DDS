@@ -16,6 +16,7 @@ use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::tcp::tcp_transport_plugin::TcpTransportPlugin;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 use crate::rtps::transport::udp::udp_sender::UdpSender;
+use crate::rtps::transport::TransportConfig;
 
 /// Channel buffer size for merged sources.
 const CHANNEL_BUFFER_SIZE: usize = 256;
@@ -54,8 +55,9 @@ impl HybridTransportPlugin {
         multicast_if_ip: String,
         working_ips: Vec<String>,
         guid_prefix: GuidPrefix,
+        transport_config: TransportConfig,
     ) -> io::Result<Self> {
-        let udp_sender = UdpSender::new(bind_ip.clone(), multicast_if_ip)?;
+        let udp_sender = UdpSender::new(bind_ip.clone(), multicast_if_ip, transport_config)?;
 
         // Multicast first (domain-wide port, no per-participant collision).
         let discovery_mc_port = PortManager::get_discovery_traffic_multicast_port(domain_id);

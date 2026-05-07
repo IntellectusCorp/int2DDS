@@ -63,7 +63,7 @@ impl TlsConfig {
     pub fn from_property(property: &PropertyQosPolicy) -> io::Result<Option<Self>> {
         let any_tls_key = [keys::CA_FILE, keys::CERT_FILE, keys::KEY_FILE]
             .iter()
-            .any(|k| property.get(k).is_some());
+            .any(|k| property.find_property(k).is_some());
         if !any_tls_key {
             return Ok(None);
         }
@@ -71,8 +71,8 @@ impl TlsConfig {
         let ca_file = require_property(property, keys::CA_FILE)?.into();
         let cert_file = require_property(property, keys::CERT_FILE)?.into();
         let key_file = require_property(property, keys::KEY_FILE)?.into();
-        let server_name = property.get(keys::SERVER_NAME).unwrap_or("localhost").to_string();
-        let verify_peer = property.get(keys::VERIFY_PEER).map(|v| v == "true").unwrap_or(false);
+        let server_name = property.find_property(keys::SERVER_NAME).unwrap_or("localhost").to_string();
+        let verify_peer = property.find_property(keys::VERIFY_PEER).map(|v| v == "true").unwrap_or(false);
 
         Ok(Some(Self { ca_file, cert_file, key_file, server_name, verify_peer }))
     }
@@ -152,7 +152,7 @@ impl TlsConfig {
 // ── helpers ────────────────────────────────────────────────────────────────
 
 fn require_property<'a>(p: &'a PropertyQosPolicy, key: &'static str) -> io::Result<&'a str> {
-    p.get(key).ok_or_else(|| {
+    p.find_property(key).ok_or_else(|| {
         transport_io_error(
             TransportErrorCode::TlsMissingProperty,
             format!("TLS property '{}' is required", key),
@@ -187,7 +187,7 @@ mod tests {
     fn pq(pairs: &[(&str, &str)]) -> PropertyQosPolicy {
         let mut p = PropertyQosPolicy::default();
         for (k, v) in pairs {
-            p.set(k, v);
+            p.add_property(*k, *v, false);
         }
         p
     }

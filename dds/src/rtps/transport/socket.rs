@@ -176,7 +176,7 @@ impl Socket {
 mod tests {
     use super::*;
     use crate::rtps::transport::plugin::TransportPluginFactory;
-    use crate::rtps::transport::TransportType;
+    use crate::rtps::transport::{TransportConfig, TransportType};
 
     #[test]
     fn test_create_socket() {
@@ -190,6 +190,7 @@ mod tests {
             socket.working_ips(),
             [0u8; 12],
             None,
+            TransportConfig::default(),
         )
         .unwrap();
         let transport: Arc<dyn TransportPlugin> = Arc::from(transport);

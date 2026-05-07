@@ -186,7 +186,7 @@ impl SpdpLogic {
             }
         }
 
-        participant.unmatch_with_remote_participant(terminated_participant_guid);
+        participant.unmatch_with_remote_participant(terminated_participant_guid)?;
 
         Ok(())
     }
@@ -222,7 +222,7 @@ mod tests {
     use crate::rtps::entities::participant::Participant;
     use crate::rtps::logic::spdp_logic::SpdpLogic;
     use crate::rtps::transport::plugin::TransportPluginFactory;
-    use crate::rtps::transport::{get_transport_type, socket::Socket};
+    use crate::rtps::transport::{get_transport_type, socket::Socket, TransportConfig};
     use crate::test_utils::unique_domain_id;
 
     #[test]
@@ -239,6 +239,7 @@ mod tests {
             socket.working_ips().iter().map(|ip| ip.to_string()).collect(),
             GUIDPREFIX_UNKNOWN,
             None,
+            TransportConfig::default(),
         )
         .expect("Failed to create transport plugin");
         socket.set_transport(Arc::from(transport));

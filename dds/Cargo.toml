@@ -86,6 +86,10 @@ name = "hello_world"
 path = "examples/hello_world/hello_world.rs"
 
 [[example]]
+name = "hello_world_with_ttl"
+path = "examples/hello_world/hello_world_with_ttl.rs"
+
+[[example]]
 name = "qos_profile_publisher"
 path = "examples/qos_profile/publisher.rs"
 

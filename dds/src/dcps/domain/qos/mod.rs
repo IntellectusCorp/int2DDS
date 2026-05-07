@@ -22,19 +22,11 @@ use crate::{
 
 pub const PARTICIPANT_QOS_DEFAULT: QosKind<DomainParticipantQos> = QosKind::Default;
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, ConstDefault, Clone, PartialEq, Eq)]
 pub struct DomainParticipantQos {
     pub user_data: UserDataQosPolicy,
     pub entity_factory: EntityFactoryQosPolicy,
     pub property: PropertyQosPolicy,
-}
-
-impl ConstDefault for DomainParticipantQos {
-    const DEFAULT: Self = Self {
-        user_data: UserDataQosPolicy::DEFAULT,
-        entity_factory: EntityFactoryQosPolicy::DEFAULT,
-        property: PropertyQosPolicy::DEFAULT,
-    };
 }
 
 impl Qos for DomainParticipantQos {

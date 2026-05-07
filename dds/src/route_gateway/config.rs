@@ -65,18 +65,19 @@ pub struct NodeConfig {
 impl NodeConfig {
     pub fn to_participant_qos(&self) -> DomainParticipantQos {
         let mut property = PropertyQosPolicy::default();
-        property.set("int2dds.transport", &self.transport);
+        property.add_property("int2dds.transport", &self.transport, false);
         if !self.initial_peers.is_empty() {
-            property.set("int2dds.initial_peers", &self.initial_peers.join(","));
+            property.add_property("int2dds.initial_peers", self.initial_peers.join(","), false);
         }
         if let Some(tls) = &self.tls {
-            property.set("int2dds.tls.ca_file", &tls.ca_file);
-            property.set("int2dds.tls.cert_file", &tls.cert_file);
-            property.set("int2dds.tls.key_file", &tls.key_file);
-            property.set("int2dds.tls.server_name", &tls.server_name);
-            property.set(
+            property.add_property("int2dds.tls.ca_file", &tls.ca_file, false);
+            property.add_property("int2dds.tls.cert_file", &tls.cert_file, false);
+            property.add_property("int2dds.tls.key_file", &tls.key_file, false);
+            property.add_property("int2dds.tls.server_name", &tls.server_name, false);
+            property.add_property(
                 "int2dds.tls.verify_peer",
                 if tls.verify_peer { "true" } else { "false" },
+                false,
             );
         }
         DomainParticipantQos { property, ..Default::default() }
@@ -272,9 +273,9 @@ mod tests {
             tls: None,
         };
         let qos = node.to_participant_qos();
-        assert_eq!(qos.property.get("int2dds.transport"), Some("tcp"));
-        assert_eq!(qos.property.get("int2dds.initial_peers"), Some("1.2.3.4:7400"));
-        assert!(qos.property.get("int2dds.tls.ca_file").is_none());
+        assert_eq!(qos.property.find_property("int2dds.transport"), Some("tcp"));
+        assert_eq!(qos.property.find_property("int2dds.initial_peers"), Some("1.2.3.4:7400"));
+        assert!(qos.property.find_property("int2dds.tls.ca_file").is_none());
     }
 
     #[test]
@@ -316,11 +317,11 @@ mod tests {
             }),
         };
         let qos = node.to_participant_qos();
-        assert_eq!(qos.property.get("int2dds.tls.ca_file"), Some("/etc/ssl/ca.pem"));
-        assert_eq!(qos.property.get("int2dds.tls.cert_file"), Some("/etc/ssl/cert.pem"));
-        assert_eq!(qos.property.get("int2dds.tls.key_file"), Some("/etc/ssl/key.pem"));
-        assert_eq!(qos.property.get("int2dds.tls.server_name"), Some("gw.example.com"));
-        assert_eq!(qos.property.get("int2dds.tls.verify_peer"), Some("true"));
+        assert_eq!(qos.property.find_property("int2dds.tls.ca_file"), Some("/etc/ssl/ca.pem"));
+        assert_eq!(qos.property.find_property("int2dds.tls.cert_file"), Some("/etc/ssl/cert.pem"));
+        assert_eq!(qos.property.find_property("int2dds.tls.key_file"), Some("/etc/ssl/key.pem"));
+        assert_eq!(qos.property.find_property("int2dds.tls.server_name"), Some("gw.example.com"));
+        assert_eq!(qos.property.find_property("int2dds.tls.verify_peer"), Some("true"));
     }
 
     #[test]

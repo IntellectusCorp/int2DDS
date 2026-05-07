@@ -63,6 +63,8 @@ pub fn init_from_env() {
     // - INT2DDS_TCP_TLS_KEY_PATH: TLS private key file path - Default: none (not yet implemented)
     // - INT2DDS_TCP_TLS_CA_PATH: TLS CA certificate file path - Default: none (not yet implemented)
 
+    // - INT2DDS_MULTICAST_TTL: Set IPv4 multicast TTL fallback (0-255) when no PropertyQosPolicy entry is present - Default: OS default (1)
+
     apply_cli_args_to_env();
 
     setting_log();
@@ -300,6 +302,14 @@ fn apply_cli_args_to_env() {
                     .num_args(1)
                     .value_hint(ValueHint::Other),
             )
+            .arg(
+                Arg::new("int2dds_multicast_ttl")
+                    .long("int2dds-multicast-ttl")
+                    .value_name("TTL")
+                    .help("IPv4 multicast TTL fallback (0-255) used when PropertyQosPolicy has no multicast_ttl entry")
+                    .num_args(1)
+                    .value_hint(ValueHint::Other),
+            )
     }
 
     let matches = build_command()
@@ -425,6 +435,10 @@ fn apply_cli_args_to_env() {
     if let Some(v) = matches.get_one::<String>("int2dds_initial_peers") {
         log::info!("Environment variable set: INT2DDS_INITIAL_PEERS = {}", v);
         unsafe { std::env::set_var("INT2DDS_INITIAL_PEERS", v) };
+    }
+    if let Some(v) = matches.get_one::<String>("int2dds_multicast_ttl") {
+        log::info!("Environment variable set: INT2DDS_MULTICAST_TTL = {}", v);
+        unsafe { std::env::set_var("INT2DDS_MULTICAST_TTL", v) };
     }
 }
 
@@ -931,4 +945,33 @@ pub fn get_tcp_tls_key_path() -> Option<String> {
 /// Get the TLS CA certificate file path (stub, not yet implemented)
 pub fn get_tcp_tls_ca_path() -> Option<String> {
     std::env::var("INT2DDS_TCP_TLS_CA_PATH").ok()
+}
+
+/// Read the IPv4 multicast TTL override from `INT2DDS_MULTICAST_TTL`.
+///
+/// Returns `None` when the variable is unset, empty, or fails to parse as `u8`
+/// (0-255). Used as a fallback by `TransportConfig::from_property` when the
+/// `PropertyQosPolicy` does not carry an explicit `int2dds.transport.UDPv4.multicast_ttl`
+/// entry, so explicit code- or profile-driven settings always win.
+pub fn get_multicast_ttl_override() -> Option<u8> {
+    let raw = std::env::var("INT2DDS_MULTICAST_TTL").ok().filter(|s| !s.is_empty())?;
+    match raw.parse::<u8>() {
+        Ok(ttl) => Some(ttl),
+        Err(e) => {
+            log::warn!(
+                "Invalid INT2DDS_MULTICAST_TTL value '{}': {}. Ignoring env override.",
+                raw,
+                e
+            );
+            None
+        }
+    }
+}
+
+/// Set the IPv4 multicast TTL fallback via the `INT2DDS_MULTICAST_TTL` environment
+/// variable. Must be called before the first `DomainParticipant` is created in
+/// order to take effect.
+pub fn set_multicast_ttl(ttl: u8) {
+    log::info!("Environment variable set: INT2DDS_MULTICAST_TTL = {}", ttl);
+    unsafe { std::env::set_var("INT2DDS_MULTICAST_TTL", ttl.to_string()) };
 }
