@@ -20,7 +20,7 @@ use int2dds::{
     infrastructure::status::StatusMask,
 };
 
-use super::{error::*, types::*};
+use super::{error::*, qos::Int2DdsParticipantQos, types::*};
 
 /// Create a DomainParticipant
 ///
@@ -93,6 +93,49 @@ pub unsafe extern "C" fn int2dds_create_participant_with_profile(
     let participant = ffi_try!(factory.create_participant_with_profile(
         domain_id,
         qos_path_str,
+        None,
+        StatusMask::default()
+    ));
+
+    let participant_handle = Box::new(Int2DdsParticipant { inner: Arc::new(participant) });
+
+    *participant_out = Box::into_raw(participant_handle);
+
+    INT2DDS_RET_OK
+}
+
+/// Create a DomainParticipant with the given QoS handle.
+///
+/// The handle is cloned internally; the caller still owns `qos` and must
+/// destroy it with `int2dds_participant_qos_destroy`.
+///
+/// # Safety
+/// - `name` must be a valid null-terminated C string or null
+/// - `qos` must be a valid QoS handle created by
+///   `int2dds_participant_qos_create_default`
+/// - `participant_out` must be a valid pointer to a null pointer
+/// - The returned participant must be freed with `int2dds_delete_participant`
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_create_participant_with_qos(
+    _factory: *const Int2DdsParticipantFactory,
+    name: *const std::os::raw::c_char,
+    domain_id: i32,
+    qos: *const Int2DdsParticipantQos,
+    participant_out: *mut *mut Int2DdsParticipant,
+) -> Int2DdsRet {
+    check_null!(qos);
+    check_null!(participant_out);
+
+    if !name.is_null() && CStr::from_ptr(name).to_str().is_err() {
+        return INT2DDS_RET_INVALID_ARGUMENT;
+    }
+
+    let factory = DomainParticipantFactory::get_instance();
+    let qos_ref = &*qos;
+
+    let participant = ffi_try!(factory.create_participant(
+        domain_id,
+        qos_ref.inner.clone(),
         None,
         StatusMask::default()
     ));
