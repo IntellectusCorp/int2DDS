@@ -140,22 +140,20 @@ macro_rules! impl_dds_entity_impl {
                     self.get_qos()?.check_immutable_change(&qos)?;
                 }
 
-                match self.qos.lock() {
-                    Ok(mut prev_qos) => {
-                        self.update_rtps_entity(&qos)?;
-                        *prev_qos = qos;
-                        Ok(())
-                    }
-                    Err(e) => Err(DdsError::Error(e.to_string())),
-                }
+                // Allow only one set_qos to run at a time so that the cache store
+                // and the following update_rtps_entity stay paired. Reads via
+                // get_qos() go through ArcSwap and never block on this lock.
+                let _update_guard = self.update_lock.lock()
+                    .map_err(|e| DdsError::Error(e.to_string()))?;
+
+                self.qos.store(std::sync::Arc::new(qos.clone()));
+                self.update_rtps_entity(&qos)?;
+                Ok(())
             }
 
             fn get_qos(&self) -> DdsResult<Self::Qos> {
                 self.is_deleted()?;
-                match self.qos.lock() {
-                    Ok(qos) => Ok(qos.clone()),
-                    Err(e) => Err(DdsError::Error(e.to_string())),
-                }
+                Ok((**self.qos.load()).clone())
             }
         }
 

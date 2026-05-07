@@ -10,7 +10,9 @@ use crate::rtps::transport::tcp::tcp_listener::TcpListener;
 use crate::rtps::transport::tcp::tcp_sender::TcpSender;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 use crate::rtps::transport::udp::udp_sender::UdpSender;
-use crate::rtps::transport::{get_transport_type, Transport, TransportSender, TransportType};
+use crate::rtps::transport::{
+    get_transport_type, Transport, TransportConfig, TransportSender, TransportType,
+};
 
 #[derive(Debug)]
 pub(crate) struct Socket {
@@ -42,6 +44,7 @@ pub(crate) struct Socket {
     domain_id: DomainId,
     participant_id: ParticipantId,
     working_ips: WorkingIps,
+    transport_config: TransportConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -53,7 +56,7 @@ pub(crate) struct WorkingIps {
 pub const MAX_EVENTS: usize = 512;
 
 impl Socket {
-    pub(crate) fn new(domain_id: DomainId) -> Self {
+    pub(crate) fn new(domain_id: DomainId, transport_config: TransportConfig) -> Self {
         let working_ip = Self::get_new_working_ips().unwrap_or_else(|e| {
             log::error!("[socket] Failed to determine working IP: {}. Using fallback 127.0.0.1", e);
             WorkingIps { ips: vec!["127.0.0.1".to_string()], from_feature: false }
@@ -87,6 +90,7 @@ impl Socket {
             domain_id,
             participant_id: 0,
             working_ips: working_ip,
+            transport_config,
         }
     }
 
@@ -108,6 +112,7 @@ impl Socket {
                 self.sender = match UdpSender::new(
                     self.get_sender_bind_addr(),
                     self.get_sender_multicast_if_addr(),
+                    self.transport_config,
                 ) {
                     Ok(udp_sender) => {
                         let transport_sender = TransportSender::Udp(udp_sender);
@@ -141,6 +146,7 @@ impl Socket {
                 self.sender = match UdpSender::new(
                     self.get_sender_bind_addr(),
                     self.get_sender_multicast_if_addr(),
+                    self.transport_config,
                 ) {
                     Ok(udp_sender) => {
                         let transport_sender = TransportSender::Udp(udp_sender);
@@ -170,6 +176,7 @@ impl Socket {
                 self.sender = match UdpSender::new(
                     self.get_sender_bind_addr(),
                     self.get_sender_multicast_if_addr(),
+                    self.transport_config,
                 ) {
                     Ok(udp_sender) => {
                         let transport_sender = TransportSender::Udp(udp_sender);
@@ -618,7 +625,7 @@ mod tests {
 
     #[test]
     fn test_create_listener() {
-        let mut socket = Socket::new(0);
+        let mut socket = Socket::new(0, TransportConfig::default());
         socket.create_listener();
         assert!(socket.discovery_multicast_listener().is_some());
         assert!(socket.discovery_unicast_listener().is_some());

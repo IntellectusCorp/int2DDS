@@ -45,6 +45,7 @@ pub enum Int2DdsQosPolicyId {
     DurabilityService = 22,
     DataRepresentation = 23,
     TypeConsistencyEnforcement = 24,
+    Property = 25,
 }
 
 impl From<QosPolicyId> for Int2DdsQosPolicyId {
@@ -75,6 +76,7 @@ impl From<QosPolicyId> for Int2DdsQosPolicyId {
             QosPolicyId::DurabilityService => Self::DurabilityService,
             QosPolicyId::DataRepresentation => Self::DataRepresentation,
             QosPolicyId::TypeConsistencyEnforcement => Self::TypeConsistencyEnforcement,
+            QosPolicyId::Property => Self::Property,
         }
     }
 }

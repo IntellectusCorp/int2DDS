@@ -383,6 +383,20 @@ int2dds_type_info_add_field_primitive()    // Add primitive field with flags
 int2dds_type_info_destroy()                // Destroy type info
 ```
 
+#### Environment Configuration
+```c
+int2dds_env_set_multicast_ttl(uint8_t ttl)              // Set INT2DDS_MULTICAST_TTL
+int2dds_env_get_multicast_ttl(uint8_t *out, bool *has)  // Read current override
+```
+
+These functions mutate the **process** environment and must be called before
+the first `int2dds_create_participant()`. The Rust core consults
+`INT2DDS_MULTICAST_TTL` only when no `int2dds.transport.UDPv4.multicast_ttl`
+PropertyQosPolicy entry is set, so explicit QoS always wins.
+
+See [docs/guide/env.md](../docs/guide/env.md) for the full environment
+variable reference.
+
 ### Error Codes
 
 All functions return `Int2DdsRet` (i32) with the following codes:
