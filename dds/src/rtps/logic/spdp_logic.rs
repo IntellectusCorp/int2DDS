@@ -241,7 +241,7 @@ impl SpdpLogic {
             }
         }
 
-        participant.unmatch_with_remote_participant(terminated_participant_guid);
+        participant.unmatch_with_remote_participant(terminated_participant_guid)?;
 
         Ok(())
     }

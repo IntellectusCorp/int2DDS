@@ -27,7 +27,7 @@ use crate::{
     rtps::{
         common::{
             entity_id::EntityId,
-            guid::Guid,
+            guid::{Guid, GuidPrefix},
             locator::Locator,
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
             sequence::SequenceNumber,
@@ -457,6 +457,66 @@ impl Writer for StatelessWriter {
         } else {
             Err(RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, ""))
         }
+    }
+
+    fn remove_matched_reader(&self, reader_guid: Guid) -> RtpsResult<bool> {
+        let mut locators = self
+            .reader_locators
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+        // One reader can register multiple ReaderLocators (per NIC); drop them all.
+        let len_before = locators.len();
+        locators.retain(|locator| {
+            locator.guid_prefix() != reader_guid.prefix()
+                || locator.remote_entity_id() != reader_guid.entity_id()
+        });
+
+        if locators.len() == len_before {
+            debug!("Reader locator with guid {:?} not found in matched readers", reader_guid);
+            return Ok(false);
+        }
+
+        drop(locators);
+        self.update_publication_matched_status(-1, InstanceHandle::from_guid(&reader_guid));
+
+        debug!("Removed reader locator with guid {:?} from matched readers", reader_guid);
+        Ok(true)
+    }
+
+    fn remove_all_matched_readers_with_prefix(&self, prefix: GuidPrefix) -> RtpsResult<usize> {
+        let mut reader_locator = self
+            .reader_locators
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+        debug!(
+            "Before unmatching with reader, this writer had {:?} matched readers",
+            reader_locator.len()
+        );
+
+        // Collect unique entity IDs to avoid duplicate callbacks (a reader can have
+        // multiple locators per NIC).
+        let unique_entity_ids: std::collections::HashSet<_> = reader_locator
+            .iter()
+            .filter(|locator| locator.guid_prefix() == prefix)
+            .map(|locator| locator.remote_entity_id())
+            .collect();
+
+        for entity_id in &unique_entity_ids {
+            self.update_publication_matched_status(
+                -1,
+                InstanceHandle::from_guid(&Guid::new(prefix, *entity_id)),
+            );
+        }
+
+        let len_before = reader_locator.len();
+        reader_locator.retain(|locator| locator.guid_prefix() != prefix);
+        let removed = len_before - reader_locator.len();
+
+        debug!("Removed all unmatched reader locators from participant: {:?}", prefix);
+        debug!("Current number of matched reader: {:?}", reader_locator.len());
+        Ok(removed)
     }
 }
 
