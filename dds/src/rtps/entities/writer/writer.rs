@@ -25,7 +25,7 @@ use crate::{
     infrastructure::qos_policy::LivelinessQosPolicy,
     rtps::{
         common::{
-            guid::Guid,
+            guid::{Guid, GuidPrefix},
             rtps_error_code::RtpsResult,
             sequence::SequenceNumber,
             time::{RtpsDuration, RtpsTime},
@@ -89,6 +89,11 @@ pub(crate) trait Writer: Entity + Endpoint + Debug + Any {
         &self,
         reader_guid: Guid,
     ) -> RtpsResult<SubscriptionBuiltinTopicData>;
+    fn remove_matched_reader(&self, reader_guid: Guid) -> RtpsResult<bool>;
+
+    // Remove all matched readers whose GUID prefix equals `prefix` (e.g. on remote
+    // participant termination). Returns the number of readers removed.
+    fn remove_all_matched_readers_with_prefix(&self, prefix: GuidPrefix) -> RtpsResult<usize>;
 
     //any
     fn as_any(&self) -> &dyn Any;
