@@ -1479,13 +1479,12 @@ fn generate_appendable_deserialize_impl(
                     &field_config,
                 );
             }
-            if field_config.parent {
-                return quote! {
-                    let #field_name = <#field_type as #crate_path::serialize::xcdr::XcdrDeserializeMembers>::deserialize_xcdr_members(deserializer)?;
-                };
-            }
 
-            if field_config.optional {
+            let read_step: proc_macro2::TokenStream = if field_config.parent {
+                quote! {
+                    let #field_name = <#field_type as #crate_path::serialize::xcdr::XcdrDeserializeMembers>::deserialize_xcdr_members(deserializer)?;
+                }
+            } else if field_config.optional {
                 quote! {
                     let #field_name = {
                         let has_value = deserializer.deserialize_bool()?;
@@ -1518,6 +1517,16 @@ fn generate_appendable_deserialize_impl(
                         #post_check
                     }
                 }
+            };
+
+            let field_name_str = field_name.to_string();
+            quote! {
+                if deserializer.position() >= __object_end {
+                    return Err(#crate_path::serialize::core::SerializationError::DeserializationError(
+                        format!("Missing field `{}`: DHEADER ({} bytes) exhausted", #field_name_str, __object_size)
+                    ));
+                }
+                #read_step
             }
         })
         .collect();
@@ -1527,9 +1536,10 @@ fn generate_appendable_deserialize_impl(
     quote! {
         impl #impl_generics #crate_path::serialize::xcdr::XcdrDeserialize for #name #ty_generics #where_clause {
             fn deserialize_xcdr(deserializer: &mut #crate_path::serialize::xcdr::XcdrDeserializer) -> #crate_path::serialize::xcdr::XcdrResult<Self> {
-                let (object_size, start_position) = deserializer.begin_struct()?;
+                let (__object_size, __start_position) = deserializer.begin_struct()?;
+                let __object_end = __start_position + __object_size as usize;
                 #(#field_deserializations)*
-                deserializer.end_struct(object_size, start_position)?;
+                deserializer.end_struct(__object_size, __start_position)?;
 
                 Ok(#name {
                     #(#field_names,)*

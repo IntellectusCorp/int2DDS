@@ -296,6 +296,10 @@ impl<'a> Xcdr2Deserializer<'a> {
         }
     }
 
+    pub fn position(&self) -> usize {
+        self.position
+    }
+
     /// Align position to boundary (accounting for removed header)
     /// XCDR2 limits maximum alignment to 4 bytes to reduce padding
     /// XCDR1 (CDR) allows full alignment (up to 8 bytes for double/i64/u64)
