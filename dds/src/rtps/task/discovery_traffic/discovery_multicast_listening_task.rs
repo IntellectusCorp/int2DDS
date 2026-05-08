@@ -10,6 +10,7 @@ use crate::rtps::messages::message_receiver::MessageReceiver;
 use crate::rtps::transport::plugin::MessageSource;
 use crate::rtps::transport::socket::MAX_EVENTS;
 use crate::serialize::pl_cdr::InlineQosParameters;
+use bytes::Bytes;
 use log::{debug, error, info, warn};
 use mio::{Events, Interest, Poll, Token};
 use std::net::SocketAddr;
@@ -34,6 +35,9 @@ impl DiscoveryMulticastListeningTask {
         match source {
             MessageSource::MioPoll { mut listener } => self.listen_mio_poll(&mut listener),
             MessageSource::Channel { rx } => self.listen_channel(&rx),
+            MessageSource::MioPollWithShm { .. } => {
+                unreachable!("MioPollWithShm is only used by user-data unicast")
+            }
         }
     }
 
@@ -84,7 +88,7 @@ impl DiscoveryMulticastListeningTask {
                             return Ok(());
                         }
 
-                        self.process_rtps_message(&buffer, from_addr);
+                        self.process_rtps_message(buffer, from_addr);
                     }
                 }
             }
@@ -106,7 +110,7 @@ impl DiscoveryMulticastListeningTask {
                         debug!("Detected global termination flag, discovery multicast channel listening terminating...");
                         return Ok(());
                     }
-                    self.process_rtps_message(&msg.data, msg.source);
+                    self.process_rtps_message(Bytes::from(msg.data), msg.source);
                 }
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                     let spdp_logic =
@@ -124,9 +128,9 @@ impl DiscoveryMulticastListeningTask {
         }
     }
 
-    fn process_rtps_message(&mut self, buffer: &[u8], from_addr: SocketAddr) {
+    fn process_rtps_message(&mut self, bytes: Bytes, from_addr: SocketAddr) {
         let mut message_receiver = MessageReceiver::new(self.guid_prefix, &from_addr);
-        let rtps_message = message_receiver.init(&bytes::Bytes::copy_from_slice(buffer));
+        let rtps_message = message_receiver.init(&bytes);
         if rtps_message.is_err() {
             error!("Failed to parse RTPS message from {:?}", from_addr);
             return;

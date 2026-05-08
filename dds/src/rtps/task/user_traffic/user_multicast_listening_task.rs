@@ -9,6 +9,7 @@ use crate::rtps::logic::user_logic::UserLogic;
 use crate::rtps::messages::message_receiver::MessageReceiver;
 use crate::rtps::transport::plugin::MessageSource;
 use crate::rtps::transport::socket::MAX_EVENTS;
+use bytes::Bytes;
 use log::{info, warn};
 use mio::{Events, Interest, Poll, Token};
 use std::net::SocketAddr;
@@ -33,6 +34,9 @@ impl UserMulticastListeningTask {
         match source {
             MessageSource::MioPoll { mut listener } => self.listen_mio_poll(&mut listener),
             MessageSource::Channel { rx } => self.listen_channel(&rx),
+            MessageSource::MioPollWithShm { .. } => {
+                unreachable!("MioPollWithShm is only used by user-data unicast")
+            }
         }
     }
 
@@ -59,7 +63,7 @@ impl UserMulticastListeningTask {
             for event in events.iter() {
                 if event.token() == token && event.is_readable() {
                     while let Some((buffer, from_addr)) = listener.get_message() {
-                        self.process_rtps_message(&buffer, from_addr);
+                        self.process_rtps_message(buffer, from_addr);
                     }
                 }
             }
@@ -75,7 +79,7 @@ impl UserMulticastListeningTask {
         loop {
             match rx.recv() {
                 Ok(msg) => {
-                    self.process_rtps_message(&msg.data, msg.source);
+                    self.process_rtps_message(Bytes::from(msg.data), msg.source);
                 }
                 Err(_) => {
                     info!("[UserMulticast] Channel disconnected, stopping listener");
@@ -85,9 +89,9 @@ impl UserMulticastListeningTask {
         }
     }
 
-    fn process_rtps_message(&mut self, buffer: &[u8], from_addr: SocketAddr) {
+    fn process_rtps_message(&mut self, bytes: Bytes, from_addr: SocketAddr) {
         let mut message_receiver = MessageReceiver::new(self.guid_prefix, &from_addr);
-        let rtps_message = message_receiver.init(&bytes::Bytes::copy_from_slice(buffer));
+        let rtps_message = message_receiver.init(&bytes);
         if rtps_message.is_err() {
             log::error!("Failed to parse RTPS message");
             return;

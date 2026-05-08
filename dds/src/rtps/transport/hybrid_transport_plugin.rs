@@ -158,8 +158,16 @@ impl HybridTransportPlugin {
         })
     }
 
+    /// Expand a single UDP port into per-NIC IPv4 locators using the
+    /// plugin's `working_ips`. `INT2DDS_EXTERNAL_ADDRESS` (when set) replaces
+    /// every NIC IP with a single advertised IP — matches develop's
+    /// `init_locators` behavior so the env override remains effective.
     fn udp_locators(&self, port: u32) -> Vec<Locator> {
         let mut locators = Vec::new();
+        if let Some(ext_ip) = crate::common::env::get_external_address() {
+            locators.push(Locator::from_ip_v4_addr_and_port(&ext_ip, port));
+            return locators;
+        }
         for ip_str in &self.working_ips {
             if let Ok(ip) = ip_str.parse::<Ipv4Addr>() {
                 locators.push(Locator::from_ip_v4_addr_and_port(&ip, port));
@@ -173,8 +181,7 @@ impl TransportPlugin for HybridTransportPlugin {
     fn send(&self, data: &[u8], target: &SendTarget) -> io::Result<()> {
         match target {
             SendTarget::SPDPDiscovery { initial_peers } => {
-                // Discovery multicast always uses UDP.
-                self.udp_sender.send_multicast(self.domain_id, data)?;
+                let _ = self.udp_sender.send_multicast(self.domain_id, data);
                 // initial_peers fan-out: Hybrid reaches them over both UDP and
                 // TCP so peers reachable on either transport get the SPDP.
                 for peer_addr in *initial_peers {
@@ -186,23 +193,33 @@ impl TransportPlugin for HybridTransportPlugin {
             SendTarget::SEDPDiscovery(locator) => {
                 if locator.is_tcp() {
                     self.tcp_plugin.send(data, target)
-                } else {
+                } else if locator.is_udp() {
                     let ip = locator.to_ip_v4_addr();
                     let port = locator.port() as u16;
                     let addr = SocketAddr::new(IpAddr::V4(ip), port);
                     self.udp_sender.send(&addr, data)?;
                     Ok(())
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        locator.kind_name(),
+                    ))
                 }
             }
             SendTarget::UserData(locator) => {
                 if locator.is_tcp() {
                     self.tcp_plugin.send(data, target)
-                } else {
+                } else if locator.is_udp() {
                     let ip = locator.to_ip_v4_addr();
                     let port = locator.port() as u16;
                     let addr = SocketAddr::new(IpAddr::V4(ip), port);
                     self.udp_sender.send(&addr, data)?;
                     Ok(())
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        locator.kind_name(),
+                    ))
                 }
             }
         }
@@ -214,10 +231,9 @@ impl TransportPlugin for HybridTransportPlugin {
     }
 
     fn advertised_metatraffic_unicast_locators(&self) -> Vec<Locator> {
-        let udp_port = PortManager::get_discovery_traffic_unicast_port(
-            self.domain_id,
-            self.participant_id,
-        ) as u32;
+        let udp_port =
+            PortManager::get_discovery_traffic_unicast_port(self.domain_id, self.participant_id)
+                as u32;
         let mut locators = self.udp_locators(udp_port);
         // Hybrid advertises both UDP and TCP endpoints so peers on either
         // transport can reach us.

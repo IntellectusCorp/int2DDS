@@ -1338,13 +1338,18 @@ impl UserLogic {
         let locators: Vec<&Locator> = pick(Locator::is_shm)
             .or_else(|| pick(Locator::is_tcp))
             .or_else(|| pick(Locator::is_udp))
-            .unwrap_or_default();
+            .unwrap_or(locators);
 
         let mut is_sent = false;
         let mut last_error = None;
         for locator in locators {
             match self.transport.send(buffer, &SendTarget::UserData(locator)) {
                 Ok(_) => is_sent = true,
+                Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
+                    let kind = e.to_string();
+                    warn!("[UserLogic] {} locator found but no {} sender available", kind, kind);
+                    continue;
+                }
                 Err(e) => {
                     warn!("[UserLogic] Failed to send to locator {:?}: {:?}", locator, e);
                     match e.kind() {
@@ -1787,11 +1792,27 @@ impl UnicastMessageProcessor for UserLogic {
                                                     .or_else(|| try_kind(Locator::is_udp))
                                                     .unwrap_or(locs);
                                                 for locator in chosen {
-                                                    let _ = transport_clone
+                                                    match transport_clone
                                                         .send(&buffer, &SendTarget::UserData(locator))
-                                                        .map_err(|e| {
-                                                            warn!("[UserLogic] Failed to send NACK_FRAG: {:?}", e);
-                                                        });
+                                                    {
+                                                        Ok(_) => {}
+                                                        Err(e)
+                                                            if e.kind()
+                                                                == std::io::ErrorKind::Unsupported =>
+                                                        {
+                                                            let kind = e.to_string();
+                                                            warn!(
+                                                                "[UserLogic] {} locator found but no {} sender available",
+                                                                kind, kind
+                                                            );
+                                                        }
+                                                        Err(e) => {
+                                                            warn!(
+                                                                "[UserLogic] Failed to send NACK_FRAG: {:?}",
+                                                                e
+                                                            );
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }

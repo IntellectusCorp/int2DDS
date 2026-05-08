@@ -6,6 +6,7 @@ use std::net::SocketAddr;
 
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::locator::Locator;
+use crate::rtps::transport::shm::shm_listener::ShmListener;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 
 use super::TransportType;
@@ -58,9 +59,17 @@ pub(crate) enum MessageSource {
     /// Used when a single listener owns the receive path (e.g., UDP-only mode).
     MioPoll { listener: UdpListener },
 
+    /// Direct mio polling for a UDP listener combined with direct ring-buffer
+    /// polling for an SHM listener in the same loop.
+    /// SHM has no file descriptor and cannot register with mio, so it is polled
+    /// alongside UDP (zero-timeout poll + brief CPU yield when both are idle).
+    /// Used by SHM mode for user data unicast where UDP fallback and SHM are
+    /// merged at the listening-task level (no inter-thread channel).
+    MioPollWithShm { listener: UdpListener, shm: ShmListener },
+
     /// Channel-based receiving.
-    /// Used when multiple sources must be merged (Hybrid, SHM)
-    /// or when the transport internally demuxes (TCP mux listener).
+    /// Used when the transport internally demultiplexes a single byte stream
+    /// into per-logical-port streams (TCP single-port mux).
     Channel { rx: crossbeam_channel::Receiver<IncomingMessage> },
 }
 

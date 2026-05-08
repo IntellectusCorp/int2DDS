@@ -754,42 +754,19 @@ pub fn set_discovery_mode(mode: DiscoveryMode) {
 ///     println!("Initial peer: {}", peer);
 /// }
 /// ```
+
 /// Parse a comma-separated initial peers string into `SocketAddr`s.
-///
-/// Entries may be `"ip:port"` or bare `"ip"` (port defaults to the TCP physical
-/// port for domain 0 when running over TCP/Hybrid, or the UDP discovery multicast
-/// port otherwise).
 pub fn parse_initial_peers(peers_str: &str) -> Vec<std::net::SocketAddr> {
-    use crate::rtps::transport::get_transport_type;
-    use crate::rtps::transport::port_manager::PortManager;
-    use crate::rtps::transport::TransportType;
-
-    let default_port = match get_transport_type() {
-        TransportType::TCP | TransportType::Hybrid => PortManager::get_tcp_physical_port(0),
-        _ => PortManager::get_discovery_traffic_multicast_port(0),
-    };
-
     peers_str
         .split(',')
         .filter_map(|s| {
             let trimmed = s.trim();
             match trimmed.parse::<std::net::SocketAddr>() {
                 Ok(addr) => Some(addr),
-                Err(_) => match trimmed.parse::<std::net::IpAddr>() {
-                    Ok(ip) => {
-                        let addr = std::net::SocketAddr::new(ip, default_port);
-                        log::info!(
-                            "[ENV] Initial peer '{}' has no port, using default: {}",
-                            trimmed,
-                            addr
-                        );
-                        Some(addr)
-                    }
-                    Err(e) => {
-                        log::warn!("Failed to parse initial peer '{}': {}", trimmed, e);
-                        None
-                    }
-                },
+                Err(e) => {
+                    log::warn!("Failed to parse initial peer '{}': {}", trimmed, e);
+                    None
+                }
             }
         })
         .collect()

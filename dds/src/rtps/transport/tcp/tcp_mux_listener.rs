@@ -311,10 +311,8 @@ impl MuxListenerShared {
                     self.domain_id,
                     self.participant_id,
                 );
-                let my_user = PortManager::get_user_traffic_unicast_port(
-                    self.domain_id,
-                    self.participant_id,
-                );
+                let my_user =
+                    PortManager::get_user_traffic_unicast_port(self.domain_id, self.participant_id);
 
                 if logical_port != my_disc && logical_port != my_user {
                     warn!(
@@ -408,15 +406,17 @@ impl MuxListenerShared {
 
         // Resolve peer group — prefer the guid from PORT_RESERVE time so the
         // data connection lands in the same group as the control connection.
-        let group_guid = self.cookie_to_guid.remove(cookie).map(|(_, g)| g).or_else(|| {
-            self.connections.get(&conn_id).map(|c| addr_to_guid(c.remote_addr))
-        });
+        let group_guid = self
+            .cookie_to_guid
+            .remove(cookie)
+            .map(|(_, g)| g)
+            .or_else(|| self.connections.get(&conn_id).map(|c| addr_to_guid(c.remote_addr)));
 
         if let Some(guid) = group_guid {
             let mut pc = self.peer_connections.lock().expect("peer_connections lock");
             let group = pc.entry(guid).or_insert_with(PeerConnectionGroup::new);
 
-            if PortManager::is_discovery_unicast_port(self.domain_id, logical_port) {
+            if PortManager::is_discovery_unicast_port_logically(self.domain_id, logical_port) {
                 group.discovery_conn = Some(conn_id);
             } else {
                 group.user_data_conn = Some(conn_id);
@@ -444,15 +444,14 @@ impl MuxListenerShared {
     }
 
     fn route_rtps_data(&self, conn_id: ConnectionId, payload: &[u8], remote_addr: SocketAddr) {
-        let logical_port =
-            match self.connections.get(&conn_id).and_then(|c| c.bound_logical_port) {
-                Some(p) => p,
-                None => return,
-            };
+        let logical_port = match self.connections.get(&conn_id).and_then(|c| c.bound_logical_port) {
+            Some(p) => p,
+            None => return,
+        };
 
         let msg = IncomingMessage { data: payload.to_vec(), source: remote_addr };
 
-        if PortManager::is_discovery_unicast_port(self.domain_id, logical_port) {
+        if PortManager::is_discovery_unicast_port_logically(self.domain_id, logical_port) {
             if let Err(e) = self.discovery_tx.try_send(msg) {
                 warn!(
                     "TcpMuxListener [{}]: Failed to route discovery: {:?}",
@@ -460,7 +459,7 @@ impl MuxListenerShared {
                     e
                 );
             }
-        } else if PortManager::is_user_unicast_port(self.domain_id, logical_port) {
+        } else if PortManager::is_user_unicast_port_logically(self.domain_id, logical_port) {
             if let Err(e) = self.user_data_tx.try_send(msg) {
                 warn!(
                     "TcpMuxListener [{}]: Failed to route user data: {:?}",
@@ -590,7 +589,7 @@ impl TcpMuxListener {
 
     pub(crate) fn close(&mut self) {
         self.listener.take(); // Drop the listener socket.
-        // Signal all active read threads to exit before clearing the map.
+                              // Signal all active read threads to exit before clearing the map.
         for entry in self.shared.connections.iter() {
             entry.shutdown.store(true, Ordering::SeqCst);
         }
