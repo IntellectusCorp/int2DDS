@@ -43,7 +43,16 @@ pub fn init_from_env() {
     // - INT2DDS_UDP_SOCKET_BUFFER: Set UDP socket buffer size (bytes) - Default: OS default
     // - INT2DDS_SHM_BUFFER_SIZE: Set shared memory buffer size (bytes) - Default: 1048576 (1MB)
 
+    // - INT2DDS_INITIAL_PEERS: Set initial peers for SPDP unicast discovery (comma-separated, e.g., "192.168.1.10:7400,192.168.1.11:7400") - Default: none
+
+    // - INT2DDS_MULTICAST_TTL: Set IPv4 multicast TTL fallback (0-255) when no PropertyQosPolicy entry is present - Default: OS default (1)
+
+    // - INT2DDS_EXTERNAL_ADDRESS: Public IPv4 advertised in SPDP for NAT/WAN traversal. Sockets still bind to local NICs.
+    // - INT2DDS_META_PORT: Pinned metatraffic unicast port; ignores domain_id when set, applies +2*pid offset for multi-participant.
+    // - INT2DDS_USER_PORT: Pinned user-traffic unicast port; ignores domain_id when set, applies +2*pid offset for multi-participant.
+
     // - INT2DDS_TCP_PORT: set TCP listening port - Default: 7400 + 250 * domain_id
+    // - INT2DDS_TCP_PUBLIC_ADDR: Set public address for WAN/NAT traversal (e.g., "203.0.113.5:7400") - Default: none (LAN mode)
     // - INT2DDS_TCP_CONNECT_TIMEOUT: Set TCP connection timeout (milliseconds) - Default: 5000
     // - INT2DDS_TCP_WRITE_TIMEOUT: Set TCP write timeout (milliseconds) - Default: 10000
     // - INT2DDS_TCP_NODELAY: Enable TCP Nodelay (disable Nagle algorithm) (true, false) - Default: true
@@ -54,21 +63,10 @@ pub fn init_from_env() {
     // - INT2DDS_TCP_INCOMING_IDLE_TIMEOUT: Set idle timeout for incoming TCP connections (milliseconds) - Default: 60000
     // - INT2DDS_TCP_SO_RCVBUF: Force SO_RCVBUF on every TCP socket (bytes). Used by tests to induce backpressure - Default: OS-managed
     // - INT2DDS_TCP_SO_SNDBUF: Force SO_SNDBUF on every TCP socket (bytes). Used by tests to induce backpressure - Default: OS-managed
-
-    // - INT2DDS_INITIAL_PEERS: Set initial peers for SPDP unicast discovery (comma-separated, e.g., "192.168.1.10:7400,192.168.1.11:7400") - Default: none
-
-    // - INT2DDS_TCP_PUBLIC_ADDR: Set public address for WAN/NAT traversal (e.g., "203.0.113.5:7400") - Default: none (LAN mode)
     // - INT2DDS_TCP_TLS_ENABLED: Enable TLS for TCP connections (true, false) - Default: false (not yet implemented)
     // - INT2DDS_TCP_TLS_CERT_PATH: TLS certificate file path - Default: none (not yet implemented)
     // - INT2DDS_TCP_TLS_KEY_PATH: TLS private key file path - Default: none (not yet implemented)
     // - INT2DDS_TCP_TLS_CA_PATH: TLS CA certificate file path - Default: none (not yet implemented)
-
-    // - INT2DDS_MULTICAST_TTL: Set IPv4 multicast TTL fallback (0-255) when no PropertyQosPolicy entry is present - Default: OS default (1)
-
-    // - INT2DDS_EXTERNAL_ADDRESS: Public IPv4 advertised in SPDP for NAT/WAN traversal. Sockets still bind to local NICs.
-    // - INT2DDS_META_PORT: Pinned metatraffic unicast port; ignores domain_id when set, applies +2*pid offset for multi-participant.
-    // - INT2DDS_USER_PORT: Pinned user-traffic unicast port; ignores domain_id when set, applies +2*pid offset for multi-participant.
-
     apply_cli_args_to_env();
 
     setting_log();
@@ -213,6 +211,46 @@ fn apply_cli_args_to_env() {
                     .value_hint(ValueHint::Other),
             )
             .arg(
+                Arg::new("int2dds_initial_peers")
+                    .long("int2dds-initial-peers")
+                    .value_name("PEERS")
+                    .help("Initial peers for SPDP unicast discovery (comma-separated, e.g., \"192.168.1.10:7400,192.168.1.11:7400\")")
+                    .num_args(1)
+                    .value_hint(ValueHint::Other),
+            )
+            .arg(
+                Arg::new("int2dds_external_address")
+                    .long("int2dds-external-address")
+                    .value_name("IPV4")
+                    .help("Public IPv4 advertised in SPDP for NAT/WAN traversal (bind unaffected)")
+                    .num_args(1)
+                    .value_hint(ValueHint::Other),
+            )
+            .arg(
+                Arg::new("int2dds_meta_port")
+                    .long("int2dds-meta-port")
+                    .value_name("PORT")
+                    .help("Pinned metatraffic unicast port")
+                    .num_args(1)
+                    .value_hint(ValueHint::Other),
+            )
+            .arg(
+                Arg::new("int2dds_user_port")
+                    .long("int2dds-user-port")
+                    .value_name("PORT")
+                    .help("Pinned user-traffic unicast port")
+                    .num_args(1)
+                    .value_hint(ValueHint::Other),
+            )
+            .arg(
+                Arg::new("int2dds_multicast_ttl")
+                    .long("int2dds-multicast-ttl")
+                    .value_name("TTL")
+                    .help("IPv4 multicast TTL fallback (0-255) used when PropertyQosPolicy has no multicast_ttl entry")
+                    .num_args(1)
+                    .value_hint(ValueHint::Other),
+            )
+                 .arg(
                 Arg::new("int2dds_tcp_port")
                     .long("int2dds-tcp-port")
                     .value_name("PORT")
@@ -295,46 +333,6 @@ fn apply_cli_args_to_env() {
                     .long("int2dds-tcp-so-sndbuf")
                     .value_name("BYTES")
                     .help("Force SO_SNDBUF on every TCP socket (bytes). Used by tests to induce backpressure")
-                    .num_args(1)
-                    .value_hint(ValueHint::Other),
-            )
-            .arg(
-                Arg::new("int2dds_initial_peers")
-                    .long("int2dds-initial-peers")
-                    .value_name("PEERS")
-                    .help("Initial peers for SPDP unicast discovery (comma-separated, e.g., \"192.168.1.10:7400,192.168.1.11:7400\")")
-                    .num_args(1)
-                    .value_hint(ValueHint::Other),
-            )
-            .arg(
-                Arg::new("int2dds_external_address")
-                    .long("int2dds-external-address")
-                    .value_name("IPV4")
-                    .help("Public IPv4 advertised in SPDP for NAT/WAN traversal (bind unaffected)")
-                    .num_args(1)
-                    .value_hint(ValueHint::Other),
-            )
-            .arg(
-                Arg::new("int2dds_meta_port")
-                    .long("int2dds-meta-port")
-                    .value_name("PORT")
-                    .help("Pinned metatraffic unicast port")
-                    .num_args(1)
-                    .value_hint(ValueHint::Other),
-            )
-            .arg(
-                Arg::new("int2dds_user_port")
-                    .long("int2dds-user-port")
-                    .value_name("PORT")
-                    .help("Pinned user-traffic unicast port")
-                    .num_args(1)
-                    .value_hint(ValueHint::Other),
-            )
-            .arg(
-                Arg::new("int2dds_multicast_ttl")
-                    .long("int2dds-multicast-ttl")
-                    .value_name("TTL")
-                    .help("IPv4 multicast TTL fallback (0-255) used when PropertyQosPolicy has no multicast_ttl entry")
                     .num_args(1)
                     .value_hint(ValueHint::Other),
             )
@@ -773,10 +771,7 @@ pub fn parse_initial_peers(peers_str: &str) -> Vec<std::net::SocketAddr> {
 }
 
 pub fn get_initial_peers() -> Vec<std::net::SocketAddr> {
-    std::env::var("INT2DDS_INITIAL_PEERS")
-        .ok()
-        .map(|s| parse_initial_peers(&s))
-        .unwrap_or_default()
+    std::env::var("INT2DDS_INITIAL_PEERS").ok().map(|s| parse_initial_peers(&s)).unwrap_or_default()
 }
 
 /// Set initial peers via environment variable
