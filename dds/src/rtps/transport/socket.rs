@@ -65,9 +65,11 @@ impl Socket {
         let mut ips: Vec<String> = Vec::new();
         let mut from_feature = false;
 
+        // Check if user specified which network to use via env variable
         let is_network_specified = get_network_interface().is_some() || get_network_ip().is_some();
 
         if let Ok(Some(ip)) = crate::common::int2dds_feature_ffi::get_working_ip() {
+            // int2DDS-feature enabled
             if is_network_specified {
                 log::debug!("Using int2DDS-feature specified IP: {}", ip);
                 ips.push(ip);
@@ -79,12 +81,14 @@ impl Socket {
                 );
             }
         } else if is_network_specified {
+            // These variables can only be used with int2DDS-feature
             log::warn!(
                 "Env variable INT2DDS_NETWORK_INTERFACE or INT2DDS_NETWORK_IP is set \
                  but int2DDS-feature is not enabled. Ignoring the value"
             );
         }
 
+        // If no specific IP was selected, use all available NICs
         if ips.is_empty() {
             if let Ok(ifaces) = get_if_addrs::get_if_addrs() {
                 for iface in ifaces {
@@ -100,6 +104,8 @@ impl Socket {
         let should_add_loopback =
             !from_feature && !ips.contains(&"127.0.0.1".to_string()) && use_loopback;
 
+        // If no NIC available or loopback is set to use, add localhost IP to the list
+        // also skipped when from_feature — feature-specified NIC takes full control
         if ips.is_empty() || should_add_loopback {
             ips.push("127.0.0.1".to_string());
         }
@@ -118,9 +124,11 @@ impl Socket {
     }
 
     pub(crate) fn get_sender_bind_addr(&self) -> String {
+        // From int2DDS-feature: bind to the feature-specified IP directly
         if self.working_ips.from_feature {
             return self.working_ips.ips[0].clone();
         }
+        // This happens when no physical NIC exists
         let only_loopback =
             self.working_ips.ips.len() == 1 && self.working_ips.ips[0] == "127.0.0.1";
         if only_loopback {
@@ -134,7 +142,12 @@ impl Socket {
         }
     }
 
+    // TODO: Ideally, create one multicast sender per NIC with set_multicast_if_v4(ip) + bind(ip:0)
+    // to send multicast out of all NICs simultaneously.
+    // 0.0.0.0 relies on default route, which doesn't exist in gateway-less environments,
+    // and multicast addresses (e.g. 239.x) don't match any subnet route.
     pub(crate) fn get_sender_multicast_if_addr(&self) -> String {
+        // From int2DDS-feature: use the feature-specified IP directly
         if self.working_ips.from_feature {
             log::debug!(
                 "Using int2DDS-feature specified multicast interface IP: {}",
@@ -143,6 +156,8 @@ impl Socket {
             return self.working_ips.ips[0].clone();
         }
 
+        // Probe the OS routing table by connecting to a public address.
+        // Resolve the default outgoing IP via 0.0.0.0 bind & connect
         if let Ok(addr) = std::net::UdpSocket::bind("0.0.0.0:0")
             .and_then(|s| s.connect("8.8.8.8:80").map(|_| s))
             .and_then(|s| s.local_addr())

@@ -64,7 +64,7 @@ impl PortManager {
     /// Check if a logical port is a discovery unicast port for the given domain.
     /// Discovery ports: PB + DG*domain + D1 + PG*participant (D1=10, PG=2)
     /// → offsets from base are 10, 12, 14, ... (even offsets >= D1)
-    pub(crate) fn is_discovery_unicast_port(domain_id: u32, logical_port: u16) -> bool {
+    pub(crate) fn is_discovery_unicast_port_logically(domain_id: u32, logical_port: u16) -> bool {
         let base = Self::get_tcp_physical_port(domain_id) as u32;
         let port = logical_port as u32;
         if port < base + Self::D1_ADDITIONAL_OFFSET {
@@ -76,7 +76,7 @@ impl PortManager {
     /// Check if a logical port is a user data unicast port for the given domain.
     /// User ports: PB + DG*domain + D3 + PG*participant (D3=11, PG=2)
     /// → offsets from base are 11, 13, 15, ... (odd offsets >= D3)
-    pub(crate) fn is_user_unicast_port(domain_id: u32, logical_port: u16) -> bool {
+    pub(crate) fn is_user_unicast_port_logically(domain_id: u32, logical_port: u16) -> bool {
         let base = Self::get_tcp_physical_port(domain_id) as u32;
         let port = logical_port as u32;
         if port < base + Self::D3_ADDITIONAL_OFFSET {
@@ -145,34 +145,34 @@ mod tests {
     #[test]
     fn test_is_discovery_unicast_port() {
         // domain=0: pid=0→7410, pid=1→7412, pid=2→7414
-        assert!(PortManager::is_discovery_unicast_port(0, 7410));
-        assert!(PortManager::is_discovery_unicast_port(0, 7412));
-        assert!(PortManager::is_discovery_unicast_port(0, 7414));
+        assert!(PortManager::is_discovery_unicast_port_logically(0, 7410));
+        assert!(PortManager::is_discovery_unicast_port_logically(0, 7412));
+        assert!(PortManager::is_discovery_unicast_port_logically(0, 7414));
 
-        assert!(!PortManager::is_discovery_unicast_port(0, 7400)); // base port
-        assert!(!PortManager::is_discovery_unicast_port(0, 7409)); // below D1
-        assert!(!PortManager::is_discovery_unicast_port(0, 7411)); // user port
+        assert!(!PortManager::is_discovery_unicast_port_logically(0, 7400)); // base port
+        assert!(!PortManager::is_discovery_unicast_port_logically(0, 7409)); // below D1
+        assert!(!PortManager::is_discovery_unicast_port_logically(0, 7411)); // user port
 
         // domain=1: pid=0→7660
-        assert!(PortManager::is_discovery_unicast_port(1, 7660));
-        assert!(!PortManager::is_discovery_unicast_port(1, 7661));
-        assert!(!PortManager::is_discovery_unicast_port(1, 7410)); // wrong domain
+        assert!(PortManager::is_discovery_unicast_port_logically(1, 7660));
+        assert!(!PortManager::is_discovery_unicast_port_logically(1, 7661));
+        assert!(!PortManager::is_discovery_unicast_port_logically(1, 7410)); // wrong domain
     }
 
     #[test]
     fn test_is_user_unicast_port() {
         // domain=0: pid=0→7411, pid=1→7413, pid=2→7415
-        assert!(PortManager::is_user_unicast_port(0, 7411));
-        assert!(PortManager::is_user_unicast_port(0, 7413));
-        assert!(PortManager::is_user_unicast_port(0, 7415));
+        assert!(PortManager::is_user_unicast_port_logically(0, 7411));
+        assert!(PortManager::is_user_unicast_port_logically(0, 7413));
+        assert!(PortManager::is_user_unicast_port_logically(0, 7415));
 
-        assert!(!PortManager::is_user_unicast_port(0, 7400)); // base port
-        assert!(!PortManager::is_user_unicast_port(0, 7410)); // discovery port
-        assert!(!PortManager::is_user_unicast_port(0, 7409)); // below D3
+        assert!(!PortManager::is_user_unicast_port_logically(0, 7400)); // base port
+        assert!(!PortManager::is_user_unicast_port_logically(0, 7410)); // discovery port
+        assert!(!PortManager::is_user_unicast_port_logically(0, 7409)); // below D3
 
         // domain=1: pid=0→7661
-        assert!(PortManager::is_user_unicast_port(1, 7661));
-        assert!(!PortManager::is_user_unicast_port(1, 7660));
+        assert!(PortManager::is_user_unicast_port_logically(1, 7661));
+        assert!(!PortManager::is_user_unicast_port_logically(1, 7660));
     }
 
     #[test]
@@ -182,28 +182,28 @@ mod tests {
             for pid in 0..10 {
                 let port = PortManager::get_discovery_traffic_unicast_port(domain, pid);
                 assert!(
-                    PortManager::is_discovery_unicast_port(domain, port),
+                    PortManager::is_discovery_unicast_port_logically(domain, port),
                     "discovery port {} (domain={}, pid={}) not recognized",
                     port,
                     domain,
                     pid
                 );
                 assert!(
-                    !PortManager::is_user_unicast_port(domain, port),
+                    !PortManager::is_user_unicast_port_logically(domain, port),
                     "discovery port {} incorrectly classified as user port",
                     port
                 );
 
                 let port = PortManager::get_user_traffic_unicast_port(domain, pid);
                 assert!(
-                    PortManager::is_user_unicast_port(domain, port),
+                    PortManager::is_user_unicast_port_logically(domain, port),
                     "user port {} (domain={}, pid={}) not recognized",
                     port,
                     domain,
                     pid
                 );
                 assert!(
-                    !PortManager::is_discovery_unicast_port(domain, port),
+                    !PortManager::is_discovery_unicast_port_logically(domain, port),
                     "user port {} incorrectly classified as discovery port",
                     port
                 );

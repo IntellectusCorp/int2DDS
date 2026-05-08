@@ -334,50 +334,10 @@ impl SedpLogic {
         &self,
         match_type: MatchType,
         endpoint: &dyn std::any::Any,
-        mut builtin_topic_data: BuiltinTopicData,
+        builtin_topic_data: BuiltinTopicData,
         skip_cross_match: bool, // To prevent infinite recursion during cross-matching
     ) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
-
-        // Same-participant match: rewrite TCP unicast locators to loopback.
-        // The endpoint being matched (publisher for ReaderPublication,
-        // subscriber for WriterSubscription) carries its participant's
-        // advertised locators. When that participant is us, the advertised
-        // locator is the WAN/public address from INT2DDS_TCP_PUBLIC_ADDR,
-        // which is not routable back to the host itself on AWS VPC (no
-        // elastic-IP hairpin). Every write then blocks on the full 5s
-        // tcp_connect timeout, starving the forwarding loop.
-        //
-        // The listener binds to 0.0.0.0, so 127.0.0.1 reliably reaches it
-        // regardless of environment. UDP transports (tcp_listener_port
-        // returns None) are left untouched because private/NIC IP self-send
-        // is already locally routable.
-        let data_guid = match &builtin_topic_data {
-            BuiltinTopicData::Publication(pd) => pd.endpoint_guid(),
-            BuiltinTopicData::Subscription(sd) => sd.endpoint_guid(),
-        };
-        if data_guid.prefix() == participant.guid().prefix() {
-            if let Some(tcp_port) = self.transport.tcp_listener_port() {
-                let loopback = crate::rtps::common::locator::Locator::from_tcp_v4(
-                    std::net::Ipv4Addr::LOCALHOST,
-                    tcp_port as u32,
-                );
-                match &mut builtin_topic_data {
-                    BuiltinTopicData::Publication(pd) => {
-                        pd.set_unicast_locator_list(vec![loopback.clone()]);
-                        pd.set_multicast_locator_list(vec![]);
-                    }
-                    BuiltinTopicData::Subscription(sd) => {
-                        sd.set_unicast_locator_list(vec![loopback.clone()]);
-                        sd.set_multicast_locator_list(vec![]);
-                    }
-                }
-                debug!(
-                    "Local endpoint TCP locators rewritten to 127.0.0.1:{} for GUID: {:?}",
-                    tcp_port, data_guid
-                );
-            }
-        }
 
         match (match_type, builtin_topic_data) {
             (MatchType::ReaderPublication, BuiltinTopicData::Publication(mut publication_data)) => {
@@ -1406,6 +1366,11 @@ impl SedpLogic {
                     match buffer {
                         Ok(buffer) => {
                             for locator in reader_proxy.unicast_locator_list() {
+                                // SEDP heartbeat is a UDP-only path (matches
+                                // develop's `if locator.kind() == 1` filter).
+                                if !locator.is_udp() {
+                                    continue;
+                                }
                                 match self
                                     .transport
                                     .send(&buffer, &SendTarget::SEDPDiscovery(&locator))

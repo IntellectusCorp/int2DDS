@@ -46,6 +46,9 @@ impl DiscoveryUnicastListeningTask {
         match source {
             MessageSource::MioPoll { mut listener } => self.listen_mio_poll(&mut listener),
             MessageSource::Channel { rx } => self.listen_channel(&rx),
+            MessageSource::MioPollWithShm { .. } => {
+                unreachable!("MioPollWithShm is only used by user-data unicast")
+            }
         }
     }
 

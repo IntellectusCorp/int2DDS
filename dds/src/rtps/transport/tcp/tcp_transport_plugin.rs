@@ -170,6 +170,13 @@ impl TcpTransportPlugin {
     /// remote peers only reach us through it) so upper layers never
     /// need to know about it.
     fn advertised_tcp_locators(&self) -> Vec<Locator> {
+        // Override precedence:
+        //   1. INT2DDS_TCP_PUBLIC_ADDR — TCP-specific WAN/NAT public endpoint
+        //      (feature-introduced; takes precedence because it carries an
+        //      explicit port that may differ from the local listener port).
+        //   2. INT2DDS_EXTERNAL_ADDRESS — generic IP override inherited from
+        //      develop's `init_locators`; preserved for cross-branch parity.
+        //   3. working_ips — all local NICs.
         if let Some(public_addr) = crate::common::env::get_tcp_public_addr() {
             if let std::net::IpAddr::V4(v4) = public_addr.ip() {
                 log::info!(
@@ -180,6 +187,9 @@ impl TcpTransportPlugin {
                 return vec![Locator::from_tcp_v4(v4, public_addr.port() as u32)];
             }
             log::warn!("[TcpTransportPlugin] Public address is not IPv4, falling back to LAN NICs");
+        }
+        if let Some(ext_ip) = crate::common::env::get_external_address() {
+            return vec![Locator::from_tcp_v4(ext_ip, self.listener_port as u32)];
         }
         let mut locators = Vec::new();
         for ip_str in &self.working_ips {
@@ -201,6 +211,12 @@ impl TransportPlugin for TcpTransportPlugin {
                 Ok(())
             }
             SendTarget::SEDPDiscovery(locator) => {
+                if !locator.is_tcp() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        locator.kind_name(),
+                    ));
+                }
                 let ip = locator.to_ip_v4_addr();
                 let port = locator.port() as u16;
                 let addr = SocketAddr::new(std::net::IpAddr::V4(ip), port);
@@ -208,6 +224,12 @@ impl TransportPlugin for TcpTransportPlugin {
                 Ok(())
             }
             SendTarget::UserData(locator) => {
+                if !locator.is_tcp() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        locator.kind_name(),
+                    ));
+                }
                 let ip = locator.to_ip_v4_addr();
                 let port = locator.port() as u16;
                 let addr = SocketAddr::new(std::net::IpAddr::V4(ip), port);
