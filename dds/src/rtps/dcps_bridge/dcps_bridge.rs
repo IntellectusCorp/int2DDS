@@ -4,7 +4,7 @@
 //! managing participant lifecycles, entity creation, and message routing between
 //! the two layers.
 
-use std::sync::{Arc, OnceLock, RwLock, Weak};
+use std::sync::{Arc, RwLock, Weak};
 
 use log::debug;
 
@@ -48,8 +48,10 @@ use crate::{
             user_logic::UserLogic,
         },
         messages::sedp_message::SEDPMessage,
-        service::background_service::BackgroundService,
-        task::{peer_monitor::PeerMonitor, sending_handler::SendingHandler, thread_monitor::ThreadMonitor},
+        task::{
+            peer_monitor::PeerMonitor, sending_handler::SendingHandler,
+            thread_monitor::ThreadMonitor,
+        },
         transport::{
             plugin::{TransportPlugin, TransportPluginFactory},
             socket::Socket,
@@ -72,7 +74,6 @@ pub(crate) struct DcpsBridge {
     thread_monitor: Option<ThreadMonitor>,
 }
 
-static BACKGROUND_SERVICE: OnceLock<Arc<BackgroundService>> = OnceLock::new();
 pub(crate) static PARTICIPANTS: RwLock<Vec<Weak<Participant>>> = RwLock::new(Vec::new());
 
 impl DcpsBridge {
@@ -144,8 +145,7 @@ impl DcpsBridge {
         // advertise over SPDP. The plugin encapsulates the locator kind
         // (UDP/TCP/SHM), per-NIC expansion, port formulas, and any WAN
         // public-address override — so Participant never needs to know.
-        let metatraffic_unicast_locators =
-            transport.advertised_metatraffic_unicast_locators();
+        let metatraffic_unicast_locators = transport.advertised_metatraffic_unicast_locators();
         let default_unicast_locators = transport.advertised_default_unicast_locators();
 
         let participant = Participant::new(
@@ -213,12 +213,6 @@ impl DcpsBridge {
             let mut peer_monitor = PeerMonitor::new(&self.participant, dead_peer_rx);
             peer_monitor.start();
         }
-
-        BACKGROUND_SERVICE.get_or_init(|| {
-            let service = BackgroundService::new();
-            service.start_background_thread();
-            Arc::new(service)
-        });
 
         // Initialize thread monitoring
         self.thread_monitor = Some(ThreadMonitor::new(self.participant.clone()));
@@ -603,16 +597,19 @@ impl DcpsBridge {
 
         // Terminate sending task thread
         let sending_handler = SendingHandler::get_instance(self.participant.clone(), None);
+        sending_handler.wake_event_loop();
         let _ = sending_handler.join_sending_thread();
         drop(sending_handler);
 
         // Terminate discovery listening task
         if let Some(sedp_logic) = self.sedp_logic.as_ref() {
+            sedp_logic.wake_listening_threads();
             sedp_logic.join_all_listening_threads()?;
         }
 
         // Terminate user traffic listening task
         if let Some(user_logic) = self.user_logic.as_ref() {
+            user_logic.wake_unicast_listening_thread();
             user_logic.join_unicast_listening_thread()?;
         }
 
@@ -624,11 +621,6 @@ impl DcpsBridge {
             wlp_logic.shutdown();
         }
 
-        // Terminate user traffic listening task
-        // if let Some(background_logic) = &self.background_logic {
-        //     background_logic.join_background_thread()?;
-        // }
-
         // Drop logic instances to release sender references
         self.spdp_logic = Arc::new(None);
         self.sedp_logic = Arc::new(None);
@@ -638,7 +630,6 @@ impl DcpsBridge {
         self.participant.clear_wlp_logic_sender();
 
         // Remove all threads spawned
-
         SendingHandler::remove_map_guard(&self.participant.guid());
         TimerHandler::remove_map_guard(&self.participant.guid().prefix());
         self.thread_monitor = None;
@@ -834,7 +825,8 @@ mod tests {
 
         //initialize dcps_bridge
         let domain_id = unique_domain_id();
-        let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
+        let dcps_bridge =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
         match dcps_bridge.lock() {
             Ok(mut dcps_bridge) => dcps_bridge.init().unwrap(),
             Err(e) => {
@@ -849,7 +841,8 @@ mod tests {
     #[test]
     fn test_all_logic_cleanup() {
         let domain_id = unique_domain_id();
-        let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
+        let dcps_bridge =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
 
         {
             let mut bridge = dcps_bridge.lock().unwrap();
@@ -879,7 +872,8 @@ mod tests {
         use crate::utils::timer::timer_handler::TimerHandler;
 
         let domain_id = unique_domain_id();
-        let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
+        let dcps_bridge =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
         let participant_guid: crate::rtps::common::guid::Guid;
 
         {
@@ -941,7 +935,8 @@ mod tests {
         let test_type_name = "HelloWorld";
 
         //initialize dcps_bridge
-        let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
+        let dcps_bridge =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
 
         let _participant = dcps_bridge.lock().unwrap().get_participant().unwrap();
 
@@ -1008,7 +1003,8 @@ mod tests {
         let test_type_name = "HelloWorld";
 
         let dcps_bridge_test: Arc<Mutex<DcpsBridge>>;
-        dcps_bridge_test = Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
+        dcps_bridge_test =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
 
         let _participant = dcps_bridge_test.lock().unwrap().get_participant().unwrap();
 
@@ -1072,7 +1068,8 @@ mod tests {
         let test_topic_name = "remove_writer_topic";
         let test_type_name = "HelloWorld";
 
-        let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
+        let dcps_bridge =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
 
         let mut subscription_builtin_topic_data = SubscriptionBuiltinTopicData::new(
             &DataReaderQos::default(),
@@ -1167,7 +1164,8 @@ mod tests {
         let test_topic_name = "remove_writer_topic";
         let test_type_name = "HelloWorld";
 
-        let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
+        let dcps_bridge =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
 
         let mut publication_builtin_topic_data = PublicationBuiltinTopicData::new(
             &DataWriterQos::default(),
@@ -1262,7 +1260,8 @@ mod tests {
         let test_type_name = "HelloWorld";
 
         let dcps_bridge_test: Arc<Mutex<DcpsBridge>>;
-        dcps_bridge_test = Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
+        dcps_bridge_test =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
 
         let mut publication_builtin_topic_data = PublicationBuiltinTopicData::new(
             // &DataWriterQos::default(),
@@ -1318,7 +1317,8 @@ mod tests {
         let test_type_name = "HelloWorld";
 
         let dcps_bridge_test: Arc<Mutex<DcpsBridge>>;
-        dcps_bridge_test = Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
+        dcps_bridge_test =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
 
         let mut publication_builtin_topic_data = PublicationBuiltinTopicData::new(
             &DataWriterQos {
@@ -1373,7 +1373,8 @@ mod tests {
         let test_type_name = "HelloWorld";
 
         //initialize dcps_bridge
-        let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
+        let dcps_bridge =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
 
         let mut subscription_builtin_topic_data = SubscriptionBuiltinTopicData::new(
             &DataReaderQos {
@@ -1430,7 +1431,8 @@ mod tests {
         let test_topic_name = "remove_writer_topic";
         let test_type_name = "HelloWorld";
 
-        let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
+        let dcps_bridge =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
 
         let reader_qos = DataReaderQos {
             reliability: ReliabilityQosPolicy {
@@ -1501,7 +1503,8 @@ mod tests {
         let test_topic_name = "remove_writer_topic";
         let test_type_name = "HelloWorld";
 
-        let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
+        let dcps_bridge =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
 
         let writer_qos = DataWriterQos {
             reliability: ReliabilityQosPolicy {
@@ -1569,7 +1572,8 @@ mod tests {
         let test_topic_name = "remove_writer_topic";
         let test_type_name = "HelloWorld";
 
-        let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
+        let dcps_bridge =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
 
         let writer_qos = DataWriterQos {
             reliability: ReliabilityQosPolicy {
@@ -1641,7 +1645,8 @@ mod tests {
         let test_topic_name = "remove_writer_topic";
         let test_type_name = "HelloWorld";
 
-        let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
+        let dcps_bridge =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
 
         let writer_qos = DataWriterQos {
             reliability: ReliabilityQosPolicy {
@@ -1761,7 +1766,8 @@ mod tests {
     #[test]
     fn test_remove_unmatched_endpoint_from_terminated_participant() {
         let domain_id = unique_domain_id();
-        let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
+        let dcps_bridge =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
 
         // Create Writer
         let mut publication_builtin_topic_data = PublicationBuiltinTopicData::default();
@@ -1864,7 +1870,8 @@ mod tests {
     fn test_delete_participant() {
         // Test first participant
         let domain_id = unique_domain_id();
-        let dcps_bridge_1 = Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
+        let dcps_bridge_1 =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
 
         {
             let mut bridge_guard = dcps_bridge_1.lock().unwrap();

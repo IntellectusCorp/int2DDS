@@ -9,18 +9,20 @@ use crate::rtps::logic::spdp_logic::SpdpLogic;
 use crate::rtps::messages::message_receiver::MessageReceiver;
 use crate::rtps::transport::plugin::MessageSource;
 use crate::rtps::transport::socket::MAX_EVENTS;
+use crate::rtps::transport::tokens::ListenerToken;
 use crate::serialize::pl_cdr::InlineQosParameters;
 use bytes::Bytes;
 use log::{debug, error, info, warn};
-use mio::{Events, Interest, Poll, Token};
+use mio::{Events, Interest, Poll, Waker};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 pub(crate) struct DiscoveryMulticastListeningTask {
     guid_prefix: GuidPrefix,
     domain_id: DomainId,
     spdp_logic: Arc<Option<SpdpLogic>>,
+    shutdown_waker: Arc<OnceLock<Arc<Waker>>>,
 }
 
 impl DiscoveryMulticastListeningTask {
@@ -28,7 +30,11 @@ impl DiscoveryMulticastListeningTask {
         let guid_prefix = participant.guid().prefix();
         let domain_id = participant.domain_id();
         let (spdp_logic, _, _) = participant.get_logics();
-        Self { guid_prefix, domain_id, spdp_logic }
+        Self { guid_prefix, domain_id, spdp_logic, shutdown_waker: Arc::new(OnceLock::new()) }
+    }
+
+    pub(crate) fn set_shutdown_waker(&mut self, handle: Arc<OnceLock<Arc<Waker>>>) {
+        self.shutdown_waker = handle;
     }
 
     pub(crate) fn multicast_listening(&mut self, source: MessageSource) -> std::io::Result<()> {
@@ -49,7 +55,11 @@ impl DiscoveryMulticastListeningTask {
         let mut poll = Poll::new()?;
         let mut events = Events::with_capacity(MAX_EVENTS);
 
-        let token = Token(listener.socket().local_addr().unwrap().port() as usize);
+        let waker = Arc::new(Waker::new(poll.registry(), ListenerToken::Shutdown.to_mio())?);
+        let _ = self.shutdown_waker.set(waker);
+
+        let port = listener.socket().local_addr().unwrap().port();
+        let token = ListenerToken::Udp(port).to_mio();
         poll.registry().register(listener.socket(), token, Interest::READABLE)?;
 
         loop {

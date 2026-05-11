@@ -108,6 +108,8 @@ pub(crate) struct SedpLogic {
     transport: Arc<dyn TransportPlugin>,
     multicast_listening_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     unicast_listening_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+    multicast_listening_waker: Arc<std::sync::OnceLock<Arc<mio::Waker>>>,
+    unicast_listening_waker: Arc<std::sync::OnceLock<Arc<mio::Waker>>>,
     timer_handler: Arc<Mutex<TimerHandler>>,
 }
 
@@ -221,7 +223,18 @@ impl SedpLogic {
             transport,
             multicast_listening_handle: Arc::new(Mutex::new(None)),
             unicast_listening_handle: Arc::new(Mutex::new(None)),
+            multicast_listening_waker: Arc::new(std::sync::OnceLock::new()),
+            unicast_listening_waker: Arc::new(std::sync::OnceLock::new()),
             timer_handler,
+        }
+    }
+
+    pub(crate) fn wake_listening_threads(&self) {
+        if let Some(waker) = self.multicast_listening_waker.get() {
+            let _ = waker.wake();
+        }
+        if let Some(waker) = self.unicast_listening_waker.get() {
+            let _ = waker.wake();
         }
     }
 
@@ -239,6 +252,8 @@ impl SedpLogic {
         if let Some(multicast_source) = discovery_multicast_source {
             let mut discovery_multicast_listening_task =
                 DiscoveryMulticastListeningTask::new(participant.clone());
+            discovery_multicast_listening_task
+                .set_shutdown_waker(self.multicast_listening_waker.clone());
 
             let mc_guid = participant_guid;
             let multicast_handle = thread::Builder::new()
@@ -271,6 +286,8 @@ impl SedpLogic {
         if let Some(unicast_source) = discovery_unicast_source {
             let mut discovery_unicast_listening_task =
                 DiscoveryUnicastListeningTask::new(participant.clone());
+            discovery_unicast_listening_task
+                .set_shutdown_waker(self.unicast_listening_waker.clone());
 
             let unicast_guid = participant_guid;
             let unicast_handle = thread::Builder::new()
