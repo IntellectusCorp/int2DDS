@@ -9,14 +9,13 @@ use crate::rtps::messages::message_receiver::MessageReceiver;
 use crate::rtps::transport::shm::ShmListener;
 use crate::rtps::transport::socket::MAX_EVENTS;
 use crate::rtps::transport::tcp::tcp_listener::TcpListener;
+use crate::rtps::transport::tokens::ListenerToken;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 use log::{debug, error, info, warn};
-use mio::{Events, Interest, Poll, Token, Waker};
+use mio::{Events, Interest, Poll, Waker};
 use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
-
-const SHUTDOWN_WAKE_TOKEN: Token = Token(usize::MAX - 1);
 
 pub(crate) struct UserUnicastListeningTask {
     guid_prefix: GuidPrefix,
@@ -57,17 +56,15 @@ impl UserUnicastListeningTask {
         let mut poll = Poll::new().unwrap();
         let mut events = Events::with_capacity(MAX_EVENTS);
 
-        let waker = Arc::new(Waker::new(poll.registry(), SHUTDOWN_WAKE_TOKEN)?);
+        let waker = Arc::new(Waker::new(poll.registry(), ListenerToken::Shutdown.to_mio())?);
         let _ = self.shutdown_waker.set(waker);
 
         // Register UDP listener if present
         let udp_token = if let Some(listener) = &mut self.user_unicast_listener {
-            let token = Token(listener.socket().local_addr().unwrap().port() as usize);
+            let port = listener.socket().local_addr().unwrap().port();
+            let token = ListenerToken::Udp(port).to_mio();
             poll.registry().register(listener.socket(), token, Interest::READABLE)?;
-            info!(
-                "[UserUnicast] UDP listener registered on port {}",
-                listener.socket().local_addr().unwrap().port()
-            );
+            info!("[UserUnicast] UDP listener registered on port {}", port);
             Some(token)
         } else {
             None
@@ -77,8 +74,7 @@ impl UserUnicastListeningTask {
         let tcp_token = if let Some(tcp_listener) = &mut self.tcp_listener {
             let port = tcp_listener.port();
             if let Some(socket) = tcp_listener.socket_mut() {
-                // Use a different token range for TCP (add 10000 to avoid collision)
-                let token = Token(port as usize + 10000);
+                let token = ListenerToken::Tcp(port).to_mio();
                 poll.registry().register(socket, token, Interest::READABLE)?;
                 info!("[UserUnicast] TCP listener registered on port {}", port);
                 Some(token)
