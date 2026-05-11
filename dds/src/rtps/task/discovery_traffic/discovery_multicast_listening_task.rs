@@ -11,15 +11,18 @@ use crate::rtps::transport::socket::MAX_EVENTS;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 use crate::serialize::pl_cdr::InlineQosParameters;
 use log::{debug, error, info, warn};
-use mio::{Events, Interest, Poll, Token};
-use std::sync::Arc;
+use mio::{Events, Interest, Poll, Token, Waker};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
+
+const SHUTDOWN_WAKE_TOKEN: Token = Token(usize::MAX - 1);
 
 pub(crate) struct DiscoveryMulticastListeningTask {
     guid_prefix: GuidPrefix,
     domain_id: DomainId,
     discovery_multicast_listener: Option<UdpListener>,
     spdp_logic: Arc<Option<SpdpLogic>>,
+    shutdown_waker: Arc<OnceLock<Arc<Waker>>>,
 }
 
 impl DiscoveryMulticastListeningTask {
@@ -30,13 +33,26 @@ impl DiscoveryMulticastListeningTask {
         let guid_prefix = { participant.guid().prefix() };
         let domain_id = { participant.domain_id() };
         let (spdp_logic, _, _) = participant.get_logics();
-        Self { guid_prefix, domain_id, discovery_multicast_listener, spdp_logic }
+        Self {
+            guid_prefix,
+            domain_id,
+            discovery_multicast_listener,
+            spdp_logic,
+            shutdown_waker: Arc::new(OnceLock::new()),
+        }
+    }
+
+    pub(crate) fn set_shutdown_waker(&mut self, handle: Arc<OnceLock<Arc<Waker>>>) {
+        self.shutdown_waker = handle;
     }
 
     pub(crate) fn multicast_listening(&mut self) -> std::io::Result<()> {
         info!("start discovery multicast listening");
         let mut poll = Poll::new().unwrap();
         let mut events = Events::with_capacity(MAX_EVENTS);
+
+        let waker = Arc::new(Waker::new(poll.registry(), SHUTDOWN_WAKE_TOKEN)?);
+        let _ = self.shutdown_waker.set(waker);
 
         let listener: &mut UdpListener = match &mut self.discovery_multicast_listener {
             Some(listener) => listener,

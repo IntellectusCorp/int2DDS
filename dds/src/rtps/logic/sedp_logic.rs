@@ -112,6 +112,8 @@ pub(crate) struct SedpLogic {
     sender: Option<Arc<TransportSender>>,
     multicast_listening_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     unicast_listening_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+    multicast_listening_waker: Arc<std::sync::OnceLock<Arc<mio::Waker>>>,
+    unicast_listening_waker: Arc<std::sync::OnceLock<Arc<mio::Waker>>>,
     timer_handler: Arc<Mutex<TimerHandler>>,
 }
 
@@ -225,7 +227,18 @@ impl SedpLogic {
             sender,
             multicast_listening_handle: Arc::new(Mutex::new(None)),
             unicast_listening_handle: Arc::new(Mutex::new(None)),
+            multicast_listening_waker: Arc::new(std::sync::OnceLock::new()),
+            unicast_listening_waker: Arc::new(std::sync::OnceLock::new()),
             timer_handler,
+        }
+    }
+
+    pub(crate) fn wake_listening_threads(&self) {
+        if let Some(waker) = self.multicast_listening_waker.get() {
+            let _ = waker.wake();
+        }
+        if let Some(waker) = self.unicast_listening_waker.get() {
+            let _ = waker.wake();
         }
     }
 
@@ -240,6 +253,8 @@ impl SedpLogic {
 
         let mut discovery_multicast_listening_task =
             DiscoveryMulticastListeningTask::new(discovery_multicast_listener, participant.clone());
+        discovery_multicast_listening_task
+            .set_shutdown_waker(self.multicast_listening_waker.clone());
 
         let participant_guid = participant.guid().clone();
 
@@ -276,6 +291,7 @@ impl SedpLogic {
             discovery_tcp_listener,
             participant.clone(),
         );
+        discovery_unicast_listening_task.set_shutdown_waker(self.unicast_listening_waker.clone());
 
         // unicast listening
         let unicast_guid = participant_guid;

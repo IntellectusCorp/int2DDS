@@ -11,10 +11,12 @@ use crate::rtps::transport::socket::MAX_EVENTS;
 use crate::rtps::transport::tcp::tcp_listener::TcpListener;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 use log::{debug, error, info, warn};
-use mio::{Events, Interest, Poll, Token};
+use mio::{Events, Interest, Poll, Token, Waker};
 use std::net::SocketAddr;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
+
+const SHUTDOWN_WAKE_TOKEN: Token = Token(usize::MAX - 1);
 
 pub(crate) struct UserUnicastListeningTask {
     guid_prefix: GuidPrefix,
@@ -23,6 +25,7 @@ pub(crate) struct UserUnicastListeningTask {
     shm_listener: Option<ShmListener>,
     participant: Weak<Participant>,
     user_logic: Arc<Option<UserLogic>>,
+    shutdown_waker: Arc<OnceLock<Arc<Waker>>>,
 }
 
 impl UserUnicastListeningTask {
@@ -32,10 +35,6 @@ impl UserUnicastListeningTask {
         shm_listener: Option<ShmListener>,
         participant: Arc<Participant>,
     ) -> Self {
-        // Extract TCP sender from participant if available (for Hybrid mode)
-        // In Hybrid mode, we need to pass both UDP and TCP senders to UserLogic
-        // let tcp_sender = None; // TCP sender not needed for receiving, only for sending via UserLogic
-        // let user_logic = UserLogic::new(participant.clone(), Some(sender.clone()), tcp_sender);
         let (_, _, user_logic) = participant.get_logics();
         let guid_prefix = participant.guid().prefix();
         Self {
@@ -45,13 +44,21 @@ impl UserUnicastListeningTask {
             shm_listener,
             participant: Arc::downgrade(&participant),
             user_logic,
+            shutdown_waker: Arc::new(OnceLock::new()),
         }
+    }
+
+    pub(crate) fn set_shutdown_waker(&mut self, handle: Arc<OnceLock<Arc<Waker>>>) {
+        self.shutdown_waker = handle;
     }
 
     pub(crate) fn unicast_listening(&mut self) -> std::io::Result<()> {
         info!("start user unicast listening");
         let mut poll = Poll::new().unwrap();
         let mut events = Events::with_capacity(MAX_EVENTS);
+
+        let waker = Arc::new(Waker::new(poll.registry(), SHUTDOWN_WAKE_TOKEN)?);
+        let _ = self.shutdown_waker.set(waker);
 
         // Register UDP listener if present
         let udp_token = if let Some(listener) = &mut self.user_unicast_listener {
