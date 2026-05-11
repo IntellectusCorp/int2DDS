@@ -2,6 +2,11 @@ use std::sync::{
     mpsc::{sync_channel, SyncSender},
     Arc,
 };
+use std::time::Duration as StdDuration;
+
+#[path = "../common/shutdown.rs"]
+mod shutdown;
+use shutdown::{cleanup_participant, Shutdown};
 
 use clap::Parser;
 use int2dds::{
@@ -20,7 +25,6 @@ use int2dds::{
             ReliabilityQosPolicyKind,
         },
         status::StatusMask,
-        wait_set::WaitSet,
     },
     publication::{
         data_writer_listener::DataWriterListener,
@@ -232,6 +236,7 @@ impl DataReaderListener for SubListener {
 
 fn run_publisher(args: &Args) {
     let qos = build_qos(args, true);
+    let shutdown = Shutdown::install();
 
     let factory = DomainParticipantFactory::get_instance();
     let participant = factory
@@ -305,12 +310,17 @@ fn run_publisher(args: &Args) {
         qos.partition.name,
     );
 
-    let mut condition = writer.get_statuscondition().unwrap().clone();
-    condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
-    let wait_set = WaitSet::new();
-    wait_set.attach_condition(condition).unwrap();
-    wait_set.wait(Duration::infinite()).unwrap();
-    writer.get_publication_matched_status().unwrap();
+    while !shutdown.is_stopped() {
+        let status = writer.get_publication_matched_status().unwrap();
+        if status.current_count() > 0 {
+            break;
+        }
+        if shutdown.wait_timeout(StdDuration::from_millis(100)) {
+            drop(writer);
+            cleanup_participant(participant);
+            return;
+        }
+    }
 
     let reliability_str = match qos.reliability {
         ReliabilityQosPolicyKind::BestEffort => "best_effort",
@@ -318,7 +328,8 @@ fn run_publisher(args: &Args) {
     };
 
     let mut i = 1;
-    loop {
+    let period = StdDuration::from_millis(args.interval);
+    while !shutdown.is_stopped() {
         let mut message = format!(
             "[{:?}]HelloWorld_{}_d{}",
             hostname::get().unwrap(),
@@ -335,13 +346,20 @@ fn run_publisher(args: &Args) {
         let data = HelloWorldType { index: i, message };
         writer.write(&data, InstanceHandle::NIL).unwrap();
         info!("Published {:?}", data);
-        std::thread::sleep(std::time::Duration::from_millis(args.interval));
+        if shutdown.wait_timeout(period) {
+            println!("break");
+            break;
+        }
         i += 1;
     }
+
+    drop(writer);
+    cleanup_participant(participant);
 }
 
 fn run_subscriber(args: &Args) {
     let qos = build_qos(args, false);
+    let shutdown = Shutdown::install();
 
     let factory = DomainParticipantFactory::get_instance();
     let participant = factory
@@ -413,9 +431,10 @@ fn run_subscriber(args: &Args) {
         qos.partition.name,
     );
 
-    loop {
-        std::thread::sleep(std::time::Duration::from_secs(1));
-    }
+    shutdown.wait();
+
+    drop(_reader);
+    cleanup_participant(participant);
 }
 
 fn main() {

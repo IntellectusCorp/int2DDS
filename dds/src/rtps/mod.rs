@@ -57,6 +57,5 @@ pub(crate) mod dcps_bridge;
 pub(crate) mod entities;
 pub(crate) mod logic;
 pub(crate) mod messages;
-pub(crate) mod service;
 pub(crate) mod task;
 pub(crate) mod transport;
