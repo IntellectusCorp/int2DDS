@@ -6,6 +6,7 @@ use std::time::Duration;
 use int2dds::domain::{
     domain_participant::DomainParticipant, domain_participant_factory::DomainParticipantFactory,
 };
+use log::info;
 
 pub struct Shutdown {
     flag: Mutex<bool>,
@@ -44,6 +45,8 @@ impl Shutdown {
 }
 
 pub fn cleanup_participant(participant: DomainParticipant) {
+    info!("Received shutdown signal, cleaning up resources");
+
     if let Err(e) = participant.delete_contained_entities() {
         eprintln!("delete_contained_entities failed: {:?}", e);
     }
