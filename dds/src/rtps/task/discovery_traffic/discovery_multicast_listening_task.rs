@@ -8,14 +8,13 @@ use crate::rtps::logic::message_processor::participant_message_processor::Partic
 use crate::rtps::logic::spdp_logic::SpdpLogic;
 use crate::rtps::messages::message_receiver::MessageReceiver;
 use crate::rtps::transport::socket::MAX_EVENTS;
+use crate::rtps::transport::tokens::ListenerToken;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 use crate::serialize::pl_cdr::InlineQosParameters;
 use log::{debug, error, info, warn};
-use mio::{Events, Interest, Poll, Token, Waker};
+use mio::{Events, Interest, Poll, Waker};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
-
-const SHUTDOWN_WAKE_TOKEN: Token = Token(usize::MAX - 1);
 
 pub(crate) struct DiscoveryMulticastListeningTask {
     guid_prefix: GuidPrefix,
@@ -51,7 +50,7 @@ impl DiscoveryMulticastListeningTask {
         let mut poll = Poll::new().unwrap();
         let mut events = Events::with_capacity(MAX_EVENTS);
 
-        let waker = Arc::new(Waker::new(poll.registry(), SHUTDOWN_WAKE_TOKEN)?);
+        let waker = Arc::new(Waker::new(poll.registry(), ListenerToken::Shutdown.to_mio())?);
         let _ = self.shutdown_waker.set(waker);
 
         let listener: &mut UdpListener = match &mut self.discovery_multicast_listener {
@@ -60,8 +59,8 @@ impl DiscoveryMulticastListeningTask {
                 return Err(std::io::Error::other("discovery multicast listener task is not set"));
             }
         };
-        let discovery_multicast_token =
-            Token(listener.socket().local_addr().unwrap().port() as usize);
+        let port = listener.socket().local_addr().unwrap().port();
+        let discovery_multicast_token = ListenerToken::Udp(port).to_mio();
         poll.registry().register(
             listener.socket(),
             discovery_multicast_token,
