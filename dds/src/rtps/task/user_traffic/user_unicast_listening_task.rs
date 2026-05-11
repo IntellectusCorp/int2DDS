@@ -9,23 +9,34 @@ use crate::rtps::messages::message_receiver::MessageReceiver;
 use crate::rtps::transport::plugin::MessageSource;
 use crate::rtps::transport::shm::shm_listener::ShmListener;
 use crate::rtps::transport::socket::MAX_EVENTS;
+use crate::rtps::transport::tokens::ListenerToken;
 use log::{debug, error, info, warn};
-use mio::{Events, Interest, Poll, Token};
+use mio::{Events, Interest, Poll, Waker};
 use std::net::SocketAddr;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
 pub(crate) struct UserUnicastListeningTask {
     guid_prefix: GuidPrefix,
     participant: Weak<Participant>,
     user_logic: Arc<Option<UserLogic>>,
+    shutdown_waker: Arc<OnceLock<Arc<Waker>>>,
 }
 
 impl UserUnicastListeningTask {
     pub(crate) fn new(participant: Arc<Participant>) -> Self {
         let (_, _, user_logic) = participant.get_logics();
         let guid_prefix = participant.guid().prefix();
-        Self { guid_prefix, participant: Arc::downgrade(&participant), user_logic }
+        Self {
+            guid_prefix,
+            participant: Arc::downgrade(&participant),
+            user_logic,
+            shutdown_waker: Arc::new(OnceLock::new()),
+        }
+    }
+
+    pub(crate) fn set_shutdown_waker(&mut self, handle: Arc<OnceLock<Arc<Waker>>>) {
+        self.shutdown_waker = handle;
     }
 
     pub(crate) fn unicast_listening(&mut self, source: MessageSource) -> std::io::Result<()> {
@@ -46,12 +57,13 @@ impl UserUnicastListeningTask {
         let mut poll = Poll::new()?;
         let mut events = Events::with_capacity(MAX_EVENTS);
 
-        let token = Token(listener.socket().local_addr().unwrap().port() as usize);
+        let waker = Arc::new(Waker::new(poll.registry(), ListenerToken::Shutdown.to_mio())?);
+        let _ = self.shutdown_waker.set(waker);
+
+        let port = listener.socket().local_addr().unwrap().port();
+        let token = ListenerToken::Udp(port).to_mio();
         poll.registry().register(listener.socket(), token, Interest::READABLE)?;
-        info!(
-            "[UserUnicast] UDP listener registered on port {}",
-            listener.socket().local_addr().unwrap().port()
-        );
+        info!("[UserUnicast] UDP listener registered on port {}", port);
 
         let participant = self
             .participant
@@ -98,12 +110,13 @@ impl UserUnicastListeningTask {
         let mut poll = Poll::new()?;
         let mut events = Events::with_capacity(MAX_EVENTS);
 
-        let token = Token(listener.socket().local_addr().unwrap().port() as usize);
+        let waker = Arc::new(Waker::new(poll.registry(), ListenerToken::Shutdown.to_mio())?);
+        let _ = self.shutdown_waker.set(waker);
+
+        let port = listener.socket().local_addr().unwrap().port();
+        let token = ListenerToken::Udp(port).to_mio();
         poll.registry().register(listener.socket(), token, Interest::READABLE)?;
-        info!(
-            "[UserUnicast] UDP listener registered on port {} (SHM enabled)",
-            listener.socket().local_addr().unwrap().port()
-        );
+        info!("[UserUnicast] UDP listener registered on port {} (SHM enabled)", port);
 
         let participant = self
             .participant

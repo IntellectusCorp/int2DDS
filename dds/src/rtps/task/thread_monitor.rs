@@ -467,7 +467,6 @@ impl ThreadMonitor {
             ("sending", "sending_task"),
             ("timer", "timer_handler"),
             ("discovery", "discovery_task"),
-            ("background", "background_service"),
             ("multicast", "multicast_listener"),
             ("unicast", "unicast_listener"),
             ("user", "user_traffic"),

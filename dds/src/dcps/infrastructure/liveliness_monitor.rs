@@ -10,10 +10,7 @@
 
 use std::{
     collections::HashMap,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
+    sync::{Arc, Condvar, Mutex},
     thread::{self, JoinHandle},
 };
 
@@ -43,10 +40,12 @@ impl TrackerInfo {
     }
 }
 
+type ShutdownSignal = Arc<(Mutex<bool>, Condvar)>;
+
 pub(crate) struct LivelinessMonitor {
     writer_trackers: Arc<Mutex<HashMap<Guid, TrackerInfo>>>,
     monitor_task: Option<JoinHandle<()>>,
-    shutdown: Arc<AtomicBool>,
+    shutdown_waker: ShutdownSignal,
     _callback: Arc<dyn Fn(Guid) -> bool + Send + Sync>,
 }
 
@@ -59,15 +58,15 @@ impl Drop for LivelinessMonitor {
 impl LivelinessMonitor {
     pub(crate) fn new(callback: Arc<dyn Fn(Guid) -> bool + Send + Sync>) -> Self {
         let writer_trackers = Arc::new(Mutex::new(HashMap::new()));
-        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_waker: ShutdownSignal = Arc::new((Mutex::new(false), Condvar::new()));
 
         let monitor_task = Some(Self::spawn_monitor(
             Arc::clone(&writer_trackers),
-            Arc::clone(&shutdown),
+            Arc::clone(&shutdown_waker),
             Arc::clone(&callback),
         ));
 
-        Self { writer_trackers, monitor_task, shutdown, _callback: callback }
+        Self { writer_trackers, monitor_task, shutdown_waker, _callback: callback }
     }
 
     // Track Writer
@@ -129,7 +128,13 @@ impl LivelinessMonitor {
     }
 
     pub(crate) fn shutdown(&mut self) {
-        self.shutdown.store(true, Ordering::SeqCst);
+        {
+            let (lock, cvar) = &*self.shutdown_waker;
+            if let Ok(mut stopped) = lock.lock() {
+                *stopped = true;
+                cvar.notify_all();
+            }
+        }
         if let Some(task) = self.monitor_task.take() {
             let _ = task.join();
         }
@@ -137,13 +142,14 @@ impl LivelinessMonitor {
 
     fn spawn_monitor(
         writer_trackers: Arc<Mutex<HashMap<Guid, TrackerInfo>>>,
-        shutdown: Arc<AtomicBool>,
+        shutdown_waker: ShutdownSignal,
         callback: Arc<dyn Fn(Guid) -> bool + Send + Sync>,
     ) -> JoinHandle<()> {
         thread::Builder::new()
             .name("liveliness_monitor".to_string())
             .spawn(move || {
-            while !shutdown.load(Ordering::Relaxed) {
+            let (lock, cvar) = &*shutdown_waker;
+            loop {
                 let sleep_duration = {
                     if let Ok(writer_trackers) = writer_trackers.lock() {
                         if writer_trackers.is_empty() {
@@ -170,7 +176,18 @@ impl LivelinessMonitor {
                         Duration::from_millis(10)
                     }
                 };
-                thread::sleep(sleep_duration.try_into().unwrap());
+                let sleep_std: std::time::Duration = sleep_duration.try_into().unwrap();
+                let stopped = match lock.lock() {
+                    Ok(g) => g,
+                    Err(_) => break,
+                };
+                let (stopped, _) = cvar
+                    .wait_timeout_while(stopped, sleep_std, |stop| !*stop)
+                    .expect("liveliness monitor cvar wait failed");
+                if *stopped {
+                    break;
+                }
+                drop(stopped);
 
                 // Check liveliness - collect expired guids first (without holding lock during callback)
                 let expired_guids: Vec<(Guid, Duration, Duration)> = {

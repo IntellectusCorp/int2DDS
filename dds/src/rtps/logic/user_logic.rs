@@ -53,8 +53,9 @@ use crate::rtps::{
 use crate::serialize::pl_cdr::InlineQosParameters;
 use crate::utils::timer::{timer_handler::TimerHandler, timer_id::TimerId};
 use dashmap::DashMap;
+use mio::Waker;
 
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::thread::{self, JoinHandle};
 
 #[allow(dead_code)]
@@ -64,6 +65,7 @@ pub(crate) struct UserLogic {
     transport: Arc<dyn TransportPlugin>,
     fragment_buffers: Arc<DashMap<(Guid, SequenceNumber), FragmentBuffer>>,
     unicast_listening_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+    unicast_listening_waker: Arc<OnceLock<Arc<Waker>>>,
 }
 
 // Initialization
@@ -74,6 +76,13 @@ impl UserLogic {
             transport,
             fragment_buffers: Arc::new(DashMap::new()),
             unicast_listening_handle: Arc::new(Mutex::new(None)),
+            unicast_listening_waker: Arc::new(OnceLock::new()),
+        }
+    }
+
+    pub(crate) fn wake_unicast_listening_thread(&self) {
+        if let Some(waker) = self.unicast_listening_waker.get() {
+            let _ = waker.wake();
         }
     }
 
@@ -88,6 +97,7 @@ impl UserLogic {
 
             let mut user_unicast_listening_task =
                 UserUnicastListeningTask::new(participant.clone());
+            user_unicast_listening_task.set_shutdown_waker(self.unicast_listening_waker.clone());
             let participant_guid = participant.guid();
 
             let unicast_handle = thread::Builder::new()
