@@ -414,8 +414,8 @@ fn quote_deserialize_impl(
     _name: &syn::Ident,
     extensibility: Option<ExtensibilityKind>,
     cdr_field_deserialization: &proc_macro2::TokenStream,
-    _xcdr_field_deserialization: &proc_macro2::TokenStream,
-    _xcdr_field_deserialization_per_field_dheader: &proc_macro2::TokenStream,
+    xcdr_field_deserialization: &proc_macro2::TokenStream,
+    xcdr_field_deserialization_per_field_dheader: &proc_macro2::TokenStream,
     crate_path: &proc_macro2::TokenStream,
     gc: &GenCtx,
 ) -> proc_macro2::TokenStream {
@@ -490,14 +490,57 @@ fn quote_deserialize_impl(
 
                     Ok(Box::new(result))
                 },
-                #crate_path::dcps::topic::type_support::SerializationFormat::Xcdr { .. } => {
+                #crate_path::dcps::topic::type_support::SerializationFormat::Xcdr { use_delimiters, .. } => {
                     use #crate_path::serialize::xcdr::{Xcdr2Deserializer, XcdrDeserialize};
 
-                    let mut deserializer = Xcdr2Deserializer::new(data)
+                    let use_delimiters = *use_delimiters;
+
+                    // Try 1: Spec-compliant path (single struct DHEADER + per-field bound checks).
+                    // This is the standards-correct deserialization and is always tried first.
+                    let mut strict_deserializer = Xcdr2Deserializer::new(data)
                         .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
-                    let value = <#full_type as XcdrDeserialize>::deserialize_xcdr(&mut deserializer)
+                    let strict_err = match <#full_type as XcdrDeserialize>::deserialize_xcdr(&mut strict_deserializer) {
+                        Ok(value) => return Ok(Box::new(value)),
+                        Err(e) => #crate_path::dcps::core::error::DdsError::Error(e.to_string()),
+                    };
+
+                    // Lenient interoperability fallbacks: only used when the spec path failed,
+                    // to interop with peers (e.g., dust-dds) whose wire layout differs slightly.
+                    let parse_body = |mut deserializer: &mut Xcdr2Deserializer<'_>| -> #crate_path::dcps::core::error::DdsResult<#full_type> {
+                        #xcdr_field_deserialization
+                        Ok(result)
+                    };
+                    let parse_body_per_field_dheader = |mut deserializer: &mut Xcdr2Deserializer<'_>| -> #crate_path::dcps::core::error::DdsResult<#full_type> {
+                        #xcdr_field_deserialization_per_field_dheader
+                        Ok(result)
+                    };
+
+                    if use_delimiters {
+                        // Try 2: Per-field DHEADER format (interoperability fallback).
+                        let mut compat_deserializer = Xcdr2Deserializer::new(data)
+                            .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+                        match parse_body_per_field_dheader(&mut compat_deserializer) {
+                            Ok(value) => {
+                                log::debug!("XCDR2 strict path failed, per-field DHEADER fallback succeeded");
+                                return Ok(Box::new(value));
+                            }
+                            Err(e) => log::debug!("XCDR2 per-field DHEADER fallback failed: {}", e),
+                        }
+                    }
+
+                    // Try 3: No-delimiter fallback (raw field reads, no outer DHEADER).
+                    let mut fallback_deserializer = Xcdr2Deserializer::new(data)
                         .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
-                    Ok(Box::new(value))
+                    match parse_body(&mut fallback_deserializer) {
+                        Ok(value) => {
+                            log::debug!("XCDR2 strict path failed, no-delimiter fallback succeeded");
+                            Ok(Box::new(value))
+                        }
+                        Err(e) => {
+                            log::debug!("XCDR2 no-delimiter fallback failed: {}", e);
+                            Err(strict_err)
+                        }
+                    }
                 }
             }
         }
