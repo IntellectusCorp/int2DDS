@@ -23,6 +23,12 @@
 //! cargo run --example dynamic_type_publisher -- --domain 0
 //! ```
 
+use std::time::Duration as StdDuration;
+
+#[path = "../common/shutdown.rs"]
+mod shutdown;
+use shutdown::{cleanup_participant, Shutdown};
+
 use clap::Parser;
 use int2dds::{
     common::{
@@ -35,7 +41,6 @@ use int2dds::{
     infrastructure::{
         qos_policy::{ReliabilityQosPolicy, ReliabilityQosPolicyKind},
         status::StatusMask,
-        wait_set::WaitSet,
     },
     publication::qos::{DataWriterQos, PublisherQos},
     topic::{qos::TopicQos, type_support::DdsType},
@@ -68,6 +73,7 @@ fn main() {
     set_console_log_level(LogLevel::Info);
 
     let args = Args::parse();
+    let shutdown = Shutdown::install();
 
     println!("XTypes Publisher — Final SensorData with bounded string");
     println!("The XTypes Subscriber receives this using DynamicData.\n");
@@ -109,19 +115,24 @@ fn main() {
         .expect("Failed to create datawriter");
 
     println!("Waiting for subscriber to match...");
-    let mut condition = writer.get_statuscondition().unwrap().clone();
-    condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
-    let wait_set = WaitSet::new();
-    wait_set.attach_condition(condition).unwrap();
-    wait_set.wait(Duration::infinite()).unwrap();
-    writer.get_publication_matched_status().unwrap();
+    while !shutdown.is_stopped() {
+        let status = writer.get_publication_matched_status().unwrap();
+        if status.current_count() > 0 {
+            break;
+        }
+        if shutdown.wait_timeout(StdDuration::from_millis(100)) {
+            drop(writer);
+            cleanup_participant(participant);
+            return;
+        }
+    }
     println!("Subscriber matched! Starting to publish...\n");
 
     let locations = ["Lab A", "Lab B", "Warehouse", "Office"];
     let mut sensor_id = 1;
     let mut index = 0usize;
 
-    loop {
+    while !shutdown.is_stopped() {
         let data = SensorData {
             sensor_id,
             temperature: 20.0 + (index as f64 * 0.5) % 15.0,
@@ -139,10 +150,15 @@ fn main() {
             Err(e) => eprintln!("Write failed: {:?}", e),
         }
 
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        if shutdown.wait_timeout(StdDuration::from_secs(1)) {
+            break;
+        }
         index += 1;
         if index % 5 == 0 {
             sensor_id = (sensor_id % 3) + 1;
         }
     }
+
+    drop(writer);
+    cleanup_participant(participant);
 }
