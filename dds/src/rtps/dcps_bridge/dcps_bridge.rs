@@ -592,12 +592,15 @@ impl DcpsBridge {
         }
         drop(timer_handler);
 
+        // Wake and join the sending thread first so it releases the SendingTask mutex.
+        // Otherwise the send_termination_message_on_shutdown() below blocks waiting for it.
+        let sending_handler = SendingHandler::get_instance(self.participant.clone(), None);
+        sending_handler.wake_event_loop();
+
         // Send termination message before stopping sending thread
         let _ = self.participant.send_termination_message_on_shutdown();
 
         // Terminate sending task thread
-        let sending_handler = SendingHandler::get_instance(self.participant.clone(), None);
-        sending_handler.wake_event_loop();
         let _ = sending_handler.join_sending_thread();
         drop(sending_handler);
 
