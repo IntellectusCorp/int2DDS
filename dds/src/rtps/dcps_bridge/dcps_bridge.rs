@@ -4,7 +4,7 @@
 //! managing participant lifecycles, entity creation, and message routing between
 //! the two layers.
 
-use std::sync::{Arc, OnceLock, RwLock, Weak};
+use std::sync::{Arc, RwLock, Weak};
 
 use log::debug;
 
@@ -48,7 +48,6 @@ use crate::{
             user_logic::UserLogic,
         },
         messages::sedp_message::SEDPMessage,
-        service::background_service::BackgroundService,
         task::{sending_handler::SendingHandler, thread_monitor::ThreadMonitor},
         transport::{socket::Socket, TransportConfig},
     },
@@ -68,7 +67,6 @@ pub(crate) struct DcpsBridge {
     thread_monitor: Option<ThreadMonitor>,
 }
 
-static BACKGROUND_SERVICE: OnceLock<Arc<BackgroundService>> = OnceLock::new();
 pub(crate) static PARTICIPANTS: RwLock<Vec<Weak<Participant>>> = RwLock::new(Vec::new());
 
 impl DcpsBridge {
@@ -142,12 +140,6 @@ impl DcpsBridge {
             log::error!("user_logic is not set");
         }
 
-        BACKGROUND_SERVICE.get_or_init(|| {
-            let service = BackgroundService::new();
-            service.start_background_thread();
-            Arc::new(service)
-        });
-
         // Initialize thread monitoring
         self.thread_monitor = Some(ThreadMonitor::new(self.participant.clone()));
         match self.thread_monitor.as_ref() {
@@ -159,14 +151,6 @@ impl DcpsBridge {
                 log::error!("thread_monitor is not set");
             }
         }
-
-        // self.background_logic = Some(BackgroundLogic::new(self.participant.clone()));
-        // match self.background_logic.as_ref() {
-        //     Some(background_logic) => background_logic.start_background_thread(),
-        //     None => {
-        //         log::error!("background_logic is not set");
-        //     }
-        // };
 
         Ok(())
     }
@@ -534,21 +518,25 @@ impl DcpsBridge {
         }
         drop(timer_handler);
 
-        // Send termination message before stopping sending thread
-        let _ = self.participant.send_termination_message_on_shutdown();
-
-        // Terminate sending task thread
+        // Wake and join the sending thread first so it releases the SendingTask
+        // mutex; otherwise the sync termination send below blocks waiting for it.
         let sending_handler = SendingHandler::get_instance(self.participant.clone(), None, None);
+        sending_handler.wake_event_loop();
+        let _ = self.participant.send_termination_message_on_shutdown();
         let _ = sending_handler.join_sending_thread();
         drop(sending_handler);
 
         // Terminate discovery listening task
         if let Some(sedp_logic) = self.sedp_logic.as_ref() {
+            // Wake all listening polls before joining so each thread observes the
+            // terminate flag instantly instead of waiting out its 100ms poll timeout.
+            sedp_logic.wake_listening_threads();
             sedp_logic.join_all_listening_threads()?;
         }
 
         // Terminate user traffic listening task
         if let Some(user_logic) = self.user_logic.as_ref() {
+            user_logic.wake_unicast_listening_thread();
             user_logic.join_unicast_listening_thread()?;
         }
 
@@ -560,11 +548,6 @@ impl DcpsBridge {
             wlp_logic.shutdown();
         }
 
-        // Terminate user traffic listening task
-        // if let Some(background_logic) = &self.background_logic {
-        //     background_logic.join_background_thread()?;
-        // }
-
         // Drop logic instances to release sender references
         self.spdp_logic = Arc::new(None);
         self.sedp_logic = Arc::new(None);
@@ -574,7 +557,6 @@ impl DcpsBridge {
         self.participant.clear_wlp_logic_sender();
 
         // Remove all threads spawned
-
         SendingHandler::remove_map_guard(&self.participant.guid());
         TimerHandler::remove_map_guard(&self.participant.guid().prefix());
         self.thread_monitor = None;
