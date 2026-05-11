@@ -54,7 +54,7 @@ use crate::{
         },
         entities::{
             entity::Entity,
-            history::history_cache::HistoryCache,
+            history::{cache_change::CacheChange, history_cache::HistoryCache},
             reader::{Reader, ReaderStore, StatefulReader, StatelessReader},
             wire_buffer_pool::WireBufferPool,
             writer::{StatefulWriter, StatelessWriter, Writer, WriterStore},
@@ -63,7 +63,6 @@ use crate::{
             sedp_logic::SedpLogic, spdp_logic::SpdpLogic, user_logic::UserLogic,
             wlp_logic::WlpLogic,
         },
-        task::sending_handler::{MessageType, SendingHandler},
         transport::{
             get_transport_type, port_manager::PortManager, TransportSender, TransportType,
         },
@@ -562,11 +561,11 @@ impl Participant {
                     Some(RtpsTime::now()),
                 );
 
-                let handler = SendingHandler::get_instance(Arc::new(self.clone()), None, None);
-                handler.push_message_and_wake(MessageType::SedpTerminateEndpoint(
+                self.sync_send_sedp_terminate_endpoint(
                     self.sedp_builtin_publications_writer().guid(),
                     Arc::new(a_cache_change),
-                ));
+                )?;
+
                 log::info!("Remote writer with GUID {:?} terminated", writer_guid);
 
                 // Remove builtin topic data from builtin endpoint
@@ -637,11 +636,10 @@ impl Participant {
                     Some(RtpsTime::now()),
                 );
 
-                let handler = SendingHandler::get_instance(Arc::new(self.clone()), None, None);
-                handler.push_message_and_wake(MessageType::SedpTerminateEndpoint(
+                self.sync_send_sedp_terminate_endpoint(
                     self.sedp_builtin_subscriptions_writer().guid(),
                     Arc::new(a_cache_change),
-                ));
+                )?;
 
                 // Remove builtin topic data from builtin endpoint
                 match self.builtin_endpoints.sedp_builtin_subscriptions_writer.writer_cache().lock()
@@ -825,24 +823,10 @@ impl Participant {
                 Some(RtpsTime::now()),
             );
 
-            let handler = SendingHandler::get_instance(Arc::new(self.clone()), None, None);
-            if let Some(sending_task) = handler.get_sending_task() {
-                // Send messages synchronously without using event loop
-                if let Ok(sending_task_guard) = sending_task.lock() {
-                    // let join_handle = sending_task_guard.create_worker_thread(MessageType::SedpTerminateEndpoint(
-                    //     self.sedp_builtin_subscriptions_writer().guid(),
-                    //     Arc::new(a_cache_change),
-                    // ));
-
-                    // if let Err(e) = join_handle.join() {
-                    //     log::error!("Failed to join sending task thread for SEDP Terminate endpoint task: {:?}", e);
-                    // }
-                    sending_task_guard.sync_sedp_terminate_endpoint_task(
-                        self.sedp_builtin_subscriptions_writer().guid(),
-                        Arc::new(a_cache_change),
-                    );
-                }
-            }
+            self.sync_send_sedp_terminate_endpoint(
+                self.sedp_builtin_subscriptions_writer().guid(),
+                Arc::new(a_cache_change),
+            )?;
         }
 
         // Send Data(w[UD]) messages
@@ -855,45 +839,44 @@ impl Participant {
                 Some(RtpsTime::now()),
             );
 
-            let handler = SendingHandler::get_instance(Arc::new(self.clone()), None, None);
-            if let Some(sending_task) = handler.get_sending_task() {
-                // Send messages synchronously without using event loop
-                if let Ok(sending_task_guard) = sending_task.lock() {
-                    // let join_handle = sending_task_guard.create_worker_thread(
-                    //     MessageType::SedpTerminateEndpoint(
-                    //         self.sedp_builtin_publications_writer().guid(),
-                    //         Arc::new(a_cache_change),
-                    //     ),
-                    // );
-
-                    // if let Err(e) = join_handle.join() {
-                    //     log::error!("Failed to join sending task thread for SEDP Terminate endpoint task: {:?}", e);
-                    // }
-
-                    sending_task_guard.sync_sedp_terminate_endpoint_task(
-                        self.sedp_builtin_publications_writer().guid(),
-                        Arc::new(a_cache_change),
-                    );
-                }
-            }
+            self.sync_send_sedp_terminate_endpoint(
+                self.sedp_builtin_publications_writer().guid(),
+                Arc::new(a_cache_change),
+            )?;
         }
 
         // Send Data(p[UD]) messages
-        let handler = SendingHandler::get_instance(Arc::new(self.clone()), None, None);
-        if let Some(sending_task) = handler.get_sending_task() {
-            // Send messages synchronously without using event loop
-            if let Ok(sending_task_guard) = sending_task.lock() {
-                // let join_handle = sending_task_guard
-                //     .create_worker_thread(MessageType::SpdpTerminateParticipant());
+        self.sync_send_spdp_terminate_participant()?;
 
-                // if let Err(e) = join_handle.join() {
-                //     log::error!("Failed to join sending task thread for SPDP Terminate participant task: {:?}", e);
-                // }
+        Ok(())
+    }
 
-                sending_task_guard.sync_spdp_terminate_participant_task()?;
-            }
+    // Send a SEDP dispose synchronously; the event-loop path can race participant teardown
+    pub fn sync_send_sedp_terminate_endpoint(
+        &self,
+        builtin_writer_guid: Guid,
+        cache_change: Arc<CacheChange>,
+    ) -> RtpsResult<()> {
+        if let Some(sedp_logic) = self.sedp_logic.get().and_then(|a| a.as_ref().as_ref()) {
+            sedp_logic.send_endpoint_termination_message(builtin_writer_guid, cache_change)?;
         }
+        Ok(())
+    }
 
+    // Send SPDP/SEDP participant dispose synchronously on shutdown
+    pub fn sync_send_spdp_terminate_participant(&self) -> RtpsResult<()> {
+        let spdp_logic = self
+            .spdp_logic
+            .get()
+            .and_then(|a| a.as_ref().as_ref())
+            .ok_or(RtpsError::new(RtpsErrorCode::NotInitialized, "SpdpLogic is not initialized"))?;
+        spdp_logic.send_participant_termination_message_multicast()?;
+        let sedp_logic = self
+            .sedp_logic
+            .get()
+            .and_then(|a| a.as_ref().as_ref())
+            .ok_or(RtpsError::new(RtpsErrorCode::NotInitialized, "SedpLogic is not initialized"))?;
+        sedp_logic.send_participant_termination_message_unicast()?;
         Ok(())
     }
 
