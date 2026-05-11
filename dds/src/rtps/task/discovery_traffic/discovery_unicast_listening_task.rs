@@ -11,10 +11,12 @@ use crate::rtps::transport::socket::MAX_EVENTS;
 use crate::rtps::transport::tcp::tcp_listener::TcpListener;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 use log::{debug, error, info, warn};
-use mio::{Events, Interest, Poll, Token};
+use mio::{Events, Interest, Poll, Token, Waker};
 use std::net::SocketAddr;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
+
+const SHUTDOWN_WAKE_TOKEN: Token = Token(usize::MAX - 1);
 
 pub(crate) struct DiscoveryUnicastListeningTask {
     guid_prefix: GuidPrefix,
@@ -22,6 +24,7 @@ pub(crate) struct DiscoveryUnicastListeningTask {
     tcp_listener: Option<TcpListener>,
     participant: Weak<Participant>,
     sedp_logic: Arc<Option<SedpLogic>>,
+    shutdown_waker: Arc<OnceLock<Arc<Waker>>>,
 }
 
 impl DiscoveryUnicastListeningTask {
@@ -38,13 +41,21 @@ impl DiscoveryUnicastListeningTask {
             tcp_listener,
             participant: Arc::downgrade(&participant),
             sedp_logic,
+            shutdown_waker: Arc::new(OnceLock::new()),
         }
+    }
+
+    pub(crate) fn set_shutdown_waker(&mut self, handle: Arc<OnceLock<Arc<Waker>>>) {
+        self.shutdown_waker = handle;
     }
 
     pub(crate) fn unicast_listening(&mut self) -> std::io::Result<()> {
         info!("start discovery unicast listening");
         let mut poll = Poll::new().unwrap();
         let mut events = Events::with_capacity(MAX_EVENTS);
+
+        let waker = Arc::new(Waker::new(poll.registry(), SHUTDOWN_WAKE_TOKEN)?);
+        let _ = self.shutdown_waker.set(waker);
 
         // Register UDP listener if present
         let udp_token = if let Some(listener) = &mut self.discovery_unicast_listener {

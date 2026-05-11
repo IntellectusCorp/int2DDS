@@ -518,8 +518,6 @@ impl DcpsBridge {
         }
         drop(timer_handler);
 
-        // Wake and join the sending thread first so it releases the SendingTask
-        // mutex; otherwise the sync termination send below blocks waiting for it.
         let sending_handler = SendingHandler::get_instance(self.participant.clone(), None, None);
         sending_handler.wake_event_loop();
         let _ = self.participant.send_termination_message_on_shutdown();
@@ -528,8 +526,6 @@ impl DcpsBridge {
 
         // Terminate discovery listening task
         if let Some(sedp_logic) = self.sedp_logic.as_ref() {
-            // Wake all listening polls before joining so each thread observes the
-            // terminate flag instantly instead of waiting out its 100ms poll timeout.
             sedp_logic.wake_listening_threads();
             sedp_logic.join_all_listening_threads()?;
         }
