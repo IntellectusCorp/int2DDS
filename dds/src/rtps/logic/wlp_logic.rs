@@ -1580,28 +1580,35 @@ impl UnicastMessageProcessor for WlpLogic {
             return Ok(());
         }
 
-        let missing_changes = {
-            let writer_cache = writer.writer_cache();
-            let writer_cache_guard = match writer_cache.lock() {
-                Ok(guard) => guard,
-                Err(e) => {
-                    error!("[acknack] Failed to acquire writer cache lock: {}", e);
-                    return Ok(());
-                }
-            };
-
-            let mut missing_changes = Vec::new();
-            for seq_num in missing_sequence_numbers {
-                if let Some(change) = writer_cache_guard.get_change(seq_num) {
-                    missing_changes.push(change);
-                }
+        // LOCK ORDER: acquires `writer_cache` first, then `reader_proxies`.
+        let writer_cache = writer.writer_cache();
+        let cache_guard = match writer_cache.lock() {
+            Ok(guard) => guard,
+            Err(e) => {
+                error!("[acknack] Failed to acquire writer cache lock: {}", e);
+                return Ok(());
             }
-            missing_changes
         };
+
+        let mut missing_changes = Vec::new();
+        for seq_num in missing_sequence_numbers {
+            if let Some(change) = cache_guard.get_change(seq_num) {
+                missing_changes.push(change);
+            }
+        }
 
         if missing_changes.is_empty() {
             return Ok(());
         }
+
+        let wlp_last_change_sn = writer.last_change_sequence_number();
+        let heartbeat_info = Some((
+            writer.heartbeat_count(),
+            cache_guard.get_seq_num_min().unwrap_or(wlp_last_change_sn + 1),
+            cache_guard.get_seq_num_max().unwrap_or(wlp_last_change_sn),
+            false,
+            false,
+        ));
 
         debug!(
             "Retransmitting {} missing changes from remote: {:?}",
@@ -1624,26 +1631,6 @@ impl UnicastMessageProcessor for WlpLogic {
         }
 
         for change in missing_changes {
-            let heartbeat_info = {
-                let writer_cache = writer.writer_cache();
-                let cache_guard = match writer_cache.lock() {
-                    Ok(guard) => guard,
-                    Err(e) => {
-                        warn!("[WLP] Failed to acquire writer cache lock for change, skipping this change: {}", e);
-                        continue; // Skip this change and process next change
-                    }
-                };
-
-                let wlp_last_change_sn = writer.last_change_sequence_number();
-                Some((
-                    writer.heartbeat_count(),
-                    cache_guard.get_seq_num_min().unwrap_or(wlp_last_change_sn + 1),
-                    cache_guard.get_seq_num_max().unwrap_or(wlp_last_change_sn),
-                    false,
-                    false,
-                ))
-            };
-
             let participant = self.get_upgraded_participant()?;
             for reader_proxy in proxies_guard.iter() {
                 // Get heartbeat info to include in the same RTPS message as Data
