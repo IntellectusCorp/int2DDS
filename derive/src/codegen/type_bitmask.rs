@@ -210,6 +210,18 @@ pub fn derive_bitmask_impl(
             }
         }
 
+        impl #crate_path::serialize::xcdr::XcdrSerializeMembers for #value_name {
+            fn serialize_xcdr_members(&self, serializer: &mut #crate_path::serialize::xcdr::XcdrSerializer) -> #crate_path::serialize::xcdr::XcdrResult<()> {
+                #crate_path::serialize::xcdr::XcdrSerialize::serialize_xcdr(self, serializer)
+            }
+        }
+
+        impl #crate_path::serialize::xcdr::XcdrDeserializeMembers for #value_name {
+            fn deserialize_xcdr_members(deserializer: &mut #crate_path::serialize::xcdr::XcdrDeserializer) -> #crate_path::serialize::xcdr::XcdrResult<Self> {
+                #crate_path::serialize::xcdr::XcdrDeserialize::deserialize_xcdr(deserializer)
+            }
+        }
+
         #[automatically_derived]
         impl<C: speedy::Context> speedy::Writable<C> for #value_name {
             fn write_to<T: ?Sized + speedy::Writer<C>>(&self, writer: &mut T) -> Result<(), C::Error> {
