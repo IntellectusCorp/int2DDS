@@ -610,7 +610,6 @@ impl<'a> CGen<'a> {
                 self.raw("    size_t dh;\n");
                 self.raw("    int2dds_cdr_write_dheader_begin(&w, &dh);\n");
                 self.emit_serialize_fields_mutable(s, "val");
-                self.raw("    int2dds_cdr_write_sentinel(&w);\n");
                 self.raw("    int2dds_cdr_write_dheader_finalize(&w, dh);\n");
             }
         }
@@ -685,11 +684,10 @@ impl<'a> CGen<'a> {
                 self.raw("    }\n");
             }
             ExtensibilityKind::Mutable => {
-                // Mutable always requires XCDR2 (DHEADER + EMHEADER)
+                // Mutable always requires XCDR2 (DHEADER + EMHEADER, DHEADER-bounded, no sentinel)
                 self.raw("    size_t dh;\n");
                 self.raw("    int2dds_cdr_write_dheader_begin(&w, &dh);\n");
                 self.emit_serialize_fields_mutable(s, "val");
-                self.raw("    int2dds_cdr_write_sentinel(&w);\n");
                 self.raw("    int2dds_cdr_write_dheader_finalize(&w, dh);\n");
             }
         }
@@ -714,13 +712,19 @@ impl<'a> CGen<'a> {
     }
 
     fn emit_serialize_fields(&mut self, s: &ResolvedStruct, prefix: &str) {
-        // If there's a base type, serialize parent fields first
+        // Inline parent fields (flat) — a single outer DHEADER bounds the whole
+        // struct including inherited fields, matching Rust/C#. Calling
+        // {Parent}_serialize_fields would emit a nested DHEADER and desync with Rust.
         if let Some(base) = &s.base_type {
             let simple = base.rsplit("::").next().unwrap_or(base);
-            self.raw(&format!(
-                "    {}_serialize_fields(&w, (const {}*)&{}->parent);\n",
-                simple, simple, prefix
-            ));
+            if let Some(parent_struct) = self.model.structs.iter().find(|st| st.name == simple).cloned() {
+                let parent_var = format!("_p_{}", simple.to_lowercase());
+                self.raw(&format!(
+                    "    const {} *{} = &{}->parent;\n",
+                    simple, parent_var, prefix
+                ));
+                self.emit_serialize_fields(&parent_struct, &parent_var);
+            }
         }
         for m in &s.members {
             let field_name = naming::escape_keyword(&m.name, naming::TargetLang::C);
@@ -944,13 +948,17 @@ impl<'a> CGen<'a> {
     }
 
     fn emit_deserialize_fields(&mut self, s: &ResolvedStruct, prefix: &str) {
-        // If there's a base type, deserialize parent fields first
+        // Inline parent fields (flat) — see emit_serialize_fields.
         if let Some(base) = &s.base_type {
             let simple = base.rsplit("::").next().unwrap_or(base);
-            self.raw(&format!(
-                "    {}_deserialize_fields(&r, ({}*)&{}->parent);\n",
-                simple, simple, prefix
-            ));
+            if let Some(parent_struct) = self.model.structs.iter().find(|st| st.name == simple).cloned() {
+                let parent_var = format!("_p_{}", simple.to_lowercase());
+                self.raw(&format!(
+                    "    {} *{} = &{}->parent;\n",
+                    simple, parent_var, prefix
+                ));
+                self.emit_deserialize_fields(&parent_struct, &parent_var);
+            }
         }
         for m in &s.members {
             let field_name = naming::escape_keyword(&m.name, naming::TargetLang::C);
@@ -960,7 +968,8 @@ impl<'a> CGen<'a> {
     }
 
     fn emit_deserialize_fields_mutable(&mut self, s: &ResolvedStruct, prefix: &str) {
-        self.raw("    while (!int2dds_cdr_is_sentinel(&r)) {\n");
+        self.raw("    size_t _d_end = start_pos + obj_size;\n");
+        self.raw("    while (int2dds_cdr_reader_position(&r) < _d_end) {\n");
         self.raw("        uint32_t mid, dlen;\n        bool mu;\n");
         self.raw(
             "        if (!int2dds_cdr_read_emheader(&r, &mid, &dlen, &mu))\n            return false;\n",
@@ -981,7 +990,6 @@ impl<'a> CGen<'a> {
         self.raw("            break;\n");
         self.raw("        }\n");
         self.raw("    }\n");
-        self.raw("    int2dds_cdr_skip_bytes(&r, 4); /* sentinel */\n");
     }
 
     fn emit_read_field(&mut self, ty: &ResolvedType, accessor: &str) {
@@ -1230,7 +1238,10 @@ impl<'a> CGen<'a> {
             element,
             ResolvedType::String { .. }
                 | ResolvedType::WString { .. }
+                | ResolvedType::Struct(_)
                 | ResolvedType::Sequence { .. }
+                | ResolvedType::Array { .. }
+                | ResolvedType::Map { .. }
         )
     }
 
@@ -1727,11 +1738,11 @@ mod tests {
         assert!(code.contains("INT2DDS_CDR_MUTABLE"));
         assert!(code.contains("int2dds_cdr_write_emheader_begin(&w, 0, false, &em)"));
         assert!(code.contains("int2dds_cdr_write_emheader_begin(&w, 1, false, &em)"));
-        assert!(code.contains("int2dds_cdr_write_sentinel(&w)"));
+        assert!(code.contains("int2dds_cdr_write_dheader_finalize(&w, dh)"));
         assert!(code.contains("switch (mid)"));
         assert!(code.contains("case 0:"));
         assert!(code.contains("case 1:"));
-        assert!(code.contains("int2dds_cdr_is_sentinel(&r)"));
+        assert!(code.contains("int2dds_cdr_reader_position(&r) < _d_end"));
     }
 
     #[test]

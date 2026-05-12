@@ -73,9 +73,6 @@ impl<'a> CdrDeserializer<'a> {
             utf16_chars.push(self.read_u16()?);
         }
 
-        // Align to 4-byte boundary after reading all UTF-16 code units
-        self.align(4);
-
         String::from_utf16(&utf16_chars).map_err(|_| CdrError::InvalidWideCharacter)
     }
 
@@ -175,7 +172,6 @@ impl<'a> Xcdr2Deserializer<'a> {
         for _ in 0..length {
             utf16_chars.push(self.read_u16()?);
         }
-        self.align(4);
         String::from_utf16(&utf16_chars).map_err(|_| CdrError::InvalidWideCharacter)
     }
 
