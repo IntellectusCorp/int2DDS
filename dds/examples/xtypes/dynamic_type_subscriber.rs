@@ -19,6 +19,11 @@
 //! 5. Accesses fields by name: `data.get::<i32>("sensor_id")`
 
 use std::sync::Arc;
+use std::time::Duration as StdDuration;
+
+#[path = "../common/shutdown.rs"]
+mod shutdown;
+use shutdown::{cleanup_participant, Shutdown};
 
 use clap::Parser;
 use int2dds::{
@@ -58,18 +63,13 @@ struct Args {
 fn wait_for_type_object(
     builtin_subscriber: &int2dds::subscription::subscriber::Subscriber,
     topic_name: &str,
-) -> (TypeObject, String) {
+    shutdown: &Shutdown,
+) -> Option<(TypeObject, String)> {
     let publication_reader = builtin_subscriber
         .lookup_datareader::<PublicationBuiltinTopicData>("DCPSPublication")
         .expect("Failed to lookup DCPSPublication reader");
 
-    let mut condition = publication_reader.get_statuscondition().unwrap().clone();
-    condition.set_enabled_statuses(StatusMask::DATA_AVAILABLE).unwrap();
-    let wait_set = WaitSet::new();
-    wait_set.attach_condition(condition).unwrap();
-
-    loop {
-        let _ = wait_set.wait(Duration { sec: 1, nanosec: 0 });
+    while !shutdown.is_stopped() {
         publication_reader.get_status_changes().ok();
 
         if let Ok(samples) = publication_reader.read(
@@ -82,13 +82,18 @@ fn wait_for_type_object(
                 if let Ok(pub_data) = sample.data() {
                     if pub_data.topic_name() == topic_name {
                         if let Some(type_obj) = pub_data.type_object() {
-                            return (type_obj.clone(), pub_data.type_name().to_string());
+                            return Some((type_obj.clone(), pub_data.type_name().to_string()));
                         }
                     }
                 }
             }
         }
+
+        if shutdown.wait_timeout(StdDuration::from_millis(100)) {
+            return None;
+        }
     }
+    None
 }
 
 fn main() {
@@ -96,6 +101,7 @@ fn main() {
     set_console_log_level(LogLevel::Info);
 
     let args = Args::parse();
+    let shutdown = Shutdown::install();
 
     println!("XTypes Subscriber - Type Discovery Demo");
     println!("Waiting for publisher on topic '{}'...\n", args.topic);
@@ -115,7 +121,12 @@ fn main() {
     let builtin_subscriber =
         participant.get_builtin_subscriber().expect("Failed to get builtin subscriber");
 
-    let (type_object, type_name) = wait_for_type_object(&builtin_subscriber, &args.topic);
+    let Some((type_object, type_name)) =
+        wait_for_type_object(&builtin_subscriber, &args.topic, &shutdown)
+    else {
+        cleanup_participant(participant);
+        return;
+    };
 
     // Create DynamicTypeSupport from discovered TypeObject
     let type_support = participant
@@ -168,13 +179,17 @@ fn main() {
         )
         .expect("Failed to create dynamic datareader");
 
-    // Wait for subscription matched
-    let mut match_condition = reader.get_statuscondition().unwrap().clone();
-    match_condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
-    let match_wait_set = WaitSet::new();
-    match_wait_set.attach_condition(match_condition).unwrap();
-    match_wait_set.wait(Duration::infinite()).unwrap();
-    reader.get_subscription_matched_status().unwrap();
+    while !shutdown.is_stopped() {
+        let status = reader.get_subscription_matched_status().unwrap();
+        if status.current_count() > 0 {
+            break;
+        }
+        if shutdown.wait_timeout(StdDuration::from_millis(100)) {
+            drop(reader);
+            cleanup_participant(participant);
+            return;
+        }
+    }
 
     println!("Matched with publisher. Receiving data...\n");
 
@@ -184,8 +199,8 @@ fn main() {
     let data_wait_set = WaitSet::new();
     data_wait_set.attach_condition(data_condition).unwrap();
 
-    loop {
-        if data_wait_set.wait(Duration { sec: 5, nanosec: 0 }).is_ok() {
+    while !shutdown.is_stopped() {
+        if data_wait_set.wait(Duration { sec: 0, nanosec: 100_000_000 }).is_ok() {
             reader.get_status_changes().ok();
 
             match reader.take(
@@ -216,4 +231,7 @@ fn main() {
             }
         }
     }
+
+    drop(reader);
+    cleanup_participant(participant);
 }

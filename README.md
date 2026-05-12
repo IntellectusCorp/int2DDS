@@ -210,34 +210,112 @@ fn main() {
 
 ### Prerequisites
 
-- Rust 1.89 or later
-- Cargo
+**Common (all builds):**
 
-### Build
+- Rust 1.89 or later, with Cargo
+- Git
+
+**Per-language (only if building that binding):**
+
+- C#: .NET SDK 8.0 or later (covers all multi-targets including legacy net45/net48 via reference assemblies)
+- Python: Python 3.10 or later, `pip`
+- Java: JDK 11 or later (Gradle wrapper is included — no separate install needed)
 
 ```bash
-# Clone the repository
 git clone https://github.com/IntellectusCorp/int2DDS.git
 cd int2DDS
-
-# Build the project
-cargo build
-
-# Run tests
-cargo test
-
-# Build with release optimizations
-cargo build --release
 ```
+
+### 1. Build the FFI native libraries
+
+The C# and Python bindings load `int2dds-ffi` (a `cdylib`) at runtime. The Java binding uses a separate JNI crate (`int2dds-java`).
+
+```bash
+# Required for C# and Python bindings
+cargo build --release -p int2dds-ffi
+
+# Required for the Java binding (currently on the feature/java-binding branch)
+cargo build --release -p int2dds-java
+```
+
+Outputs land in `target/release/`:
+
+- `int2dds_ffi.{dll,so,dylib}` — for C# / Python
+- `int2dds_java.{dll,so,dylib}` — for Java
+
+> **Note:** native libraries are built for the host architecture by default. The process loading them must match (e.g. an x64 .dll cannot be loaded into a 32-bit process). Cross-compile with `cargo build --release --target <triple>` if needed.
+
+### 2. Rust core
+
+```bash
+cargo build --release
+cargo test
+```
+
+### 3. C# binding
+
+```bash
+dotnet build csharp/Int2Dds.sln -c Release
+dotnet test csharp/tests/Int2Dds.Tests/Int2Dds.Tests.csproj -c Release
+```
+
+The C# build does **not** auto-copy the native FFI dll. Copy it next to the executable before running an example:
+
+```bash
+# Windows; adjust the TFM (net8.0, net6.0, …) as needed
+cp target/release/int2dds_ffi.dll csharp/examples/HelloWorldPublisher/bin/Release/net8.0/
+```
+
+> Run from an ASCII path — the FFI loader currently fails silently on paths containing non-ASCII characters (e.g. Korean).
+
+See [csharp/](csharp/) for projects and examples.
+
+### 4. Python binding
+
+```bash
+cd python
+pip install -e .
+pytest
+```
+
+The wrapper auto-discovers `target/release/int2dds_ffi.{dll,so,dylib}` from the workspace root. If the library lives elsewhere, set:
+
+```bash
+export INT2DDS_FFI_PATH=/abs/path/to/int2dds_ffi.dll
+```
+
+See [python/README.md](python/README.md) for the full guide.
+
+### 5. Java binding
+
+```bash
+cd java
+./gradlew build
+./gradlew test
+```
+
+The native loader looks in this order: the `INT2DDS_JAVA_LIB` environment variable → bundled JAR resources → `java.library.path`. For local development:
+
+```bash
+export INT2DDS_JAVA_LIB=/abs/path/to/target/release/int2dds_java.dll
+```
+
+> **Status:** the Java JNI crate lives on the `feature/java-binding` branch and is being integrated; the API module under [java/int2dds-api/](java/int2dds-api/) compiles independently.
 
 ### Running Examples
 
-examples:
-
 ```bash
-# Basic hello world examples
-cargo run --example hello_world_param -- --role pub --domain 0 --reliability reliable
-cargo run --example hello_world_param -- --role sub --domain 0 --reliability reliable
+# Rust
+cargo run --release --example hello_world_param -- --role pub --domain 0 --reliability reliable
+cargo run --release --example hello_world_param -- --role sub --domain 0 --reliability reliable
+
+# C# (requires int2dds_ffi.dll copied next to the exe; see step 3)
+dotnet run -c Release --project csharp/examples/HelloWorldPublisher -f net8.0
+dotnet run -c Release --project csharp/examples/HelloWorldSubscriber -f net8.0
+
+# Python
+python python/examples/hello_world_publisher.py
+python python/examples/hello_world_subscriber.py
 ```
 
 ## Documentation
@@ -259,6 +337,7 @@ int2DDS supports various environment variables for configuration:
 - `INT2DDS_FILE_LOG_LEVEL`: File log level (error, warn, info, debug, trace)
 - `INT2DDS_UDP_SOCKET_BUFFER`: UDP socket buffer size (bytes), increase up to 8388608(8MB) for large payloads
 - `INT2DDS_USE_LOOPBACK_INTERFACE`: Enable loopback interface for endpoint communication
+- `INT2DDS_MULTICAST_TTL`: IPv4 multicast TTL fallback (0-255), used when `PropertyQosPolicy` has no `int2dds.transport.UDPv4.multicast_ttl` entry (default: 1)
 
 ### TCP Environment Variables
 

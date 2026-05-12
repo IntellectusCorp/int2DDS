@@ -10,11 +10,14 @@
 //! ```
 
 use std::sync::Arc;
+use std::time::Duration as StdDuration;
+
+#[path = "../common/shutdown.rs"]
+mod shutdown;
+use shutdown::{cleanup_participant, Shutdown};
 
 use int2dds::{
     common::{env::DEFAULT_DOMAIN_ID, instance_handle::InstanceHandle},
-    core::time::Duration,
-    dcps::infrastructure::wait_set::WaitSet,
     domain::{domain_participant_factory::DomainParticipantFactory, qos::PARTICIPANT_QOS_DEFAULT},
     infrastructure::status::StatusMask,
     publication::{
@@ -51,6 +54,8 @@ impl DataWriterListener for PublisherListener {
 }
 
 fn main() {
+    let shutdown = Shutdown::install();
+
     let domain_id = DEFAULT_DOMAIN_ID;
     let factory = DomainParticipantFactory::get_instance();
 
@@ -96,14 +101,20 @@ fn main() {
 
     println!("\n[Publisher] Publishing messages... (Ctrl+C to stop)\n");
 
-    let mut condition = writer.get_statuscondition().unwrap().clone();
-    condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
-    let wait_set = WaitSet::new();
-    wait_set.attach_condition(condition).unwrap();
-    wait_set.wait(Duration::infinite()).unwrap();
-    writer.get_publication_matched_status().unwrap();
+    while !shutdown.is_stopped() {
+        let status = writer.get_publication_matched_status().unwrap();
+        if status.current_count() > 0 {
+            break;
+        }
+        if shutdown.wait_timeout(StdDuration::from_millis(100)) {
+            drop(writer);
+            cleanup_participant(participant);
+            return;
+        }
+    }
 
-    for i in 0.. {
+    let mut i: u32 = 0;
+    while !shutdown.is_stopped() {
         let data = HelloWorld { id: i, message: format!("Hello from QoS Profile example! #{}", i) };
 
         match writer.write(&data, InstanceHandle::NIL) {
@@ -111,6 +122,12 @@ fn main() {
             Err(e) => eprintln!("[Publisher] Write failed: {:?}", e),
         }
 
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        if shutdown.wait_timeout(StdDuration::from_secs(1)) {
+            break;
+        }
+        i = i.wrapping_add(1);
     }
+
+    drop(writer);
+    cleanup_participant(participant);
 }

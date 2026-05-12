@@ -4,7 +4,7 @@
 //! managing participant lifecycles, entity creation, and message routing between
 //! the two layers.
 
-use std::sync::{Arc, OnceLock, RwLock, Weak};
+use std::sync::{Arc, RwLock, Weak};
 
 use log::debug;
 
@@ -48,9 +48,8 @@ use crate::{
             user_logic::UserLogic,
         },
         messages::sedp_message::SEDPMessage,
-        service::background_service::BackgroundService,
         task::{sending_handler::SendingHandler, thread_monitor::ThreadMonitor},
-        transport::socket::Socket,
+        transport::{socket::Socket, TransportConfig},
     },
     utils::timer::timer_handler::TimerHandler,
 };
@@ -68,12 +67,11 @@ pub(crate) struct DcpsBridge {
     thread_monitor: Option<ThreadMonitor>,
 }
 
-static BACKGROUND_SERVICE: OnceLock<Arc<BackgroundService>> = OnceLock::new();
 pub(crate) static PARTICIPANTS: RwLock<Vec<Weak<Participant>>> = RwLock::new(Vec::new());
 
 impl DcpsBridge {
-    pub(crate) fn new(domain_id: DomainId) -> Self {
-        let mut socket = Socket::new(domain_id);
+    pub(crate) fn new(domain_id: DomainId, transport_config: TransportConfig) -> Self {
+        let mut socket = Socket::new(domain_id, transport_config);
         socket.create_socket();
 
         let participant =
@@ -142,12 +140,6 @@ impl DcpsBridge {
             log::error!("user_logic is not set");
         }
 
-        BACKGROUND_SERVICE.get_or_init(|| {
-            let service = BackgroundService::new();
-            service.start_background_thread();
-            Arc::new(service)
-        });
-
         // Initialize thread monitoring
         self.thread_monitor = Some(ThreadMonitor::new(self.participant.clone()));
         match self.thread_monitor.as_ref() {
@@ -159,14 +151,6 @@ impl DcpsBridge {
                 log::error!("thread_monitor is not set");
             }
         }
-
-        // self.background_logic = Some(BackgroundLogic::new(self.participant.clone()));
-        // match self.background_logic.as_ref() {
-        //     Some(background_logic) => background_logic.start_background_thread(),
-        //     None => {
-        //         log::error!("background_logic is not set");
-        //     }
-        // };
 
         Ok(())
     }
@@ -271,6 +255,15 @@ impl DcpsBridge {
                 publication_builtin_topic_data.clone(),
             );
 
+        let writer = writer.ok_or_else(|| {
+            log::error!("writer is not set");
+            RtpsError::new(RtpsErrorCode::LockError, "Writer lock error")
+        })?;
+
+        let _ = self
+            .participant
+            .add_writer(&publication_builtin_topic_data.topic_name(), writer.clone());
+
         self.send_sedp_message_and_match(
             cache_change,
             publication_builtin_topic_data.topic_name().as_str(),
@@ -287,21 +280,10 @@ impl DcpsBridge {
                     .match_writer_with_subscription(writer.clone(), subscription_data)
                     .map(|_| false)
             },
-            writer.as_ref(),
+            Some(&writer),
         );
 
-        match writer {
-            Some(writer) => {
-                let _ = self
-                    .participant
-                    .add_writer(&publication_builtin_topic_data.topic_name(), writer.clone());
-                Ok(writer)
-            }
-            None => {
-                log::error!("writer is not set");
-                Err(RtpsError::new(RtpsErrorCode::LockError, "Writer lock error"))
-            }
-        }
+        Ok(writer)
     }
 
     pub(crate) fn get_participant(&self) -> Result<Participant, RtpsError> {
@@ -425,6 +407,15 @@ impl DcpsBridge {
                 subscription_builtin_topic_data.clone(),
             );
 
+        let reader = reader.ok_or_else(|| {
+            log::error!("Reader is not set");
+            RtpsError::new(RtpsErrorCode::LockError, "Reader lock error")
+        })?;
+
+        // Register the reader in the participant store BEFORE matching so that
+        // any liveliness/match notifications fired during cross-match can find it.
+        self.participant.add_reader(&subscription_builtin_topic_data.topic_name(), reader.clone());
+
         self.send_sedp_message_and_match(
             cache_change,
             subscription_builtin_topic_data.topic_name().as_str(),
@@ -440,20 +431,10 @@ impl DcpsBridge {
                 sedp_logic.match_reader_with_publication(reader.clone(), publication_data);
                 Ok(false)
             },
-            reader.as_ref(),
+            Some(&reader),
         );
 
-        match reader {
-            Some(reader) => {
-                self.participant
-                    .add_reader(&subscription_builtin_topic_data.topic_name(), reader.clone());
-                Ok(reader)
-            }
-            None => {
-                log::error!("Reader is not set");
-                Err(RtpsError::new(RtpsErrorCode::LockError, "Reader lock error"))
-            }
-        }
+        Ok(reader)
     }
 
     /// send sedp message to remote participants and match pending endpoints
@@ -537,21 +518,21 @@ impl DcpsBridge {
         }
         drop(timer_handler);
 
-        // Send termination message before stopping sending thread
-        let _ = self.participant.send_termination_message_on_shutdown();
-
-        // Terminate sending task thread
         let sending_handler = SendingHandler::get_instance(self.participant.clone(), None, None);
+        sending_handler.wake_event_loop();
+        let _ = self.participant.send_termination_message_on_shutdown();
         let _ = sending_handler.join_sending_thread();
         drop(sending_handler);
 
         // Terminate discovery listening task
         if let Some(sedp_logic) = self.sedp_logic.as_ref() {
+            sedp_logic.wake_listening_threads();
             sedp_logic.join_all_listening_threads()?;
         }
 
         // Terminate user traffic listening task
         if let Some(user_logic) = self.user_logic.as_ref() {
+            user_logic.wake_unicast_listening_thread();
             user_logic.join_unicast_listening_thread()?;
         }
 
@@ -563,11 +544,6 @@ impl DcpsBridge {
             wlp_logic.shutdown();
         }
 
-        // Terminate user traffic listening task
-        // if let Some(background_logic) = &self.background_logic {
-        //     background_logic.join_background_thread()?;
-        // }
-
         // Drop logic instances to release sender references
         self.spdp_logic = Arc::new(None);
         self.sedp_logic = Arc::new(None);
@@ -577,7 +553,6 @@ impl DcpsBridge {
         self.participant.clear_wlp_logic_sender();
 
         // Remove all threads spawned
-
         SendingHandler::remove_map_guard(&self.participant.guid());
         TimerHandler::remove_map_guard(&self.participant.guid().prefix());
         self.thread_monitor = None;
@@ -773,7 +748,8 @@ mod tests {
 
         //initialize dcps_bridge
         let domain_id = unique_domain_id();
-        let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32)));
+        let dcps_bridge =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, TransportConfig::default())));
         match dcps_bridge.lock() {
             Ok(mut dcps_bridge) => dcps_bridge.init().unwrap(),
             Err(e) => {
@@ -788,7 +764,8 @@ mod tests {
     #[test]
     fn test_all_logic_cleanup() {
         let domain_id = unique_domain_id();
-        let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32)));
+        let dcps_bridge =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, TransportConfig::default())));
 
         {
             let mut bridge = dcps_bridge.lock().unwrap();
@@ -818,7 +795,8 @@ mod tests {
         use crate::utils::timer::timer_handler::TimerHandler;
 
         let domain_id = unique_domain_id();
-        let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32)));
+        let dcps_bridge =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, TransportConfig::default())));
         let participant_guid: crate::rtps::common::guid::Guid;
 
         {
@@ -880,7 +858,8 @@ mod tests {
         let test_type_name = "HelloWorld";
 
         //initialize dcps_bridge
-        let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32)));
+        let dcps_bridge =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, TransportConfig::default())));
 
         let _participant = dcps_bridge.lock().unwrap().get_participant().unwrap();
 
@@ -947,7 +926,8 @@ mod tests {
         let test_type_name = "HelloWorld";
 
         let dcps_bridge_test: Arc<Mutex<DcpsBridge>>;
-        dcps_bridge_test = Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32)));
+        dcps_bridge_test =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, TransportConfig::default())));
 
         let _participant = dcps_bridge_test.lock().unwrap().get_participant().unwrap();
 
@@ -1011,7 +991,8 @@ mod tests {
         let test_topic_name = "remove_writer_topic";
         let test_type_name = "HelloWorld";
 
-        let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32)));
+        let dcps_bridge =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, TransportConfig::default())));
 
         let mut subscription_builtin_topic_data = SubscriptionBuiltinTopicData::new(
             &DataReaderQos::default(),
@@ -1106,7 +1087,8 @@ mod tests {
         let test_topic_name = "remove_writer_topic";
         let test_type_name = "HelloWorld";
 
-        let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32)));
+        let dcps_bridge =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, TransportConfig::default())));
 
         let mut publication_builtin_topic_data = PublicationBuiltinTopicData::new(
             &DataWriterQos::default(),
@@ -1201,7 +1183,8 @@ mod tests {
         let test_type_name = "HelloWorld";
 
         let dcps_bridge_test: Arc<Mutex<DcpsBridge>>;
-        dcps_bridge_test = Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32)));
+        dcps_bridge_test =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, TransportConfig::default())));
 
         let mut publication_builtin_topic_data = PublicationBuiltinTopicData::new(
             // &DataWriterQos::default(),
@@ -1257,7 +1240,8 @@ mod tests {
         let test_type_name = "HelloWorld";
 
         let dcps_bridge_test: Arc<Mutex<DcpsBridge>>;
-        dcps_bridge_test = Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32)));
+        dcps_bridge_test =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, TransportConfig::default())));
 
         let mut publication_builtin_topic_data = PublicationBuiltinTopicData::new(
             &DataWriterQos {
@@ -1312,7 +1296,8 @@ mod tests {
         let test_type_name = "HelloWorld";
 
         //initialize dcps_bridge
-        let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32)));
+        let dcps_bridge =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, TransportConfig::default())));
 
         let mut subscription_builtin_topic_data = SubscriptionBuiltinTopicData::new(
             &DataReaderQos {
@@ -1369,7 +1354,8 @@ mod tests {
         let test_topic_name = "remove_writer_topic";
         let test_type_name = "HelloWorld";
 
-        let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32)));
+        let dcps_bridge =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, TransportConfig::default())));
 
         let reader_qos = DataReaderQos {
             reliability: ReliabilityQosPolicy {
@@ -1424,7 +1410,10 @@ mod tests {
         );
 
         // Remove mocked writer proxy
-        guard.participant.remove_unmatched_writer_from_reader(remote_writer_guid);
+        guard
+            .participant
+            .cleanup_remote_writer(remote_writer_guid, &test_topic_name.to_string())
+            .unwrap();
         assert!(
             stateful_reader.writer_proxies().lock().unwrap().is_empty(),
             "WriterProxy list should be empty after removal"
@@ -1437,7 +1426,8 @@ mod tests {
         let test_topic_name = "remove_writer_topic";
         let test_type_name = "HelloWorld";
 
-        let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32)));
+        let dcps_bridge =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, TransportConfig::default())));
 
         let writer_qos = DataWriterQos {
             reliability: ReliabilityQosPolicy {
@@ -1489,7 +1479,10 @@ mod tests {
         );
 
         // Remove mocked reader locator
-        guard.participant.remove_unmatched_reader_from_writer(remote_reader_guid);
+        guard
+            .participant
+            .cleanup_remote_reader(remote_reader_guid, &test_topic_name.to_string())
+            .unwrap();
         assert!(
             stateless_writer.reader_locator().lock().unwrap().is_empty(),
             "ReaderLocator list should be empty after removal"
@@ -1502,7 +1495,8 @@ mod tests {
         let test_topic_name = "remove_writer_topic";
         let test_type_name = "HelloWorld";
 
-        let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32)));
+        let dcps_bridge =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, TransportConfig::default())));
 
         let writer_qos = DataWriterQos {
             reliability: ReliabilityQosPolicy {
@@ -1558,7 +1552,10 @@ mod tests {
         );
 
         // Remove mocked reader proxy
-        guard.participant.remove_unmatched_reader_from_writer(remote_reader_guid);
+        guard
+            .participant
+            .cleanup_remote_reader(remote_reader_guid, &test_topic_name.to_string())
+            .unwrap();
         assert!(
             stateful_writer.reader_proxies().lock().unwrap().is_empty(),
             "MatchedReaders list should be empty after removal"
@@ -1571,7 +1568,8 @@ mod tests {
         let test_topic_name = "remove_writer_topic";
         let test_type_name = "HelloWorld";
 
-        let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32)));
+        let dcps_bridge =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, TransportConfig::default())));
 
         let writer_qos = DataWriterQos {
             reliability: ReliabilityQosPolicy {
@@ -1674,7 +1672,10 @@ mod tests {
         );
 
         // Remove mocked reader proxy
-        guard.participant.remove_unmatched_reader_from_writer(remote_reader_guid_1);
+        guard
+            .participant
+            .cleanup_remote_reader(remote_reader_guid_1, &test_topic_name.to_string())
+            .unwrap();
         assert!(
             stateful_writer_1.reader_proxies().lock().unwrap().len() == 1,
             "Stateful writer 1's reader proxy list should contain 1 elements after removal"
@@ -1688,7 +1689,8 @@ mod tests {
     #[test]
     fn test_remove_unmatched_endpoint_from_terminated_participant() {
         let domain_id = unique_domain_id();
-        let dcps_bridge = Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32)));
+        let dcps_bridge =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, TransportConfig::default())));
 
         // Create Writer
         let mut publication_builtin_topic_data = PublicationBuiltinTopicData::default();
@@ -1775,7 +1777,10 @@ mod tests {
         );
 
         // This would remove 2 mocked reader proxies
-        guard.participant.remove_all_unmatched_endpoint_from_terminated_participant([5; 12]);
+        guard
+            .participant
+            .remove_all_unmatched_endpoint_from_terminated_participant([5; 12])
+            .unwrap();
 
         assert!(
             stateful_writer.reader_proxies().lock().unwrap().len() == 1,
@@ -1788,7 +1793,8 @@ mod tests {
     fn test_delete_participant() {
         // Test first participant
         let domain_id = unique_domain_id();
-        let dcps_bridge_1 = Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32)));
+        let dcps_bridge_1 =
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, TransportConfig::default())));
 
         {
             let mut bridge_guard = dcps_bridge_1.lock().unwrap();

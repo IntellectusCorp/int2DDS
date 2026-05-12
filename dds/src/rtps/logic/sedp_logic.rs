@@ -112,6 +112,8 @@ pub(crate) struct SedpLogic {
     sender: Option<Arc<TransportSender>>,
     multicast_listening_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     unicast_listening_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+    multicast_listening_waker: Arc<std::sync::OnceLock<Arc<mio::Waker>>>,
+    unicast_listening_waker: Arc<std::sync::OnceLock<Arc<mio::Waker>>>,
     timer_handler: Arc<Mutex<TimerHandler>>,
 }
 
@@ -123,7 +125,6 @@ fn validate_endpoint_compatibility<L>(
     update_inconsistent_topic: impl Fn(&L),
     who: &'static str, // for log
 ) -> RtpsResult<()> {
-    let diag_qos = std::env::var("INT2DDS_DIAG_QOS_MATCH").is_ok();
     // TopicKind - reject if writer and reader disagree on keyed vs keyless
     let writer_keyed = offered.endpoint_guid().entity_kind().is_with_key();
     let reader_keyed = requested.endpoint_guid().entity_kind().is_with_key();
@@ -146,28 +147,6 @@ fn validate_endpoint_compatibility<L>(
     if !check_qos_compatibility(requested, offered) {
         if let Some(pid) = check_qos_compatibility_with_policy_id(requested, offered) {
             update_incompatible_qos(local, pid);
-            if diag_qos {
-                eprintln!(
-                    "[INT2DDS_DIAG_QOS_MATCH] incompatible who={} pid={:?} writer={:?} reader={:?} \
-requested[liveliness={:?}, lease={:?}, durability={:?}, reliability={:?}, deadline={:?}] \
-offered[liveliness={:?}, lease={:?}, durability={:?}, reliability={:?}, deadline={:?}, lifespan={:?}]",
-                    who,
-                    pid,
-                    offered.endpoint_guid(),
-                    requested.endpoint_guid(),
-                    requested.liveliness().kind,
-                    requested.liveliness().lease_duration,
-                    requested.durability().kind,
-                    requested.reliability().kind,
-                    requested.deadline().period,
-                    offered.liveliness().kind,
-                    offered.liveliness().lease_duration,
-                    offered.durability().kind,
-                    offered.reliability().kind,
-                    offered.deadline().period,
-                    offered.lifespan().duration
-                );
-            }
         }
         let err = RtpsError::new(RtpsErrorCode::QosIncompatible, format!("[QoS failed :{}]", who));
 
@@ -248,7 +227,18 @@ impl SedpLogic {
             sender,
             multicast_listening_handle: Arc::new(Mutex::new(None)),
             unicast_listening_handle: Arc::new(Mutex::new(None)),
+            multicast_listening_waker: Arc::new(std::sync::OnceLock::new()),
+            unicast_listening_waker: Arc::new(std::sync::OnceLock::new()),
             timer_handler,
+        }
+    }
+
+    pub(crate) fn wake_listening_threads(&self) {
+        if let Some(waker) = self.multicast_listening_waker.get() {
+            let _ = waker.wake();
+        }
+        if let Some(waker) = self.unicast_listening_waker.get() {
+            let _ = waker.wake();
         }
     }
 
@@ -263,6 +253,8 @@ impl SedpLogic {
 
         let mut discovery_multicast_listening_task =
             DiscoveryMulticastListeningTask::new(discovery_multicast_listener, participant.clone());
+        discovery_multicast_listening_task
+            .set_shutdown_waker(self.multicast_listening_waker.clone());
 
         let participant_guid = participant.guid().clone();
 
@@ -299,6 +291,7 @@ impl SedpLogic {
             discovery_tcp_listener,
             participant.clone(),
         );
+        discovery_unicast_listening_task.set_shutdown_waker(self.unicast_listening_waker.clone());
 
         // unicast listening
         let unicast_guid = participant_guid;
@@ -541,11 +534,6 @@ impl SedpLogic {
 
 /// Subscription Handling (Local Writer <-> Remote Reader)
 impl SedpLogic {
-    fn handle_remote_subscription_termination(&self, participant: &Participant, reader_guid: Guid) {
-        participant.remove_unmatched_reader_from_writer(reader_guid);
-        participant.remove_remote_subscription_by_guid(reader_guid);
-    }
-
     fn handle_subscription_builtin_topic_data(
         &self,
         subscription_builtin_topic_data: SubscriptionBuiltinTopicData,
@@ -564,12 +552,14 @@ impl SedpLogic {
                     debug!("Received Data(r[UD])");
 
                     // Terminating endpoint provides GUID via KeyHash, but sometimes sends DATA message without SerializedData payload
-                    let terminated_reader_guid = inline_qos_params
-                        .get_key_hash()
-                        .unwrap_or_else(|| InstanceHandle::from_guid(&endpoint_guid));
+                    let terminated_reader_guid =
+                        if let Some(key_hash) = inline_qos_params.get_key_hash() {
+                            key_hash.to_guid()
+                        } else {
+                            endpoint_guid
+                        };
 
-                    let reader_guid = InstanceHandle::to_guid(&terminated_reader_guid);
-                    self.handle_remote_subscription_termination(&participant, reader_guid);
+                    participant.cleanup_remote_reader(terminated_reader_guid, &topic_name)?;
                     return Ok(());
                 }
             } else {
@@ -741,7 +731,7 @@ impl SedpLogic {
         if writer_guid.entity_id().entity_kind().is_user_defined() {
             let participant = self.get_upgraded_participant()?;
             if let Some(wlp_logic) = participant.wlp_logic() {
-                let _ = wlp_logic.add_local_writer(writer_guid, writer.liveliness()?);
+                let _ = wlp_logic.register_asserting_writer(writer_guid, writer.liveliness()?);
             }
         }
 
@@ -935,17 +925,6 @@ impl SedpLogic {
 
 /// Publication Handling (Local Reader <-> Remote Writer)
 impl SedpLogic {
-    fn handle_remote_publication_termination(&self, participant: &Participant, writer_guid: Guid) {
-        if writer_guid.entity_id().entity_kind().is_user_defined() {
-            if let Some(wlp_logic) = participant.wlp_logic() {
-                let _ = wlp_logic.remove_remote_writer(writer_guid);
-            }
-        }
-
-        participant.remove_unmatched_writer_from_reader(writer_guid);
-        participant.remove_remote_publication_by_guid(writer_guid);
-    }
-
     fn handle_publication_builtin_topic_data(
         &self,
         publication_builtin_topic_data: PublicationBuiltinTopicData,
@@ -962,13 +941,16 @@ impl SedpLogic {
                 // DISPOSED and UNREGISTERED status flags to be set
                 if status_info.disposed() || status_info.unregistered() {
                     debug!("Received Data(w[UD])");
-                    // Terminating endpoint provides GUID via KeyHash, but sometimes sends DATA message without SerializedData payload
-                    let terminated_writer_guid = inline_qos_params
-                        .get_key_hash()
-                        .unwrap_or_else(|| InstanceHandle::from_guid(&endpoint_guid));
 
-                    let writer_guid = InstanceHandle::to_guid(&terminated_writer_guid);
-                    self.handle_remote_publication_termination(&participant, writer_guid);
+                    // Terminating endpoint provides GUID via KeyHash, but sometimes sends DATA message without SerializedData payload
+                    let terminated_writer_guid =
+                        if let Some(key_hash) = inline_qos_params.get_key_hash() {
+                            InstanceHandle::to_guid(&key_hash)
+                        } else {
+                            endpoint_guid
+                        };
+
+                    participant.cleanup_remote_writer(terminated_writer_guid, &topic_name)?;
                     return Ok(());
                 }
             } else {
@@ -1024,6 +1006,14 @@ impl SedpLogic {
                     "QoS changed for remote writer {:?}, now incompatible - removing matching",
                     endpoint_guid
                 );
+
+                // Fire LIVELINESS_CHANGED first; needs reader's matched list intact.
+                if endpoint_guid.entity_id().entity_kind().is_user_defined() {
+                    if let Some(wlp_logic) = self.get_upgraded_participant()?.wlp_logic() {
+                        let _ = wlp_logic.deregister_monitored_writer(endpoint_guid);
+                    }
+                }
+
                 reader
                     .writer_proxies()
                     .lock()
@@ -1098,8 +1088,10 @@ impl SedpLogic {
         let writer_guid = endpoint_guid;
         if writer_guid.entity_id().entity_kind().is_user_defined() {
             if let Some(wlp_logic) = self.get_upgraded_participant()?.wlp_logic() {
-                let _ = wlp_logic
-                    .add_remote_writer(writer_guid, *publication_builtin_topic_data.liveliness());
+                let _ = wlp_logic.register_monitored_writer(
+                    writer_guid,
+                    *publication_builtin_topic_data.liveliness(),
+                );
             }
         }
 
@@ -1138,6 +1130,14 @@ impl SedpLogic {
                     "QoS changed for remote writer {:?}, now incompatible - removing matching",
                     endpoint_guid
                 );
+
+                // Fire LIVELINESS_CHANGED first; needs reader's matched list intact.
+                if endpoint_guid.entity_id().entity_kind().is_user_defined() {
+                    if let Some(wlp_logic) = self.get_upgraded_participant()?.wlp_logic() {
+                        let _ = wlp_logic.deregister_monitored_writer(endpoint_guid);
+                    }
+                }
+
                 reader
                     .remote_writer_infos()
                     .lock()
@@ -1209,8 +1209,10 @@ impl SedpLogic {
         if writer_guid.entity_id().entity_kind().is_user_defined() {
             let participant = self.get_upgraded_participant()?;
             if let Some(wlp_logic) = participant.wlp_logic() {
-                let _ = wlp_logic
-                    .add_remote_writer(writer_guid, *publication_builtin_topic_data.liveliness());
+                let _ = wlp_logic.register_monitored_writer(
+                    writer_guid,
+                    *publication_builtin_topic_data.liveliness(),
+                );
             }
         }
 
@@ -1387,15 +1389,22 @@ impl SedpLogic {
                     match buffer {
                         Ok(buffer) => {
                             for locator in reader_proxy.unicast_locator_list() {
-                                if let Err(e) = self.send_to_single_locator(
-                                    &buffer,
-                                    locator.clone(),
-                                    "SEDP heartbeat",
-                                ) {
-                                    warn!("Failed to send SEDP heartbeat: {:?}", e);
-                                } else {
-                                    is_sent = true;
-                                }
+                                if locator.kind() == 1 {
+                                    //UDPv4
+                                    let socket_addr = SocketAddr::V4(SocketAddrV4::new(
+                                        locator.to_ip_v4_addr(),
+                                        locator.port() as u16,
+                                    ));
+                                    if let Some(ref sender) = self.sender {
+                                        if let Err(e) = sender.send(&socket_addr, &buffer) {
+                                            warn!("Failed to send SEDP heartbeat: {:?}", e);
+                                        } else {
+                                            is_sent = true;
+                                        }
+                                    } else {
+                                        debug!("UDP sender not available, skipping SEDP heartbeat");
+                                    }
+                                };
                             }
                             writer.increase_heartbeat_count();
                             if writer.last_change_sequence_number() != SequenceNumber::ZERO {
@@ -2026,10 +2035,9 @@ impl UnicastMessageProcessor for SedpLogic {
                     if let Some(terminated_writer_guid) =
                         inline_qos_params.as_ref().and_then(|qos| qos.get_key_hash())
                     {
-                        self.handle_remote_publication_termination(
-                            &participant,
-                            InstanceHandle::to_guid(&terminated_writer_guid),
-                        );
+                        participant.cleanup_remote_writer_by_guid(InstanceHandle::to_guid(
+                            &terminated_writer_guid,
+                        ))?;
                         return Ok(());
                     }
                 }
@@ -2079,10 +2087,9 @@ impl UnicastMessageProcessor for SedpLogic {
                     if let Some(terminated_reader_guid) =
                         inline_qos_params.as_ref().and_then(|qos| qos.get_key_hash())
                     {
-                        self.handle_remote_subscription_termination(
-                            &participant,
-                            InstanceHandle::to_guid(&terminated_reader_guid),
-                        );
+                        participant.cleanup_remote_reader_by_guid(InstanceHandle::to_guid(
+                            &terminated_reader_guid,
+                        ))?;
                         return Ok(());
                     }
                 }
@@ -2146,7 +2153,8 @@ impl UnicastMessageProcessor for SedpLogic {
                         || InstanceHandle::from_guid(&participant_proxy_data.participant_guid()),
                     );
 
-                participant.unmatch_with_remote_participant(&terminated_participant_guid.to_guid());
+                let _ = participant
+                    .unmatch_with_remote_participant(&terminated_participant_guid.to_guid());
             } else {
                 return self.handle_discovered_participant_data(participant_proxy_data.clone());
             }
@@ -2458,7 +2466,7 @@ mod tests {
             },
             sending_handler::SendingHandler,
         },
-        transport::socket::Socket,
+        transport::{socket::Socket, TransportConfig},
     };
     use crate::test_utils::unique_domain_id;
 
@@ -2473,7 +2481,7 @@ mod tests {
         env_logger::builder().filter_level(log::LevelFilter::Debug).init();
 
         let domain_id = unique_domain_id() as u32;
-        let mut socket = Socket::new(domain_id); //domain_id 0
+        let mut socket = Socket::new(domain_id, TransportConfig::default()); //domain_id 0
         socket.create_socket();
         let participant =
             Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ips()));
@@ -2525,7 +2533,7 @@ mod tests {
         env_logger::builder().filter_level(log::LevelFilter::Info).init();
 
         let domain_id = unique_domain_id() as u32;
-        let mut socket = Socket::new(domain_id); //domain_id 0
+        let mut socket = Socket::new(domain_id, TransportConfig::default()); //domain_id 0
         socket.create_socket();
         let participant =
             Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ips()));

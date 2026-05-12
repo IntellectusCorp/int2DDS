@@ -25,6 +25,8 @@ use std::{
     },
 };
 
+use arc_swap::ArcSwap;
+
 use crate::{
     common::instance_handle::InstanceHandle,
     core::error::{DdsError, DdsResult},
@@ -81,7 +83,8 @@ pub struct Subscriber {
     // See also: DomainParticipant::get_builtin_subscriber()
     is_builtin: bool,
     guid: Guid,
-    qos: Arc<Mutex<SubscriberQos>>,
+    qos: Arc<ArcSwap<SubscriberQos>>,
+    update_lock: Arc<Mutex<()>>,
     listener: Arc<RwLock<Option<Arc<dyn SubscriberListener>>>>,
     mask: Arc<RwLock<StatusMask>>,
     status_condition: Arc<Mutex<StatusCondition<SubscriberQos>>>,
@@ -104,7 +107,7 @@ impl Debug for Subscriber {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Subscriber")
             .field("guid", &self.guid)
-            .field("qos", &self.qos.lock().unwrap())
+            .field("qos", &**self.qos.load())
             .field(
                 "listener",
                 &self.listener.read().unwrap().as_ref().map(|_| "Arc<dyn SubscriberListener>"),
@@ -186,7 +189,8 @@ impl Subscriber {
         let mut subscriber = Self {
             is_builtin,
             guid: handle.to_guid(),
-            qos: Arc::new(Mutex::new(qos)),
+            qos: Arc::new(ArcSwap::from_pointee(qos)),
+            update_lock: Arc::new(Mutex::new(())),
             listener: Arc::new(RwLock::new(listener)),
             mask: Arc::new(RwLock::new(mask)),
             status_condition: Arc::new(Mutex::new(StatusCondition::new(None))),

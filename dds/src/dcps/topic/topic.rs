@@ -21,6 +21,7 @@
 //! `DomainParticipant::delete_topic()` before the participant is deleted. A topic cannot be
 //! deleted while DataReaders or DataWriters are still using it.
 
+use arc_swap::ArcSwap;
 use std::{
     any::Any,
     fmt::Debug,
@@ -64,7 +65,8 @@ pub struct Topic {
     // See also: DomainParticipant::get_builtin_subscriber()
     is_builtin: bool,
     guid: Guid,
-    qos: Arc<Mutex<TopicQos>>,
+    qos: Arc<ArcSwap<TopicQos>>,
+    update_lock: Arc<Mutex<()>>,
     listener: Arc<RwLock<Option<Arc<dyn TopicListener>>>>,
     mask: Arc<RwLock<StatusMask>>,
     status_condition: Arc<Mutex<StatusCondition<TopicQos>>>,
@@ -81,7 +83,7 @@ impl Debug for Topic {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Topic")
             .field("guid", &self.guid)
-            .field("qos", &self.qos.lock().unwrap())
+            .field("qos", &**self.qos.load())
             .field(
                 "listener",
                 &self.listener.read().unwrap().as_ref().map(|_| "Arc<dyn TopicListener>"),
@@ -174,7 +176,8 @@ impl Topic {
         let mut topic = Self {
             is_builtin,
             guid: handle.to_guid(),
-            qos: Arc::new(Mutex::new(qos)),
+            qos: Arc::new(ArcSwap::from_pointee(qos)),
+            update_lock: Arc::new(Mutex::new(())),
             listener: Arc::new(RwLock::new(listener)),
             mask: Arc::new(RwLock::new(mask)),
             status_condition: Arc::new(Mutex::new(StatusCondition::new(None))),
