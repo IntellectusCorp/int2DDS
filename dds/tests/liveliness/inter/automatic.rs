@@ -61,6 +61,9 @@ fn unmatch_alive() {
 
 #[test]
 fn unmatch_propagation_to_reader() {
+    int2dds::common::env::set_log_type(int2dds::common::log::LogType::File);
+    int2dds::common::env::set_file_log_level(int2dds::common::log::LogLevel::Debug);
+
     // matched_count, liveliness counts, and a NOT_ALIVE_NO_WRITERS sample
     // must all reflect the unmatch. autodispose=false for NO_WRITERS.
     let s = Scenario::inter();
@@ -72,13 +75,14 @@ fn unmatch_propagation_to_reader() {
     let reader = s.create_reader(rqos);
     wait_for_liveliness_changed_state(&reader, 1, 0, StdDuration::from_secs(2)).unwrap();
     wait_for_subscription_matched_count(&reader, 1, StdDuration::from_secs(2)).unwrap();
+    wait_for_publication_matched_count(&writer, 1, StdDuration::from_secs(2)).unwrap();
 
     // Instance must exist before NO_WRITERS can surface.
     writer.write(&KeyedDataType::default(), InstanceHandle::NIL).unwrap();
-
     std::thread::sleep(StdDuration::from_millis(500));
 
     s.publisher.delete_datawriter(writer).unwrap();
+    std::thread::sleep(StdDuration::from_millis(500));
 
     wait_for_subscription_matched_count(&reader, 0, StdDuration::from_secs(3)).unwrap();
     wait_for_liveliness_changed_state(&reader, 0, 0, StdDuration::from_secs(3)).unwrap();
