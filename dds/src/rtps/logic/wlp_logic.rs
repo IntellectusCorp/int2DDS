@@ -595,13 +595,29 @@ impl WlpLogic {
     }
 
     // ManualByParticipant
+    // LOCK ORDER: acquires `writer_cache` first, then `reader_proxies`.
     pub(crate) fn send_liveliness_once(&self, data: &ParticipantMessageData) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
 
         let writer = participant.builtin_participant_message_writer();
 
         let payload = data.to_serialized_data();
-        // Check if there are any reader proxies first
+
+        let cache_change = Arc::new(writer.new_change(
+            ChangeKind::Alive,
+            payload.to_vec(),
+            InstanceHandle::NIL,
+            Some(RtpsTime::now()),
+        ));
+
+        let writer_cache_lock = writer.writer_cache();
+        let mut cache_guard = writer_cache_lock.lock().map_err(|e| {
+            RtpsError::new(
+                RtpsErrorCode::LockError,
+                format!("Failed to lock writer cache in send_liveliness_once: {}", e),
+            )
+        })?;
+
         let reader_proxies = writer.reader_proxies();
         let proxies_guard = reader_proxies.lock().map_err(|e| {
             RtpsError::new(
@@ -618,28 +634,15 @@ impl WlpLogic {
             return Ok(());
         }
 
-        let cache_change = Arc::new(writer.new_change(
-            ChangeKind::Alive,
-            payload.to_vec(),
-            InstanceHandle::NIL,
-            Some(RtpsTime::now()),
-        ));
-
-        // Try to add to cache, but don't fail if it doesn't work - heartbeat is more important
-        if let Ok(mut cache_guard) = writer.writer_cache().lock() {
-            let old_changes = cache_guard.get_changes();
-            for old_change in old_changes {
-                if let Err(e) = cache_guard.remove_change(old_change) {
-                    log::warn!("Failed to remove old change: {}", e);
-                }
+        let old_changes = cache_guard.get_changes();
+        for old_change in old_changes {
+            if let Err(e) = cache_guard.remove_change(old_change) {
+                log::warn!("Failed to remove old change: {}", e);
             }
-            if let Err(e) = cache_guard.add_change_builtin(cache_change.clone()) {
-                log::warn!("Failed to add liveliness change to cache: {}, continuing to send heartbeat anyway", e);
-                // Don't return - continue to send heartbeat even if cache add fails
-            }
-        } else {
-            log::warn!("Failed to lock writer cache in send_liveliness_once, continuing to send heartbeat anyway");
-            // Don't return - continue to send heartbeat even if cache lock fails
+        }
+        if let Err(e) = cache_guard.add_change_builtin(cache_change.clone()) {
+            log::warn!("Failed to add liveliness change to cache: {}, continuing to send heartbeat anyway", e);
+            // Don't return - continue to send heartbeat even if cache add fails
         }
 
         let participant = self.get_upgraded_participant()?;
@@ -647,14 +650,6 @@ impl WlpLogic {
         for reader_proxy in proxies_guard.iter() {
             // Get heartbeat info to include in the same RTPS message as Data
             let heartbeat_info = {
-                let cache = writer.writer_cache();
-                let cache_guard = match cache.lock() {
-                    Ok(guard) => guard,
-                    Err(e) => {
-                        log::warn!("Failed to lock writer cache for heartbeat info: {}", e);
-                        continue; // Skip this reader proxy
-                    }
-                };
                 let wlp_last_change_sn = writer.last_change_sequence_number();
                 let first_sn = cache_guard.get_seq_num_min().unwrap_or(wlp_last_change_sn + 1);
                 let last_sn = cache_guard.get_seq_num_max().unwrap_or(wlp_last_change_sn);
