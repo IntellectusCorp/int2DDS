@@ -73,9 +73,9 @@ fn unmatch_propagation_to_reader() {
 
     let writer = s.create_writer(wqos);
     let reader = s.create_reader(rqos);
-    wait_for_liveliness_changed_state(&reader, 1, 0, StdDuration::from_secs(2)).unwrap();
     wait_for_subscription_matched_count(&reader, 1, StdDuration::from_secs(2)).unwrap();
     wait_for_publication_matched_count(&writer, 1, StdDuration::from_secs(2)).unwrap();
+    wait_for_liveliness_changed_state(&reader, 1, 0, StdDuration::from_secs(2)).unwrap();
 
     // Instance must exist before NO_WRITERS can surface.
     writer.write(&KeyedDataType::default(), InstanceHandle::NIL).unwrap();
