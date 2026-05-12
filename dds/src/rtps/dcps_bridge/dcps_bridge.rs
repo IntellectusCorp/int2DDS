@@ -1492,7 +1492,7 @@ mod tests {
         // Remove mocked writer proxy
         guard
             .participant
-            .cleanup_remote_writer(remote_writer_guid, &test_topic_name.to_string())
+            .cleanup_resources_for_remote_writer(remote_writer_guid, &test_topic_name.to_string())
             .unwrap();
         assert!(
             stateful_reader.writer_proxies().lock().unwrap().is_empty(),
@@ -1561,7 +1561,7 @@ mod tests {
         // Remove mocked reader locator
         guard
             .participant
-            .cleanup_remote_reader(remote_reader_guid, &test_topic_name.to_string())
+            .cleanup_resources_for_remote_reader(remote_reader_guid, &test_topic_name.to_string())
             .unwrap();
         assert!(
             stateless_writer.reader_locator().lock().unwrap().is_empty(),
@@ -1634,7 +1634,7 @@ mod tests {
         // Remove mocked reader proxy
         guard
             .participant
-            .cleanup_remote_reader(remote_reader_guid, &test_topic_name.to_string())
+            .cleanup_resources_for_remote_reader(remote_reader_guid, &test_topic_name.to_string())
             .unwrap();
         assert!(
             stateful_writer.reader_proxies().lock().unwrap().is_empty(),
@@ -1754,7 +1754,7 @@ mod tests {
         // Remove mocked reader proxy
         guard
             .participant
-            .cleanup_remote_reader(remote_reader_guid_1, &test_topic_name.to_string())
+            .cleanup_resources_for_remote_reader(remote_reader_guid_1, &test_topic_name.to_string())
             .unwrap();
         assert!(
             stateful_writer_1.reader_proxies().lock().unwrap().len() == 1,
@@ -1793,8 +1793,11 @@ mod tests {
 
         let stateful_writer = writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
 
-        // Add 3 mocked reader proxies
-        stateful_writer.matched_reader_add(ReaderProxy::new(
+        // Mirror SEDP discovery: register each remote reader in the participant's
+        // subscription catalog AND attach a proxy to the writer. The catalog is
+        // what prefix-based cleanup keys off in production.
+        let topic_name = publication_builtin_topic_data.topic_name().to_string();
+        let remote_readers = [
             Guid::new(
                 [0; 12], // REMOTE PREFIX 1
                 EntityId {
@@ -1802,18 +1805,6 @@ mod tests {
                     entity_kind: EntityKind::USER_DEFINED_READER_NO_KEY,
                 },
             ),
-            EntityId::UNKNOWN,
-            Vec::new(),
-            Vec::new(),
-            SequenceNumber { high: 0, low: 0 },
-            SequenceNumber { high: 0, low: 0 },
-            false,
-            true,
-            SubscriptionBuiltinTopicData::default(),
-            SequenceNumber::new(0, 0),
-        ));
-
-        stateful_writer.matched_reader_add(ReaderProxy::new(
             Guid::new(
                 [5; 12], // REMOTE PREFIX 2
                 EntityId {
@@ -1821,18 +1812,6 @@ mod tests {
                     entity_kind: EntityKind::USER_DEFINED_READER_NO_KEY,
                 },
             ),
-            EntityId::UNKNOWN,
-            Vec::new(),
-            Vec::new(),
-            SequenceNumber { high: 0, low: 0 },
-            SequenceNumber { high: 0, low: 0 },
-            false,
-            true,
-            SubscriptionBuiltinTopicData::default(),
-            SequenceNumber::new(0, 0),
-        ));
-
-        stateful_writer.matched_reader_add(ReaderProxy::new(
             Guid::new(
                 [5; 12], // REMOTE PREFIX 2
                 EntityId {
@@ -1840,16 +1819,30 @@ mod tests {
                     entity_kind: EntityKind::USER_DEFINED_READER_NO_KEY,
                 },
             ),
-            EntityId::UNKNOWN,
-            Vec::new(),
-            Vec::new(),
-            SequenceNumber { high: 0, low: 0 },
-            SequenceNumber { high: 0, low: 0 },
-            false,
-            true,
-            SubscriptionBuiltinTopicData::default(),
-            SequenceNumber::new(0, 0),
-        ));
+        ];
+        for reader_guid in remote_readers {
+            let mut sub_data = SubscriptionBuiltinTopicData::default();
+            sub_data.set_endpoint_guid(reader_guid);
+            guard
+                .participant
+                .remote_subscriptions()
+                .entry(topic_name.clone())
+                .or_default()
+                .insert(reader_guid, sub_data.clone());
+
+            stateful_writer.matched_reader_add(ReaderProxy::new(
+                reader_guid,
+                EntityId::UNKNOWN,
+                Vec::new(),
+                Vec::new(),
+                SequenceNumber { high: 0, low: 0 },
+                SequenceNumber { high: 0, low: 0 },
+                false,
+                true,
+                sub_data,
+                SequenceNumber::new(0, 0),
+            ));
+        }
 
         assert!(
             stateful_writer.reader_proxies().lock().unwrap().len() == 3,
