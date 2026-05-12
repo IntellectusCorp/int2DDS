@@ -1412,7 +1412,7 @@ mod tests {
         // Remove mocked writer proxy
         guard
             .participant
-            .cleanup_remote_writer(remote_writer_guid, &test_topic_name.to_string())
+            .cleanup_resources_for_remote_writer(remote_writer_guid, &test_topic_name.to_string())
             .unwrap();
         assert!(
             stateful_reader.writer_proxies().lock().unwrap().is_empty(),
@@ -1481,7 +1481,7 @@ mod tests {
         // Remove mocked reader locator
         guard
             .participant
-            .cleanup_remote_reader(remote_reader_guid, &test_topic_name.to_string())
+            .cleanup_resources_for_remote_reader(remote_reader_guid, &test_topic_name.to_string())
             .unwrap();
         assert!(
             stateless_writer.reader_locator().lock().unwrap().is_empty(),
@@ -1554,7 +1554,7 @@ mod tests {
         // Remove mocked reader proxy
         guard
             .participant
-            .cleanup_remote_reader(remote_reader_guid, &test_topic_name.to_string())
+            .cleanup_resources_for_remote_reader(remote_reader_guid, &test_topic_name.to_string())
             .unwrap();
         assert!(
             stateful_writer.reader_proxies().lock().unwrap().is_empty(),
@@ -1674,7 +1674,7 @@ mod tests {
         // Remove mocked reader proxy
         guard
             .participant
-            .cleanup_remote_reader(remote_reader_guid_1, &test_topic_name.to_string())
+            .cleanup_resources_for_remote_reader(remote_reader_guid_1, &test_topic_name.to_string())
             .unwrap();
         assert!(
             stateful_writer_1.reader_proxies().lock().unwrap().len() == 1,
