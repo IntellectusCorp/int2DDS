@@ -164,6 +164,29 @@ pub fn wait_for_subscription_matched_count(
     }
 }
 
+// Poll until the writer's matched-subscription count hits the target.
+pub fn wait_for_publication_matched_count(
+    writer: &DataWriter<KeyedDataType>,
+    target: i32,
+    deadline: std::time::Duration,
+) -> Result<(), String> {
+    let start = Instant::now();
+    loop {
+        let status = writer.get_publication_matched_status().unwrap();
+        if status.current_count() == target {
+            return Ok(());
+        }
+        if start.elapsed() >= deadline {
+            return Err(format!(
+                "publication_matched timed out: want {}, last seen {}",
+                target,
+                status.current_count()
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 // Poll take() until a sample with NOT_ALIVE_NO_WRITERS instance_state surfaces.
 pub fn wait_for_no_writers_sample(
     reader: &DataReader<KeyedDataType>,
