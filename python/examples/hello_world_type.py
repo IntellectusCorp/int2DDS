@@ -29,9 +29,12 @@ class HelloWorld:
     index: int = 0
     message: str = ""
 
-    def _serialize_cdr(self) -> bytes:
-        """Serialize to CDR bytes with encapsulation header."""
-        w = CdrWriter(extensibility=self._extensibility)
+    def _serialize_cdr(self, xcdr2: bool = False) -> bytes:
+        """Serialize to CDR bytes with encapsulation header.
+
+        Defaults to XCDR1 per the XTypes spec; pass ``xcdr2=True`` for XCDR2.
+        """
+        w = CdrWriter(extensibility=self._extensibility, xcdr2=xcdr2)
         w.write_u32(self.index)
         w.write_string(self.message)
         return w.to_bytes()

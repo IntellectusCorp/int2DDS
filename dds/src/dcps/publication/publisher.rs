@@ -26,6 +26,8 @@ use std::{
     },
 };
 
+use arc_swap::ArcSwap;
+
 use super::{
     data_writer::{DataWriter, DataWriterBase, DataWriterInternal},
     data_writer_listener::DataWriterListener,
@@ -68,7 +70,8 @@ pub struct Publisher {
     // if needed (e.g., exposing built-in publisher for diagnostics).
     is_builtin: bool,
     guid: Guid,
-    qos: Arc<Mutex<PublisherQos>>,
+    qos: Arc<ArcSwap<PublisherQos>>,
+    update_lock: Arc<Mutex<()>>,
     listener: Arc<RwLock<Option<Arc<dyn PublisherListener>>>>,
     mask: Arc<RwLock<StatusMask>>,
     status_condition: Arc<Mutex<StatusCondition<PublisherQos>>>,
@@ -90,7 +93,7 @@ impl Debug for Publisher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Publisher")
             .field("guid", &self.guid)
-            .field("qos", &self.qos.lock().unwrap())
+            .field("qos", &**self.qos.load())
             .field(
                 "listener",
                 &self.listener.read().unwrap().as_ref().map(|_| "Arc<dyn PublisherListener>"),
@@ -171,7 +174,8 @@ impl Publisher {
     ) -> Self {
         let mut publisher = Self {
             is_builtin,
-            qos: Arc::new(Mutex::new(qos)),
+            qos: Arc::new(ArcSwap::from_pointee(qos)),
+            update_lock: Arc::new(Mutex::new(())),
             guid: handle.to_guid(),
             listener: Arc::new(RwLock::new(listener)),
             mask: Arc::new(RwLock::new(mask)),

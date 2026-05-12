@@ -56,9 +56,10 @@ use crate::rtps::{
 use crate::serialize::pl_cdr::InlineQosParameters;
 use crate::utils::timer::{timer_handler::TimerHandler, timer_id::TimerId};
 use dashmap::DashMap;
+use mio::Waker;
 
 use std::net::{SocketAddr, SocketAddrV4};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::thread::{self, JoinHandle};
 
 #[allow(dead_code)]
@@ -70,6 +71,7 @@ pub(crate) struct UserLogic {
     shm_sender: Option<Arc<TransportSender>>,
     fragment_buffers: Arc<DashMap<(Guid, SequenceNumber), FragmentBuffer>>,
     unicast_listening_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+    unicast_listening_waker: Arc<OnceLock<Arc<Waker>>>,
 }
 
 // Initialization
@@ -87,6 +89,13 @@ impl UserLogic {
             shm_sender,
             fragment_buffers: Arc::new(DashMap::new()),
             unicast_listening_handle: Arc::new(Mutex::new(None)),
+            unicast_listening_waker: Arc::new(OnceLock::new()),
+        }
+    }
+
+    pub(crate) fn wake_unicast_listening_thread(&self) {
+        if let Some(waker) = self.unicast_listening_waker.get() {
+            let _ = waker.wake();
         }
     }
 
@@ -108,6 +117,8 @@ impl UserLogic {
             shm_listener,
             participant.clone(),
         );
+
+        user_unicast_listening_task.set_shutdown_waker(self.unicast_listening_waker.clone());
 
         let participant_guid = participant.guid();
 
@@ -1314,22 +1325,51 @@ impl UserLogic {
     where
         T: IntoIterator<Item = &'a Locator>,
     {
+        Self::send_via_senders(
+            locators,
+            buffer,
+            self.shm_sender.as_ref(),
+            self.tcp_sender.as_ref(),
+            self.sender.as_ref(),
+        )
+    }
+
+    /// Send `buffer` via the highest-priority transport reachable on both
+    /// sides (SHM > TCP > UDP); a peer advertising multiple transports gets
+    /// a single copy. Associated fn so `&self`-less closures (e.g. the
+    /// NACK_FRAG timer) can route through the same path.
+    fn send_via_senders<'a, T>(
+        locators: T,
+        buffer: &[u8],
+        shm_sender: Option<&Arc<TransportSender>>,
+        tcp_sender: Option<&Arc<TransportSender>>,
+        udp_sender: Option<&Arc<TransportSender>>,
+    ) -> RtpsResult<()>
+    where
+        T: IntoIterator<Item = &'a Locator>,
+    {
+        let locators: Vec<&Locator> = locators.into_iter().collect();
+        let pick = |kind: fn(&Locator) -> bool, have_sender: bool| -> Option<Vec<&Locator>> {
+            (have_sender && locators.iter().any(|l| kind(l)))
+                .then(|| locators.iter().copied().filter(|l| kind(l)).collect())
+        };
+        let locators = pick(Locator::is_shm, shm_sender.is_some())
+            .or_else(|| pick(Locator::is_tcp, tcp_sender.is_some()))
+            .or_else(|| pick(Locator::is_udp, udp_sender.is_some()))
+            .unwrap_or(locators);
+
         let mut is_sent = false;
         let mut last_error = None;
 
         for locator in locators {
-            // Check if this is a SHM locator
             if locator.is_shm() {
-                // Use SHM sender if available
-                if let Some(shm_sender) = &self.shm_sender {
-                    // SHM doesn't use socket addresses, but Transport trait requires it
-                    // Use a dummy address - the actual routing is done via shared memory
+                if let Some(shm) = shm_sender {
+                    // SHM doesn't use socket addresses, but Transport trait requires
+                    // one. Routing is done internally via shared memory.
                     let dummy_addr =
                         SocketAddr::V4(SocketAddrV4::new(std::net::Ipv4Addr::new(127, 0, 0, 1), 0));
-                    match shm_sender.send(&dummy_addr, buffer) {
-                        Ok(_) => {
-                            is_sent = true;
-                        }
+                    match shm.send(&dummy_addr, buffer) {
+                        Ok(_) => is_sent = true,
                         Err(e) => {
                             warn!("[UserLogic] Failed to send SHM message: {:?}", e);
                             last_error = Some(e);
@@ -1340,16 +1380,13 @@ impl UserLogic {
                     warn!("[UserLogic] SHM locator found but no SHM sender available");
                     continue;
                 }
-            }
-            // Check if this is a TCP locator
-            else if locator.is_tcp() {
-                // Use TCP sender if available
-                if let Some(tcp_sender) = &self.tcp_sender {
+            } else if locator.is_tcp() {
+                if let Some(tcp) = tcp_sender {
                     let socket_addr = SocketAddr::V4(SocketAddrV4::new(
                         locator.to_ip_v4_addr(),
                         locator.port() as u16,
                     ));
-                    match tcp_sender.send(&socket_addr, buffer) {
+                    match tcp.send(&socket_addr, buffer) {
                         Ok(_) => {
                             is_sent = true;
                             debug!("[UserLogic] Sent message via TCP to {:?}", socket_addr);
@@ -1371,16 +1408,13 @@ impl UserLogic {
                     continue;
                 }
             } else if locator.is_udp() {
-                // Use UDP sender
                 let socket_addr = SocketAddr::V4(SocketAddrV4::new(
                     locator.to_ip_v4_addr(),
                     locator.port() as u16,
                 ));
-                if let Some(ref sender) = self.sender {
-                    match sender.send(&socket_addr, buffer) {
-                        Ok(_) => {
-                            is_sent = true;
-                        }
+                if let Some(udp) = udp_sender {
+                    match udp.send(&socket_addr, buffer) {
+                        Ok(_) => is_sent = true,
                         Err(e) => {
                             warn!("Failed to send message to locator {:?}: {:?}", socket_addr, e);
                             last_error = Some(e);
@@ -1589,7 +1623,7 @@ impl UnicastMessageProcessor for UserLogic {
         }
 
         if let Some(wlp) = self.get_upgraded_participant()?.wlp_logic() {
-            wlp.update_remote_writer_liveliness(remote_writer_guid)?;
+            wlp.mark_monitored_writer_alive(remote_writer_guid)?;
         }
 
         Ok(())
@@ -1744,7 +1778,10 @@ impl UnicastMessageProcessor for UserLogic {
                     let writer_proxies_clone = writer_proxies.clone();
                     let stateful_reader_guid = stateful_reader.guid();
                     let participant = participant.clone();
-                    let sender_clone = self.sender.clone(); // Option<Arc<TransportSender>>
+                    // Capture all three senders so the timer closure can route
+                    let shm_sender_clone = self.shm_sender.clone();
+                    let tcp_sender_clone = self.tcp_sender.clone();
+                    let udp_sender_clone = self.sender.clone();
                     let last_sn = heartbeat.last_sn;
                     let missing_fragments_clone = missing_fragments.clone();
                     let remote_writer_guid = writer_proxy.remote_writer_guid();
@@ -1800,28 +1837,13 @@ impl UnicastMessageProcessor for UserLogic {
                                             current_writer_proxy.nackfrag_count(),
                                             acknack_info,
                                         ) {
-                                            for locator in
-                                                current_writer_proxy.unicast_locator_list()
-                                            {
-                                                if locator.kind() == 1 {
-                                                    let socket_addr = std::net::SocketAddr::V4(
-                                                        std::net::SocketAddrV4::new(
-                                                            locator.to_ip_v4_addr(),
-                                                            locator.port() as u16,
-                                                        ),
-                                                    );
-                                                    if let Some(ref sender) = sender_clone {
-                                                        let _ = sender
-                                                            .send(&socket_addr, &buffer)
-                                                            .map_err(|e| {
-                                                                RtpsError::new(
-                                                                    RtpsErrorCode::Io,
-                                                                    e.to_string(),
-                                                                )
-                                                            });
-                                                    }
-                                                }
-                                            }
+                                            let _ = Self::send_via_senders(
+                                                current_writer_proxy.unicast_locator_list(),
+                                                &buffer,
+                                                shm_sender_clone.as_ref(),
+                                                tcp_sender_clone.as_ref(),
+                                                udp_sender_clone.as_ref(),
+                                            );
                                         }
                                     }
                                 }

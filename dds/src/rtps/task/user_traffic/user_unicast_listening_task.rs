@@ -9,11 +9,12 @@ use crate::rtps::messages::message_receiver::MessageReceiver;
 use crate::rtps::transport::shm::ShmListener;
 use crate::rtps::transport::socket::MAX_EVENTS;
 use crate::rtps::transport::tcp::tcp_listener::TcpListener;
+use crate::rtps::transport::tokens::ListenerToken;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 use log::{debug, error, info, warn};
-use mio::{Events, Interest, Poll, Token};
+use mio::{Events, Interest, Poll, Waker};
 use std::net::SocketAddr;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
 pub(crate) struct UserUnicastListeningTask {
@@ -23,6 +24,7 @@ pub(crate) struct UserUnicastListeningTask {
     shm_listener: Option<ShmListener>,
     participant: Weak<Participant>,
     user_logic: Arc<Option<UserLogic>>,
+    shutdown_waker: Arc<OnceLock<Arc<Waker>>>,
 }
 
 impl UserUnicastListeningTask {
@@ -32,10 +34,6 @@ impl UserUnicastListeningTask {
         shm_listener: Option<ShmListener>,
         participant: Arc<Participant>,
     ) -> Self {
-        // Extract TCP sender from participant if available (for Hybrid mode)
-        // In Hybrid mode, we need to pass both UDP and TCP senders to UserLogic
-        // let tcp_sender = None; // TCP sender not needed for receiving, only for sending via UserLogic
-        // let user_logic = UserLogic::new(participant.clone(), Some(sender.clone()), tcp_sender);
         let (_, _, user_logic) = participant.get_logics();
         let guid_prefix = participant.guid().prefix();
         Self {
@@ -45,7 +43,12 @@ impl UserUnicastListeningTask {
             shm_listener,
             participant: Arc::downgrade(&participant),
             user_logic,
+            shutdown_waker: Arc::new(OnceLock::new()),
         }
+    }
+
+    pub(crate) fn set_shutdown_waker(&mut self, handle: Arc<OnceLock<Arc<Waker>>>) {
+        self.shutdown_waker = handle;
     }
 
     pub(crate) fn unicast_listening(&mut self) -> std::io::Result<()> {
@@ -53,14 +56,15 @@ impl UserUnicastListeningTask {
         let mut poll = Poll::new().unwrap();
         let mut events = Events::with_capacity(MAX_EVENTS);
 
+        let waker = Arc::new(Waker::new(poll.registry(), ListenerToken::Shutdown.to_mio())?);
+        let _ = self.shutdown_waker.set(waker);
+
         // Register UDP listener if present
         let udp_token = if let Some(listener) = &mut self.user_unicast_listener {
-            let token = Token(listener.socket().local_addr().unwrap().port() as usize);
+            let port = listener.socket().local_addr().unwrap().port();
+            let token = ListenerToken::Udp(port).to_mio();
             poll.registry().register(listener.socket(), token, Interest::READABLE)?;
-            info!(
-                "[UserUnicast] UDP listener registered on port {}",
-                listener.socket().local_addr().unwrap().port()
-            );
+            info!("[UserUnicast] UDP listener registered on port {}", port);
             Some(token)
         } else {
             None
@@ -70,8 +74,7 @@ impl UserUnicastListeningTask {
         let tcp_token = if let Some(tcp_listener) = &mut self.tcp_listener {
             let port = tcp_listener.port();
             if let Some(socket) = tcp_listener.socket_mut() {
-                // Use a different token range for TCP (add 10000 to avoid collision)
-                let token = Token(port as usize + 10000);
+                let token = ListenerToken::Tcp(port).to_mio();
                 poll.registry().register(socket, token, Interest::READABLE)?;
                 info!("[UserUnicast] TCP listener registered on port {}", port);
                 Some(token)
@@ -272,12 +275,13 @@ mod tests {
     use crate::rtps::entities::participant::Participant;
     use crate::rtps::task::user_traffic::user_unicast_listening_task::UserUnicastListeningTask;
     use crate::rtps::transport::socket::Socket;
+    use crate::rtps::transport::TransportConfig;
 
     #[test]
     #[ignore]
     fn test_user_unicast_receive() {
         let domain_id: DomainId = 17;
-        let mut socket = Socket::new(domain_id); //domain_id 0
+        let mut socket = Socket::new(domain_id, TransportConfig::default()); //domain_id 0
         socket.create_socket();
         // When socket reset is needed
         let participant =

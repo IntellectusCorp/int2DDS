@@ -742,6 +742,57 @@ impl Writer for StatefulWriter {
             Err(RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, ""))
         }
     }
+
+    fn remove_matched_reader(&self, reader_guid: Guid) -> RtpsResult<bool> {
+        let mut proxies = self
+            .matched_readers
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+        // Find the index of the reader to remove
+        let Some(idx) = proxies.iter().position(|proxy| proxy.remote_reader_guid() == reader_guid)
+        else {
+            debug!("Reader proxy with guid {:?} not found in matched readers", reader_guid);
+            return Ok(false);
+        };
+
+        // Remove the reader proxy from the list
+        proxies.swap_remove(idx);
+        drop(proxies);
+
+        // Update publication matched status
+        self.update_publication_matched_status(-1, InstanceHandle::from_guid(&reader_guid));
+
+        debug!("Removed reader proxy with guid {:?} from matched readers", reader_guid);
+        Ok(true)
+    }
+
+    fn remove_all_matched_readers_with_prefix(&self, prefix: GuidPrefix) -> RtpsResult<usize> {
+        let mut reader_proxies = self
+            .matched_readers
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+
+        debug!(
+            "Before unmatching with reader, this writer had {:?} matched readers",
+            reader_proxies.len()
+        );
+        for reader_proxy in reader_proxies.iter() {
+            if reader_proxy.remote_reader_guid().prefix() == prefix {
+                self.update_publication_matched_status(
+                    -1,
+                    InstanceHandle::from_guid(&reader_proxy.remote_reader_guid()),
+                );
+            }
+        }
+        let len_before = reader_proxies.len();
+        reader_proxies.retain(|reader_proxy| reader_proxy.remote_reader_guid().prefix() != prefix);
+        let removed = len_before - reader_proxies.len();
+
+        debug!("Removed all unmatched reader proxies from unmatched participant: {:?}", prefix);
+        debug!("Current number of matched reader: {:?}", reader_proxies.len());
+        Ok(removed)
+    }
 }
 
 impl Endpoint for StatefulWriter {
