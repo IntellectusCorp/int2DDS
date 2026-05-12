@@ -179,6 +179,15 @@ impl UserLogic {
         let writer = self.find_stateful_writer(writer_entity_id)?;
         let stateful_writer = writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
 
+        // LOCK ORDER: acquires `writer_cache` first, then `reader_proxies`.
+        let writer_cache = stateful_writer.writer_cache();
+        let cache_guard = writer_cache.lock().map_err(|e| {
+            RtpsError::new(
+                RtpsErrorCode::LockError,
+                format!("Failed to acquire writer cache lock: {}", e),
+            )
+        })?;
+
         let reader_proxies = stateful_writer.reader_proxies();
         let mut reader_proxies_guard = reader_proxies.lock().map_err(|e| {
             RtpsError::new(
@@ -204,14 +213,6 @@ impl UserLogic {
                 gap_list.push(*requested_change_sn);
                 continue;
             }
-
-            let writer_cache = stateful_writer.writer_cache();
-            let cache_guard = writer_cache.lock().map_err(|e| {
-                RtpsError::new(
-                    RtpsErrorCode::LockError,
-                    format!("Failed to acquire writer cache lock: {}", e),
-                )
-            })?;
 
             if let Some(a_change) = cache_guard.get_change(*requested_change_sn) {
                 // ACK may have been received in the meantime, so check first
@@ -2184,7 +2185,12 @@ impl UnicastMessageProcessor for UserLogic {
         let writer = self.find_stateful_writer(writer_id)?;
         let stateful_writer = writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
 
-        // Lock acquisition order to prevent deadlock: reader_proxies -> history_cache
+        // LOCK ORDER: acquires `writer_cache` first, then `reader_proxies`.
+        let writer_cache = stateful_writer.writer_cache();
+        let history_cache_guard = writer_cache.lock().map_err(|_| {
+            RtpsError::new(RtpsErrorCode::LockError, "Failed to acquire history cache lock")
+        })?;
+
         let reader_proxies = stateful_writer.reader_proxies();
         let mut reader_proxies_guard = reader_proxies.lock().map_err(|_| {
             RtpsError::new(RtpsErrorCode::LockError, "Failed to acquire reader_proxies lock")
@@ -2213,11 +2219,6 @@ impl UnicastMessageProcessor for UserLogic {
             }
         }
         reader_proxy.set_last_nackfrag_count(nack_frag.count);
-
-        let writer_cache = stateful_writer.writer_cache();
-        let history_cache_guard = writer_cache.lock().map_err(|_| {
-            RtpsError::new(RtpsErrorCode::LockError, "Failed to acquire history cache lock")
-        })?;
 
         let change = history_cache_guard.get_change(writer_sn).ok_or_else(|| {
             warn!("NACK_FRAG requested missing change SN={:?}", writer_sn);
