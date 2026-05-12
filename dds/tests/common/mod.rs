@@ -16,6 +16,33 @@ use int2dds::dcps::{
     },
     topic::{qos::TopicQos, type_support::DdsType},
 };
+use int2dds::serialize::cdr::{CdrSerialize, CdrSerializer};
+use int2dds::serialize::BufferManager;
+
+/// Serialize a value with the default CDR encoding and return the wire bytes including header.
+pub fn encode_cdr<T: CdrSerialize>(value: &T) -> Vec<u8> {
+    let mut serializer = CdrSerializer::new(true);
+    serializer.write_encapsulation_header().unwrap();
+    value.serialize_cdr(&mut serializer).unwrap();
+    serializer.into_bytes()
+}
+
+/// Compare `actual` bytes against a space/whitespace-separated hex string.
+pub fn parse_hex(spec: &str) -> Vec<u8> {
+    spec.split_ascii_whitespace()
+        .map(|tok| u8::from_str_radix(tok.trim_start_matches("0x"), 16).expect("invalid hex"))
+        .collect()
+}
+
+/// Assert that a `CdrSerialize` value produces the given hex wire layout (header + payload).
+#[macro_export]
+macro_rules! assert_wire_bytes {
+    ($value:expr, $expected_hex:expr $(,)?) => {{
+        let actual = $crate::common::encode_cdr(&$value);
+        let expected = $crate::common::parse_hex($expected_hex);
+        assert_eq!(actual, expected, "wire bytes mismatch");
+    }};
+}
 
 #[derive(DdsType)]
 #[dds_type(crate_path = "int2dds", extensibility = "Appendable")]

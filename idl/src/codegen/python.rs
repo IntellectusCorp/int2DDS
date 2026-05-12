@@ -604,14 +604,17 @@ impl<'a> PyGen<'a> {
                 }
             }
             ExtensibilityKind::Appendable => {
-                // Appendable: wrap with DHEADER only in XCDR2
+                // Appendable: wrap with DHEADER only in XCDR2.
+                // Inherited fields are flattened (single outer DHEADER bounds the
+                // whole struct including parent fields) to match Rust/C# wire format.
                 self.line("if w._xcdr2:");
                 self.indent += 1;
                 self.line("with w.dheader():");
                 self.indent += 1;
-                // XCDR2: nested DHEADERs for inherited fields (matches Rust wire format)
-                let s_clone = s.clone();
-                self.emit_xcdr2_inherited_serialize(&s_clone);
+                for m in &members {
+                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
+                    self.emit_write_field(&m.resolved_type, &format!("self.{}", field_name));
+                }
                 self.indent -= 1;
                 self.indent -= 1;
                 self.line("else:");
@@ -624,7 +627,7 @@ impl<'a> PyGen<'a> {
                 self.indent -= 1;
             }
             ExtensibilityKind::Mutable => {
-                // Mutable: DHEADER + EMHEADER per field + sentinel
+                // Mutable: DHEADER + EMHEADER per field (no sentinel; DHEADER bounds the struct)
                 self.line("with w.dheader():");
                 self.indent += 1;
                 for (i, m) in members.iter().enumerate() {
@@ -639,7 +642,6 @@ impl<'a> PyGen<'a> {
                     self.emit_write_field(&m.resolved_type, &format!("self.{}", field_name));
                     self.indent -= 1;
                 }
-                self.line("w.write_sentinel()");
                 self.indent -= 1;
             }
         }
@@ -666,9 +668,10 @@ impl<'a> PyGen<'a> {
                 self.indent += 1;
                 self.line("with w.dheader():");
                 self.indent += 1;
-                // XCDR2: nested DHEADERs for inherited fields (matches Rust wire format)
-                let s_clone = s.clone();
-                self.emit_xcdr2_inherited_serialize(&s_clone);
+                for m in &members {
+                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
+                    self.emit_write_field(&m.resolved_type, &format!("self.{}", field_name));
+                }
                 self.indent -= 1;
                 self.indent -= 1;
                 self.line("else:");
@@ -695,7 +698,6 @@ impl<'a> PyGen<'a> {
                     self.emit_write_field(&m.resolved_type, &format!("self.{}", field_name));
                     self.indent -= 1;
                 }
-                self.line("w.write_sentinel()");
                 self.indent -= 1;
             }
         }
@@ -717,56 +719,19 @@ impl<'a> PyGen<'a> {
         all
     }
 
-    /// Find a struct's parent (clones to avoid borrow issues).
-    fn find_parent_struct(&self, s: &ResolvedStruct) -> Option<ResolvedStruct> {
-        let base_name = s.base_type.as_ref()?;
-        let simple = base_name.rsplit("::").next().unwrap_or(base_name);
-        self.model.structs.iter().find(|st| st.name == simple).cloned()
-    }
-
-    /// XCDR2: Serialize inherited fields with nested DHEADERs to match Rust's wire format.
-    /// For each ancestor in the chain, parent fields are wrapped in their own DHEADER
-    /// (if the parent is APPENDABLE).
-    fn emit_xcdr2_inherited_serialize(&mut self, s: &ResolvedStruct) {
-        if let Some(parent) = self.find_parent_struct(s) {
-            if parent.extensibility == ExtensibilityKind::Appendable {
-                self.line("with w.dheader():");
-                self.indent += 1;
-                self.emit_xcdr2_inherited_serialize(&parent);
-                self.indent -= 1;
-            } else {
-                self.emit_xcdr2_inherited_serialize(&parent);
-            }
-        }
-        for m in &s.members {
-            let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
-            self.emit_write_field(&m.resolved_type, &format!("self.{}", field_name));
-        }
-    }
-
-    /// XCDR2: Deserialize inherited fields with nested DHEADER reads (mirror of serialize).
-    /// `depth` is used to generate unique variable names for nested DHEADERs.
-    fn emit_xcdr2_inherited_deserialize(&mut self, s: &ResolvedStruct, depth: usize) {
-        if let Some(parent) = self.find_parent_struct(s) {
-            if parent.extensibility == ExtensibilityKind::Appendable {
-                self.line(&format!("_pdsize{0}, _pdstart{0} = r.read_dheader()", depth));
-                self.emit_xcdr2_inherited_deserialize(&parent, depth + 1);
-                self.line(&format!("r.read_dheader_end(_pdsize{0}, _pdstart{0})", depth));
-            } else {
-                self.emit_xcdr2_inherited_deserialize(&parent, depth);
-            }
-        }
-        for m in &s.members {
-            let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
-            self.emit_read_field(&m.resolved_type, &field_name);
-        }
-    }
-
     fn is_non_primitive_element(element: &ResolvedType) -> bool {
-        // Only String needs per-sequence DHEADER in XCDR2.
-        // Enum: fixed-size (i32), no DHEADER needed.
-        // Struct: APPENDABLE structs already have per-element DHEADER.
-        matches!(element, ResolvedType::String { .. })
+        // Per DDS-XTypes 7.4.3.5.4, sequences/arrays of non-primitive elements
+        // are preceded by a DHEADER. Matches Rust `XcdrSerialize for Vec<T>`
+        // where T::IS_PRIMITIVE == false.
+        matches!(
+            element,
+            ResolvedType::String { .. }
+                | ResolvedType::WString { .. }
+                | ResolvedType::Struct(_)
+                | ResolvedType::Sequence { .. }
+                | ResolvedType::Array { .. }
+                | ResolvedType::Map { .. }
+        )
     }
 
     fn find_bitmask(&self, name: &str) -> Option<&ResolvedBitmask> {
@@ -878,12 +843,15 @@ impl<'a> PyGen<'a> {
                 }
             }
             ExtensibilityKind::Appendable => {
-                // Appendable: XCDR2 uses nested DHEADERs for inheritance, XCDR1 is flat
+                // Appendable: XCDR2 has a single outer DHEADER bounding all fields
+                // (including inherited parent fields). Matches Rust/C# wire format.
                 self.line("if r._xcdr2:");
                 self.indent += 1;
                 self.line("_dsize, _dstart = r.read_dheader()");
-                let s_clone = s.clone();
-                self.emit_xcdr2_inherited_deserialize(&s_clone, 0);
+                for m in &members {
+                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
+                    self.emit_read_field(&m.resolved_type, &field_name);
+                }
                 self.line("r.read_dheader_end(_dsize, _dstart)");
                 self.indent -= 1;
                 self.line("else:");
@@ -925,7 +893,8 @@ impl<'a> PyGen<'a> {
                     }
                 }
 
-                self.line("while not r.is_sentinel():");
+                self.line("_dend = _dstart + _dsize");
+                self.line("while r.position < _dend:");
                 self.indent += 1;
                 self.line("_mid, _mlen, _mu = r.read_emheader()");
 
@@ -950,7 +919,6 @@ impl<'a> PyGen<'a> {
                 self.indent -= 1;
 
                 self.indent -= 1;
-                self.line("r.skip_sentinel()");
                 self.line("r.read_dheader_end(_dsize, _dstart)");
             }
         }
@@ -982,8 +950,10 @@ impl<'a> PyGen<'a> {
                 self.line("if r._xcdr2:");
                 self.indent += 1;
                 self.line("_dsize, _dstart = r.read_dheader()");
-                let s_clone = s.clone();
-                self.emit_xcdr2_inherited_deserialize(&s_clone, 0);
+                for m in &members {
+                    let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
+                    self.emit_read_field(&m.resolved_type, &field_name);
+                }
                 self.line("r.read_dheader_end(_dsize, _dstart)");
                 self.indent -= 1;
                 self.line("else:");
@@ -1015,7 +985,8 @@ impl<'a> PyGen<'a> {
                         self.line(&format!("{} = {}", field_name, default));
                     }
                 }
-                self.line("while not r.is_sentinel():");
+                self.line("_dend = _dstart + _dsize");
+                self.line("while r.position < _dend:");
                 self.indent += 1;
                 self.line("_mid, _mlen, _mu = r.read_emheader()");
                 let mut first = true;
@@ -1037,7 +1008,6 @@ impl<'a> PyGen<'a> {
                 self.line("r.skip(_mlen)  # Unknown field");
                 self.indent -= 1;
                 self.indent -= 1;
-                self.line("r.skip_sentinel()");
                 self.line("r.read_dheader_end(_dsize, _dstart)");
             }
         }

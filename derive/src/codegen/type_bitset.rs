@@ -127,6 +127,18 @@ pub fn derive_bitset_impl(
             }
         }
 
+        impl #crate_path::serialize::xcdr::XcdrSerializeMembers for #name {
+            fn serialize_xcdr_members(&self, serializer: &mut #crate_path::serialize::xcdr::XcdrSerializer) -> #crate_path::serialize::xcdr::XcdrResult<()> {
+                #crate_path::serialize::xcdr::XcdrSerialize::serialize_xcdr(self, serializer)
+            }
+        }
+
+        impl #crate_path::serialize::xcdr::XcdrDeserializeMembers for #name {
+            fn deserialize_xcdr_members(deserializer: &mut #crate_path::serialize::xcdr::XcdrDeserializer) -> #crate_path::serialize::xcdr::XcdrResult<Self> {
+                #crate_path::serialize::xcdr::XcdrDeserialize::deserialize_xcdr(deserializer)
+            }
+        }
+
         #additional_derives
 
         #has_type_object_impl

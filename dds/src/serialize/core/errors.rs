@@ -18,6 +18,7 @@ pub enum SerializationError {
     InvalidUnionDiscriminant(i32),
     // Slice conversion error
     SliceConversionError,
+    InvalidMemberId(u32),
 }
 
 impl std::fmt::Display for SerializationError {
@@ -49,6 +50,9 @@ impl std::fmt::Display for SerializationError {
             }
             SerializationError::SliceConversionError => {
                 write!(f, "Slice conversion error")
+            }
+            SerializationError::InvalidMemberId(id) => {
+                write!(f, "EMHEADER member_id exceeds 28 bits: {:#x}", id)
             }
         }
     }
