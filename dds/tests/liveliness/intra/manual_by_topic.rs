@@ -57,6 +57,9 @@ fn lost() {
 
 #[test]
 fn recovered() {
+    // int2dds::common::env::set_log_type(int2dds::common::log::LogType::File);
+    // int2dds::common::env::set_file_log_level(int2dds::common::log::LogLevel::Debug);
+
     let s = Scenario::intra();
     let (wqos, rqos) = qos_pair();
     let writer = s.create_writer(wqos);

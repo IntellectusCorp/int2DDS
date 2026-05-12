@@ -61,8 +61,8 @@ fn unmatch_alive() {
 
 #[test]
 fn unmatch_propagation_to_reader() {
-    int2dds::common::env::set_log_type(int2dds::common::log::LogType::File);
-    int2dds::common::env::set_file_log_level(int2dds::common::log::LogLevel::Debug);
+    // int2dds::common::env::set_log_type(int2dds::common::log::LogType::File);
+    // int2dds::common::env::set_file_log_level(int2dds::common::log::LogLevel::Debug);
 
     // matched_count, liveliness counts, and a NOT_ALIVE_NO_WRITERS sample
     // must all reflect the unmatch. autodispose=false for NO_WRITERS.
