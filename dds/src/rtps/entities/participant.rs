@@ -595,7 +595,10 @@ impl Participant {
         }
 
         // Unmatch with intra participant readers
-        self.cleanup_remote_writer(Guid::new(self.guid().prefix(), entity_id), &topic_name)?;
+        self.cleanup_resources_for_remote_writer(
+            Guid::new(self.guid().prefix(), entity_id),
+            &topic_name,
+        )?;
 
         // Remove from store
         self.rtps_writer_store.remove(&topic_name, entity_id);
@@ -671,12 +674,15 @@ impl Participant {
         self.rtps_reader_store.remove(&topic_name, entity_id);
 
         // Unmatch with intra participant writers
-        self.cleanup_remote_reader(Guid::new(self.guid().prefix(), entity_id), &topic_name)?;
+        self.cleanup_resources_for_remote_reader(
+            Guid::new(self.guid().prefix(), entity_id),
+            &topic_name,
+        )?;
 
         Ok(())
     }
 
-    pub(crate) fn cleanup_remote_reader(
+    pub(crate) fn cleanup_resources_for_remote_reader(
         &self,
         reader_guid: Guid,
         topic_name: &str,
@@ -697,7 +703,7 @@ impl Participant {
         Ok(())
     }
 
-    pub(crate) fn cleanup_remote_writer(
+    pub(crate) fn cleanup_resources_for_remote_writer(
         &self,
         writer_guid: Guid,
         topic_name: &str,
@@ -729,10 +735,10 @@ impl Participant {
     fn remove_unmatched_writer_from_reader(&self, writer_guid: Guid) -> RtpsResult<()> {
         for reader in self.rtps_reader_store.iter_all() {
             if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
-                stateful_reader.remove_matched_writer(writer_guid)?;
+                stateful_reader.remove_matched_writer_and_update_status(writer_guid)?;
             } else if let Some(stateless_reader) = reader.as_any().downcast_ref::<StatelessReader>()
             {
-                stateless_reader.remove_matched_writer(writer_guid)?;
+                stateless_reader.remove_matched_writer_and_update_status(writer_guid)?;
             }
         }
 
@@ -743,10 +749,10 @@ impl Participant {
     fn remove_unmatched_reader_from_writer(&self, reader_guid: Guid) -> RtpsResult<()> {
         for writer in self.rtps_writer_store.iter_all() {
             if let Some(stateful_writer) = writer.as_any().downcast_ref::<StatefulWriter>() {
-                stateful_writer.remove_matched_reader(reader_guid)?;
+                stateful_writer.remove_matched_reader_and_update_status(reader_guid)?;
             } else if let Some(stateless_writer) = writer.as_any().downcast_ref::<StatelessWriter>()
             {
-                stateless_writer.remove_matched_reader(reader_guid)?;
+                stateless_writer.remove_matched_reader_and_update_status(reader_guid)?;
             }
         }
 
@@ -908,26 +914,42 @@ impl Participant {
         &self,
         terminated_participant_guid_prefix: GuidPrefix,
     ) -> RtpsResult<()> {
-        for reader in self.rtps_reader_store.iter_all() {
-            if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
-                stateful_reader
-                    .remove_all_matched_writers_with_prefix(terminated_participant_guid_prefix)?;
-            } else if let Some(stateless_reader) = reader.as_any().downcast_ref::<StatelessReader>()
-            {
-                stateless_reader
-                    .remove_all_matched_writers_with_prefix(terminated_participant_guid_prefix)?;
-            }
+        // Get all writers with the same GuidPrefix
+        let writers: Vec<(String, Guid)> = self
+            .remote_publications()
+            .iter()
+            .flat_map(|e| {
+                let topic = e.key().clone();
+                e.value()
+                    .iter()
+                    .filter(|(guid, _)| guid.prefix() == terminated_participant_guid_prefix)
+                    .map(|(guid, _)| (topic.clone(), *guid))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        // Clean up resources related to each writer
+        for (topic, writer_guid) in writers {
+            self.cleanup_resources_for_remote_writer(writer_guid, &topic)?;
         }
 
-        for writer in self.rtps_writer_store.iter_all() {
-            if let Some(stateful_writer) = writer.as_any().downcast_ref::<StatefulWriter>() {
-                stateful_writer
-                    .remove_all_matched_readers_with_prefix(terminated_participant_guid_prefix)?;
-            } else if let Some(stateless_writer) = writer.as_any().downcast_ref::<StatelessWriter>()
-            {
-                stateless_writer
-                    .remove_all_matched_readers_with_prefix(terminated_participant_guid_prefix)?;
-            }
+        // Get all readers with the same GuidPrefix
+        let readers: Vec<(String, Guid)> = self
+            .remote_subscriptions()
+            .iter()
+            .flat_map(|e| {
+                let topic = e.key().clone();
+                e.value()
+                    .iter()
+                    .filter(|(guid, _)| guid.prefix() == terminated_participant_guid_prefix)
+                    .map(|(guid, _)| (topic.clone(), *guid))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        // Clean up resources related to each reader
+        for (topic, reader_guid) in readers {
+            self.cleanup_resources_for_remote_reader(reader_guid, &topic)?;
         }
 
         Ok(())
