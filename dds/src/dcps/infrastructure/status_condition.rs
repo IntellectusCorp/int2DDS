@@ -162,30 +162,33 @@ impl<Q: Debug> StatusCondition<Q> {
     }
 
     fn add_communication_status(&self, status: &StatusKind) -> DdsResult<()> {
-        match self.status_changes.lock() {
-            Ok(mut status_changes) => {
-                status_changes.insert(*status);
-                debug!("status_changes: {:?}", status_changes);
-
-                // Check if it's a status of interest in enabled_statuses
-                let should_trigger = match self.enabled_statuses.lock() {
-                    Ok(enabled_statuses) => enabled_statuses.contains(*status),
-                    Err(e) => return Err(DdsError::Error(e.to_string())),
-                };
-
-                // Call callback only when a status of interest is added
-                if should_trigger {
-                    if let Ok(callback) = self.waitset_callback.lock() {
-                        if let Some(callback) = callback.as_ref() {
-                            callback(); // Always true (state is activated)
-                        }
-                    }
+        {
+            match self.status_changes.lock() {
+                Ok(mut status_changes) => {
+                    status_changes.insert(*status);
+                    debug!("status_changes: {:?}", status_changes);
                 }
-
-                Ok(())
+                Err(e) => return Err(DdsError::Error(e.to_string())),
             }
-            Err(e) => Err(DdsError::Error(e.to_string())),
         }
+
+        // Match get_trigger_value lock ordering by never holding status_changes
+        // while checking enabled_statuses.
+        let should_trigger = match self.enabled_statuses.lock() {
+            Ok(enabled_statuses) => enabled_statuses.contains(*status),
+            Err(e) => return Err(DdsError::Error(e.to_string())),
+        };
+
+        // Call callback only when a status of interest is added.
+        if should_trigger {
+            if let Ok(callback) = self.waitset_callback.lock() {
+                if let Some(callback) = callback.as_ref() {
+                    callback(); // Always true (state is activated)
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
