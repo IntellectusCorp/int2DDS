@@ -450,7 +450,7 @@ impl Reader for StatelessReader {
         }
     }
 
-    fn remove_matched_writer(&self, writer_guid: Guid) -> RtpsResult<bool> {
+    fn remove_matched_writer_and_update_status(&self, writer_guid: Guid) -> RtpsResult<bool> {
         let mut writers = self
             .matched_writers
             .lock()
@@ -474,7 +474,10 @@ impl Reader for StatelessReader {
         Ok(true)
     }
 
-    fn remove_all_matched_writers_with_prefix(&self, prefix: GuidPrefix) -> RtpsResult<usize> {
+    fn remove_all_matched_writers_with_prefix_and_update_status(
+        &self,
+        prefix: GuidPrefix,
+    ) -> RtpsResult<usize> {
         let mut remote_writer_info = self
             .matched_writers
             .lock()

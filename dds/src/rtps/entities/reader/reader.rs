@@ -62,9 +62,12 @@ pub(crate) trait Reader: Entity + Endpoint + Debug + Any {
         writer_guid: Guid,
     ) -> RtpsResult<PublicationBuiltinTopicData>;
 
-    fn remove_matched_writer(&self, writer_guid: Guid) -> RtpsResult<bool>;
+    fn remove_matched_writer_and_update_status(&self, writer_guid: Guid) -> RtpsResult<bool>;
 
     // Remove all matched writers whose GUID prefix equals `prefix` (e.g. on remote
     // participant termination). Returns the number of writers removed.
-    fn remove_all_matched_writers_with_prefix(&self, prefix: GuidPrefix) -> RtpsResult<usize>;
+    fn remove_all_matched_writers_with_prefix_and_update_status(
+        &self,
+        prefix: GuidPrefix,
+    ) -> RtpsResult<usize>;
 }
