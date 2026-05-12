@@ -552,7 +552,8 @@ impl SedpLogic {
                             endpoint_guid
                         };
 
-                    participant.cleanup_remote_reader(terminated_reader_guid, &topic_name)?;
+                    participant
+                        .cleanup_resources_for_remote_reader(terminated_reader_guid, &topic_name)?;
                     return Ok(());
                 }
             } else {
@@ -943,7 +944,8 @@ impl SedpLogic {
                             endpoint_guid
                         };
 
-                    participant.cleanup_remote_writer(terminated_writer_guid, &topic_name)?;
+                    participant
+                        .cleanup_resources_for_remote_writer(terminated_writer_guid, &topic_name)?;
                     return Ok(());
                 }
             } else {

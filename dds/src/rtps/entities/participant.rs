@@ -52,7 +52,7 @@ use crate::{
         },
         entities::{
             entity::Entity,
-            history::history_cache::HistoryCache,
+            history::{cache_change::CacheChange, history_cache::HistoryCache},
             reader::{Reader, ReaderStore, StatefulReader, StatelessReader},
             wire_buffer_pool::WireBufferPool,
             writer::{StatefulWriter, StatelessWriter, Writer, WriterStore},
@@ -61,7 +61,6 @@ use crate::{
             sedp_logic::SedpLogic, spdp_logic::SpdpLogic, user_logic::UserLogic,
             wlp_logic::WlpLogic,
         },
-        task::sending_handler::{MessageType, SendingHandler},
         transport::plugin::TransportPlugin,
     },
     utils::timer::timer_handler::TimerHandler,
@@ -481,11 +480,11 @@ impl Participant {
                     Some(RtpsTime::now()),
                 );
 
-                let handler = SendingHandler::get_instance(Arc::new(self.clone()), None);
-                handler.push_message_and_wake(MessageType::SedpTerminateEndpoint(
+                self.sync_send_sedp_terminate_endpoint(
                     self.sedp_builtin_publications_writer().guid(),
                     Arc::new(a_cache_change),
-                ));
+                )?;
+
                 log::info!("Remote writer with GUID {:?} terminated", writer_guid);
 
                 // Remove builtin topic data from builtin endpoint
@@ -515,7 +514,10 @@ impl Participant {
         }
 
         // Unmatch with intra participant readers
-        self.cleanup_remote_writer(Guid::new(self.guid().prefix(), entity_id), &topic_name)?;
+        self.cleanup_resources_for_remote_writer(
+            Guid::new(self.guid().prefix(), entity_id),
+            &topic_name,
+        )?;
 
         // Remove from store
         self.rtps_writer_store.remove(&topic_name, entity_id);
@@ -556,11 +558,10 @@ impl Participant {
                     Some(RtpsTime::now()),
                 );
 
-                let handler = SendingHandler::get_instance(Arc::new(self.clone()), None);
-                handler.push_message_and_wake(MessageType::SedpTerminateEndpoint(
+                self.sync_send_sedp_terminate_endpoint(
                     self.sedp_builtin_subscriptions_writer().guid(),
                     Arc::new(a_cache_change),
-                ));
+                )?;
 
                 // Remove builtin topic data from builtin endpoint
                 match self.builtin_endpoints.sedp_builtin_subscriptions_writer.writer_cache().lock()
@@ -592,12 +593,15 @@ impl Participant {
         self.rtps_reader_store.remove(&topic_name, entity_id);
 
         // Unmatch with intra participant writers
-        self.cleanup_remote_reader(Guid::new(self.guid().prefix(), entity_id), &topic_name)?;
+        self.cleanup_resources_for_remote_reader(
+            Guid::new(self.guid().prefix(), entity_id),
+            &topic_name,
+        )?;
 
         Ok(())
     }
 
-    pub(crate) fn cleanup_remote_reader(
+    pub(crate) fn cleanup_resources_for_remote_reader(
         &self,
         reader_guid: Guid,
         topic_name: &str,
@@ -618,7 +622,7 @@ impl Participant {
         Ok(())
     }
 
-    pub(crate) fn cleanup_remote_writer(
+    pub(crate) fn cleanup_resources_for_remote_writer(
         &self,
         writer_guid: Guid,
         topic_name: &str,
@@ -650,10 +654,10 @@ impl Participant {
     fn remove_unmatched_writer_from_reader(&self, writer_guid: Guid) -> RtpsResult<()> {
         for reader in self.rtps_reader_store.iter_all() {
             if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
-                stateful_reader.remove_matched_writer(writer_guid)?;
+                stateful_reader.remove_matched_writer_and_update_status(writer_guid)?;
             } else if let Some(stateless_reader) = reader.as_any().downcast_ref::<StatelessReader>()
             {
-                stateless_reader.remove_matched_writer(writer_guid)?;
+                stateless_reader.remove_matched_writer_and_update_status(writer_guid)?;
             }
         }
 
@@ -664,10 +668,10 @@ impl Participant {
     fn remove_unmatched_reader_from_writer(&self, reader_guid: Guid) -> RtpsResult<()> {
         for writer in self.rtps_writer_store.iter_all() {
             if let Some(stateful_writer) = writer.as_any().downcast_ref::<StatefulWriter>() {
-                stateful_writer.remove_matched_reader(reader_guid)?;
+                stateful_writer.remove_matched_reader_and_update_status(reader_guid)?;
             } else if let Some(stateless_writer) = writer.as_any().downcast_ref::<StatelessWriter>()
             {
-                stateless_writer.remove_matched_reader(reader_guid)?;
+                stateless_writer.remove_matched_reader_and_update_status(reader_guid)?;
             }
         }
 
@@ -744,24 +748,10 @@ impl Participant {
                 Some(RtpsTime::now()),
             );
 
-            let handler = SendingHandler::get_instance(Arc::new(self.clone()), None);
-            if let Some(sending_task) = handler.get_sending_task() {
-                // Send messages synchronously without using event loop
-                if let Ok(sending_task_guard) = sending_task.lock() {
-                    // let join_handle = sending_task_guard.create_worker_thread(MessageType::SedpTerminateEndpoint(
-                    //     self.sedp_builtin_subscriptions_writer().guid(),
-                    //     Arc::new(a_cache_change),
-                    // ));
-
-                    // if let Err(e) = join_handle.join() {
-                    //     log::error!("Failed to join sending task thread for SEDP Terminate endpoint task: {:?}", e);
-                    // }
-                    sending_task_guard.sync_sedp_terminate_endpoint_task(
-                        self.sedp_builtin_subscriptions_writer().guid(),
-                        Arc::new(a_cache_change),
-                    );
-                }
-            }
+            self.sync_send_sedp_terminate_endpoint(
+                self.sedp_builtin_subscriptions_writer().guid(),
+                Arc::new(a_cache_change),
+            )?;
         }
 
         // Send Data(w[UD]) messages
@@ -774,45 +764,44 @@ impl Participant {
                 Some(RtpsTime::now()),
             );
 
-            let handler = SendingHandler::get_instance(Arc::new(self.clone()), None);
-            if let Some(sending_task) = handler.get_sending_task() {
-                // Send messages synchronously without using event loop
-                if let Ok(sending_task_guard) = sending_task.lock() {
-                    // let join_handle = sending_task_guard.create_worker_thread(
-                    //     MessageType::SedpTerminateEndpoint(
-                    //         self.sedp_builtin_publications_writer().guid(),
-                    //         Arc::new(a_cache_change),
-                    //     ),
-                    // );
-
-                    // if let Err(e) = join_handle.join() {
-                    //     log::error!("Failed to join sending task thread for SEDP Terminate endpoint task: {:?}", e);
-                    // }
-
-                    sending_task_guard.sync_sedp_terminate_endpoint_task(
-                        self.sedp_builtin_publications_writer().guid(),
-                        Arc::new(a_cache_change),
-                    );
-                }
-            }
+            self.sync_send_sedp_terminate_endpoint(
+                self.sedp_builtin_publications_writer().guid(),
+                Arc::new(a_cache_change),
+            )?;
         }
 
         // Send Data(p[UD]) messages
-        let handler = SendingHandler::get_instance(Arc::new(self.clone()), None);
-        if let Some(sending_task) = handler.get_sending_task() {
-            // Send messages synchronously without using event loop
-            if let Ok(sending_task_guard) = sending_task.lock() {
-                // let join_handle = sending_task_guard
-                //     .create_worker_thread(MessageType::SpdpTerminateParticipant());
+        self.sync_send_spdp_terminate_participant()?;
 
-                // if let Err(e) = join_handle.join() {
-                //     log::error!("Failed to join sending task thread for SPDP Terminate participant task: {:?}", e);
-                // }
+        Ok(())
+    }
 
-                sending_task_guard.sync_spdp_terminate_participant_task()?;
-            }
+    // Send a SEDP dispose synchronously; the event-loop path can race participant teardown
+    pub fn sync_send_sedp_terminate_endpoint(
+        &self,
+        builtin_writer_guid: Guid,
+        cache_change: Arc<CacheChange>,
+    ) -> RtpsResult<()> {
+        if let Some(sedp_logic) = self.sedp_logic.get().and_then(|a| a.as_ref().as_ref()) {
+            sedp_logic.send_endpoint_termination_message(builtin_writer_guid, cache_change)?;
         }
+        Ok(())
+    }
 
+    // Send SPDP/SEDP participant dispose synchronously on shutdown
+    pub fn sync_send_spdp_terminate_participant(&self) -> RtpsResult<()> {
+        let spdp_logic = self
+            .spdp_logic
+            .get()
+            .and_then(|a| a.as_ref().as_ref())
+            .ok_or(RtpsError::new(RtpsErrorCode::NotInitialized, "SpdpLogic is not initialized"))?;
+        spdp_logic.send_participant_termination_message_multicast()?;
+        let sedp_logic = self
+            .sedp_logic
+            .get()
+            .and_then(|a| a.as_ref().as_ref())
+            .ok_or(RtpsError::new(RtpsErrorCode::NotInitialized, "SedpLogic is not initialized"))?;
+        sedp_logic.send_participant_termination_message_unicast()?;
         Ok(())
     }
 
@@ -844,26 +833,42 @@ impl Participant {
         &self,
         terminated_participant_guid_prefix: GuidPrefix,
     ) -> RtpsResult<()> {
-        for reader in self.rtps_reader_store.iter_all() {
-            if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
-                stateful_reader
-                    .remove_all_matched_writers_with_prefix(terminated_participant_guid_prefix)?;
-            } else if let Some(stateless_reader) = reader.as_any().downcast_ref::<StatelessReader>()
-            {
-                stateless_reader
-                    .remove_all_matched_writers_with_prefix(terminated_participant_guid_prefix)?;
-            }
+        // Get all writers with the same GuidPrefix
+        let writers: Vec<(String, Guid)> = self
+            .remote_publications()
+            .iter()
+            .flat_map(|e| {
+                let topic = e.key().clone();
+                e.value()
+                    .iter()
+                    .filter(|(guid, _)| guid.prefix() == terminated_participant_guid_prefix)
+                    .map(|(guid, _)| (topic.clone(), *guid))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        // Clean up resources related to each writer
+        for (topic, writer_guid) in writers {
+            self.cleanup_resources_for_remote_writer(writer_guid, &topic)?;
         }
 
-        for writer in self.rtps_writer_store.iter_all() {
-            if let Some(stateful_writer) = writer.as_any().downcast_ref::<StatefulWriter>() {
-                stateful_writer
-                    .remove_all_matched_readers_with_prefix(terminated_participant_guid_prefix)?;
-            } else if let Some(stateless_writer) = writer.as_any().downcast_ref::<StatelessWriter>()
-            {
-                stateless_writer
-                    .remove_all_matched_readers_with_prefix(terminated_participant_guid_prefix)?;
-            }
+        // Get all readers with the same GuidPrefix
+        let readers: Vec<(String, Guid)> = self
+            .remote_subscriptions()
+            .iter()
+            .flat_map(|e| {
+                let topic = e.key().clone();
+                e.value()
+                    .iter()
+                    .filter(|(guid, _)| guid.prefix() == terminated_participant_guid_prefix)
+                    .map(|(guid, _)| (topic.clone(), *guid))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        // Clean up resources related to each reader
+        for (topic, reader_guid) in readers {
+            self.cleanup_resources_for_remote_reader(reader_guid, &topic)?;
         }
 
         Ok(())

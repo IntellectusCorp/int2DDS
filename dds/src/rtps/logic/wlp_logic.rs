@@ -1197,6 +1197,11 @@ impl WlpLogic {
 
         if let Ok(readers) = participant.find_readers_matched_with_remote_writer(guid) {
             for reader in readers {
+                log::debug!(
+                    "[WLP] mark_monitored_writer_lost: Notifying reader {:?} of LOST for writer {:?}",
+                    reader.guid(),
+                    guid
+                );
                 notify_reader_liveliness_changed(&reader, &guid, LivelinessTransition::Lost);
             }
 
@@ -1222,25 +1227,36 @@ impl WlpLogic {
     }
 
     pub(crate) fn renew_asserting_writer(&self, writer_guid: &Guid) -> RtpsResult<()> {
+        log::debug!("[WLP] renew_asserting_writer called for guid={:?}", writer_guid);
+
         if let Some(mut info) = self.asserting_writers.get_mut(writer_guid) {
-            let was_not_alive = info.alive_state() == WriterAliveState::NotAlive;
             info.set_alive();
 
-            // NOT_ALIVE -> ALIVE
-            if was_not_alive {
-                let participant = self.get_upgraded_participant()?;
-                if let Ok(readers) = participant.find_readers_matched_with_local_writer(writer_guid)
-                {
-                    for reader in readers {
-                        // Recovery: NOT_ALIVE -> ALIVE.
-                        notify_reader_liveliness_changed(
-                            &reader,
-                            writer_guid,
-                            LivelinessTransition::Recovered,
-                        );
-                    }
-                }
-            }
+            // Below will be done at the reader side (monitored side), not here
+            // For example, in user_logic.rs, wlp.mark_monitored_writer_alive(remote_writer_guid)? in handle_data_message()
+            // Do not notify readers in any asserting side method
+
+            // let was_not_alive = info.alive_state() == WriterAliveState::NotAlive;
+            // // NOT_ALIVE -> ALIVE
+            // if was_not_alive {
+            //     let participant = self.get_upgraded_participant()?;
+            //     if let Ok(readers) = participant.find_readers_matched_with_local_writer(writer_guid)
+            //     {
+            //         for reader in readers {
+            //             log::debug!(
+            //                 "[WLP] renew_asserting_writer: Notifying reader {:?} of recovery for writer {:?}",
+            //                 reader.guid(),
+            //                 writer_guid
+            //             );
+            //             // Recovery: NOT_ALIVE -> ALIVE.
+            //             notify_reader_liveliness_changed(
+            //                 &reader,
+            //                 writer_guid,
+            //                 LivelinessTransition::Recovered,
+            //             );
+            //         }
+            //     }
+            // }
 
             // LivelinessMonitor Timer Update (re-track if removed after LOST)
             if let Ok(monitor) = self.liveliness_monitor.lock() {
@@ -1388,6 +1404,13 @@ fn notify_reader_liveliness_changed(
     transition: LivelinessTransition,
 ) {
     let (alive_change, not_alive_change) = transition.deltas();
+    log::debug!(
+        "[WLP] notify_reader_liveliness_changed: transition={:?}, writer={:?}, reader={:?}",
+        transition.deltas(),
+        guid,
+        reader.guid()
+    );
+
     reader.update_status(
         StatusKind::LIVELINESS_CHANGED,
         Some(Arc::new(LivelinessChangedStatus {
