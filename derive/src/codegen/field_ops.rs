@@ -1,9 +1,168 @@
 use quote::quote;
 
 use crate::codegen::utils::{
-    get_array_size, get_serialization_method, is_map_type, parse_field_attributes,
-    SerializationMethod,
+    get_array_size, get_serialization_method, is_map_type, is_option_type, literal_to_tokens,
+    parse_field_attributes, FieldConfig, SerializationMethod, TryConstructKind,
 };
+
+/// Emit the local binding for a `@non_serialized` field. Uses `@default` literal if present,
+/// otherwise `Default::default()`.
+pub fn non_serialized_binding(
+    field_name: &syn::Ident,
+    field_type: &syn::Type,
+    field_config: &FieldConfig,
+) -> proc_macro2::TokenStream {
+    if let Some(lit) = &field_config.default {
+        let default_expr = literal_to_tokens(lit, field_type);
+        quote! { let #field_name: #field_type = #default_expr; }
+    } else {
+        quote! { let #field_name: #field_type = Default::default(); }
+    }
+}
+
+/// Which Err(..) variant the generated bound-violation code should return.
+#[derive(Debug, Clone, Copy)]
+pub enum DeserErrorKind {
+    /// TypeSupport / DdsType path returning `DdsResult`.
+    Dds,
+    /// CdrDeserialize / XcdrDeserialize trait path returning `SerializationResult`.
+    Serialization,
+}
+
+/// Post-deserialize bound enforcement for the given field (applies @try_construct).
+/// Emits nothing for types where bound is not applicable (primitives, arrays, maps, custom).
+/// Expects `#field_name` to be a `mut` binding in scope.
+pub fn gen_post_deserialize_bound_check(
+    field_name: &syn::Ident,
+    field_type: &syn::Type,
+    bound: Option<usize>,
+    try_construct: TryConstructKind,
+    crate_path: &proc_macro2::TokenStream,
+    err_kind: DeserErrorKind,
+) -> proc_macro2::TokenStream {
+    let Some(max_len) = bound else {
+        return quote! {};
+    };
+    let method = get_serialization_method(field_type);
+
+    match method {
+        SerializationMethod::String => {
+            let truncate = quote! {
+                while #field_name.len() > #max_len {
+                    #field_name.pop();
+                }
+            };
+            let action = gen_bound_violation_action(
+                field_name,
+                "string field",
+                quote! { #field_name.len() },
+                quote! { #max_len },
+                crate_path,
+                try_construct,
+                err_kind,
+                truncate,
+            );
+            quote! {
+                if #field_name.len() > #max_len {
+                    #action
+                }
+            }
+        }
+        SerializationMethod::WString => {
+            let truncate = quote! {
+                let mut __inner = #field_name.as_str().to_string();
+                while __inner.encode_utf16().count() > #max_len {
+                    __inner.pop();
+                }
+                #field_name = #crate_path::serialize::core::bounded_types::WString::new(__inner);
+            };
+            let action = gen_bound_violation_action(
+                field_name,
+                "WString field",
+                quote! { __utf16_len },
+                quote! { #max_len },
+                crate_path,
+                try_construct,
+                err_kind,
+                truncate,
+            );
+            quote! {
+                {
+                    let __utf16_len = #field_name.as_str().encode_utf16().count();
+                    if __utf16_len > #max_len {
+                        #action
+                    }
+                }
+            }
+        }
+        SerializationMethod::VecU8
+        | SerializationMethod::VecU16
+        | SerializationMethod::VecU32
+        | SerializationMethod::VecU64
+        | SerializationMethod::VecI8
+        | SerializationMethod::VecI16
+        | SerializationMethod::VecI32
+        | SerializationMethod::VecI64
+        | SerializationMethod::VecF32
+        | SerializationMethod::VecF64
+        | SerializationMethod::VecBool
+        | SerializationMethod::VecChar
+        | SerializationMethod::VecString => {
+            let truncate = quote! { #field_name.truncate(#max_len); };
+            let action = gen_bound_violation_action(
+                field_name,
+                "sequence field",
+                quote! { #field_name.len() },
+                quote! { #max_len },
+                crate_path,
+                try_construct,
+                err_kind,
+                truncate,
+            );
+            quote! {
+                if #field_name.len() > #max_len {
+                    #action
+                }
+            }
+        }
+        _ => quote! {},
+    }
+}
+
+/// Emit the deserialize-side action for a bound violation according to @try_construct.
+/// `truncate` is the type-specific truncation code (ignored for Discard/UseDefault).
+fn gen_bound_violation_action(
+    field_name: &syn::Ident,
+    field_kind: &str,
+    len_expr: proc_macro2::TokenStream,
+    max_len: proc_macro2::TokenStream,
+    crate_path: &proc_macro2::TokenStream,
+    try_construct: TryConstructKind,
+    err_kind: DeserErrorKind,
+    truncate: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    match try_construct {
+        TryConstructKind::Discard => {
+            let msg = quote! {
+                format!("Deserialized {} '{}' length {} exceeds maximum {}",
+                    #field_kind, stringify!(#field_name), #len_expr, #max_len)
+            };
+            let err_ctor = match err_kind {
+                DeserErrorKind::Dds => quote! {
+                    #crate_path::dcps::core::error::DdsError::Error(#msg)
+                },
+                DeserErrorKind::Serialization => quote! {
+                    #crate_path::serialize::cdr::CdrError::DeserializationError(#msg)
+                },
+            };
+            quote! { return Err(#err_ctor); }
+        }
+        TryConstructKind::UseDefault => quote! {
+            #field_name = Default::default();
+        },
+        TryConstructKind::Trim => truncate,
+    }
+}
 
 /// Helper function to generate serialize code for primitive types
 fn gen_primitive_serialize(
@@ -78,18 +237,27 @@ fn gen_sequence_deserialize(
     field_name: &syn::Ident,
     crate_path: &proc_macro2::TokenStream,
     bound: Option<usize>,
+    try_construct: TryConstructKind,
 ) -> proc_macro2::TokenStream {
     let method_ident = syn::Ident::new(method, field_name.span());
 
     if let Some(max_len) = bound {
+        let truncate = quote! { #field_name.truncate(#max_len); };
+        let action = gen_bound_violation_action(
+            field_name,
+            "sequence field",
+            quote! { #field_name.len() },
+            quote! { #max_len },
+            crate_path,
+            try_construct,
+            DeserErrorKind::Dds,
+            truncate,
+        );
         quote! {
-            let #field_name = deserializer.#method_ident()
+            let mut #field_name = deserializer.#method_ident()
                 .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
             if #field_name.len() > #max_len {
-                return Err(#crate_path::dcps::core::error::DdsError::Error(
-                    format!("Deserialized sequence field '{}' length {} exceeds maximum {}",
-                        stringify!(#field_name), #field_name.len(), #max_len)
-                ));
+                #action
             }
         }
     } else {
@@ -268,6 +436,17 @@ fn gen_serialize_code(
             gen_array_serialize("serialize_string_array", field_name, crate_path)
         }
         SerializationMethod::Fallback => {
+            if !xcdr && is_option_type(field_type) {
+                let msg = format!(
+                    "XCDR1 does not support Option<T> field '{}' (PL_CDR v1 pending T2-1); use XCDR2",
+                    field_name
+                );
+                return quote! {
+                    (|| -> ::std::result::Result<(), #crate_path::dcps::core::error::DdsError> {
+                        Err(#crate_path::dcps::core::error::DdsError::Error(#msg.to_string()))
+                    })()?;
+                };
+            }
             let trait_path = if xcdr {
                 quote!(#crate_path::serialize::xcdr::XcdrSerialize::serialize_xcdr)
             } else {
@@ -305,6 +484,7 @@ fn gen_deserialize_code(
     crate_path: &proc_macro2::TokenStream,
     xcdr: bool,
     bound: Option<usize>,
+    try_construct: TryConstructKind,
 ) -> proc_macro2::TokenStream {
     match method {
         SerializationMethod::U8 => {
@@ -345,14 +525,26 @@ fn gen_deserialize_code(
         }
         SerializationMethod::String => {
             if let Some(max_len) = bound {
+                let truncate = quote! {
+                    while #field_name.len() > #max_len {
+                        #field_name.pop();
+                    }
+                };
+                let action = gen_bound_violation_action(
+                    field_name,
+                    "string field",
+                    quote! { #field_name.len() },
+                    quote! { #max_len },
+                    crate_path,
+                    try_construct,
+                    DeserErrorKind::Dds,
+                    truncate,
+                );
                 quote! {
-                    let #field_name = deserializer.deserialize_string()
+                    let mut #field_name = deserializer.deserialize_string()
                         .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
                     if #field_name.len() > #max_len {
-                        return Err(#crate_path::dcps::core::error::DdsError::Error(
-                            format!("Deserialized string field '{}' length {} exceeds maximum {}",
-                                stringify!(#field_name), #field_name.len(), #max_len)
-                        ));
+                        #action
                     }
                 }
             } else {
@@ -367,16 +559,30 @@ fn gen_deserialize_code(
             };
 
             if let Some(max_len) = bound {
+                let truncate = quote! {
+                    let mut __inner = #field_name.as_str().to_string();
+                    while __inner.encode_utf16().count() > #max_len {
+                        __inner.pop();
+                    }
+                    #field_name = #crate_path::serialize::core::bounded_types::WString::new(__inner);
+                };
+                let action = gen_bound_violation_action(
+                    field_name,
+                    "WString field",
+                    quote! { __utf16_len },
+                    quote! { #max_len },
+                    crate_path,
+                    try_construct,
+                    DeserErrorKind::Dds,
+                    truncate,
+                );
                 quote! {
-                    let #field_name = <#field_type as #trait_name>::#method_name(&mut deserializer)
+                    let mut #field_name = <#field_type as #trait_name>::#method_name(&mut deserializer)
                         .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
                     {
                         let __utf16_len = #field_name.as_str().encode_utf16().count();
                         if __utf16_len > #max_len {
-                            return Err(#crate_path::dcps::core::error::DdsError::Error(
-                                format!("Deserialized WString field '{}' UTF-16 length {} exceeds bound {}",
-                                    stringify!(#field_name), __utf16_len, #max_len)
-                            ));
+                            #action
                         }
                     }
                 }
@@ -539,22 +745,28 @@ fn gen_deserialize_code(
         }
         SerializationMethod::VecU8 => {
             if let Some(max_len) = bound {
+                let truncate = quote! { #field_name.truncate(#max_len); };
+                let action = gen_bound_violation_action(
+                    field_name,
+                    "sequence field",
+                    quote! { #field_name.len() },
+                    quote! { #max_len },
+                    crate_path,
+                    try_construct,
+                    DeserErrorKind::Dds,
+                    truncate,
+                );
                 quote! {
-                    let #field_name: #field_type = match deserializer.deserialize_byte_sequence() {
-                        Ok(value) => {
-                            if value.len() > #max_len {
-                                return Err(#crate_path::dcps::core::error::DdsError::Error(
-                                    format!("Deserialized sequence field '{}' length {} exceeds maximum {}",
-                                        stringify!(#field_name), value.len(), #max_len)
-                                ));
-                            }
-                            value
-                        },
+                    let mut #field_name: #field_type = match deserializer.deserialize_byte_sequence() {
+                        Ok(value) => value,
                         Err(#crate_path::serialize::cdr::CdrError::InsufficientData) => Vec::new(),
                         Err(e) => {
                             return Err(#crate_path::dcps::core::error::DdsError::Error(e.to_string()));
                         }
                     };
+                    if #field_name.len() > #max_len {
+                        #action
+                    }
                 }
             } else {
                 quote! {
@@ -568,42 +780,90 @@ fn gen_deserialize_code(
                 }
             }
         }
-        SerializationMethod::VecU16 => {
-            gen_sequence_deserialize("deserialize_u16_sequence", field_name, crate_path, bound)
-        }
-        SerializationMethod::VecU32 => {
-            gen_sequence_deserialize("deserialize_u32_sequence", field_name, crate_path, bound)
-        }
-        SerializationMethod::VecU64 => {
-            gen_sequence_deserialize("deserialize_u64_sequence", field_name, crate_path, bound)
-        }
-        SerializationMethod::VecI8 => {
-            gen_sequence_deserialize("deserialize_i8_sequence", field_name, crate_path, bound)
-        }
-        SerializationMethod::VecI16 => {
-            gen_sequence_deserialize("deserialize_i16_sequence", field_name, crate_path, bound)
-        }
-        SerializationMethod::VecI32 => {
-            gen_sequence_deserialize("deserialize_i32_sequence", field_name, crate_path, bound)
-        }
-        SerializationMethod::VecI64 => {
-            gen_sequence_deserialize("deserialize_i64_sequence", field_name, crate_path, bound)
-        }
-        SerializationMethod::VecF32 => {
-            gen_sequence_deserialize("deserialize_f32_sequence", field_name, crate_path, bound)
-        }
-        SerializationMethod::VecF64 => {
-            gen_sequence_deserialize("deserialize_f64_sequence", field_name, crate_path, bound)
-        }
-        SerializationMethod::VecBool => {
-            gen_sequence_deserialize("deserialize_bool_sequence", field_name, crate_path, bound)
-        }
-        SerializationMethod::VecChar => {
-            gen_sequence_deserialize("deserialize_char_sequence", field_name, crate_path, bound)
-        }
-        SerializationMethod::VecString => {
-            gen_sequence_deserialize("deserialize_string_sequence", field_name, crate_path, bound)
-        }
+        SerializationMethod::VecU16 => gen_sequence_deserialize(
+            "deserialize_u16_sequence",
+            field_name,
+            crate_path,
+            bound,
+            try_construct,
+        ),
+        SerializationMethod::VecU32 => gen_sequence_deserialize(
+            "deserialize_u32_sequence",
+            field_name,
+            crate_path,
+            bound,
+            try_construct,
+        ),
+        SerializationMethod::VecU64 => gen_sequence_deserialize(
+            "deserialize_u64_sequence",
+            field_name,
+            crate_path,
+            bound,
+            try_construct,
+        ),
+        SerializationMethod::VecI8 => gen_sequence_deserialize(
+            "deserialize_i8_sequence",
+            field_name,
+            crate_path,
+            bound,
+            try_construct,
+        ),
+        SerializationMethod::VecI16 => gen_sequence_deserialize(
+            "deserialize_i16_sequence",
+            field_name,
+            crate_path,
+            bound,
+            try_construct,
+        ),
+        SerializationMethod::VecI32 => gen_sequence_deserialize(
+            "deserialize_i32_sequence",
+            field_name,
+            crate_path,
+            bound,
+            try_construct,
+        ),
+        SerializationMethod::VecI64 => gen_sequence_deserialize(
+            "deserialize_i64_sequence",
+            field_name,
+            crate_path,
+            bound,
+            try_construct,
+        ),
+        SerializationMethod::VecF32 => gen_sequence_deserialize(
+            "deserialize_f32_sequence",
+            field_name,
+            crate_path,
+            bound,
+            try_construct,
+        ),
+        SerializationMethod::VecF64 => gen_sequence_deserialize(
+            "deserialize_f64_sequence",
+            field_name,
+            crate_path,
+            bound,
+            try_construct,
+        ),
+        SerializationMethod::VecBool => gen_sequence_deserialize(
+            "deserialize_bool_sequence",
+            field_name,
+            crate_path,
+            bound,
+            try_construct,
+        ),
+        SerializationMethod::VecChar => gen_sequence_deserialize(
+            "deserialize_char_sequence",
+            field_name,
+            crate_path,
+            bound,
+            try_construct,
+        ),
+        SerializationMethod::VecString => gen_sequence_deserialize(
+            "deserialize_string_sequence",
+            field_name,
+            crate_path,
+            bound,
+            try_construct,
+        ),
         SerializationMethod::BoolArray => {
             if let Some(size) = get_array_size(field_type) {
                 quote! {
@@ -652,6 +912,18 @@ fn gen_deserialize_code(
             }
         }
         SerializationMethod::Fallback => {
+            if !xcdr && is_option_type(field_type) {
+                let msg = format!(
+                    "XCDR1 does not support Option<T> field '{}' (PL_CDR v1 pending T2-1); use XCDR2",
+                    field_name
+                );
+                return quote! {
+                    (|| -> ::std::result::Result<(), #crate_path::dcps::core::error::DdsError> {
+                        Err(#crate_path::dcps::core::error::DdsError::Error(#msg.to_string()))
+                    })()?;
+                    let #field_name: #field_type = None;
+                };
+            }
             if xcdr {
                 let trait_name = quote!(#crate_path::serialize::xcdr::XcdrDeserialize);
                 let method_name = quote!(deserialize_xcdr);
@@ -709,6 +981,9 @@ fn generate_field_serialization_internal(
 ) -> proc_macro2::TokenStream {
     let field_serializations = fields.iter().filter_map(|field| {
         let field_config = parse_field_attributes(field);
+        if field_config.non_serialized {
+            return None;
+        }
         if !include_key_fields && field_config.key {
             return None;
         }
@@ -734,6 +1009,9 @@ fn generate_key_field_serialization_internal(
 ) -> proc_macro2::TokenStream {
     let field_serializations = fields.iter().filter_map(|field| {
         let field_config = parse_field_attributes(field);
+        if field_config.non_serialized {
+            return None;
+        }
         if !field_config.key {
             return None;
         }
@@ -803,8 +1081,19 @@ fn generate_field_deserialization_internal(
     let field_deserializations = fields.iter().map(|field| {
         let field_config = parse_field_attributes(field);
         let field_name = field.ident.as_ref().unwrap();
+        if field_config.non_serialized {
+            return non_serialized_binding(field_name, &field.ty, &field_config);
+        }
         let method = get_serialization_method(&field.ty);
-        gen_deserialize_code(method, field_name, &field.ty, crate_path, xcdr, field_config.bound)
+        gen_deserialize_code(
+            method,
+            field_name,
+            &field.ty,
+            crate_path,
+            xcdr,
+            field_config.bound,
+            field_config.try_construct,
+        )
     });
 
     let field_names: Vec<_> = fields.iter().map(|f| f.ident.as_ref().unwrap()).collect();
@@ -845,6 +1134,9 @@ pub fn generate_field_deserialization_xcdr_per_field_dheader(
     let field_deserializations = fields.iter().map(|field| {
         let field_config = parse_field_attributes(field);
         let field_name = field.ident.as_ref().unwrap();
+        if field_config.non_serialized {
+            return non_serialized_binding(field_name, &field.ty, &field_config);
+        }
         let method = get_serialization_method(&field.ty);
         let inner_deserialize = gen_deserialize_code(
             method,
@@ -853,6 +1145,7 @@ pub fn generate_field_deserialization_xcdr_per_field_dheader(
             crate_path,
             true,
             field_config.bound,
+            field_config.try_construct,
         );
 
         // Read DHEADER before each field (interoperability format)
