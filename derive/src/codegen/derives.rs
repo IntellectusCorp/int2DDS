@@ -407,7 +407,11 @@ fn generate_enum_additional_derives(
                         Self::#variant_name(value) => Self::#variant_name(value.clone()),
                     },
                     _ => quote! {
-                        Self::#variant_name { .. } => unimplemented!("Clone not supported for this variant"),
+                        Self::#variant_name { .. } => compile_error!(concat!(
+                            "derive(DdsType): multi-field or named-field variants are unsupported (",
+                            stringify!(#variant_name),
+                            ")"
+                        )),
                     },
                 }
             })
@@ -452,7 +456,11 @@ fn generate_enum_additional_derives(
                         }
                     },
                     _ => quote! {
-                        Self::#variant_name { .. } => unimplemented!("Writable not supported for this variant"),
+                        Self::#variant_name { .. } => compile_error!(concat!(
+                            "derive(DdsType): multi-field or named-field variants are unsupported (",
+                            stringify!(#variant_name),
+                            ")"
+                        )),
                     },
                 }
             })
@@ -473,7 +481,11 @@ fn generate_enum_additional_derives(
                         #idx => Self::#variant_name(reader.read_value()?),
                     },
                     _ => quote! {
-                        #idx => unimplemented!("Readable not supported for this variant"),
+                        #idx => compile_error!(concat!(
+                            "derive(DdsType): multi-field or named-field variants are unsupported (",
+                            stringify!(#variant_name),
+                            ")"
+                        )),
                     },
                 }
             })

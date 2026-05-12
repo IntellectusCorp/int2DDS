@@ -12,9 +12,9 @@ use crate::dcps::topic::type_support::SerializationFormat;
 use crate::rtps::common::types::SerializedData;
 use crate::serialize::cdr::{
     CdrDeserializer, CdrError, CdrSerializer, ExtensibilityKind, PrimitiveSerialize,
-    StringSerialize, Xcdr2Deserializer, Xcdr2Serializer, MEMBER_ID_SENTINEL,
+    StringSerialize, Xcdr2Deserializer, Xcdr2Serializer,
 };
-use crate::serialize::BufferManager;
+use crate::serialize::{BufferManager, DeserializerReader};
 
 use super::dynamic_data::{DynamicData, DynamicValue};
 use super::dynamic_type::{
@@ -459,25 +459,22 @@ fn serialize_struct_xcdr(
         }
         ExtensibilityKind::Mutable => {
             let size_pos = serializer.begin_struct().map_err(cdr_error)?;
-            let mut nested = |serializer: &mut Xcdr2Serializer, inner: &DynamicData| {
-                serialize_struct_xcdr(serializer, inner, extensibility)
-            };
 
             for member in struct_desc.members() {
                 if let Some(value) = member_value_or_default(data, member) {
-                    let _member_start = serializer.position();
-                    let header_pos = serializer.position();
-                    serializer.write_member_header(member.member_id, 0).map_err(cdr_error)?;
-
-                    let content_start = serializer.position();
-                    serialize_value(serializer, &value, &mut nested)?;
-                    let content_end = serializer.position();
-
-                    let _ = (header_pos, content_start, content_end);
+                    let member_id = member.member_id;
+                    serializer
+                        .write_member_with(member_id, false, |s| {
+                            let mut nested = |s: &mut Xcdr2Serializer, inner: &DynamicData| {
+                                serialize_struct_xcdr(s, inner, extensibility)
+                            };
+                            serialize_value(s, &value, &mut nested)
+                                .map_err(|e| CdrError::SerializationError(e.to_string()))
+                        })
+                        .map_err(cdr_error)?;
                 }
             }
 
-            serializer.write_member_header(MEMBER_ID_SENTINEL, 0).map_err(cdr_error)?;
             serializer.end_struct(size_pos).map_err(cdr_error)?;
         }
     }
@@ -507,8 +504,9 @@ fn deserialize_struct_xcdr(
         }
         ExtensibilityKind::Mutable => {
             let (object_size, start_pos) = deserializer.begin_struct().map_err(cdr_error)?;
+            let object_end = start_pos + object_size as usize;
 
-            while !deserializer.is_at_sentinel() {
+            while deserializer.get_position() < object_end {
                 let (member_id, member_length, must_understand) =
                     deserializer.read_member_header_full().map_err(cdr_error)?;
 
@@ -525,7 +523,6 @@ fn deserialize_struct_xcdr(
                 }
             }
 
-            deserializer.skip_sentinel_if_present().map_err(cdr_error)?;
             deserializer.end_struct(object_size, start_pos).map_err(cdr_error)?;
         }
     }
