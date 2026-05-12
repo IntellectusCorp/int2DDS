@@ -272,21 +272,25 @@ impl<'a> RustGen<'a> {
         }
 
         for m in &s.members {
-            self.emit_field(m);
+            self.emit_field(m, s.autoid);
         }
 
         self.indent -= 1;
         self.line("}");
     }
 
-    fn emit_field(&mut self, m: &ResolvedMember) {
+    fn emit_field(&mut self, m: &ResolvedMember, struct_autoid: Option<AutoIdKind>) {
         // Build field-level #[dds(...)] attributes
         let mut dds_attrs = Vec::new();
         if m.is_key {
             dds_attrs.push("key".to_string());
         }
+        let id_is_auto_computed =
+            m.hashid.is_some() || matches!(struct_autoid, Some(AutoIdKind::Hash));
         if let Some(id) = m.member_id {
-            dds_attrs.push(format!("id = {}", id));
+            if !id_is_auto_computed {
+                dds_attrs.push(format!("id = {}", id));
+            }
         }
         if m.is_optional {
             dds_attrs.push("optional".to_string());

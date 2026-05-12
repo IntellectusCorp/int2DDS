@@ -343,29 +343,32 @@ namespace Int2Dds.Cdr
             uint header = ReadU32();
             bool mustUnderstand = (header & 0x80000000u) != 0;
             byte lc = (byte)((header >> 28) & 0x07);
-            uint memberId = (header >> 16) & 0x3FFF;
-            uint lengthOrFlags = header & 0xFFFF;
+            uint memberId = header & 0x0FFFFFFFu;
             uint dataLength;
 
             switch (lc)
             {
                 case 0:
+                    dataLength = 1;
+                    break;
                 case 1:
+                    dataLength = 2;
+                    break;
                 case 2:
+                    dataLength = 4;
+                    break;
                 case 3:
-                    dataLength = lengthOrFlags;
+                    dataLength = 8;
                     break;
                 case 4:
+                case 5:
                     dataLength = ReadU32();
                     break;
-                case 5:
-                    dataLength = ReadU32() * 4;
-                    break;
                 case 6:
-                    dataLength = ReadU32() * 8;
+                    dataLength = ReadU32() * 4 + 4;
                     break;
                 case 7:
-                    dataLength = lengthOrFlags;
+                    dataLength = ReadU32() * 8 + 4;
                     break;
                 default:
                     dataLength = 0;
@@ -386,7 +389,7 @@ namespace Int2Dds.Cdr
                 uint header = _littleEndian
                     ? BinaryPrimitives.ReadUInt32LittleEndian(_data.AsSpan(_pos))
                     : BinaryPrimitives.ReadUInt32BigEndian(_data.AsSpan(_pos));
-                uint memberId = (header >> 16) & 0x3FFF;
+                uint memberId = header & 0x0FFFFFFFu;
                 return memberId == MemberIdSentinel;
             }
         }

@@ -8,15 +8,34 @@ use std::fmt::Debug;
 
 use int2dds::dcps::core::error::{DdsError, DdsResult};
 use int2dds::dcps::topic::type_support::{DdsType, FieldAccessor};
-use int2dds::serialize::cdr::{CdrDeserialize, CdrSerialize, XcdrDeserialize, XcdrSerialize};
+use int2dds::serialize::cdr::{
+    CdrDeserialize, CdrSerialize, XcdrDeserialize, XcdrDeserializeMembers, XcdrSerialize,
+    XcdrSerializeMembers,
+};
 use int2dds::topic::sql::ast::Parameter;
 
 pub trait DdsRpcType:
-    DdsType + Clone + Debug + CdrSerialize + CdrDeserialize + XcdrSerialize + XcdrDeserialize
+    DdsType
+    + Clone
+    + Debug
+    + CdrSerialize
+    + CdrDeserialize
+    + XcdrSerialize
+    + XcdrDeserialize
+    + XcdrSerializeMembers
+    + XcdrDeserializeMembers
 {
 }
 impl<T> DdsRpcType for T where
-    T: DdsType + Clone + Debug + CdrSerialize + CdrDeserialize + XcdrSerialize + XcdrDeserialize
+    T: DdsType
+        + Clone
+        + Debug
+        + CdrSerialize
+        + CdrDeserialize
+        + XcdrSerialize
+        + XcdrDeserialize
+        + XcdrSerializeMembers
+        + XcdrDeserializeMembers
 {
 }
 
