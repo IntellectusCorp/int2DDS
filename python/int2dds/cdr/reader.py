@@ -365,19 +365,22 @@ class CdrReader:
 
         must_understand = bool(header & 0x80000000)
         lc = (header >> 28) & 0x07
-        member_id = (header >> 16) & 0x0FFF
-        length_or_flags = header & 0xFFFF
+        member_id = header & 0x0FFFFFFF
 
-        if lc in (0, 1, 2, 3):
-            data_length = length_or_flags
-        elif lc == 4:
+        if lc == 0:
+            data_length = 1
+        elif lc == 1:
+            data_length = 2
+        elif lc == 2:
+            data_length = 4
+        elif lc == 3:
+            data_length = 8
+        elif lc in (4, 5):
             data_length = self.read_u32()
-        elif lc == 5:
-            data_length = self.read_u32() * 4
         elif lc == 6:
-            data_length = self.read_u32() * 8
+            data_length = self.read_u32() * 4 + 4
         else:  # lc == 7
-            data_length = length_or_flags
+            data_length = self.read_u32() * 8 + 4
 
         return member_id, data_length, must_understand
 
@@ -388,7 +391,7 @@ class CdrReader:
 
         fmt = "<I" if self._le else ">I"
         header = struct.unpack_from(fmt, self._buf, self._pos)[0]
-        member_id = (header >> 16) & 0x0FFF
+        member_id = header & 0x0FFFFFFF
         return member_id == MEMBER_ID_SENTINEL
 
     def skip_sentinel(self) -> None:

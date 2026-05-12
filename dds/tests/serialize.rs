@@ -108,33 +108,6 @@ fn test_cdr_vec_i32() {
     assert_eq!(result, value);
 }
 
-// Option Tests - CDR
-
-#[test]
-fn test_cdr_option() {
-    // None
-    let value: Option<i32> = None;
-    let mut serializer = CdrSerializer::new(true);
-    serializer.write_encapsulation_header().unwrap();
-    value.serialize_cdr(&mut serializer).unwrap();
-
-    let bytes = serializer.into_bytes();
-    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
-    let result = Option::<i32>::deserialize_cdr(&mut deserializer).unwrap();
-    assert_eq!(result, value);
-
-    // Some
-    let value: Option<i32> = Some(42);
-    let mut serializer = CdrSerializer::new(true);
-    serializer.write_encapsulation_header().unwrap();
-    value.serialize_cdr(&mut serializer).unwrap();
-
-    let bytes = serializer.into_bytes();
-    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
-    let result = Option::<i32>::deserialize_cdr(&mut deserializer).unwrap();
-    assert_eq!(result, value);
-}
-
 // Array Tests - CDR
 
 #[test]
@@ -149,6 +122,61 @@ fn test_cdr_array_i32() {
     let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
     let result = <[i32; 5]>::deserialize_cdr(&mut deserializer).unwrap();
     assert_eq!(result, value);
+}
+
+#[test]
+fn test_cdr_multidim_array_row_major() {
+    let value: [[u16; 3]; 2] = [[1, 2, 3], [4, 5, 6]];
+
+    let mut serializer = CdrSerializer::new(true);
+    serializer.write_encapsulation_header().unwrap();
+    value.serialize_cdr(&mut serializer).unwrap();
+
+    let bytes = serializer.into_bytes();
+    let expected: &[u8] = &[0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x04, 0x00, 0x05, 0x00, 0x06, 0x00];
+    assert_eq!(&bytes[4..], expected);
+
+    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+    let result = <[[u16; 3]; 2]>::deserialize_cdr(&mut deserializer).unwrap();
+    assert_eq!(result, value);
+}
+
+#[test]
+fn test_xcdr2_multidim_array_row_major() {
+    let value: [[u16; 3]; 2] = [[1, 2, 3], [4, 5, 6]];
+
+    let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Final);
+    serializer.write_encapsulation_header().unwrap();
+    value.serialize_xcdr(&mut serializer).unwrap();
+
+    let bytes = serializer.into_bytes();
+    let expected: &[u8] = &[
+        0x0C, 0x00, 0x00, 0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x04, 0x00, 0x05, 0x00, 0x06,
+        0x00,
+    ];
+    assert_eq!(&bytes[4..], expected);
+
+    let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
+    let result = <[[u16; 3]; 2]>::deserialize_xcdr(&mut deserializer).unwrap();
+    assert_eq!(result, value);
+}
+
+#[test]
+fn test_xcdr2_3d_array_row_major() {
+    let value: [[[u8; 2]; 3]; 2] = [[[1, 2], [3, 4], [5, 6]], [[7, 8], [9, 10], [11, 12]]];
+
+    let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Final);
+    serializer.write_encapsulation_header().unwrap();
+    value.serialize_xcdr(&mut serializer).unwrap();
+
+    let bytes = serializer.into_bytes();
+    let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
+    let result = <[[[u8; 2]; 3]; 2]>::deserialize_xcdr(&mut deserializer).unwrap();
+    assert_eq!(result, value);
+
+    let payload = &bytes[4..];
+    let outer_dheader = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+    assert_eq!(outer_dheader as usize, payload.len() - 4);
 }
 
 // HashMap Tests - CDR
@@ -563,23 +591,25 @@ use speedy::Endianness;
 
 #[test]
 fn test_emheader_roundtrip_small_length() {
-    // Test EMHEADER with small length (< 64KB, LC=0)
-    let header = MemberHeader::new(42, 100); // member_id=42, length=100
+    for (length, expected_lc) in [(1usize, 0u8), (2, 1), (4, 2), (8, 3)] {
+        let header = MemberHeader::new(42, length);
+        let mut buffer = Vec::new();
+        header.write(&mut buffer, Endianness::LittleEndian).unwrap();
 
-    let mut buffer = Vec::new();
-    header.write(&mut buffer, Endianness::LittleEndian).unwrap();
+        assert_eq!(buffer.len(), 4, "length={length} must encode as 4 bytes");
 
-    // Verify header is 4 bytes for small lengths
-    assert_eq!(buffer.len(), 4);
+        let word = u32::from_le_bytes(buffer[..4].try_into().unwrap());
+        assert_eq!((word >> 28) & 0x07, expected_lc as u32);
+        assert_eq!(word & 0x0FFF_FFFF, 42);
+        assert_eq!(word & 0x8000_0000, 0);
 
-    // Read it back
-    let (read_header, bytes_consumed) =
-        MemberHeader::read(&buffer, 0, Endianness::LittleEndian).unwrap();
-
-    assert_eq!(bytes_consumed, 4);
-    assert_eq!(read_header.member_id, 42);
-    assert_eq!(read_header.member_length, 100);
-    assert!(!read_header.must_understand);
+        let (read_header, bytes_consumed) =
+            MemberHeader::read(&buffer, 0, Endianness::LittleEndian).unwrap();
+        assert_eq!(bytes_consumed, 4);
+        assert_eq!(read_header.member_id, 42);
+        assert_eq!(read_header.member_length as usize, length);
+        assert!(!read_header.must_understand);
+    }
 }
 
 #[test]
@@ -1073,10 +1103,147 @@ fn test_struct_inheritance_xcdr_appendable() {
     value.serialize_xcdr(&mut serializer).unwrap();
 
     let bytes = serializer.into_bytes();
+
+    let payload = &bytes[4..];
+    let dheader = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+    assert_eq!(dheader, 12);
+    let x_val = i32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+    assert_eq!(x_val, 100);
+    let y_val = f64::from_le_bytes(payload[8..16].try_into().unwrap());
+    assert!((y_val - 2.71).abs() < 1e-15);
+
     let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
     let result = AppendableChild2::deserialize_xcdr(&mut deserializer).unwrap();
     assert_eq!(result.base.x, 100);
     assert_eq!(result.y, 2.71);
+}
+
+// ============================================================================
+// XCDR1 MUTABLE (PL_CDR v1) Tests
+// ============================================================================
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Mutable")]
+struct MutableV1Simple {
+    pub x: u32,
+    pub y: u16,
+}
+
+#[test]
+fn test_xcdr1_mutable_roundtrip() {
+    let value = MutableV1Simple { x: 42, y: 7 };
+
+    let mut serializer = CdrSerializer::new_mutable(true);
+    serializer.write_encapsulation_header().unwrap();
+    value.serialize_cdr(&mut serializer).unwrap();
+
+    let bytes = serializer.into_bytes();
+
+    assert_eq!(bytes[0], 0x00);
+    assert_eq!(bytes[1], 0x03);
+
+    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+    let result = MutableV1Simple::deserialize_cdr(&mut deserializer).unwrap();
+    assert_eq!(result.x, 42);
+    assert_eq!(result.y, 7);
+}
+
+#[test]
+fn test_xcdr1_mutable_wire_format() {
+    let value = MutableV1Simple { x: 0x12345678, y: 0xABCD };
+
+    let mut serializer = CdrSerializer::new_mutable(true);
+    serializer.write_encapsulation_header().unwrap();
+    value.serialize_cdr(&mut serializer).unwrap();
+
+    let bytes = serializer.into_bytes();
+    let payload = &bytes[4..];
+
+    let pid0 = u16::from_le_bytes([payload[0], payload[1]]);
+    let len0 = u16::from_le_bytes([payload[2], payload[3]]);
+    assert_eq!(pid0 & 0x3FFF, 0);
+    assert_eq!(len0, 4);
+    assert_eq!(u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]), 0x12345678);
+
+    let pid1 = u16::from_le_bytes([payload[8], payload[9]]);
+    let len1 = u16::from_le_bytes([payload[10], payload[11]]);
+    assert_eq!(pid1 & 0x3FFF, 1);
+    assert_eq!(len1, 2);
+    assert_eq!(u16::from_le_bytes([payload[12], payload[13]]), 0xABCD);
+
+    let sentinel_offset = 16;
+    let sentinel_pid = u16::from_le_bytes([payload[sentinel_offset], payload[sentinel_offset + 1]]);
+    assert_eq!(sentinel_pid & 0x3FFF, 0x3F02 & 0x3FFF);
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Mutable")]
+struct MutableV1WithOptional {
+    pub required_val: u32,
+    #[dds(optional)]
+    pub optional_val: Option<u16>,
+}
+
+#[test]
+fn test_xcdr1_mutable_optional_present() {
+    let value = MutableV1WithOptional { required_val: 10, optional_val: Some(20) };
+
+    let mut serializer = CdrSerializer::new_mutable(true);
+    serializer.write_encapsulation_header().unwrap();
+    value.serialize_cdr(&mut serializer).unwrap();
+
+    let bytes = serializer.into_bytes();
+    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+    let result = MutableV1WithOptional::deserialize_cdr(&mut deserializer).unwrap();
+    assert_eq!(result.required_val, 10);
+    assert_eq!(result.optional_val, Some(20));
+}
+
+#[test]
+fn test_xcdr1_mutable_optional_absent() {
+    let value = MutableV1WithOptional { required_val: 99, optional_val: None };
+
+    let mut serializer = CdrSerializer::new_mutable(true);
+    serializer.write_encapsulation_header().unwrap();
+    value.serialize_cdr(&mut serializer).unwrap();
+
+    let bytes = serializer.into_bytes();
+    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+    let result = MutableV1WithOptional::deserialize_cdr(&mut deserializer).unwrap();
+    assert_eq!(result.required_val, 99);
+    assert_eq!(result.optional_val, None);
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Mutable")]
+struct MutableV1WithId {
+    #[dds(id = 100)]
+    pub a: u32,
+    #[dds(id = 200)]
+    pub b: u64,
+}
+
+#[test]
+fn test_xcdr1_mutable_explicit_ids() {
+    let value = MutableV1WithId { a: 1, b: 2 };
+
+    let mut serializer = CdrSerializer::new_mutable(true);
+    serializer.write_encapsulation_header().unwrap();
+    value.serialize_cdr(&mut serializer).unwrap();
+
+    let bytes = serializer.into_bytes();
+
+    let payload = &bytes[4..];
+    let pid0 = u16::from_le_bytes([payload[0], payload[1]]);
+    assert_eq!(pid0 & 0x3FFF, 100);
+    let pid1_offset = 4 + 4;
+    let pid1 = u16::from_le_bytes([payload[pid1_offset], payload[pid1_offset + 1]]);
+    assert_eq!(pid1 & 0x3FFF, 200);
+
+    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+    let result = MutableV1WithId::deserialize_cdr(&mut deserializer).unwrap();
+    assert_eq!(result.a, 1);
+    assert_eq!(result.b, 2);
 }
 
 // ============================================================================
@@ -1251,4 +1418,441 @@ fn test_small_bitset_u8_wire_type() {
     let result = SmallBitset::deserialize_cdr(&mut deserializer).unwrap();
     assert_eq!(result.flag, 1);
     assert_eq!(result.mode, 5);
+}
+
+// ============================================================================
+// KeyHash BE-CDR Golden Tests
+// ============================================================================
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final")]
+struct SingleU32Key {
+    #[dds(key)]
+    pub id: u32,
+    pub data: f64,
+}
+
+#[test]
+fn test_keyhash_u32_big_endian() {
+    use int2dds::dcps::topic::type_support::TypeSupport;
+
+    let value = SingleU32Key { id: 42, data: 1.0 };
+    let type_support = SingleU32Key::get_type_support();
+    let key_bytes = type_support.serialize_key(&value).unwrap();
+
+    assert_eq!(&*key_bytes, &[0x00, 0x00, 0x00, 0x2A]);
+
+    let instance_handle = type_support.compute_key(&value);
+    let handle_bytes = instance_handle.value();
+    let mut expected = [0u8; 16];
+    expected[..4].copy_from_slice(&[0x00, 0x00, 0x00, 0x2A]);
+    assert_eq!(handle_bytes, &expected);
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final")]
+struct MultiKeyStruct {
+    #[dds(key)]
+    pub a: u16,
+    #[dds(key)]
+    pub b: u32,
+    pub c: f64,
+}
+
+#[test]
+fn test_keyhash_multi_key_big_endian_order() {
+    use int2dds::dcps::topic::type_support::TypeSupport;
+
+    let value = MultiKeyStruct { a: 1, b: 2, c: 99.0 };
+    let type_support = MultiKeyStruct::get_type_support();
+    let key_bytes = type_support.serialize_key(&value).unwrap();
+
+    assert_eq!(&*key_bytes, &[0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,]);
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final")]
+struct LargeKeyStruct {
+    #[dds(key)]
+    pub a: u64,
+    #[dds(key)]
+    pub b: u64,
+    #[dds(key)]
+    pub c: u64,
+}
+
+#[test]
+fn test_keyhash_large_key_uses_md5() {
+    use int2dds::dcps::topic::type_support::TypeSupport;
+
+    let value = LargeKeyStruct { a: 1, b: 2, c: 3 };
+    let type_support = LargeKeyStruct::get_type_support();
+    let key_bytes = type_support.serialize_key(&value).unwrap();
+
+    assert_eq!(key_bytes.len(), 24);
+
+    let instance_handle = type_support.compute_key(&value);
+    let expected_md5 = md5::compute(&*key_bytes);
+    assert_eq!(instance_handle.value(), &expected_md5.0);
+}
+
+// ============================================================================
+// LC 6/7 EMHEADER Optimization Tests
+// ============================================================================
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Mutable")]
+struct MutableWithSeqU32 {
+    #[dds(id = 0)]
+    pub values: Vec<u32>,
+}
+
+#[test]
+fn test_lc6_u32_sequence_emheader() {
+    use int2dds::serialize::cdr::MemberHeader;
+
+    let value = MutableWithSeqU32 { values: vec![1, 2, 3] };
+
+    let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Mutable);
+    serializer.write_encapsulation_header().unwrap();
+    value.serialize_xcdr(&mut serializer).unwrap();
+
+    let bytes = serializer.into_bytes();
+    let payload = &bytes[4..];
+
+    let emheader_bytes = &payload[4..];
+    let (header, _) =
+        MemberHeader::read(emheader_bytes, 0, speedy::Endianness::LittleEndian).unwrap();
+
+    assert_eq!(header.member_id, 0);
+
+    let emh_word = u32::from_le_bytes([
+        emheader_bytes[0],
+        emheader_bytes[1],
+        emheader_bytes[2],
+        emheader_bytes[3],
+    ]);
+    let lc = (emh_word >> 28) & 0x07;
+    assert_eq!(lc, 6);
+
+    let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
+    let result = MutableWithSeqU32::deserialize_xcdr(&mut deserializer).unwrap();
+    assert_eq!(result.values, vec![1, 2, 3]);
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Mutable")]
+struct MutableWithSeqF64 {
+    #[dds(id = 0)]
+    pub data: Vec<f64>,
+}
+
+#[test]
+fn test_lc7_f64_sequence_emheader() {
+    let value = MutableWithSeqF64 { data: vec![1.0, 2.0] };
+
+    let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Mutable);
+    serializer.write_encapsulation_header().unwrap();
+    value.serialize_xcdr(&mut serializer).unwrap();
+
+    let bytes = serializer.into_bytes();
+    let payload = &bytes[4..];
+
+    let emheader_bytes = &payload[4..];
+    let emh_word = u32::from_le_bytes([
+        emheader_bytes[0],
+        emheader_bytes[1],
+        emheader_bytes[2],
+        emheader_bytes[3],
+    ]);
+    let lc = (emh_word >> 28) & 0x07;
+    assert_eq!(lc, 7);
+
+    let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
+    let result = MutableWithSeqF64::deserialize_xcdr(&mut deserializer).unwrap();
+    assert_eq!(result.data, vec![1.0, 2.0]);
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final")]
+struct TcWireSeq {
+    pub values: Vec<i32>,
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final")]
+struct TcSeqDiscard {
+    #[dds(bound = 4)]
+    pub values: Vec<i32>,
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final")]
+struct TcSeqUseDefault {
+    #[dds(bound = 4, try_construct = "use_default")]
+    pub values: Vec<i32>,
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final")]
+struct TcSeqTrim {
+    #[dds(bound = 4, try_construct = "trim")]
+    pub values: Vec<i32>,
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final")]
+struct TcWireString {
+    pub s: String,
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final")]
+struct TcStringTrim {
+    #[dds(bound = 5, try_construct = "trim")]
+    pub s: String,
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final")]
+struct TcStringUseDefault {
+    #[dds(bound = 5, try_construct = "use_default")]
+    pub s: String,
+}
+
+fn encode_cdr<T: CdrSerialize>(value: &T) -> Vec<u8> {
+    let mut serializer = CdrSerializer::new(true);
+    serializer.write_encapsulation_header().unwrap();
+    value.serialize_cdr(&mut serializer).unwrap();
+    serializer.into_bytes()
+}
+
+#[test]
+fn test_try_construct_discard_is_error() {
+    let bytes = encode_cdr(&TcWireSeq { values: vec![1, 2, 3, 4, 5, 6, 7, 8] });
+    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+    let result = TcSeqDiscard::deserialize_cdr(&mut deserializer);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_try_construct_use_default_yields_empty_sequence() {
+    let bytes = encode_cdr(&TcWireSeq { values: vec![1, 2, 3, 4, 5, 6, 7, 8] });
+    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+    let result = TcSeqUseDefault::deserialize_cdr(&mut deserializer).unwrap();
+    assert!(result.values.is_empty());
+}
+
+#[test]
+fn test_try_construct_trim_truncates_sequence() {
+    let bytes = encode_cdr(&TcWireSeq { values: vec![1, 2, 3, 4, 5, 6, 7, 8] });
+    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+    let result = TcSeqTrim::deserialize_cdr(&mut deserializer).unwrap();
+    assert_eq!(result.values, vec![1, 2, 3, 4]);
+}
+
+#[test]
+fn test_try_construct_trim_preserves_within_bound() {
+    let bytes = encode_cdr(&TcWireSeq { values: vec![1, 2] });
+    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+    let result = TcSeqTrim::deserialize_cdr(&mut deserializer).unwrap();
+    assert_eq!(result.values, vec![1, 2]);
+}
+
+#[test]
+fn test_try_construct_string_trim() {
+    let bytes = encode_cdr(&TcWireString { s: "Hello World!".to_string() });
+    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+    let result = TcStringTrim::deserialize_cdr(&mut deserializer).unwrap();
+    assert_eq!(result.s, "Hello");
+}
+
+#[test]
+fn test_try_construct_string_use_default() {
+    let bytes = encode_cdr(&TcWireString { s: "Hello World!".to_string() });
+    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+    let result = TcStringUseDefault::deserialize_cdr(&mut deserializer).unwrap();
+    assert!(result.s.is_empty());
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final")]
+struct NsLocalCache {
+    pub sent_field: i32,
+    #[dds(non_serialized)]
+    pub local_cache: i64,
+    pub other_sent: i32,
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final")]
+struct NsTwinWireOnly {
+    pub sent_field: i32,
+    pub other_sent: i32,
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final")]
+struct NsWithDefault {
+    pub a: i32,
+    #[dds(non_serialized, default = 42)]
+    pub cached: i64,
+}
+
+#[test]
+fn test_non_serialized_wire_omits_field() {
+    let value = NsLocalCache { sent_field: 1, local_cache: 9999, other_sent: 2 };
+    let bytes_full = encode_cdr(&value);
+    let bytes_twin = encode_cdr(&NsTwinWireOnly { sent_field: 1, other_sent: 2 });
+    assert_eq!(bytes_full, bytes_twin);
+}
+
+#[test]
+fn test_non_serialized_roundtrip_restores_default() {
+    let value = NsLocalCache { sent_field: 7, local_cache: 9999, other_sent: 3 };
+    let bytes = encode_cdr(&value);
+    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+    let result = NsLocalCache::deserialize_cdr(&mut deserializer).unwrap();
+    assert_eq!(result.sent_field, 7);
+    assert_eq!(result.other_sent, 3);
+    assert_eq!(result.local_cache, 0);
+}
+
+#[test]
+fn test_non_serialized_with_default_literal() {
+    let value = NsWithDefault { a: 5, cached: 999 };
+    let bytes = encode_cdr(&value);
+    let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+    let result = NsWithDefault::deserialize_cdr(&mut deserializer).unwrap();
+    assert_eq!(result.a, 5);
+    assert_eq!(result.cached, 42);
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds")]
+#[repr(i32)]
+enum EnumWithValue {
+    First,
+    #[dds(value = 100)]
+    HundredLit,
+    Third,
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", ignore_literal_names)]
+#[repr(i32)]
+enum EnumWithDefaultLiteral {
+    Alpha,
+    #[dds(default_literal)]
+    Beta,
+    Gamma,
+}
+
+#[test]
+fn test_enum_value_attribute_roundtrip() {
+    use int2dds::xtypes::HasTypeObject;
+    let obj = EnumWithValue::complete_type_object();
+    let literals = match obj {
+        int2dds::xtypes::CompleteTypeObject::Enum(e) => e.literal_seq,
+        _ => panic!("expected enum complete type"),
+    };
+    assert_eq!(literals[0].common.value, 0);
+    assert_eq!(literals[1].common.value, 100);
+    assert_eq!(literals[2].common.value, 101);
+}
+
+#[test]
+fn test_enum_default_literal_flag() {
+    use int2dds::xtypes::HasTypeObject;
+    let obj = EnumWithDefaultLiteral::complete_type_object();
+    let literals = match obj {
+        int2dds::xtypes::CompleteTypeObject::Enum(e) => e.literal_seq,
+        _ => panic!("expected enum complete type"),
+    };
+    assert!(!literals[0].common.flags.is_default());
+    assert!(literals[1].common.flags.is_default());
+    assert!(!literals[2].common.flags.is_default());
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", alias, extensibility = "Final")]
+struct MyIntSequence(pub Vec<i32>);
+
+#[test]
+fn test_alias_emits_tk_alias_type_object() {
+    use int2dds::xtypes::{CompleteTypeObject, HasTypeObject};
+    let obj = MyIntSequence::complete_type_object();
+    match obj {
+        CompleteTypeObject::Alias(_) => {}
+        _ => panic!("expected Alias TypeObject"),
+    }
+}
+
+#[test]
+fn test_alias_wire_matches_base_type() {
+    let alias_value = MyIntSequence(vec![1, 2, 3]);
+    let base_value: Vec<i32> = vec![1, 2, 3];
+    let alias_bytes = encode_cdr(&alias_value);
+    let mut serializer = CdrSerializer::new(true);
+    serializer.write_encapsulation_header().unwrap();
+    base_value.serialize_cdr(&mut serializer).unwrap();
+    let base_bytes = serializer.into_bytes();
+    assert_eq!(alias_bytes, base_bytes);
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", nested, extensibility = "Final")]
+struct NestedOnly {
+    pub v: i32,
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final")]
+struct NotNested {
+    pub v: i32,
+}
+
+#[test]
+fn test_nested_flag_in_type_object() {
+    use int2dds::xtypes::{CompleteTypeObject, HasTypeObject};
+    let nested = match NestedOnly::complete_type_object() {
+        CompleteTypeObject::Struct(s) => s.struct_flags.is_nested(),
+        _ => panic!("expected struct"),
+    };
+    let not_nested = match NotNested::complete_type_object() {
+        CompleteTypeObject::Struct(s) => s.struct_flags.is_nested(),
+        _ => panic!("expected struct"),
+    };
+    assert!(nested);
+    assert!(!not_nested);
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final", nested)]
+#[dds_type(data_representation(XCDR2))]
+struct AnnBuiltinType {
+    #[dds(hashid = "custom_hash_name")]
+    pub v: i32,
+}
+
+#[test]
+fn test_type_ann_builtin_nested_and_data_representation() {
+    use int2dds::xtypes::{CompleteTypeObject, HasTypeObject};
+    let ann = match AnnBuiltinType::complete_type_object() {
+        CompleteTypeObject::Struct(s) => s.header.detail.ann_builtin.expect("ann_builtin"),
+        _ => panic!("expected struct"),
+    };
+    assert_eq!(ann.nested, Some(true));
+    assert_eq!(ann.data_representation, Some(1u16 << 2));
+}
+
+#[test]
+fn test_member_ann_builtin_hashid() {
+    use int2dds::xtypes::{CompleteTypeObject, HasTypeObject};
+    let member = match AnnBuiltinType::complete_type_object() {
+        CompleteTypeObject::Struct(s) => s.member_seq[0].clone(),
+        _ => panic!("expected struct"),
+    };
+    let ann = member.detail.ann_builtin.expect("member ann_builtin");
+    assert_eq!(ann.hash_id.as_deref(), Some("custom_hash_name"));
 }

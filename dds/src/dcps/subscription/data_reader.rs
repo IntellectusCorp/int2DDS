@@ -1516,16 +1516,18 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     ) -> DdsResult<InstanceHandle> {
         let instance_handle = change.instance_handle();
 
-        // Fallback: If InlineQos has no key_hash, compute from SerializedData (RTPS 9.6.4.8)
-        if instance_handle.is_nil() && self.type_support.is_compute_key_provided() {
-            log::info!("Instance handle is NIL, computing from serialized data (fallback)");
+        if !instance_handle.is_nil() || !self.type_support.is_compute_key_provided() {
+            return Ok(instance_handle);
+        }
+
+        // Dispose/unregister/filtered samples carry a key-only payload; only Alive
+        // (and AliveFiltered) samples carry the full data record.
+        if matches!(change.kind(), ChangeKind::Alive | ChangeKind::AliveFiltered) {
             let data = self.type_support.deserialize(change.data_value(), None)?;
-            let computed_handle = self.type_support.compute_key(&*data);
-            // log::info!("Computed instance handle from data: {:?}", computed_handle);
-            Ok(computed_handle)
+            Ok(self.type_support.compute_key(&*data))
         } else {
-            // log::info!("Using instance_handle from InlineQos (no fallback needed)");
-            Ok(instance_handle)
+            let key_any = self.type_support.deserialize_key(change.data_value())?;
+            Ok(self.type_support.compute_key(&*key_any))
         }
     }
 
