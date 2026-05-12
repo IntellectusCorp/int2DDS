@@ -77,8 +77,10 @@ fn generate_key_impls_from_fields(
 
     let bytes_post_process = if is_single_unbounded_string {
         quote! {
+            // Drop the 4-byte encapsulation prefix; CDR alignment was relative to it.
             let mut bytes = serializer.into_bytes();
-            while bytes.len() > 5 && bytes[bytes.len() - 1] == 0 {
+            bytes.drain(..4);
+            while bytes.len() > 1 && bytes[bytes.len() - 1] == 0 {
                 let prev_byte = bytes[bytes.len() - 2];
                 if prev_byte == 0 {
                     bytes.pop();
@@ -90,7 +92,9 @@ fn generate_key_impls_from_fields(
         }
     } else {
         quote! {
-            let bytes = serializer.into_bytes();
+            // Drop the 4-byte encapsulation prefix; CDR alignment was relative to it.
+            let mut bytes = serializer.into_bytes();
+            bytes.drain(..4);
             Ok(std::sync::Arc::from(bytes))
         }
     };
@@ -101,8 +105,10 @@ fn generate_key_impls_from_fields(
             use #crate_path::serialize::BufferManager;
 
             if let Some(typed_data) = data.downcast_ref::<#full_type>() {
-                // Match regular serialize: little-endian CDR with encapsulation header
-                let mut serializer = CdrSerializer::with_capacity(true, 64);
+                // Per RTPS KeyHash spec: big-endian CDR of key fields, no encapsulation header.
+                // We still write the header so the serializer's alignment math (which assumes
+                // a 4-byte encapsulation prefix) yields correct CDR alignment, and strip it after.
+                let mut serializer = CdrSerializer::with_capacity(false, 64);
                 serializer.write_encapsulation_header()
                     .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
                 #(
@@ -126,8 +132,8 @@ fn generate_key_impls_from_fields(
         fn deserialize_key(&self, serialized_key: &[u8]) -> #crate_path::dcps::core::error::DdsResult<Box<dyn std::any::Any + Send + Sync>> {
             use #crate_path::serialize::cdr::{CdrDeserialize, CdrDeserializer};
 
-            let mut deserializer = CdrDeserializer::new(serialized_key)
-                .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+            // Key bytes are big-endian CDR with no encapsulation header (RTPS KeyHash format).
+            let mut deserializer = CdrDeserializer::new_without_header(serialized_key, false);
             let mut key_holder = <#full_type as Default>::default();
 
             #(
