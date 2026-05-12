@@ -1,6 +1,6 @@
 use speedy::Endianness;
 
-use super::{CdrError, CdrSerializerCommon, EncodingKind, ExtensibilityKind, MemberHeader};
+use super::{CdrError, CdrSerializerCommon, EncodingKind, ExtensibilityKind, LcHint, MemberHeader};
 use crate::serialize::core::endianness_from_bool;
 use crate::serialize::{
     align_position_with_header_offset, to_bytes_u32, BufferManager, DeserializerReader,
@@ -140,6 +140,69 @@ impl Xcdr2Serializer {
         self.buffer.splice(position..position, [0u8; 4]);
     }
 
+    pub fn write_member_with<F>(
+        &mut self,
+        member_id: u32,
+        must_understand: bool,
+        write_value: F,
+    ) -> Result<(), CdrError>
+    where
+        F: FnOnce(&mut Self) -> Result<(), CdrError>,
+    {
+        self.write_member_with_lc(member_id, must_understand, LcHint::Auto, write_value)
+    }
+
+    pub fn write_member_with_lc<F>(
+        &mut self,
+        member_id: u32,
+        must_understand: bool,
+        lc_hint: LcHint,
+        write_value: F,
+    ) -> Result<(), CdrError>
+    where
+        F: FnOnce(&mut Self) -> Result<(), CdrError>,
+    {
+        if member_id > 0x0FFF_FFFF {
+            return Err(CdrError::InvalidMemberId(member_id));
+        }
+        let emh_pos = self.reserve_dheader();
+        let start = self.position();
+        write_value(self)?;
+        let len = (self.position() - start) as u32;
+
+        let must_bit: u32 = if must_understand { 0x8000_0000 } else { 0 };
+
+        let (lc_word, nextint) = self.select_lc(len, lc_hint);
+
+        let emh = must_bit | lc_word | (member_id & 0x0FFF_FFFF);
+        if let Some(ni) = nextint {
+            self.insert_nextint_slot_at(emh_pos + 4);
+            self.write_dheader_at(emh_pos, emh);
+            self.write_dheader_at(emh_pos + 4, ni);
+        } else {
+            self.write_dheader_at(emh_pos, emh);
+        }
+        Ok(())
+    }
+
+    fn select_lc(&self, len: u32, hint: LcHint) -> (u32, Option<u32>) {
+        match len {
+            1 => (0u32 << 28, None),
+            2 => (1u32 << 28, None),
+            4 => (2u32 << 28, None),
+            8 => (3u32 << 28, None),
+            _ => match hint {
+                LcHint::SeqMul4 if len >= 4 && (len - 4) % 4 == 0 => {
+                    (6u32 << 28, Some((len - 4) / 4))
+                }
+                LcHint::SeqMul8 if len >= 4 && (len - 4) % 8 == 0 => {
+                    (7u32 << 28, Some((len - 4) / 8))
+                }
+                _ => (4u32 << 28, Some(len)),
+            },
+        }
+    }
+
     /// Helper method for writing u32 (used by begin_struct)
     fn _write_u32(&mut self, value: u32) -> Result<(), CdrError> {
         self.align(4);
@@ -231,6 +294,10 @@ impl<'a> Xcdr2Deserializer<'a> {
             header_size: 0,
             is_xcdr2: true, // Default to XCDR2 behavior
         }
+    }
+
+    pub fn position(&self) -> usize {
+        self.position
     }
 
     /// Align position to boundary (accounting for removed header)
@@ -347,34 +414,6 @@ impl<'a> Xcdr2Deserializer<'a> {
         MemberHeader::read(self.data, self.position, self.endianness)
             .ok()
             .map(|(h, _)| (h.member_id, h.member_length))
-    }
-
-    /// Check if the next member header is a sentinel (end of mutable struct)
-    pub fn is_at_sentinel(&self) -> bool {
-        use super::is_sentinel_member_id;
-
-        if self.position + 4 > self.data.len() {
-            return false;
-        }
-
-        if let Ok((header, _)) =
-            super::MemberHeader::read(self.data, self.position, self.endianness)
-        {
-            is_sentinel_member_id(header.member_id)
-        } else {
-            false
-        }
-    }
-
-    /// Skip the sentinel header if present
-    pub fn skip_sentinel_if_present(&mut self) -> Result<bool, CdrError> {
-        if self.is_at_sentinel() {
-            // Read and discard the sentinel header
-            let _ = self.read_member_header()?;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
     }
 }
 

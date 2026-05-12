@@ -24,6 +24,15 @@ pub struct DdsTypeConfig {
     pub bitset: bool,
     pub no_additional_derives: bool,
     pub skip_field_accessor: bool,
+    /// Marks a newtype struct as an IDL alias. Emits `TK_ALIAS` TypeObject
+    /// with the inner field's type as the base.
+    pub alias: bool,
+    /// @nested: type is intended for use only as a member of another aggregated type,
+    /// not as a top-level topic type.
+    pub nested: bool,
+    /// @data_representation(mask): restricts allowed wire representations.
+    /// Bit 0 = XCDR1, bit 1 = XML, bit 2 = XCDR2.
+    pub data_representation_mask: Option<u32>,
 }
 
 pub fn parse_dds_type_attributes(input: &DeriveInput) -> DdsTypeConfig {
@@ -38,6 +47,9 @@ pub fn parse_dds_type_attributes(input: &DeriveInput) -> DdsTypeConfig {
     let mut bitset = false;
     let mut no_additional_derives = false;
     let mut skip_field_accessor = false;
+    let mut alias = false;
+    let mut nested = false;
+    let mut data_representation_mask: Option<u32> = None;
 
     // Parse #[dds_type(...)] attributes
     for attr in &input.attrs {
@@ -100,6 +112,30 @@ pub fn parse_dds_type_attributes(input: &DeriveInput) -> DdsTypeConfig {
                     no_additional_derives = true;
                 } else if meta.path.is_ident("skip_field_accessor") {
                     skip_field_accessor = true;
+                } else if meta.path.is_ident("alias") {
+                    alias = true;
+                } else if meta.path.is_ident("nested") {
+                    nested = true;
+                } else if meta.path.is_ident("data_representation") {
+                    let mut mask: u32 = 0;
+                    meta.parse_nested_meta(|inner| {
+                        let ident = inner.path.get_ident().map(ToString::to_string).unwrap_or_default();
+                        match ident.to_ascii_uppercase().as_str() {
+                            "XCDR" | "XCDR1" => mask |= 1 << 0,
+                            "XML" => mask |= 1 << 1,
+                            "XCDR2" => mask |= 1 << 2,
+                            _ => {
+                                return Err(inner.error(format!(
+                                    "unknown data_representation value '{}', expected XCDR | XML | XCDR2",
+                                    ident
+                                )));
+                            }
+                        }
+                        Ok(())
+                    })?;
+                    data_representation_mask = Some(mask);
+                } else if meta.path.is_ident("verbatim") {
+                    meta.parse_nested_meta(|_| Ok(()))?;
                 }
                 Ok(())
             });
@@ -130,6 +166,9 @@ pub fn parse_dds_type_attributes(input: &DeriveInput) -> DdsTypeConfig {
         bitset,
         no_additional_derives,
         skip_field_accessor,
+        alias,
+        nested,
+        data_representation_mask,
     }
 }
 
