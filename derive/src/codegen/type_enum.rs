@@ -44,10 +44,10 @@ pub fn derive_enum_impl(
         }
     };
 
-    // Resolve extensibility for unions (defaults to Final if unspecified).
-    // C-style enums have no extensibility but the helper still emits the
-    // hardcoded Final variant via this value.
-    let union_extensibility = type_config.extensibility.unwrap_or(ExtensibilityKind::Final);
+    // Resolve extensibility for unions (defaults to Appendable per XTypes spec
+    // when unspecified). C-style enums have no extensibility but the helper
+    // still emits the hardcoded Final variant via this value.
+    let union_extensibility = type_config.extensibility.unwrap_or(ExtensibilityKind::Appendable);
 
     // Generate TypeSupport trait implementation for enum/union
     let type_support_impl = generate_enum_type_support_impl(
@@ -100,6 +100,19 @@ pub fn derive_enum_impl(
         generate_has_type_object_union_impl(name, variants, type_config, disc_type)
     };
 
+    let xcdr_members_impls = quote! {
+        impl #crate_path::serialize::xcdr::XcdrSerializeMembers for #name {
+            fn serialize_xcdr_members(&self, serializer: &mut #crate_path::serialize::xcdr::XcdrSerializer) -> #crate_path::serialize::xcdr::XcdrResult<()> {
+                #crate_path::serialize::xcdr::XcdrSerialize::serialize_xcdr(self, serializer)
+            }
+        }
+        impl #crate_path::serialize::xcdr::XcdrDeserializeMembers for #name {
+            fn deserialize_xcdr_members(deserializer: &mut #crate_path::serialize::xcdr::XcdrDeserializer) -> #crate_path::serialize::xcdr::XcdrResult<Self> {
+                #crate_path::serialize::xcdr::XcdrDeserialize::deserialize_xcdr(deserializer)
+            }
+        }
+    };
+
     quote! {
         #type_support_struct
         #type_support_impl
@@ -108,6 +121,7 @@ pub fn derive_enum_impl(
         #cdr_deserialize_impl
         #xcdr_serialize_impl
         #xcdr_deserialize_impl
+        #xcdr_members_impls
         #has_type_object_impl
         #additional_derives
     }

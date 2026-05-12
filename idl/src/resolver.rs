@@ -10,6 +10,15 @@ use std::collections::{HashMap, HashSet};
 use crate::parser::ast::*;
 use crate::types::*;
 
+/// Compute member_id from a name using MD5 first 4 bytes (little-endian) masked to 28 bits.
+/// Must match `int2dds_derive::codegen::utils::compute_member_id_hash` bit-for-bit so that
+/// derive-macro output and IDL-generator output produce identical wire IDs.
+pub fn compute_member_id_hash(name: &str) -> u32 {
+    let digest = md5::compute(name.as_bytes());
+    let bytes: [u8; 4] = [digest[0], digest[1], digest[2], digest[3]];
+    u32::from_le_bytes(bytes) & 0x0FFF_FFFF
+}
+
 #[derive(Debug)]
 pub struct ResolveError {
     pub message: String,
@@ -318,7 +327,7 @@ impl Resolver {
 
         let mut members = Vec::new();
         for m in &sdef.members {
-            members.push(self.resolve_member(m)?);
+            members.push(self.resolve_member(m, autoid)?);
         }
 
         Ok(ResolvedStruct {
@@ -331,14 +340,18 @@ impl Resolver {
         })
     }
 
-    fn resolve_member(&self, m: &StructMember) -> Result<ResolvedMember, ResolveError> {
+    fn resolve_member(
+        &self,
+        m: &StructMember,
+        autoid: Option<AutoIdKind>,
+    ) -> Result<ResolvedMember, ResolveError> {
         let resolved_type = self.resolve_type_spec(&m.type_spec)?;
         let is_key = m.annotations.iter().any(|a| a.name == "key");
         let is_optional = m.annotations.iter().any(|a| a.name == "optional");
         let must_understand = m.annotations.iter().any(|a| a.name == "must_understand");
         let is_external = m.annotations.iter().any(|a| a.name == "external");
 
-        let member_id = m.annotations.iter().find_map(|a| {
+        let explicit_id = m.annotations.iter().find_map(|a| {
             if a.name == "id" {
                 a.params.first().and_then(|p| match p {
                     AnnotationParam::Positional(ConstExpr::Int(v)) => Some(*v as u32),
@@ -351,6 +364,17 @@ impl Resolver {
 
         let default_value = self.extract_default(&m.annotations);
         let hashid = self.extract_hashid(&m.annotations);
+
+        let member_id = if let Some(id) = explicit_id {
+            Some(id)
+        } else if let Some(hash_custom) = hashid.as_ref() {
+            let hash_input = hash_custom.as_deref().unwrap_or(m.name.as_str());
+            Some(compute_member_id_hash(hash_input))
+        } else if matches!(autoid, Some(AutoIdKind::Hash)) {
+            Some(compute_member_id_hash(&m.name))
+        } else {
+            None
+        };
 
         Ok(ResolvedMember {
             name: m.name.clone(),
@@ -634,7 +658,7 @@ impl Resolver {
     ) -> Result<ResolvedException, ResolveError> {
         let mut members = Vec::new();
         for m in &edef.members {
-            members.push(self.resolve_member(m)?);
+            members.push(self.resolve_member(m, None)?);
         }
         Ok(ResolvedException {
             name: edef.name.clone(),

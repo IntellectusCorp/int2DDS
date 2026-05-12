@@ -5,5 +5,6 @@
 // Re-export v2 types
 pub use crate::serialize::cdr::{
     EncodingKind, ExtensibilityKind, MemberHeader, Xcdr2Deserializer, Xcdr2Serializer,
-    XcdrDeserialize, XcdrDeserializer, XcdrError, XcdrResult, XcdrSerialize, XcdrSerializer,
+    XcdrDeserialize, XcdrDeserializeMembers, XcdrDeserializer, XcdrError, XcdrResult,
+    XcdrSerialize, XcdrSerializeMembers, XcdrSerializer,
 };
