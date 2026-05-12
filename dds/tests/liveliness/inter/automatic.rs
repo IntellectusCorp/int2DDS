@@ -87,6 +87,9 @@ fn unmatch_propagation_to_reader() {
 
 #[test]
 fn unmatch_via_delete_participant() {
+    // int2dds::common::env::set_log_type(int2dds::common::log::LogType::File);
+    // int2dds::common::env::set_file_log_level(int2dds::common::log::LogLevel::Debug);
+
     // Dropping the writer participant must unmatch via SEDP dispose.
     let s = Scenario::inter();
     let (wqos, rqos) = qos_pair();
