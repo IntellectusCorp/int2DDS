@@ -595,13 +595,29 @@ impl WlpLogic {
     }
 
     // ManualByParticipant
+    // LOCK ORDER: acquires `writer_cache` first, then `reader_proxies`.
     pub(crate) fn send_liveliness_once(&self, data: &ParticipantMessageData) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
 
         let writer = participant.builtin_participant_message_writer();
 
         let payload = data.to_serialized_data();
-        // Check if there are any reader proxies first
+
+        let cache_change = Arc::new(writer.new_change(
+            ChangeKind::Alive,
+            payload.to_vec(),
+            InstanceHandle::NIL,
+            Some(RtpsTime::now()),
+        ));
+
+        let writer_cache_lock = writer.writer_cache();
+        let mut cache_guard = writer_cache_lock.lock().map_err(|e| {
+            RtpsError::new(
+                RtpsErrorCode::LockError,
+                format!("Failed to lock writer cache in send_liveliness_once: {}", e),
+            )
+        })?;
+
         let reader_proxies = writer.reader_proxies();
         let proxies_guard = reader_proxies.lock().map_err(|e| {
             RtpsError::new(
@@ -618,28 +634,15 @@ impl WlpLogic {
             return Ok(());
         }
 
-        let cache_change = Arc::new(writer.new_change(
-            ChangeKind::Alive,
-            payload.to_vec(),
-            InstanceHandle::NIL,
-            Some(RtpsTime::now()),
-        ));
-
-        // Try to add to cache, but don't fail if it doesn't work - heartbeat is more important
-        if let Ok(mut cache_guard) = writer.writer_cache().lock() {
-            let old_changes = cache_guard.get_changes();
-            for old_change in old_changes {
-                if let Err(e) = cache_guard.remove_change(old_change) {
-                    log::warn!("Failed to remove old change: {}", e);
-                }
+        let old_changes = cache_guard.get_changes();
+        for old_change in old_changes {
+            if let Err(e) = cache_guard.remove_change(old_change) {
+                log::warn!("Failed to remove old change: {}", e);
             }
-            if let Err(e) = cache_guard.add_change_builtin(cache_change.clone()) {
-                log::warn!("Failed to add liveliness change to cache: {}, continuing to send heartbeat anyway", e);
-                // Don't return - continue to send heartbeat even if cache add fails
-            }
-        } else {
-            log::warn!("Failed to lock writer cache in send_liveliness_once, continuing to send heartbeat anyway");
-            // Don't return - continue to send heartbeat even if cache lock fails
+        }
+        if let Err(e) = cache_guard.add_change_builtin(cache_change.clone()) {
+            log::warn!("Failed to add liveliness change to cache: {}, continuing to send heartbeat anyway", e);
+            // Don't return - continue to send heartbeat even if cache add fails
         }
 
         let participant = self.get_upgraded_participant()?;
@@ -647,14 +650,6 @@ impl WlpLogic {
         for reader_proxy in proxies_guard.iter() {
             // Get heartbeat info to include in the same RTPS message as Data
             let heartbeat_info = {
-                let cache = writer.writer_cache();
-                let cache_guard = match cache.lock() {
-                    Ok(guard) => guard,
-                    Err(e) => {
-                        log::warn!("Failed to lock writer cache for heartbeat info: {}", e);
-                        continue; // Skip this reader proxy
-                    }
-                };
                 let wlp_last_change_sn = writer.last_change_sequence_number();
                 let first_sn = cache_guard.get_seq_num_min().unwrap_or(wlp_last_change_sn + 1);
                 let last_sn = cache_guard.get_seq_num_max().unwrap_or(wlp_last_change_sn);
@@ -1234,6 +1229,11 @@ impl WlpLogic {
 
         if let Ok(readers) = participant.find_readers_matched_with_remote_writer(guid) {
             for reader in readers {
+                log::debug!(
+                    "[WLP] mark_monitored_writer_lost: Notifying reader {:?} of LOST for writer {:?}",
+                    reader.guid(),
+                    guid
+                );
                 notify_reader_liveliness_changed(&reader, &guid, LivelinessTransition::Lost);
             }
 
@@ -1259,25 +1259,36 @@ impl WlpLogic {
     }
 
     pub(crate) fn renew_asserting_writer(&self, writer_guid: &Guid) -> RtpsResult<()> {
+        log::debug!("[WLP] renew_asserting_writer called for guid={:?}", writer_guid);
+
         if let Some(mut info) = self.asserting_writers.get_mut(writer_guid) {
-            let was_not_alive = info.alive_state() == WriterAliveState::NotAlive;
             info.set_alive();
 
-            // NOT_ALIVE -> ALIVE
-            if was_not_alive {
-                let participant = self.get_upgraded_participant()?;
-                if let Ok(readers) = participant.find_readers_matched_with_local_writer(writer_guid)
-                {
-                    for reader in readers {
-                        // Recovery: NOT_ALIVE -> ALIVE.
-                        notify_reader_liveliness_changed(
-                            &reader,
-                            writer_guid,
-                            LivelinessTransition::Recovered,
-                        );
-                    }
-                }
-            }
+            // Below will be done at the reader side (monitored side), not here
+            // For example, in user_logic.rs, wlp.mark_monitored_writer_alive(remote_writer_guid)? in handle_data_message()
+            // Do not notify readers in any asserting side method
+
+            // let was_not_alive = info.alive_state() == WriterAliveState::NotAlive;
+            // // NOT_ALIVE -> ALIVE
+            // if was_not_alive {
+            //     let participant = self.get_upgraded_participant()?;
+            //     if let Ok(readers) = participant.find_readers_matched_with_local_writer(writer_guid)
+            //     {
+            //         for reader in readers {
+            //             log::debug!(
+            //                 "[WLP] renew_asserting_writer: Notifying reader {:?} of recovery for writer {:?}",
+            //                 reader.guid(),
+            //                 writer_guid
+            //             );
+            //             // Recovery: NOT_ALIVE -> ALIVE.
+            //             notify_reader_liveliness_changed(
+            //                 &reader,
+            //                 writer_guid,
+            //                 LivelinessTransition::Recovered,
+            //             );
+            //         }
+            //     }
+            // }
 
             // LivelinessMonitor Timer Update (re-track if removed after LOST)
             if let Ok(monitor) = self.liveliness_monitor.lock() {
@@ -1425,6 +1436,13 @@ fn notify_reader_liveliness_changed(
     transition: LivelinessTransition,
 ) {
     let (alive_change, not_alive_change) = transition.deltas();
+    log::debug!(
+        "[WLP] notify_reader_liveliness_changed: transition={:?}, writer={:?}, reader={:?}",
+        transition.deltas(),
+        guid,
+        reader.guid()
+    );
+
     reader.update_status(
         StatusKind::LIVELINESS_CHANGED,
         Some(Arc::new(LivelinessChangedStatus {
@@ -1557,28 +1575,35 @@ impl UnicastMessageProcessor for WlpLogic {
             return Ok(());
         }
 
-        let missing_changes = {
-            let writer_cache = writer.writer_cache();
-            let writer_cache_guard = match writer_cache.lock() {
-                Ok(guard) => guard,
-                Err(e) => {
-                    error!("[acknack] Failed to acquire writer cache lock: {}", e);
-                    return Ok(());
-                }
-            };
-
-            let mut missing_changes = Vec::new();
-            for seq_num in missing_sequence_numbers {
-                if let Some(change) = writer_cache_guard.get_change(seq_num) {
-                    missing_changes.push(change);
-                }
+        // LOCK ORDER: acquires `writer_cache` first, then `reader_proxies`.
+        let writer_cache = writer.writer_cache();
+        let cache_guard = match writer_cache.lock() {
+            Ok(guard) => guard,
+            Err(e) => {
+                error!("[acknack] Failed to acquire writer cache lock: {}", e);
+                return Ok(());
             }
-            missing_changes
         };
+
+        let mut missing_changes = Vec::new();
+        for seq_num in missing_sequence_numbers {
+            if let Some(change) = cache_guard.get_change(seq_num) {
+                missing_changes.push(change);
+            }
+        }
 
         if missing_changes.is_empty() {
             return Ok(());
         }
+
+        let wlp_last_change_sn = writer.last_change_sequence_number();
+        let heartbeat_info = Some((
+            writer.heartbeat_count(),
+            cache_guard.get_seq_num_min().unwrap_or(wlp_last_change_sn + 1),
+            cache_guard.get_seq_num_max().unwrap_or(wlp_last_change_sn),
+            false,
+            false,
+        ));
 
         debug!(
             "Retransmitting {} missing changes from remote: {:?}",
@@ -1601,26 +1626,6 @@ impl UnicastMessageProcessor for WlpLogic {
         }
 
         for change in missing_changes {
-            let heartbeat_info = {
-                let writer_cache = writer.writer_cache();
-                let cache_guard = match writer_cache.lock() {
-                    Ok(guard) => guard,
-                    Err(e) => {
-                        warn!("[WLP] Failed to acquire writer cache lock for change, skipping this change: {}", e);
-                        continue; // Skip this change and process next change
-                    }
-                };
-
-                let wlp_last_change_sn = writer.last_change_sequence_number();
-                Some((
-                    writer.heartbeat_count(),
-                    cache_guard.get_seq_num_min().unwrap_or(wlp_last_change_sn + 1),
-                    cache_guard.get_seq_num_max().unwrap_or(wlp_last_change_sn),
-                    false,
-                    false,
-                ))
-            };
-
             let participant = self.get_upgraded_participant()?;
             for reader_proxy in proxies_guard.iter() {
                 // Get heartbeat info to include in the same RTPS message as Data
