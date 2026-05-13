@@ -1,8 +1,9 @@
 use quote::quote;
 
 use crate::codegen::utils::{
-    get_array_size, get_serialization_method, is_map_type, is_option_type, literal_to_tokens,
-    parse_field_attributes, FieldConfig, SerializationMethod, TryConstructKind,
+    extract_option_inner_type, get_array_size, get_serialization_method, is_map_type,
+    is_option_type, literal_to_tokens, parse_field_attributes, FieldConfig, SerializationMethod,
+    TryConstructKind,
 };
 
 /// Emit the local binding for a `@non_serialized` field. Uses `@default` literal if present,
@@ -437,14 +438,19 @@ fn gen_serialize_code(
         }
         SerializationMethod::Fallback => {
             if !xcdr && is_option_type(field_type) {
-                let msg = format!(
-                    "XCDR1 does not support Option<T> field '{}' (PL_CDR v1 pending T2-1); use XCDR2",
-                    field_name
-                );
                 return quote! {
-                    (|| -> ::std::result::Result<(), #crate_path::dcps::core::error::DdsError> {
-                        Err(#crate_path::dcps::core::error::DdsError::Error(#msg.to_string()))
-                    })()?;
+                    match &typed_data.#field_name {
+                        Some(__opt_val) => {
+                            serializer.serialize_bool(true)
+                                .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+                            #crate_path::serialize::cdr::CdrSerialize::serialize_cdr(__opt_val, &mut serializer)
+                                .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+                        }
+                        None => {
+                            serializer.serialize_bool(false)
+                                .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+                        }
+                    }
                 };
             }
             let trait_path = if xcdr {
@@ -913,15 +919,19 @@ fn gen_deserialize_code(
         }
         SerializationMethod::Fallback => {
             if !xcdr && is_option_type(field_type) {
-                let msg = format!(
-                    "XCDR1 does not support Option<T> field '{}' (PL_CDR v1 pending T2-1); use XCDR2",
-                    field_name
-                );
+                let inner_type =
+                    extract_option_inner_type(field_type).unwrap_or_else(|| field_type.clone());
                 return quote! {
-                    (|| -> ::std::result::Result<(), #crate_path::dcps::core::error::DdsError> {
-                        Err(#crate_path::dcps::core::error::DdsError::Error(#msg.to_string()))
-                    })()?;
-                    let #field_name: #field_type = None;
+                    let #field_name: #field_type = {
+                        let __has_value = deserializer.deserialize_bool()
+                            .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+                        if __has_value {
+                            Some(<#inner_type as #crate_path::serialize::cdr::CdrDeserialize>::deserialize_cdr(&mut deserializer)
+                                .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?)
+                        } else {
+                            None
+                        }
+                    };
                 };
             }
             if xcdr {
