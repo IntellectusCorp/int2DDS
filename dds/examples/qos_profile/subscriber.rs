@@ -10,6 +10,10 @@
 
 use std::sync::Arc;
 
+#[path = "../common/shutdown.rs"]
+mod shutdown;
+use shutdown::{cleanup_participant, Shutdown};
+
 use int2dds::{
     common::env::DEFAULT_DOMAIN_ID,
     domain::{domain_participant_factory::DomainParticipantFactory, qos::PARTICIPANT_QOS_DEFAULT},
@@ -70,6 +74,8 @@ impl DataReaderListener for SubscriberListener {
 }
 
 fn main() {
+    let shutdown = Shutdown::install();
+
     let domain_id = DEFAULT_DOMAIN_ID;
     let factory = DomainParticipantFactory::get_instance();
 
@@ -115,7 +121,8 @@ fn main() {
 
     println!("\n[Subscriber] Waiting for data... (Ctrl+C to stop)\n");
 
-    loop {
-        std::thread::sleep(std::time::Duration::from_secs(1));
-    }
+    shutdown.wait();
+
+    drop(reader);
+    cleanup_participant(participant);
 }

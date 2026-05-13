@@ -22,8 +22,8 @@ use crate::dcps::infrastructure::qos_policy::{
     TypeConsistencyEnforcementQosPolicy, TypeConsistencyKind,
 };
 use crate::xtypes::{
-    EquivalenceHash, ExtensibilityKind, MinimalStructMember, MinimalStructType, TypeIdentifier,
-    TypeObject,
+    CompleteStructMember, CompleteStructType, EquivalenceHash, ExtensibilityKind,
+    MinimalStructMember, MinimalStructType, TypeIdentifier, TypeObject,
 };
 
 // ============================================================================
@@ -1055,6 +1055,56 @@ fn get_map_info(type_id: &TypeIdentifier) -> Option<(&TypeIdentifier, &TypeIdent
     }
 }
 
+/// Project a `MinimalStructType` by retaining only members whose flags lack the `@key` bit.
+pub fn minimal_key_erased(ty: &MinimalStructType) -> MinimalStructType {
+    MinimalStructType {
+        struct_flags: ty.struct_flags,
+        header: ty.header.clone(),
+        member_seq: filter_minimal_members(&ty.member_seq, false),
+    }
+}
+
+/// Project a `MinimalStructType` by retaining only members whose flags carry the `@key` bit.
+pub fn minimal_key_holder(ty: &MinimalStructType) -> MinimalStructType {
+    MinimalStructType {
+        struct_flags: ty.struct_flags,
+        header: ty.header.clone(),
+        member_seq: filter_minimal_members(&ty.member_seq, true),
+    }
+}
+
+/// Project a `CompleteStructType` by retaining only members whose flags lack the `@key` bit.
+pub fn complete_key_erased(ty: &CompleteStructType) -> CompleteStructType {
+    CompleteStructType {
+        struct_flags: ty.struct_flags,
+        header: ty.header.clone(),
+        member_seq: filter_complete_members(&ty.member_seq, false),
+    }
+}
+
+/// Project a `CompleteStructType` by retaining only members whose flags carry the `@key` bit.
+pub fn complete_key_holder(ty: &CompleteStructType) -> CompleteStructType {
+    CompleteStructType {
+        struct_flags: ty.struct_flags,
+        header: ty.header.clone(),
+        member_seq: filter_complete_members(&ty.member_seq, true),
+    }
+}
+
+fn filter_minimal_members(
+    members: &[MinimalStructMember],
+    keep_keys: bool,
+) -> Vec<MinimalStructMember> {
+    members.iter().filter(|m| m.common.member_flags.is_key() == keep_keys).cloned().collect()
+}
+
+fn filter_complete_members(
+    members: &[CompleteStructMember],
+    keep_keys: bool,
+) -> Vec<CompleteStructMember> {
+    members.iter().filter(|m| m.common.member_flags.is_key() == keep_keys).cloned().collect()
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -1420,5 +1470,124 @@ mod tests {
         let policy = default_tce_policy();
 
         assert!(check_structural_compatibility(None, None, None, None, &policy).is_ok());
+    }
+
+    #[test]
+    fn test_ignore_member_names_matches_by_id() {
+        let mut writer_struct = MinimalStructType::new(
+            TypeFlag::new(ExtensibilityKind::Appendable, false, false),
+            None,
+        );
+        writer_struct.add_member(MinimalStructMember::new(
+            7,
+            MemberFlag::default(),
+            TypeIdentifier::Int32,
+            "alpha",
+        ));
+
+        let mut reader_struct = MinimalStructType::new(
+            TypeFlag::new(ExtensibilityKind::Appendable, false, false),
+            None,
+        );
+        reader_struct.add_member(MinimalStructMember::new(
+            7,
+            MemberFlag::default(),
+            TypeIdentifier::Int32,
+            "beta",
+        ));
+
+        let writer_obj = TypeObject::Minimal(MinimalTypeObject::Struct(writer_struct));
+        let reader_obj = TypeObject::Minimal(MinimalTypeObject::Struct(reader_struct));
+        let writer_id = TypeIdentifier::MinimalTypeId(writer_obj.compute_hash());
+        let reader_id = TypeIdentifier::MinimalTypeId(reader_obj.compute_hash());
+
+        let strict = TypeConsistencyEnforcementQosPolicy {
+            kind: TypeConsistencyKind::AllowTypeCoercion,
+            ignore_member_names: false,
+            ..Default::default()
+        };
+        assert!(check_structural_compatibility(
+            Some(&writer_id),
+            Some(&reader_id),
+            Some(&writer_obj),
+            Some(&reader_obj),
+            &strict,
+        )
+        .is_err());
+
+        let lenient = TypeConsistencyEnforcementQosPolicy {
+            kind: TypeConsistencyKind::AllowTypeCoercion,
+            ignore_member_names: true,
+            ..Default::default()
+        };
+        assert!(check_structural_compatibility(
+            Some(&writer_id),
+            Some(&reader_id),
+            Some(&writer_obj),
+            Some(&reader_obj),
+            &lenient,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn test_minimal_key_projections_split_members() {
+        let mut ty = MinimalStructType::new(
+            TypeFlag::new(ExtensibilityKind::Appendable, false, false),
+            None,
+        );
+        ty.add_member(MinimalStructMember::new(
+            1,
+            MemberFlag::new(TryConstructKind::Discard, false, false, false, true, false),
+            TypeIdentifier::Int32,
+            "id",
+        ));
+        ty.add_member(MinimalStructMember::new(
+            2,
+            MemberFlag::default(),
+            TypeIdentifier::String8,
+            "value",
+        ));
+
+        let erased = minimal_key_erased(&ty);
+        assert_eq!(erased.member_seq.len(), 1);
+        assert_eq!(erased.member_seq[0].common.member_id, 2);
+
+        let holder = minimal_key_holder(&ty);
+        assert_eq!(holder.member_seq.len(), 1);
+        assert_eq!(holder.member_seq[0].common.member_id, 1);
+        assert!(holder.member_seq[0].common.member_flags.is_key());
+    }
+
+    #[test]
+    fn test_complete_key_projections_split_members() {
+        use crate::xtypes::CompleteStructMember;
+
+        let mut ty = CompleteStructType::new(
+            TypeFlag::new(ExtensibilityKind::Appendable, false, false),
+            "Sample".to_string(),
+            None,
+        );
+        ty.add_member(CompleteStructMember::new(
+            1,
+            MemberFlag::new(TryConstructKind::Discard, false, false, false, true, false),
+            TypeIdentifier::Int32,
+            "id".to_string(),
+        ));
+        ty.add_member(CompleteStructMember::new(
+            2,
+            MemberFlag::default(),
+            TypeIdentifier::String8,
+            "value".to_string(),
+        ));
+
+        let erased = complete_key_erased(&ty);
+        assert_eq!(erased.member_seq.len(), 1);
+        assert_eq!(erased.member_seq[0].detail.name, "value");
+
+        let holder = complete_key_holder(&ty);
+        assert_eq!(holder.member_seq.len(), 1);
+        assert_eq!(holder.member_seq[0].detail.name, "id");
+        assert!(holder.member_seq[0].common.member_flags.is_key());
     }
 }

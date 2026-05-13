@@ -111,6 +111,7 @@ const DATAREPRESENTATION_QOS_POLICY_NAME: &str = "DataRepresentation";
 const TYPECONSISTENCYENFORCEMENT_QOS_POLICY_NAME: &str = "TypeConsistencyEnforcement";
 const WRITER_RELIABILITY_EXTENSION_QOS_POLICY_NAME: &str = "WriterReliabilityExtension";
 const READER_RELIABILITY_EXTENSION_QOS_POLICY_NAME: &str = "ReaderReliabilityExtension";
+const PROPERTY_QOS_POLICY_NAME: &str = "Property";
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash, Readable, Writable)]
 pub enum QosPolicyId {
@@ -140,6 +141,7 @@ pub enum QosPolicyId {
     DurabilityService = 22,
     DataRepresentation = 23,
     TypeConsistencyEnforcement = 24,
+    Property = 25,
 }
 
 impl QosPolicyId {
@@ -174,6 +176,7 @@ impl QosPolicyId {
             22 => Some(QosPolicyId::DurabilityService),
             23 => Some(QosPolicyId::DataRepresentation),
             24 => Some(QosPolicyId::TypeConsistencyEnforcement),
+            25 => Some(QosPolicyId::Property),
             _ => None,
         }
     }
@@ -205,6 +208,7 @@ impl QosPolicyId {
             QosPolicyId::DurabilityService => DURABILITYSERVICE_QOS_POLICY_NAME,
             QosPolicyId::DataRepresentation => DATAREPRESENTATION_QOS_POLICY_NAME,
             QosPolicyId::TypeConsistencyEnforcement => TYPECONSISTENCYENFORCEMENT_QOS_POLICY_NAME,
+            QosPolicyId::Property => PROPERTY_QOS_POLICY_NAME,
         }
     }
 }
@@ -793,6 +797,151 @@ pub struct GroupDataQosPolicy {
 impl QosPolicy for GroupDataQosPolicy {
     fn name(&self) -> &str {
         GROUPDATA_QOS_POLICY_NAME
+    }
+}
+
+/// Named text property for the [`PropertyQosPolicy`] container.
+///
+/// Standard mapping: OMG DDS-Security v1.2 spec 7.3.2 `Property_t`
+/// `@extensibility(FINAL) struct Property_t { string name; string value; @non-serialized boolean propagate; }`.
+/// `propagate` is wire-omitted; receivers always treat it as `true` (spec 7.4.2.2).
+#[derive(Debug, Default, Clone, PartialEq, Eq, ConstDefault)]
+pub struct Property {
+    pub name: String,
+    pub value: String,
+    pub propagate: bool,
+}
+
+/// Named binary property for the [`PropertyQosPolicy`] container.
+///
+/// Standard mapping: OMG DDS-Security v1.2 spec 7.3.3 `BinaryProperty_t`
+/// `@extensibility(FINAL) struct BinaryProperty_t { string name; OctetSeq value; @non-serialized boolean propagate; }`.
+#[derive(Debug, Default, Clone, PartialEq, Eq, ConstDefault)]
+pub struct BinaryProperty {
+    pub name: String,
+    pub value: Vec<u8>,
+    pub propagate: bool,
+}
+
+/// Property key for IPv4 multicast TTL. int2dds-owned namespace; the matching
+/// reader lives in `rtps::transport::transport_config`.
+pub const PROP_MULTICAST_TTL: &str = "int2dds.transport.UDPv4.multicast_ttl";
+
+/// Generic name/value extension channel for QoS-driven configuration.
+///
+/// Standard mapping: OMG DDS-Security v1.2 spec 7.3.21 `PropertyQosPolicy`
+/// `@extensibility(APPENDABLE) struct PropertyQosPolicy { PropertySeq value; BinaryPropertySeq binary_value; }`.
+///
+/// Used both for security tokens (CA certs, identity material) and as a vendor extension
+/// channel for parameters not exposed as first-class QoS — e.g. multicast TTL via
+/// [`PROP_MULTICAST_TTL`] (int2dds namespace).
+///
+/// # Default
+/// Empty `value` and `binary_value` vectors.
+#[derive(Debug, Default, Clone, PartialEq, Eq, ConstDefault)]
+pub struct PropertyQosPolicy {
+    pub value: Vec<Property>,
+    pub binary_value: Vec<BinaryProperty>,
+}
+
+impl QosPolicy for PropertyQosPolicy {
+    fn name(&self) -> &str {
+        PROPERTY_QOS_POLICY_NAME
+    }
+}
+
+impl PropertyQosPolicy {
+    /// Returns the value of the text property with the given name, or `None` if absent.
+    pub fn find_property(&self, name: &str) -> Option<&str> {
+        self.value.iter().find(|p| p.name == name).map(|p| p.value.as_str())
+    }
+
+    /// Inserts or overwrites a text property by name. Same-name entries are replaced
+    /// in place to preserve relative ordering (relied on by JSON `MergeQos`).
+    pub fn add_property(
+        &mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+        propagate: bool,
+    ) {
+        let name = name.into();
+        let value = value.into();
+        if let Some(slot) = self.value.iter_mut().find(|p| p.name == name) {
+            slot.value = value;
+            slot.propagate = propagate;
+        } else {
+            self.value.push(Property { name, value, propagate });
+        }
+    }
+
+    /// Removes and returns the text property with the given name, if present.
+    pub fn remove_property(&mut self, name: &str) -> Option<Property> {
+        let pos = self.value.iter().position(|p| p.name == name)?;
+        Some(self.value.remove(pos))
+    }
+
+    /// Iterates over text properties whose names start with `prefix`.
+    pub fn get_properties_with_prefix<'a>(
+        &'a self,
+        prefix: &'a str,
+    ) -> impl Iterator<Item = &'a Property> + 'a {
+        self.value.iter().filter(move |p| p.name.starts_with(prefix))
+    }
+
+    /// Returns the value of the binary property with the given name, or `None` if absent.
+    pub fn find_binary_property(&self, name: &str) -> Option<&[u8]> {
+        self.binary_value.iter().find(|p| p.name == name).map(|p| p.value.as_slice())
+    }
+
+    /// Inserts or overwrites a binary property by name.
+    pub fn add_binary_property(
+        &mut self,
+        name: impl Into<String>,
+        value: impl Into<Vec<u8>>,
+        propagate: bool,
+    ) {
+        let name = name.into();
+        let value = value.into();
+        if let Some(slot) = self.binary_value.iter_mut().find(|p| p.name == name) {
+            slot.value = value;
+            slot.propagate = propagate;
+        } else {
+            self.binary_value.push(BinaryProperty { name, value, propagate });
+        }
+    }
+
+    /// Removes and returns the binary property with the given name, if present.
+    pub fn remove_binary_property(&mut self, name: &str) -> Option<BinaryProperty> {
+        let pos = self.binary_value.iter().position(|p| p.name == name)?;
+        Some(self.binary_value.remove(pos))
+    }
+
+    /// Iterates over binary properties whose names start with `prefix`.
+    pub fn get_binary_properties_with_prefix<'a>(
+        &'a self,
+        prefix: &'a str,
+    ) -> impl Iterator<Item = &'a BinaryProperty> + 'a {
+        self.binary_value.iter().filter(move |p| p.name.starts_with(prefix))
+    }
+
+    /// Convenience setter for the IPv4 multicast TTL property.
+    /// Equivalent to `add_property(PROP_MULTICAST_TTL, ttl.to_string(), false)`.
+    pub fn set_multicast_ttl(&mut self, ttl: u8) {
+        self.add_property(PROP_MULTICAST_TTL, ttl.to_string(), false);
+    }
+
+    /// Converts the `propagate==true` text properties into the RTPS wire-format
+    /// representation (`PID_PROPERTY_LIST`, 0x0059). The `propagate` flag is dropped
+    /// since the RTPS struct only carries `name`/`value` per spec 7.4.2.2.
+    pub fn to_rtps_property_list(&self) -> Vec<crate::rtps::common::parameters::Property> {
+        self.value
+            .iter()
+            .filter(|p| p.propagate)
+            .map(|p| crate::rtps::common::parameters::Property {
+                name: p.name.clone(),
+                value: p.value.clone(),
+            })
+            .collect()
     }
 }
 
@@ -2070,5 +2219,74 @@ impl ConstDefault for ReaderReliabilityExtensionQosPolicy {
 impl QosPolicy for ReaderReliabilityExtensionQosPolicy {
     fn name(&self) -> &str {
         READER_RELIABILITY_EXTENSION_QOS_POLICY_NAME
+    }
+}
+
+#[cfg(test)]
+mod property_qos_tests {
+    use super::*;
+
+    #[test]
+    fn text_property_add_find_remove_lifecycle() {
+        let mut p = PropertyQosPolicy::default();
+        assert_eq!(p.find_property("missing"), None);
+        p.add_property("a", "1", true);
+        p.add_property("b", "2", false);
+        assert_eq!(p.find_property("a"), Some("1"));
+        let removed = p.remove_property("a").expect("present");
+        assert_eq!(removed.name, "a");
+        assert!(p.remove_property("missing").is_none());
+        assert_eq!(p.value.len(), 1);
+    }
+
+    #[test]
+    fn add_property_overwrites_same_name_in_place() {
+        // MergeQos relies on this: same-name override must keep relative ordering.
+        let mut p = PropertyQosPolicy::default();
+        p.add_property("a", "1", true);
+        p.add_property("b", "2", false);
+        p.add_property("a", "9", false);
+        assert_eq!(p.value.len(), 2);
+        assert_eq!(p.value[0].name, "a");
+        assert_eq!(p.value[0].value, "9");
+        assert!(!p.value[0].propagate);
+        assert_eq!(p.value[1].name, "b");
+    }
+
+    #[test]
+    fn get_properties_with_prefix_filters_by_name() {
+        let mut p = PropertyQosPolicy::default();
+        p.add_property("int2dds.transport.UDPv4.multicast_ttl", "32", false);
+        p.add_property("int2dds.transport.UDPv4.send_buffer_size", "65536", false);
+        p.add_property("dds.sec.auth.identity_ca", "ignored", true);
+        let count = p.get_properties_with_prefix("int2dds.transport.").count();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn set_multicast_ttl_writes_canonical_key() {
+        let mut p = PropertyQosPolicy::default();
+        p.set_multicast_ttl(64);
+        assert_eq!(p.find_property(PROP_MULTICAST_TTL), Some("64"));
+        p.set_multicast_ttl(1);
+        assert_eq!(p.find_property(PROP_MULTICAST_TTL), Some("1"));
+        assert_eq!(p.value.len(), 1, "same key must overwrite, not append");
+    }
+
+    #[test]
+    fn to_rtps_property_list_filters_propagate_false() {
+        let mut p = PropertyQosPolicy::default();
+        p.add_property("propagated", "yes", true);
+        p.add_property("local", "no", false);
+        let list = p.to_rtps_property_list();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "propagated");
+    }
+
+    #[test]
+    fn qos_policy_id_property_round_trips() {
+        assert_eq!(QosPolicyId::Property.as_u32(), 25);
+        assert_eq!(QosPolicyId::from_u32(25), Some(QosPolicyId::Property));
+        assert_eq!(QosPolicyId::Property.as_str(), "Property");
     }
 }

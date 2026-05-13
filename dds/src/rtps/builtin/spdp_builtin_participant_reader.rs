@@ -19,7 +19,7 @@ use crate::{
     rtps::{
         common::{
             entity_id::EntityId,
-            guid::Guid,
+            guid::{Guid, GuidPrefix},
             locator::Locator,
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
             time::RtpsDuration,
@@ -186,5 +186,16 @@ impl Reader for SPDPBuiltinParticipantReader {
         _writer_guid: Guid,
     ) -> RtpsResult<PublicationBuiltinTopicData> {
         Err(RtpsError::new(RtpsErrorCode::Unknown, "UnSupported"))
+    }
+
+    fn remove_matched_writer_and_update_status(&self, _writer_guid: Guid) -> RtpsResult<bool> {
+        Ok(false)
+    }
+
+    fn remove_all_matched_writers_with_prefix_and_update_status(
+        &self,
+        _prefix: GuidPrefix,
+    ) -> RtpsResult<usize> {
+        Ok(0)
     }
 }
