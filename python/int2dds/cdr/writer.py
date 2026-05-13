@@ -269,24 +269,19 @@ class CdrWriter:
         self, member_id: int, data_length: int, must_understand: bool = False
     ) -> None:
         """
-        Write an EMHEADER for a mutable type field.
+        Write an EMHEADER for a mutable type field using LC=4 (NEXTINT) encoding.
 
         Args:
-            member_id: Field member ID (0-4095)
+            member_id: Field member ID (0..0x0FFFFFFF, 28 bits)
             data_length: Length of the field data
             must_understand: Whether the field must be understood
         """
+        if member_id > 0x0FFFFFFF:
+            raise ValueError(f"EMHEADER member_id exceeds 28 bits: 0x{member_id:X}")
         mu_bit = 0x80000000 if must_understand else 0
-
-        if data_length <= 0xFFFF:
-            # Short encoding: LC=0
-            header = mu_bit | ((member_id & 0x0FFF) << 16) | (data_length & 0xFFFF)
-            self.write_u32(header)
-        else:
-            # Extended encoding: LC=4
-            header = mu_bit | (4 << 28) | ((member_id & 0x0FFF) << 16)
-            self.write_u32(header)
-            self.write_u32(data_length)
+        header = mu_bit | (4 << 28) | (member_id & 0x0FFFFFFF)
+        self.write_u32(header)
+        self.write_u32(data_length)
 
     @contextmanager
     def emheader(self, member_id: int, must_understand: bool = False) -> Iterator[None]:
@@ -310,8 +305,10 @@ class CdrWriter:
         Returns:
             Token to pass to write_emheader_finalize()
         """
+        if member_id > 0x0FFFFFFF:
+            raise ValueError(f"EMHEADER member_id exceeds 28 bits: 0x{member_id:X}")
         mu_bit = 0x80000000 if must_understand else 0
-        header = mu_bit | (4 << 28) | ((member_id & 0x0FFF) << 16)
+        header = mu_bit | (4 << 28) | (member_id & 0x0FFFFFFF)
         self.write_u32(header)
         token = len(self._buf)
         self._buf.extend(b"\x00\x00\x00\x00")  # Placeholder for length
@@ -325,8 +322,7 @@ class CdrWriter:
 
     def write_sentinel(self) -> None:
         """Write a sentinel marker (end of mutable struct fields)."""
-        header = MEMBER_ID_SENTINEL << 16
-        self.write_u32(header)
+        self.write_u32(MEMBER_ID_SENTINEL)
 
     # -------------------------------------------------------------------------
     # Output

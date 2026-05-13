@@ -16,7 +16,6 @@ use crate::rtps::common::rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult}
 use crate::rtps::common::sequence::SequenceNumber;
 use crate::rtps::common::types::DomainId;
 use crate::rtps::entities::entity::Entity;
-use crate::rtps::entities::history::cache_change::CacheChange;
 use crate::rtps::entities::participant::Participant;
 use crate::rtps::logic::wlp_logic::WlpLogic;
 use crate::rtps::task::sending_task::SendingTask;
@@ -39,7 +38,9 @@ pub(crate) enum MessageType {
     PeriodicPublicationHeartbeat(Option<Instant>, StdDuration, Arc<GuidPrefix>),
     PeriodicSubscriptionHeartbeat(Option<Instant>, StdDuration, Arc<GuidPrefix>),
     PeriodicSedpTopicHeartbeat(Option<Instant>, StdDuration, Arc<GuidPrefix>),
-    SedpTerminateEndpoint(Guid, Arc<CacheChange>),
+    // Not used anymore since asynchronous sending can cause participant to be already removed
+    // when the task is executed, so now sent synchronously via SendingTask method
+    // SedpTerminateEndpoint(Guid, Arc<CacheChange>),
 
     // User traffic
     UserHeartbeatToOne(EntityId, Guid, bool),
@@ -244,11 +245,6 @@ impl SendingHandler {
     //         }
     //     }
     // }
-
-    /// Allows direct access to SendingTask when synchronous transmission is needed instead of event loop
-    pub(crate) fn get_sending_task(&self) -> Option<Arc<Mutex<SendingTask>>> {
-        self.sending_task.lock().ok()?.clone()
-    }
 
     pub(crate) fn join_sending_thread(&self) -> RtpsResult<()> {
         let mut handle_guard = self.sending_thread_join_handle.lock().map_err(|e| {
