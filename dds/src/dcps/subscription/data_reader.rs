@@ -25,6 +25,7 @@
 //! - **Conditions**: Read, query, and status conditions for event-driven reading
 //! - **Status Notifications**: Callbacks for data available, subscription matched, etc.
 
+use arc_swap::ArcSwap;
 use std::{
     any::{Any, TypeId},
     cmp::Ordering as CmpOrdering,
@@ -80,6 +81,7 @@ use crate::{
             history::{cache_change::CacheChange, history_cache::HistoryCache as _},
             reader::Reader as RtpsReader,
         },
+        logic::wlp_logic::LivelinessTransition,
     },
     subscription::{
         data_reader_history::{DataReaderHistoryCache, ReaderChangeId},
@@ -162,7 +164,8 @@ pub struct DataReader<Foo> {
     // See also: DomainParticipant::get_builtin_subscriber()
     is_builtin: bool,
     guid: Guid,
-    qos: Arc<Mutex<DataReaderQos>>,
+    qos: Arc<ArcSwap<DataReaderQos>>,
+    update_lock: Arc<Mutex<()>>,
     listener: Arc<RwLock<Option<Arc<dyn DataReaderListener<Foo = Foo>>>>>,
     mask: Arc<RwLock<StatusMask>>,
     pub status_condition: Arc<Mutex<StatusCondition<DataReaderQos>>>,
@@ -195,7 +198,7 @@ impl<Foo> Debug for DataReader<Foo> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DataReader")
             .field("guid", &self.guid)
-            .field("qos", &self.qos.lock().unwrap())
+            .field("qos", &**self.qos.load())
             .field(
                 "listener",
                 &self.listener.read().unwrap().as_ref().map(|_| "Arc<dyn DataReaderListener>"),
@@ -233,6 +236,7 @@ impl<Foo: 'static + Clone + Debug> Clone for DataReader<Foo> {
             is_builtin: self.is_builtin,
             guid: self.guid,
             qos: self.qos.clone(),
+            update_lock: self.update_lock.clone(),
             listener: self.listener.clone(),
             mask: self.mask.clone(),
             status_condition: self.status_condition.clone(),
@@ -513,7 +517,20 @@ impl<Foo: 'static + Clone + Debug> UpdateStatus for DataReader<Foo> {
                     Arc::downcast::<LivelinessChangedStatus>(info.ok_or(DdsError::BadParameter)?)
                         .map_err(|_| DdsError::BadParameter)?;
 
-                if info.alive_count_change() == -1 && info.not_alive_count_change() == 1 {
+                let transition = LivelinessTransition::from_deltas(
+                    info.alive_count_change(),
+                    info.not_alive_count_change(),
+                );
+
+                // Lost / UnmatchAlive / UnmatchNotAlive.
+                if matches!(
+                    transition,
+                    Some(
+                        LivelinessTransition::Lost
+                            | LivelinessTransition::UnmatchAlive
+                            | LivelinessTransition::UnmatchNotAlive
+                    )
+                ) {
                     if let Ok(datareader_cache) = self.datareader_cache.lock() {
                         datareader_cache.remove_writer_from_owner_candidates(
                             info.last_publication_handle().to_guid(),
@@ -1390,7 +1407,10 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     pub(crate) fn get_available_changes(&self) -> DdsResult<Vec<Arc<CacheChange>>> {
         let datareader_cache = self.get_datareader_cache();
         let arc = datareader_cache?;
-        let guard = arc.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        let mut guard = arc.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        // Enforce Lifespan QoS at read time so expired samples are never returned,
+        // even if the periodic cleanup timer hasn't fired yet.
+        guard.purge_expired_on_read()?;
         Ok(guard.get_changes().clone())
     }
 
@@ -1496,16 +1516,18 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     ) -> DdsResult<InstanceHandle> {
         let instance_handle = change.instance_handle();
 
-        // Fallback: If InlineQos has no key_hash, compute from SerializedData (RTPS 9.6.4.8)
-        if instance_handle.is_nil() && self.type_support.is_compute_key_provided() {
-            log::info!("Instance handle is NIL, computing from serialized data (fallback)");
+        if !instance_handle.is_nil() || !self.type_support.is_compute_key_provided() {
+            return Ok(instance_handle);
+        }
+
+        // Dispose/unregister/filtered samples carry a key-only payload; only Alive
+        // (and AliveFiltered) samples carry the full data record.
+        if matches!(change.kind(), ChangeKind::Alive | ChangeKind::AliveFiltered) {
             let data = self.type_support.deserialize(change.data_value(), None)?;
-            let computed_handle = self.type_support.compute_key(&*data);
-            // log::info!("Computed instance handle from data: {:?}", computed_handle);
-            Ok(computed_handle)
+            Ok(self.type_support.compute_key(&*data))
         } else {
-            // log::info!("Using instance_handle from InlineQos (no fallback needed)");
-            Ok(instance_handle)
+            let key_any = self.type_support.deserialize_key(change.data_value())?;
+            Ok(self.type_support.compute_key(&*key_any))
         }
     }
 
@@ -1844,7 +1866,8 @@ impl<Foo: DdsType> DataReader<Foo> {
         let mut reader = Self {
             is_builtin,
             guid,
-            qos: Arc::new(Mutex::new(qos.clone())),
+            qos: Arc::new(ArcSwap::from_pointee(qos.clone())),
+            update_lock: Arc::new(Mutex::new(())),
             listener: Arc::new(RwLock::new(listener)),
             mask: Arc::new(RwLock::new(mask)),
             status_condition: Arc::new(Mutex::new(StatusCondition::new(None))),

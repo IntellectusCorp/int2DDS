@@ -4,7 +4,7 @@ use crate::{
     config::types::qos_policy::{
         DataRepresentationQosPolicy, DestinationOrderQosPolicy, DurabilityQosPolicy,
         DurabilityServiceQosPolicy, GroupDataQosPolicy, HistoryQosPolicy, LivelinessQosPolicy,
-        OwnershipQosPolicy, PartitionQosPolicy, PresentationQosPolicy,
+        OwnershipQosPolicy, PartitionQosPolicy, PresentationQosPolicy, PropertyQosPolicy,
         ReaderReliabilityExtensionQosPolicy, ReliabilityQosPolicy, TopicDataQosPolicy,
         TypeConsistencyEnforcementQosPolicy, UserDataQosPolicy,
         WriterReliabilityExtensionQosPolicy, DEFAULT_MAX_BLOCKING_TIME,
@@ -723,6 +723,30 @@ pub(crate) struct DomainParticipantQos {
     pub(crate) user_data: Option<UserDataQosPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) entity_factory: Option<EntityFactoryQosPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) property: Option<PropertyQosPolicy>,
+}
+
+/// Merge two `PropertyQosPolicy` mirrors by `name`: parent's keys are kept and
+/// child's keys override on collision. This matches RTI XML inheritance semantics
+/// and is required because the simple `.or()` fallback would drop all parent
+/// properties as soon as the child sets a single one.
+fn merge_property_policies(
+    parent: PropertyQosPolicy,
+    child: PropertyQosPolicy,
+) -> PropertyQosPolicy {
+    let mut merged = parent;
+    if let Some(child_entries) = child.value {
+        let merged_entries = merged.value.get_or_insert_with(Vec::new);
+        for entry in child_entries {
+            if let Some(slot) = merged_entries.iter_mut().find(|e| e.name == entry.name) {
+                *slot = entry;
+            } else {
+                merged_entries.push(entry);
+            }
+        }
+    }
+    merged
 }
 
 impl MergeQos for DomainParticipantQos {
@@ -731,6 +755,11 @@ impl MergeQos for DomainParticipantQos {
             base_name: self.base_name.clone(),
             user_data: self.user_data.clone().or(base.user_data.clone()),
             entity_factory: self.entity_factory.or(base.entity_factory),
+            property: match (self.property.clone(), base.property.clone()) {
+                (Some(child), Some(parent)) => Some(merge_property_policies(parent, child)),
+                (Some(child), None) => Some(child),
+                (None, parent) => parent,
+            },
         }
     }
 }
@@ -757,6 +786,10 @@ impl From<DomainParticipantQos> for domain::qos::DomainParticipantQos {
             qos.entity_factory = entity_factory;
         }
 
+        if let Some(property) = external.property {
+            qos.property = property.into();
+        }
+
         qos
     }
 }
@@ -767,6 +800,87 @@ impl From<domain::qos::DomainParticipantQos> for DomainParticipantQos {
             base_name: None,
             user_data: Some(internal.user_data.into()),
             entity_factory: Some(internal.entity_factory),
+            property: Some(internal.property.into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod property_qos_config_tests {
+    use super::*;
+    use crate::config::types::qos_policy::PropertyEntry;
+
+    fn entry(name: &str, value: &str, propagate: Option<bool>) -> PropertyEntry {
+        PropertyEntry { name: name.into(), value: value.into(), propagate }
+    }
+
+    #[test]
+    fn property_round_trips_internal_external_internal() {
+        // Covers external→internal (with propagate default = true), internal→external,
+        // and the empty-policy edge case in one go.
+        let mut internal = internal_qos_policy::PropertyQosPolicy::default();
+        internal.add_property("int2dds.transport.UDPv4.multicast_ttl", "32", false);
+        internal.add_property("vendor.us.int2.example", "abc", true);
+
+        let external: PropertyQosPolicy = internal.clone().into();
+        let back: internal_qos_policy::PropertyQosPolicy = external.into();
+        assert_eq!(back, internal);
+
+        let empty_external: PropertyQosPolicy =
+            internal_qos_policy::PropertyQosPolicy::default().into();
+        assert!(empty_external.value.is_none(), "empty internal serializes to None");
+
+        let propagate_default: internal_qos_policy::PropertyQosPolicy =
+            PropertyQosPolicy { value: Some(vec![entry("k", "v", None)]) }.into();
+        assert!(propagate_default.value[0].propagate, "missing propagate => true");
+    }
+
+    #[test]
+    fn participant_qos_merge_unions_and_overrides_by_name() {
+        // Covers both the helper and the MergeQos branch in one fixture.
+        let parent_qos = DomainParticipantQos {
+            property: Some(PropertyQosPolicy {
+                value: Some(vec![entry("a", "1", None), entry("b", "2", None)]),
+            }),
+            ..Default::default()
+        };
+        let child_qos = DomainParticipantQos {
+            property: Some(PropertyQosPolicy {
+                value: Some(vec![entry("b", "9", Some(false)), entry("c", "3", None)]),
+            }),
+            ..Default::default()
+        };
+
+        let merged_entries = child_qos.merge(&parent_qos).property.unwrap().value.unwrap();
+        assert_eq!(merged_entries.len(), 3);
+        assert_eq!(merged_entries[0].value, "1");
+        assert_eq!(merged_entries[1].value, "9", "child overrides parent by name");
+        assert_eq!(merged_entries[1].propagate, Some(false));
+        assert_eq!(merged_entries[2].name, "c");
+
+        // Parent-only and child-only fallthrough branches.
+        assert!(DomainParticipantQos::default().merge(&parent_qos).property.is_some());
+    }
+
+    #[test]
+    fn participant_qos_round_trips_through_json() {
+        let json = r#"{
+            "property": {
+                "value": [
+                    { "name": "int2dds.transport.UDPv4.multicast_ttl", "value": "32", "propagate": false },
+                    { "name": "vendor.us.int2.example", "value": "abc" }
+                ]
+            }
+        }"#;
+        let parsed: DomainParticipantQos = serde_json::from_str(json).expect("parse");
+        let internal: domain::qos::DomainParticipantQos = parsed.into();
+        assert_eq!(
+            internal.property.find_property("int2dds.transport.UDPv4.multicast_ttl"),
+            Some("32")
+        );
+
+        let external: DomainParticipantQos = internal.clone().into();
+        let internal2: domain::qos::DomainParticipantQos = external.into();
+        assert_eq!(internal2, internal);
     }
 }

@@ -56,9 +56,10 @@ use crate::rtps::{
 use crate::serialize::pl_cdr::InlineQosParameters;
 use crate::utils::timer::{timer_handler::TimerHandler, timer_id::TimerId};
 use dashmap::DashMap;
+use mio::Waker;
 
 use std::net::{SocketAddr, SocketAddrV4};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::thread::{self, JoinHandle};
 
 #[allow(dead_code)]
@@ -70,6 +71,7 @@ pub(crate) struct UserLogic {
     shm_sender: Option<Arc<TransportSender>>,
     fragment_buffers: Arc<DashMap<(Guid, SequenceNumber), FragmentBuffer>>,
     unicast_listening_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+    unicast_listening_waker: Arc<OnceLock<Arc<Waker>>>,
 }
 
 // Initialization
@@ -87,6 +89,13 @@ impl UserLogic {
             shm_sender,
             fragment_buffers: Arc::new(DashMap::new()),
             unicast_listening_handle: Arc::new(Mutex::new(None)),
+            unicast_listening_waker: Arc::new(OnceLock::new()),
+        }
+    }
+
+    pub(crate) fn wake_unicast_listening_thread(&self) {
+        if let Some(waker) = self.unicast_listening_waker.get() {
+            let _ = waker.wake();
         }
     }
 
@@ -108,6 +117,8 @@ impl UserLogic {
             shm_listener,
             participant.clone(),
         );
+
+        user_unicast_listening_task.set_shutdown_waker(self.unicast_listening_waker.clone());
 
         let participant_guid = participant.guid();
 
@@ -168,6 +179,15 @@ impl UserLogic {
         let writer = self.find_stateful_writer(writer_entity_id)?;
         let stateful_writer = writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
 
+        // LOCK ORDER: acquires `writer_cache` first, then `reader_proxies`.
+        let writer_cache = stateful_writer.writer_cache();
+        let cache_guard = writer_cache.lock().map_err(|e| {
+            RtpsError::new(
+                RtpsErrorCode::LockError,
+                format!("Failed to acquire writer cache lock: {}", e),
+            )
+        })?;
+
         let reader_proxies = stateful_writer.reader_proxies();
         let mut reader_proxies_guard = reader_proxies.lock().map_err(|e| {
             RtpsError::new(
@@ -193,14 +213,6 @@ impl UserLogic {
                 gap_list.push(*requested_change_sn);
                 continue;
             }
-
-            let writer_cache = stateful_writer.writer_cache();
-            let cache_guard = writer_cache.lock().map_err(|e| {
-                RtpsError::new(
-                    RtpsErrorCode::LockError,
-                    format!("Failed to acquire writer cache lock: {}", e),
-                )
-            })?;
 
             if let Some(a_change) = cache_guard.get_change(*requested_change_sn) {
                 // ACK may have been received in the meantime, so check first
@@ -819,6 +831,15 @@ impl UserLogic {
         let writer = self.find_stateful_writer(writer_entity_id)?;
         let stateful_writer = writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
 
+        // LOCK ORDER: acquires `writer_cache` first, then `reader_proxies`.
+        let writer_cache_lock = stateful_writer.writer_cache();
+        let history_cache = writer_cache_lock.lock().map_err(|e| {
+            RtpsError::new(
+                RtpsErrorCode::LockError,
+                format!("Failed to acquire writer cache lock for heartbeat: {:?}", e),
+            )
+        })?;
+
         let reader_proxies_lock = stateful_writer.reader_proxies();
         let mut reader_proxies = reader_proxies_lock.lock().map_err(|e| {
             RtpsError::new(
@@ -842,8 +863,12 @@ impl UserLogic {
             return Ok(());
         }
 
-        // Send with GAP if preemptive
-        self.send_heartbeat_to_a_reader_proxy_inner(stateful_writer, reader_proxy, is_preemptive)?;
+        self.send_heartbeat_to_a_reader_proxy_inner(
+            stateful_writer,
+            reader_proxy,
+            is_preemptive,
+            &history_cache,
+        )?;
 
         Ok(())
     }
@@ -853,22 +878,12 @@ impl UserLogic {
         writer: &StatefulWriter,
         reader_proxy: &mut ReaderProxy,
         should_send_gap: bool,
+        history_cache: &WriterHistoryCache,
     ) -> RtpsResult<()> {
         if !reader_proxy.is_reliable() {
             trace!("Remote reader is not reliable, skipping heartbeat.");
             return Ok(());
         }
-
-        let writer_cache_lock = writer.writer_cache();
-        let history_cache = match writer_cache_lock.lock() {
-            Ok(cache) => cache,
-            Err(e) => {
-                return Err(RtpsError::new(
-                    RtpsErrorCode::LockError,
-                    format!("Failed to acquire writer cache lock for heartbeat: {:?}", e),
-                ));
-            }
-        };
 
         let highest_sn = history_cache.highest_sn();
 
@@ -1312,22 +1327,51 @@ impl UserLogic {
     where
         T: IntoIterator<Item = &'a Locator>,
     {
+        Self::send_via_senders(
+            locators,
+            buffer,
+            self.shm_sender.as_ref(),
+            self.tcp_sender.as_ref(),
+            self.sender.as_ref(),
+        )
+    }
+
+    /// Send `buffer` via the highest-priority transport reachable on both
+    /// sides (SHM > TCP > UDP); a peer advertising multiple transports gets
+    /// a single copy. Associated fn so `&self`-less closures (e.g. the
+    /// NACK_FRAG timer) can route through the same path.
+    fn send_via_senders<'a, T>(
+        locators: T,
+        buffer: &[u8],
+        shm_sender: Option<&Arc<TransportSender>>,
+        tcp_sender: Option<&Arc<TransportSender>>,
+        udp_sender: Option<&Arc<TransportSender>>,
+    ) -> RtpsResult<()>
+    where
+        T: IntoIterator<Item = &'a Locator>,
+    {
+        let locators: Vec<&Locator> = locators.into_iter().collect();
+        let pick = |kind: fn(&Locator) -> bool, have_sender: bool| -> Option<Vec<&Locator>> {
+            (have_sender && locators.iter().any(|l| kind(l)))
+                .then(|| locators.iter().copied().filter(|l| kind(l)).collect())
+        };
+        let locators = pick(Locator::is_shm, shm_sender.is_some())
+            .or_else(|| pick(Locator::is_tcp, tcp_sender.is_some()))
+            .or_else(|| pick(Locator::is_udp, udp_sender.is_some()))
+            .unwrap_or(locators);
+
         let mut is_sent = false;
         let mut last_error = None;
 
         for locator in locators {
-            // Check if this is a SHM locator
             if locator.is_shm() {
-                // Use SHM sender if available
-                if let Some(shm_sender) = &self.shm_sender {
-                    // SHM doesn't use socket addresses, but Transport trait requires it
-                    // Use a dummy address - the actual routing is done via shared memory
+                if let Some(shm) = shm_sender {
+                    // SHM doesn't use socket addresses, but Transport trait requires
+                    // one. Routing is done internally via shared memory.
                     let dummy_addr =
                         SocketAddr::V4(SocketAddrV4::new(std::net::Ipv4Addr::new(127, 0, 0, 1), 0));
-                    match shm_sender.send(&dummy_addr, buffer) {
-                        Ok(_) => {
-                            is_sent = true;
-                        }
+                    match shm.send(&dummy_addr, buffer) {
+                        Ok(_) => is_sent = true,
                         Err(e) => {
                             warn!("[UserLogic] Failed to send SHM message: {:?}", e);
                             last_error = Some(e);
@@ -1338,16 +1382,13 @@ impl UserLogic {
                     warn!("[UserLogic] SHM locator found but no SHM sender available");
                     continue;
                 }
-            }
-            // Check if this is a TCP locator
-            else if locator.is_tcp() {
-                // Use TCP sender if available
-                if let Some(tcp_sender) = &self.tcp_sender {
+            } else if locator.is_tcp() {
+                if let Some(tcp) = tcp_sender {
                     let socket_addr = SocketAddr::V4(SocketAddrV4::new(
                         locator.to_ip_v4_addr(),
                         locator.port() as u16,
                     ));
-                    match tcp_sender.send(&socket_addr, buffer) {
+                    match tcp.send(&socket_addr, buffer) {
                         Ok(_) => {
                             is_sent = true;
                             debug!("[UserLogic] Sent message via TCP to {:?}", socket_addr);
@@ -1369,16 +1410,13 @@ impl UserLogic {
                     continue;
                 }
             } else if locator.is_udp() {
-                // Use UDP sender
                 let socket_addr = SocketAddr::V4(SocketAddrV4::new(
                     locator.to_ip_v4_addr(),
                     locator.port() as u16,
                 ));
-                if let Some(ref sender) = self.sender {
-                    match sender.send(&socket_addr, buffer) {
-                        Ok(_) => {
-                            is_sent = true;
-                        }
+                if let Some(udp) = udp_sender {
+                    match udp.send(&socket_addr, buffer) {
+                        Ok(_) => is_sent = true,
                         Err(e) => {
                             warn!("Failed to send message to locator {:?}: {:?}", socket_addr, e);
                             last_error = Some(e);
@@ -1594,7 +1632,7 @@ impl UnicastMessageProcessor for UserLogic {
         }
 
         if let Some(wlp) = self.get_upgraded_participant()?.wlp_logic() {
-            wlp.update_remote_writer_liveliness(remote_writer_guid)?;
+            wlp.mark_monitored_writer_alive(remote_writer_guid)?;
         }
 
         Ok(())
@@ -1749,7 +1787,10 @@ impl UnicastMessageProcessor for UserLogic {
                     let writer_proxies_clone = writer_proxies.clone();
                     let stateful_reader_guid = stateful_reader.guid();
                     let participant = participant.clone();
-                    let sender_clone = self.sender.clone(); // Option<Arc<TransportSender>>
+                    // Capture all three senders so the timer closure can route
+                    let shm_sender_clone = self.shm_sender.clone();
+                    let tcp_sender_clone = self.tcp_sender.clone();
+                    let udp_sender_clone = self.sender.clone();
                     let last_sn = heartbeat.last_sn;
                     let missing_fragments_clone = missing_fragments.clone();
                     let remote_writer_guid = writer_proxy.remote_writer_guid();
@@ -1805,28 +1846,13 @@ impl UnicastMessageProcessor for UserLogic {
                                             current_writer_proxy.nackfrag_count(),
                                             acknack_info,
                                         ) {
-                                            for locator in
-                                                current_writer_proxy.unicast_locator_list()
-                                            {
-                                                if locator.kind() == 1 {
-                                                    let socket_addr = std::net::SocketAddr::V4(
-                                                        std::net::SocketAddrV4::new(
-                                                            locator.to_ip_v4_addr(),
-                                                            locator.port() as u16,
-                                                        ),
-                                                    );
-                                                    if let Some(ref sender) = sender_clone {
-                                                        let _ = sender
-                                                            .send(&socket_addr, &buffer)
-                                                            .map_err(|e| {
-                                                                RtpsError::new(
-                                                                    RtpsErrorCode::Io,
-                                                                    e.to_string(),
-                                                                )
-                                                            });
-                                                    }
-                                                }
-                                            }
+                                            let _ = Self::send_via_senders(
+                                                current_writer_proxy.unicast_locator_list(),
+                                                &buffer,
+                                                shm_sender_clone.as_ref(),
+                                                tcp_sender_clone.as_ref(),
+                                                udp_sender_clone.as_ref(),
+                                            );
                                         }
                                     }
                                 }
@@ -1967,13 +1993,26 @@ impl UnicastMessageProcessor for UserLogic {
         let writer = self.find_stateful_writer(acknack.writer_id)?;
         let stateful_writer = writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
 
+        // LOCK ORDER: acquires `writer_cache` first, then `reader_proxies` (via matched_reader_lookup).
+        let writer_cache_lock = stateful_writer.writer_cache();
+        let history_cache = writer_cache_lock.lock().map_err(|e| {
+            RtpsError::new(
+                RtpsErrorCode::LockError,
+                format!("Failed to acquire writer cache lock for heartbeat: {:?}", e),
+            )
+        })?;
+
         let mut reader_proxy =
             stateful_writer.matched_reader_lookup(remote_reader_guid).ok_or_else(|| {
                 RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, "ReaderProxy not found")
             })?;
 
-        // Directly send heartbeat response to let the reader know about the writer's status
-        self.send_heartbeat_to_a_reader_proxy_inner(stateful_writer, &mut reader_proxy, true)
+        self.send_heartbeat_to_a_reader_proxy_inner(
+            stateful_writer,
+            &mut reader_proxy,
+            true,
+            &history_cache,
+        )
     }
 
     fn handle_datafrag_message(
@@ -2155,7 +2194,12 @@ impl UnicastMessageProcessor for UserLogic {
         let writer = self.find_stateful_writer(writer_id)?;
         let stateful_writer = writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
 
-        // Lock acquisition order to prevent deadlock: reader_proxies -> history_cache
+        // LOCK ORDER: acquires `writer_cache` first, then `reader_proxies`.
+        let writer_cache = stateful_writer.writer_cache();
+        let history_cache_guard = writer_cache.lock().map_err(|_| {
+            RtpsError::new(RtpsErrorCode::LockError, "Failed to acquire history cache lock")
+        })?;
+
         let reader_proxies = stateful_writer.reader_proxies();
         let mut reader_proxies_guard = reader_proxies.lock().map_err(|_| {
             RtpsError::new(RtpsErrorCode::LockError, "Failed to acquire reader_proxies lock")
@@ -2184,11 +2228,6 @@ impl UnicastMessageProcessor for UserLogic {
             }
         }
         reader_proxy.set_last_nackfrag_count(nack_frag.count);
-
-        let writer_cache = stateful_writer.writer_cache();
-        let history_cache_guard = writer_cache.lock().map_err(|_| {
-            RtpsError::new(RtpsErrorCode::LockError, "Failed to acquire history cache lock")
-        })?;
 
         let change = history_cache_guard.get_change(writer_sn).ok_or_else(|| {
             warn!("NACK_FRAG requested missing change SN={:?}", writer_sn);
@@ -2281,16 +2320,17 @@ impl UnicastMessageProcessor for UserLogic {
 
                 irrelevant_changes.extend(gap.gap_list.extract_numbers().iter());
 
-                // Flush buffered changes if expected_sn is affected
-                if irrelevant_changes.last().unwrap_or(&SequenceNumber::new(0, 0))
-                    >= &writer_proxy.expected_sn()
-                {
-                    writer_proxy.set_expected_sn(SequenceNumber::from_i64(
-                        irrelevant_changes.last().unwrap().to_i64() + 1,
-                    ));
+                // Flush buffered changes if expected_sn is affected.
+                if let Some(last) = irrelevant_changes.last() {
+                    if last >= &writer_proxy.expected_sn() {
+                        writer_proxy.set_expected_sn(SequenceNumber::from_i64(last.to_i64() + 1));
 
-                    let flushed_changes = writer_proxy.flush_buffered_changes();
-                    self.add_change_to_reader_cache_and_notify(stateful_reader, flushed_changes)?;
+                        let flushed_changes = writer_proxy.flush_buffered_changes();
+                        self.add_change_to_reader_cache_and_notify(
+                            stateful_reader,
+                            flushed_changes,
+                        )?;
+                    }
                 }
 
                 for seq_num in irrelevant_changes {

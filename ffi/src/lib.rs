@@ -19,6 +19,7 @@
 //! - [`error`] - Error codes and conversion utilities
 //! - [`types`] - Opaque pointer types for FFI handles
 //! - [`context`] - DomainParticipantFactory management
+//! - [`env`] - Environment-variable–driven configuration helpers
 //! - [`participant`] - DomainParticipant management
 //! - [`topic`] - Topic creation and management
 //! - [`publisher`] - Publisher and DataWriter functions
@@ -53,6 +54,7 @@ pub mod context;
 pub mod data;
 pub mod discovery;
 pub mod dynamic;
+pub mod env;
 pub mod listener;
 pub mod participant;
 pub mod publisher;

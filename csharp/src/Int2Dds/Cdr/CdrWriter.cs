@@ -257,7 +257,7 @@ namespace Int2Dds.Cdr
             WriteU32(cdrLen);
             EnsureCapacity(byteCount + 1);
             if (byteCount > 0)
-                Encoding.UTF8.GetBytes(s.AsSpan(), _buffer.AsSpan(_pos));
+                Encoding.UTF8.GetBytes(s, 0, s.Length, _buffer, _pos);
             _buffer[_pos + byteCount] = 0; // null terminator
             _pos += byteCount + 1;
         }
@@ -331,25 +331,16 @@ namespace Int2Dds.Cdr
         // ---- XCDR2 EMHEADER -------------------------------------------------
 
         /// <summary>
-        /// Write an EMHEADER with a known data length.
-        /// Uses short encoding (LC=0) if dataLength fits in 16 bits, otherwise extended (LC=4).
+        /// Write an EMHEADER with a known data length using LC=4 (NEXTINT) encoding.
         /// </summary>
         public void WriteEmheader(uint memberId, uint dataLength, bool mustUnderstand)
         {
+            if (memberId > 0x0FFFFFFFu)
+                throw new ArgumentOutOfRangeException(nameof(memberId), $"EMHEADER member_id exceeds 28 bits: 0x{memberId:X}");
             uint muBit = mustUnderstand ? 0x80000000u : 0;
-            if (dataLength <= 0xFFFF)
-            {
-                // Short encoding: LC=0
-                uint header = muBit | ((memberId & 0x3FFF) << 16) | (dataLength & 0xFFFF);
-                WriteU32(header);
-            }
-            else
-            {
-                // Extended encoding: LC=4
-                uint header = muBit | (4u << 28) | ((memberId & 0x3FFF) << 16);
-                WriteU32(header);
-                WriteU32(dataLength);
-            }
+            uint header = muBit | (4u << 28) | (memberId & 0x0FFFFFFFu);
+            WriteU32(header);
+            WriteU32(dataLength);
         }
 
         /// <summary>
@@ -358,8 +349,10 @@ namespace Int2Dds.Cdr
         /// </summary>
         public int EmheaderBegin(uint memberId, bool mustUnderstand)
         {
+            if (memberId > 0x0FFFFFFFu)
+                throw new ArgumentOutOfRangeException(nameof(memberId), $"EMHEADER member_id exceeds 28 bits: 0x{memberId:X}");
             uint muBit = mustUnderstand ? 0x80000000u : 0;
-            uint header = muBit | (4u << 28) | ((memberId & 0x3FFF) << 16);
+            uint header = muBit | (4u << 28) | (memberId & 0x0FFFFFFFu);
             WriteU32(header);
             int token = _pos;
             WriteU32(0); // placeholder for length
@@ -384,8 +377,7 @@ namespace Int2Dds.Cdr
         /// </summary>
         public void WriteSentinel()
         {
-            uint header = MemberIdSentinel << 16;
-            WriteU32(header);
+            WriteU32(MemberIdSentinel);
         }
 
         // ---- Output ---------------------------------------------------------

@@ -6,7 +6,7 @@ pub mod xcdr2;
 use crate::serialize::core::{SerializationError, SerializationResult};
 
 // Re-export v1 (CDR) types
-pub use xcdr1::{CdrDeserializer, CdrSerializer};
+pub use xcdr1::{CdrDeserializer, CdrSerializer, PlCdrMemberHeader};
 
 // Re-export v2 (XCDR2) types
 pub use xcdr2::{Xcdr2Deserializer, Xcdr2Serializer};
@@ -52,16 +52,13 @@ pub struct MemberHeader {
     pub must_understand: bool,
 }
 
-/// PL_CDR2 sentinel member_id indicating end of mutable struct members
-pub const MEMBER_ID_SENTINEL: u32 = 0x3F02;
-
-/// Check if a member_id is the list terminator sentinel
-#[inline]
-pub fn is_sentinel_member_id(member_id: u32) -> bool {
-    member_id == MEMBER_ID_SENTINEL
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LcHint {
+    Auto,
+    SeqMul4,
+    SeqMul8,
 }
 
-/// EMHEADER Length Code values (LC field in bits 30-28)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LengthCode {
     /// LC 0-3: Length is directly in lower 16 bits (0-65535 bytes)
@@ -85,8 +82,7 @@ impl MemberHeader {
         Self { member_id, member_length: length as u32, must_understand }
     }
 
-    /// Write EMHEADER to buffer
-    /// Supports extended length encoding (LC) for lengths > 65535 bytes
+    /// Write EMHEADER1 per DDS-XTypes 7.4.3.4.2.
     pub fn write(
         &self,
         buffer: &mut Vec<u8>,
@@ -94,40 +90,22 @@ impl MemberHeader {
     ) -> Result<(), SerializationError> {
         use crate::serialize::to_bytes_u32;
 
-        let must_understand_bit = if self.must_understand { 0x8000_0000u32 } else { 0 };
+        if self.member_id > 0x0FFF_FFFF {
+            return Err(SerializationError::InvalidMemberId(self.member_id));
+        }
 
-        if self.member_length <= 0xFFFF {
-            // Short encoding: LC=0, length directly in lower 16 bits
-            // EMHEADER1 format: [M(1bit)][LC(3bits)][member_id(28bits)]
-            // But for LC 0-3, lower 16 bits carry the length directly
-            // So format is: [M(1bit)][LC(3bits)][member_id_high(12bits)][length(16bits)]
-            // For 28-bit member_id support, we use LC=4 when member_id > 0x0FFF
-            if self.member_id <= 0x0FFF {
-                // member_id fits in 12 bits, use compact encoding
-                let header = must_understand_bit
-                    | ((self.member_id & 0x0FFF) << 16)
-                    | (self.member_length & 0xFFFF);
-                let bytes = to_bytes_u32(header, endianness);
-                buffer.extend_from_slice(&bytes);
-            } else {
-                // member_id needs 28 bits, use LC=4 with NEXTINT encoding
-                let lc = LengthCode::NextInt as u32;
-                let header = must_understand_bit | (lc << 28) | (self.member_id & 0x0FFF_FFFF);
-                let bytes = to_bytes_u32(header, endianness);
-                buffer.extend_from_slice(&bytes);
-                let len_bytes = to_bytes_u32(self.member_length, endianness);
-                buffer.extend_from_slice(&len_bytes);
-            }
-        } else {
-            // Extended encoding with LC=4: length follows in next 4 bytes
-            // Format: [M(1bit)][LC=4(3bits)][member_id(28bits)]
-            let lc = LengthCode::NextInt as u32;
-            let header = must_understand_bit | (lc << 28) | (self.member_id & 0x0FFF_FFFF);
-            let bytes = to_bytes_u32(header, endianness);
-            buffer.extend_from_slice(&bytes);
-            // Write actual length as next 4 bytes
-            let len_bytes = to_bytes_u32(self.member_length, endianness);
-            buffer.extend_from_slice(&len_bytes);
+        let must_bit = if self.must_understand { 0x8000_0000u32 } else { 0 };
+        let (lc_word, nextint) = match self.member_length {
+            1 => (0u32 << 28, None),
+            2 => (1u32 << 28, None),
+            4 => (2u32 << 28, None),
+            8 => (3u32 << 28, None),
+            n => (4u32 << 28, Some(n)),
+        };
+        let header = must_bit | lc_word | (self.member_id & 0x0FFF_FFFF);
+        buffer.extend_from_slice(&to_bytes_u32(header, endianness));
+        if let Some(len) = nextint {
+            buffer.extend_from_slice(&to_bytes_u32(len, endianness));
         }
         Ok(())
     }
@@ -150,67 +128,30 @@ impl MemberHeader {
             .map_err(|_| SerializationError::InsufficientData)?;
         let header = from_bytes_u32(header_bytes, endianness);
 
-        // Parse EMHEADER fields
         let must_understand = (header & 0x8000_0000) != 0;
-        let lc = ((header >> 28) & 0x07) as u8; // LC is bits 30-28
+        let lc = ((header >> 28) & 0x07) as u8;
+        let member_id = header & 0x0FFF_FFFF;
 
-        #[allow(clippy::manual_range_patterns)]
-        let (member_id, member_length, bytes_consumed) = match lc {
-            0 | 1 | 2 | 3 => {
-                // LC 0-3: Direct length encoding
-                // Format: [M(1bit)][LC(3bits)][member_id(12bits)][length(16bits)]
-                let mid = (header >> 16) & 0x0FFF;
-                let length = header & 0xFFFF;
-                (mid, length, 4)
+        let read_nextint = |buf: &[u8]| -> Result<u32, SerializationError> {
+            if position + 8 > buf.len() {
+                return Err(SerializationError::InsufficientData);
             }
-            4 => {
-                // LC 4: 28-bit member_id, next 4 bytes contain the actual length
-                let mid = header & 0x0FFF_FFFF;
-                if position + 8 > data.len() {
-                    return Err(SerializationError::InsufficientData);
-                }
-                let ext_bytes: [u8; 4] = data[position + 4..position + 8]
-                    .try_into()
-                    .map_err(|_| SerializationError::InsufficientData)?;
-                let ext_len = from_bytes_u32(ext_bytes, endianness);
-                (mid, ext_len, 8)
-            }
-            5 => {
-                // LC 5: 28-bit member_id, length is (next 4 bytes) * 4
-                let mid = header & 0x0FFF_FFFF;
-                if position + 8 > data.len() {
-                    return Err(SerializationError::InsufficientData);
-                }
-                let ext_bytes: [u8; 4] = data[position + 4..position + 8]
-                    .try_into()
-                    .map_err(|_| SerializationError::InsufficientData)?;
-                let ext_len = from_bytes_u32(ext_bytes, endianness);
-                (mid, ext_len * 4, 8)
-            }
-            6 => {
-                // LC 6: 28-bit member_id, length is (next 4 bytes) * 8
-                let mid = header & 0x0FFF_FFFF;
-                if position + 8 > data.len() {
-                    return Err(SerializationError::InsufficientData);
-                }
-                let ext_bytes: [u8; 4] = data[position + 4..position + 8]
-                    .try_into()
-                    .map_err(|_| SerializationError::InsufficientData)?;
-                let ext_len = from_bytes_u32(ext_bytes, endianness);
-                (mid, ext_len * 8, 8)
-            }
-            7 => {
-                // LC 7: Nested length
-                let mid = (header >> 16) & 0x0FFF;
-                let length = header & 0xFFFF;
-                (mid, length, 4)
-            }
-            _ => {
-                // Should not happen with 3-bit LC
-                let mid = (header >> 16) & 0x0FFF;
-                let length = header & 0xFFFF;
-                (mid, length, 4)
-            }
+            let b: [u8; 4] = buf[position + 4..position + 8]
+                .try_into()
+                .map_err(|_| SerializationError::InsufficientData)?;
+            Ok(from_bytes_u32(b, endianness))
+        };
+
+        let (member_length, bytes_consumed) = match lc {
+            0 => (1u32, 4usize),
+            1 => (2u32, 4usize),
+            2 => (4u32, 4usize),
+            3 => (8u32, 4usize),
+            4 => (read_nextint(data)?, 8usize),
+            5 => (4u32 + read_nextint(data)?, 8usize),
+            6 => (4u32 + 4 * read_nextint(data)?, 8usize),
+            7 => (4u32 + 8 * read_nextint(data)?, 8usize),
+            _ => return Err(SerializationError::InvalidMemberHeader),
         };
 
         Ok((MemberHeader { member_id, member_length, must_understand }, bytes_consumed))
@@ -302,27 +243,6 @@ impl<T: CdrDeserialize> CdrDeserialize for Vec<T> {
     }
 }
 
-impl<T: CdrSerialize> CdrSerialize for Option<T> {
-    fn serialize_cdr(&self, serializer: &mut CdrSerializer) -> CdrResult<()> {
-        match self {
-            Some(value) => {
-                serializer.serialize_bool(true)?;
-                value.serialize_cdr(serializer)?;
-            }
-            None => {
-                serializer.serialize_bool(false)?;
-            }
-        }
-        Ok(())
-    }
-}
-
-impl<T: CdrDeserialize> CdrDeserialize for Option<T> {
-    fn deserialize_cdr(deserializer: &mut CdrDeserializer) -> CdrResult<Self> {
-        deserializer.deserialize_optional(|d| T::deserialize_cdr(d))
-    }
-}
-
 impl<T: CdrSerialize, const N: usize> CdrSerialize for [T; N] {
     fn serialize_cdr(&self, serializer: &mut CdrSerializer) -> CdrResult<()> {
         // Arrays are fixed size, no need to write length
@@ -346,10 +266,18 @@ impl<T: CdrDeserialize, const N: usize> CdrDeserialize for [T; N] {
     }
 }
 
+pub trait XcdrSerializeMembers {
+    fn serialize_xcdr_members(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()>;
+}
+
+pub trait XcdrDeserializeMembers: Sized {
+    fn deserialize_xcdr_members(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self>;
+}
+
 /// Trait for types that can be serialized using XCDR
 pub trait XcdrSerialize {
     /// Whether this type is a CDR primitive (no DHEADER required when used as
-    /// the element type of a sequence/array per DDS-XTypes §7.4.3.5.3-4).
+    /// the element type of a sequence/array per DDS-XTypes 7.4.3.5.3-4).
     /// Defaults to `false`; primitive impls override to `true`.
     const IS_PRIMITIVE: bool = false;
     fn serialize_xcdr(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()>;
@@ -398,7 +326,7 @@ impl XcdrDeserialize for String {
 
 impl<T: XcdrSerialize> XcdrSerialize for Vec<T> {
     fn serialize_xcdr(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()> {
-        // DDS-XTypes §7.4.3.5.4: a sequence whose element type is *non-primitive*
+        // DDS-XTypes 7.4.3.5.4: a sequence whose element type is *non-primitive*
         // is preceded by a 4-byte DHEADER carrying the byte size of the element
         // payload (length + elements). Sequences of primitives omit the DHEADER.
         if T::IS_PRIMITIVE {
@@ -467,7 +395,7 @@ impl<T: XcdrDeserialize> XcdrDeserialize for Option<T> {
 
 impl<T: XcdrSerialize, const N: usize> XcdrSerialize for [T; N] {
     fn serialize_xcdr(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()> {
-        // DDS-XTypes §7.4.3.5.3: arrays of non-primitive elements carry a
+        // DDS-XTypes 7.4.3.5.3: arrays of non-primitive elements carry a
         // DHEADER of the element payload byte size; primitive arrays do not.
         if T::IS_PRIMITIVE {
             for item in self.iter() {
@@ -680,6 +608,18 @@ impl<T: XcdrSerialize> XcdrSerialize for Box<T> {
 impl<T: XcdrDeserialize> XcdrDeserialize for Box<T> {
     fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
         Ok(Box::new(T::deserialize_xcdr(deserializer)?))
+    }
+}
+
+impl<T: XcdrSerializeMembers> XcdrSerializeMembers for Box<T> {
+    fn serialize_xcdr_members(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()> {
+        (**self).serialize_xcdr_members(serializer)
+    }
+}
+
+impl<T: XcdrDeserializeMembers> XcdrDeserializeMembers for Box<T> {
+    fn deserialize_xcdr_members(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
+        Ok(Box::new(T::deserialize_xcdr_members(deserializer)?))
     }
 }
 

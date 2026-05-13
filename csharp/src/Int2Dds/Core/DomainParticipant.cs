@@ -61,20 +61,111 @@ namespace Int2Dds.Core
 
             unsafe
             {
-                if (name != null)
+                var qosPathBytes = Encoding.UTF8.GetBytes(qosPath + '\0');
+                fixed (byte* pQos = qosPathBytes)
                 {
-                    var nameBytes = Encoding.UTF8.GetBytes(name + '\0');
-                    fixed (byte* p = nameBytes)
+                    if (name != null)
+                    {
+                        var nameBytes = Encoding.UTF8.GetBytes(name + '\0');
+                        fixed (byte* p = nameBytes)
+                        {
+                            ReturnCodeHelper.CheckReturn(
+                                NativeMethods.int2dds_create_participant_with_profile(factory.Handle, p, domainId, pQos, out _handle));
+                        }
+                    }
+                    else
                     {
                         ReturnCodeHelper.CheckReturn(
-                            NativeMethods.int2dds_create_participant_with_profile(factory.Handle, p, domainId, qosPath, out _handle));
+                            NativeMethods.int2dds_create_participant_with_profile(factory.Handle, null, domainId, pQos, out _handle));
                     }
                 }
-                else
+            }
+        }
+
+        /// <summary>
+        /// Creates a new DomainParticipant with the given QoS settings.
+        /// </summary>
+        /// <param name="domainId">The DDS domain to join.</param>
+        /// <param name="qos">Participant QoS (e.g. multicast TTL via PropertyQosPolicy).</param>
+        /// <param name="name">Optional name for the participant.</param>
+        public DomainParticipant(int domainId, ParticipantQos qos, string? name = null)
+        {
+            if (qos == null) throw new ArgumentNullException(nameof(qos));
+            _domainId = domainId;
+            var factory = DomainParticipantFactory.Instance;
+
+            var qosHandle = BuildNativeQos(qos);
+            try
+            {
+                unsafe
                 {
-                    ReturnCodeHelper.CheckReturn(
-                        NativeMethods.int2dds_create_participant_with_profile(factory.Handle, null, domainId, qosPath, out _handle));
+                    if (name != null)
+                    {
+                        var nameBytes = Encoding.UTF8.GetBytes(name + '\0');
+                        fixed (byte* p = nameBytes)
+                        {
+                            ReturnCodeHelper.CheckReturn(
+                                NativeMethods.int2dds_create_participant_with_qos(factory.Handle, p, domainId, qosHandle, out _handle));
+                        }
+                    }
+                    else
+                    {
+                        ReturnCodeHelper.CheckReturn(
+                            NativeMethods.int2dds_create_participant_with_qos(factory.Handle, null, domainId, qosHandle, out _handle));
+                    }
                 }
+            }
+            finally
+            {
+                NativeMethods.int2dds_participant_qos_destroy(qosHandle);
+            }
+        }
+
+        private static IntPtr BuildNativeQos(ParticipantQos qos)
+        {
+            ReturnCodeHelper.CheckReturn(
+                NativeMethods.int2dds_participant_qos_create_default(out var handle));
+
+            try
+            {
+                if (qos.UserData != null && qos.UserData.Data != null && qos.UserData.Data.Length > 0)
+                {
+                    unsafe
+                    {
+                        fixed (byte* p = qos.UserData.Data)
+                        {
+                            ReturnCodeHelper.CheckReturn(
+                                NativeMethods.int2dds_participant_qos_set_user_data(
+                                    handle, p, (UIntPtr)qos.UserData.Data.Length));
+                        }
+                    }
+                }
+
+                if (qos.Property != null)
+                {
+                    foreach (var entry in qos.Property.Entries)
+                    {
+                        var nameBytes = Encoding.UTF8.GetBytes(entry.Name + '\0');
+                        var valueBytes = Encoding.UTF8.GetBytes(entry.Value + '\0');
+                        unsafe
+                        {
+                            fixed (byte* n = nameBytes)
+                            fixed (byte* v = valueBytes)
+                            {
+                                ReturnCodeHelper.CheckReturn(
+                                    NativeMethods.int2dds_participant_qos_add_property(
+                                        handle, n, v, entry.Propagate));
+                            }
+                        }
+                    }
+                }
+
+                return handle;
+            }
+            catch
+            {
+                NativeMethods.int2dds_participant_qos_destroy(handle);
+                throw;
             }
         }
 

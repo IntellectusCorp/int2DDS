@@ -1,4 +1,5 @@
 use crate::common::instance_handle::InstanceHandle;
+use crate::rtps::common::entity_kind::EntityKind;
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::types::DomainId;
 use crate::rtps::entities::entity::Entity;
@@ -7,11 +8,12 @@ use crate::rtps::logic::message_processor::participant_message_processor::Partic
 use crate::rtps::logic::spdp_logic::SpdpLogic;
 use crate::rtps::messages::message_receiver::MessageReceiver;
 use crate::rtps::transport::socket::MAX_EVENTS;
+use crate::rtps::transport::tokens::ListenerToken;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 use crate::serialize::pl_cdr::InlineQosParameters;
 use log::{debug, error, info, warn};
-use mio::{Events, Interest, Poll, Token};
-use std::sync::Arc;
+use mio::{Events, Interest, Poll, Waker};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 pub(crate) struct DiscoveryMulticastListeningTask {
@@ -19,6 +21,7 @@ pub(crate) struct DiscoveryMulticastListeningTask {
     domain_id: DomainId,
     discovery_multicast_listener: Option<UdpListener>,
     spdp_logic: Arc<Option<SpdpLogic>>,
+    shutdown_waker: Arc<OnceLock<Arc<Waker>>>,
 }
 
 impl DiscoveryMulticastListeningTask {
@@ -29,7 +32,17 @@ impl DiscoveryMulticastListeningTask {
         let guid_prefix = { participant.guid().prefix() };
         let domain_id = { participant.domain_id() };
         let (spdp_logic, _, _) = participant.get_logics();
-        Self { guid_prefix, domain_id, discovery_multicast_listener, spdp_logic }
+        Self {
+            guid_prefix,
+            domain_id,
+            discovery_multicast_listener,
+            spdp_logic,
+            shutdown_waker: Arc::new(OnceLock::new()),
+        }
+    }
+
+    pub(crate) fn set_shutdown_waker(&mut self, handle: Arc<OnceLock<Arc<Waker>>>) {
+        self.shutdown_waker = handle;
     }
 
     pub(crate) fn multicast_listening(&mut self) -> std::io::Result<()> {
@@ -37,14 +50,17 @@ impl DiscoveryMulticastListeningTask {
         let mut poll = Poll::new().unwrap();
         let mut events = Events::with_capacity(MAX_EVENTS);
 
+        let waker = Arc::new(Waker::new(poll.registry(), ListenerToken::Shutdown.to_mio())?);
+        let _ = self.shutdown_waker.set(waker);
+
         let listener: &mut UdpListener = match &mut self.discovery_multicast_listener {
             Some(listener) => listener,
             None => {
                 return Err(std::io::Error::other("discovery multicast listener task is not set"));
             }
         };
-        let discovery_multicast_token =
-            Token(listener.socket().local_addr().unwrap().port() as usize);
+        let port = listener.socket().local_addr().unwrap().port();
+        let discovery_multicast_token = ListenerToken::Udp(port).to_mio();
         poll.registry().register(
             listener.socket(),
             discovery_multicast_token,
@@ -114,6 +130,19 @@ impl DiscoveryMulticastListeningTask {
 
                         match participant_proxy_data {
                             Some((participant_proxy_data, inline_qos_params)) => {
+                                if participant_proxy_data
+                                    .participant_guid()
+                                    .entity_id()
+                                    .entity_kind()
+                                    != EntityKind::BUILT_IN_PARTICIPANT
+                                {
+                                    debug!(
+                                        "Received RTPS message with non-participant entity ID: {:?}. Ignoring.",
+                                        participant_proxy_data.participant_guid()
+                                    );
+                                    continue;
+                                }
+
                                 let spdp_logic = self
                                     .spdp_logic
                                     .as_ref()
@@ -168,12 +197,13 @@ mod tests {
     use crate::rtps::entities::participant::Participant;
     use crate::rtps::task::discovery_traffic::discovery_multicast_listening_task::DiscoveryMulticastListeningTask;
     use crate::rtps::transport::socket::Socket;
+    use crate::rtps::transport::TransportConfig;
 
     #[test]
     #[ignore]
     fn test_discovery_multicast_receive() {
         let domain_id = 10;
-        let mut socket = Socket::new(domain_id); //domain_id 0
+        let mut socket = Socket::new(domain_id, TransportConfig::default()); //domain_id 0
         socket.create_socket();
         let participant =
             Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ips()));

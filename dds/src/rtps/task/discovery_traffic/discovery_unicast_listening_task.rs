@@ -9,11 +9,12 @@ use crate::rtps::logic::sedp_logic::SedpLogic;
 use crate::rtps::messages::message_receiver::MessageReceiver;
 use crate::rtps::transport::socket::MAX_EVENTS;
 use crate::rtps::transport::tcp::tcp_listener::TcpListener;
+use crate::rtps::transport::tokens::ListenerToken;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 use log::{debug, error, info, warn};
-use mio::{Events, Interest, Poll, Token};
+use mio::{Events, Interest, Poll, Waker};
 use std::net::SocketAddr;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
 pub(crate) struct DiscoveryUnicastListeningTask {
@@ -22,6 +23,7 @@ pub(crate) struct DiscoveryUnicastListeningTask {
     tcp_listener: Option<TcpListener>,
     participant: Weak<Participant>,
     sedp_logic: Arc<Option<SedpLogic>>,
+    shutdown_waker: Arc<OnceLock<Arc<Waker>>>,
 }
 
 impl DiscoveryUnicastListeningTask {
@@ -38,7 +40,12 @@ impl DiscoveryUnicastListeningTask {
             tcp_listener,
             participant: Arc::downgrade(&participant),
             sedp_logic,
+            shutdown_waker: Arc::new(OnceLock::new()),
         }
+    }
+
+    pub(crate) fn set_shutdown_waker(&mut self, handle: Arc<OnceLock<Arc<Waker>>>) {
+        self.shutdown_waker = handle;
     }
 
     pub(crate) fn unicast_listening(&mut self) -> std::io::Result<()> {
@@ -46,14 +53,15 @@ impl DiscoveryUnicastListeningTask {
         let mut poll = Poll::new().unwrap();
         let mut events = Events::with_capacity(MAX_EVENTS);
 
+        let waker = Arc::new(Waker::new(poll.registry(), ListenerToken::Shutdown.to_mio())?);
+        let _ = self.shutdown_waker.set(waker);
+
         // Register UDP listener if present
         let udp_token = if let Some(listener) = &mut self.discovery_unicast_listener {
-            let token = Token(listener.socket().local_addr().unwrap().port() as usize);
+            let port = listener.socket().local_addr().unwrap().port();
+            let token = ListenerToken::Udp(port).to_mio();
             poll.registry().register(listener.socket(), token, Interest::READABLE)?;
-            info!(
-                "[DiscoveryUnicast] UDP listener registered on port {}",
-                listener.socket().local_addr().unwrap().port()
-            );
+            info!("[DiscoveryUnicast] UDP listener registered on port {}", port);
             Some(token)
         } else {
             None
@@ -63,8 +71,7 @@ impl DiscoveryUnicastListeningTask {
         let tcp_token = if let Some(tcp_listener) = &mut self.tcp_listener {
             let port = tcp_listener.port();
             if let Some(socket) = tcp_listener.socket_mut() {
-                // Use a different token range for TCP (add 10000 to avoid collision)
-                let token = Token(port as usize + 10000);
+                let token = ListenerToken::Tcp(port).to_mio();
                 poll.registry().register(socket, token, Interest::READABLE)?;
                 info!("[DiscoveryUnicast] TCP listener registered on port {}", port);
                 Some(token)
@@ -260,12 +267,13 @@ mod tests {
     use crate::rtps::entities::participant::Participant;
     use crate::rtps::task::discovery_traffic::discovery_unicast_listening_task::DiscoveryUnicastListeningTask;
     use crate::rtps::transport::socket::Socket;
+    use crate::rtps::transport::TransportConfig;
 
     #[test]
     #[ignore]
     fn test_discovery_unicast_receive() {
         let domain_id: DomainId = 17;
-        let mut socket = Socket::new(domain_id); //domain_id 0
+        let mut socket = Socket::new(domain_id, TransportConfig::default()); //domain_id 0
         socket.create_socket();
         let participant =
             Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ips()));

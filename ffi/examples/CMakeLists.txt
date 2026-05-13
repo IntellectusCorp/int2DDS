@@ -36,6 +36,13 @@ target_link_libraries(hello_world_publisher ${INT2DDS_FFI_LIB})
 add_executable(hello_world_subscriber hello_world/hello_world_subscriber.c)
 target_link_libraries(hello_world_subscriber ${INT2DDS_FFI_LIB})
 
+# Hello World with multicast TTL Examples (PropertyQosPolicy)
+add_executable(hello_world_with_ttl_publisher hello_world/hello_world_with_ttl_publisher.c)
+target_link_libraries(hello_world_with_ttl_publisher ${INT2DDS_FFI_LIB})
+
+add_executable(hello_world_with_ttl_subscriber hello_world/hello_world_with_ttl_subscriber.c)
+target_link_libraries(hello_world_with_ttl_subscriber ${INT2DDS_FFI_LIB})
+
 # WaitSet Examples
 add_executable(waitset_publisher hello_world/waitset_publisher.c)
 target_link_libraries(waitset_publisher ${INT2DDS_FFI_LIB})

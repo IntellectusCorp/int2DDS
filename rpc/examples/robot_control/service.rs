@@ -6,7 +6,6 @@
 mod types;
 
 use std::sync::Mutex;
-use std::time::Duration;
 
 use int2dds::dcps::domain::domain_participant_factory::DomainParticipantFactory;
 use int2dds::dcps::domain::qos::DomainParticipantQos;
@@ -94,5 +93,5 @@ fn main() {
     println!("[Service] Press Ctrl+C to stop.");
 
     // Run the server and process incoming requests
-    server.run_for(Duration::from_secs(60)).unwrap();
+    server.run().unwrap();
 }
