@@ -230,6 +230,22 @@ impl Locator {
         self.kind == LOCATOR_KIND_SHM
     }
 
+    /// Short human-readable name of this locator's kind (e.g. "UDP", "TCP",
+    /// "SHM", "UNKNOWN"). Used by transport plugins when reporting an
+    /// "unsupported locator kind" error so RTPS-layer logs can format the
+    /// rejected kind dynamically without per-kind branching.
+    pub fn kind_name(&self) -> &'static str {
+        if self.is_shm() {
+            "SHM"
+        } else if self.is_tcp() {
+            "TCP"
+        } else if self.is_udp() {
+            "UDP"
+        } else {
+            "UNKNOWN"
+        }
+    }
+
     /// Check if this locator is valid (not INVALID or RESERVED)
     ///
     /// # Returns

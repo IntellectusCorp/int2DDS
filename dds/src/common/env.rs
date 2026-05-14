@@ -43,11 +43,7 @@ pub fn init_from_env() {
     // - INT2DDS_UDP_SOCKET_BUFFER: Set UDP socket buffer size (bytes) - Default: OS default
     // - INT2DDS_SHM_BUFFER_SIZE: Set shared memory buffer size (bytes) - Default: 1048576 (1MB)
 
-    // - INT2DDS_TCP_CONNECT_TIMEOUT: Set TCP connection timeout (milliseconds) - Default: 5000
-    // - INT2DDS_TCP_WRITE_TIMEOUT: Set TCP write timeout (milliseconds) - Default: 10000
-    // - INT2DDS_TCP_NODELAY: Enable TCP Nodelay (disable Nagle algorithm) (true, false) - Default: true
-
-    // - INT2DDS_INITIAL_PEERS: Set initial peers for SPDP unicast discovery (comma-separated, e.g., "192.168.1.10:7410,192.168.1.11:7410") - Default: none
+    // - INT2DDS_INITIAL_PEERS: Set initial peers for SPDP unicast discovery (comma-separated, e.g., "192.168.1.10:7400,192.168.1.11:7400") - Default: none
 
     // - INT2DDS_MULTICAST_TTL: Set IPv4 multicast TTL fallback (0-255) when no PropertyQosPolicy entry is present - Default: OS default (1)
 
@@ -55,6 +51,22 @@ pub fn init_from_env() {
     // - INT2DDS_META_PORT: Pinned metatraffic unicast port; ignores domain_id when set, applies +2*pid offset for multi-participant.
     // - INT2DDS_USER_PORT: Pinned user-traffic unicast port; ignores domain_id when set, applies +2*pid offset for multi-participant.
 
+    // - INT2DDS_TCP_PORT: set TCP listening port - Default: 7400 + 250 * domain_id
+    // - INT2DDS_TCP_PUBLIC_ADDR: Set public address for WAN/NAT traversal (e.g., "203.0.113.5:7400") - Default: none (LAN mode)
+    // - INT2DDS_TCP_CONNECT_TIMEOUT: Set TCP connection timeout (milliseconds) - Default: 5000
+    // - INT2DDS_TCP_WRITE_TIMEOUT: Set TCP write timeout (milliseconds) - Default: 10000
+    // - INT2DDS_TCP_NODELAY: Enable TCP Nodelay (disable Nagle algorithm) (true, false) - Default: true
+    // - INT2DDS_TCP_BIND_TIMEOUT: Set TCP BIND handshake response timeout (milliseconds) - Default: 5000
+    // - INT2DDS_TCP_KEEPALIVE_INTERVAL: Set TCP control keepalive send interval (milliseconds) - Default: 10000
+    // - INT2DDS_TCP_KEEPALIVE_TIMEOUT: Set TCP keepalive response timeout (milliseconds) - Default: 5000
+    // - INT2DDS_TCP_KEEPALIVE_MAX_MISSES: Set TCP keepalive max consecutive misses before disconnect - Default: 3
+    // - INT2DDS_TCP_INCOMING_IDLE_TIMEOUT: Set idle timeout for incoming TCP connections (milliseconds) - Default: 60000
+    // - INT2DDS_TCP_SO_RCVBUF: Force SO_RCVBUF on every TCP socket (bytes). Used by tests to induce backpressure - Default: OS-managed
+    // - INT2DDS_TCP_SO_SNDBUF: Force SO_SNDBUF on every TCP socket (bytes). Used by tests to induce backpressure - Default: OS-managed
+    // - INT2DDS_TCP_TLS_ENABLED: Enable TLS for TCP connections (true, false) - Default: false (not yet implemented)
+    // - INT2DDS_TCP_TLS_CERT_PATH: TLS certificate file path - Default: none (not yet implemented)
+    // - INT2DDS_TCP_TLS_KEY_PATH: TLS private key file path - Default: none (not yet implemented)
+    // - INT2DDS_TCP_TLS_CA_PATH: TLS CA certificate file path - Default: none (not yet implemented)
     apply_cli_args_to_env();
 
     setting_log();
@@ -199,32 +211,10 @@ fn apply_cli_args_to_env() {
                     .value_hint(ValueHint::Other),
             )
             .arg(
-                Arg::new("int2dds_tcp_connect_timeout")
-                    .long("int2dds-tcp-connect-timeout")
-                    .value_name("MILLISECONDS")
-                    .help("TCP connection timeout (milliseconds)")
-                    .num_args(1)
-                    .value_hint(ValueHint::Other),
-            )
-            .arg(
-                Arg::new("int2dds_tcp_write_timeout")
-                    .long("int2dds-tcp-write-timeout")
-                    .value_name("MILLISECONDS")
-                    .help("TCP write timeout (milliseconds)")
-                    .num_args(1)
-                    .value_hint(ValueHint::Other),
-            )
-            .arg(
-                Arg::new("int2dds_tcp_nodelay")
-                    .long("int2dds-tcp-nodelay")
-                    .help("Enable TCP Nodelay (disable Nagle algorithm)")
-                    .action(ArgAction::SetTrue),
-            )
-            .arg(
                 Arg::new("int2dds_initial_peers")
                     .long("int2dds-initial-peers")
                     .value_name("PEERS")
-                    .help("Initial peers for SPDP unicast discovery (comma-separated, e.g., \"192.168.1.10:7410,192.168.1.11:7410\")")
+                    .help("Initial peers for SPDP unicast discovery (comma-separated, e.g., \"192.168.1.10:7400,192.168.1.11:7400\")")
                     .num_args(1)
                     .value_hint(ValueHint::Other),
             )
@@ -257,6 +247,92 @@ fn apply_cli_args_to_env() {
                     .long("int2dds-multicast-ttl")
                     .value_name("TTL")
                     .help("IPv4 multicast TTL fallback (0-255) used when PropertyQosPolicy has no multicast_ttl entry")
+                    .num_args(1)
+                    .value_hint(ValueHint::Other),
+            )
+                 .arg(
+                Arg::new("int2dds_tcp_port")
+                    .long("int2dds-tcp-port")
+                    .value_name("PORT")
+                    .help("TCP listening port")
+                    .num_args(1)
+                    .value_hint(ValueHint::Other),
+            )
+            .arg(
+                Arg::new("int2dds_tcp_connect_timeout")
+                    .long("int2dds-tcp-connect-timeout")
+                    .value_name("MILLISECONDS")
+                    .help("TCP connection timeout (milliseconds)")
+                    .num_args(1)
+                    .value_hint(ValueHint::Other),
+            )
+            .arg(
+                Arg::new("int2dds_tcp_write_timeout")
+                    .long("int2dds-tcp-write-timeout")
+                    .value_name("MILLISECONDS")
+                    .help("TCP write timeout (milliseconds)")
+                    .num_args(1)
+                    .value_hint(ValueHint::Other),
+            )
+            .arg(
+                Arg::new("int2dds_tcp_nodelay")
+                    .long("int2dds-tcp-nodelay")
+                    .help("Enable TCP Nodelay (disable Nagle algorithm)")
+                    .action(ArgAction::SetTrue),
+            )
+            .arg(
+                Arg::new("int2dds_tcp_bind_timeout")
+                    .long("int2dds-tcp-bind-timeout")
+                    .value_name("MILLISECONDS")
+                    .help("TCP BIND handshake response timeout (milliseconds)")
+                    .num_args(1)
+                    .value_hint(ValueHint::Other),
+            )
+            .arg(
+                Arg::new("int2dds_tcp_keepalive_interval")
+                    .long("int2dds-tcp-keepalive-interval")
+                    .value_name("MILLISECONDS")
+                    .help("TCP control keepalive send interval (milliseconds)")
+                    .num_args(1)
+                    .value_hint(ValueHint::Other),
+            )
+            .arg(
+                Arg::new("int2dds_tcp_keepalive_timeout")
+                    .long("int2dds-tcp-keepalive-timeout")
+                    .value_name("MILLISECONDS")
+                    .help("TCP keepalive response timeout (milliseconds)")
+                    .num_args(1)
+                    .value_hint(ValueHint::Other),
+            )
+            .arg(
+                Arg::new("int2dds_tcp_keepalive_max_misses")
+                    .long("int2dds-tcp-keepalive-max-misses")
+                    .value_name("COUNT")
+                    .help("TCP keepalive max consecutive misses before disconnect")
+                    .num_args(1)
+                    .value_hint(ValueHint::Other),
+            )
+            .arg(
+                Arg::new("int2dds_tcp_incoming_idle_timeout")
+                    .long("int2dds-tcp-incoming-idle-timeout")
+                    .value_name("MILLISECONDS")
+                    .help("Idle timeout for incoming TCP connections (milliseconds)")
+                    .num_args(1)
+                    .value_hint(ValueHint::Other),
+            )
+            .arg(
+                Arg::new("int2dds_tcp_so_rcvbuf")
+                    .long("int2dds-tcp-so-rcvbuf")
+                    .value_name("BYTES")
+                    .help("Force SO_RCVBUF on every TCP socket (bytes). Used by tests to induce backpressure")
+                    .num_args(1)
+                    .value_hint(ValueHint::Other),
+            )
+            .arg(
+                Arg::new("int2dds_tcp_so_sndbuf")
+                    .long("int2dds-tcp-so-sndbuf")
+                    .value_name("BYTES")
+                    .help("Force SO_SNDBUF on every TCP socket (bytes). Used by tests to induce backpressure")
                     .num_args(1)
                     .value_hint(ValueHint::Other),
             )
@@ -338,6 +414,10 @@ fn apply_cli_args_to_env() {
         log::info!("Environment variable set: INT2DDS_SHM_BUFFER_SIZE = {}", v);
         unsafe { std::env::set_var("INT2DDS_SHM_BUFFER_SIZE", v) };
     }
+    if let Some(v) = matches.get_one::<String>("int2dds_tcp_port") {
+        log::info!("Environment variable set: INT2DDS_TCP_PORT = {}", v);
+        unsafe { std::env::set_var("INT2DDS_TCP_PORT", v) };
+    }
     if let Some(v) = matches.get_one::<String>("int2dds_tcp_connect_timeout") {
         log::info!("Environment variable set: INT2DDS_TCP_CONNECT_TIMEOUT = {}", v);
         unsafe { std::env::set_var("INT2DDS_TCP_CONNECT_TIMEOUT", v) };
@@ -349,6 +429,34 @@ fn apply_cli_args_to_env() {
     if matches.get_flag("int2dds_tcp_nodelay") {
         log::info!("Environment variable set: INT2DDS_TCP_NODELAY = true");
         unsafe { std::env::set_var("INT2DDS_TCP_NODELAY", "true") };
+    }
+    if let Some(v) = matches.get_one::<String>("int2dds_tcp_bind_timeout") {
+        log::info!("Environment variable set: INT2DDS_TCP_BIND_TIMEOUT = {}", v);
+        unsafe { std::env::set_var("INT2DDS_TCP_BIND_TIMEOUT", v) };
+    }
+    if let Some(v) = matches.get_one::<String>("int2dds_tcp_keepalive_interval") {
+        log::info!("Environment variable set: INT2DDS_TCP_KEEPALIVE_INTERVAL = {}", v);
+        unsafe { std::env::set_var("INT2DDS_TCP_KEEPALIVE_INTERVAL", v) };
+    }
+    if let Some(v) = matches.get_one::<String>("int2dds_tcp_keepalive_timeout") {
+        log::info!("Environment variable set: INT2DDS_TCP_KEEPALIVE_TIMEOUT = {}", v);
+        unsafe { std::env::set_var("INT2DDS_TCP_KEEPALIVE_TIMEOUT", v) };
+    }
+    if let Some(v) = matches.get_one::<String>("int2dds_tcp_keepalive_max_misses") {
+        log::info!("Environment variable set: INT2DDS_TCP_KEEPALIVE_MAX_MISSES = {}", v);
+        unsafe { std::env::set_var("INT2DDS_TCP_KEEPALIVE_MAX_MISSES", v) };
+    }
+    if let Some(v) = matches.get_one::<String>("int2dds_tcp_incoming_idle_timeout") {
+        log::info!("Environment variable set: INT2DDS_TCP_INCOMING_IDLE_TIMEOUT = {}", v);
+        unsafe { std::env::set_var("INT2DDS_TCP_INCOMING_IDLE_TIMEOUT", v) };
+    }
+    if let Some(v) = matches.get_one::<String>("int2dds_tcp_so_rcvbuf") {
+        log::info!("Environment variable set: INT2DDS_TCP_SO_RCVBUF = {}", v);
+        unsafe { std::env::set_var("INT2DDS_TCP_SO_RCVBUF", v) };
+    }
+    if let Some(v) = matches.get_one::<String>("int2dds_tcp_so_sndbuf") {
+        log::info!("Environment variable set: INT2DDS_TCP_SO_SNDBUF = {}", v);
+        unsafe { std::env::set_var("INT2DDS_TCP_SO_SNDBUF", v) };
     }
     if let Some(v) = matches.get_one::<String>("int2dds_initial_peers") {
         log::info!("Environment variable set: INT2DDS_INITIAL_PEERS = {}", v);
@@ -626,40 +734,44 @@ pub fn set_discovery_mode(mode: DiscoveryMode) {
 /// When set, SPDP messages are sent via unicast to these peers instead of multicast.
 ///
 /// Reads INT2DDS_INITIAL_PEERS environment variable.
-/// Format: "ip:port,ip:port,..." (comma-separated socket addresses, port must be metatraffic unicast port)
+/// Format: "ip:port,ip:port,..." or "ip,ip,..." (port-less entries default to TCP physical port 7400)
 ///
 /// # Examples
 ///
 /// ```no_run
 /// use int2dds::common::env::get_initial_peers;
 ///
-/// // Set environment variable:
+/// // With explicit ports:
 /// // INT2DDS_INITIAL_PEERS="192.168.1.10:7400,192.168.1.11:7400"
+///
+/// // Without ports (defaults to 7400):
+/// // INT2DDS_INITIAL_PEERS="192.168.1.10,192.168.1.11"
 ///
 /// let peers = get_initial_peers();
 /// for peer in peers {
 ///     println!("Initial peer: {}", peer);
 /// }
 /// ```
-pub fn get_initial_peers() -> Vec<std::net::SocketAddr> {
-    std::env::var("INT2DDS_INITIAL_PEERS")
-        .ok()
-        .map(|peers_str| {
-            peers_str
-                .split(',')
-                .filter_map(|s| {
-                    let trimmed = s.trim();
-                    match trimmed.parse::<std::net::SocketAddr>() {
-                        Ok(addr) => Some(addr),
-                        Err(e) => {
-                            log::warn!("Failed to parse initial peer '{}': {}", trimmed, e);
-                            None
-                        }
-                    }
-                })
-                .collect()
+
+/// Parse a comma-separated initial peers string into `SocketAddr`s.
+pub fn parse_initial_peers(peers_str: &str) -> Vec<std::net::SocketAddr> {
+    peers_str
+        .split(',')
+        .filter_map(|s| {
+            let trimmed = s.trim();
+            match trimmed.parse::<std::net::SocketAddr>() {
+                Ok(addr) => Some(addr),
+                Err(e) => {
+                    log::warn!("Failed to parse initial peer '{}': {}", trimmed, e);
+                    None
+                }
+            }
         })
-        .unwrap_or_default()
+        .collect()
+}
+
+pub fn get_initial_peers() -> Vec<std::net::SocketAddr> {
+    std::env::var("INT2DDS_INITIAL_PEERS").ok().map(|s| parse_initial_peers(&s)).unwrap_or_default()
 }
 
 /// Set initial peers via environment variable
@@ -672,6 +784,179 @@ pub fn set_initial_peers(peers: &[std::net::SocketAddr]) {
 
     log::info!("Environment variable set: INT2DDS_INITIAL_PEERS = {}", peers_str);
     unsafe { std::env::set_var("INT2DDS_INITIAL_PEERS", peers_str) };
+}
+
+/// Get the TCP BIND handshake timeout in milliseconds
+/// Default: 5000ms
+pub fn get_tcp_bind_timeout_ms() -> u64 {
+    std::env::var("INT2DDS_TCP_BIND_TIMEOUT").ok().and_then(|v| v.parse().ok()).unwrap_or(5000)
+}
+
+/// Set the TCP BIND handshake timeout via environment variable
+pub fn set_tcp_bind_timeout(timeout_ms: u64) {
+    log::info!("Environment variable set: INT2DDS_TCP_BIND_TIMEOUT = {}", timeout_ms);
+    unsafe { std::env::set_var("INT2DDS_TCP_BIND_TIMEOUT", timeout_ms.to_string()) };
+}
+
+/// Get the TCP keepalive send interval in milliseconds
+/// Default: 30000ms (30 seconds)
+pub fn get_tcp_keepalive_interval_ms() -> u64 {
+    std::env::var("INT2DDS_TCP_KEEPALIVE_INTERVAL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10000)
+}
+
+/// Set the TCP keepalive send interval via environment variable
+pub fn set_tcp_keepalive_interval(interval_ms: u64) {
+    log::info!("Environment variable set: INT2DDS_TCP_KEEPALIVE_INTERVAL = {}", interval_ms);
+    unsafe { std::env::set_var("INT2DDS_TCP_KEEPALIVE_INTERVAL", interval_ms.to_string()) };
+}
+
+/// Get the TCP keepalive response timeout in milliseconds
+/// Default: 10000ms (10 seconds)
+pub fn get_tcp_keepalive_timeout_ms() -> u64 {
+    std::env::var("INT2DDS_TCP_KEEPALIVE_TIMEOUT").ok().and_then(|v| v.parse().ok()).unwrap_or(5000)
+}
+
+/// Set the TCP keepalive response timeout via environment variable
+pub fn set_tcp_keepalive_timeout(timeout_ms: u64) {
+    log::info!("Environment variable set: INT2DDS_TCP_KEEPALIVE_TIMEOUT = {}", timeout_ms);
+    unsafe { std::env::set_var("INT2DDS_TCP_KEEPALIVE_TIMEOUT", timeout_ms.to_string()) };
+}
+
+/// Get the TCP keepalive max consecutive misses before disconnecting
+/// Default: 3
+pub fn get_tcp_keepalive_max_misses() -> u32 {
+    std::env::var("INT2DDS_TCP_KEEPALIVE_MAX_MISSES").ok().and_then(|v| v.parse().ok()).unwrap_or(3)
+}
+
+/// Set the TCP keepalive max misses via environment variable
+pub fn set_tcp_keepalive_max_misses(max_misses: u32) {
+    log::info!("Environment variable set: INT2DDS_TCP_KEEPALIVE_MAX_MISSES = {}", max_misses);
+    unsafe { std::env::set_var("INT2DDS_TCP_KEEPALIVE_MAX_MISSES", max_misses.to_string()) };
+}
+
+/// Get the idle timeout for incoming TCP connections in milliseconds
+/// Default: 10000ms (10 seconds)
+pub fn get_tcp_incoming_idle_timeout_ms() -> u64 {
+    std::env::var("INT2DDS_TCP_INCOMING_IDLE_TIMEOUT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60_000)
+}
+
+/// Set the idle timeout for incoming TCP connections via environment variable
+pub fn set_tcp_incoming_idle_timeout(timeout_ms: u64) {
+    log::info!("Environment variable set: INT2DDS_TCP_INCOMING_IDLE_TIMEOUT = {}", timeout_ms);
+    unsafe { std::env::set_var("INT2DDS_TCP_INCOMING_IDLE_TIMEOUT", timeout_ms.to_string()) };
+}
+
+/// Get the TCP write timeout in milliseconds
+/// Default: 10000ms (10 seconds)
+pub fn get_tcp_write_timeout_ms() -> u64 {
+    std::env::var("INT2DDS_TCP_WRITE_TIMEOUT").ok().and_then(|v| v.parse().ok()).unwrap_or(10_000)
+}
+
+/// Get the TCP_NODELAY flag (true = disable Nagle, false = enable Nagle)
+/// Default: true
+pub fn get_tcp_nodelay() -> bool {
+    std::env::var("INT2DDS_TCP_NODELAY").ok().and_then(|v| v.parse().ok()).unwrap_or(true)
+}
+
+/// Get the optional SO_RCVBUF override (bytes) for every TCP socket.
+/// Used by tests to induce backpressure deterministically.
+/// Default: None (OS-managed)
+pub fn get_tcp_so_rcvbuf() -> Option<usize> {
+    std::env::var("INT2DDS_TCP_SO_RCVBUF").ok().and_then(|v| v.parse().ok())
+}
+
+/// Set the optional SO_RCVBUF override via environment variable
+pub fn set_tcp_so_rcvbuf(bytes: usize) {
+    log::info!("Environment variable set: INT2DDS_TCP_SO_RCVBUF = {}", bytes);
+    unsafe { std::env::set_var("INT2DDS_TCP_SO_RCVBUF", bytes.to_string()) };
+}
+
+/// Get the optional SO_SNDBUF override (bytes) for every TCP socket.
+/// Used by tests to induce backpressure deterministically.
+/// Default: None (OS-managed)
+pub fn get_tcp_so_sndbuf() -> Option<usize> {
+    std::env::var("INT2DDS_TCP_SO_SNDBUF").ok().and_then(|v| v.parse().ok())
+}
+
+/// Set the optional SO_SNDBUF override via environment variable
+pub fn set_tcp_so_sndbuf(bytes: usize) {
+    log::info!("Environment variable set: INT2DDS_TCP_SO_SNDBUF = {}", bytes);
+    unsafe { std::env::set_var("INT2DDS_TCP_SO_SNDBUF", bytes.to_string()) };
+}
+
+/// Get the TCP public address for WAN/NAT traversal.
+/// When set, SPDP locators advertise this address instead of the local working IP.
+///
+/// Format: "ip:port" (e.g., "203.0.113.5:7400")
+/// Default: None (LAN mode, use working IP)
+pub fn get_tcp_public_addr() -> Option<std::net::SocketAddr> {
+    std::env::var("INT2DDS_TCP_PUBLIC_ADDR").ok().and_then(|v| {
+        match v.trim().parse::<std::net::SocketAddr>() {
+            Ok(addr) => Some(addr),
+            Err(e) => {
+                log::warn!("Failed to parse INT2DDS_TCP_PUBLIC_ADDR '{}': {}", v, e);
+                None
+            }
+        }
+    })
+}
+
+/// Set the TCP public address via environment variable
+pub fn set_tcp_public_addr(addr: &std::net::SocketAddr) {
+    log::info!("Environment variable set: INT2DDS_TCP_PUBLIC_ADDR = {}", addr);
+    unsafe { std::env::set_var("INT2DDS_TCP_PUBLIC_ADDR", addr.to_string()) };
+}
+
+/// Get the custom TCP physical port.
+/// When set, overrides the default port calculation (7400 + 250 * domain_id).
+///
+/// Environment variable: INT2DDS_TCP_PORT
+/// Default: None (use calculated port)
+pub fn get_tcp_port() -> Option<u16> {
+    std::env::var("INT2DDS_TCP_PORT").ok().and_then(|v| v.parse::<u16>().ok())
+}
+
+/// Set the TCP physical port via environment variable.
+pub fn set_tcp_port(port: u16) {
+    log::info!("Environment variable set: INT2DDS_TCP_PORT = {}", port);
+    unsafe { std::env::set_var("INT2DDS_TCP_PORT", port.to_string()) };
+}
+
+/// Check if TLS is enabled for TCP connections.
+/// Default: false (not yet implemented)
+pub fn is_tcp_tls_enabled() -> bool {
+    let enabled = std::env::var("INT2DDS_TCP_TLS_ENABLED")
+        .ok()
+        .and_then(|v| v.parse::<bool>().ok())
+        .unwrap_or(false);
+
+    if enabled {
+        log::warn!(
+            "INT2DDS_TCP_TLS_ENABLED=true but TLS is not yet implemented. Running plain TCP."
+        );
+    }
+    enabled
+}
+
+/// Get the TLS certificate file path (stub, not yet implemented)
+pub fn get_tcp_tls_cert_path() -> Option<String> {
+    std::env::var("INT2DDS_TCP_TLS_CERT_PATH").ok()
+}
+
+/// Get the TLS private key file path (stub, not yet implemented)
+pub fn get_tcp_tls_key_path() -> Option<String> {
+    std::env::var("INT2DDS_TCP_TLS_KEY_PATH").ok()
+}
+
+/// Get the TLS CA certificate file path (stub, not yet implemented)
+pub fn get_tcp_tls_ca_path() -> Option<String> {
+    std::env::var("INT2DDS_TCP_TLS_CA_PATH").ok()
 }
 
 /// Read the IPv4 multicast TTL override from `INT2DDS_MULTICAST_TTL`.
