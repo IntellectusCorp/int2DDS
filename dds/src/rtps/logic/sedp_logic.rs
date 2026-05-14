@@ -1385,9 +1385,8 @@ impl SedpLogic {
                     match buffer {
                         Ok(buffer) => {
                             for locator in reader_proxy.unicast_locator_list() {
-                                // SEDP heartbeat is a UDP-only path (matches
-                                // develop's `if locator.kind() == 1` filter).
-                                if !locator.is_udp() {
+                                // SEDP heartbeat is a UDP/TCP-only path
+                                if !locator.is_udp() && !locator.is_tcp() {
                                     continue;
                                 }
                                 match self
