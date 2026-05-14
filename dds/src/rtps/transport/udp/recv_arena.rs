@@ -60,7 +60,7 @@ impl RecvArena {
     // count is 1 (no outstanding Bytes), this rewinds the cursor in place; when
     // it is >1, a fresh chunk is allocated.
     fn ensure_space(&mut self) {
-        self.current.reserve(self.chunk_size);
+        self.current.reserve(self.max_packet);
     }
 }
 
