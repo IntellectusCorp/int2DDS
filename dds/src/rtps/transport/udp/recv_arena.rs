@@ -45,10 +45,9 @@ impl RecvArena {
         // Roll back any previous reservation so slots can't stack up.
         self.release_unused_slot();
 
-        // If the remaining capacity is too small for another packet, start a new chunk.
-        if self.current.capacity() - self.current.len() < self.max_packet {
-            self.current = BytesMut::with_capacity(self.chunk_size);
-        }
+        // Reclaim in place every iteration: BytesMut::reserve rewinds the
+        // cursor to the chunk start when all frozen slices were dropped.
+        self.current.reserve(self.chunk_size);
 
         // Mark the new slot as reserved and zero-fill it. The zeroing is needed to
         // prevent uninitialized memory from being exposed if the caller commits a shorter packet.
@@ -165,5 +164,63 @@ mod tests {
             arena.commit_received_packet(4)
         };
         assert_eq!(&b[..], &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn rewinds_in_place_when_all_slices_dropped() {
+        let mut arena = RecvArena::new(4096, 1500);
+        let origin = arena.current.as_ptr();
+
+        // Two commits whose Bytes are dropped at the end of the block,
+        // returning the chunk's Arc strong count to 1.
+        {
+            let s = arena.reserve_packet_slot();
+            s[0] = 0xaa;
+            let _ = arena.commit_received_packet(1500);
+            let s = arena.reserve_packet_slot();
+            s[0] = 0xbb;
+            let _ = arena.commit_received_packet(1500);
+        }
+
+        // Next reservation must rewind to the chunk origin instead of
+        // allocating a fresh chunk.
+        let _ = arena.reserve_packet_slot();
+        assert_eq!(arena.current.as_ptr(), origin);
+    }
+
+    #[test]
+    fn rewinds_every_iteration_when_idle() {
+        let mut arena = RecvArena::new(4096, 1500);
+        let origin = arena.current.as_ptr();
+
+        // Each committed Bytes is dropped before the next reserve, so every
+        // iteration's reservation must come back to the same origin.
+        for _ in 0..10 {
+            let s = arena.reserve_packet_slot();
+            s[0] = 0xcc;
+            let _ = arena.commit_received_packet(1500);
+        }
+
+        let _ = arena.reserve_packet_slot();
+        assert_eq!(arena.current.as_ptr(), origin);
+    }
+
+    #[test]
+    fn allocates_new_chunk_when_outstanding_slices_block_reclaim() {
+        let chunk_size = 1024 * 1024;
+        let max_packet = 64 * 1024;
+        let mut arena = RecvArena::new(chunk_size, max_packet);
+        let origin = arena.current.as_ptr();
+
+        // Keep the committed Bytes alive so strong_count > 1 blocks reclaim.
+        let _b1 = {
+            let s = arena.reserve_packet_slot();
+            s[0] = 0xaa;
+            arena.commit_received_packet(max_packet)
+        };
+
+        // Next reserve requests chunk_size; reclaim fails, fresh chunk alloc.
+        let _ = arena.reserve_packet_slot();
+        assert_ne!(arena.current.as_ptr(), origin);
     }
 }
