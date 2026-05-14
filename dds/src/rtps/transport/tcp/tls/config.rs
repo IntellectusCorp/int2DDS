@@ -71,8 +71,10 @@ impl TlsConfig {
         let ca_file = require_property(property, keys::CA_FILE)?.into();
         let cert_file = require_property(property, keys::CERT_FILE)?.into();
         let key_file = require_property(property, keys::KEY_FILE)?.into();
-        let server_name = property.find_property(keys::SERVER_NAME).unwrap_or("localhost").to_string();
-        let verify_peer = property.find_property(keys::VERIFY_PEER).map(|v| v == "true").unwrap_or(false);
+        let server_name =
+            property.find_property(keys::SERVER_NAME).unwrap_or("localhost").to_string();
+        let verify_peer =
+            property.find_property(keys::VERIFY_PEER).map(|v| v == "true").unwrap_or(false);
 
         Ok(Some(Self { ca_file, cert_file, key_file, server_name, verify_peer }))
     }
@@ -146,6 +148,10 @@ impl TlsConfig {
             builder.with_no_client_auth().with_single_cert(cert_chain, key).map_err(rustls_to_io)?
         };
         Ok(Arc::new(cfg))
+    }
+
+    pub fn server_name(&self) -> &str {
+        self.server_name.as_str()
     }
 }
 

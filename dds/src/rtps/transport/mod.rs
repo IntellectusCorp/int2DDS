@@ -37,6 +37,7 @@ pub(crate) mod port_manager;
 pub(crate) mod shm;
 pub(crate) mod socket;
 pub(crate) mod tcp;
+pub(crate) mod tcp_async;
 pub(crate) mod tokens;
 pub(crate) mod transport_config;
 pub(crate) mod udp;
@@ -55,6 +56,7 @@ pub enum TransportType {
     UDP,
     /// TCP transport
     TCP,
+    TCPAsync,
     /// Hybrid transport (both UDP and TCP simultaneously)
     Hybrid,
     /// Shared Memory transport
@@ -66,6 +68,7 @@ impl std::fmt::Display for TransportType {
         match self {
             TransportType::UDP => write!(f, "udp"),
             TransportType::TCP => write!(f, "tcp"),
+            TransportType::TCPAsync => write!(f, "tcp_async"),
             TransportType::Hybrid => write!(f, "hybrid"),
             TransportType::SHM => write!(f, "shm"),
         }
@@ -79,6 +82,7 @@ impl std::str::FromStr for TransportType {
         match s.to_lowercase().as_str() {
             "udp" => Ok(TransportType::UDP),
             "tcp" => Ok(TransportType::TCP),
+            "tcp_async" => Ok(TransportType::TCPAsync),
             "hybrid" => Ok(TransportType::Hybrid),
             "shm" => Ok(TransportType::SHM),
             _ => Err(format!(
