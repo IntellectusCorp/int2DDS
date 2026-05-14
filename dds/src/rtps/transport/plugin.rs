@@ -200,6 +200,18 @@ impl TransportPluginFactory {
                 )?;
                 Ok(Box::new(plugin))
             }
+            TransportType::TCPAsync => {
+                use crate::rtps::transport::tcp_async::tcp_transport_plugin::TcpAsyncTransportPlugin;
+                let plugin = TcpAsyncTransportPlugin::new_with_tls(
+                    domain_id,
+                    participant_id,
+                    bind_ip,
+                    working_ips,
+                    guid_prefix,
+                    tls_config,
+                )?;
+                Ok(Box::new(plugin))
+            }
             TransportType::Hybrid => {
                 use crate::rtps::transport::hybrid_transport_plugin::HybridTransportPlugin;
                 let plugin = HybridTransportPlugin::new(
