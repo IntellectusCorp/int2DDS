@@ -3,9 +3,9 @@
 //! One `BytesMut` chunk backs many incoming datagrams. Each packet is handed
 //! out as a zero-copy `Bytes` slice of that chunk. When every slice derived
 //! from the chunk is dropped, `BytesMut::reserve` rewinds the cursor to the
-//! chunk start so subsequent packets reuse the same allocation. A single
-//! scratch buffer is zero-filled once at construction and reused as the
-//! `recv_from` destination.
+//! chunk start so subsequent packets reuse the same allocation. `recv_from`
+//! writes directly into the chunk's spare capacity; only the prefix the
+//! kernel actually filled is exposed via `set_len`.
 
 use bytes::{Bytes, BytesMut};
 use std::io;
@@ -24,21 +24,13 @@ pub(crate) struct RecvArena {
     current: BytesMut,
     chunk_size: usize,
     max_packet: usize,
-    // Buffer reused as the recv_from destination on every call,
-    // Pre-initialized once to make it safe to pass as &mut [u8] which requires initialized memory.
-    scratch: Box<[u8]>,
 }
 
 impl RecvArena {
     // `chunk_size` is clamped to `>= max_packet` so a single datagram always fits.
     pub(crate) fn new(chunk_size: usize, max_packet: usize) -> Self {
         let chunk_size = chunk_size.max(max_packet);
-        Self {
-            current: BytesMut::with_capacity(chunk_size),
-            chunk_size,
-            max_packet,
-            scratch: vec![0u8; max_packet].into_boxed_slice(),
-        }
+        Self { current: BytesMut::with_capacity(chunk_size), chunk_size, max_packet }
     }
 
     // Receive one datagram into the arena. Returns the zero-copy `Bytes` view
@@ -48,11 +40,38 @@ impl RecvArena {
         &mut self,
         sock: &mio::net::UdpSocket,
     ) -> io::Result<(Bytes, SocketAddr)> {
-        let (nbytes, sender) = sock.recv_from(&mut self.scratch[..])?;
+        // Make sure the chunk has at least one datagram's worth of spare ahead.
+        self.ensure_space();
+
+        // Borrow the chunk's uninitialized tail as the recv destination.
+        let spare = self.current.spare_capacity_mut();
+
+        // Cap the recv slice at the largest datagram we accept.
+        let recv_buffer_len = spare.len().min(self.max_packet);
+
+        let recv_buffer: &mut [u8] = unsafe {
+            // SAFETY: Make &mut [u8] from &mut [MaybeUninit<u8>] without initialization
+            // 1. because we will only write to it and never read the uninit bytes.
+            // 2. and only the first `nbytes` (what the kernel actually wrote) are
+            // exposed below via set_len + split_to.
+            core::slice::from_raw_parts_mut(spare.as_mut_ptr().cast::<u8>(), recv_buffer_len)
+        };
+
+        // Kernel fills the front `nbytes` of dst with the datagram payload.
+        let (nbytes, sender) = sock.recv_from(recv_buffer)?;
+
+        // Make sure it is not larger than the max we promised to accept
         let nbytes = nbytes.min(self.max_packet);
 
-        self.ensure_space();
-        self.current.extend_from_slice(&self.scratch[..nbytes]);
+        // Move the chunk head past the new data so the next recv writes after it
+        let new_len = self.current.len() + nbytes;
+
+        unsafe {
+            // SAFETY: recv_from initialized `nbytes` bytes starting at the old len.
+            self.current.set_len(new_len);
+        }
+
+        // Hand out a zero-copy view of those bytes; the chunk head advances past them.
         Ok((self.current.split_to(nbytes).freeze(), sender))
     }
 
