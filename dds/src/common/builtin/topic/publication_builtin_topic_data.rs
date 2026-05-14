@@ -19,9 +19,10 @@ use crate::{
 };
 
 use super::builtin_topic_key::BuiltinTopicKey;
+use crate::serialize::DeserializerReader;
 
 #[derive(DdsType, Eq)]
-#[dds_type(crate_path = "crate", no_default)]
+#[dds_type(crate_path = "crate", no_default, extensibility = "Mutable")]
 pub struct PublicationBuiltinTopicData {
     #[dds(key)]
     endpoint_guid: Guid,
@@ -44,12 +45,16 @@ pub struct PublicationBuiltinTopicData {
     partition: PartitionQosPolicy,
     topic_data: TopicDataQosPolicy,
     group_data: GroupDataQosPolicy,
+    #[dds(optional)]
     key_hash: Option<[u8; 16]>,
+    #[dds(optional)]
     type_max_size_serialized: Option<u32>,
     unicast_locator_list: Vec<Locator>,
     multicast_locator_list: Vec<Locator>,
     data_representation: DataRepresentationQosPolicy,
+    #[dds(optional)]
     type_identifier: Option<TypeIdentifier>,
+    #[dds(optional)]
     type_object: Option<TypeObject>,
     writer_reliability_extension: WriterReliabilityExtensionQosPolicy,
 }

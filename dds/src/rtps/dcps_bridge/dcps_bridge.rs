@@ -48,8 +48,15 @@ use crate::{
             user_logic::UserLogic,
         },
         messages::sedp_message::SEDPMessage,
-        task::{sending_handler::SendingHandler, thread_monitor::ThreadMonitor},
-        transport::{socket::Socket, TransportConfig},
+        task::{
+            peer_monitor::PeerMonitor, sending_handler::SendingHandler,
+            thread_monitor::ThreadMonitor,
+        },
+        transport::{
+            plugin::{TransportPlugin, TransportPluginFactory},
+            socket::Socket,
+            TransportConfig,
+        },
     },
     utils::timer::timer_handler::TimerHandler,
 };
@@ -70,31 +77,97 @@ pub(crate) struct DcpsBridge {
 pub(crate) static PARTICIPANTS: RwLock<Vec<Weak<Participant>>> = RwLock::new(Vec::new());
 
 impl DcpsBridge {
-    pub(crate) fn new(domain_id: DomainId, transport_config: TransportConfig) -> Self {
-        let mut socket = Socket::new(domain_id, transport_config);
-        socket.create_socket();
+    pub(crate) fn new(
+        domain_id: DomainId,
+        property: &crate::infrastructure::qos_policy::PropertyQosPolicy,
+    ) -> Self {
+        let mut socket = Socket::new(domain_id);
+        let transport_config = TransportConfig::from_property(property);
 
-        let participant =
-            Participant::new(domain_id, socket.participant_id(), socket.working_ips());
+        let transport_type = property
+            .find_property("int2dds.transport")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(crate::rtps::transport::get_transport_type);
+
+        // Build optional TLS config from the same PropertyQosPolicy.
+        // A partial/invalid TLS config is a hard error so misconfiguration
+        // surfaces immediately instead of silently falling back to plain TCP.
+        let tls_config = match crate::rtps::transport::tcp::tls::TlsConfig::from_property(property)
+        {
+            Ok(cfg) => cfg.map(std::sync::Arc::new),
+            Err(e) => panic!("Invalid TLS configuration in DomainParticipantQos: {e}"),
+        };
+
+        let participant_id = socket.participant_id();
+
+        // For TCP/Hybrid, we need guid_prefix before creating the transport.
+        // Only guid() is used from this temporary participant, so locator
+        // lists are left empty.
+        let guid_prefix = {
+            let temp = Participant::new(
+                domain_id,
+                participant_id,
+                socket.working_ips(),
+                Vec::new(),
+                Vec::new(),
+            );
+            temp.guid().prefix()
+        };
+
+        // Create transport plugin via factory — single branching point
+        let bind_ip = socket.get_sender_bind_addr();
+        let multicast_if_ip = socket.get_sender_multicast_if_addr();
+        let working_ips: Vec<String> =
+            socket.working_ips().iter().map(|ip| ip.to_string()).collect();
+
+        let transport: Arc<dyn TransportPlugin> = Arc::from(
+            TransportPluginFactory::create(
+                transport_type,
+                domain_id,
+                participant_id,
+                bind_ip,
+                multicast_if_ip,
+                working_ips,
+                guid_prefix,
+                tls_config,
+                transport_config,
+            )
+            .expect("Failed to create transport plugin"),
+        );
+
+        socket.set_transport(transport.clone());
+
+        // Use the transport's final participant_id (may have been incremented
+        // due to unicast port conflicts with other participants on the same host).
+        let participant_id = transport.participant_id();
+
+        // Ask the transport itself which locators this participant should
+        // advertise over SPDP. The plugin encapsulates the locator kind
+        // (UDP/TCP/SHM), per-NIC expansion, port formulas, and any WAN
+        // public-address override — so Participant never needs to know.
+        let metatraffic_unicast_locators = transport.advertised_metatraffic_unicast_locators();
+        let default_unicast_locators = transport.advertised_default_unicast_locators();
+
+        let participant = Participant::new(
+            domain_id,
+            participant_id,
+            socket.working_ips(),
+            metatraffic_unicast_locators,
+            default_unicast_locators,
+        );
         let guid_prefix = participant.guid().prefix();
         let participant = Arc::new(participant);
 
-        // Initialize all logics in Participant first (SendingHandler needs them)
-        participant.init_logics(socket.sender(), socket.tcp_sender(), socket.shm_sender());
+        participant.init_logics(transport.clone(), property);
 
-        // Get logics from participant
         let (spdp_logic, sedp_logic, user_logic) = participant.get_logics();
 
-        // Initialize SendingHandler (uses logics internally)
-        let _ = SendingHandler::get_instance(
-            participant.clone(),
-            Some(socket.sender()),
-            socket.tcp_sender(),
-        );
+        let _ = SendingHandler::get_instance(participant.clone(), Some(transport));
 
         if let Ok(mut participants) = PARTICIPANTS.write() {
             participants.push(Arc::downgrade(&participant));
         }
+
         Self {
             guid_prefix,
             domain_id,
@@ -108,12 +181,13 @@ impl DcpsBridge {
     }
 
     pub(crate) fn init(&mut self) -> RtpsResult<()> {
-        // Start SEDP threads
+        let transport = self.socket.transport();
+
+        // Start SEDP threads (discovery multicast + unicast listening)
         if let Some(sedp_logic) = self.sedp_logic.as_ref() {
             sedp_logic.start_sedp(
-                self.socket.discovery_multicast_listener(),
-                self.socket.discovery_unicast_listener(),
-                self.socket.discovery_tcp_listener(),
+                transport.take_discovery_multicast_source(),
+                transport.take_discovery_unicast_source(),
             )?;
         } else {
             log::error!("sedp_logic is not set");
@@ -128,16 +202,16 @@ impl DcpsBridge {
 
         // Start User traffic threads
         if let Some(user_logic) = self.user_logic.as_ref() {
-            user_logic.start_user_traffic(
-                self.domain_id,
-                self.socket.user_traffic_multicast_listener(),
-                self.socket.user_traffic_unicast_listener(),
-                self.socket.user_traffic_tcp_listener(),
-                self.socket.shm_listener(),
-                self.socket.sender(),
-            )?;
+            user_logic
+                .start_user_traffic(self.domain_id, transport.take_user_data_unicast_source())?;
         } else {
             log::error!("user_logic is not set");
+        }
+
+        // Start dead peer monitoring (TCP keepalive-based)
+        if let Some(dead_peer_rx) = transport.take_dead_peer_receiver() {
+            let mut peer_monitor = PeerMonitor::new(&self.participant, dead_peer_rx);
+            peer_monitor.start();
         }
 
         // Initialize thread monitoring
@@ -518,9 +592,15 @@ impl DcpsBridge {
         }
         drop(timer_handler);
 
-        let sending_handler = SendingHandler::get_instance(self.participant.clone(), None, None);
+        // Wake and join the sending thread first so it releases the SendingTask mutex.
+        // Otherwise the send_termination_message_on_shutdown() below blocks waiting for it.
+        let sending_handler = SendingHandler::get_instance(self.participant.clone(), None);
         sending_handler.wake_event_loop();
+
+        // Send termination message before stopping sending thread
         let _ = self.participant.send_termination_message_on_shutdown();
+
+        // Terminate sending task thread
         let _ = sending_handler.join_sending_thread();
         drop(sending_handler);
 
@@ -749,7 +829,7 @@ mod tests {
         //initialize dcps_bridge
         let domain_id = unique_domain_id();
         let dcps_bridge =
-            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, TransportConfig::default())));
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
         match dcps_bridge.lock() {
             Ok(mut dcps_bridge) => dcps_bridge.init().unwrap(),
             Err(e) => {
@@ -765,7 +845,7 @@ mod tests {
     fn test_all_logic_cleanup() {
         let domain_id = unique_domain_id();
         let dcps_bridge =
-            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, TransportConfig::default())));
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
 
         {
             let mut bridge = dcps_bridge.lock().unwrap();
@@ -796,7 +876,7 @@ mod tests {
 
         let domain_id = unique_domain_id();
         let dcps_bridge =
-            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, TransportConfig::default())));
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
         let participant_guid: crate::rtps::common::guid::Guid;
 
         {
@@ -859,7 +939,7 @@ mod tests {
 
         //initialize dcps_bridge
         let dcps_bridge =
-            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, TransportConfig::default())));
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
 
         let _participant = dcps_bridge.lock().unwrap().get_participant().unwrap();
 
@@ -927,7 +1007,7 @@ mod tests {
 
         let dcps_bridge_test: Arc<Mutex<DcpsBridge>>;
         dcps_bridge_test =
-            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, TransportConfig::default())));
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
 
         let _participant = dcps_bridge_test.lock().unwrap().get_participant().unwrap();
 
@@ -992,7 +1072,7 @@ mod tests {
         let test_type_name = "HelloWorld";
 
         let dcps_bridge =
-            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, TransportConfig::default())));
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
 
         let mut subscription_builtin_topic_data = SubscriptionBuiltinTopicData::new(
             &DataReaderQos::default(),
@@ -1088,7 +1168,7 @@ mod tests {
         let test_type_name = "HelloWorld";
 
         let dcps_bridge =
-            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, TransportConfig::default())));
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
 
         let mut publication_builtin_topic_data = PublicationBuiltinTopicData::new(
             &DataWriterQos::default(),
@@ -1184,7 +1264,7 @@ mod tests {
 
         let dcps_bridge_test: Arc<Mutex<DcpsBridge>>;
         dcps_bridge_test =
-            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, TransportConfig::default())));
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
 
         let mut publication_builtin_topic_data = PublicationBuiltinTopicData::new(
             // &DataWriterQos::default(),
@@ -1241,7 +1321,7 @@ mod tests {
 
         let dcps_bridge_test: Arc<Mutex<DcpsBridge>>;
         dcps_bridge_test =
-            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, TransportConfig::default())));
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
 
         let mut publication_builtin_topic_data = PublicationBuiltinTopicData::new(
             &DataWriterQos {
@@ -1297,7 +1377,7 @@ mod tests {
 
         //initialize dcps_bridge
         let dcps_bridge =
-            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, TransportConfig::default())));
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
 
         let mut subscription_builtin_topic_data = SubscriptionBuiltinTopicData::new(
             &DataReaderQos {
@@ -1355,7 +1435,7 @@ mod tests {
         let test_type_name = "HelloWorld";
 
         let dcps_bridge =
-            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, TransportConfig::default())));
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
 
         let reader_qos = DataReaderQos {
             reliability: ReliabilityQosPolicy {
@@ -1427,7 +1507,7 @@ mod tests {
         let test_type_name = "HelloWorld";
 
         let dcps_bridge =
-            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, TransportConfig::default())));
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
 
         let writer_qos = DataWriterQos {
             reliability: ReliabilityQosPolicy {
@@ -1496,7 +1576,7 @@ mod tests {
         let test_type_name = "HelloWorld";
 
         let dcps_bridge =
-            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, TransportConfig::default())));
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
 
         let writer_qos = DataWriterQos {
             reliability: ReliabilityQosPolicy {
@@ -1569,7 +1649,7 @@ mod tests {
         let test_type_name = "HelloWorld";
 
         let dcps_bridge =
-            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, TransportConfig::default())));
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
 
         let writer_qos = DataWriterQos {
             reliability: ReliabilityQosPolicy {
@@ -1690,7 +1770,7 @@ mod tests {
     fn test_remove_unmatched_endpoint_from_terminated_participant() {
         let domain_id = unique_domain_id();
         let dcps_bridge =
-            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, TransportConfig::default())));
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
 
         // Create Writer
         let mut publication_builtin_topic_data = PublicationBuiltinTopicData::default();
@@ -1787,7 +1867,7 @@ mod tests {
         // Test first participant
         let domain_id = unique_domain_id();
         let dcps_bridge_1 =
-            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, TransportConfig::default())));
+            Arc::new(Mutex::new(DcpsBridge::new(domain_id as u32, &Default::default())));
 
         {
             let mut bridge_guard = dcps_bridge_1.lock().unwrap();
