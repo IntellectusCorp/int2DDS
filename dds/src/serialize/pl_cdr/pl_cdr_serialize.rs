@@ -25,7 +25,6 @@ use crate::{
             types::{Count, ProtocolVersion, VendorId},
         },
     },
-    serialize::core::{BufferSize, PooledBuffer},
 };
 
 pub struct PlCdrSerializer {
@@ -157,8 +156,7 @@ impl PlCdrSerializer {
 
     /// Serialize parameter value
     fn serialize_parameter_value(&self, value: &ParameterValue) -> Result<Vec<u8>, String> {
-        // Use buffer pool for parameter serialization (high-frequency operation)
-        let mut buffer = PooledBuffer::new(BufferSize::Small);
+        let mut buffer: Vec<u8> = Vec::with_capacity(256);
 
         match value {
             ParameterValue::ProtocolVersion(v) => {
@@ -408,8 +406,7 @@ impl PlCdrSerializer {
             }
         }
 
-        // Convert PooledBuffer to Vec<u8> for return
-        Ok(buffer.into_vec())
+        Ok(buffer)
     }
 
     /// Serialize duration
