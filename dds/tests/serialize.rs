@@ -1856,3 +1856,248 @@ fn test_member_ann_builtin_hashid() {
     let ann = member.detail.ann_builtin.expect("member ann_builtin");
     assert_eq!(ann.hash_id.as_deref(), Some("custom_hash_name"));
 }
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Mutable")]
+struct ThreeU64Mutable {
+    a: u64,
+    b: u64,
+    c: u64,
+}
+
+#[test]
+fn xcdr2_mutable_three_u64_serialize_into_round_trip() {
+    use int2dds::dcps::topic::type_support::{SerializationFormat, TypeSupport};
+
+    let value = ThreeU64Mutable {
+        a: 0xAAAA_AAAA_AAAA_AAAA,
+        b: 0xBBBB_BBBB_BBBB_BBBB,
+        c: 0xCCCC_CCCC_CCCC_CCCC,
+    };
+    let format = SerializationFormat::Xcdr {
+        extensibility_kind: ExtensibilityKind::Mutable,
+        use_delimiters: true,
+    };
+    let ts = ThreeU64Mutable::get_type_support();
+
+    let mut buf = Vec::new();
+    ts.serialize_into(&value, &mut buf, Some(&format)).unwrap();
+
+    let got = ts.deserialize(&buf, Some(&format)).unwrap();
+    let got = got.downcast_ref::<ThreeU64Mutable>().unwrap();
+    assert_eq!(*got, value);
+}
+
+#[test]
+fn xcdr2_mutable_three_u64_serialize_into_matches_serialize() {
+    use int2dds::dcps::topic::type_support::{SerializationFormat, TypeSupport};
+
+    let value = ThreeU64Mutable { a: 1, b: 2, c: 3 };
+    let format = SerializationFormat::Xcdr {
+        extensibility_kind: ExtensibilityKind::Mutable,
+        use_delimiters: true,
+    };
+    let ts = ThreeU64Mutable::get_type_support();
+
+    let serialized = ts.serialize(&value, Some(&format)).unwrap();
+    let mut buf = Vec::new();
+    ts.serialize_into(&value, &mut buf, Some(&format)).unwrap();
+
+    assert_eq!(&buf[..], &serialized[..]);
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Mutable")]
+struct U64Mutable {
+    a: u64,
+    b: u64,
+}
+
+#[test]
+fn xcdr1_mutable_encap_header_is_pl_cdr_le() {
+    use int2dds::dcps::topic::type_support::{SerializationFormat, TypeSupport};
+
+    let value = U64Mutable { a: 1, b: 2 };
+    let ts = U64Mutable::get_type_support();
+    let bytes = ts.serialize(&value, Some(&SerializationFormat::Cdr)).unwrap();
+    assert_eq!(&bytes[0..2], &[0x00, 0x03], "XCDR1 + Mutable must emit PL_CDR LE encap (0x0003)");
+}
+
+#[test]
+fn xcdr1_mutable_serialize_round_trip() {
+    use int2dds::dcps::topic::type_support::{SerializationFormat, TypeSupport};
+
+    let value = U64Mutable { a: 0xAAAA, b: 0xBBBB };
+    let ts = U64Mutable::get_type_support();
+    let bytes = ts.serialize(&value, Some(&SerializationFormat::Cdr)).unwrap();
+    let got = ts.deserialize(&bytes, Some(&SerializationFormat::Cdr)).unwrap();
+    let got = got.downcast_ref::<U64Mutable>().unwrap();
+    assert_eq!(got.a, value.a);
+    assert_eq!(got.b, value.b);
+}
+
+#[test]
+fn xcdr1_mutable_serialize_into_round_trip() {
+    use int2dds::dcps::topic::type_support::{SerializationFormat, TypeSupport};
+
+    let value = U64Mutable { a: 0xCCCC, b: 0xDDDD };
+    let ts = U64Mutable::get_type_support();
+    let mut buf = Vec::new();
+    ts.serialize_into(&value, &mut buf, Some(&SerializationFormat::Cdr)).unwrap();
+    assert_eq!(
+        &buf[0..2],
+        &[0x00, 0x03],
+        "XCDR1 + Mutable serialize_into must emit PL_CDR LE encap"
+    );
+    let got = ts.deserialize(&buf, Some(&SerializationFormat::Cdr)).unwrap();
+    let got = got.downcast_ref::<U64Mutable>().unwrap();
+    assert_eq!(got.a, value.a);
+    assert_eq!(got.b, value.b);
+}
+
+#[test]
+fn xcdr1_mutable_serialize_into_matches_serialize() {
+    use int2dds::dcps::topic::type_support::{SerializationFormat, TypeSupport};
+
+    let value = U64Mutable { a: 7, b: 8 };
+    let ts = U64Mutable::get_type_support();
+    let serialized = ts.serialize(&value, Some(&SerializationFormat::Cdr)).unwrap();
+    let mut buf = Vec::new();
+    ts.serialize_into(&value, &mut buf, Some(&SerializationFormat::Cdr)).unwrap();
+    assert_eq!(&buf[..], &serialized[..]);
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final")]
+struct MatrixFinal {
+    a: u32,
+    b: u32,
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+struct MatrixAppendable {
+    a: u32,
+    b: u32,
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Mutable")]
+struct MatrixMutable {
+    a: u32,
+    b: u32,
+}
+
+fn xcdr1_format() -> int2dds::dcps::topic::type_support::SerializationFormat {
+    int2dds::dcps::topic::type_support::SerializationFormat::Cdr
+}
+
+fn xcdr2_format(ext: ExtensibilityKind) -> int2dds::dcps::topic::type_support::SerializationFormat {
+    int2dds::dcps::topic::type_support::SerializationFormat::Xcdr {
+        extensibility_kind: ext,
+        use_delimiters: !matches!(ext, ExtensibilityKind::Final),
+    }
+}
+
+macro_rules! matrix_case {
+    ($name:ident, $ty:ident, $field_setter:expr, $field_getter:expr, $format:expr, $encap:expr) => {
+        #[test]
+        fn $name() {
+            use int2dds::dcps::topic::type_support::TypeSupport;
+
+            let value: $ty = $field_setter;
+            let ts = <$ty>::get_type_support();
+            let fmt = $format;
+
+            // serialize → bytes
+            let serialized = ts.serialize(&value, Some(&fmt)).unwrap();
+            assert_eq!(
+                &serialized[0..2],
+                &$encap,
+                concat!(stringify!($name), ": serialize() encap mismatch"),
+            );
+            let got_a = ts.deserialize(&serialized, Some(&fmt)).unwrap();
+            let got_a = got_a.downcast_ref::<$ty>().unwrap();
+            $field_getter(got_a, &value);
+
+            // serialize_into → buffer
+            let mut buf = Vec::new();
+            ts.serialize_into(&value, &mut buf, Some(&fmt)).unwrap();
+            assert_eq!(
+                &buf[0..2],
+                &$encap,
+                concat!(stringify!($name), ": serialize_into() encap mismatch"),
+            );
+            assert_eq!(
+                &buf[..],
+                &serialized[..],
+                concat!(stringify!($name), ": serialize_into() differs from serialize()"),
+            );
+            let got_b = ts.deserialize(&buf, Some(&fmt)).unwrap();
+            let got_b = got_b.downcast_ref::<$ty>().unwrap();
+            $field_getter(got_b, &value);
+        }
+    };
+}
+
+fn matrix_check(got: &MatrixFinal, want: &MatrixFinal) {
+    assert_eq!(got.a, want.a);
+    assert_eq!(got.b, want.b);
+}
+fn matrix_check_a(got: &MatrixAppendable, want: &MatrixAppendable) {
+    assert_eq!(got.a, want.a);
+    assert_eq!(got.b, want.b);
+}
+fn matrix_check_m(got: &MatrixMutable, want: &MatrixMutable) {
+    assert_eq!(got.a, want.a);
+    assert_eq!(got.b, want.b);
+}
+
+matrix_case!(
+    matrix_xcdr1_final,
+    MatrixFinal,
+    MatrixFinal { a: 0x1111_1111, b: 0x2222_2222 },
+    matrix_check,
+    xcdr1_format(),
+    [0x00, 0x01]
+);
+matrix_case!(
+    matrix_xcdr1_appendable,
+    MatrixAppendable,
+    MatrixAppendable { a: 0x3333_3333, b: 0x4444_4444 },
+    matrix_check_a,
+    xcdr1_format(),
+    [0x00, 0x01]
+);
+matrix_case!(
+    matrix_xcdr1_mutable,
+    MatrixMutable,
+    MatrixMutable { a: 0x5555_5555, b: 0x6666_6666 },
+    matrix_check_m,
+    xcdr1_format(),
+    [0x00, 0x03]
+);
+matrix_case!(
+    matrix_xcdr2_final,
+    MatrixFinal,
+    MatrixFinal { a: 0x7777_7777, b: 0x8888_8888 },
+    matrix_check,
+    xcdr2_format(ExtensibilityKind::Final),
+    [0x00, 0x07]
+);
+matrix_case!(
+    matrix_xcdr2_appendable,
+    MatrixAppendable,
+    MatrixAppendable { a: 0x9999_9999, b: 0xAAAA_AAAA },
+    matrix_check_a,
+    xcdr2_format(ExtensibilityKind::Appendable),
+    [0x00, 0x09]
+);
+matrix_case!(
+    matrix_xcdr2_mutable,
+    MatrixMutable,
+    MatrixMutable { a: 0xBBBB_BBBB, b: 0xCCCC_CCCC },
+    matrix_check_m,
+    xcdr2_format(ExtensibilityKind::Mutable),
+    [0x00, 0x0B]
+);
