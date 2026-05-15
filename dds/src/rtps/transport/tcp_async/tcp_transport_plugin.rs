@@ -27,9 +27,7 @@ use log::{debug, info};
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::locator::Locator;
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
-use crate::rtps::transport::plugin::{
-    IncomingMessage, MessageSource, SendTarget, TransportPlugin,
-};
+use crate::rtps::transport::plugin::{IncomingMessage, MessageSource, SendTarget, TransportPlugin};
 use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::tcp::tls::TlsConfig;
 use crate::rtps::transport::tcp_async::tcp_mux_listener::TcpMuxListener;
@@ -37,7 +35,7 @@ use crate::rtps::transport::tcp_async::tcp_sender::TcpSender;
 
 /// Channel buffer size — matches the sync plugin so backpressure semantics
 /// are identical for the DDS layer.
-const CHANNEL_BUFFER_SIZE: usize = 256;
+const CHANNEL_BUFFER_SIZE: usize = 512;
 
 /// Default keepalive interval / inbound idle timeout. Both are overridable
 /// via the existing `INT2DDS_TCP_*` env vars (when those helpers exist).
@@ -248,10 +246,7 @@ impl TransportPlugin for TcpAsyncTransportPlugin {
             }
             SendTarget::SEDPDiscovery(locator) => {
                 if !locator.is_tcp() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        locator.kind_name(),
-                    ));
+                    return Err(io::Error::new(io::ErrorKind::Unsupported, locator.kind_name()));
                 }
                 let addr = SocketAddr::new(
                     std::net::IpAddr::V4(locator.to_ip_v4_addr()),
@@ -261,10 +256,7 @@ impl TransportPlugin for TcpAsyncTransportPlugin {
             }
             SendTarget::UserData(locator) => {
                 if !locator.is_tcp() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        locator.kind_name(),
-                    ));
+                    return Err(io::Error::new(io::ErrorKind::Unsupported, locator.kind_name()));
                 }
                 let addr = SocketAddr::new(
                     std::net::IpAddr::V4(locator.to_ip_v4_addr()),
@@ -367,9 +359,7 @@ fn worker_thread_count() -> usize {
             }
         }
     }
-    let cpus = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(2);
+    let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
     cpus.min(4).max(1)
 }
 
