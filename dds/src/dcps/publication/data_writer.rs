@@ -843,8 +843,6 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         self.is_enabled()?;
         Self::validate_timestamp(&timestamp)?;
 
-        let data: Vec<u8> = serialized_data.to_vec();
-
         let key_info = match serialized_key {
             Some(key_bytes) if !key_bytes.is_empty() => {
                 let key_data: SerializedData = Arc::from(key_bytes);
@@ -857,7 +855,12 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         let (instance_handle, _) =
             self.resolve_write_instance(key_info, InstanceHandle::NIL, timestamp)?;
 
-        self.add_change(ChangeKind::Alive, data, instance_handle, Some(timestamp.into()))?;
+        self.add_serialized_change_pooled(
+            ChangeKind::Alive,
+            serialized_data,
+            instance_handle,
+            Some(timestamp.into()),
+        )?;
 
         self.update_liveliness()?;
 
@@ -1192,6 +1195,33 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                 self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
             datawriter_cache.add_change_with_cleanup(Arc::new(change))?;
         }
+        Ok(seq_num)
+    }
+
+    fn add_serialized_change_pooled(
+        &self,
+        kind: ChangeKind,
+        serialized_data: &[u8],
+        handle: InstanceHandle,
+        source_timestamp: Option<RtpsTime>,
+    ) -> DdsResult<SequenceNumber> {
+        let rtps_writer = self.get_rtps_writer()?;
+
+        let mut change = {
+            let mut datawriter_cache =
+                self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            datawriter_cache.acquire_change()
+        };
+
+        let seq_num = rtps_writer.allocate_sequence_number();
+        change.reset(kind, rtps_writer.guid(), handle, seq_num, source_timestamp);
+        change.data_mut().extend_from_slice(serialized_data);
+        change.apply_fragmentation(rtps_writer.data_max_size_serialized() as usize);
+
+        let mut datawriter_cache =
+            self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        datawriter_cache.add_change_with_cleanup(Arc::new(change))?;
+
         Ok(seq_num)
     }
 
