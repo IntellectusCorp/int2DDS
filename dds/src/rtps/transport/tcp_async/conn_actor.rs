@@ -23,7 +23,7 @@ use crate::rtps::transport::tcp_async::{
 
 /// Inbox capacity per connection. Tunes backpressure: a full inbox makes
 /// `try_send` return `Full`, letting callers drop or queue rather than block.
-pub(crate) const WRITER_INBOX_CAPACITY: usize = 64;
+pub(crate) const WRITER_INBOX_CAPACITY: usize = 512;
 
 /// Spawn the reader/writer task pair for one connection.
 ///
