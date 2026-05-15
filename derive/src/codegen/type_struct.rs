@@ -7,13 +7,11 @@ use crate::codegen::utils::{
     SerializationMethod,
 };
 use crate::codegen::{
-    generate_additional_derives, generate_field_deserialization,
-    generate_field_deserialization_xcdr, generate_field_deserialization_xcdr_per_field_dheader,
-    generate_field_serialization, generate_field_serialization_xcdr,
-    generate_key_field_serialization, generate_key_field_serialization_xcdr, generate_key_methods,
-    generate_multi_key_methods, generate_non_key_field_serialization,
-    generate_non_key_field_serialization_xcdr, parse_field_attributes, KeyFieldInfo,
-    MultiKeyFieldInfo,
+    generate_additional_derives, generate_field_deserialization_xcdr,
+    generate_field_deserialization_xcdr_per_field_dheader, generate_key_field_serialization,
+    generate_key_field_serialization_xcdr, generate_key_methods, generate_multi_key_methods,
+    generate_non_key_field_serialization, generate_non_key_field_serialization_xcdr,
+    parse_field_attributes, KeyFieldInfo, MultiKeyFieldInfo,
 };
 use crate::codegen::{quote_extensibility_tokens, DdsTypeConfig, ExtensibilityKind};
 
@@ -118,10 +116,7 @@ pub fn derive_struct_impl(
         }
     };
 
-    // Generate CDR and XCDR field information
-    let field_serialization = generate_field_serialization(fields, crate_path);
-    let field_deserialization = generate_field_deserialization(fields, name, crate_path);
-    let xcdr_field_serialization = generate_field_serialization_xcdr(fields, crate_path);
+    // Generate XCDR field deserialization (CDR / XCDR serialize paths go through the trait impls).
     let xcdr_field_deserialization = generate_field_deserialization_xcdr(fields, name, crate_path);
 
     // Generate per-field DHEADER deserialization for dust-dds compatibility
@@ -141,15 +136,10 @@ pub fn derive_struct_impl(
     let (serialize_key_impl, deserialize_key_impl, compute_key_impl) = if all_key_fields.is_empty()
     {
         // When there are no keys
-        generate_key_methods(None, &gc.full_type, &field_deserialization, crate_path)
+        generate_key_methods(None, &gc.full_type, crate_path)
     } else if all_key_fields.len() == 1 {
         // Single key
-        generate_key_methods(
-            Some(&all_key_fields[0]),
-            &gc.full_type,
-            &field_deserialization,
-            crate_path,
-        )
+        generate_key_methods(Some(&all_key_fields[0]), &gc.full_type, crate_path)
     } else {
         // Multiple keys
         let multi_key_info = MultiKeyFieldInfo { fields: all_key_fields };
@@ -165,9 +155,6 @@ pub fn derive_struct_impl(
         name,
         has_key,
         has_non_key_fields,
-        &field_serialization,
-        &field_deserialization,
-        &xcdr_field_serialization,
         &xcdr_field_deserialization,
         &xcdr_field_deserialization_per_field_dheader,
         &key_field_serialization,
@@ -291,9 +278,8 @@ fn find_all_key_fields(
 /// Generate serialize method implementation (unified: handles both None and Some format)
 fn quote_serialize_impl(
     _name: &syn::Ident,
-    cdr_field_serialization: &proc_macro2::TokenStream,
-    _xcdr_field_serialization: &proc_macro2::TokenStream,
     crate_path: &proc_macro2::TokenStream,
+    extensibility_tokens: &proc_macro2::TokenStream,
     gc: &GenCtx,
 ) -> proc_macro2::TokenStream {
     let full_type = &gc.full_type;
@@ -305,14 +291,13 @@ fn quote_serialize_impl(
                 match format {
                     #crate_path::dcps::topic::type_support::SerializationFormat::Cdr => {
                         use #crate_path::serialize::{cdr::CdrSerializer, BufferManager};
-                        use #crate_path::serialize::cdr::{PrimitiveSerialize, StringSerialize, ArraySerialize, SequenceSerialize};
+                        use #crate_path::serialize::cdr::CdrSerialize;
 
-                        let mut serializer = CdrSerializer::with_capacity(true, 64);
+                        let mut serializer = CdrSerializer::with_extensibility(true, #extensibility_tokens);
                         serializer.write_encapsulation_header()
                             .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
-
-                        #cdr_field_serialization
-
+                        CdrSerialize::serialize_cdr(typed_data, &mut serializer)
+                            .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
                         let bytes = serializer.into_bytes();
                         Ok(std::sync::Arc::from(bytes.into_boxed_slice()))
                     },
@@ -339,9 +324,8 @@ fn quote_serialize_impl(
 /// Generate serialize_into method implementation (buffer-reusing variant)
 fn quote_serialize_into_impl(
     _name: &syn::Ident,
-    cdr_field_serialization: &proc_macro2::TokenStream,
-    xcdr_field_serialization: &proc_macro2::TokenStream,
     crate_path: &proc_macro2::TokenStream,
+    extensibility_tokens: &proc_macro2::TokenStream,
     gc: &GenCtx,
 ) -> proc_macro2::TokenStream {
     let full_type = &gc.full_type;
@@ -353,51 +337,27 @@ fn quote_serialize_into_impl(
                 match format {
                     #crate_path::dcps::topic::type_support::SerializationFormat::Cdr => {
                         use #crate_path::serialize::{cdr::CdrSerializer, BufferManager};
-                        use #crate_path::serialize::cdr::{PrimitiveSerialize, StringSerialize, ArraySerialize, SequenceSerialize};
+                        use #crate_path::serialize::cdr::CdrSerialize;
 
                         let buf = std::mem::take(buffer);
-                        let mut serializer = CdrSerializer::reuse_buffer(true, buf);
+                        let mut serializer = CdrSerializer::with_extensibility_and_buffer(true, #extensibility_tokens, buf);
                         serializer.write_encapsulation_header()
                             .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
-
-                        #cdr_field_serialization
-
+                        CdrSerialize::serialize_cdr(typed_data, &mut serializer)
+                            .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
                         *buffer = serializer.into_buffer();
                         Ok(())
                     },
-                    #crate_path::dcps::topic::type_support::SerializationFormat::Xcdr { extensibility_kind, use_delimiters } => {
+                    #crate_path::dcps::topic::type_support::SerializationFormat::Xcdr { extensibility_kind, .. } => {
                         use #crate_path::serialize::{xcdr::Xcdr2Serializer, BufferManager};
-                        use #crate_path::serialize::cdr::{PrimitiveSerialize, StringSerialize, ArraySerialize, SequenceSerialize};
+                        use #crate_path::serialize::xcdr::XcdrSerialize;
 
-                        let effective_extensibility = *extensibility_kind;
-                        let use_delimiters = *use_delimiters;
                         let buf = std::mem::take(buffer);
-                        let mut serializer = Xcdr2Serializer::reuse_buffer(true, effective_extensibility, buf);
+                        let mut serializer = Xcdr2Serializer::reuse_buffer(true, *extensibility_kind, buf);
                         serializer.write_encapsulation_header()
                             .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
-
-                        let size_pos = if use_delimiters {
-                            Some(
-                                serializer
-                                    .begin_struct()
-                                    .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(
-                                        e.to_string(),
-                                    ))?,
-                            )
-                        } else {
-                            None
-                        };
-
-                        #xcdr_field_serialization
-
-                        if let Some(size_pos) = size_pos {
-                            serializer
-                                .end_struct(size_pos)
-                                .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(
-                                    e.to_string(),
-                                ))?;
-                        }
-
+                        XcdrSerialize::serialize_xcdr(typed_data, &mut serializer)
+                            .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
                         *buffer = serializer.into_buffer();
                         Ok(())
                     }
@@ -413,7 +373,6 @@ fn quote_serialize_into_impl(
 fn quote_deserialize_impl(
     _name: &syn::Ident,
     extensibility: Option<ExtensibilityKind>,
-    cdr_field_deserialization: &proc_macro2::TokenStream,
     xcdr_field_deserialization: &proc_macro2::TokenStream,
     xcdr_field_deserialization_per_field_dheader: &proc_macro2::TokenStream,
     crate_path: &proc_macro2::TokenStream,
@@ -481,13 +440,12 @@ fn quote_deserialize_impl(
             };
             match &resolved_format {
                 #crate_path::dcps::topic::type_support::SerializationFormat::Cdr => {
-                    use #crate_path::serialize::cdr::CdrDeserializer;
+                    use #crate_path::serialize::cdr::{CdrDeserialize, CdrDeserializer};
 
                     let mut deserializer = CdrDeserializer::new(data)
                         .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
-
-                    #cdr_field_deserialization
-
+                    let result = <#full_type as CdrDeserialize>::deserialize_cdr(&mut deserializer)
+                        .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
                     Ok(Box::new(result))
                 },
                 #crate_path::dcps::topic::type_support::SerializationFormat::Xcdr { use_delimiters, .. } => {
@@ -553,9 +511,6 @@ fn generate_unified_type_support_impl(
     name: &syn::Ident,
     has_key: bool,
     _has_non_key_fields: bool,
-    cdr_field_serialization: &proc_macro2::TokenStream,
-    cdr_field_deserialization: &proc_macro2::TokenStream,
-    xcdr_field_serialization: &proc_macro2::TokenStream,
     xcdr_field_deserialization: &proc_macro2::TokenStream,
     xcdr_field_deserialization_per_field_dheader: &proc_macro2::TokenStream,
     _key_field_serialization: &proc_macro2::TokenStream,
@@ -570,33 +525,21 @@ fn generate_unified_type_support_impl(
     type_name_override: Option<&str>,
     gc: &GenCtx,
 ) -> proc_macro2::TokenStream {
-    let serialize_impl = quote_serialize_impl(
-        name,
-        cdr_field_serialization,
-        xcdr_field_serialization,
+    let extensibility_tokens = quote_extensibility_tokens(
+        extensibility.unwrap_or(ExtensibilityKind::Appendable),
         crate_path,
-        gc,
     );
-    let serialize_into_impl = quote_serialize_into_impl(
-        name,
-        cdr_field_serialization,
-        xcdr_field_serialization,
-        crate_path,
-        gc,
-    );
+
+    let serialize_impl = quote_serialize_impl(name, crate_path, &extensibility_tokens, gc);
+    let serialize_into_impl =
+        quote_serialize_into_impl(name, crate_path, &extensibility_tokens, gc);
     let deserialize_impl = quote_deserialize_impl(
         name,
         extensibility,
-        cdr_field_deserialization,
         xcdr_field_deserialization,
         xcdr_field_deserialization_per_field_dheader,
         crate_path,
         gc,
-    );
-
-    let extensibility_tokens = quote_extensibility_tokens(
-        extensibility.unwrap_or(ExtensibilityKind::Appendable),
-        crate_path,
     );
 
     let impl_generics = &gc.impl_generics;
@@ -1895,12 +1838,7 @@ pub fn derive_tuple_struct_impl(
     // Generate field serialization/deserialization for tuple fields
     let field_count = fields.len();
 
-    // Generate CDR serialization
-    let cdr_field_serialization = generate_tuple_field_serialization(fields, crate_path);
-    let cdr_field_deserialization = generate_tuple_field_deserialization(fields, name, crate_path);
-
-    // Generate XCDR serialization
-    let xcdr_field_serialization = generate_tuple_field_serialization_xcdr(fields, crate_path);
+    // XCDR deserialization paths (serialize / CDR deserialize go through trait impls).
     let xcdr_field_deserialization =
         generate_tuple_field_deserialization_xcdr(fields, name, crate_path);
 
@@ -1910,7 +1848,7 @@ pub fn derive_tuple_struct_impl(
 
     // Generate key-related methods (no keys for tuple structs)
     let (serialize_key_impl, deserialize_key_impl, compute_key_impl) =
-        generate_key_methods(None, &tuple_gc.full_type, &cdr_field_deserialization, crate_path);
+        generate_key_methods(None, &tuple_gc.full_type, crate_path);
 
     // Generate field access methods
     let field_access_impl = generate_tuple_field_access_methods(field_count, name, crate_path);
@@ -1920,9 +1858,6 @@ pub fn derive_tuple_struct_impl(
         &type_support_name,
         name,
         has_key,
-        &cdr_field_serialization,
-        &cdr_field_deserialization,
-        &xcdr_field_serialization,
         &xcdr_field_deserialization,
         &xcdr_field_deserialization_per_field_dheader,
         &serialize_key_impl,
@@ -2040,74 +1975,6 @@ fn generate_tuple_xcdr_deserialize_members_impl(
             }
         }
     }
-}
-
-/// Generate tuple field serialization code for CDR
-fn generate_tuple_field_serialization(
-    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
-    crate_path: &proc_macro2::TokenStream,
-) -> proc_macro2::TokenStream {
-    let field_serializations: Vec<_> = fields
-        .iter()
-        .enumerate()
-        .map(|(idx, _field)| {
-            let idx = syn::Index::from(idx);
-            quote! {
-                #crate_path::serialize::cdr::CdrSerialize::serialize_cdr(&typed_data.#idx, &mut serializer)
-                    .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
-            }
-        })
-        .collect();
-
-    quote! { #(#field_serializations)* }
-}
-
-/// Generate tuple field deserialization code for CDR
-fn generate_tuple_field_deserialization(
-    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
-    name: &syn::Ident,
-    crate_path: &proc_macro2::TokenStream,
-) -> proc_macro2::TokenStream {
-    let field_deserializations: Vec<_> = fields
-        .iter()
-        .enumerate()
-        .map(|(idx, field)| {
-            let field_var = quote::format_ident!("field_{}", idx);
-            let field_type = &field.ty;
-            quote! {
-                let #field_var = <#field_type as #crate_path::serialize::cdr::CdrDeserialize>::deserialize_cdr(&mut deserializer)
-                    .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
-            }
-        })
-        .collect();
-
-    let field_vars: Vec<_> =
-        (0..fields.len()).map(|idx| quote::format_ident!("field_{}", idx)).collect();
-
-    quote! {
-        #(#field_deserializations)*
-        let result = #name(#(#field_vars),*);
-    }
-}
-
-/// Generate tuple field serialization code for XCDR
-fn generate_tuple_field_serialization_xcdr(
-    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
-    crate_path: &proc_macro2::TokenStream,
-) -> proc_macro2::TokenStream {
-    let field_serializations: Vec<_> = fields
-        .iter()
-        .enumerate()
-        .map(|(idx, _field)| {
-            let idx = syn::Index::from(idx);
-            quote! {
-                #crate_path::serialize::xcdr::XcdrSerialize::serialize_xcdr(&typed_data.#idx, &mut serializer)
-                    .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
-            }
-        })
-        .collect();
-
-    quote! { #(#field_serializations)* }
 }
 
 /// Generate tuple field deserialization code for XCDR
@@ -2256,9 +2123,6 @@ fn generate_tuple_type_support_impl(
     type_support_name: &syn::Ident,
     name: &syn::Ident,
     has_key: bool,
-    cdr_field_serialization: &proc_macro2::TokenStream,
-    cdr_field_deserialization: &proc_macro2::TokenStream,
-    xcdr_field_serialization: &proc_macro2::TokenStream,
     xcdr_field_deserialization: &proc_macro2::TokenStream,
     xcdr_field_deserialization_per_field_dheader: &proc_macro2::TokenStream,
     serialize_key_impl: &proc_macro2::TokenStream,
@@ -2277,33 +2141,21 @@ fn generate_tuple_type_support_impl(
         has_type_params: false,
     };
 
-    let serialize_impl = quote_serialize_impl(
-        name,
-        cdr_field_serialization,
-        xcdr_field_serialization,
+    let extensibility_tokens = quote_extensibility_tokens(
+        extensibility.unwrap_or(ExtensibilityKind::Appendable),
         crate_path,
-        &tuple_gc,
     );
-    let serialize_into_impl = quote_serialize_into_impl(
-        name,
-        cdr_field_serialization,
-        xcdr_field_serialization,
-        crate_path,
-        &tuple_gc,
-    );
+
+    let serialize_impl = quote_serialize_impl(name, crate_path, &extensibility_tokens, &tuple_gc);
+    let serialize_into_impl =
+        quote_serialize_into_impl(name, crate_path, &extensibility_tokens, &tuple_gc);
     let deserialize_impl = quote_deserialize_impl(
         name,
         extensibility,
-        cdr_field_deserialization,
         xcdr_field_deserialization,
         xcdr_field_deserialization_per_field_dheader,
         crate_path,
         &tuple_gc,
-    );
-
-    let extensibility_tokens = quote_extensibility_tokens(
-        extensibility.unwrap_or(ExtensibilityKind::Appendable),
-        crate_path,
     );
 
     quote! {
