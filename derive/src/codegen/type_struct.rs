@@ -843,19 +843,31 @@ fn generate_cdr_serialize_impl(
             }
             let is_optional = field_config.optional;
 
+            let method = get_serialization_method(&field.ty);
+            let primitive_vec_method = primitive_vec_serialize_method(method);
+
             if is_mutable {
                 let member_id = resolve_member_id(&field_config, &field_name.to_string(), index, autoid);
                 let must_understand = field_config.must_understand;
 
-                let inner_serialize = quote! {
-                    #crate_path::serialize::cdr::CdrSerialize::serialize_cdr(val, serializer)?;
+                let inner_serialize_val = if let Some(ser_method) = primitive_vec_method {
+                    let method_ident = syn::Ident::new(ser_method, field_name.span());
+                    quote! { serializer.#method_ident(val)?; }
+                } else {
+                    quote! { #crate_path::serialize::cdr::CdrSerialize::serialize_cdr(val, serializer)?; }
+                };
+                let inner_serialize_field = if let Some(ser_method) = primitive_vec_method {
+                    let method_ident = syn::Ident::new(ser_method, field_name.span());
+                    quote! { serializer.#method_ident(&self.#field_name)?; }
+                } else {
+                    quote! { #crate_path::serialize::cdr::CdrSerialize::serialize_cdr(&self.#field_name, serializer)?; }
                 };
 
                 if is_optional {
                     Some(quote! {
                         if let Some(ref val) = self.#field_name {
                             serializer.write_member_with_v1(#member_id as u32, #must_understand, |serializer| {
-                                #inner_serialize
+                                #inner_serialize_val
                                 Ok(())
                             })?;
                         }
@@ -863,11 +875,16 @@ fn generate_cdr_serialize_impl(
                 } else {
                     Some(quote! {
                         serializer.write_member_with_v1(#member_id as u32, #must_understand, |serializer| {
-                            #crate_path::serialize::cdr::CdrSerialize::serialize_cdr(&self.#field_name, serializer)?;
+                            #inner_serialize_field
                             Ok(())
                         })?;
                     })
                 }
+            } else if let Some(ser_method) = primitive_vec_method {
+                let method_ident = syn::Ident::new(ser_method, field_name.span());
+                Some(quote! {
+                    serializer.#method_ident(&self.#field_name)?;
+                })
             } else {
                 Some(quote! {
                     #crate_path::serialize::cdr::CdrSerialize::serialize_cdr(&self.#field_name, serializer)?;
@@ -961,9 +978,18 @@ fn generate_cdr_deserialize_impl(
                 crate_path,
                 crate::codegen::field_ops::DeserErrorKind::Serialization,
             );
-            quote! {
-                let mut #field_name = <#field_type as #crate_path::serialize::cdr::CdrDeserialize>::deserialize_cdr(deserializer)?;
-                #post_check
+            let method = get_serialization_method(&field.ty);
+            if let Some(deser_method) = primitive_vec_deserialize_method(method) {
+                let method_ident = syn::Ident::new(deser_method, field_name.span());
+                quote! {
+                    let mut #field_name = deserializer.#method_ident()?;
+                    #post_check
+                }
+            } else {
+                quote! {
+                    let mut #field_name = <#field_type as #crate_path::serialize::cdr::CdrDeserialize>::deserialize_cdr(deserializer)?;
+                    #post_check
+                }
             }
         })
         .collect();
@@ -1037,11 +1063,21 @@ fn generate_cdr_mutable_deserialize_impl(
                     }
                 })
             } else {
-                Some(quote! {
-                    #member_id => {
-                        #field_name = Some(<#field_type as #crate_path::serialize::cdr::CdrDeserialize>::deserialize_cdr(deserializer)?);
-                    }
-                })
+                let method = get_serialization_method(&field.ty);
+                if let Some(deser_method) = primitive_vec_deserialize_method(method) {
+                    let method_ident = syn::Ident::new(deser_method, field_name.span());
+                    Some(quote! {
+                        #member_id => {
+                            #field_name = Some(deserializer.#method_ident()?);
+                        }
+                    })
+                } else {
+                    Some(quote! {
+                        #member_id => {
+                            #field_name = Some(<#field_type as #crate_path::serialize::cdr::CdrDeserialize>::deserialize_cdr(deserializer)?);
+                        }
+                    })
+                }
             }
         })
         .collect();
