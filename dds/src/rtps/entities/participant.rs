@@ -10,8 +10,6 @@
 use std::{
     collections::HashMap,
     fmt::Debug,
-    net::Ipv4Addr,
-    str::FromStr,
     sync::{atomic::AtomicBool, Arc, Mutex, OnceLock},
 };
 
@@ -54,7 +52,7 @@ use crate::{
         },
         entities::{
             entity::Entity,
-            history::history_cache::HistoryCache,
+            history::{cache_change::CacheChange, history_cache::HistoryCache},
             reader::{Reader, ReaderStore, StatefulReader, StatelessReader},
             wire_buffer_pool::WireBufferPool,
             writer::{StatefulWriter, StatelessWriter, Writer, WriterStore},
@@ -63,10 +61,7 @@ use crate::{
             sedp_logic::SedpLogic, spdp_logic::SpdpLogic, user_logic::UserLogic,
             wlp_logic::WlpLogic,
         },
-        task::sending_handler::{MessageType, SendingHandler},
-        transport::{
-            get_transport_type, port_manager::PortManager, TransportSender, TransportType,
-        },
+        transport::plugin::TransportPlugin,
     },
     utils::timer::timer_handler::TimerHandler,
 };
@@ -133,10 +128,19 @@ impl Entity for Participant {
 }
 
 impl Participant {
+    /// Create a new Participant.
+    ///
+    /// `metatraffic_unicast_locators` / `default_unicast_locators` are the
+    /// locators this participant advertises to peers over SPDP. The caller
+    /// (typically `DcpsBridge`) obtains them from the owning `TransportPlugin`
+    /// so that locator generation stays encapsulated in the transport layer —
+    /// `Participant` intentionally has no knowledge of transport types.
     pub(crate) fn new(
         domain_id: DomainId,
         participant_id: ParticipantId,
         working_ips: Vec<String>,
+        metatraffic_unicast_locators: Vec<Locator>,
+        default_unicast_locators: Vec<Locator>,
     ) -> Self {
         let guid = Guid::new(Guid::generate_unique_guid_prefix(), EntityId::PARTICIPANT);
 
@@ -146,12 +150,12 @@ impl Participant {
             Participant::init_builtin_endpoints(),
         );
 
-        Self::init_locators(
-            &working_ips,
-            &mut local_participant_proxy_data,
-            domain_id,
-            participant_id,
-        );
+        for locator in metatraffic_unicast_locators {
+            local_participant_proxy_data.add_metatraffic_unicast_locator(locator);
+        }
+        for locator in default_unicast_locators {
+            local_participant_proxy_data.add_default_unicast_locator(locator);
+        }
 
         let local_participant_proxy_data = Arc::new(local_participant_proxy_data);
         let builtin_endpoints = Arc::new(BuiltinEndpoints::new(guid));
@@ -196,92 +200,6 @@ impl Participant {
         endpointset.add(BuiltinEndpointFlag::DISC_BUILTIN_ENDPOINT_TOPICS_ANNOUNCER);
         endpointset.add(BuiltinEndpointFlag::DISC_BUILTIN_ENDPOINT_TOPICS_DETECTOR);
         endpointset
-    }
-
-    /// Initialize locators for participant proxy data based on transport type.
-    /// Registers locators for all available NIC IPs.
-    fn init_locators(
-        working_ips: &Vec<String>,
-        local_participant_proxy_data: &mut SPDPDiscoveredParticipantData,
-        domain_id: DomainId,
-        participant_id: ParticipantId,
-    ) {
-        let transport_type = get_transport_type();
-        let metatraffic_port =
-            PortManager::get_discovery_traffic_unicast_port(domain_id, participant_id) as u32;
-        let user_port =
-            PortManager::get_user_traffic_unicast_port(domain_id, participant_id) as u32;
-
-        // Env override replaces every NIC IP with a single advertised IP
-        if let Some(ext_ip) = crate::common::env::get_external_address() {
-            Self::add_locators_for_ip(
-                local_participant_proxy_data,
-                transport_type,
-                ext_ip,
-                metatraffic_port,
-                user_port,
-            );
-            return;
-        }
-
-        for working_ip in working_ips {
-            let Ok(ip) = Ipv4Addr::from_str(working_ip) else {
-                continue;
-            };
-            Self::add_locators_for_ip(
-                local_participant_proxy_data,
-                transport_type,
-                ip,
-                metatraffic_port,
-                user_port,
-            );
-        }
-    }
-
-    fn add_locators_for_ip(
-        local_participant_proxy_data: &mut SPDPDiscoveredParticipantData,
-        transport_type: TransportType,
-        ip: Ipv4Addr,
-        metatraffic_port: u32,
-        user_port: u32,
-    ) {
-        match transport_type {
-            TransportType::UDP => {
-                local_participant_proxy_data.add_metatraffic_unicast_locator(
-                    Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port),
-                );
-                local_participant_proxy_data
-                    .add_default_unicast_locator(Locator::from_ip_v4_addr_and_port(&ip, user_port));
-            }
-            TransportType::TCP => {
-                local_participant_proxy_data
-                    .add_metatraffic_unicast_locator(Locator::from_tcp_v4(ip, metatraffic_port));
-                local_participant_proxy_data
-                    .add_default_unicast_locator(Locator::from_tcp_v4(ip, user_port));
-            }
-            TransportType::Hybrid => {
-                // Add both UDP and TCP locators
-                local_participant_proxy_data.add_metatraffic_unicast_locator(
-                    Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port),
-                );
-                local_participant_proxy_data
-                    .add_default_unicast_locator(Locator::from_ip_v4_addr_and_port(&ip, user_port));
-                local_participant_proxy_data
-                    .add_metatraffic_unicast_locator(Locator::from_tcp_v4(ip, metatraffic_port));
-                local_participant_proxy_data
-                    .add_default_unicast_locator(Locator::from_tcp_v4(ip, user_port));
-            }
-            TransportType::SHM => {
-                // metatraffic uses UDP. For default user-data, advertise both
-                local_participant_proxy_data.add_metatraffic_unicast_locator(
-                    Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port),
-                );
-                local_participant_proxy_data
-                    .add_default_unicast_locator(Locator::from_shm(&ip, user_port));
-                local_participant_proxy_data
-                    .add_default_unicast_locator(Locator::from_ip_v4_addr_and_port(&ip, user_port));
-            }
-        }
     }
 
     pub(crate) fn builtin_endpoints(&self) -> Arc<BuiltinEndpoints> {
@@ -562,11 +480,11 @@ impl Participant {
                     Some(RtpsTime::now()),
                 );
 
-                let handler = SendingHandler::get_instance(Arc::new(self.clone()), None, None);
-                handler.push_message_and_wake(MessageType::SedpTerminateEndpoint(
+                self.sync_send_sedp_terminate_endpoint(
                     self.sedp_builtin_publications_writer().guid(),
                     Arc::new(a_cache_change),
-                ));
+                )?;
+
                 log::info!("Remote writer with GUID {:?} terminated", writer_guid);
 
                 // Remove builtin topic data from builtin endpoint
@@ -596,7 +514,10 @@ impl Participant {
         }
 
         // Unmatch with intra participant readers
-        self.cleanup_remote_writer(Guid::new(self.guid().prefix(), entity_id), &topic_name)?;
+        self.cleanup_resources_for_remote_writer(
+            Guid::new(self.guid().prefix(), entity_id),
+            &topic_name,
+        )?;
 
         // Remove from store
         self.rtps_writer_store.remove(&topic_name, entity_id);
@@ -637,11 +558,10 @@ impl Participant {
                     Some(RtpsTime::now()),
                 );
 
-                let handler = SendingHandler::get_instance(Arc::new(self.clone()), None, None);
-                handler.push_message_and_wake(MessageType::SedpTerminateEndpoint(
+                self.sync_send_sedp_terminate_endpoint(
                     self.sedp_builtin_subscriptions_writer().guid(),
                     Arc::new(a_cache_change),
-                ));
+                )?;
 
                 // Remove builtin topic data from builtin endpoint
                 match self.builtin_endpoints.sedp_builtin_subscriptions_writer.writer_cache().lock()
@@ -673,12 +593,15 @@ impl Participant {
         self.rtps_reader_store.remove(&topic_name, entity_id);
 
         // Unmatch with intra participant writers
-        self.cleanup_remote_reader(Guid::new(self.guid().prefix(), entity_id), &topic_name)?;
+        self.cleanup_resources_for_remote_reader(
+            Guid::new(self.guid().prefix(), entity_id),
+            &topic_name,
+        )?;
 
         Ok(())
     }
 
-    pub(crate) fn cleanup_remote_reader(
+    pub(crate) fn cleanup_resources_for_remote_reader(
         &self,
         reader_guid: Guid,
         topic_name: &str,
@@ -706,7 +629,7 @@ impl Participant {
         Ok(())
     }
 
-    pub(crate) fn cleanup_remote_writer(
+    pub(crate) fn cleanup_resources_for_remote_writer(
         &self,
         writer_guid: Guid,
         topic_name: &str,
@@ -765,10 +688,10 @@ impl Participant {
     fn remove_unmatched_writer_from_reader(&self, writer_guid: Guid) -> RtpsResult<()> {
         for reader in self.rtps_reader_store.iter_all() {
             if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
-                stateful_reader.remove_matched_writer(writer_guid)?;
+                stateful_reader.remove_matched_writer_and_update_status(writer_guid)?;
             } else if let Some(stateless_reader) = reader.as_any().downcast_ref::<StatelessReader>()
             {
-                stateless_reader.remove_matched_writer(writer_guid)?;
+                stateless_reader.remove_matched_writer_and_update_status(writer_guid)?;
             }
         }
 
@@ -779,10 +702,10 @@ impl Participant {
     fn remove_unmatched_reader_from_writer(&self, reader_guid: Guid) -> RtpsResult<()> {
         for writer in self.rtps_writer_store.iter_all() {
             if let Some(stateful_writer) = writer.as_any().downcast_ref::<StatefulWriter>() {
-                stateful_writer.remove_matched_reader(reader_guid)?;
+                stateful_writer.remove_matched_reader_and_update_status(reader_guid)?;
             } else if let Some(stateless_writer) = writer.as_any().downcast_ref::<StatelessWriter>()
             {
-                stateless_writer.remove_matched_reader(reader_guid)?;
+                stateless_writer.remove_matched_reader_and_update_status(reader_guid)?;
             }
         }
 
@@ -859,24 +782,10 @@ impl Participant {
                 Some(RtpsTime::now()),
             );
 
-            let handler = SendingHandler::get_instance(Arc::new(self.clone()), None, None);
-            if let Some(sending_task) = handler.get_sending_task() {
-                // Send messages synchronously without using event loop
-                if let Ok(sending_task_guard) = sending_task.lock() {
-                    // let join_handle = sending_task_guard.create_worker_thread(MessageType::SedpTerminateEndpoint(
-                    //     self.sedp_builtin_subscriptions_writer().guid(),
-                    //     Arc::new(a_cache_change),
-                    // ));
-
-                    // if let Err(e) = join_handle.join() {
-                    //     log::error!("Failed to join sending task thread for SEDP Terminate endpoint task: {:?}", e);
-                    // }
-                    sending_task_guard.sync_sedp_terminate_endpoint_task(
-                        self.sedp_builtin_subscriptions_writer().guid(),
-                        Arc::new(a_cache_change),
-                    );
-                }
-            }
+            self.sync_send_sedp_terminate_endpoint(
+                self.sedp_builtin_subscriptions_writer().guid(),
+                Arc::new(a_cache_change),
+            )?;
         }
 
         // Send Data(w[UD]) messages
@@ -889,45 +798,44 @@ impl Participant {
                 Some(RtpsTime::now()),
             );
 
-            let handler = SendingHandler::get_instance(Arc::new(self.clone()), None, None);
-            if let Some(sending_task) = handler.get_sending_task() {
-                // Send messages synchronously without using event loop
-                if let Ok(sending_task_guard) = sending_task.lock() {
-                    // let join_handle = sending_task_guard.create_worker_thread(
-                    //     MessageType::SedpTerminateEndpoint(
-                    //         self.sedp_builtin_publications_writer().guid(),
-                    //         Arc::new(a_cache_change),
-                    //     ),
-                    // );
-
-                    // if let Err(e) = join_handle.join() {
-                    //     log::error!("Failed to join sending task thread for SEDP Terminate endpoint task: {:?}", e);
-                    // }
-
-                    sending_task_guard.sync_sedp_terminate_endpoint_task(
-                        self.sedp_builtin_publications_writer().guid(),
-                        Arc::new(a_cache_change),
-                    );
-                }
-            }
+            self.sync_send_sedp_terminate_endpoint(
+                self.sedp_builtin_publications_writer().guid(),
+                Arc::new(a_cache_change),
+            )?;
         }
 
         // Send Data(p[UD]) messages
-        let handler = SendingHandler::get_instance(Arc::new(self.clone()), None, None);
-        if let Some(sending_task) = handler.get_sending_task() {
-            // Send messages synchronously without using event loop
-            if let Ok(sending_task_guard) = sending_task.lock() {
-                // let join_handle = sending_task_guard
-                //     .create_worker_thread(MessageType::SpdpTerminateParticipant());
+        self.sync_send_spdp_terminate_participant()?;
 
-                // if let Err(e) = join_handle.join() {
-                //     log::error!("Failed to join sending task thread for SPDP Terminate participant task: {:?}", e);
-                // }
+        Ok(())
+    }
 
-                sending_task_guard.sync_spdp_terminate_participant_task()?;
-            }
+    // Send a SEDP dispose synchronously; the event-loop path can race participant teardown
+    pub fn sync_send_sedp_terminate_endpoint(
+        &self,
+        builtin_writer_guid: Guid,
+        cache_change: Arc<CacheChange>,
+    ) -> RtpsResult<()> {
+        if let Some(sedp_logic) = self.sedp_logic.get().and_then(|a| a.as_ref().as_ref()) {
+            sedp_logic.send_endpoint_termination_message(builtin_writer_guid, cache_change)?;
         }
+        Ok(())
+    }
 
+    // Send SPDP/SEDP participant dispose synchronously on shutdown
+    pub fn sync_send_spdp_terminate_participant(&self) -> RtpsResult<()> {
+        let spdp_logic = self
+            .spdp_logic
+            .get()
+            .and_then(|a| a.as_ref().as_ref())
+            .ok_or(RtpsError::new(RtpsErrorCode::NotInitialized, "SpdpLogic is not initialized"))?;
+        spdp_logic.send_participant_termination_message_multicast()?;
+        let sedp_logic = self
+            .sedp_logic
+            .get()
+            .and_then(|a| a.as_ref().as_ref())
+            .ok_or(RtpsError::new(RtpsErrorCode::NotInitialized, "SedpLogic is not initialized"))?;
+        sedp_logic.send_participant_termination_message_unicast()?;
         Ok(())
     }
 
@@ -959,26 +867,42 @@ impl Participant {
         &self,
         terminated_participant_guid_prefix: GuidPrefix,
     ) -> RtpsResult<()> {
-        for reader in self.rtps_reader_store.iter_all() {
-            if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
-                stateful_reader
-                    .remove_all_matched_writers_with_prefix(terminated_participant_guid_prefix)?;
-            } else if let Some(stateless_reader) = reader.as_any().downcast_ref::<StatelessReader>()
-            {
-                stateless_reader
-                    .remove_all_matched_writers_with_prefix(terminated_participant_guid_prefix)?;
-            }
+        // Get all writers with the same GuidPrefix
+        let writers: Vec<(String, Guid)> = self
+            .remote_publications()
+            .iter()
+            .flat_map(|e| {
+                let topic = e.key().clone();
+                e.value()
+                    .iter()
+                    .filter(|(guid, _)| guid.prefix() == terminated_participant_guid_prefix)
+                    .map(|(guid, _)| (topic.clone(), *guid))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        // Clean up resources related to each writer
+        for (topic, writer_guid) in writers {
+            self.cleanup_resources_for_remote_writer(writer_guid, &topic)?;
         }
 
-        for writer in self.rtps_writer_store.iter_all() {
-            if let Some(stateful_writer) = writer.as_any().downcast_ref::<StatefulWriter>() {
-                stateful_writer
-                    .remove_all_matched_readers_with_prefix(terminated_participant_guid_prefix)?;
-            } else if let Some(stateless_writer) = writer.as_any().downcast_ref::<StatelessWriter>()
-            {
-                stateless_writer
-                    .remove_all_matched_readers_with_prefix(terminated_participant_guid_prefix)?;
-            }
+        // Get all readers with the same GuidPrefix
+        let readers: Vec<(String, Guid)> = self
+            .remote_subscriptions()
+            .iter()
+            .flat_map(|e| {
+                let topic = e.key().clone();
+                e.value()
+                    .iter()
+                    .filter(|(guid, _)| guid.prefix() == terminated_participant_guid_prefix)
+                    .map(|(guid, _)| (topic.clone(), *guid))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        // Clean up resources related to each reader
+        for (topic, reader_guid) in readers {
+            self.cleanup_resources_for_remote_reader(reader_guid, &topic)?;
         }
 
         Ok(())
@@ -1035,43 +959,39 @@ impl Participant {
     }
 
     /// Initialize all logic instances. Must be called immediately after creating Participant.
-    /// This creates SPDP, SEDP, User, and WLP logic instances using the provided sender.
+    /// This creates SPDP, SEDP, User, and WLP logic instances using the provided transport.
+    ///
+    /// `property` is consulted first for `int2dds.initial_peers`; if absent, falls back to the
+    /// `INT2DDS_INITIAL_PEERS` environment variable.
     pub(crate) fn init_logics(
         self: &Arc<Self>,
-        sender: Arc<TransportSender>,
-        tcp_sender: Option<Arc<TransportSender>>,
-        shm_sender: Option<Arc<TransportSender>>,
+        transport: Arc<dyn TransportPlugin>,
+        property: &crate::infrastructure::qos_policy::PropertyQosPolicy,
     ) {
-        // Get initial peers from environment for TCP/Hybrid discovery
-        let initial_peers = crate::common::env::get_initial_peers();
+        // Prefer initial_peers from PropertyQosPolicy; fall back to env var.
+        let initial_peers = property
+            .find_property("int2dds.initial_peers")
+            .map(crate::common::env::parse_initial_peers)
+            .unwrap_or_else(crate::common::env::get_initial_peers);
         if !initial_peers.is_empty() {
             log::info!("Configured initial peers for SPDP: {:?}", initial_peers);
         }
 
         // Create SPDP logic
-        let spdp_logic = Arc::new(Some(SpdpLogic::new(
-            self.clone(),
-            Some(sender.clone()),
-            tcp_sender.clone(),
-            initial_peers,
-        )));
+        let spdp_logic =
+            Arc::new(Some(SpdpLogic::new(self.clone(), transport.clone(), initial_peers)));
         let _ = self.spdp_logic.set(spdp_logic);
 
         // Create SEDP logic
-        let sedp_logic = Arc::new(Some(SedpLogic::new(self.clone(), Some(sender.clone()))));
+        let sedp_logic = Arc::new(Some(SedpLogic::new(self.clone(), transport.clone())));
         let _ = self.sedp_logic.set(sedp_logic);
 
         // Create User logic
-        let user_logic = Arc::new(Some(UserLogic::new(
-            self.clone(),
-            Some(sender.clone()),
-            tcp_sender.clone(),
-            shm_sender,
-        )));
+        let user_logic = Arc::new(Some(UserLogic::new(self.clone(), transport.clone())));
         let _ = self.user_logic.set(user_logic);
 
         // Create WLP logic
-        let wlp_logic = WlpLogic::new(self.clone(), sender);
+        let wlp_logic = WlpLogic::new(self.clone(), transport);
         let _ = self.wlp_logic.set(wlp_logic);
     }
 

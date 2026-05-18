@@ -188,11 +188,14 @@ impl Reader for SPDPBuiltinParticipantReader {
         Err(RtpsError::new(RtpsErrorCode::Unknown, "UnSupported"))
     }
 
-    fn remove_matched_writer(&self, _writer_guid: Guid) -> RtpsResult<bool> {
+    fn remove_matched_writer_and_update_status(&self, _writer_guid: Guid) -> RtpsResult<bool> {
         Ok(false)
     }
 
-    fn remove_all_matched_writers_with_prefix(&self, _prefix: GuidPrefix) -> RtpsResult<usize> {
+    fn remove_all_matched_writers_with_prefix_and_update_status(
+        &self,
+        _prefix: GuidPrefix,
+    ) -> RtpsResult<usize> {
         Ok(0)
     }
 }

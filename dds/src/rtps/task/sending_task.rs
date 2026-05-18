@@ -3,16 +3,14 @@ use std::sync::{Arc, Mutex, Weak};
 use mio::{Events, Poll, Token, Waker};
 
 use crate::rtps::common::entity_id::EntityId;
-use crate::rtps::common::guid::Guid;
 use crate::rtps::common::rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult};
-use crate::rtps::entities::history::cache_change::CacheChange;
 use crate::rtps::entities::participant::Participant;
 use crate::rtps::logic::sedp_logic::SedpLogic;
 use crate::rtps::logic::spdp_logic::SpdpLogic;
 use crate::rtps::logic::user_logic::UserLogic;
 use crate::rtps::task::sending_handler::MessageType;
+use crate::rtps::transport::plugin::TransportPlugin;
 use crate::rtps::transport::socket::MAX_EVENTS;
-use crate::rtps::transport::{Transport, TransportSender};
 
 pub(crate) struct SendingTask {
     participant: Weak<Participant>,
@@ -25,36 +23,9 @@ pub(crate) struct SendingTask {
 }
 
 impl SendingTask {
-    pub(crate) fn new(
-        participant: Arc<Participant>,
-        udp_sender: Option<Arc<TransportSender>>,
-        tcp_sender: Option<Arc<TransportSender>>,
-    ) -> Self {
-        // For waker token, use UDP port if available, otherwise TCP port
-        let port = if let Some(ref sender) = udp_sender {
-            sender.port()
-        } else if let Some(ref sender) = tcp_sender {
-            sender.port()
-        } else {
-            panic!("At least one sender (UDP or TCP) must be provided");
-        };
+    pub(crate) fn new(participant: Arc<Participant>, transport: Arc<dyn TransportPlugin>) -> Self {
+        let port = transport.port();
 
-        // Get initial peers from environment for TCP/Hybrid discovery
-        let initial_peers = crate::common::env::get_initial_peers();
-        if !initial_peers.is_empty() {
-            log::info!("[SendingTask] Initial peers loaded: {:?}", initial_peers);
-        }
-
-        // let (sedp_logic, spdp_logic, user_logic) = (
-        //     SedpLogic::new(participant.clone(), udp_sender.clone()),
-        //     SpdpLogic::new(
-        //         participant.clone(),
-        //         udp_sender.clone(),
-        //         tcp_sender.clone(),
-        //         initial_peers, // Pass initial peers for TCP discovery
-        //     ),
-        //     UserLogic::new(participant.clone(), udp_sender.clone(), tcp_sender.clone()),
-        // );
         let (spdp_logic, sedp_logic, user_logic) = participant.get_logics();
         let poll = Poll::new().unwrap();
         let events = Events::with_capacity(MAX_EVENTS);
@@ -170,11 +141,10 @@ impl SendingTask {
                 Ok(())
             }
 
-            MessageType::SedpTerminateEndpoint(builtin_writer_guid, cache_change) => {
-                sedp_logic.send_endpoint_termination_message(builtin_writer_guid, cache_change)?;
-                Ok(())
-            }
-
+            // MessageType::SedpTerminateEndpoint(builtin_writer_guid, cache_change) => {
+            //     sedp_logic.send_endpoint_termination_message(builtin_writer_guid, cache_change)?;
+            //     Ok(())
+            // }
             MessageType::UserHeartbeatToAll(entity_id) => {
                 user_logic.send_heartbeat_to_anonymous_matched_readers(entity_id)?;
                 Ok(())
@@ -221,31 +191,6 @@ impl SendingTask {
                 Ok(())
             }
         }
-    }
-
-    pub(crate) fn sync_sedp_terminate_endpoint_task(
-        &self,
-        builtin_writer_guid: Guid,
-        cache_change: Arc<CacheChange>,
-    ) {
-        let sedp_logic = self.sedp_logic.as_ref().as_ref().expect("SedpLogic is not initialized");
-        let _ = sedp_logic.send_endpoint_termination_message(builtin_writer_guid, cache_change);
-    }
-
-    pub(crate) fn sync_spdp_terminate_participant_task(&self) -> RtpsResult<()> {
-        let spdp_logic = self
-            .spdp_logic
-            .as_ref()
-            .as_ref()
-            .ok_or(RtpsError::new(RtpsErrorCode::NotInitialized, "SpdpLogic is not initialized"))?;
-        spdp_logic.send_participant_termination_message_multicast()?;
-        let sedp_logic = self
-            .sedp_logic
-            .as_ref()
-            .as_ref()
-            .ok_or(RtpsError::new(RtpsErrorCode::NotInitialized, "SedpLogic is not initialized"))?;
-        sedp_logic.send_participant_termination_message_unicast()?;
-        Ok(())
     }
 
     pub(crate) fn event_loop(&mut self, queue: Arc<Mutex<Vec<MessageType>>>) -> RtpsResult<()> {

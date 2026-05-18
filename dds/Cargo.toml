@@ -49,6 +49,9 @@ futures-util = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 get_if_addrs = "0.5.3"
+rustls = "0.23"
+rustls-pemfile = "2"
+crossbeam-channel = "0.5.15"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gpio-cdev = "0.6"
@@ -100,11 +103,17 @@ path = "examples/xtypes/dynamic_type_publisher.rs"
 name = "dynamic_type_subscriber"
 path = "examples/xtypes/dynamic_type_subscriber.rs"
 
+[[example]]
+name = "route_gateway"
+path = "examples/route_gateway/route_gateway.rs"
+required-features = []
+
 [dev-dependencies]
 husky-rs = "0.1.5"
 criterion = { version = "0.7.0", features = ["html_reports"] }
 tempfile = "3"
 ctrlc = { version = "3.4", features = ["termination"] }
+rcgen = "0.13"
 
 # Faster than opt-level = 0 and still reasonably debuggable
 # opt-level = 1: keeps most of the code structure while applying light optimizations → much faster debugging

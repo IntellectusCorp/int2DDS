@@ -13,10 +13,12 @@
 //! - [`discovery_traffic`] - Discovery message handling (SPDP/SEDP)
 //! - [`sending_handler`] - Message sending coordination
 //! - [`sending_task`] - Dedicated sending thread with thread pool
+//! - [`peer_monitor`] - Dead peer detection and RTPS state cleanup
 //! - [`thread_monitor`] - Thread monitoring and diagnostics
 //! - [`user_traffic`] - User data message handling
 
 pub(crate) mod discovery_traffic;
+pub(crate) mod peer_monitor;
 pub(crate) mod sending_handler;
 pub(crate) mod sending_task;
 pub(crate) mod thread_monitor;

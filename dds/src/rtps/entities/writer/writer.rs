@@ -89,11 +89,14 @@ pub(crate) trait Writer: Entity + Endpoint + Debug + Any {
         &self,
         reader_guid: Guid,
     ) -> RtpsResult<SubscriptionBuiltinTopicData>;
-    fn remove_matched_reader(&self, reader_guid: Guid) -> RtpsResult<bool>;
+    fn remove_matched_reader_and_update_status(&self, reader_guid: Guid) -> RtpsResult<bool>;
 
     // Remove all matched readers whose GUID prefix equals `prefix` (e.g. on remote
     // participant termination). Returns the number of readers removed.
-    fn remove_all_matched_readers_with_prefix(&self, prefix: GuidPrefix) -> RtpsResult<usize>;
+    fn remove_all_matched_readers_with_prefix_and_update_status(
+        &self,
+        prefix: GuidPrefix,
+    ) -> RtpsResult<usize>;
 
     //any
     fn as_any(&self) -> &dyn Any;
