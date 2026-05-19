@@ -27,7 +27,7 @@ use crate::rtps::transport::tcp_async::{
 /// park the caller until the writer task drains a slot, or makes `try_send`
 /// return `Full` so the caller drops the frame.
 ///
-/// Overridable via `INT2DDS_TCP_OUTBOUND_INBOX_CAPACITY`. Default 512.
+/// Overridable via `INT2DDS_TCP_OUTBOUND_INBOX_CAPACITY`. Default 4
 /// Read once via `OnceLock` so the value is stable across all connections
 /// created in a single run.
 static OUTBOUND_INBOX_CAPACITY_CACHE: OnceLock<usize> = OnceLock::new();
