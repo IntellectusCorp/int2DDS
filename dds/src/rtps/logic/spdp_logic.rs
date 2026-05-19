@@ -94,10 +94,9 @@ impl SpdpLogic {
         let start = Instant::now();
         match data {
             Some(ref data) => {
-                let _ = self.transport.send(
-                    data,
-                    &SendTarget::SPDPDiscovery { initial_peers: &self.initial_peers },
-                );
+                let _ = self
+                    .transport
+                    .send(data, &SendTarget::SPDPDiscovery { initial_peers: &self.initial_peers });
                 log::debug!("SPDP announcement dispatched (peers={})", self.initial_peers.len());
             }
             None => {
