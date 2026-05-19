@@ -43,13 +43,12 @@ use crate::{
             submessages::{ack_nack::AckNack, data::Data, heartbeat::Heartbeat},
         },
         task::sending_handler::{MessageType, SendingHandler},
-        transport::{Transport, TransportSender},
+        transport::plugin::{SendTarget, TransportPlugin},
     },
     utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
 };
 use std::{
     collections::HashMap,
-    net::{SocketAddr, SocketAddrV4},
     sync::{Arc, Mutex, Weak},
     time::{Duration as StdDuration, Instant},
 };
@@ -118,7 +117,7 @@ pub(crate) fn decide_refresh_action(prev: RtpsDuration, new: RtpsDuration) -> Le
 #[derive(Clone)]
 pub(crate) struct WlpLogic {
     participant: Weak<Participant>,
-    sender: Arc<Mutex<Option<Arc<TransportSender>>>>,
+    transport: Arc<dyn TransportPlugin>,
     timer_handler: Arc<Mutex<TimerHandler>>,
     // Writers whose liveliness this participant asserts (local data writers).
     asserting_writers: Arc<DashMap<Guid, WriterInfo>>,
@@ -133,11 +132,11 @@ pub(crate) struct WlpLogic {
 
 // Constructor and lifecycle management
 impl WlpLogic {
-    pub(crate) fn new(participant: Arc<Participant>, sender: Arc<TransportSender>) -> Self {
+    pub(crate) fn new(participant: Arc<Participant>, transport: Arc<dyn TransportPlugin>) -> Self {
         let timer_handler = TimerHandler::get_instance(participant.guid().prefix());
         Self {
             participant: Arc::downgrade(&participant),
-            sender: Arc::new(Mutex::new(Some(sender))),
+            transport,
             timer_handler,
             asserting_writers: Arc::new(DashMap::new()),
             monitored_writers: Arc::new(DashMap::new()),
@@ -147,12 +146,10 @@ impl WlpLogic {
         }
     }
 
-    /// Clear the sender reference to allow Arc cleanup.
+    /// Clear the transport reference to allow Arc cleanup.
     /// This should be called during participant shutdown.
     pub(crate) fn clear_sender(&self) {
-        if let Ok(mut guard) = self.sender.lock() {
-            *guard = None;
-        }
+        // No-op: transport is shared via Arc and will be cleaned up when all references are dropped
     }
 
     /// Shutdown liveliness monitor and join its thread
@@ -573,17 +570,10 @@ impl WlpLogic {
             for remote_data in remote_datas_guard.iter() {
                 if remote_data.participant_guid().prefix() == remote_prefix {
                     for locator in remote_data.metatraffic_unicast_locator_list() {
-                        if locator.kind() == 1 {
-                            let socket_addr = SocketAddr::V4(SocketAddrV4::new(
-                                locator.to_ip_v4_addr(),
-                                locator.port() as u16,
-                            ));
-                            if let Ok(guard) = self.sender.lock() {
-                                if let Some(sender) = guard.as_ref() {
-                                    let _ = sender.send(&socket_addr, &buffer);
-                                }
-                            }
+                        if !locator.is_udp() {
+                            continue;
                         }
+                        let _ = self.transport.send(&buffer, &SendTarget::SEDPDiscovery(locator));
                     }
                     break;
                 }
@@ -641,7 +631,10 @@ impl WlpLogic {
             }
         }
         if let Err(e) = cache_guard.add_change_builtin(cache_change.clone()) {
-            log::warn!("Failed to add liveliness change to cache: {}, continuing to send heartbeat anyway", e);
+            log::warn!(
+                "Failed to add liveliness change to cache: {}, continuing to send heartbeat anyway",
+                e
+            );
             // Don't return - continue to send heartbeat even if cache add fails
         }
 
@@ -689,20 +682,13 @@ impl WlpLogic {
             }
 
             for locator in reader_proxy.unicast_locator_list() {
-                if locator.kind() == 1 {
-                    //UDPv4
-                    let socket_addr = SocketAddr::V4(SocketAddrV4::new(
-                        locator.to_ip_v4_addr(),
-                        locator.port() as u16,
-                    ));
-
-                    if let Ok(guard) = self.sender.lock() {
-                        if let Some(sender) = guard.as_ref() {
-                            if let Err(e) = sender.send(&socket_addr, &send_buffer) {
-                                log::warn!("Failed to send P2P DATA message: {:?}", e);
-                            }
-                        }
-                    }
+                if !locator.is_udp() {
+                    continue;
+                }
+                if let Err(e) =
+                    self.transport.send(&send_buffer, &SendTarget::SEDPDiscovery(&locator))
+                {
+                    log::warn!("Failed to send P2P DATA message: {:?}", e);
                 }
             }
             if let Ok(mut pool) = participant.wire_buffer_pool().lock() {
@@ -729,24 +715,16 @@ impl WlpLogic {
                 for remote_participant_data in remote_participant_datas.iter() {
                     if remote_participant_data.participant_guid().prefix() == remote_guid.prefix() {
                         for locator in remote_participant_data.metatraffic_unicast_locator_list() {
-                            if locator.kind() == 1 {
-                                // UDPv4
-                                let socket_addr = SocketAddr::V4(SocketAddrV4::new(
-                                    locator.to_ip_v4_addr(),
-                                    locator.port() as u16,
-                                ));
-                                if let Ok(guard) = self.sender.lock() {
-                                    if let Some(sender) = guard.as_ref() {
-                                        let _ = sender.send(&socket_addr, buffer);
-                                        debug!(
-                                            "[{}] WLP Logic: {} message sent to {}",
-                                            message_type, message_type, socket_addr
-                                        );
-                                        is_sent = true;
-                                    }
-                                }
+                            if !locator.is_udp() {
+                                continue;
                             }
-                            // TODO: Add UDPv6 support
+                            let _ =
+                                self.transport.send(buffer, &SendTarget::SEDPDiscovery(&locator));
+                            debug!(
+                                "[{}] WLP Logic: {} message sent to {:?}",
+                                message_type, message_type, locator
+                            );
+                            is_sent = true;
                         }
                         break;
                     }
@@ -833,7 +811,7 @@ impl WlpLogic {
                         if let Some(participant) = participant_weak.upgrade() {
                             if !participant.is_terminated() {
                                 let sending_handler =
-                                    SendingHandler::get_instance(participant, None, None);
+                                    SendingHandler::get_instance(participant, None);
                                 sending_handler.push_message_and_wake((*message).clone());
                             }
                         }
@@ -1110,11 +1088,7 @@ impl WlpLogic {
         let data = ParticipantMessageData::new(participant.guid().prefix(), kind);
 
         if !lease_duration.is_infinite() {
-            let handler = SendingHandler::get_instance(
-                participant.clone(),
-                self.sender.lock().ok().and_then(|g| g.clone()),
-                None,
-            );
+            let handler = SendingHandler::get_instance(participant.clone(), None);
 
             let send_period = lease_duration.to_std_duration() * 2 / 3;
             handler.push_message_and_wake(MessageType::P2pData(None, send_period, Arc::new(data)));
@@ -1127,11 +1101,7 @@ impl WlpLogic {
 
     pub(crate) fn stop_periodic_liveliness(&self, kind: LivelinessQosPolicyKind) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
-        let handler = SendingHandler::get_instance(
-            participant.clone(),
-            self.sender.lock().ok().and_then(|g| g.clone()),
-            None,
-        );
+        let handler = SendingHandler::get_instance(participant.clone(), None);
 
         handler.cancel_p2p_messages_by_kind(kind.into());
 
@@ -1147,11 +1117,7 @@ impl WlpLogic {
 
         let data = ParticipantMessageData::new(participant.guid().prefix(), kind);
 
-        let handler = SendingHandler::get_instance(
-            participant.clone(),
-            self.sender.lock().ok().and_then(|g| g.clone()),
-            None,
-        );
+        let handler = SendingHandler::get_instance(participant.clone(), None);
 
         // Only this kind's entry is removed; the other kind keeps running.
         handler.cancel_p2p_messages_by_kind(kind.into());
@@ -1656,24 +1622,16 @@ impl UnicastMessageProcessor for WlpLogic {
                 }
 
                 for locator in reader_proxy.unicast_locator_list() {
-                    if locator.kind() == 1 {
-                        //UDPv4
-                        let socket_addr = SocketAddr::V4(SocketAddrV4::new(
-                            locator.to_ip_v4_addr(),
-                            locator.port() as u16,
-                        ));
-
-                        if let Ok(guard) = self.sender.lock() {
-                            if let Some(sender) = guard.as_ref() {
-                                if let Err(e) = sender.send(&socket_addr, &send_buffer) {
-                                    warn!(
-                                        "[WLP] Failed to send DATA message to locator {:?}: {:?}",
-                                        socket_addr, e
-                                    );
-                                    // Even if error occurs, continue trying other locators
-                                }
-                            }
-                        }
+                    if !locator.is_udp() {
+                        continue;
+                    }
+                    if let Err(e) =
+                        self.transport.send(&send_buffer, &SendTarget::SEDPDiscovery(&locator))
+                    {
+                        warn!(
+                            "[WLP] Failed to send DATA message to locator {:?}: {:?}",
+                            locator, e
+                        );
                     }
                 }
                 if let Ok(mut pool) = participant.wire_buffer_pool().lock() {

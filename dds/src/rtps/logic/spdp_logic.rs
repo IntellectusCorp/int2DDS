@@ -23,15 +23,14 @@ use crate::rtps::{
     logic::message_processor::participant_message_processor::ParticipantMessageProcessor,
     messages::message_creator::MessageCreator,
     task::sending_handler::{MessageType, SendingHandler},
-    transport::{Transport, TransportSender, TransportType},
+    transport::plugin::{SendTarget, TransportPlugin},
 };
 use crate::utils::timer::{timer_handler::TimerHandler, timer_id::TimerId};
 
 #[derive(Clone)]
 pub(crate) struct SpdpLogic {
     participant: Weak<Participant>,
-    sender: Option<Arc<TransportSender>>,
-    tcp_sender: Option<Arc<TransportSender>>,
+    transport: Arc<dyn TransportPlugin>,
     initial_peers: Vec<std::net::SocketAddr>,
     timer_handler: Arc<Mutex<TimerHandler>>,
 }
@@ -43,18 +42,11 @@ impl ParticipantMessageProcessor for SpdpLogic {}
 impl SpdpLogic {
     pub(crate) fn new(
         participant: Arc<Participant>,
-        sender: Option<Arc<TransportSender>>,
-        tcp_sender: Option<Arc<TransportSender>>,
+        transport: Arc<dyn TransportPlugin>,
         initial_peers: Vec<std::net::SocketAddr>,
     ) -> Self {
         let timer_handler = TimerHandler::get_instance(participant.guid().prefix());
-        Self {
-            participant: Arc::downgrade(&participant),
-            sender,
-            tcp_sender,
-            initial_peers,
-            timer_handler,
-        }
+        Self { participant: Arc::downgrade(&participant), transport, initial_peers, timer_handler }
     }
 
     pub(crate) fn start_spdp(&self) -> RtpsResult<()> {
@@ -79,7 +71,7 @@ impl SpdpLogic {
             }
         };
         // Actually request SPDP multicast transmission
-        let sending_handler = SendingHandler::get_instance(participant.clone(), None, None);
+        let sending_handler = SendingHandler::get_instance(participant.clone(), None);
         sending_handler.push_message_and_wake(MessageType::PeriodicParticipantDataMulticast(
             None,
             heartbeat_period.to_std_duration(),
@@ -102,16 +94,10 @@ impl SpdpLogic {
         let start = Instant::now();
         match data {
             Some(ref data) => {
-                // No initial peers: use multicast (default behavior)
-                if let Some(ref sender) = self.sender {
-                    let _ = sender.send_multicast(domain_id, data);
-                    log::debug!("discovery multicast packet send");
-                } else {
-                    log::debug!("UDP sender not available, skipping SPDP multicast");
-                }
-
-                // This will send to initial peers if configured
-                self.send_spdp_to_initial_peers(data);
+                let _ = self
+                    .transport
+                    .send(data, &SendTarget::SPDPDiscovery { initial_peers: &self.initial_peers });
+                log::debug!("SPDP announcement dispatched (peers={})", self.initial_peers.len());
             }
             None => {
                 log::error!("spdp message is not set");
@@ -143,7 +129,7 @@ impl SpdpLogic {
                         if let Some(participant) = participant_weak.upgrade() {
                             if !participant.is_terminated() {
                                 let sending_handler =
-                                    SendingHandler::get_instance(participant, None, None);
+                                    SendingHandler::get_instance(participant, None);
                                 sending_handler.push_message_and_wake(
                                     MessageType::PeriodicParticipantDataMulticast(
                                         Some(Instant::now()),
@@ -164,43 +150,6 @@ impl SpdpLogic {
         Ok(())
     }
 
-    /// Send SPDP message to initial peers via unicast
-    pub(crate) fn send_spdp_to_initial_peers(&self, data: &[u8]) {
-        if self.initial_peers.is_empty() {
-            return;
-        }
-
-        log::debug!(
-            "[SPDP] Sending to {} initial peers: {:?}",
-            self.initial_peers.len(),
-            self.initial_peers
-        );
-
-        let transport_type = crate::rtps::transport::get_transport_type();
-
-        match transport_type {
-            TransportType::TCP | TransportType::Hybrid => {
-                if let Some(ref tcp_sender) = self.tcp_sender {
-                    for peer_addr in &self.initial_peers {
-                        let _ = tcp_sender.send(peer_addr, data);
-                    }
-                } else {
-                    log::error!("[SPDP] TCP sender not available for initial peers");
-                }
-            }
-            _ => {
-                // UDP / SHM: send via UDP unicast
-                if let Some(ref sender) = self.sender {
-                    for peer_addr in &self.initial_peers {
-                        let _ = sender.send(peer_addr, data);
-                    }
-                } else {
-                    log::error!("[SPDP] UDP sender not available for initial peers");
-                }
-            }
-        }
-    }
-
     /// Method to notify the network that the Participant has been terminated after deleting my Participant
     pub(crate) fn send_participant_termination_message_multicast(&self) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
@@ -210,15 +159,10 @@ impl SpdpLogic {
         {
             let buffer = rtps_message.write_to_vec_with_ctx(Endianness::LittleEndian);
             if let Ok(buffer) = buffer {
-                if let Some(ref sender) = self.sender {
-                    let _ = sender.send_multicast(participant.domain_id(), &buffer);
-                    log::debug!("discovery multicast packet send");
-                } else {
-                    log::debug!("UDP sender not available, skipping SPDP termination multicast");
-                }
-
-                // This will send to initial peers if configured
-                self.send_spdp_to_initial_peers(&buffer);
+                let _ = self.transport.send(
+                    &buffer,
+                    &SendTarget::SPDPDiscovery { initial_peers: &self.initial_peers },
+                );
             } else {
                 log::error!("Failed to serialize SPDP message with inline qos");
             }
@@ -273,33 +217,43 @@ mod tests {
     use std::sync::Arc;
     use std::thread;
 
+    use crate::rtps::common::guid::GUIDPREFIX_UNKNOWN;
     use crate::rtps::entities::participant::Participant;
     use crate::rtps::logic::spdp_logic::SpdpLogic;
-    use crate::rtps::task::sending_handler::SendingHandler;
-    use crate::rtps::transport::socket::Socket;
-    use crate::rtps::transport::TransportConfig;
+    use crate::rtps::transport::plugin::TransportPluginFactory;
+    use crate::rtps::transport::{get_transport_type, socket::Socket, TransportConfig};
     use crate::test_utils::unique_domain_id;
 
     #[test]
     #[ignore]
     fn test_send_spdp_multicast() {
         let domain_id = unique_domain_id() as u32;
-        let mut socket = Socket::new(domain_id, TransportConfig::default());
-        socket.create_socket();
-        let participant =
-            Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ips()));
+        let mut socket = Socket::new(domain_id);
+        let transport = TransportPluginFactory::create(
+            get_transport_type(),
+            domain_id,
+            socket.participant_id(),
+            socket.get_sender_bind_addr(),
+            socket.get_sender_multicast_if_addr(),
+            socket.working_ips().iter().map(|ip| ip.to_string()).collect(),
+            GUIDPREFIX_UNKNOWN,
+            None,
+            TransportConfig::default(),
+        )
+        .expect("Failed to create transport plugin");
+        socket.set_transport(Arc::from(transport));
 
-        // socket.create_sender();
-        let _ = SendingHandler::get_instance(
-            participant.clone(),
-            Some(socket.sender()),
-            socket.tcp_sender(),
-        );
+        let participant = Arc::new(Participant::new(
+            domain_id,
+            socket.participant_id(),
+            socket.working_ips(),
+            Vec::new(),
+            Vec::new(),
+        ));
 
         let spdp_logic = SpdpLogic::new(
             participant.clone(),
-            Some(socket.sender()),
-            socket.tcp_sender(),
+            socket.transport(),
             Vec::new(), // No initial peers for test
         );
         spdp_logic.trigger_send_spdp_multicast().unwrap();
