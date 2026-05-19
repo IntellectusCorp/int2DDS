@@ -81,30 +81,31 @@ impl TcpTransportPlugin {
         let (dead_peer_tx, dead_peer_rx) = bounded::<SocketAddr>(CHANNEL_BUFFER_SIZE);
         let terminated = Arc::new(AtomicBool::new(false));
 
-        let mux_listener = match TcpMuxListener::new(
-            physical_port,
-            domain_id,
-            participant_id,
-            guid_prefix,
-            discovery_tx,
-            user_data_tx,
-        ) {
-            Ok(l) => l,
-            Err(e) => {
-                log::error!(
+        let mux_listener =
+            match TcpMuxListener::new(
+                physical_port,
+                domain_id,
+                participant_id,
+                guid_prefix,
+                discovery_tx,
+                user_data_tx,
+            ) {
+                Ok(l) => l,
+                Err(e) => {
+                    log::error!(
                     "[TcpTransportPlugin] Failed to bind TCP listener on port {} (domain={}): {}. \
                      Another participant may already be using this port on the same host.",
                     physical_port, domain_id, e
                 );
-                return Err(transport_io_error(
-                    TransportErrorCode::TcpBindFailed,
-                    format!(
-                        "Failed to bind TCP listener on port {} (domain={}): {}",
-                        physical_port, domain_id, e
-                    ),
-                ));
-            }
-        };
+                    return Err(transport_io_error(
+                        TransportErrorCode::TcpBindFailed,
+                        format!(
+                            "Failed to bind TCP listener on port {} (domain={}): {}",
+                            physical_port, domain_id, e
+                        ),
+                    ));
+                }
+            };
         let listener_port = mux_listener.port();
 
         let sender = TcpSender::new_with_tls(
@@ -212,10 +213,7 @@ impl TransportPlugin for TcpTransportPlugin {
             }
             SendTarget::SEDPDiscovery(locator) => {
                 if !locator.is_tcp() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        locator.kind_name(),
-                    ));
+                    return Err(io::Error::new(io::ErrorKind::Unsupported, locator.kind_name()));
                 }
                 let ip = locator.to_ip_v4_addr();
                 let port = locator.port() as u16;
@@ -225,10 +223,7 @@ impl TransportPlugin for TcpTransportPlugin {
             }
             SendTarget::UserData(locator) => {
                 if !locator.is_tcp() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        locator.kind_name(),
-                    ));
+                    return Err(io::Error::new(io::ErrorKind::Unsupported, locator.kind_name()));
                 }
                 let ip = locator.to_ip_v4_addr();
                 let port = locator.port() as u16;
@@ -379,9 +374,7 @@ impl TcpMuxListeningLoopTask {
         let listener = match listener_opt {
             Some(l) => l,
             None => {
-                info!(
-                    "[TcpMuxListeningLoopTask] No accept socket; timer remains active"
-                );
+                info!("[TcpMuxListeningLoopTask] No accept socket; timer remains active");
                 while !self.terminated.load(Ordering::SeqCst) {
                     thread::sleep(Duration::from_millis(200));
                 }

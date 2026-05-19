@@ -227,8 +227,7 @@ impl RouteGatewayConfig {
     }
 
     pub fn from_json(raw: &str) -> DdsResult<Self> {
-        serde_json::from_str(raw)
-            .map_err(|e| DdsError::Error(format!("invalid config JSON: {e}")))
+        serde_json::from_str(raw).map_err(|e| DdsError::Error(format!("invalid config JSON: {e}")))
     }
 }
 
@@ -378,10 +377,11 @@ mod tests {
         }"#;
         let cfg = RouteGatewayConfig::from_json(json).unwrap();
         let provider = cfg.auto_relay.build_qos_provider().unwrap();
-        let qos = provider
-            .get_datareader_qos("GwLib::KeepAll")
-            .expect("profile resolves");
-        matches!(qos.history.kind, crate::infrastructure::qos_policy::HistoryQosPolicyKind::KeepAll);
+        let qos = provider.get_datareader_qos("GwLib::KeepAll").expect("profile resolves");
+        matches!(
+            qos.history.kind,
+            crate::infrastructure::qos_policy::HistoryQosPolicyKind::KeepAll
+        );
     }
 
     #[test]
