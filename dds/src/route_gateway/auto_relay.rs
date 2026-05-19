@@ -122,10 +122,7 @@ impl QosResolver {
     /// Build a resolver from an [`AutoRelayConfig`] and the list of
     /// [`TopicRelayRule`] entries. Any referenced profile path is validated
     /// eagerly; an unresolvable reference returns [`DdsError::Error`].
-    pub fn from_config(
-        auto_relay: &AutoRelayConfig,
-        rules: &[TopicRelayRule],
-    ) -> DdsResult<Self> {
+    pub fn from_config(auto_relay: &AutoRelayConfig, rules: &[TopicRelayRule]) -> DdsResult<Self> {
         let provider = auto_relay.build_qos_provider()?;
 
         let check_reader = |path: &Option<String>, where_: &str| -> DdsResult<()> {
@@ -182,8 +179,12 @@ impl QosResolver {
         })
     }
 
-    fn resolve_reader(&self, topic: &str, pick: fn(&CompiledRule) -> &Option<String>,
-        default: &Option<String>) -> DataReaderQos {
+    fn resolve_reader(
+        &self,
+        topic: &str,
+        pick: fn(&CompiledRule) -> &Option<String>,
+        default: &Option<String>,
+    ) -> DataReaderQos {
         for rule in &self.rules {
             if rule.pattern.matches(topic) {
                 if let Some(path) = pick(rule) {
@@ -196,16 +197,17 @@ impl QosResolver {
             }
         }
         if let Some(path) = default {
-            return self
-                .provider
-                .get_datareader_qos(path)
-                .unwrap_or_else(default_relay_reader_qos);
+            return self.provider.get_datareader_qos(path).unwrap_or_else(default_relay_reader_qos);
         }
         default_relay_reader_qos()
     }
 
-    fn resolve_writer(&self, topic: &str, pick: fn(&CompiledRule) -> &Option<String>,
-        default: &Option<String>) -> DataWriterQos {
+    fn resolve_writer(
+        &self,
+        topic: &str,
+        pick: fn(&CompiledRule) -> &Option<String>,
+        default: &Option<String>,
+    ) -> DataWriterQos {
         for rule in &self.rules {
             if rule.pattern.matches(topic) {
                 if let Some(path) = pick(rule) {
@@ -218,10 +220,7 @@ impl QosResolver {
             }
         }
         if let Some(path) = default {
-            return self
-                .provider
-                .get_datawriter_qos(path)
-                .unwrap_or_else(default_relay_writer_qos);
+            return self.provider.get_datawriter_qos(path).unwrap_or_else(default_relay_writer_qos);
         }
         default_relay_writer_qos()
     }
@@ -269,13 +268,9 @@ struct DiscoverySide {
 impl DiscoverySide {
     fn new(participant: &DomainParticipant) -> DdsResult<Self> {
         let builtin = participant.get_builtin_subscriber()?;
-        let publication_reader = builtin
-            .lookup_datareader::<PublicationBuiltinTopicData>("DCPSPublication")?;
-        Ok(Self {
-            publication_reader,
-            seen_topics: HashSet::new(),
-            seen_instances: HashSet::new(),
-        })
+        let publication_reader =
+            builtin.lookup_datareader::<PublicationBuiltinTopicData>("DCPSPublication")?;
+        Ok(Self { publication_reader, seen_topics: HashSet::new(), seen_instances: HashSet::new() })
     }
 }
 
@@ -359,13 +354,8 @@ impl AutoRelay {
                 continue;
             }
             let qos = self.qos_resolver.resolve(&topic_name);
-            match TopicRelay::new_with_qos(
-                &self.local,
-                &self.remote,
-                &topic_name,
-                type_object,
-                qos,
-            ) {
+            match TopicRelay::new_with_qos(&self.local, &self.remote, &topic_name, type_object, qos)
+            {
                 Ok(relay) => {
                     relays.insert(topic_name, Arc::new(relay));
                     created += 1;
@@ -385,8 +375,7 @@ impl AutoRelay {
     /// Run one bidirectional forwarding pass over every active relay.
     /// Returns total forwarded sample count.
     pub fn forward_once(&self) -> DdsResult<usize> {
-        let relays: Vec<Arc<TopicRelay>> =
-            self.relays.lock().unwrap().values().cloned().collect();
+        let relays: Vec<Arc<TopicRelay>> = self.relays.lock().unwrap().values().cloned().collect();
         let mut total = 0;
         for relay in relays {
             let (l2r, r2l) = relay.forward_once()?;
@@ -586,8 +575,8 @@ mod tests {
             // Example lives in the sibling examples repo; skip if absent.
             return;
         }
-        let cfg = super::super::RouteGatewayConfig::from_file(&path)
-            .expect("example config parses");
+        let cfg =
+            super::super::RouteGatewayConfig::from_file(&path).expect("example config parses");
         let resolver = QosResolver::from_config(&cfg.auto_relay, &cfg.topic_relays)
             .expect("example config resolves");
 

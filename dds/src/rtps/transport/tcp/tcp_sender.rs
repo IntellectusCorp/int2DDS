@@ -18,9 +18,7 @@ use crate::rtps::transport::tcp::framing::{read_framed_message, write_framed_mes
 use crate::rtps::transport::tcp::protocol::{
     encode_locator, ControlMsg, MSG_KEEPALIVE_ACK, MSG_PEER_HELLO_ACK, MSG_PORT_BIND_ACK,
 };
-use crate::rtps::transport::tcp::stream_wrapper::{
-    connect_tls, wrap_stream, TcpStreamWrapper,
-};
+use crate::rtps::transport::tcp::stream_wrapper::{connect_tls, wrap_stream, TcpStreamWrapper};
 use crate::rtps::transport::tcp::tls::TlsConfig;
 
 /// Connection key: (physical address, logical_port)
@@ -419,10 +417,7 @@ impl TcpSender {
     }
 
     pub(crate) fn disconnect_peer(&self, addr: &SocketAddr) {
-        let had_entry = self
-            .connections
-            .iter()
-            .any(|e| e.key().0 == *addr)
+        let had_entry = self.connections.iter().any(|e| e.key().0 == *addr)
             || self.peer_info.contains_key(addr);
 
         self.connections.retain(|key, _| key.0 != *addr);
@@ -467,11 +462,10 @@ impl TcpSender {
             }
 
             let key = (peer_addr, CONTROL_LOGICAL_PORT);
-            let mut stream =
-                match self.connections.get(&key).and_then(|s| s.try_clone_box().ok()) {
-                    Some(s) => s,
-                    None => continue,
-                };
+            let mut stream = match self.connections.get(&key).and_then(|s| s.try_clone_box().ok()) {
+                Some(s) => s,
+                None => continue,
+            };
 
             if let Err(e) = write_framed_message(&mut stream, &ControlMsg::Keepalive.to_bytes()) {
                 warn!("TcpSender: Keepalive send failed to {:?}: {:?}", peer_addr, e);
