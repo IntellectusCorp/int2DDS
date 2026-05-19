@@ -162,10 +162,7 @@ impl TransportPlugin for ShmTransportPlugin {
                 // can format a "X locator found but no X sender" log without
                 // per-kind branching.
                 if !locator.is_udp() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        locator.kind_name(),
-                    ));
+                    return Err(io::Error::new(io::ErrorKind::Unsupported, locator.kind_name()));
                 }
                 let ip = locator.to_ip_v4_addr();
                 let port = locator.port() as u16;
@@ -185,10 +182,7 @@ impl TransportPlugin for ShmTransportPlugin {
                     self.udp_sender.send(&addr, data)?;
                     Ok(())
                 } else {
-                    Err(io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        locator.kind_name(),
-                    ))
+                    Err(io::Error::new(io::ErrorKind::Unsupported, locator.kind_name()))
                 }
             }
         }
