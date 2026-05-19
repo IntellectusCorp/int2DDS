@@ -8,7 +8,7 @@
 //! on this connection — the actor lifecycle is otherwise self-managed via
 //! a child `CancellationToken` shared by both tasks.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use log::{debug, warn};
 use tokio::io::AsyncWriteExt;
@@ -21,9 +21,40 @@ use crate::rtps::transport::tcp_async::{
     stream::{AsyncConnReadHalf, AsyncConnStream, AsyncConnWriteHalf},
 };
 
-/// Inbox capacity per connection. Tunes backpressure: a full inbox makes
-/// `try_send` return `Full`, letting callers drop or queue rather than block.
-pub(crate) const WRITER_INBOX_CAPACITY: usize = 512;
+/// Per-connection writer inbox capacity for **sender-initiated (outbound)**
+/// connections. Tunes producer-side backpressure when paired with
+/// `INT2DDS_TCP_SEND_MODE=blocking`: a full inbox makes `blocking_send`
+/// park the caller until the writer task drains a slot, or makes `try_send`
+/// return `Full` so the caller drops the frame.
+///
+/// Overridable via `INT2DDS_TCP_OUTBOUND_INBOX_CAPACITY`. Default 512.
+/// Read once via `OnceLock` so the value is stable across all connections
+/// created in a single run.
+static OUTBOUND_INBOX_CAPACITY_CACHE: OnceLock<usize> = OnceLock::new();
+
+pub(crate) fn outbound_inbox_capacity() -> usize {
+    *OUTBOUND_INBOX_CAPACITY_CACHE.get_or_init(|| {
+        let cap = crate::common::env::get_tcp_outbound_inbox_capacity();
+        log::info!("[tcp_async] OUTBOUND_INBOX_CAPACITY = {}", cap);
+        cap
+    })
+}
+
+/// Per-connection writer inbox capacity for **listener-accepted (inbound)**
+/// connections. Carries control responses (acks, keepalive replies) sent
+/// back over the inbound socket. Rarely the bottleneck for RTPS traffic —
+/// keep generous unless deliberately experimenting.
+///
+/// Overridable via `INT2DDS_TCP_INBOUND_INBOX_CAPACITY`. Default 512.
+static INBOUND_INBOX_CAPACITY_CACHE: OnceLock<usize> = OnceLock::new();
+
+pub(crate) fn inbound_inbox_capacity() -> usize {
+    *INBOUND_INBOX_CAPACITY_CACHE.get_or_init(|| {
+        let cap = crate::common::env::get_tcp_inbound_inbox_capacity();
+        log::info!("[tcp_async] INBOUND_INBOX_CAPACITY = {}", cap);
+        cap
+    })
+}
 
 /// Spawn the reader/writer task pair for one connection.
 ///
