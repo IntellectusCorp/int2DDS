@@ -76,11 +76,8 @@ fn auto_relay_discovers_and_forwards_topic() {
             StatusMask::default(),
         )
         .unwrap();
-    let pub_writer = create_datawriter(
-        &publisher_participant,
-        PublisherQos::default(),
-        reliable_writer_qos(),
-    );
+    let pub_writer =
+        create_datawriter(&publisher_participant, PublisherQos::default(), reliable_writer_qos());
 
     // Real subscriber on the WAN side.
     let subscriber_participant = factory
@@ -91,11 +88,8 @@ fn auto_relay_discovers_and_forwards_topic() {
             StatusMask::default(),
         )
         .unwrap();
-    let sub_reader = create_datareader(
-        &subscriber_participant,
-        SubscriberQos::default(),
-        reliable_reader_qos(),
-    );
+    let sub_reader =
+        create_datareader(&subscriber_participant, SubscriberQos::default(), reliable_reader_qos());
 
     // Route Gateway.
     let local_node = Arc::new(
@@ -202,11 +196,8 @@ fn auto_relay_filter_excludes_nonmatching_topics() {
         )
         .unwrap();
     // KeyedDataType publishes on "test_topic"; we filter for "sensor/*".
-    let _pub_writer = create_datawriter(
-        &publisher_participant,
-        PublisherQos::default(),
-        reliable_writer_qos(),
-    );
+    let _pub_writer =
+        create_datawriter(&publisher_participant, PublisherQos::default(), reliable_writer_qos());
 
     let local_node = Arc::new(
         factory

@@ -191,19 +191,11 @@ impl TcpStreamWrapper for TlsTcpStream {
     }
 
     fn set_write_timeout(&self, dur: Option<std::time::Duration>) -> io::Result<()> {
-        self.inner
-            .lock()
-            .expect("TlsTcpStream lock poisoned")
-            .socket()
-            .set_write_timeout(dur)
+        self.inner.lock().expect("TlsTcpStream lock poisoned").socket().set_write_timeout(dur)
     }
 
     fn set_read_timeout(&self, dur: Option<std::time::Duration>) -> io::Result<()> {
-        self.inner
-            .lock()
-            .expect("TlsTcpStream lock poisoned")
-            .socket()
-            .set_read_timeout(dur)
+        self.inner.lock().expect("TlsTcpStream lock poisoned").socket().set_read_timeout(dur)
     }
 
     fn try_clone_box(&self) -> io::Result<Box<dyn TcpStreamWrapper>> {
@@ -227,9 +219,8 @@ pub(crate) fn connect_tls(
     let mut conn = ClientConnection::new(config, server_name)
         .map_err(|e| transport_io_error(TransportErrorCode::TlsConfigError, e.to_string()))?;
     let mut tcp = tcp;
-    conn.complete_io(&mut tcp).map_err(|e| {
-        transport_io_error(TransportErrorCode::TlsHandshakeFailed, e.to_string())
-    })?;
+    conn.complete_io(&mut tcp)
+        .map_err(|e| transport_io_error(TransportErrorCode::TlsHandshakeFailed, e.to_string()))?;
     let stream = StreamOwned::new(conn, tcp);
     Ok(Box::new(TlsTcpStream::new(TlsKind::Client(stream))?))
 }
@@ -243,9 +234,8 @@ pub(crate) fn accept_tls(
     let mut conn = ServerConnection::new(config)
         .map_err(|e| transport_io_error(TransportErrorCode::TlsConfigError, e.to_string()))?;
     let mut tcp = tcp;
-    conn.complete_io(&mut tcp).map_err(|e| {
-        transport_io_error(TransportErrorCode::TlsHandshakeFailed, e.to_string())
-    })?;
+    conn.complete_io(&mut tcp)
+        .map_err(|e| transport_io_error(TransportErrorCode::TlsHandshakeFailed, e.to_string()))?;
     let stream = StreamOwned::new(conn, tcp);
     Ok(Box::new(TlsTcpStream::new(TlsKind::Server(stream))?))
 }
