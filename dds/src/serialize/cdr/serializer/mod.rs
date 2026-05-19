@@ -47,11 +47,11 @@ impl CdrSerializerCommon for CdrSerializer {
 
     #[inline]
     fn align(&mut self, alignment: usize) {
-        // CDR alignment is relative to data start (after 4-byte encapsulation header)
-        const ENCAPSULATION_HEADER_SIZE: usize = 4;
-        let data_len = self.buffer.len().saturating_sub(ENCAPSULATION_HEADER_SIZE);
+        // CDR alignment is relative to data start.
+        let header_size = self.header_size;
+        let data_len = self.buffer.len().saturating_sub(header_size);
         let aligned_data_len = (data_len + alignment - 1) & !(alignment - 1);
-        let target_len = ENCAPSULATION_HEADER_SIZE + aligned_data_len;
+        let target_len = header_size + aligned_data_len;
         if target_len > self.buffer.len() {
             self.buffer.resize(target_len, 0);
         }
