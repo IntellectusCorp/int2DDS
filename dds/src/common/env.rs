@@ -63,8 +63,8 @@ pub fn init_from_env() {
     // - INT2DDS_TCP_INCOMING_IDLE_TIMEOUT: Set idle timeout for incoming TCP connections (milliseconds) - Default: 60000
     // - INT2DDS_TCP_SO_RCVBUF: Force SO_RCVBUF on every TCP socket (bytes). Used by tests to induce backpressure - Default: OS-managed
     // - INT2DDS_TCP_SO_SNDBUF: Force SO_SNDBUF on every TCP socket (bytes). Used by tests to induce backpressure - Default: OS-managed
-    // - INT2DDS_TCP_SEND_MODE: Outbound send mode for tcp_async (try | blocking) - Default: try
-    // - INT2DDS_TCP_OUTBOUND_INBOX_CAPACITY: Per-connection writer mpsc capacity for sender-initiated conns (>= 1) - Default: 512
+    // - INT2DDS_TCP_SEND_MODE: Outbound send mode for tcp_async (try | blocking) - Default: blocking
+    // - INT2DDS_TCP_OUTBOUND_INBOX_CAPACITY: Per-connection writer mpsc capacity for sender-initiated conns (>= 1) - Default: 4
     // - INT2DDS_TCP_INBOUND_INBOX_CAPACITY: Per-connection writer mpsc capacity for listener-accepted conns (>= 1) - Default: 512
     // - INT2DDS_TCP_TLS_ENABLED: Enable TLS for TCP connections (true, false) - Default: false (not yet implemented)
     // - INT2DDS_TCP_TLS_CERT_PATH: TLS certificate file path - Default: none (not yet implemented)
@@ -909,15 +909,15 @@ pub enum TcpSendMode {
 }
 
 /// Get the outbound TCP send mode for the tcp_async transport.
-/// Default: `Try` (non-blocking, lossy under backpressure).
+/// Default: `Blocking` (RTI-like synchronous producer backpressure).
 pub fn get_tcp_send_mode() -> TcpSendMode {
     match std::env::var("INT2DDS_TCP_SEND_MODE")
         .ok()
         .map(|v| v.trim().to_ascii_lowercase())
         .as_deref()
     {
-        Some("blocking") | Some("block") => TcpSendMode::Blocking,
-        _ => TcpSendMode::Try,
+        Some("try") => TcpSendMode::Try,
+        _ => TcpSendMode::Blocking,
     }
 }
 
@@ -934,13 +934,14 @@ pub fn set_tcp_send_mode(mode: TcpSendMode) {
 /// Get the per-connection writer mpsc capacity for sender-initiated
 /// (outbound) tcp_async connections. Tunes producer-side backpressure when
 /// paired with `INT2DDS_TCP_SEND_MODE=blocking`.
-/// Default: 512. Floor: 1 (tokio::sync::mpsc::channel panics on 0).
+/// Default: 4 (tight backpressure for RTI-like sync semantics). Floor: 1
+/// (tokio::sync::mpsc::channel panics on 0).
 pub fn get_tcp_outbound_inbox_capacity() -> usize {
     std::env::var("INT2DDS_TCP_OUTBOUND_INBOX_CAPACITY")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .map(|v| v.max(1))
-        .unwrap_or(512)
+        .unwrap_or(4)
 }
 
 /// Set the outbound writer mpsc capacity via environment variable.
