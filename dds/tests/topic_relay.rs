@@ -85,11 +85,8 @@ fn topic_relay_forwards_local_to_remote() {
             StatusMask::default(),
         )
         .unwrap();
-    let pub_writer = create_datawriter(
-        &publisher_participant,
-        PublisherQos::default(),
-        reliable_writer_qos(),
-    );
+    let pub_writer =
+        create_datawriter(&publisher_participant, PublisherQos::default(), reliable_writer_qos());
 
     // Sink subscriber on the WAN side (domain B).
     let subscriber_participant = factory
@@ -100,11 +97,8 @@ fn topic_relay_forwards_local_to_remote() {
             StatusMask::default(),
         )
         .unwrap();
-    let sub_reader = create_datareader(
-        &subscriber_participant,
-        SubscriberQos::default(),
-        reliable_reader_qos(),
-    );
+    let sub_reader =
+        create_datareader(&subscriber_participant, SubscriberQos::default(), reliable_reader_qos());
 
     // Route Gateway: LocalNode on domain A, RemoteNode on domain B.
     let local_node = factory
@@ -126,19 +120,18 @@ fn topic_relay_forwards_local_to_remote() {
 
     // Build TopicRelay using KeyedDataType's TypeObject (no SEDP wait needed in test).
     let type_object = TypeObject::Complete(KeyedDataType::complete_type_object());
-    let relay = TopicRelay::new(
-        &local_node,
-        &remote_node,
-        KeyedDataType::get_topic_name(),
-        type_object,
-    )
-    .expect("Failed to create TopicRelay");
+    let relay =
+        TopicRelay::new(&local_node, &remote_node, KeyedDataType::get_topic_name(), type_object)
+            .expect("Failed to create TopicRelay");
 
     // Wait until the publisher matches the LocalNode reader,
     // and the RemoteNode writer matches the subscriber.
     let matched = wait_matched(
         || {
-            pub_writer.get_publication_matched_status().map(|s| s.current_count() >= 1).unwrap_or(false)
+            pub_writer
+                .get_publication_matched_status()
+                .map(|s| s.current_count() >= 1)
+                .unwrap_or(false)
                 && sub_reader
                     .get_subscription_matched_status()
                     .map(|s| s.current_count() >= 1)
@@ -203,11 +196,8 @@ fn topic_relay_forwards_remote_to_local() {
             StatusMask::default(),
         )
         .unwrap();
-    let pub_writer = create_datawriter(
-        &publisher_participant,
-        PublisherQos::default(),
-        reliable_writer_qos(),
-    );
+    let pub_writer =
+        create_datawriter(&publisher_participant, PublisherQos::default(), reliable_writer_qos());
 
     // Sink subscriber on the LAN side (domain A).
     let subscriber_participant = factory
@@ -218,11 +208,8 @@ fn topic_relay_forwards_remote_to_local() {
             StatusMask::default(),
         )
         .unwrap();
-    let sub_reader = create_datareader(
-        &subscriber_participant,
-        SubscriberQos::default(),
-        reliable_reader_qos(),
-    );
+    let sub_reader =
+        create_datareader(&subscriber_participant, SubscriberQos::default(), reliable_reader_qos());
 
     // Route Gateway.
     let local_node = factory
@@ -243,17 +230,16 @@ fn topic_relay_forwards_remote_to_local() {
         .unwrap();
 
     let type_object = TypeObject::Complete(KeyedDataType::complete_type_object());
-    let relay = TopicRelay::new(
-        &local_node,
-        &remote_node,
-        KeyedDataType::get_topic_name(),
-        type_object,
-    )
-    .unwrap();
+    let relay =
+        TopicRelay::new(&local_node, &remote_node, KeyedDataType::get_topic_name(), type_object)
+            .unwrap();
 
     let matched = wait_matched(
         || {
-            pub_writer.get_publication_matched_status().map(|s| s.current_count() >= 1).unwrap_or(false)
+            pub_writer
+                .get_publication_matched_status()
+                .map(|s| s.current_count() >= 1)
+                .unwrap_or(false)
                 && sub_reader
                     .get_subscription_matched_status()
                     .map(|s| s.current_count() >= 1)
@@ -320,13 +306,9 @@ fn topic_relay_no_data_when_no_publisher() {
         .unwrap();
 
     let type_object = TypeObject::Complete(KeyedDataType::complete_type_object());
-    let relay = TopicRelay::new(
-        &local_node,
-        &remote_node,
-        KeyedDataType::get_topic_name(),
-        type_object,
-    )
-    .unwrap();
+    let relay =
+        TopicRelay::new(&local_node, &remote_node, KeyedDataType::get_topic_name(), type_object)
+            .unwrap();
 
     // No publishers anywhere; forward should yield zero samples cleanly.
     let (l2r, r2l) = relay.forward_once().unwrap();
@@ -334,4 +316,3 @@ fn topic_relay_no_data_when_no_publisher() {
     assert_eq!(r2l, 0);
     assert_eq!(relay.topic_name(), KeyedDataType::get_topic_name());
 }
-
