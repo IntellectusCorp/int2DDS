@@ -118,9 +118,9 @@ impl TransportErrorCode {
 
             Self::TcpKeepaliveTimeout | Self::TcpIdleTimeout => io::ErrorKind::TimedOut,
 
-            Self::TcpFrameInvalidMagic
-            | Self::TcpFrameTooLarge
-            | Self::TcpFrameInvalidLength => io::ErrorKind::InvalidData,
+            Self::TcpFrameInvalidMagic | Self::TcpFrameTooLarge | Self::TcpFrameInvalidLength => {
+                io::ErrorKind::InvalidData
+            }
 
             Self::TcpControlProtocolError
             | Self::TcpControlInvalidPort

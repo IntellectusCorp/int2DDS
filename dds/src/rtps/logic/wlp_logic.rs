@@ -631,7 +631,10 @@ impl WlpLogic {
             }
         }
         if let Err(e) = cache_guard.add_change_builtin(cache_change.clone()) {
-            log::warn!("Failed to add liveliness change to cache: {}, continuing to send heartbeat anyway", e);
+            log::warn!(
+                "Failed to add liveliness change to cache: {}, continuing to send heartbeat anyway",
+                e
+            );
             // Don't return - continue to send heartbeat even if cache add fails
         }
 

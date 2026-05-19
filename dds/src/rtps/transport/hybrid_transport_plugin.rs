@@ -200,10 +200,7 @@ impl TransportPlugin for HybridTransportPlugin {
                     self.udp_sender.send(&addr, data)?;
                     Ok(())
                 } else {
-                    Err(io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        locator.kind_name(),
-                    ))
+                    Err(io::Error::new(io::ErrorKind::Unsupported, locator.kind_name()))
                 }
             }
             SendTarget::UserData(locator) => {
@@ -216,10 +213,7 @@ impl TransportPlugin for HybridTransportPlugin {
                     self.udp_sender.send(&addr, data)?;
                     Ok(())
                 } else {
-                    Err(io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        locator.kind_name(),
-                    ))
+                    Err(io::Error::new(io::ErrorKind::Unsupported, locator.kind_name()))
                 }
             }
         }

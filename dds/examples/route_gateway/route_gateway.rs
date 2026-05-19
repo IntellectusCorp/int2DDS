@@ -70,10 +70,7 @@ fn main() {
         .unwrap_or_else(|e| panic!("Failed to load config '{}': {:?}", args.config, e));
 
     println!("[Route Gateway] starting");
-    println!(
-        "  local:  domain={}, transport={}",
-        cfg.local.domain_id, cfg.local.transport
-    );
+    println!("  local:  domain={}, transport={}", cfg.local.domain_id, cfg.local.transport);
     println!(
         "  remote: domain={}, transport={}, tls={}, initial_peers={:?}",
         cfg.remote.domain_id,

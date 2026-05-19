@@ -71,8 +71,10 @@ impl TlsConfig {
         let ca_file = require_property(property, keys::CA_FILE)?.into();
         let cert_file = require_property(property, keys::CERT_FILE)?.into();
         let key_file = require_property(property, keys::KEY_FILE)?.into();
-        let server_name = property.find_property(keys::SERVER_NAME).unwrap_or("localhost").to_string();
-        let verify_peer = property.find_property(keys::VERIFY_PEER).map(|v| v == "true").unwrap_or(false);
+        let server_name =
+            property.find_property(keys::SERVER_NAME).unwrap_or("localhost").to_string();
+        let verify_peer =
+            property.find_property(keys::VERIFY_PEER).map(|v| v == "true").unwrap_or(false);
 
         Ok(Some(Self { ca_file, cert_file, key_file, server_name, verify_peer }))
     }
