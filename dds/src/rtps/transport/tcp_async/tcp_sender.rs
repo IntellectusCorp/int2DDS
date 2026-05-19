@@ -29,11 +29,12 @@ use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
+use crate::common::env::{get_tcp_send_mode, TcpSendMode};
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::tcp::tls::TlsConfig;
-use crate::rtps::transport::tcp_async::conn_actor::{spawn_conn_actor, WRITER_INBOX_CAPACITY};
+use crate::rtps::transport::tcp_async::conn_actor::{outbound_inbox_capacity, spawn_conn_actor};
 use crate::rtps::transport::tcp_async::framing::{read_framed_message, write_framed_message};
 use crate::rtps::transport::tcp_async::mux_state::MuxState;
 use crate::rtps::transport::tcp_async::protocol::ControlMsg;
@@ -129,6 +130,11 @@ pub(crate) struct TcpSender {
 
     tls_config: Option<Arc<TlsConfig>>,
 
+    /// Producer-side send-method selection (Try vs Blocking). Captured
+    /// once at construction from `INT2DDS_TCP_SEND_MODE` so a single run
+    /// has consistent semantics. See [`TcpSendMode`].
+    send_mode: TcpSendMode,
+
     /// Shared mux state — outbound connections also live in `shared.connections`.
     shared: Arc<MuxState>,
 
@@ -170,6 +176,9 @@ impl TcpSender {
         // spawn connect tasks even though they are not in runtime context.
         let runtime_handle = tokio::runtime::Handle::current();
 
+        let send_mode = get_tcp_send_mode();
+        info!("[TcpSender] send_mode = {:?}", send_mode);
+
         let sender = Arc::new(Self {
             domain_id,
             participant_id,
@@ -182,6 +191,7 @@ impl TcpSender {
             keepalive_timeout: DEFAULT_KEEPALIVE_TIMEOUT,
             max_missed_keepalives: DEFAULT_MAX_MISSED_KEEPALIVES,
             tls_config,
+            send_mode,
             shared,
             connections: Arc::new(DashMap::new()),
             in_flight: Arc::new(DashMap::new()),
@@ -246,13 +256,37 @@ impl TcpSender {
         let key = (addr, logical_port);
 
         if let Some(entry) = self.connections.get(&key) {
-            match entry.writer_tx.try_send(data.to_vec()) {
-                Ok(()) => return Ok(()),
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    warn!("send to {:?} dropped (writer inbox full)", addr);
-                    return Err(io::Error::new(io::ErrorKind::WouldBlock, "writer inbox full"));
+            // Producer-side send method is toggleable via INT2DDS_TCP_SEND_MODE
+            // (captured into `self.send_mode` at construction):
+            //   - Try      → non-blocking try_send; drops on full inbox (lossy).
+            //   - Blocking → blocking_send; parks the caller until the writer
+            //                task drains a slot (lossless, RTI-like).
+            //
+            // Runtime-safety override: `blocking_send` panics when invoked from
+            // inside a tokio runtime worker. Production DDS write path is a
+            // sync thread (outside any runtime) so safe; tests using
+            // `#[tokio::test]` are not — when `Handle::try_current().is_ok()`
+            // we silently fall back to `try_send` even if Blocking is configured.
+            let use_blocking = self.send_mode == TcpSendMode::Blocking
+                && tokio::runtime::Handle::try_current().is_err();
+            let result = if use_blocking {
+                entry.writer_tx.blocking_send(data.to_vec())
+            } else {
+                match entry.writer_tx.try_send(data.to_vec()) {
+                    Ok(()) => Ok(()),
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        warn!("send to {:?} dropped (writer inbox full)", addr);
+                        return Err(io::Error::new(io::ErrorKind::WouldBlock, "writer inbox full"));
+                    }
+                    Err(mpsc::error::TrySendError::Closed(returned)) => {
+                        Err(mpsc::error::SendError(returned))
+                    }
                 }
-                Err(mpsc::error::TrySendError::Closed(returned)) => {
+            };
+
+            match result {
+                Ok(()) => return Ok(()),
+                Err(mpsc::error::SendError(returned)) => {
                     // Connection dead — drop guard, evict, then spawn fresh.
                     drop(entry);
                     self.connections.remove(&key);
@@ -429,7 +463,7 @@ async fn do_connect_control(
     peer_hello_handshake(&mut stream, sender.handshake_timeout).await?;
 
     // 3. Channel + cancel + pending_ack mailbox.
-    let (tx, rx) = mpsc::channel::<Vec<u8>>(WRITER_INBOX_CAPACITY);
+    let (tx, rx) = mpsc::channel::<Vec<u8>>(outbound_inbox_capacity());
     let conn_cancel = sender.cancel.child_token();
     let pending_ack = Arc::new(StdMutex::new(None));
     let request_lock = Arc::new(TokioMutex::new(()));
@@ -490,7 +524,7 @@ async fn do_connect_data(
     port_bind_handshake(&mut stream, cookie, sender.handshake_timeout).await?;
 
     // 5. Channel + cancel — no pending_ack needed for data connections.
-    let (tx, rx) = mpsc::channel::<Vec<u8>>(WRITER_INBOX_CAPACITY);
+    let (tx, rx) = mpsc::channel::<Vec<u8>>(outbound_inbox_capacity());
     let conn_cancel = sender.cancel.child_token();
 
     // 6. Register, then spawn (race-free order).
