@@ -59,9 +59,8 @@ fn make_writer(
             StatusMask::default(),
         )
         .unwrap();
-    let publisher = participant
-        .create_publisher(PublisherQos::default(), None, StatusMask::default())
-        .unwrap();
+    let publisher =
+        participant.create_publisher(PublisherQos::default(), None, StatusMask::default()).unwrap();
     publisher
         .create_datawriter::<KeyedDataType>(
             &topic,
@@ -105,12 +104,9 @@ fn auto_relay_discovers_all_topics_after_sedp_settles() {
             )
             .unwrap(),
     );
-    let auto = AutoRelay::new(
-        Arc::clone(&local_node),
-        Arc::clone(&remote_node),
-        TopicFilter::default(),
-    )
-    .expect("Failed to create AutoRelay");
+    let auto =
+        AutoRelay::new(Arc::clone(&local_node), Arc::clone(&remote_node), TopicFilter::default())
+            .expect("Failed to create AutoRelay");
 
     // Step 2: Create publisher participant + N writers in a burst.
     let publisher_participant = factory
@@ -122,12 +118,9 @@ fn auto_relay_discovers_all_topics_after_sedp_settles() {
         )
         .unwrap();
 
-    let topic_names: Vec<String> =
-        (0..N_TOPICS).map(|i| format!("burst_topic_{i}")).collect();
-    let _writers: Vec<DataWriter<KeyedDataType>> = topic_names
-        .iter()
-        .map(|name| make_writer(&publisher_participant, name))
-        .collect();
+    let topic_names: Vec<String> = (0..N_TOPICS).map(|i| format!("burst_topic_{i}")).collect();
+    let _writers: Vec<DataWriter<KeyedDataType>> =
+        topic_names.iter().map(|name| make_writer(&publisher_participant, name)).collect();
 
     // Step 3: Wait for SEDP to deliver all announcements to local_node's
     // built-in cache. With KeepLast(1) + NIL, only the last writer's
@@ -145,8 +138,7 @@ fn auto_relay_discovers_all_topics_after_sedp_settles() {
     let relay_count = auto.relay_count();
 
     if relay_count < N_TOPICS {
-        let missing: Vec<&String> =
-            topic_names.iter().filter(|n| !active.contains(n)).collect();
+        let missing: Vec<&String> = topic_names.iter().filter(|n| !active.contains(n)).collect();
         panic!(
             "AutoRelay missed topics: relay_count={}, expected={}, missing={:?}",
             relay_count, N_TOPICS, missing
@@ -154,9 +146,6 @@ fn auto_relay_discovers_all_topics_after_sedp_settles() {
     }
 
     for name in &topic_names {
-        assert!(
-            active.contains(name),
-            "expected topic '{name}' to be relayed, got {active:?}"
-        );
+        assert!(active.contains(name), "expected topic '{name}' to be relayed, got {active:?}");
     }
 }

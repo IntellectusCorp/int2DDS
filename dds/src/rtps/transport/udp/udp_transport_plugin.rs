@@ -152,10 +152,7 @@ impl TransportPlugin for UdpTransportPlugin {
                 // the RTPS layer can format "X locator found but no X sender
                 // available" without needing to branch on the kind itself.
                 if !locator.is_udp() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        locator.kind_name(),
-                    ));
+                    return Err(io::Error::new(io::ErrorKind::Unsupported, locator.kind_name()));
                 }
                 let ip = locator.to_ip_v4_addr();
                 let port = locator.port() as u16;
