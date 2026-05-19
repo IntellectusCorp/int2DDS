@@ -9,7 +9,8 @@ use super::CdrError;
 use crate::serialize::core::endianness_from_bool;
 use crate::serialize::{align_position_with_header_offset, DeserializerReader};
 
-/// CDR deserializer
+/// Deprecated. Use `cdr::CdrDeserializer` (re-export of `xcdr1::CdrDeserializer`).
+#[allow(dead_code)]
 pub struct CdrDeserializer<'a> {
     pub(super) endianness: Endianness,
     pub(super) data: &'a [u8],
