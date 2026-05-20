@@ -970,6 +970,24 @@ impl super::ParsedBuiltinTopicData {
                 value: ParameterValue::TimeBasedFilter(time_based_filter.minimum_separation.into()),
             });
         }
+        if let Some(history) = &self.history {
+            parameters.push(PlCdrParameter {
+                id: ParameterId::PidHistory,
+                value: ParameterValue::HistoryQosPolicy(*history),
+            });
+        }
+        if let Some(resource_limits) = &self.resource_limits {
+            parameters.push(PlCdrParameter {
+                id: ParameterId::PidResourceLimits,
+                value: ParameterValue::ResourceLimits(*resource_limits),
+            });
+        }
+        if let Some(transport_priority) = &self.transport_priority {
+            parameters.push(PlCdrParameter {
+                id: ParameterId::PidTransportPriority,
+                value: ParameterValue::TransportPriority(transport_priority.value as u32),
+            });
+        }
 
         // Optional fields
         if let Some(key_hash) = self.key_hash {

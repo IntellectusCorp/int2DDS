@@ -275,6 +275,17 @@ fn find_all_key_fields(
         .collect()
 }
 
+fn builtin_topic_type_paths(
+    crate_path: &proc_macro2::TokenStream,
+) -> Vec<proc_macro2::TokenStream> {
+    vec![
+        quote! { #crate_path::common::builtin::topic::publication_builtin_topic_data::PublicationBuiltinTopicData },
+        quote! { #crate_path::common::builtin::topic::subscription_builtin_topic_data::SubscriptionBuiltinTopicData },
+        quote! { #crate_path::common::builtin::topic::participant_builtin_topic_data::ParticipantBuiltinTopicData },
+        quote! { #crate_path::common::builtin::topic::topic_builtin_topic_data::TopicBuiltinTopicData },
+    ]
+}
+
 /// Generate serialize method implementation (unified: handles both None and Some format)
 fn quote_serialize_impl(
     _name: &syn::Ident,
@@ -283,8 +294,15 @@ fn quote_serialize_impl(
     gc: &GenCtx,
 ) -> proc_macro2::TokenStream {
     let full_type = &gc.full_type;
+    let builtin_paths = builtin_topic_type_paths(crate_path);
     quote! {
         fn serialize(&self, data: &dyn std::any::Any, format: Option<&#crate_path::dcps::topic::type_support::SerializationFormat>) -> #crate_path::dcps::core::error::DdsResult<#crate_path::rtps::common::types::SerializedData> {
+            #(
+                if let Some(typed) = data.downcast_ref::<#builtin_paths>() {
+                    return Ok(typed.to_serialized_data());
+                }
+            )*
+
             let default_format = #crate_path::dcps::topic::type_support::SerializationFormat::Cdr;
             let format = format.unwrap_or(&default_format);
             if let Some(typed_data) = data.downcast_ref::<#full_type>() {
@@ -329,8 +347,18 @@ fn quote_serialize_into_impl(
     gc: &GenCtx,
 ) -> proc_macro2::TokenStream {
     let full_type = &gc.full_type;
+    let builtin_paths = builtin_topic_type_paths(crate_path);
     quote! {
         fn serialize_into(&self, data: &dyn std::any::Any, buffer: &mut Vec<u8>, format: Option<&#crate_path::dcps::topic::type_support::SerializationFormat>) -> #crate_path::dcps::core::error::DdsResult<()> {
+            #(
+                if let Some(typed) = data.downcast_ref::<#builtin_paths>() {
+                    let payload = typed.to_serialized_data();
+                    buffer.clear();
+                    buffer.extend_from_slice(payload.as_ref());
+                    return Ok(());
+                }
+            )*
+
             let default_format = #crate_path::dcps::topic::type_support::SerializationFormat::Cdr;
             let format = format.unwrap_or(&default_format);
             if let Some(typed_data) = data.downcast_ref::<#full_type>() {
@@ -379,25 +407,19 @@ fn quote_deserialize_impl(
     gc: &GenCtx,
 ) -> proc_macro2::TokenStream {
     let full_type = &gc.full_type;
+    let builtin_paths = builtin_topic_type_paths(crate_path);
     let builtin_pl_cdr_fallback = quote! {
         if data.len() >= 4 {
             let encoding_id = u16::from_be_bytes([data[0], data[1]]);
             if matches!(encoding_id, 0x0002 | 0x0003) {
-                // Discovery builtins are serialized as PL_CDR parameter lists rather than
-                // regular CDR/XCDR structs, so use their dedicated parser.
                 let type_id = std::any::TypeId::of::<#full_type>();
-
-                if type_id == std::any::TypeId::of::<#crate_path::common::builtin::topic::publication_builtin_topic_data::PublicationBuiltinTopicData>() {
-                    let value = #crate_path::common::builtin::topic::publication_builtin_topic_data::PublicationBuiltinTopicData::from_serialized_data(data)
-                        .map_err(#crate_path::dcps::core::error::DdsError::Error)?;
-                    return Ok(Box::new(value));
-                }
-
-                if type_id == std::any::TypeId::of::<#crate_path::common::builtin::topic::subscription_builtin_topic_data::SubscriptionBuiltinTopicData>() {
-                    let value = #crate_path::common::builtin::topic::subscription_builtin_topic_data::SubscriptionBuiltinTopicData::from_serialized_data(data)
-                        .map_err(#crate_path::dcps::core::error::DdsError::Error)?;
-                    return Ok(Box::new(value));
-                }
+                #(
+                    if type_id == std::any::TypeId::of::<#builtin_paths>() {
+                        let value = <#builtin_paths>::from_serialized_data(data)
+                            .map_err(#crate_path::dcps::core::error::DdsError::Error)?;
+                        return Ok(Box::new(value));
+                    }
+                )*
             }
         }
     };
