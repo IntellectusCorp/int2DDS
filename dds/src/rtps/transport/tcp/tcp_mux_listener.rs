@@ -495,9 +495,7 @@ impl TcpMuxListener {
         let addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
         let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)?;
         socket.set_reuse_address(true)?;
-        socket.set_nonblocking(false)?;
-        // Periodic accept timeout so the loop can check the termination flag.
-        socket.set_read_timeout(Some(Duration::from_millis(100)))?;
+        socket.set_nonblocking(true)?;
         socket.bind(&addr.into())?;
         socket.listen(128)?;
 
@@ -767,8 +765,7 @@ mod tests {
     /// Accept one raw connection from the listener and register it in the shared
     /// map (no read thread).  Returns the assigned ConnectionId.
     fn accept_raw_no_thread(listener: &TcpMuxListener) -> ConnectionId {
-        let (tcp, addr) =
-            listener.listener.as_ref().expect("listener present").accept().expect("accept");
+        let (tcp, addr) = accept_with_retry(listener.listener.as_ref().expect("listener present"));
         let conn_id = listener.shared.next_conn_id.fetch_add(1, Ordering::SeqCst);
         let shutdown = Arc::new(AtomicBool::new(false));
         let error_on_exit = Arc::new(AtomicBool::new(false));
@@ -793,9 +790,27 @@ mod tests {
         terminated: Arc<AtomicBool>,
         idle_timeout: Duration,
     ) -> ConnectionId {
-        let (tcp, addr) =
-            listener.listener.as_ref().expect("listener present").accept().expect("accept");
+        let (tcp, addr) = accept_with_retry(listener.listener.as_ref().expect("listener present"));
         listener.accept_connection(wrap_stream(tcp), addr, terminated, idle_timeout)
+    }
+
+    /// Block-with-retry wrapper around a non-blocking listener's accept().
+    /// Spins for up to ~2 s so test threads can synchronize with the
+    /// client-side connect() without racing.
+    fn accept_with_retry(listener: &std::net::TcpListener) -> (std::net::TcpStream, SocketAddr) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match listener.accept() {
+                Ok(pair) => return pair,
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        panic!("accept timed out (no incoming connection within 2s)");
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => panic!("accept: {:?}", e),
+            }
+        }
     }
 
     /// Spin-wait (up to `deadline`) until `pred` returns true.
