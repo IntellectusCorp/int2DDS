@@ -820,18 +820,6 @@ fn generate_cdr_serialize_impl(
         };
     }
 
-    if !is_mutable && fields.iter().any(|f| is_option_type(&f.ty)) {
-        return quote! {
-            impl #impl_generics #crate_path::serialize::cdr::CdrSerialize for #name #ty_generics #where_clause {
-                fn serialize_cdr(&self, _serializer: &mut #crate_path::serialize::cdr::CdrSerializer) -> #crate_path::serialize::cdr::CdrResult<()> {
-                    Err(#crate_path::serialize::cdr::CdrError::SerializationError(
-                        concat!("XCDR1 FINAL does not support Option<T> fields in '", stringify!(#name), "'; use MUTABLE or XCDR2").to_string(),
-                    ))
-                }
-            }
-        };
-    }
-
     let field_calls: Vec<_> = fields
         .iter()
         .enumerate()
@@ -846,24 +834,23 @@ fn generate_cdr_serialize_impl(
             let method = get_serialization_method(&field.ty);
             let primitive_vec_method = primitive_vec_serialize_method(method);
 
-            if is_mutable {
+            let inner_serialize_val = if let Some(ser_method) = primitive_vec_method {
+                let method_ident = syn::Ident::new(ser_method, field_name.span());
+                quote! { serializer.#method_ident(val)?; }
+            } else {
+                quote! { #crate_path::serialize::cdr::CdrSerialize::serialize_cdr(val, serializer)?; }
+            };
+            let inner_serialize_field = if let Some(ser_method) = primitive_vec_method {
+                let method_ident = syn::Ident::new(ser_method, field_name.span());
+                quote! { serializer.#method_ident(&self.#field_name)?; }
+            } else {
+                quote! { #crate_path::serialize::cdr::CdrSerialize::serialize_cdr(&self.#field_name, serializer)?; }
+            };
+
+            if is_optional {
                 let member_id = resolve_member_id(&field_config, &field_name.to_string(), index, autoid);
                 let must_understand = field_config.must_understand;
-
-                let inner_serialize_val = if let Some(ser_method) = primitive_vec_method {
-                    let method_ident = syn::Ident::new(ser_method, field_name.span());
-                    quote! { serializer.#method_ident(val)?; }
-                } else {
-                    quote! { #crate_path::serialize::cdr::CdrSerialize::serialize_cdr(val, serializer)?; }
-                };
-                let inner_serialize_field = if let Some(ser_method) = primitive_vec_method {
-                    let method_ident = syn::Ident::new(ser_method, field_name.span());
-                    quote! { serializer.#method_ident(&self.#field_name)?; }
-                } else {
-                    quote! { #crate_path::serialize::cdr::CdrSerialize::serialize_cdr(&self.#field_name, serializer)?; }
-                };
-
-                if is_optional {
+                if is_mutable {
                     Some(quote! {
                         if let Some(ref val) = self.#field_name {
                             serializer.write_member_with_v1(#member_id as u32, #must_understand, |serializer| {
@@ -875,20 +862,24 @@ fn generate_cdr_serialize_impl(
                 } else {
                     Some(quote! {
                         serializer.write_member_with_v1(#member_id as u32, #must_understand, |serializer| {
-                            #inner_serialize_field
+                            if let Some(ref val) = self.#field_name {
+                                #inner_serialize_val
+                            }
                             Ok(())
                         })?;
                     })
                 }
-            } else if let Some(ser_method) = primitive_vec_method {
-                let method_ident = syn::Ident::new(ser_method, field_name.span());
+            } else if is_mutable {
+                let member_id = resolve_member_id(&field_config, &field_name.to_string(), index, autoid);
+                let must_understand = field_config.must_understand;
                 Some(quote! {
-                    serializer.#method_ident(&self.#field_name)?;
+                    serializer.write_member_with_v1(#member_id as u32, #must_understand, |serializer| {
+                        #inner_serialize_field
+                        Ok(())
+                    })?;
                 })
             } else {
-                Some(quote! {
-                    #crate_path::serialize::cdr::CdrSerialize::serialize_cdr(&self.#field_name, serializer)?;
-                })
+                Some(quote! { #inner_serialize_field })
             }
         })
         .collect();
@@ -941,18 +932,6 @@ fn generate_cdr_deserialize_impl(
         };
     }
 
-    if !is_mutable && fields.iter().any(|f| is_option_type(&f.ty)) {
-        return quote! {
-            impl #impl_generics #crate_path::serialize::cdr::CdrDeserialize for #name #ty_generics #where_clause {
-                fn deserialize_cdr(_deserializer: &mut #crate_path::serialize::cdr::CdrDeserializer) -> #crate_path::serialize::cdr::CdrResult<Self> {
-                    Err(#crate_path::serialize::cdr::CdrError::DeserializationError(
-                        concat!("XCDR1 FINAL does not support Option<T> fields in '", stringify!(#name), "'; use MUTABLE or XCDR2").to_string(),
-                    ))
-                }
-            }
-        };
-    }
-
     if is_mutable {
         return generate_cdr_mutable_deserialize_impl(name, fields, crate_path, autoid, gc);
     }
@@ -969,6 +948,26 @@ fn generate_cdr_deserialize_impl(
                     field_type,
                     &field_config,
                 );
+            }
+            if field_config.optional {
+                let inner_type = extract_option_inner_type(field_type)
+                    .unwrap_or_else(|| field_type.clone());
+                let field_name_str = field_name.to_string();
+                return quote! {
+                    let mut #field_name: #field_type = match deserializer.read_parameter_header()? {
+                        #crate_path::serialize::cdr::PlCdrMemberHeader::Short { length: 0, .. }
+                        | #crate_path::serialize::cdr::PlCdrMemberHeader::Long { length: 0, .. } => None,
+                        #crate_path::serialize::cdr::PlCdrMemberHeader::Short { .. }
+                        | #crate_path::serialize::cdr::PlCdrMemberHeader::Long { .. } => Some(
+                            <#inner_type as #crate_path::serialize::cdr::CdrDeserialize>::deserialize_cdr(deserializer)?
+                        ),
+                        #crate_path::serialize::cdr::PlCdrMemberHeader::Sentinel => {
+                            return Err(#crate_path::serialize::cdr::CdrError::DeserializationError(
+                                format!("Unexpected PID_SENTINEL while reading optional field `{}`", #field_name_str)
+                            ));
+                        }
+                    };
+                };
             }
             let post_check = crate::codegen::field_ops::gen_post_deserialize_bound_check(
                 field_name,
@@ -1426,11 +1425,13 @@ fn generate_final_deserialize_impl(
             }
 
             if field_config.optional {
+                let inner_type = extract_option_inner_type(field_type)
+                    .unwrap_or_else(|| field_type.clone());
                 quote! {
                     let #field_name = {
                         let has_value = deserializer.deserialize_bool()?;
                         if has_value {
-                            Some(<#field_type as #crate_path::serialize::xcdr::XcdrDeserialize>::deserialize_xcdr(deserializer)?)
+                            Some(<#inner_type as #crate_path::serialize::xcdr::XcdrDeserialize>::deserialize_xcdr(deserializer)?)
                         } else {
                             None
                         }
@@ -1507,11 +1508,13 @@ fn generate_appendable_deserialize_impl(
                     let #field_name = <#field_type as #crate_path::serialize::xcdr::XcdrDeserializeMembers>::deserialize_xcdr_members(deserializer)?;
                 }
             } else if field_config.optional {
+                let inner_type = extract_option_inner_type(field_type)
+                    .unwrap_or_else(|| field_type.clone());
                 quote! {
                     let #field_name = {
                         let has_value = deserializer.deserialize_bool()?;
                         if has_value {
-                            Some(<#field_type as #crate_path::serialize::xcdr::XcdrDeserialize>::deserialize_xcdr(deserializer)?)
+                            Some(<#inner_type as #crate_path::serialize::xcdr::XcdrDeserialize>::deserialize_xcdr(deserializer)?)
                         } else {
                             None
                         }
