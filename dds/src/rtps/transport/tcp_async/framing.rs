@@ -51,9 +51,12 @@ pub(crate) async fn read_framed_message<R>(stream: &mut R) -> io::Result<Vec<u8>
 where
     R: AsyncRead + Unpin + ?Sized,
 {
-    let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).await?;
-    let len = u32::from_be_bytes(len_buf) as usize;
+    // Read length + magic together into a stack buffer, then read the payload
+    // directly into its own exact-sized Vec. This avoids the extra alloc + memcpy
+    // that `data[MAGIC_SIZE..].to_vec()` used to incur on every frame.
+    let mut header = [0u8; 4 + MAGIC_SIZE];
+    stream.read_exact(&mut header).await?;
+    let len = u32::from_be_bytes(header[..4].try_into().unwrap()) as usize;
 
     if len < MAGIC_SIZE {
         return Err(transport_io_error(
@@ -69,22 +72,20 @@ where
         ));
     }
 
-    let mut data = vec![0u8; len];
-    stream.read_exact(&mut data).await?;
-
-    // Validate magic
-    if data[0..4] != FRAME_MAGIC {
+    if header[4..] != FRAME_MAGIC {
         return Err(transport_io_error(
             TransportErrorCode::TcpFrameInvalidMagic,
             format!(
                 "Invalid frame magic: {:02x} {:02x} {:02x} {:02x} (expected INT2)",
-                data[0], data[1], data[2], data[3]
+                header[4], header[5], header[6], header[7]
             ),
         ));
     }
 
-    // Return payload after magic
-    Ok(data[MAGIC_SIZE..].to_vec())
+    let payload_len = len - MAGIC_SIZE;
+    let mut payload = vec![0u8; payload_len];
+    stream.read_exact(&mut payload).await?;
+    Ok(payload)
 }
 
 /// Classification of a TCP frame payload
