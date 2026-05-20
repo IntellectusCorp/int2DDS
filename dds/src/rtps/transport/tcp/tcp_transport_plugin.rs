@@ -431,7 +431,6 @@ impl TcpMuxListeningLoopTask {
                     );
                 }
 
-                // Periodic timeout from SO_RCVTIMEO — check termination flag.
                 Err(ref e)
                     if e.kind() == io::ErrorKind::WouldBlock
                         || e.kind() == io::ErrorKind::TimedOut =>
@@ -439,6 +438,7 @@ impl TcpMuxListeningLoopTask {
                     if terminated.load(Ordering::SeqCst) {
                         break;
                     }
+                    thread::sleep(Duration::from_millis(100));
                 }
 
                 Err(e) => {
@@ -657,7 +657,13 @@ mod tls_tests {
                     }
                     Err(ref e)
                         if e.kind() == std::io::ErrorKind::WouldBlock
-                            || e.kind() == std::io::ErrorKind::TimedOut => {}
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        // Listener is non-blocking; back off briefly so the
+                        // loop does not busy-spin and starve the TLS handshake
+                        // thread (especially noticeable on Windows).
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
                     Err(_) => break,
                 }
             }
