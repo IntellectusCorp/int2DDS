@@ -623,8 +623,9 @@ impl TcpSender {
         match socket2.connect(&SockAddr::from(*addr)) {
             Ok(_) => {}
             Err(e)
-                if e.raw_os_error() == Some(10035)
-                    || e.raw_os_error() == Some(115)
+                if e.raw_os_error() == Some(10035)   // Windows WSAEWOULDBLOCK
+                    || e.raw_os_error() == Some(115) // Linux EINPROGRESS
+                    || e.raw_os_error() == Some(36)  // macOS/BSD EINPROGRESS
                     || e.kind() == ErrorKind::WouldBlock =>
             {
                 let start = std::time::Instant::now();
@@ -744,8 +745,11 @@ mod tests {
         std::thread::Builder::new()
             .name("test_listener_pump".to_string())
             .spawn(move || {
-                // TcpMuxListener already sets SO_RCVTIMEO = 100ms on the socket,
-                // so accept() returns WouldBlock periodically for stop-flag checks.
+                // TcpMuxListener configures the listener as non-blocking, so
+                // accept() returns WouldBlock when there is nothing pending;
+                // we sleep briefly so the stop flag is checked periodically
+                // without busy-spinning. SO_RCVTIMEO is not used here because
+                // it does not propagate to accept() on macOS/BSD/Windows.
                 let raw_listener = match listener.take_listener() {
                     Some(l) => l,
                     None => return,
@@ -769,7 +773,7 @@ mod tests {
                             if e.kind() == std::io::ErrorKind::WouldBlock
                                 || e.kind() == std::io::ErrorKind::TimedOut =>
                         {
-                            // Timeout — check stop flag on next iteration.
+                            std::thread::sleep(Duration::from_millis(100));
                         }
                         Err(_) => break,
                     }
