@@ -7,6 +7,7 @@
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, ServerConfig, ServerConnection, StreamOwned};
@@ -207,6 +208,26 @@ impl TcpStreamWrapper for TlsTcpStream {
     }
 }
 
+/// Default timeout for TLS handshake (read side).
+/// Matches the default TCP connect timeout (`INT2DDS_TCP_CONNECT_TIMEOUT`).
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Set a temporary read timeout for the TLS handshake, run `complete_io`,
+/// then restore the original timeout so callers are not surprised.
+fn complete_handshake_io<C: rustls::SideData>(
+    conn: &mut rustls::ConnectionCommon<C>,
+    tcp: &mut TcpStream,
+) -> io::Result<()> {
+    let prev = tcp.read_timeout()?;
+    tcp.set_read_timeout(Some(TLS_HANDSHAKE_TIMEOUT))?;
+    let result = conn.complete_io(tcp);
+    // Restore regardless of success/failure.
+    let _ = tcp.set_read_timeout(prev);
+    result
+        .map(|_| ())
+        .map_err(|e| transport_io_error(TransportErrorCode::TlsHandshakeFailed, e.to_string()))
+}
+
 /// Open a TLS connection over an established TCP socket (client role).
 /// The TLS handshake is performed synchronously before returning.
 pub(crate) fn connect_tls(
@@ -219,8 +240,7 @@ pub(crate) fn connect_tls(
     let mut conn = ClientConnection::new(config, server_name)
         .map_err(|e| transport_io_error(TransportErrorCode::TlsConfigError, e.to_string()))?;
     let mut tcp = tcp;
-    conn.complete_io(&mut tcp)
-        .map_err(|e| transport_io_error(TransportErrorCode::TlsHandshakeFailed, e.to_string()))?;
+    complete_handshake_io(&mut conn, &mut tcp)?;
     let stream = StreamOwned::new(conn, tcp);
     Ok(Box::new(TlsTcpStream::new(TlsKind::Client(stream))?))
 }
@@ -233,9 +253,11 @@ pub(crate) fn accept_tls(
 ) -> io::Result<Box<dyn TcpStreamWrapper>> {
     let mut conn = ServerConnection::new(config)
         .map_err(|e| transport_io_error(TransportErrorCode::TlsConfigError, e.to_string()))?;
+    // On Windows, accepted sockets inherit the non-blocking flag from the
+    // listener.  complete_io requires blocking I/O to finish the handshake.
     let mut tcp = tcp;
-    conn.complete_io(&mut tcp)
-        .map_err(|e| transport_io_error(TransportErrorCode::TlsHandshakeFailed, e.to_string()))?;
+    tcp.set_nonblocking(false)?;
+    complete_handshake_io(&mut conn, &mut tcp)?;
     let stream = StreamOwned::new(conn, tcp);
     Ok(Box::new(TlsTcpStream::new(TlsKind::Server(stream))?))
 }
