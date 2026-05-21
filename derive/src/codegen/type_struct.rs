@@ -7,13 +7,11 @@ use crate::codegen::utils::{
     SerializationMethod,
 };
 use crate::codegen::{
-    generate_additional_derives, generate_field_deserialization,
-    generate_field_deserialization_xcdr, generate_field_deserialization_xcdr_per_field_dheader,
-    generate_field_serialization, generate_field_serialization_xcdr,
-    generate_key_field_serialization, generate_key_field_serialization_xcdr, generate_key_methods,
-    generate_multi_key_methods, generate_non_key_field_serialization,
-    generate_non_key_field_serialization_xcdr, parse_field_attributes, KeyFieldInfo,
-    MultiKeyFieldInfo,
+    generate_additional_derives, generate_field_deserialization_xcdr,
+    generate_field_deserialization_xcdr_per_field_dheader, generate_key_field_serialization,
+    generate_key_field_serialization_xcdr, generate_key_methods, generate_multi_key_methods,
+    generate_non_key_field_serialization, generate_non_key_field_serialization_xcdr,
+    parse_field_attributes, KeyFieldInfo, MultiKeyFieldInfo,
 };
 use crate::codegen::{quote_extensibility_tokens, DdsTypeConfig, ExtensibilityKind};
 
@@ -118,10 +116,7 @@ pub fn derive_struct_impl(
         }
     };
 
-    // Generate CDR and XCDR field information
-    let field_serialization = generate_field_serialization(fields, crate_path);
-    let field_deserialization = generate_field_deserialization(fields, name, crate_path);
-    let xcdr_field_serialization = generate_field_serialization_xcdr(fields, crate_path);
+    // Generate XCDR field deserialization (CDR / XCDR serialize paths go through the trait impls).
     let xcdr_field_deserialization = generate_field_deserialization_xcdr(fields, name, crate_path);
 
     // Generate per-field DHEADER deserialization for dust-dds compatibility
@@ -141,15 +136,10 @@ pub fn derive_struct_impl(
     let (serialize_key_impl, deserialize_key_impl, compute_key_impl) = if all_key_fields.is_empty()
     {
         // When there are no keys
-        generate_key_methods(None, &gc.full_type, &field_deserialization, crate_path)
+        generate_key_methods(None, &gc.full_type, crate_path)
     } else if all_key_fields.len() == 1 {
         // Single key
-        generate_key_methods(
-            Some(&all_key_fields[0]),
-            &gc.full_type,
-            &field_deserialization,
-            crate_path,
-        )
+        generate_key_methods(Some(&all_key_fields[0]), &gc.full_type, crate_path)
     } else {
         // Multiple keys
         let multi_key_info = MultiKeyFieldInfo { fields: all_key_fields };
@@ -165,9 +155,6 @@ pub fn derive_struct_impl(
         name,
         has_key,
         has_non_key_fields,
-        &field_serialization,
-        &field_deserialization,
-        &xcdr_field_serialization,
         &xcdr_field_deserialization,
         &xcdr_field_deserialization_per_field_dheader,
         &key_field_serialization,
@@ -288,31 +275,47 @@ fn find_all_key_fields(
         .collect()
 }
 
+fn builtin_topic_type_paths(
+    crate_path: &proc_macro2::TokenStream,
+) -> Vec<proc_macro2::TokenStream> {
+    vec![
+        quote! { #crate_path::common::builtin::topic::publication_builtin_topic_data::PublicationBuiltinTopicData },
+        quote! { #crate_path::common::builtin::topic::subscription_builtin_topic_data::SubscriptionBuiltinTopicData },
+        quote! { #crate_path::common::builtin::topic::participant_builtin_topic_data::ParticipantBuiltinTopicData },
+        quote! { #crate_path::common::builtin::topic::topic_builtin_topic_data::TopicBuiltinTopicData },
+    ]
+}
+
 /// Generate serialize method implementation (unified: handles both None and Some format)
 fn quote_serialize_impl(
     _name: &syn::Ident,
-    cdr_field_serialization: &proc_macro2::TokenStream,
-    _xcdr_field_serialization: &proc_macro2::TokenStream,
     crate_path: &proc_macro2::TokenStream,
+    extensibility_tokens: &proc_macro2::TokenStream,
     gc: &GenCtx,
 ) -> proc_macro2::TokenStream {
     let full_type = &gc.full_type;
+    let builtin_paths = builtin_topic_type_paths(crate_path);
     quote! {
         fn serialize(&self, data: &dyn std::any::Any, format: Option<&#crate_path::dcps::topic::type_support::SerializationFormat>) -> #crate_path::dcps::core::error::DdsResult<#crate_path::rtps::common::types::SerializedData> {
+            #(
+                if let Some(typed) = data.downcast_ref::<#builtin_paths>() {
+                    return Ok(typed.to_serialized_data());
+                }
+            )*
+
             let default_format = #crate_path::dcps::topic::type_support::SerializationFormat::Cdr;
             let format = format.unwrap_or(&default_format);
             if let Some(typed_data) = data.downcast_ref::<#full_type>() {
                 match format {
                     #crate_path::dcps::topic::type_support::SerializationFormat::Cdr => {
                         use #crate_path::serialize::{cdr::CdrSerializer, BufferManager};
-                        use #crate_path::serialize::cdr::{PrimitiveSerialize, StringSerialize, ArraySerialize, SequenceSerialize};
+                        use #crate_path::serialize::cdr::CdrSerialize;
 
-                        let mut serializer = CdrSerializer::with_capacity(true, 64);
+                        let mut serializer = CdrSerializer::with_extensibility(true, #extensibility_tokens);
                         serializer.write_encapsulation_header()
                             .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
-
-                        #cdr_field_serialization
-
+                        CdrSerialize::serialize_cdr(typed_data, &mut serializer)
+                            .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
                         let bytes = serializer.into_bytes();
                         Ok(std::sync::Arc::from(bytes.into_boxed_slice()))
                     },
@@ -339,65 +342,50 @@ fn quote_serialize_impl(
 /// Generate serialize_into method implementation (buffer-reusing variant)
 fn quote_serialize_into_impl(
     _name: &syn::Ident,
-    cdr_field_serialization: &proc_macro2::TokenStream,
-    xcdr_field_serialization: &proc_macro2::TokenStream,
     crate_path: &proc_macro2::TokenStream,
+    extensibility_tokens: &proc_macro2::TokenStream,
     gc: &GenCtx,
 ) -> proc_macro2::TokenStream {
     let full_type = &gc.full_type;
+    let builtin_paths = builtin_topic_type_paths(crate_path);
     quote! {
         fn serialize_into(&self, data: &dyn std::any::Any, buffer: &mut Vec<u8>, format: Option<&#crate_path::dcps::topic::type_support::SerializationFormat>) -> #crate_path::dcps::core::error::DdsResult<()> {
+            #(
+                if let Some(typed) = data.downcast_ref::<#builtin_paths>() {
+                    let payload = typed.to_serialized_data();
+                    buffer.clear();
+                    buffer.extend_from_slice(payload.as_ref());
+                    return Ok(());
+                }
+            )*
+
             let default_format = #crate_path::dcps::topic::type_support::SerializationFormat::Cdr;
             let format = format.unwrap_or(&default_format);
             if let Some(typed_data) = data.downcast_ref::<#full_type>() {
                 match format {
                     #crate_path::dcps::topic::type_support::SerializationFormat::Cdr => {
                         use #crate_path::serialize::{cdr::CdrSerializer, BufferManager};
-                        use #crate_path::serialize::cdr::{PrimitiveSerialize, StringSerialize, ArraySerialize, SequenceSerialize};
+                        use #crate_path::serialize::cdr::CdrSerialize;
 
                         let buf = std::mem::take(buffer);
-                        let mut serializer = CdrSerializer::reuse_buffer(true, buf);
+                        let mut serializer = CdrSerializer::with_extensibility_and_buffer(true, #extensibility_tokens, buf);
                         serializer.write_encapsulation_header()
                             .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
-
-                        #cdr_field_serialization
-
+                        CdrSerialize::serialize_cdr(typed_data, &mut serializer)
+                            .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
                         *buffer = serializer.into_buffer();
                         Ok(())
                     },
-                    #crate_path::dcps::topic::type_support::SerializationFormat::Xcdr { extensibility_kind, use_delimiters } => {
+                    #crate_path::dcps::topic::type_support::SerializationFormat::Xcdr { extensibility_kind, .. } => {
                         use #crate_path::serialize::{xcdr::Xcdr2Serializer, BufferManager};
-                        use #crate_path::serialize::cdr::{PrimitiveSerialize, StringSerialize, ArraySerialize, SequenceSerialize};
+                        use #crate_path::serialize::xcdr::XcdrSerialize;
 
-                        let effective_extensibility = *extensibility_kind;
-                        let use_delimiters = *use_delimiters;
                         let buf = std::mem::take(buffer);
-                        let mut serializer = Xcdr2Serializer::reuse_buffer(true, effective_extensibility, buf);
+                        let mut serializer = Xcdr2Serializer::reuse_buffer(true, *extensibility_kind, buf);
                         serializer.write_encapsulation_header()
                             .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
-
-                        let size_pos = if use_delimiters {
-                            Some(
-                                serializer
-                                    .begin_struct()
-                                    .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(
-                                        e.to_string(),
-                                    ))?,
-                            )
-                        } else {
-                            None
-                        };
-
-                        #xcdr_field_serialization
-
-                        if let Some(size_pos) = size_pos {
-                            serializer
-                                .end_struct(size_pos)
-                                .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(
-                                    e.to_string(),
-                                ))?;
-                        }
-
+                        XcdrSerialize::serialize_xcdr(typed_data, &mut serializer)
+                            .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
                         *buffer = serializer.into_buffer();
                         Ok(())
                     }
@@ -413,32 +401,25 @@ fn quote_serialize_into_impl(
 fn quote_deserialize_impl(
     _name: &syn::Ident,
     extensibility: Option<ExtensibilityKind>,
-    cdr_field_deserialization: &proc_macro2::TokenStream,
     xcdr_field_deserialization: &proc_macro2::TokenStream,
     xcdr_field_deserialization_per_field_dheader: &proc_macro2::TokenStream,
     crate_path: &proc_macro2::TokenStream,
     gc: &GenCtx,
 ) -> proc_macro2::TokenStream {
     let full_type = &gc.full_type;
+    let builtin_paths = builtin_topic_type_paths(crate_path);
     let builtin_pl_cdr_fallback = quote! {
         if data.len() >= 4 {
             let encoding_id = u16::from_be_bytes([data[0], data[1]]);
             if matches!(encoding_id, 0x0002 | 0x0003) {
-                // Discovery builtins are serialized as PL_CDR parameter lists rather than
-                // regular CDR/XCDR structs, so use their dedicated parser.
                 let type_id = std::any::TypeId::of::<#full_type>();
-
-                if type_id == std::any::TypeId::of::<#crate_path::common::builtin::topic::publication_builtin_topic_data::PublicationBuiltinTopicData>() {
-                    let value = #crate_path::common::builtin::topic::publication_builtin_topic_data::PublicationBuiltinTopicData::from_serialized_data(data)
-                        .map_err(#crate_path::dcps::core::error::DdsError::Error)?;
-                    return Ok(Box::new(value));
-                }
-
-                if type_id == std::any::TypeId::of::<#crate_path::common::builtin::topic::subscription_builtin_topic_data::SubscriptionBuiltinTopicData>() {
-                    let value = #crate_path::common::builtin::topic::subscription_builtin_topic_data::SubscriptionBuiltinTopicData::from_serialized_data(data)
-                        .map_err(#crate_path::dcps::core::error::DdsError::Error)?;
-                    return Ok(Box::new(value));
-                }
+                #(
+                    if type_id == std::any::TypeId::of::<#builtin_paths>() {
+                        let value = <#builtin_paths>::from_serialized_data(data)
+                            .map_err(#crate_path::dcps::core::error::DdsError::Error)?;
+                        return Ok(Box::new(value));
+                    }
+                )*
             }
         }
     };
@@ -481,13 +462,12 @@ fn quote_deserialize_impl(
             };
             match &resolved_format {
                 #crate_path::dcps::topic::type_support::SerializationFormat::Cdr => {
-                    use #crate_path::serialize::cdr::CdrDeserializer;
+                    use #crate_path::serialize::cdr::{CdrDeserialize, CdrDeserializer};
 
                     let mut deserializer = CdrDeserializer::new(data)
                         .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
-
-                    #cdr_field_deserialization
-
+                    let result = <#full_type as CdrDeserialize>::deserialize_cdr(&mut deserializer)
+                        .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
                     Ok(Box::new(result))
                 },
                 #crate_path::dcps::topic::type_support::SerializationFormat::Xcdr { use_delimiters, .. } => {
@@ -553,9 +533,6 @@ fn generate_unified_type_support_impl(
     name: &syn::Ident,
     has_key: bool,
     _has_non_key_fields: bool,
-    cdr_field_serialization: &proc_macro2::TokenStream,
-    cdr_field_deserialization: &proc_macro2::TokenStream,
-    xcdr_field_serialization: &proc_macro2::TokenStream,
     xcdr_field_deserialization: &proc_macro2::TokenStream,
     xcdr_field_deserialization_per_field_dheader: &proc_macro2::TokenStream,
     _key_field_serialization: &proc_macro2::TokenStream,
@@ -570,33 +547,21 @@ fn generate_unified_type_support_impl(
     type_name_override: Option<&str>,
     gc: &GenCtx,
 ) -> proc_macro2::TokenStream {
-    let serialize_impl = quote_serialize_impl(
-        name,
-        cdr_field_serialization,
-        xcdr_field_serialization,
+    let extensibility_tokens = quote_extensibility_tokens(
+        extensibility.unwrap_or(ExtensibilityKind::Appendable),
         crate_path,
-        gc,
     );
-    let serialize_into_impl = quote_serialize_into_impl(
-        name,
-        cdr_field_serialization,
-        xcdr_field_serialization,
-        crate_path,
-        gc,
-    );
+
+    let serialize_impl = quote_serialize_impl(name, crate_path, &extensibility_tokens, gc);
+    let serialize_into_impl =
+        quote_serialize_into_impl(name, crate_path, &extensibility_tokens, gc);
     let deserialize_impl = quote_deserialize_impl(
         name,
         extensibility,
-        cdr_field_deserialization,
         xcdr_field_deserialization,
         xcdr_field_deserialization_per_field_dheader,
         crate_path,
         gc,
-    );
-
-    let extensibility_tokens = quote_extensibility_tokens(
-        extensibility.unwrap_or(ExtensibilityKind::Appendable),
-        crate_path,
     );
 
     let impl_generics = &gc.impl_generics;
@@ -877,18 +842,6 @@ fn generate_cdr_serialize_impl(
         };
     }
 
-    if !is_mutable && fields.iter().any(|f| is_option_type(&f.ty)) {
-        return quote! {
-            impl #impl_generics #crate_path::serialize::cdr::CdrSerialize for #name #ty_generics #where_clause {
-                fn serialize_cdr(&self, _serializer: &mut #crate_path::serialize::cdr::CdrSerializer) -> #crate_path::serialize::cdr::CdrResult<()> {
-                    Err(#crate_path::serialize::cdr::CdrError::SerializationError(
-                        concat!("XCDR1 FINAL does not support Option<T> fields in '", stringify!(#name), "'; use MUTABLE or XCDR2").to_string(),
-                    ))
-                }
-            }
-        };
-    }
-
     let field_calls: Vec<_> = fields
         .iter()
         .enumerate()
@@ -900,19 +853,30 @@ fn generate_cdr_serialize_impl(
             }
             let is_optional = field_config.optional;
 
-            if is_mutable {
+            let method = get_serialization_method(&field.ty);
+            let primitive_vec_method = primitive_vec_serialize_method(method);
+
+            let inner_serialize_val = if let Some(ser_method) = primitive_vec_method {
+                let method_ident = syn::Ident::new(ser_method, field_name.span());
+                quote! { serializer.#method_ident(val)?; }
+            } else {
+                quote! { #crate_path::serialize::cdr::CdrSerialize::serialize_cdr(val, serializer)?; }
+            };
+            let inner_serialize_field = if let Some(ser_method) = primitive_vec_method {
+                let method_ident = syn::Ident::new(ser_method, field_name.span());
+                quote! { serializer.#method_ident(&self.#field_name)?; }
+            } else {
+                quote! { #crate_path::serialize::cdr::CdrSerialize::serialize_cdr(&self.#field_name, serializer)?; }
+            };
+
+            if is_optional {
                 let member_id = resolve_member_id(&field_config, &field_name.to_string(), index, autoid);
                 let must_understand = field_config.must_understand;
-
-                let inner_serialize = quote! {
-                    #crate_path::serialize::cdr::CdrSerialize::serialize_cdr(val, serializer)?;
-                };
-
-                if is_optional {
+                if is_mutable {
                     Some(quote! {
                         if let Some(ref val) = self.#field_name {
                             serializer.write_member_with_v1(#member_id as u32, #must_understand, |serializer| {
-                                #inner_serialize
+                                #inner_serialize_val
                                 Ok(())
                             })?;
                         }
@@ -920,15 +884,24 @@ fn generate_cdr_serialize_impl(
                 } else {
                     Some(quote! {
                         serializer.write_member_with_v1(#member_id as u32, #must_understand, |serializer| {
-                            #crate_path::serialize::cdr::CdrSerialize::serialize_cdr(&self.#field_name, serializer)?;
+                            if let Some(ref val) = self.#field_name {
+                                #inner_serialize_val
+                            }
                             Ok(())
                         })?;
                     })
                 }
-            } else {
+            } else if is_mutable {
+                let member_id = resolve_member_id(&field_config, &field_name.to_string(), index, autoid);
+                let must_understand = field_config.must_understand;
                 Some(quote! {
-                    #crate_path::serialize::cdr::CdrSerialize::serialize_cdr(&self.#field_name, serializer)?;
+                    serializer.write_member_with_v1(#member_id as u32, #must_understand, |serializer| {
+                        #inner_serialize_field
+                        Ok(())
+                    })?;
                 })
+            } else {
+                Some(quote! { #inner_serialize_field })
             }
         })
         .collect();
@@ -981,18 +954,6 @@ fn generate_cdr_deserialize_impl(
         };
     }
 
-    if !is_mutable && fields.iter().any(|f| is_option_type(&f.ty)) {
-        return quote! {
-            impl #impl_generics #crate_path::serialize::cdr::CdrDeserialize for #name #ty_generics #where_clause {
-                fn deserialize_cdr(_deserializer: &mut #crate_path::serialize::cdr::CdrDeserializer) -> #crate_path::serialize::cdr::CdrResult<Self> {
-                    Err(#crate_path::serialize::cdr::CdrError::DeserializationError(
-                        concat!("XCDR1 FINAL does not support Option<T> fields in '", stringify!(#name), "'; use MUTABLE or XCDR2").to_string(),
-                    ))
-                }
-            }
-        };
-    }
-
     if is_mutable {
         return generate_cdr_mutable_deserialize_impl(name, fields, crate_path, autoid, gc);
     }
@@ -1010,6 +971,26 @@ fn generate_cdr_deserialize_impl(
                     &field_config,
                 );
             }
+            if field_config.optional {
+                let inner_type = extract_option_inner_type(field_type)
+                    .unwrap_or_else(|| field_type.clone());
+                let field_name_str = field_name.to_string();
+                return quote! {
+                    let mut #field_name: #field_type = match deserializer.read_parameter_header()? {
+                        #crate_path::serialize::cdr::PlCdrMemberHeader::Short { length: 0, .. }
+                        | #crate_path::serialize::cdr::PlCdrMemberHeader::Long { length: 0, .. } => None,
+                        #crate_path::serialize::cdr::PlCdrMemberHeader::Short { .. }
+                        | #crate_path::serialize::cdr::PlCdrMemberHeader::Long { .. } => Some(
+                            <#inner_type as #crate_path::serialize::cdr::CdrDeserialize>::deserialize_cdr(deserializer)?
+                        ),
+                        #crate_path::serialize::cdr::PlCdrMemberHeader::Sentinel => {
+                            return Err(#crate_path::serialize::cdr::CdrError::DeserializationError(
+                                format!("Unexpected PID_SENTINEL while reading optional field `{}`", #field_name_str)
+                            ));
+                        }
+                    };
+                };
+            }
             let post_check = crate::codegen::field_ops::gen_post_deserialize_bound_check(
                 field_name,
                 field_type,
@@ -1018,9 +999,18 @@ fn generate_cdr_deserialize_impl(
                 crate_path,
                 crate::codegen::field_ops::DeserErrorKind::Serialization,
             );
-            quote! {
-                let mut #field_name = <#field_type as #crate_path::serialize::cdr::CdrDeserialize>::deserialize_cdr(deserializer)?;
-                #post_check
+            let method = get_serialization_method(&field.ty);
+            if let Some(deser_method) = primitive_vec_deserialize_method(method) {
+                let method_ident = syn::Ident::new(deser_method, field_name.span());
+                quote! {
+                    let mut #field_name = deserializer.#method_ident()?;
+                    #post_check
+                }
+            } else {
+                quote! {
+                    let mut #field_name = <#field_type as #crate_path::serialize::cdr::CdrDeserialize>::deserialize_cdr(deserializer)?;
+                    #post_check
+                }
             }
         })
         .collect();
@@ -1094,11 +1084,21 @@ fn generate_cdr_mutable_deserialize_impl(
                     }
                 })
             } else {
-                Some(quote! {
-                    #member_id => {
-                        #field_name = Some(<#field_type as #crate_path::serialize::cdr::CdrDeserialize>::deserialize_cdr(deserializer)?);
-                    }
-                })
+                let method = get_serialization_method(&field.ty);
+                if let Some(deser_method) = primitive_vec_deserialize_method(method) {
+                    let method_ident = syn::Ident::new(deser_method, field_name.span());
+                    Some(quote! {
+                        #member_id => {
+                            #field_name = Some(deserializer.#method_ident()?);
+                        }
+                    })
+                } else {
+                    Some(quote! {
+                        #member_id => {
+                            #field_name = Some(<#field_type as #crate_path::serialize::cdr::CdrDeserialize>::deserialize_cdr(deserializer)?);
+                        }
+                    })
+                }
             }
         })
         .collect();
@@ -1447,11 +1447,13 @@ fn generate_final_deserialize_impl(
             }
 
             if field_config.optional {
+                let inner_type = extract_option_inner_type(field_type)
+                    .unwrap_or_else(|| field_type.clone());
                 quote! {
                     let #field_name = {
                         let has_value = deserializer.deserialize_bool()?;
                         if has_value {
-                            Some(<#field_type as #crate_path::serialize::xcdr::XcdrDeserialize>::deserialize_xcdr(deserializer)?)
+                            Some(<#inner_type as #crate_path::serialize::xcdr::XcdrDeserialize>::deserialize_xcdr(deserializer)?)
                         } else {
                             None
                         }
@@ -1528,11 +1530,13 @@ fn generate_appendable_deserialize_impl(
                     let #field_name = <#field_type as #crate_path::serialize::xcdr::XcdrDeserializeMembers>::deserialize_xcdr_members(deserializer)?;
                 }
             } else if field_config.optional {
+                let inner_type = extract_option_inner_type(field_type)
+                    .unwrap_or_else(|| field_type.clone());
                 quote! {
                     let #field_name = {
                         let has_value = deserializer.deserialize_bool()?;
                         if has_value {
-                            Some(<#field_type as #crate_path::serialize::xcdr::XcdrDeserialize>::deserialize_xcdr(deserializer)?)
+                            Some(<#inner_type as #crate_path::serialize::xcdr::XcdrDeserialize>::deserialize_xcdr(deserializer)?)
                         } else {
                             None
                         }
@@ -1895,12 +1899,7 @@ pub fn derive_tuple_struct_impl(
     // Generate field serialization/deserialization for tuple fields
     let field_count = fields.len();
 
-    // Generate CDR serialization
-    let cdr_field_serialization = generate_tuple_field_serialization(fields, crate_path);
-    let cdr_field_deserialization = generate_tuple_field_deserialization(fields, name, crate_path);
-
-    // Generate XCDR serialization
-    let xcdr_field_serialization = generate_tuple_field_serialization_xcdr(fields, crate_path);
+    // XCDR deserialization paths (serialize / CDR deserialize go through trait impls).
     let xcdr_field_deserialization =
         generate_tuple_field_deserialization_xcdr(fields, name, crate_path);
 
@@ -1910,7 +1909,7 @@ pub fn derive_tuple_struct_impl(
 
     // Generate key-related methods (no keys for tuple structs)
     let (serialize_key_impl, deserialize_key_impl, compute_key_impl) =
-        generate_key_methods(None, &tuple_gc.full_type, &cdr_field_deserialization, crate_path);
+        generate_key_methods(None, &tuple_gc.full_type, crate_path);
 
     // Generate field access methods
     let field_access_impl = generate_tuple_field_access_methods(field_count, name, crate_path);
@@ -1920,9 +1919,6 @@ pub fn derive_tuple_struct_impl(
         &type_support_name,
         name,
         has_key,
-        &cdr_field_serialization,
-        &cdr_field_deserialization,
-        &xcdr_field_serialization,
         &xcdr_field_deserialization,
         &xcdr_field_deserialization_per_field_dheader,
         &serialize_key_impl,
@@ -2040,74 +2036,6 @@ fn generate_tuple_xcdr_deserialize_members_impl(
             }
         }
     }
-}
-
-/// Generate tuple field serialization code for CDR
-fn generate_tuple_field_serialization(
-    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
-    crate_path: &proc_macro2::TokenStream,
-) -> proc_macro2::TokenStream {
-    let field_serializations: Vec<_> = fields
-        .iter()
-        .enumerate()
-        .map(|(idx, _field)| {
-            let idx = syn::Index::from(idx);
-            quote! {
-                #crate_path::serialize::cdr::CdrSerialize::serialize_cdr(&typed_data.#idx, &mut serializer)
-                    .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
-            }
-        })
-        .collect();
-
-    quote! { #(#field_serializations)* }
-}
-
-/// Generate tuple field deserialization code for CDR
-fn generate_tuple_field_deserialization(
-    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
-    name: &syn::Ident,
-    crate_path: &proc_macro2::TokenStream,
-) -> proc_macro2::TokenStream {
-    let field_deserializations: Vec<_> = fields
-        .iter()
-        .enumerate()
-        .map(|(idx, field)| {
-            let field_var = quote::format_ident!("field_{}", idx);
-            let field_type = &field.ty;
-            quote! {
-                let #field_var = <#field_type as #crate_path::serialize::cdr::CdrDeserialize>::deserialize_cdr(&mut deserializer)
-                    .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
-            }
-        })
-        .collect();
-
-    let field_vars: Vec<_> =
-        (0..fields.len()).map(|idx| quote::format_ident!("field_{}", idx)).collect();
-
-    quote! {
-        #(#field_deserializations)*
-        let result = #name(#(#field_vars),*);
-    }
-}
-
-/// Generate tuple field serialization code for XCDR
-fn generate_tuple_field_serialization_xcdr(
-    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
-    crate_path: &proc_macro2::TokenStream,
-) -> proc_macro2::TokenStream {
-    let field_serializations: Vec<_> = fields
-        .iter()
-        .enumerate()
-        .map(|(idx, _field)| {
-            let idx = syn::Index::from(idx);
-            quote! {
-                #crate_path::serialize::xcdr::XcdrSerialize::serialize_xcdr(&typed_data.#idx, &mut serializer)
-                    .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
-            }
-        })
-        .collect();
-
-    quote! { #(#field_serializations)* }
 }
 
 /// Generate tuple field deserialization code for XCDR
@@ -2256,9 +2184,6 @@ fn generate_tuple_type_support_impl(
     type_support_name: &syn::Ident,
     name: &syn::Ident,
     has_key: bool,
-    cdr_field_serialization: &proc_macro2::TokenStream,
-    cdr_field_deserialization: &proc_macro2::TokenStream,
-    xcdr_field_serialization: &proc_macro2::TokenStream,
     xcdr_field_deserialization: &proc_macro2::TokenStream,
     xcdr_field_deserialization_per_field_dheader: &proc_macro2::TokenStream,
     serialize_key_impl: &proc_macro2::TokenStream,
@@ -2277,33 +2202,21 @@ fn generate_tuple_type_support_impl(
         has_type_params: false,
     };
 
-    let serialize_impl = quote_serialize_impl(
-        name,
-        cdr_field_serialization,
-        xcdr_field_serialization,
+    let extensibility_tokens = quote_extensibility_tokens(
+        extensibility.unwrap_or(ExtensibilityKind::Appendable),
         crate_path,
-        &tuple_gc,
     );
-    let serialize_into_impl = quote_serialize_into_impl(
-        name,
-        cdr_field_serialization,
-        xcdr_field_serialization,
-        crate_path,
-        &tuple_gc,
-    );
+
+    let serialize_impl = quote_serialize_impl(name, crate_path, &extensibility_tokens, &tuple_gc);
+    let serialize_into_impl =
+        quote_serialize_into_impl(name, crate_path, &extensibility_tokens, &tuple_gc);
     let deserialize_impl = quote_deserialize_impl(
         name,
         extensibility,
-        cdr_field_deserialization,
         xcdr_field_deserialization,
         xcdr_field_deserialization_per_field_dheader,
         crate_path,
         &tuple_gc,
-    );
-
-    let extensibility_tokens = quote_extensibility_tokens(
-        extensibility.unwrap_or(ExtensibilityKind::Appendable),
-        crate_path,
     );
 
     quote! {
