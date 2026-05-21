@@ -22,11 +22,11 @@ use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
+use crate::rtps::transport::tcp::tls::TlsConfig;
 use crate::rtps::transport::tcp_async::conn_actor::{inbound_inbox_capacity, spawn_conn_actor};
 use crate::rtps::transport::tcp_async::mux_state::ConnectionState;
 use crate::rtps::transport::tcp_async::protocol::ControlMsg;
 use crate::rtps::transport::tcp_async::stream::{accept_tls_async, wrap_plain};
-use crate::rtps::transport::tcp::tls::TlsConfig;
 use crate::rtps::{
     common::guid::GuidPrefix,
     transport::{plugin::IncomingMessage, tcp_async::mux_state::MuxState},

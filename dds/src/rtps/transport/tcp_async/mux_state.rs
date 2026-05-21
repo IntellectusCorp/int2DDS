@@ -352,18 +352,17 @@ impl MuxState {
             // This closes the window where a PORT_RESERVE was handled (and
             // PORT_RESERVE_ACK emitted) between the stale snapshot and the
             // eviction.
-            let (writer_tx, remote_addr, idle_for) =
-                match self.connections.get_mut(conn_id) {
-                    Some(mut entry) => {
-                        let idle_for = now.duration_since(entry.last_activity);
-                        if idle_for <= timeout {
-                            continue; // refreshed since snapshot — not actually idle
-                        }
-                        entry.state = ConnectionState::Closing;
-                        (entry.writer_tx.clone(), entry.remote_addr, idle_for)
+            let (writer_tx, remote_addr, idle_for) = match self.connections.get_mut(conn_id) {
+                Some(mut entry) => {
+                    let idle_for = now.duration_since(entry.last_activity);
+                    if idle_for <= timeout {
+                        continue; // refreshed since snapshot — not actually idle
                     }
-                    None => continue,
-                };
+                    entry.state = ConnectionState::Closing;
+                    (entry.writer_tx.clone(), entry.remote_addr, idle_for)
+                }
+                None => continue,
+            };
 
             warn!(
                 "TcpMuxListener [{}]: Pruning idle conn {} from {:?} (idle {:?})",
@@ -464,7 +463,7 @@ impl MuxState {
                 self.handle_control_frame(conn_id, &payload, writer_tx);
             }
             ConnectionState::Active => {
-                self.handle_active_frame(conn_id, &payload);
+                self.handle_active_frame(conn_id, payload);
             }
             ConnectionState::Closing => {
                 // Drop frames on closing connections — actor will exit shortly.
@@ -621,10 +620,8 @@ impl MuxState {
                 // the round-trip met `keepalive_timeout`; the counter
                 // reset / increment decision lives there, not here.
                 if let Some(entry) = self.connections.get(&conn_id) {
-                    *entry
-                        .last_keepalive_ack_at
-                        .lock()
-                        .expect("last_keepalive_ack_at lock") = Some(Instant::now());
+                    *entry.last_keepalive_ack_at.lock().expect("last_keepalive_ack_at lock") =
+                        Some(Instant::now());
                 }
             }
 
@@ -702,8 +699,8 @@ impl MuxState {
         false
     }
 
-    fn handle_active_frame(&self, conn_id: ConnectionId, payload: &[u8]) {
-        if matches!(classify_frame(payload), TcpFrameKind::RtpsData) {
+    fn handle_active_frame(&self, conn_id: ConnectionId, payload: Vec<u8>) {
+        if matches!(classify_frame(&payload), TcpFrameKind::RtpsData) {
             let remote_addr = match self.connections.get(&conn_id).map(|c| c.remote_addr) {
                 Some(a) => a,
                 None => return,
@@ -712,13 +709,13 @@ impl MuxState {
         }
     }
 
-    fn route_rtps_data(&self, conn_id: ConnectionId, payload: &[u8], remote_addr: SocketAddr) {
+    fn route_rtps_data(&self, conn_id: ConnectionId, payload: Vec<u8>, remote_addr: SocketAddr) {
         let logical_port = match self.connections.get(&conn_id).and_then(|c| c.bound_logical_port) {
             Some(p) => p,
             None => return,
         };
 
-        let msg = IncomingMessage { data: payload.to_vec(), source: remote_addr };
+        let msg = IncomingMessage { data: payload, source: remote_addr };
 
         if PortManager::is_discovery_unicast_port_logically(self.domain_id, logical_port) {
             if let Err(e) = self.discovery_tx.try_send(msg) {
