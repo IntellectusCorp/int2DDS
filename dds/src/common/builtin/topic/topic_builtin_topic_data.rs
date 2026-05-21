@@ -10,7 +10,7 @@ use crate::{
         LivelinessQosPolicy, OwnershipQosPolicy, ReliabilityQosPolicy, ResourceLimitsQosPolicy,
         TopicDataQosPolicy, TransportPriorityQosPolicy,
     },
-    rtps::common::guid::Guid,
+    rtps::common::{guid::Guid, types::SerializedData},
     topic::{qos::TopicQos, DdsType},
 };
 
@@ -20,27 +20,42 @@ use crate::serialize::DeserializerReader;
 #[derive(DdsType)]
 #[dds_type(crate_path = "crate", no_default, extensibility = "Mutable")]
 pub struct TopicBuiltinTopicData {
+    #[dds(non_serialized)]
     key: BuiltinTopicKey,
+    #[dds(id = 0x0005)] // PidTopicName
     name: String,
+    #[dds(id = 0x0007)] // PidTypeName
     type_name: String,
+    #[dds(id = 0x001d)] // PidDurability
     durability: DurabilityQosPolicy,
+    #[dds(id = 0x001e)] // PidDurabilityService
     durability_service: DurabilityServiceQosPolicy,
+    #[dds(id = 0x0023)] // PidDeadline
     deadline: DeadlineQosPolicy,
+    #[dds(id = 0x0027)] // PidLatencyBudget
     latency_budget: LatencyBudgetQosPolicy,
+    #[dds(id = 0x001b)] // PidLiveliness
     liveliness: LivelinessQosPolicy,
+    #[dds(id = 0x001a)] // PidReliability
     reliability: ReliabilityQosPolicy,
+    #[dds(id = 0x0049)] // PidTransportPriority
     transport_priority: TransportPriorityQosPolicy,
+    #[dds(id = 0x002b)] // PidLifespan
     lifespan: LifespanQosPolicy,
+    #[dds(id = 0x0025)] // PidDestinationOrder
     destination_order: DestinationOrderQosPolicy,
+    #[dds(id = 0x0040)] // PidHistory
     history: HistoryQosPolicy,
+    #[dds(id = 0x0041)] // PidResourceLimits
     resource_limits: ResourceLimitsQosPolicy,
+    #[dds(id = 0x001f)] // PidOwnership
     ownership: OwnershipQosPolicy,
+    #[dds(id = 0x002e)] // PidTopicData
     topic_data: TopicDataQosPolicy,
 }
 
 impl TopicBuiltinTopicData {
-    #[allow(dead_code)]
-    pub(crate) fn new(topic_guid: Guid, name: String, type_name: String, qos: TopicQos) -> Self {
+    pub fn new(topic_guid: Guid, name: String, type_name: String, qos: TopicQos) -> Self {
         let prefix = topic_guid.prefix();
         Self {
             key: BuiltinTopicKey {
@@ -114,5 +129,64 @@ impl TopicBuiltinTopicData {
     }
     pub fn topic_data(&self) -> TopicDataQosPolicy {
         self.topic_data.clone()
+    }
+
+    pub fn from_serialized_data(data: &[u8]) -> Result<Self, String> {
+        use crate::serialize::pl_cdr::ParsedBuiltinTopicData;
+
+        macro_rules! assign_optional {
+            ($target:expr, $source:expr, $($field:ident),+ $(,)?) => {
+                $(
+                    if let Some(value) = $source.$field {
+                        $target.$field = value;
+                    }
+                )+
+            };
+        }
+
+        let parsed = ParsedBuiltinTopicData::from_serialized_data(data)?;
+        let mut topic_data = Self::new(
+            Guid::from_bytes([0u8; 16]),
+            String::new(),
+            String::new(),
+            TopicQos::default(),
+        );
+
+        if let Some(key) = parsed.key {
+            topic_data.key = key;
+        }
+        if let Some(name) = parsed.topic_name {
+            topic_data.name = name;
+        }
+        if let Some(type_name) = parsed.type_name {
+            topic_data.type_name = type_name;
+        }
+
+        assign_optional!(
+            topic_data,
+            parsed,
+            durability,
+            durability_service,
+            deadline,
+            latency_budget,
+            liveliness,
+            reliability,
+            transport_priority,
+            lifespan,
+            destination_order,
+            history,
+            resource_limits,
+            ownership,
+            topic_data,
+        );
+
+        Ok(topic_data)
+    }
+
+    pub fn to_serialized_data(&self) -> SerializedData {
+        use crate::serialize::pl_cdr::ParsedBuiltinTopicData;
+
+        let parsed = ParsedBuiltinTopicData::from_topic_topic_data(self);
+        parsed.to_serialized_data()
     }
 }
