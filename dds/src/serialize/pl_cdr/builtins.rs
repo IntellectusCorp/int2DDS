@@ -2,11 +2,12 @@ use crate::{
     common::builtin::topic::builtin_topic_key::BuiltinTopicKey,
     infrastructure::qos_policy::{
         DataRepresentationQosPolicy, DeadlineQosPolicy, DestinationOrderQosPolicy,
-        DurabilityQosPolicy, DurabilityServiceQosPolicy, GroupDataQosPolicy,
+        DurabilityQosPolicy, DurabilityServiceQosPolicy, GroupDataQosPolicy, HistoryQosPolicy,
         LatencyBudgetQosPolicy, LifespanQosPolicy, LivelinessQosPolicy, OwnershipQosPolicy,
         OwnershipStrengthQosPolicy, PartitionQosPolicy, PresentationQosPolicy,
-        ReliabilityQosPolicy, TimeBasedFilterQosPolicy, TopicDataQosPolicy,
-        TypeConsistencyEnforcementQosPolicy, UserDataQosPolicy,
+        ReliabilityQosPolicy, ResourceLimitsQosPolicy, TimeBasedFilterQosPolicy,
+        TopicDataQosPolicy, TransportPriorityQosPolicy, TypeConsistencyEnforcementQosPolicy,
+        UserDataQosPolicy,
     },
     rtps::common::{
         guid::Guid,
@@ -55,6 +56,11 @@ pub struct ParsedBuiltinTopicData {
 
     // QoS Policies (subscription-specific)
     pub time_based_filter: Option<TimeBasedFilterQosPolicy>,
+
+    // QoS Policies (topic-specific)
+    pub history: Option<HistoryQosPolicy>,
+    pub resource_limits: Option<ResourceLimitsQosPolicy>,
+    pub transport_priority: Option<TransportPriorityQosPolicy>,
 
     // Locators
     pub unicast_locator_list: Vec<Locator>,
@@ -118,6 +124,9 @@ impl ParsedBuiltinTopicData {
             type_identifier: data.type_identifier().cloned(),
             type_object: data.type_object().cloned(),
             type_consistency_enforcement: None,
+            history: None,
+            resource_limits: None,
+            transport_priority: None,
         }
     }
 
@@ -155,6 +164,43 @@ impl ParsedBuiltinTopicData {
             type_identifier: data.type_identifier().cloned(),
             type_object: data.type_object().cloned(),
             type_consistency_enforcement: Some(*data.type_consistency_enforcement()),
+            history: None,
+            resource_limits: None,
+            transport_priority: None,
+        }
+    }
+
+    pub fn from_participant_topic_data(
+        data: &crate::common::builtin::topic::participant_builtin_topic_data::ParticipantBuiltinTopicData,
+    ) -> Self {
+        Self {
+            participant_key: Some(data.key()),
+            user_data: Some(data.user_data()),
+            ..Self::default()
+        }
+    }
+
+    pub fn from_topic_topic_data(
+        data: &crate::common::builtin::topic::topic_builtin_topic_data::TopicBuiltinTopicData,
+    ) -> Self {
+        Self {
+            key: Some(data.key()),
+            topic_name: Some(data.name()),
+            type_name: Some(data.type_name()),
+            durability: Some(data.durability()),
+            durability_service: Some(data.durability_service()),
+            deadline: Some(data.deadline()),
+            latency_budget: Some(data.latency_budget()),
+            liveliness: Some(data.liveliness()),
+            reliability: Some(data.reliability()),
+            transport_priority: Some(data.transport_priority()),
+            lifespan: Some(data.lifespan()),
+            destination_order: Some(data.destination_order()),
+            history: Some(data.history()),
+            resource_limits: Some(data.resource_limits()),
+            ownership: Some(data.ownership()),
+            topic_data: Some(data.topic_data()),
+            ..Self::default()
         }
     }
 
@@ -333,6 +379,22 @@ impl ParsedBuiltinTopicData {
             ParameterId::PidTypeObject => {
                 if let ParameterValue::TypeObject(type_obj) = parameter.value {
                     self.type_object = Some(type_obj);
+                }
+            }
+            ParameterId::PidHistory => {
+                if let ParameterValue::HistoryQosPolicy(history) = parameter.value {
+                    self.history = Some(history);
+                }
+            }
+            ParameterId::PidResourceLimits => {
+                if let ParameterValue::ResourceLimits(resource_limits) = parameter.value {
+                    self.resource_limits = Some(resource_limits);
+                }
+            }
+            ParameterId::PidTransportPriority => {
+                if let ParameterValue::TransportPriority(value) = parameter.value {
+                    self.transport_priority =
+                        Some(TransportPriorityQosPolicy { value: value as i32 });
                 }
             }
             _ => {

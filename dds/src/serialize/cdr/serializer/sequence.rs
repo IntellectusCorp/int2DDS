@@ -22,6 +22,7 @@ pub trait SequenceSerialize: CdrSerializerCommon + PrimitiveSerialize + StringSe
     fn serialize_byte_sequence(&mut self, data: &[u8]) -> Result<(), CdrError> {
         let length = checked_length(data.len())?;
         self.serialize_u32(length)?;
+        self.buffer_mut().reserve(data.len());
         self.buffer_mut().extend_from_slice(data);
         Ok(())
     }
@@ -31,6 +32,7 @@ pub trait SequenceSerialize: CdrSerializerCommon + PrimitiveSerialize + StringSe
         let length = checked_length(data.len())?;
         self.serialize_u32(length)?;
         self.align(2);
+        self.buffer_mut().reserve(data.len() * 2);
         for &value in data {
             let bytes = to_bytes_u16(value, self.endianness());
             self.buffer_mut().extend_from_slice(&bytes);
@@ -43,6 +45,7 @@ pub trait SequenceSerialize: CdrSerializerCommon + PrimitiveSerialize + StringSe
         let length = checked_length(data.len())?;
         self.serialize_u32(length)?;
         self.align(4);
+        self.buffer_mut().reserve(data.len() * 4);
         for &value in data {
             let bytes = to_bytes_u32(value, self.endianness());
             self.buffer_mut().extend_from_slice(&bytes);
@@ -55,6 +58,7 @@ pub trait SequenceSerialize: CdrSerializerCommon + PrimitiveSerialize + StringSe
         let length = checked_length(data.len())?;
         self.serialize_u32(length)?;
         self.align(8);
+        self.buffer_mut().reserve(data.len() * 8);
         for &value in data {
             let bytes = to_bytes_u64(value, self.endianness());
             self.buffer_mut().extend_from_slice(&bytes);
@@ -66,6 +70,7 @@ pub trait SequenceSerialize: CdrSerializerCommon + PrimitiveSerialize + StringSe
     fn serialize_i8_sequence(&mut self, data: &[i8]) -> Result<(), CdrError> {
         let length = checked_length(data.len())?;
         self.serialize_u32(length)?;
+        self.buffer_mut().reserve(data.len());
         for &value in data {
             self.buffer_mut().push(value as u8);
         }
@@ -77,6 +82,7 @@ pub trait SequenceSerialize: CdrSerializerCommon + PrimitiveSerialize + StringSe
         let length = checked_length(data.len())?;
         self.serialize_u32(length)?;
         self.align(2);
+        self.buffer_mut().reserve(data.len() * 2);
         for &value in data {
             let bytes = to_bytes_i16(value, self.endianness());
             self.buffer_mut().extend_from_slice(&bytes);
@@ -89,6 +95,7 @@ pub trait SequenceSerialize: CdrSerializerCommon + PrimitiveSerialize + StringSe
         let length = checked_length(data.len())?;
         self.serialize_u32(length)?;
         self.align(4);
+        self.buffer_mut().reserve(data.len() * 4);
         for &value in data {
             let bytes = to_bytes_i32(value, self.endianness());
             self.buffer_mut().extend_from_slice(&bytes);
@@ -101,6 +108,7 @@ pub trait SequenceSerialize: CdrSerializerCommon + PrimitiveSerialize + StringSe
         let length = checked_length(data.len())?;
         self.serialize_u32(length)?;
         self.align(8);
+        self.buffer_mut().reserve(data.len() * 8);
         for &value in data {
             let bytes = to_bytes_i64(value, self.endianness());
             self.buffer_mut().extend_from_slice(&bytes);
@@ -113,6 +121,7 @@ pub trait SequenceSerialize: CdrSerializerCommon + PrimitiveSerialize + StringSe
         let length = checked_length(data.len())?;
         self.serialize_u32(length)?;
         self.align(4);
+        self.buffer_mut().reserve(data.len() * 4);
         for &value in data {
             let bytes = to_bytes_f32(value, self.endianness());
             self.buffer_mut().extend_from_slice(&bytes);
@@ -125,6 +134,7 @@ pub trait SequenceSerialize: CdrSerializerCommon + PrimitiveSerialize + StringSe
         let length = checked_length(data.len())?;
         self.serialize_u32(length)?;
         self.align(8);
+        self.buffer_mut().reserve(data.len() * 8);
         for &value in data {
             let bytes = to_bytes_f64(value, self.endianness());
             self.buffer_mut().extend_from_slice(&bytes);
@@ -136,6 +146,7 @@ pub trait SequenceSerialize: CdrSerializerCommon + PrimitiveSerialize + StringSe
     fn serialize_bool_sequence(&mut self, data: &[bool]) -> Result<(), CdrError> {
         let length = checked_length(data.len())?;
         self.serialize_u32(length)?;
+        self.buffer_mut().reserve(data.len());
         for &value in data {
             self.buffer_mut().push(if value { 1 } else { 0 });
         }
@@ -146,6 +157,7 @@ pub trait SequenceSerialize: CdrSerializerCommon + PrimitiveSerialize + StringSe
     fn serialize_char_sequence(&mut self, data: &[char]) -> Result<(), CdrError> {
         let length = checked_length(data.len())?;
         self.serialize_u32(length)?;
+        self.buffer_mut().reserve(data.len());
         for &value in data {
             self.buffer_mut().push(value as u8);
         }

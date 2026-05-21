@@ -361,15 +361,25 @@ namespace Int2Dds.Cdr
                     dataLength = 8;
                     break;
                 case 4:
-                case 5:
                     dataLength = ReadU32();
                     break;
+                case 5:
                 case 6:
-                    dataLength = ReadU32() * 4 + 4;
-                    break;
                 case 7:
-                    dataLength = ReadU32() * 8 + 4;
+                {
+                    if (_pos + 4 > _data.Length)
+                        throw new CdrUnderflowException("NEXTINT extends beyond buffer.");
+                    uint nextInt = _littleEndian
+                        ? BinaryPrimitives.ReadUInt32LittleEndian(_data.AsSpan(_pos))
+                        : BinaryPrimitives.ReadUInt32BigEndian(_data.AsSpan(_pos));
+                    dataLength = lc switch
+                    {
+                        5 => nextInt,
+                        6 => 4u + 4u * nextInt,
+                        _ => 4u + 8u * nextInt, // lc == 7
+                    };
                     break;
+                }
                 default:
                     dataLength = 0;
                     break;
