@@ -21,7 +21,7 @@ use crate::{
         },
         instance_handle::InstanceHandle,
     },
-    dcps::{infrastructure::status::StatusKind, topic::type_support::DdsType},
+    dcps::infrastructure::status::StatusKind,
     infrastructure::qos_policy::{DurabilityQosPolicyKind, QosPolicyId, ReliabilityQosPolicyKind},
     rtps::{
         builtin::{
@@ -2030,6 +2030,22 @@ impl UnicastMessageProcessor for SedpLogic {
 
             let payload = data.serialized_data();
 
+            let store_wire_in_cache = |endpoint_guid: Guid| {
+                let instance_handle = InstanceHandle::from_guid(&endpoint_guid);
+                let cache_change = CacheChange::new(
+                    ChangeKind::Alive,
+                    writer_guid,
+                    instance_handle,
+                    data.writer_sn,
+                    payload.as_ref().to_vec(),
+                    message_receiver.get_source_timestamp(),
+                );
+                let reader = builtin_endpoint_pair.reader();
+                if let Ok(mut cache_guard) = reader.reader_cache().lock() {
+                    let _ = cache_guard.add_change(cache_change);
+                }
+            };
+
             if data.writer_id == EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER {
                 let writer_data = SEDPMessage::<DiscoveredWriterData>::from_serialized_payload(
                     payload.as_ref(),
@@ -2042,25 +2058,7 @@ impl UnicastMessageProcessor for SedpLogic {
                     )
                 })?;
 
-                if let Ok(serialized_data) = writer_data.publication_builtin_topic_data.serialize()
-                {
-                    let instance_handle = InstanceHandle::from_guid(
-                        &writer_data.publication_builtin_topic_data.endpoint_guid(),
-                    );
-                    let cache_change = CacheChange::new(
-                        ChangeKind::Alive,
-                        writer_guid,
-                        instance_handle,
-                        data.writer_sn,
-                        serialized_data.to_vec(),
-                        message_receiver.get_source_timestamp(),
-                    );
-
-                    let reader = builtin_endpoint_pair.reader();
-                    if let Ok(mut cache_guard) = reader.reader_cache().lock() {
-                        let _ = cache_guard.add_change(cache_change);
-                    }
-                }
+                store_wire_in_cache(writer_data.publication_builtin_topic_data.endpoint_guid());
 
                 debug!("SEDP Logic: DiscoveredWriterData: {:?}", writer_data);
                 return self.handle_publication_builtin_topic_data(
@@ -2079,25 +2077,7 @@ impl UnicastMessageProcessor for SedpLogic {
                     )
                 })?;
 
-                if let Ok(serialized_data) = reader_data.subscription_builtin_topic_data.serialize()
-                {
-                    let instance_handle = InstanceHandle::from_guid(
-                        &reader_data.subscription_builtin_topic_data.endpoint_guid(),
-                    );
-                    let cache_change = CacheChange::new(
-                        ChangeKind::Alive,
-                        writer_guid,
-                        instance_handle,
-                        data.writer_sn,
-                        serialized_data.to_vec(),
-                        message_receiver.get_source_timestamp(),
-                    );
-
-                    let reader = builtin_endpoint_pair.reader();
-                    if let Ok(mut cache_guard) = reader.reader_cache().lock() {
-                        let _ = cache_guard.add_change(cache_change);
-                    }
-                }
+                store_wire_in_cache(reader_data.subscription_builtin_topic_data.endpoint_guid());
 
                 debug!("SEDP Logic: DiscoveredReaderData: {:?}", reader_data);
                 return self.handle_subscription_builtin_topic_data(

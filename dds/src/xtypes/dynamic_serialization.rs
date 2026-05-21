@@ -178,7 +178,11 @@ fn member_value_or_default<'a>(
     }
 }
 
-fn serialize_value<S, F>(
+fn is_primitive_kind(kind: &DynamicTypeKind) -> bool {
+    matches!(kind, DynamicTypeKind::Primitive(_) | DynamicTypeKind::Enum(_))
+}
+
+fn serialize_atomic_value<S, F>(
     serializer: &mut S,
     value: &DynamicValue,
     serialize_nested_struct: &mut F,
@@ -204,30 +208,114 @@ where
         DynamicValue::String(v) => serializer.serialize_string(v).map_err(cdr_error),
         DynamicValue::WString(v) => serializer.serialize_wstring16(v).map_err(cdr_error),
         DynamicValue::Enum { value, .. } => serializer.serialize_i32(*value).map_err(cdr_error),
+        DynamicValue::Struct(inner) => serialize_nested_struct(serializer, inner),
+        DynamicValue::Null => Ok(()),
+        // Sequence/Array/Optional handled by callers with format-specific logic
+        DynamicValue::Sequence(_) | DynamicValue::Array(_) | DynamicValue::Optional(_) => {
+            Err(DdsError::Error(
+                "serialize_atomic_value called with collection/optional; use format-specific path"
+                    .to_string(),
+            ))
+        }
+    }
+}
+
+fn serialize_value_cdr<F>(
+    serializer: &mut CdrSerializer,
+    value: &DynamicValue,
+    serialize_nested_struct: &mut F,
+) -> DdsResult<()>
+where
+    F: FnMut(&mut CdrSerializer, &DynamicData) -> DdsResult<()>,
+{
+    match value {
         DynamicValue::Sequence(items) => {
             serializer.serialize_u32(items.len() as u32).map_err(cdr_error)?;
             for item in items {
-                serialize_value(serializer, item, serialize_nested_struct)?;
+                serialize_value_cdr(serializer, item, serialize_nested_struct)?;
             }
             Ok(())
         }
         DynamicValue::Array(items) => {
             for item in items {
-                serialize_value(serializer, item, serialize_nested_struct)?;
+                serialize_value_cdr(serializer, item, serialize_nested_struct)?;
             }
             Ok(())
         }
-        DynamicValue::Struct(inner) => serialize_nested_struct(serializer, inner),
         DynamicValue::Optional(Some(inner)) => {
             serializer.serialize_bool(true).map_err(cdr_error)?;
-            serialize_value(serializer, inner, serialize_nested_struct)
+            serialize_value_cdr(serializer, inner, serialize_nested_struct)
         }
         DynamicValue::Optional(None) => serializer.serialize_bool(false).map_err(cdr_error),
-        DynamicValue::Null => Ok(()),
+        other => serialize_atomic_value(serializer, other, serialize_nested_struct),
     }
 }
 
-fn deserialize_value<D>(
+fn serialize_value_xcdr2<F>(
+    serializer: &mut Xcdr2Serializer,
+    value: &DynamicValue,
+    type_kind: &DynamicTypeKind,
+    serialize_nested_struct: &mut F,
+) -> DdsResult<()>
+where
+    F: FnMut(&mut Xcdr2Serializer, &DynamicData) -> DdsResult<()>,
+{
+    match value {
+        DynamicValue::Sequence(items) => {
+            let element_type = match type_kind {
+                DynamicTypeKind::Sequence { element_type, .. } => element_type.as_ref(),
+                _ => return Err(DdsError::Error("type mismatch: expected Sequence".to_string())),
+            };
+            let mut write_inner = |s: &mut Xcdr2Serializer| -> DdsResult<()> {
+                s.serialize_u32(items.len() as u32).map_err(cdr_error)?;
+                for item in items {
+                    serialize_value_xcdr2(s, item, element_type, serialize_nested_struct)?;
+                }
+                Ok(())
+            };
+            if is_primitive_kind(element_type) {
+                write_inner(serializer)
+            } else {
+                let dh = serializer.reserve_dheader();
+                let start = serializer.position();
+                write_inner(serializer)?;
+                let size = (serializer.position() - start) as u32;
+                serializer.write_dheader_at(dh, size);
+                Ok(())
+            }
+        }
+        DynamicValue::Array(items) => {
+            let element_type = match type_kind {
+                DynamicTypeKind::Array { element_type, .. } => element_type.as_ref(),
+                _ => return Err(DdsError::Error("type mismatch: expected Array".to_string())),
+            };
+            let mut write_inner = |s: &mut Xcdr2Serializer| -> DdsResult<()> {
+                for item in items {
+                    serialize_value_xcdr2(s, item, element_type, serialize_nested_struct)?;
+                }
+                Ok(())
+            };
+            if is_primitive_kind(element_type) {
+                write_inner(serializer)
+            } else {
+                let dh = serializer.reserve_dheader();
+                let start = serializer.position();
+                write_inner(serializer)?;
+                let size = (serializer.position() - start) as u32;
+                serializer.write_dheader_at(dh, size);
+                Ok(())
+            }
+        }
+        DynamicValue::Optional(Some(inner)) => {
+            serializer.serialize_bool(true).map_err(cdr_error)?;
+            serialize_value_xcdr2(serializer, inner, type_kind, serialize_nested_struct)
+        }
+        DynamicValue::Optional(None) => serializer.serialize_bool(false).map_err(cdr_error),
+        other => serialize_atomic_value(serializer, other, serialize_nested_struct),
+    }
+}
+
+fn deserialize_atomic_value<D>(
     deserializer: &mut D,
     type_kind: &DynamicTypeKind,
 ) -> DdsResult<DynamicValue>
@@ -242,22 +330,6 @@ where
         DynamicTypeKind::WString { .. } => {
             Ok(DynamicValue::WString(deserializer.deserialize_wstring16().map_err(cdr_error)?))
         }
-        DynamicTypeKind::Sequence { element_type, .. } => {
-            let len = deserializer.deserialize_u32().map_err(cdr_error)? as usize;
-            let mut items = Vec::with_capacity(len);
-            for _ in 0..len {
-                items.push(deserialize_value(deserializer, element_type)?);
-            }
-            Ok(DynamicValue::Sequence(items))
-        }
-        DynamicTypeKind::Array { element_type, dimensions } => {
-            let total_size: u32 = dimensions.iter().product();
-            let mut items = Vec::with_capacity(total_size as usize);
-            for _ in 0..total_size {
-                items.push(deserialize_value(deserializer, element_type)?);
-            }
-            Ok(DynamicValue::Array(items))
-        }
         DynamicTypeKind::Enum(_) => {
             let value = deserializer.deserialize_i32().map_err(cdr_error)?;
             Ok(DynamicValue::Enum { name: String::new(), value })
@@ -266,6 +338,65 @@ where
             Err(nested_struct_deserialization_error(struct_desc))
         }
         DynamicTypeKind::ExternalType { .. } => Err(external_type_deserialization_error(type_kind)),
+        DynamicTypeKind::Sequence { .. } | DynamicTypeKind::Array { .. } => Err(DdsError::Error(
+            "deserialize_atomic_value called with collection; use format-specific path".to_string(),
+        )),
+    }
+}
+
+fn deserialize_value_cdr(
+    deserializer: &mut CdrDeserializer,
+    type_kind: &DynamicTypeKind,
+) -> DdsResult<DynamicValue> {
+    match type_kind {
+        DynamicTypeKind::Sequence { element_type, .. } => {
+            let len = deserializer.deserialize_u32().map_err(cdr_error)? as usize;
+            let mut items = Vec::with_capacity(len);
+            for _ in 0..len {
+                items.push(deserialize_value_cdr(deserializer, element_type)?);
+            }
+            Ok(DynamicValue::Sequence(items))
+        }
+        DynamicTypeKind::Array { element_type, dimensions } => {
+            let total_size: u32 = dimensions.iter().product();
+            let mut items = Vec::with_capacity(total_size as usize);
+            for _ in 0..total_size {
+                items.push(deserialize_value_cdr(deserializer, element_type)?);
+            }
+            Ok(DynamicValue::Array(items))
+        }
+        other => deserialize_atomic_value(deserializer, other),
+    }
+}
+
+fn deserialize_value_xcdr2(
+    deserializer: &mut Xcdr2Deserializer,
+    type_kind: &DynamicTypeKind,
+) -> DdsResult<DynamicValue> {
+    match type_kind {
+        DynamicTypeKind::Sequence { element_type, .. } => {
+            if !is_primitive_kind(element_type) {
+                let _ = deserializer.read_dheader().map_err(cdr_error)?;
+            }
+            let len = deserializer.deserialize_u32().map_err(cdr_error)? as usize;
+            let mut items = Vec::with_capacity(len);
+            for _ in 0..len {
+                items.push(deserialize_value_xcdr2(deserializer, element_type)?);
+            }
+            Ok(DynamicValue::Sequence(items))
+        }
+        DynamicTypeKind::Array { element_type, dimensions } => {
+            if !is_primitive_kind(element_type) {
+                let _ = deserializer.read_dheader().map_err(cdr_error)?;
+            }
+            let total_size: u32 = dimensions.iter().product();
+            let mut items = Vec::with_capacity(total_size as usize);
+            for _ in 0..total_size {
+                items.push(deserialize_value_xcdr2(deserializer, element_type)?);
+            }
+            Ok(DynamicValue::Array(items))
+        }
+        other => deserialize_atomic_value(deserializer, other),
     }
 }
 
@@ -322,16 +453,25 @@ where
     }
 }
 
-fn deserialize_struct_members<D>(
-    deserializer: &mut D,
+fn deserialize_struct_members_cdr(
+    deserializer: &mut CdrDeserializer,
     struct_desc: &StructDescriptor,
-) -> DdsResult<HashMap<Arc<str>, DynamicValue>>
-where
-    D: ValueDeserializer,
-{
+) -> DdsResult<HashMap<Arc<str>, DynamicValue>> {
     let mut values = HashMap::new();
     for member in struct_desc.members() {
-        let value = deserialize_value(deserializer, &member.member_type)?;
+        let value = deserialize_value_cdr(deserializer, &member.member_type)?;
+        values.insert(member.name.clone(), value);
+    }
+    Ok(values)
+}
+
+fn deserialize_struct_members_xcdr2(
+    deserializer: &mut Xcdr2Deserializer,
+    struct_desc: &StructDescriptor,
+) -> DdsResult<HashMap<Arc<str>, DynamicValue>> {
+    let mut values = HashMap::new();
+    for member in struct_desc.members() {
+        let value = deserialize_value_xcdr2(deserializer, &member.member_type)?;
         values.insert(member.name.clone(), value);
     }
     Ok(values)
@@ -390,7 +530,7 @@ fn serialize_struct_cdr(serializer: &mut CdrSerializer, data: &DynamicData) -> D
     let mut nested = serialize_struct_cdr;
     for member in struct_desc.members() {
         if let Some(value) = member_value_or_default(data, member) {
-            serialize_value(serializer, &value, &mut nested)?;
+            serialize_value_cdr(serializer, &value, &mut nested)?;
         }
     }
 
@@ -405,7 +545,7 @@ fn deserialize_struct_cdr(
         .as_struct()
         .ok_or_else(|| DdsError::Error("Expected struct type".to_string()))?;
 
-    let values = deserialize_struct_members(deserializer, struct_desc)?;
+    let values = deserialize_struct_members_cdr(deserializer, struct_desc)?;
     Ok(DynamicData::with_values(dynamic_type.clone(), values))
 }
 
@@ -441,7 +581,7 @@ fn serialize_struct_xcdr(
             };
             for member in struct_desc.members() {
                 if let Some(value) = member_value_or_default(data, member) {
-                    serialize_value(serializer, &value, &mut nested)?;
+                    serialize_value_xcdr2(serializer, &value, &member.member_type, &mut nested)?;
                 }
             }
         }
@@ -452,7 +592,7 @@ fn serialize_struct_xcdr(
             };
             for member in struct_desc.members() {
                 if let Some(value) = member_value_or_default(data, member) {
-                    serialize_value(serializer, &value, &mut nested)?;
+                    serialize_value_xcdr2(serializer, &value, &member.member_type, &mut nested)?;
                 }
             }
             serializer.end_struct(size_pos).map_err(cdr_error)?;
@@ -463,12 +603,13 @@ fn serialize_struct_xcdr(
             for member in struct_desc.members() {
                 if let Some(value) = member_value_or_default(data, member) {
                     let member_id = member.member_id;
+                    let member_type = member.member_type.clone();
                     serializer
                         .write_member_with(member_id, false, |s| {
                             let mut nested = |s: &mut Xcdr2Serializer, inner: &DynamicData| {
                                 serialize_struct_xcdr(s, inner, extensibility)
                             };
-                            serialize_value(s, &value, &mut nested)
+                            serialize_value_xcdr2(s, &value, &member_type, &mut nested)
                                 .map_err(|e| CdrError::SerializationError(e.to_string()))
                         })
                         .map_err(cdr_error)?;
@@ -495,11 +636,11 @@ fn deserialize_struct_xcdr(
 
     match extensibility {
         ExtensibilityKind::Final => {
-            values = deserialize_struct_members(deserializer, struct_desc)?;
+            values = deserialize_struct_members_xcdr2(deserializer, struct_desc)?;
         }
         ExtensibilityKind::Appendable => {
             let (object_size, start_pos) = deserializer.begin_struct().map_err(cdr_error)?;
-            values = deserialize_struct_members(deserializer, struct_desc)?;
+            values = deserialize_struct_members_xcdr2(deserializer, struct_desc)?;
             deserializer.end_struct(object_size, start_pos).map_err(cdr_error)?;
         }
         ExtensibilityKind::Mutable => {
@@ -511,7 +652,7 @@ fn deserialize_struct_xcdr(
                     deserializer.read_member_header_full().map_err(cdr_error)?;
 
                 if let Some(member) = struct_desc.get_member_by_id(member_id) {
-                    let value = deserialize_value(deserializer, &member.member_type)?;
+                    let value = deserialize_value_xcdr2(deserializer, &member.member_type)?;
                     values.insert(member.name.clone(), value);
                 } else if must_understand {
                     return Err(DdsError::Error(format!(

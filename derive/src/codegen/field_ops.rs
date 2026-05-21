@@ -1040,20 +1040,6 @@ fn generate_key_field_serialization_internal(
     quote! { #(#field_serializations)* }
 }
 
-pub fn generate_field_serialization(
-    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
-    crate_path: &proc_macro2::TokenStream,
-) -> proc_macro2::TokenStream {
-    generate_field_serialization_internal(fields, crate_path, true, false)
-}
-
-pub fn generate_field_serialization_xcdr(
-    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
-    crate_path: &proc_macro2::TokenStream,
-) -> proc_macro2::TokenStream {
-    generate_field_serialization_internal(fields, crate_path, true, true)
-}
-
 pub fn generate_non_key_field_serialization(
     fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
     crate_path: &proc_macro2::TokenStream,
@@ -1117,13 +1103,6 @@ fn generate_field_deserialization_internal(
     }
 }
 
-pub fn generate_field_deserialization(
-    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
-    name: &syn::Ident,
-    crate_path: &proc_macro2::TokenStream,
-) -> proc_macro2::TokenStream {
-    generate_field_deserialization_internal(fields, name, crate_path, false)
-}
 pub fn generate_field_deserialization_xcdr(
     fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
     name: &syn::Ident,

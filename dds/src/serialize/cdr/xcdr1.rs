@@ -47,14 +47,26 @@ impl CdrSerializer {
         }
     }
 
-    /// Create CDR serializer reusing an existing buffer (capacity preserved, content cleared)
-    pub fn reuse_buffer(little_endian: bool, mut buffer: Vec<u8>) -> Self {
+    pub fn with_extensibility(little_endian: bool, extensibility: ExtensibilityKind) -> Self {
+        Self {
+            endianness: endianness_from_bool(little_endian),
+            buffer: Vec::new(),
+            header_size: 0,
+            extensibility,
+        }
+    }
+
+    pub fn with_extensibility_and_buffer(
+        little_endian: bool,
+        extensibility: ExtensibilityKind,
+        mut buffer: Vec<u8>,
+    ) -> Self {
         buffer.clear();
         Self {
             endianness: endianness_from_bool(little_endian),
             buffer,
             header_size: 0,
-            extensibility: ExtensibilityKind::Appendable,
+            extensibility,
         }
     }
 
