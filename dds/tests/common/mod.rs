@@ -97,7 +97,8 @@ impl KeyedDataType {
 static DOMAIN_ID: AtomicI32 = AtomicI32::new(0);
 
 pub fn next_domain_id() -> i32 {
-    DOMAIN_ID.fetch_add(1, Ordering::SeqCst)
+    let base = (std::process::id() % 200) as i32;
+    base + DOMAIN_ID.fetch_add(1, Ordering::SeqCst)
 }
 
 pub fn create_datareader(

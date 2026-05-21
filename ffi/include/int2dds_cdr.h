@@ -816,22 +816,22 @@ INT2DDS_CDR_DEF bool int2dds_cdr_read_emheader(Int2DdsCdrReader *r, uint32_t *me
         *data_length_out = ext_len;
         break;
     }
-    case 5: {
-        uint32_t ext_len;
-        if (!int2dds_cdr_read_u32(r, &ext_len)) { *data_length_out = 0; return false; }
-        *data_length_out = 4u + ext_len;
-        break;
-    }
-    case 6: {
-        uint32_t ext_len;
-        if (!int2dds_cdr_read_u32(r, &ext_len)) { *data_length_out = 0; return false; }
-        *data_length_out = 4u + 4u * ext_len;
-        break;
-    }
+    case 5:
+    case 6:
     case 7: {
-        uint32_t ext_len;
-        if (!int2dds_cdr_read_u32(r, &ext_len)) { *data_length_out = 0; return false; }
-        *data_length_out = 4u + 8u * ext_len;
+        if (r->pos + 4 > r->len) {
+            r->error = INT2DDS_CDR_ERR_UNDERFLOW;
+            *data_length_out = 0;
+            return false;
+        }
+        uint32_t nextint = _int2dds_get_u32(r->buf + r->pos, r->little_endian);
+        if (lc == 5) {
+            *data_length_out = nextint;
+        } else if (lc == 6) {
+            *data_length_out = 4u + 4u * nextint;
+        } else {
+            *data_length_out = 4u + 8u * nextint;
+        }
         break;
     }
     default:
