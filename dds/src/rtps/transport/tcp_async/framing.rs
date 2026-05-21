@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
-use std::io;
+use std::io::{self, IoSlice};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
@@ -20,7 +20,6 @@ const MAGIC_SIZE: usize = 4;
 /// Format: [4B length (BE)] [4B magic "INT2"] [NB payload]
 /// length = magic(4) + payload size
 ///
-/// Single write_all to prevent TCP segmentation of header vs body.
 pub(crate) async fn write_framed_message<W>(stream: &mut W, data: &[u8]) -> io::Result<()>
 where
     W: AsyncWrite + Unpin + ?Sized,
@@ -33,13 +32,21 @@ where
     }
 
     let total_payload = MAGIC_SIZE + data.len();
-    let mut buf = Vec::with_capacity(4 + total_payload);
-    buf.extend_from_slice(&(total_payload as u32).to_be_bytes());
-    buf.extend_from_slice(&FRAME_MAGIC);
-    buf.extend_from_slice(data);
-    stream.write_all(&buf).await?;
-    stream.flush().await?;
+    let len_bytes = (total_payload as u32).to_be_bytes();
 
+    let mut bufs = [IoSlice::new(&len_bytes), IoSlice::new(&FRAME_MAGIC), IoSlice::new(data)];
+    let mut slices: &mut [IoSlice<'_>] = &mut bufs;
+    while !slices.is_empty() {
+        match stream.write_vectored(slices).await? {
+            0 => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "write_vectored returned 0 mid-frame",
+                ));
+            }
+            n => IoSlice::advance_slices(&mut slices, n),
+        }
+    }
     Ok(())
 }
 
@@ -83,8 +90,13 @@ where
     }
 
     let payload_len = len - MAGIC_SIZE;
-    let mut payload = vec![0u8; payload_len];
-    stream.read_exact(&mut payload).await?;
+    let mut payload = Vec::with_capacity(payload_len);
+    while payload.len() < payload_len {
+        let n = stream.read_buf(&mut payload).await?;
+        if n == 0 {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "premature EOF mid-payload"));
+        }
+    }
     Ok(payload)
 }
 
