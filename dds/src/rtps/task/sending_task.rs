@@ -131,15 +131,15 @@ impl SendingTask {
                 Ok(())
             }
 
-            MessageType::PeriodicSedpTopicHeartbeat(start_time, duration, guid_prefix) => {
-                sedp_logic.send_sedp_periodic_heartbeat_message(
-                    start_time,
-                    duration,
-                    guid_prefix,
-                    EntityId::SEDP_BUILTIN_TOPICS_WRITER,
-                )?;
-                Ok(())
-            }
+            // MessageType::PeriodicSedpTopicHeartbeat(start_time, duration, guid_prefix) => {
+            //     sedp_logic.send_sedp_periodic_heartbeat_message(
+            //         start_time,
+            //         duration,
+            //         guid_prefix,
+            //         EntityId::SEDP_BUILTIN_TOPICS_WRITER,
+            //     )?;
+            //     Ok(())
+            // }
 
             // MessageType::SedpTerminateEndpoint(builtin_writer_guid, cache_change) => {
             //     sedp_logic.send_endpoint_termination_message(builtin_writer_guid, cache_change)?;
