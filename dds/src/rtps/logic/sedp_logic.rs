@@ -33,6 +33,7 @@ use crate::{
             },
         },
         common::{
+            count_filter::should_accept_count,
             entity_id::EntityId,
             guid::{Guid, GuidPrefix},
             locator::{
@@ -1567,6 +1568,38 @@ impl SedpLogic {
         Ok(())
     }
 
+    fn send_sedp_gap_for_vec(
+        &self,
+        remote_guid: Guid,
+        reader_entity_id: EntityId,
+        writer_entity_id: EntityId,
+        mut gap_list: Vec<SequenceNumber>,
+    ) -> RtpsResult<()> {
+        if gap_list.is_empty() {
+            return Ok(());
+        }
+
+        let participant = self.get_upgraded_participant()?;
+
+        let buffer_list = MessageCreator::create_multiple_gap_msgs(
+            participant.guid(),
+            remote_guid,
+            reader_entity_id,
+            writer_entity_id,
+            &mut gap_list,
+        )
+        .map_err(|e| RtpsError::new(RtpsErrorCode::Io, e.to_string()))?;
+
+        for buf in buffer_list {
+            if let Err(e) = self.send_to_participant_metatraffic_locators(&buf, remote_guid, "GAP")
+            {
+                warn!("Failed to send SEDP GAP message: {:?}", e);
+            }
+        }
+
+        Ok(())
+    }
+
     pub(crate) fn send_endpoint_termination_message(
         &self,
         builtin_writer_guid: Guid,
@@ -2126,22 +2159,21 @@ impl UnicastMessageProcessor for SedpLogic {
             .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::RtpsEntityNotFound, None))?;
 
-        // Check for duplicate Heartbeat
-        match writer_proxy.last_heartbeat_count() {
-            Some(prev) => {
-                if (heartbeat.count.wrapping_sub(prev) as i32) <= 0 {
-                    debug!(
-                        "[SEDP] [Heartbeat] Ignoring old Heartbeat: count={} <= last_count={}",
-                        heartbeat.count, prev
-                    );
-                    return Ok(());
-                }
-            }
-            None => {
-                debug!("[SEDP] [Heartbeat] First Heartbeat received: count={}", heartbeat.count);
-            }
+        // Check for duplicate Heartbeat. A non-increasing count is accepted
+        // once enough time has passed (peer assumed to have reset).
+        let now = Instant::now();
+        if !should_accept_count(
+            "[SEDP] [Heartbeat]",
+            heartbeat.count,
+            writer_proxy.last_heartbeat_count(),
+            writer_proxy.last_heartbeat_at(),
+            false,
+            now,
+        ) {
+            return Ok(());
         }
         writer_proxy.set_last_heartbeat_count(heartbeat.count);
+        writer_proxy.set_last_heartbeat_at(now);
 
         let missing_changes = writer_proxy.process_heartbeat(heartbeat.first_sn, heartbeat.last_sn);
         let bitmap_base = writer_proxy.expected_sn();
@@ -2227,21 +2259,22 @@ impl UnicastMessageProcessor for SedpLogic {
             .find(|rp| rp.remote_reader_guid() == remote_reader_guid)
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
 
-        match reader_proxy.last_acknack_count() {
-            Some(prev) => {
-                if (acknack.count.wrapping_sub(prev) as i32) <= 0 {
-                    debug!(
-                        "[SEDP] [AckNack] Ignoring old AckNack: count={} <= last_count={}",
-                        acknack.count, prev
-                    );
-                    return Ok(());
-                }
-            }
-            None => {
-                debug!("[SEDP] [AckNack] First AckNack received: count={}", acknack.count);
-            }
+        // Preemptive ACKNACK (RTPS 8.4.12.2) carries seqbase < 1 as an explicit
+        // reset signal and bypasses the count/debounce check.
+        let is_preemptive = acknack.reader_sn_state.bitmap_base().to_i64() < 1;
+        let now = Instant::now();
+        if !should_accept_count(
+            "[SEDP] [AckNack]",
+            acknack.count,
+            reader_proxy.last_acknack_count(),
+            reader_proxy.last_acknack_at(),
+            is_preemptive,
+            now,
+        ) {
+            return Ok(());
         }
         reader_proxy.set_last_acknack_count(acknack.count);
+        reader_proxy.set_last_acknack_at(now);
         drop(reader_proxies_guard);
 
         let missing_sequence_numbers = acknack.reader_sn_state.extract_numbers();
@@ -2256,15 +2289,31 @@ impl UnicastMessageProcessor for SedpLogic {
         }
 
         let mut missing_changes = Vec::new();
+        let mut gap_sns: Vec<SequenceNumber> = Vec::new();
         let writer_cache = local_writer.writer_cache();
 
         {
             let cache_guard = writer_cache.lock().unwrap();
             for seq_num in missing_sequence_numbers {
-                if let Some(change) = cache_guard.get_change(seq_num) {
-                    missing_changes.push(change);
+                match cache_guard.get_change(seq_num) {
+                    Some(change) => missing_changes.push(change),
+                    None => gap_sns.push(seq_num),
                 }
             }
+        }
+
+        if !gap_sns.is_empty() {
+            debug!(
+                "[SEDP] GAP for {} missing SN(s) not in cache, remote: {:?}",
+                gap_sns.len(),
+                remote_reader_guid
+            );
+            self.send_sedp_gap_for_vec(
+                remote_reader_guid,
+                acknack.reader_id,
+                acknack.writer_id,
+                gap_sns,
+            )?;
         }
 
         if !missing_changes.is_empty() {
