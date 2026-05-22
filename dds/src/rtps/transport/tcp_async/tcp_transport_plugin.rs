@@ -37,9 +37,8 @@ use crate::rtps::transport::tcp_async::tcp_sender::TcpSender;
 /// are identical for the DDS layer.
 const CHANNEL_BUFFER_SIZE: usize = 512;
 
-/// Default keepalive interval / inbound idle timeout. Both are overridable
-/// via the existing `INT2DDS_TCP_*` env vars (when those helpers exist).
-const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+/// Default inbound idle timeout. Overridable via the existing `INT2DDS_TCP_*`
+/// env vars (when those helpers exist).
 const DEFAULT_INCOMING_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 // ── TcpAsyncTransportPlugin ──────────────────────────────────────────────────
@@ -120,7 +119,6 @@ impl TcpAsyncTransportPlugin {
                 })?,
         );
 
-        let keepalive_interval = DEFAULT_KEEPALIVE_INTERVAL;
         let idle_timeout = DEFAULT_INCOMING_IDLE_TIMEOUT;
 
         // Build listener + sender inside a runtime context — both
@@ -134,7 +132,6 @@ impl TcpAsyncTransportPlugin {
                 discovery_tx,
                 user_data_tx,
                 tls_config.clone(),
-                keepalive_interval,
                 idle_timeout,
             )
             .map_err(|e| {

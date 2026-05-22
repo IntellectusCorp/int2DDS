@@ -1,10 +1,9 @@
 //! Inbound side of the TCP mux transport.
 //!
-//! `TcpMuxListener` bundles the listener-side tasks (accept loop, idle prune,
-//! and a temporary keepalive ticker that will move to `tcp_sender`) and the
-//! cancel handle that ties them together. It exposes the shared `MuxState`
-//! via `shared()` so the sender and external consumers can reach the same
-//! per-connection bookkeeping.
+//! `TcpMuxListener` bundles the listener-side tasks (accept loop, idle prune)
+//! and the cancel handle that ties them together. It exposes the shared
+//! `MuxState` via `shared()` so the sender and external consumers can reach
+//! the same per-connection bookkeeping.
 //!
 //! The accept loop spawns one short-lived `handshake_and_register_task` per
 //! accepted connection — the TLS handshake happens off the accept loop so a
@@ -24,8 +23,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::rtps::transport::tcp::tls::TlsConfig;
 use crate::rtps::transport::tcp_async::conn_actor::{inbound_inbox_capacity, spawn_conn_actor};
-use crate::rtps::transport::tcp_async::mux_state::ConnectionState;
-use crate::rtps::transport::tcp_async::protocol::ControlMsg;
 use crate::rtps::transport::tcp_async::stream::{accept_tls_async, wrap_plain};
 use crate::rtps::{
     common::guid::GuidPrefix,
@@ -38,9 +35,9 @@ use crate::rtps::{
 const PRUNE_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
 /// TCP multiplexed listener — owns the listener-side tasks (accept loop,
-/// keepalive ticker, idle prune) and the cancel handle that ties them
-/// together. The shared `MuxState` is exposed via `shared()` for the sender
-/// and external consumers.
+/// idle prune) and the cancel handle that ties them together. The shared
+/// `MuxState` is exposed via `shared()` for the sender and external
+/// consumers.
 ///
 /// Dropping or calling `shutdown()` cancels all tasks; cancellation
 /// propagates into every conn_actor pair via child tokens.
@@ -53,7 +50,7 @@ pub(crate) struct TcpMuxListener {
 
 impl TcpMuxListener {
     /// Bind the listen socket and spawn all listener-side tasks on the
-    /// current tokio runtime: accept loop, keepalive ticker, idle prune.
+    /// current tokio runtime: accept loop, idle prune.
     ///
     /// Must be called from within a tokio runtime context — the spawn calls
     /// require `Handle::current()` to be valid. From sync code, wrap the call
@@ -69,7 +66,6 @@ impl TcpMuxListener {
         discovery_tx: crossbeam_channel::Sender<IncomingMessage>,
         user_data_tx: crossbeam_channel::Sender<IncomingMessage>,
         tls_config: Option<Arc<TlsConfig>>,
-        keepalive_interval: Duration,
         idle_timeout: Duration,
     ) -> io::Result<Self> {
         let std_listener = bind_listener(port)?;
@@ -84,16 +80,11 @@ impl TcpMuxListener {
         ));
         let cancel = CancellationToken::new();
 
-        let mut handles = Vec::with_capacity(3);
+        let mut handles = Vec::with_capacity(2);
         handles.push(tokio::spawn(accept_loop_task(
             std_listener,
             shared.clone(),
             tls_config,
-            cancel.clone(),
-        )));
-        handles.push(tokio::spawn(keepalive_interval_task(
-            shared.clone(),
-            keepalive_interval,
             cancel.clone(),
         )));
         handles.push(tokio::spawn(prune_interval_task(
@@ -253,37 +244,6 @@ async fn handshake_and_register_task(
     spawn_conn_actor(stream, conn_id, shared.clone(), conn_cancel, tx, rx);
 }
 
-/// Periodic ticker: push `KEEPALIVE` on every Control-state connection.
-///
-/// TODO: move to `tcp_sender` — this is the outbound side's responsibility
-/// in the sync version. Keeping it here temporarily so end-to-end keepalive
-/// flow can be tested before the sender refactor lands. The inbound side
-/// will then only respond with `KEEPALIVE_ACK` (already handled by
-/// `MuxState::handle_control_frame`).
-async fn keepalive_interval_task(
-    shared: Arc<MuxState>,
-    interval: Duration,
-    cancel: CancellationToken,
-) {
-    let mut ticker = tokio::time::interval(interval);
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-    loop {
-        tokio::select! {
-            _ = ticker.tick() => {
-                for entry in shared.connections.iter() {
-                    if entry.state == ConnectionState::Control {
-                        let _ = entry.writer_tx.try_send(
-                            ControlMsg::Keepalive.to_bytes()
-                        );
-                    }
-                }
-            }
-            _ = cancel.cancelled() => break,
-        }
-    }
-}
-
 /// Periodic ticker: cancel connections whose `last_activity` has exceeded
 /// `timeout`. Wakes every `PRUNE_CHECK_INTERVAL` and delegates to
 /// `MuxState::prune_idle_connections`.
@@ -310,8 +270,9 @@ async fn prune_interval_task(shared: Arc<MuxState>, timeout: Duration, cancel: C
 mod tests {
     use super::*;
     use crate::rtps::transport::tcp_async::framing::write_framed_message;
+    use crate::rtps::transport::tcp_async::mux_state::ConnectionState;
     use crate::rtps::transport::tcp_async::protocol::{
-        ERR_CODE_IDLE_TIMEOUT, MSG_ERROR, MSG_PEER_HELLO_ACK, OP_IDLE_TIMEOUT,
+        ControlMsg, ERR_CODE_IDLE_TIMEOUT, MSG_ERROR, MSG_PEER_HELLO_ACK, OP_IDLE_TIMEOUT,
     };
     use crossbeam_channel::bounded;
     use socket2::{Domain, SockAddr, Socket, Type};
@@ -332,8 +293,8 @@ mod tests {
         (d_tx, d_rx, u_tx, u_rx)
     }
 
-    /// Helper: standard listener with no TLS, generous keepalive/idle so tests
-    /// can ignore those tickers unless they explicitly exercise them.
+    /// Helper: standard listener with no TLS, generous idle timeout so tests
+    /// can ignore the prune ticker unless they explicitly exercise it.
     fn make_listener() -> TcpMuxListener {
         let (d_tx, _d_rx, u_tx, _u_rx) = make_channels();
         TcpMuxListener::bind_and_spawn(
@@ -344,7 +305,6 @@ mod tests {
             d_tx,
             u_tx,
             None,
-            Duration::from_secs(60),
             Duration::from_secs(60),
         )
         .expect("bind_and_spawn")
@@ -450,7 +410,6 @@ mod tests {
             d_tx,
             u_tx,
             None,
-            Duration::from_secs(60),   // keepalive: irrelevant here
             Duration::from_millis(50), // idle timeout
         )
         .expect("bind_and_spawn");
@@ -520,7 +479,6 @@ mod tests {
             d_tx,
             u_tx,
             None,
-            Duration::from_secs(60),
             Duration::from_millis(50),
         )
         .expect("bind_and_spawn");
