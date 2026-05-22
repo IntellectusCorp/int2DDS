@@ -64,8 +64,8 @@ pub fn init_from_env() {
     // - INT2DDS_TCP_SO_RCVBUF: Force SO_RCVBUF on every TCP socket (bytes). Used by tests to induce backpressure - Default: OS-managed
     // - INT2DDS_TCP_SO_SNDBUF: Force SO_SNDBUF on every TCP socket (bytes). Used by tests to induce backpressure - Default: OS-managed
     // - INT2DDS_TCP_SEND_MODE: Outbound send mode for tcp_async (try | blocking) - Default: blocking
-    // - INT2DDS_TCP_OUTBOUND_INBOX_CAPACITY: Per-connection writer mpsc capacity for sender-initiated conns (>= 1) - Default: 4
-    // - INT2DDS_TCP_INBOUND_INBOX_CAPACITY: Per-connection writer mpsc capacity for listener-accepted conns (>= 1) - Default: 512
+    // - INT2DDS_TCP_INBOX_CAPACITY: Per-connection writer mpsc capacity (applies to both outbound and inbound conns) (>= 1) - Default: 4
+    // - INT2DDS_TCP_USER_CHANNEL_CAPACITY: Crossbeam capacity for the inbound user_data channel that bridges tcp_async → sync DDS layer (>= 1) - Default: 512
     // - INT2DDS_TCP_TLS_ENABLED: Enable TLS for TCP connections (true, false) - Default: false (not yet implemented)
     // - INT2DDS_TCP_TLS_CERT_PATH: TLS certificate file path - Default: none (not yet implemented)
     // - INT2DDS_TCP_TLS_KEY_PATH: TLS private key file path - Default: none (not yet implemented)
@@ -931,42 +931,46 @@ pub fn set_tcp_send_mode(mode: TcpSendMode) {
     unsafe { std::env::set_var("INT2DDS_TCP_SEND_MODE", v) };
 }
 
-/// Get the per-connection writer mpsc capacity for sender-initiated
-/// (outbound) tcp_async connections. Tunes producer-side backpressure when
-/// paired with `INT2DDS_TCP_SEND_MODE=blocking`.
+/// Get the per-connection writer mpsc capacity for tcp_async conn_actor
+/// pairs — applies to both sender-initiated (outbound) and listener-accepted
+/// (inbound) connections. Tunes producer-side
+/// backpressure when paired with `INT2DDS_TCP_SEND_MODE=blocking`: a full
+/// inbox makes `blocking_send` park the caller until the writer task drains
+/// a slot, or makes `try_send` return `Full` so the caller drops the frame.
 /// Default: 4 (tight backpressure for RTI-like sync semantics). Floor: 1
 /// (tokio::sync::mpsc::channel panics on 0).
-pub fn get_tcp_outbound_inbox_capacity() -> usize {
-    std::env::var("INT2DDS_TCP_OUTBOUND_INBOX_CAPACITY")
+pub fn get_tcp_inbox_capacity() -> usize {
+    std::env::var("INT2DDS_TCP_INBOX_CAPACITY")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .map(|v| v.max(1))
         .unwrap_or(4)
 }
 
-/// Set the outbound writer mpsc capacity via environment variable.
-pub fn set_tcp_outbound_inbox_capacity(cap: usize) {
-    log::info!("Environment variable set: INT2DDS_TCP_OUTBOUND_INBOX_CAPACITY = {}", cap);
-    unsafe { std::env::set_var("INT2DDS_TCP_OUTBOUND_INBOX_CAPACITY", cap.to_string()) };
+/// Set the per-connection writer mpsc capacity via environment variable.
+pub fn set_tcp_inbox_capacity(cap: usize) {
+    log::info!("Environment variable set: INT2DDS_TCP_INBOX_CAPACITY = {}", cap);
+    unsafe { std::env::set_var("INT2DDS_TCP_INBOX_CAPACITY", cap.to_string()) };
 }
 
-/// Get the per-connection writer mpsc capacity for listener-accepted
-/// (inbound) tcp_async connections. Carries control responses (acks,
-/// keepalive replies) on the inbound socket; rarely the bottleneck under
-/// normal RTPS traffic so keep generous unless deliberately tuning.
+/// Crossbeam capacity for the inbound user_data channel that bridges
+/// tcp_async (listener-side dispatch) → sync DDS layer. When the sync
+/// consumer falls behind, `try_send` failures here cause the listener to
+/// drop RTPS data frames and emit a `TcpChannelFull` warning. Sized to
+/// absorb short consumer stalls under 1MB/60Hz × ~16 frag bursts.
 /// Default: 512. Floor: 1.
-pub fn get_tcp_inbound_inbox_capacity() -> usize {
-    std::env::var("INT2DDS_TCP_INBOUND_INBOX_CAPACITY")
+pub fn get_tcp_user_channel_capacity() -> usize {
+    std::env::var("INT2DDS_TCP_USER_CHANNEL_CAPACITY")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .map(|v| v.max(1))
         .unwrap_or(512)
 }
 
-/// Set the inbound writer mpsc capacity via environment variable.
-pub fn set_tcp_inbound_inbox_capacity(cap: usize) {
-    log::info!("Environment variable set: INT2DDS_TCP_INBOUND_INBOX_CAPACITY = {}", cap);
-    unsafe { std::env::set_var("INT2DDS_TCP_INBOUND_INBOX_CAPACITY", cap.to_string()) };
+/// Set the inbound user_data crossbeam channel capacity via env var.
+pub fn set_tcp_user_channel_capacity(cap: usize) {
+    log::info!("Environment variable set: INT2DDS_TCP_USER_CHANNEL_CAPACITY = {}", cap);
+    unsafe { std::env::set_var("INT2DDS_TCP_USER_CHANNEL_CAPACITY", cap.to_string()) };
 }
 
 /// Get the TCP public address for WAN/NAT traversal.

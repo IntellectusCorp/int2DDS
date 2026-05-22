@@ -22,7 +22,7 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
 use crate::rtps::transport::tcp::tls::TlsConfig;
-use crate::rtps::transport::tcp_async::conn_actor::{inbound_inbox_capacity, spawn_conn_actor};
+use crate::rtps::transport::tcp_async::conn_actor::{inbox_capacity, spawn_conn_actor};
 use crate::rtps::transport::tcp_async::stream::{accept_tls_async, wrap_plain};
 use crate::rtps::{
     common::guid::GuidPrefix,
@@ -236,7 +236,7 @@ async fn handshake_and_register_task(
 
     // Channel created here, NOT inside spawn_conn_actor — so we can register
     // the entry (with tx) before the reader task starts polling.
-    let (tx, rx) = mpsc::channel::<Vec<u8>>(inbound_inbox_capacity());
+    let (tx, rx) = mpsc::channel::<Vec<u8>>(inbox_capacity());
     let conn_cancel = parent_cancel.child_token();
 
     let conn_id = shared.register_inbound_connection(addr, tx.clone(), conn_cancel.clone());
