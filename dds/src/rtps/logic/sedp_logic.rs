@@ -1250,57 +1250,50 @@ impl SedpLogic {
         spdp_discovered_participant_data: Arc<SPDPDiscoveredParticipantData>,
         data: Option<Arc<Vec<u8>>>,
     ) -> RtpsResult<()> {
-        let logic_start_time = Instant::now();
-        match data {
-            Some(data) => {
-                let mut list: Vec<SPDPDiscoveredParticipantData> = Vec::new();
-                let participant = self.get_upgraded_participant()?;
+        let data =
+            data.ok_or_else(|| RtpsError::new(RtpsErrorCode::DataNotSet, "Data is not set"))?;
+        let participant = self.get_upgraded_participant()?;
+        let remote_prefix = spdp_discovered_participant_data.guid_prefix();
 
-                match participant.remote_participant_proxy_datas().lock() {
-                    Ok(remote_participant_datas) => {
-                        // Send SPDP message to everyone
-                        for remote_participant_data in remote_participant_datas.iter() {
-                            if spdp_discovered_participant_data.guid_prefix()
-                                != remote_participant_data.guid_prefix()
-                            {
-                                continue;
-                            }
-                            list.push(remote_participant_data.clone());
-                        }
+        let mut filtered_list: Vec<SPDPDiscoveredParticipantData> = Vec::new();
+        match participant.remote_participant_proxy_datas().lock() {
+            Ok(remote_participant_datas) => {
+                // Filter to the target remote participant
+                for remote_participant_data in remote_participant_datas.iter() {
+                    if remote_prefix != remote_participant_data.guid_prefix() {
+                        continue;
                     }
-                    Err(e) => {
-                        return Err(RtpsError::new(
-                            RtpsErrorCode::LockError,
-                            format!("Failed to lock remote_participant_datas: {:?}", e),
-                        ));
-                    }
+                    filtered_list.push(remote_participant_data.clone());
                 }
-
-                for remote_participant_data in list.iter() {
-                    if let Err(e) = self.send_to_participant_metatraffic_locators(
-                        &data,
-                        remote_participant_data.participant_guid(),
-                        "spdp",
-                    ) {
-                        warn!("Failed to send SPDP discovery message: {:?}", e);
-                    }
-                }
-
-                let start_time = Instant::now();
-                let _ = self.register_send_timer(
-                    Some(start_time),
-                    logic_start_time,
-                    duration,
-                    MessageType::PeriodicParticipantDataUnicast(
-                        Some(start_time),
-                        duration,
-                        spdp_discovered_participant_data.clone(),
-                        Some(data.clone()),
-                    ),
-                );
             }
-            None => return Err(RtpsError::new(RtpsErrorCode::DataNotSet, "Data is not set")),
-        };
+            Err(e) => {
+                return Err(RtpsError::new(
+                    RtpsErrorCode::LockError,
+                    format!("Failed to lock remote_participant_datas: {:?}", e),
+                ));
+            }
+        }
+
+        // In case timer had not been removed after remote participant was unmatched
+        if filtered_list.is_empty() {
+            if let Ok(handler) = self.timer_handler.lock() {
+                handler.remove_timer(TimerId::SedpScheduledMessage {
+                    remote_prefix,
+                    writer_entity_id: EntityId::SPDP_BUILTIN_PARTICIPANT_WRITER,
+                });
+            }
+            return Ok(());
+        }
+
+        for remote_participant_data in filtered_list.iter() {
+            if let Err(e) = self.send_to_participant_metatraffic_locators(
+                &data,
+                remote_participant_data.participant_guid(),
+                "spdp",
+            ) {
+                warn!("Failed to send SPDP discovery message: {:?}", e);
+            }
+        }
         Ok(())
     }
 
@@ -1315,7 +1308,6 @@ impl SedpLogic {
         guid_prefix: Arc<GuidPrefix>,
         entity_id: EntityId,
     ) -> RtpsResult<bool> {
-        let logic_start_time = Instant::now();
         // Get reader and writer corresponding to entity
         let participant = self.get_upgraded_participant()?;
 
@@ -1354,8 +1346,8 @@ impl SedpLogic {
         };
 
         let mut is_sent = false;
-        let mut retry: bool = false;
         let mut peer_disconnected = false;
+        let mut matched_any = false;
 
         let participant_guid = {
             let local_participant_data = participant.local_participant_proxy_data();
@@ -1371,6 +1363,7 @@ impl SedpLogic {
                     if !reader_proxy.is_active() {
                         continue;
                     }
+                    matched_any = true;
                     let buffer = MessageCreator::create_heartbeat_message(
                         participant_guid.prefix(),
                         reader_proxy.remote_reader_guid().prefix(),
@@ -1412,9 +1405,6 @@ impl SedpLogic {
                                 }
                             }
                             writer.increase_heartbeat_count();
-                            if writer.last_change_sequence_number() != SequenceNumber::ZERO {
-                                retry = true;
-                            }
                         }
                         Err(e) => {
                             warn!("Failed to create SEDP heartbeat message: {:?}", e);
@@ -1435,94 +1425,45 @@ impl SedpLogic {
             let _ = participant.unmatch_with_remote_participant(&peer_guid);
         }
 
-        if retry {
-            let start_time = Instant::now();
-            if entity_id == EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER {
-                self.register_send_timer(
-                    Some(start_time),
-                    logic_start_time,
-                    duration,
-                    MessageType::PeriodicPublicationHeartbeat(
-                        Some(start_time),
-                        duration,
-                        guid_prefix.clone(),
-                    ),
-                )?;
-            } else if entity_id == EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_WRITER {
-                self.register_send_timer(
-                    Some(start_time),
-                    logic_start_time,
-                    duration,
-                    MessageType::PeriodicSubscriptionHeartbeat(
-                        Some(start_time),
-                        duration,
-                        guid_prefix.clone(),
-                    ),
-                )?;
-            } else if entity_id == EntityId::SEDP_BUILTIN_TOPICS_WRITER {
-                self.register_send_timer(
-                    Some(start_time),
-                    logic_start_time,
-                    duration,
-                    MessageType::PeriodicSedpTopicHeartbeat(
-                        Some(start_time),
-                        duration,
-                        guid_prefix.clone(),
-                    ),
-                )?;
-            } else {
-                return Err(RtpsError::new(
-                    RtpsErrorCode::InvalidEntityKind,
-                    format!("Invalid entity id: {:?}", entity_id),
-                ))?;
+        // In case not peer_disconnected & timer had not been removed after remote participant was unmatched
+        if !matched_any {
+            if let Ok(handler) = self.timer_handler.lock() {
+                handler.remove_timer(TimerId::SedpScheduledMessage {
+                    remote_prefix: *guid_prefix,
+                    writer_entity_id: entity_id,
+                });
             }
         }
+
         Ok(is_sent)
     }
 
-    fn register_send_timer(
+    // Register a repeating timer that pushes `message` to the sending queue every `duration`.
+    // Keyed by (remote_prefix, writer_entity_id) so each (remote, builtin writer) pair has at
+    // most one active periodic schedule. Cleanup happens in unmatch_with_remote_participant.
+    pub(crate) fn register_periodic_send_timer(
         &self,
-        start_time: Option<Instant>,
-        logic_start_time: Instant,
+        remote_prefix: GuidPrefix,
+        writer_entity_id: EntityId,
         duration: StdDuration,
         message: MessageType,
     ) -> RtpsResult<()> {
-        let elapsed = logic_start_time.elapsed();
-        let remaining_duration = match start_time {
-            Some(start_time) => {
-                let elapsed = start_time.elapsed();
-                duration.checked_sub(elapsed).unwrap_or(StdDuration::from_millis(0))
-            }
-            None => duration.checked_sub(elapsed).unwrap_or(StdDuration::from_millis(0)),
-        };
-
-        let participant = self.get_upgraded_participant()?;
         let participant_weak = self.participant.clone();
-
-        let timer_id = TimerId::SedpScheduledMessage {
-            guid_prefix: participant.guid().prefix(),
-            elapsed_nano: logic_start_time.elapsed().as_nanos() as u64,
-        };
+        let timer_id = TimerId::SedpScheduledMessage { remote_prefix, writer_entity_id };
 
         let message = Arc::new(message);
         if let Ok(timer_handler) = self.timer_handler.lock() {
-            timer_handler.add_timer(
-                timer_id,
-                remaining_duration,
-                false, // one-shot timer
-                {
-                    let message = message.clone();
-                    move || {
-                        if let Some(participant) = participant_weak.upgrade() {
-                            if !participant.is_terminated() {
-                                let sending_handler =
-                                    SendingHandler::get_instance(participant, None);
-                                sending_handler.push_message_and_wake((*message).clone());
-                            }
+            timer_handler.add_timer(timer_id, duration, true, {
+                let message = message.clone();
+                move || {
+                    if let Some(participant) = participant_weak.upgrade() {
+                        if !participant.is_terminated() {
+                            let sending_handler = SendingHandler::get_instance(participant, None);
+                            sending_handler.push_message_and_wake((*message).clone());
                         }
                     }
-                },
-            );
+                }
+            });
         } else {
             error!("Failed to acquire timer handler lock for SEDP message sending");
         }
