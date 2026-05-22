@@ -970,7 +970,6 @@ mod tests {
             b_user_tx,
             None,
             Duration::from_secs(60),
-            Duration::from_secs(60),
         )
         .expect("listener bind_and_spawn");
         let b_port = listener.port();
@@ -1009,7 +1008,6 @@ mod tests {
             b_disc_tx,
             b_user_tx,
             None,
-            Duration::from_secs(60),
             Duration::from_secs(60),
         )
         .expect("listener bind_and_spawn");
@@ -1056,7 +1054,6 @@ mod tests {
             b_disc_tx,
             b_user_tx,
             None,
-            Duration::from_secs(60),
             Duration::from_secs(60),
         )
         .expect("listener bind_and_spawn");
