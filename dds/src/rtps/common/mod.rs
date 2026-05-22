@@ -17,6 +17,7 @@
 //! - [`types`] - Common type definitions
 
 pub mod checksum;
+pub(crate) mod count_filter;
 pub mod entity_id;
 pub mod entity_kind;
 pub mod guid;
