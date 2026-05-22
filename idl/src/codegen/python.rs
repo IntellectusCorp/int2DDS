@@ -339,12 +339,26 @@ impl<'a> PyGen<'a> {
         self.indent -= 1;
         self.line("");
 
+        let needs_union_dh = !matches!(u.extensibility, ExtensibilityKind::Final);
+
         // _serialize_cdr_inline
         self.line("def _serialize_cdr_inline(self, w: CdrWriter) -> None:");
         self.indent += 1;
         self.line("\"\"\"Serialize fields directly into an existing writer (no encap header).\"\"\"");
+        if needs_union_dh {
+            self.line("if w._xcdr2:");
+            self.indent += 1;
+            self.line("_u_token = w.write_dheader_begin()");
+            self.indent -= 1;
+        }
         self.line(&format!("w.{}(self.discriminator)", disc_write));
         self.emit_union_switch_write(u);
+        if needs_union_dh {
+            self.line("if w._xcdr2:");
+            self.indent += 1;
+            self.line("w.write_dheader_finalize(_u_token)");
+            self.indent -= 1;
+        }
         self.indent -= 1;
         self.line("");
 
@@ -364,8 +378,20 @@ impl<'a> PyGen<'a> {
         self.indent += 1;
         self.line("\"\"\"Deserialize from an existing CdrReader (no encapsulation header).\"\"\"");
         self.line("obj = cls()");
+        if needs_union_dh {
+            self.line("if r._xcdr2:");
+            self.indent += 1;
+            self.line("_u_dsize, _u_dstart = r.read_dheader()");
+            self.indent -= 1;
+        }
         self.line(&format!("obj.discriminator = r.{}()", disc_read));
         self.emit_union_switch_read(u);
+        if needs_union_dh {
+            self.line("if r._xcdr2:");
+            self.indent += 1;
+            self.line("r.read_dheader_end(_u_dsize, _u_dstart)");
+            self.indent -= 1;
+        }
         self.line("return obj");
         self.indent -= 1;
         self.line("");
@@ -812,12 +838,35 @@ impl<'a> PyGen<'a> {
             ResolvedType::WChar => self.line(&format!("w.write_wchar({})", accessor)),
             ResolvedType::WString { .. } => self.line(&format!("w.write_wstring({})", accessor)),
             ResolvedType::Map { key, value, .. } => {
-                self.line(&format!("w.write_seq_header(len({}))", accessor));
-                self.line(&format!("for _k, _v in {}.items():", accessor));
-                self.indent += 1;
-                self.emit_write_field(key, "_k");
-                self.emit_write_field(value, "_v");
-                self.indent -= 1;
+                if Self::is_non_primitive_element(value) {
+                    self.line("if w._xcdr2:");
+                    self.indent += 1;
+                    self.line("_map_token = w.write_dheader_begin()");
+                    self.line(&format!("w.write_seq_header(len({}))", accessor));
+                    self.line(&format!("for _k, _v in {}.items():", accessor));
+                    self.indent += 1;
+                    self.emit_write_field(key, "_k");
+                    self.emit_write_field(value, "_v");
+                    self.indent -= 1;
+                    self.line("w.write_dheader_finalize(_map_token)");
+                    self.indent -= 1;
+                    self.line("else:");
+                    self.indent += 1;
+                    self.line(&format!("w.write_seq_header(len({}))", accessor));
+                    self.line(&format!("for _k, _v in {}.items():", accessor));
+                    self.indent += 1;
+                    self.emit_write_field(key, "_k");
+                    self.emit_write_field(value, "_v");
+                    self.indent -= 1;
+                    self.indent -= 1;
+                } else {
+                    self.line(&format!("w.write_seq_header(len({}))", accessor));
+                    self.line(&format!("for _k, _v in {}.items():", accessor));
+                    self.indent += 1;
+                    self.emit_write_field(key, "_k");
+                    self.emit_write_field(value, "_v");
+                    self.indent -= 1;
+                }
             }
             ResolvedType::Bitmask(bitmask_name) => {
                 let (write_fn, _) = self.bitmask_methods(bitmask_name);
@@ -1077,6 +1126,12 @@ impl<'a> PyGen<'a> {
             ResolvedType::WChar => self.line(&format!("{} = r.read_wchar()", name)),
             ResolvedType::WString { .. } => self.line(&format!("{} = r.read_wstring()", name)),
             ResolvedType::Map { key, value, .. } => {
+                if Self::is_non_primitive_element(value) {
+                    self.line("if r._xcdr2:");
+                    self.indent += 1;
+                    self.line("_map_dsize, _map_dstart = r.read_dheader()");
+                    self.indent -= 1;
+                }
                 self.line(&format!("_{}_count = r.read_seq_header()", name));
                 self.line(&format!("{} = {{}}", name));
                 self.line(&format!("for _ in range(_{}_count):", name));
@@ -1085,6 +1140,12 @@ impl<'a> PyGen<'a> {
                 self.emit_read_field(value, "_v");
                 self.line(&format!("{}[_k] = _v", name));
                 self.indent -= 1;
+                if Self::is_non_primitive_element(value) {
+                    self.line("if r._xcdr2:");
+                    self.indent += 1;
+                    self.line("r.read_dheader_end(_map_dsize, _map_dstart)");
+                    self.indent -= 1;
+                }
             }
             ResolvedType::Bitmask(bitmask_name) => {
                 let (_, read_fn) = self.bitmask_methods(bitmask_name);
