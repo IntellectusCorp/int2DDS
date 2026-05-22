@@ -252,12 +252,18 @@ impl<'a> CGen<'a> {
     }
 
     fn emit_union_functions(&mut self, u: &ResolvedUnion) {
+        let needs_union_dh = !matches!(u.extensibility, ExtensibilityKind::Final);
+
         // serialize_fields (for nested union support - no encapsulation)
         self.raw(&format!(
             "static inline void {}_serialize_fields(\n    Int2DdsCdrWriter *_w,\n    const {} *val)\n{{\n",
             u.name, u.name
         ));
         self.raw("    Int2DdsCdrWriter w = *_w;\n");
+        if needs_union_dh {
+            self.raw("    size_t _u_dh = 0;\n");
+            self.raw("    if (w.xcdr2) { int2dds_cdr_write_dheader_begin(&w, &_u_dh); }\n");
+        }
         self.emit_write_field_indented(&u.discriminant_type, "val->_d", "    ");
         self.raw("    switch (val->_d) {\n");
         for case in &u.cases {
@@ -277,6 +283,9 @@ impl<'a> CGen<'a> {
             self.raw("        break;\n");
         }
         self.raw("    }\n");
+        if needs_union_dh {
+            self.raw("    if (w.xcdr2) { int2dds_cdr_write_dheader_finalize(&w, _u_dh); }\n");
+        }
         self.raw("    *_w = w;\n}\n\n");
 
         // deserialize_fields (for nested union support - no encapsulation)
@@ -285,6 +294,10 @@ impl<'a> CGen<'a> {
             u.name, u.name
         ));
         self.raw("    Int2DdsCdrReader r = *_r;\n");
+        if needs_union_dh {
+            self.raw("    uint32_t _u_sz = 0; size_t _u_sp = 0;\n");
+            self.raw("    if (r.xcdr2) { int2dds_cdr_read_dheader(&r, &_u_sz, &_u_sp); }\n");
+        }
         self.emit_read_field_indented(&u.discriminant_type, "val_out->_d", "    ");
         self.raw("    switch (val_out->_d) {\n");
         for case in &u.cases {
@@ -304,6 +317,9 @@ impl<'a> CGen<'a> {
             self.raw("        break;\n");
         }
         self.raw("    }\n");
+        if needs_union_dh {
+            self.raw("    if (r.xcdr2) { int2dds_cdr_read_dheader_end(&r, _u_sz, _u_sp); }\n");
+        }
         self.raw("    *_r = r;\n}\n\n");
 
         // Serialize function
@@ -319,6 +335,10 @@ impl<'a> CGen<'a> {
             ExtensibilityKind::Mutable => "INT2DDS_CDR_MUTABLE",
         };
         self.raw(&format!("    int2dds_cdr_write_encapsulation(&w, {});\n", union_ext));
+        if needs_union_dh {
+            self.raw("    size_t _u_dh = 0;\n");
+            self.raw("    if (w.xcdr2) { int2dds_cdr_write_dheader_begin(&w, &_u_dh); }\n");
+        }
         self.emit_write_field_indented(&u.discriminant_type, "val->_d", "    ");
         self.raw("    switch (val->_d) {\n");
         for case in &u.cases {
@@ -338,6 +358,9 @@ impl<'a> CGen<'a> {
             self.raw("        break;\n");
         }
         self.raw("    }\n");
+        if needs_union_dh {
+            self.raw("    if (w.xcdr2) { int2dds_cdr_write_dheader_finalize(&w, _u_dh); }\n");
+        }
         self.raw("    return w.error == INT2DDS_CDR_OK ? int2dds_cdr_writer_size(&w) : 0;\n}\n\n");
 
         // Deserialize function
@@ -347,6 +370,10 @@ impl<'a> CGen<'a> {
         ));
         self.raw("    Int2DdsCdrReader r;\n");
         self.raw("    if (int2dds_cdr_reader_init(&r, buf, len) != INT2DDS_CDR_OK)\n        return false;\n");
+        if needs_union_dh {
+            self.raw("    uint32_t _u_sz = 0; size_t _u_sp = 0;\n");
+            self.raw("    if (r.xcdr2) { int2dds_cdr_read_dheader(&r, &_u_sz, &_u_sp); }\n");
+        }
         self.emit_read_field_indented(&u.discriminant_type, "val_out->_d", "    ");
         self.raw("    switch (val_out->_d) {\n");
         for case in &u.cases {
@@ -366,6 +393,9 @@ impl<'a> CGen<'a> {
             self.raw("        break;\n");
         }
         self.raw("    }\n");
+        if needs_union_dh {
+            self.raw("    if (r.xcdr2) { int2dds_cdr_read_dheader_end(&r, _u_sz, _u_sp); }\n");
+        }
         self.raw("    return int2dds_cdr_reader_error(&r) == INT2DDS_CDR_OK;\n}\n");
     }
 
@@ -857,6 +887,14 @@ impl<'a> CGen<'a> {
                 self.raw(&format!("{}}}\n", indent));
             }
             ResolvedType::Map { key, value, .. } => {
+                let needs_dh = Self::sequence_element_needs_dheader(value);
+                if needs_dh {
+                    self.raw(&format!("{}{{ size_t _map_dh = 0;\n", indent));
+                    self.raw(&format!(
+                        "{}if (w.xcdr2) {{ int2dds_cdr_write_dheader_begin(&w, &_map_dh); }}\n",
+                        indent
+                    ));
+                }
                 self.raw(&format!(
                     "{}int2dds_cdr_write_seq_header(&w, {}.length);\n",
                     indent, accessor
@@ -870,6 +908,13 @@ impl<'a> CGen<'a> {
                 self.emit_write_field_indented(key, &key_acc, &format!("{}    ", indent));
                 self.emit_write_field_indented(value, &val_acc, &format!("{}    ", indent));
                 self.raw(&format!("{}}}\n", indent));
+                if needs_dh {
+                    self.raw(&format!(
+                        "{}if (w.xcdr2) {{ int2dds_cdr_write_dheader_finalize(&w, _map_dh); }}\n",
+                        indent
+                    ));
+                    self.raw(&format!("{}}}\n", indent));
+                }
             }
             ResolvedType::Struct(type_name) => {
                 let simple = type_name.rsplit("::").next().unwrap_or(type_name);
@@ -1146,6 +1191,14 @@ impl<'a> CGen<'a> {
                 self.raw(&format!("{}}}\n", indent));
             }
             ResolvedType::Map { key, value, .. } => {
+                let needs_dh = Self::sequence_element_needs_dheader(value);
+                if needs_dh {
+                    self.raw(&format!("{}{{ uint32_t _map_sz = 0; size_t _map_sp = 0;\n", indent));
+                    self.raw(&format!(
+                        "{}if (r.xcdr2) {{ int2dds_cdr_read_dheader(&r, &_map_sz, &_map_sp); }}\n",
+                        indent
+                    ));
+                }
                 self.raw(&format!(
                     "{}int2dds_cdr_read_seq_header(&r, &{}.length);\n",
                     indent, accessor
@@ -1159,6 +1212,13 @@ impl<'a> CGen<'a> {
                 self.emit_read_field_indented(key, &key_acc, &format!("{}    ", indent));
                 self.emit_read_field_indented(value, &val_acc, &format!("{}    ", indent));
                 self.raw(&format!("{}}}\n", indent));
+                if needs_dh {
+                    self.raw(&format!(
+                        "{}if (r.xcdr2) {{ int2dds_cdr_read_dheader_end(&r, _map_sz, _map_sp); }}\n",
+                        indent
+                    ));
+                    self.raw(&format!("{}}}\n", indent));
+                }
             }
             ResolvedType::Struct(type_name) => {
                 let simple = type_name.rsplit("::").next().unwrap_or(type_name);
