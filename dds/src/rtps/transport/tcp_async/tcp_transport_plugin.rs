@@ -98,8 +98,9 @@ impl TcpAsyncTransportPlugin {
 
         // Crossbeam bridges async → sync. Listener writes to *_tx; the DDS
         // layer reads from *_rx via `take_*_source()`.
+        let user_channel_capacity = crate::common::env::get_tcp_user_channel_capacity();
         let (discovery_tx, discovery_rx) = bounded::<IncomingMessage>(CHANNEL_BUFFER_SIZE);
-        let (user_data_tx, user_data_rx) = bounded::<IncomingMessage>(CHANNEL_BUFFER_SIZE);
+        let (user_data_tx, user_data_rx) = bounded::<IncomingMessage>(user_channel_capacity);
         let (dead_peer_tx, dead_peer_rx) = bounded::<SocketAddr>(CHANNEL_BUFFER_SIZE);
 
         // Runtime — worker count overridable via env for ops tuning. Default
