@@ -493,9 +493,14 @@ impl Publisher {
             let participant = self.get_participant()?;
             let mut bridge_guard = participant.get_dcps_bridge()?;
             match bridge_guard.as_mut() {
-                Some(bridge) => bridge
-                    .delete_rtps_writer(topic_name.clone(), handle.to_guid().entity_id())
-                    .map_err(|e| DdsError::Error(e.message))?,
+                Some(bridge) => {
+                    bridge
+                        .delete_rtps_writer(topic_name.clone(), handle.to_guid().entity_id())
+                        .map_err(|e| DdsError::Error(e.message))?;
+                    // Release the transport-side PublishMode registration
+                    // recorded when the writer was created.
+                    bridge.unregister_writer_publish_mode(&handle.to_guid());
+                }
                 None => return Err(DdsError::Error("DCPS Bridge is not initialized".to_string())),
             };
         }
