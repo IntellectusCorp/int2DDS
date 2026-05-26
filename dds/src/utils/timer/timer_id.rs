@@ -81,10 +81,10 @@ pub(crate) enum TimerId {
         guid_prefix: GuidPrefix,
     },
 
-    // SEDP delayed message send (one-shot, unique per invocation)
+    // SEDP periodic scheduled message per (remote participant, builtin writer)
     SedpScheduledMessage {
-        guid_prefix: GuidPrefix,
-        elapsed_nano: u64,
+        remote_prefix: GuidPrefix,
+        writer_entity_id: EntityId,
     },
 
     // Thread monitoring periodic timer
@@ -169,8 +169,13 @@ impl fmt::Display for TimerId {
             TimerId::AutopurgeNowriter { reader_guid } => {
                 write!(f, "autopurge_nowriter_{:x}", Self::guid_u128(reader_guid))
             }
-            TimerId::SedpScheduledMessage { guid_prefix, elapsed_nano } => {
-                write!(f, "sedp_scheduled_{:02x?}_{}", guid_prefix, elapsed_nano)
+            TimerId::SedpScheduledMessage { remote_prefix, writer_entity_id } => {
+                write!(
+                    f,
+                    "sedp_scheduled_{:02x?}_{}",
+                    remote_prefix,
+                    Self::id_hex(writer_entity_id)
+                )
             }
             TimerId::ThreadMonitoring => {
                 write!(f, "thread_monitoring_timer")
