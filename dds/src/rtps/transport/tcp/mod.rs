@@ -14,6 +14,7 @@ pub(crate) mod mux_state;
 pub(crate) mod protocol;
 pub(crate) mod sender;
 pub(crate) mod stream;
+pub(crate) mod sync_sender;
 pub(crate) mod tcp_mux_listener;
 pub(crate) mod tcp_sender;
 pub(crate) mod tcp_transport_plugin;
