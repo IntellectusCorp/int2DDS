@@ -2197,18 +2197,17 @@ impl QosPolicy for WriterReliabilityExtensionQosPolicy {
 #[derive(DdsType, PartialEq, Default, Copy, Eq, PartialOrd, Ord)]
 #[dds_type(crate_path = "crate", no_default, no_partialeq)]
 pub enum PublishModeQosPolicyKind {
-    /// `write()` sends inline on the user thread.
+    /// `write()` sends inline on the user thread. Default — latency-optimal
+    /// for single-sample workloads since the call performs the wire send
+    /// without a thread handoff.
+    #[default]
     Synchronous,
     /// `write()` enqueues onto an asynchronous publisher thread.
-    ///
-    /// Default — the synchronous send path is currently a stub and is
-    /// unsuitable as the implicit choice for existing applications.
-    #[default]
     Asynchronous,
 }
 
 impl ConstDefault for PublishModeQosPolicyKind {
-    const DEFAULT: Self = PublishModeQosPolicyKind::Asynchronous;
+    const DEFAULT: Self = PublishModeQosPolicyKind::Synchronous;
 }
 
 impl PublishModeQosPolicyKind {
@@ -2237,10 +2236,8 @@ pub const DEFAULT_SEND_SCHEDULER_NAME: &str = "";
 /// [`PropertyQosPolicy`] entries on the DomainParticipant).
 ///
 /// # Default
-/// - `kind: Asynchronous` — preserves the existing async TCP send path
-///   while the synchronous implementation is still a stub. Will flip back
-///   to `Synchronous` (the latency-optimal choice) once the sync sender
-///   is fully implemented.
+/// - `kind: Synchronous` — latency-optimal; the call returns only after
+///   the sample has been written to the transport.
 /// - `send_scheduler_name: ""` — default scheduler. The field is ignored
 ///   when `kind` is `Synchronous`.
 ///
@@ -2376,9 +2373,9 @@ mod publish_mode_qos_tests {
     use super::*;
 
     #[test]
-    fn default_is_asynchronous_with_empty_scheduler() {
+    fn default_is_synchronous_with_empty_scheduler() {
         let p = PublishModeQosPolicy::default();
-        assert_eq!(p.kind, PublishModeQosPolicyKind::Asynchronous);
+        assert_eq!(p.kind, PublishModeQosPolicyKind::Synchronous);
         assert_eq!(p.send_scheduler_name, DEFAULT_SEND_SCHEDULER_NAME);
         assert_eq!(p.send_scheduler_name, "");
     }
