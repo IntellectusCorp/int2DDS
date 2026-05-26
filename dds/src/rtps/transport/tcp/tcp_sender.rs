@@ -33,11 +33,10 @@ use crate::common::env::{get_tcp_send_mode, TcpSendMode};
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::port_manager::PortManager;
-use crate::rtps::transport::tcp::conn_actor::{inbox_capacity, spawn_conn_actor};
+use crate::rtps::transport::tcp::conn_actor::{inbox_capacity, spawn_conn_actor, SharedWriteHalf};
 use crate::rtps::transport::tcp::framing::{read_framed_message, write_framed_message};
 use crate::rtps::transport::tcp::mux_state::MuxState;
 use crate::rtps::transport::tcp::protocol::ControlMsg;
-use crate::rtps::transport::tcp::sender::TcpSenderImpl;
 use crate::rtps::transport::tcp::stream::{connect_tls_async, wrap_plain, AsyncConnStream};
 use crate::rtps::transport::tcp::tls::TlsConfig;
 
@@ -63,6 +62,11 @@ const ORPHAN_PRUNE_INTERVAL: Duration = Duration::from_millis(500);
 /// responses through the control connection's pending_ack slot.
 struct OutboundEntry {
     writer_tx: mpsc::Sender<Vec<u8>>,
+    /// Shared with the connection's `writer_task`. Async writes still go
+    /// through `writer_tx` (queue + batch). Synchronous writes acquire
+    /// this directly via `runtime.block_on(write_half.lock().await)` and
+    /// perform the wire `writev` inline on the user thread.
+    write_half: SharedWriteHalf,
     control: Option<ControlExtras>,
 }
 
@@ -357,23 +361,64 @@ impl TcpSender {
     }
 }
 
-// The send-side trait `TcpSenderImpl` is the unified contract used by
-// `TcpTransportPlugin` to dispatch outbound traffic. `TcpSender` is the
-// asynchronous implementation (queues frames through per-connection
-// `writer_task`s). Methods delegate to the existing inherent ones — the
-// trait impl mainly exists so the plugin can write generic dispatch code
-// alongside the upcoming synchronous sender.
-impl TcpSenderImpl for TcpSender {
-    fn send_to_discovery(self: &Arc<Self>, addr: &SocketAddr, data: &[u8]) -> io::Result<()> {
-        TcpSender::send_to_discovery(self, addr, data)
+// ── Synchronous send path ───────────────────────────────────────────────────
+//
+// Sends a single RTPS frame inline on the user thread. Connections, TLS,
+// keepalive, and the protocol handshake are reused unchanged from the
+// async path; only the wire `write_vectored` is performed synchronously
+// against the shared `SharedWriteHalf`. The user thread waits via
+// `runtime.block_on` until the kernel accepts the bytes.
+impl TcpSender {
+    pub(crate) fn send_to_discovery_sync(
+        self: &Arc<Self>,
+        addr: &SocketAddr,
+        data: &[u8],
+    ) -> io::Result<()> {
+        let logical_port =
+            PortManager::get_discovery_traffic_unicast_port(self.domain_id, self.participant_id);
+        self.send_to_sync(*addr, logical_port, data)
     }
 
-    fn send_to_user_data(self: &Arc<Self>, addr: &SocketAddr, data: &[u8]) -> io::Result<()> {
-        TcpSender::send_to_user_data(self, addr, data)
+    pub(crate) fn send_to_user_data_sync(
+        self: &Arc<Self>,
+        addr: &SocketAddr,
+        data: &[u8],
+    ) -> io::Result<()> {
+        let logical_port =
+            PortManager::get_user_traffic_unicast_port(self.domain_id, self.participant_id);
+        self.send_to_sync(*addr, logical_port, data)
     }
 
-    fn disconnect_peer(&self, addr: SocketAddr) {
-        TcpSender::disconnect_peer(self, addr)
+    /// Inline writev on the cached connection. If the connection has not
+    /// been established yet, falls back to the async cache-miss path
+    /// (`spawn_outbound_connect`) which queues `data` for delivery after
+    /// the handshake completes. Subsequent sends to the same peer/port
+    /// then take the fast inline path.
+    fn send_to_sync(
+        self: &Arc<Self>,
+        addr: SocketAddr,
+        logical_port: u16,
+        data: &[u8],
+    ) -> io::Result<()> {
+        let key = (addr, logical_port);
+
+        if let Some(entry) = self.connections.get(&key) {
+            let write_half = Arc::clone(&entry.write_half);
+            drop(entry);
+            let payload = data.to_vec();
+            // `Handle::block_on` polls the future on the caller's thread —
+            // it is not a `spawn` and does not migrate work to a worker. The
+            // `writev` syscall therefore runs inline on the user thread,
+            // matching the synchronous PublishMode contract ("user thread
+            // performs the wire send").
+            return self.runtime_handle.block_on(async move {
+                let mut wh = write_half.lock().await;
+                write_framed_message(&mut *wh, &payload).await
+            });
+        }
+
+        self.spawn_outbound_connect(addr, logical_port, Some(data.to_vec()));
+        Ok(())
     }
 }
 
@@ -499,7 +544,8 @@ async fn do_connect_control(
     );
 
     // 5. Spawn the actor pair.
-    spawn_conn_actor(stream, conn_id, Arc::clone(&sender.shared), conn_cancel, tx.clone(), rx);
+    let write_half =
+        spawn_conn_actor(stream, conn_id, Arc::clone(&sender.shared), conn_cancel, tx.clone(), rx);
 
     // 6. Seed liveness state: send first KEEPALIVE so that the
     //    interval task's first tick has not fail. (timeout)
@@ -513,6 +559,7 @@ async fn do_connect_control(
         (addr, CONTROL_LOGICAL_PORT),
         OutboundEntry {
             writer_tx: tx.clone(),
+            write_half,
             control: Some(ControlExtras { pending_ack, request_lock }),
         },
     );
@@ -555,12 +602,14 @@ async fn do_connect_data(
         tx.clone(),
         conn_cancel.clone(),
     );
-    spawn_conn_actor(stream, conn_id, Arc::clone(&sender.shared), conn_cancel, tx.clone(), rx);
+    let write_half =
+        spawn_conn_actor(stream, conn_id, Arc::clone(&sender.shared), conn_cancel, tx.clone(), rx);
 
     // 7. Cache.
-    sender
-        .connections
-        .insert((addr, logical_port), OutboundEntry { writer_tx: tx.clone(), control: None });
+    sender.connections.insert(
+        (addr, logical_port),
+        OutboundEntry { writer_tx: tx.clone(), write_half, control: None },
+    );
 
     debug!(
         "TcpSender: data connection established to {:?} (port={}, conn={})",

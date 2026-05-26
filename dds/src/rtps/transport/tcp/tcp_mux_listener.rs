@@ -241,7 +241,11 @@ async fn handshake_and_register_task(
 
     let conn_id = shared.register_inbound_connection(addr, tx.clone(), conn_cancel.clone());
 
-    spawn_conn_actor(stream, conn_id, shared.clone(), conn_cancel, tx, rx);
+    // Inbound connections only receive from the wire and write protocol
+    // acks via the shared writer_tx. The sync send path never targets an
+    // inbound connection, so the returned `SharedWriteHalf` is dropped
+    // here — only the writer_task owns it.
+    let _ = spawn_conn_actor(stream, conn_id, shared.clone(), conn_cancel, tx, rx);
 }
 
 /// Periodic ticker: cancel connections whose `last_activity` has exceeded

@@ -12,7 +12,7 @@ use std::sync::{Arc, OnceLock};
 
 use log::{debug, warn};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex as TokioMutex};
 use tokio_util::sync::CancellationToken;
 
 use crate::rtps::transport::tcp::{
@@ -54,14 +54,23 @@ fn batch_max_frames() -> usize {
     })
 }
 
+/// Shared handle to a connection's write half. The async writer task and
+/// any synchronous user-thread sender both acquire this `Mutex` before
+/// touching the wire. Hold time is intentionally short — one batched
+/// `writev` syscall — so contention between the two paths stays bounded.
+pub(crate) type SharedWriteHalf = Arc<TokioMutex<AsyncConnWriteHalf>>;
+
 /// Spawn the reader/writer task pair for one connection.
+///
+/// Returns a [`SharedWriteHalf`] that the caller stores alongside the
+/// `mpsc::Sender` inbox. Async writes still flow through the inbox →
+/// `writer_task` → batched `writev`; synchronous writes (driven by a
+/// `PublishModeQosPolicy::Synchronous` DataWriter) acquire the same
+/// `SharedWriteHalf` directly and write inline on the user thread.
 ///
 /// `tx` is the outbound inbox passed in by the caller; it has already been
 /// stored in `MuxState::ConnectionEntry::writer_tx` (so dispatched-into-here
 /// frames and externally-sent frames all converge on the same writer task).
-///
-/// — protocol acks, keepalives, RTPS data — push frames into it; the writer
-/// task serialises them onto the wire in FIFO order.
 ///
 /// Cancellation: a child of `parent_cancel` is created and shared by both
 /// tasks. Either task's exit (read EOF, write error, …) cancels the child
@@ -74,12 +83,13 @@ pub(crate) fn spawn_conn_actor(
     parent_cancel: CancellationToken,
     tx: mpsc::Sender<Vec<u8>>,
     rx: mpsc::Receiver<Vec<u8>>,
-) {
+) -> SharedWriteHalf {
     // Child token: cancelling this pair does not affect siblings, but
     // parent shutdown still propagates down to both tasks.
     let conn_cancel = parent_cancel.child_token();
 
     let (read_half, write_half) = stream.into_split();
+    let write_half: SharedWriteHalf = Arc::new(TokioMutex::new(write_half));
 
     // Reader task — owns the read half. The `writer_tx` clone lets the
     // reader push protocol responses (acks, replies) through the writer
@@ -90,11 +100,14 @@ pub(crate) fn spawn_conn_actor(
         tokio::spawn(reader_task(read_half, conn_id, shared, tx, cancel));
     }
 
-    // Writer task — owns the write half and the inbox receiver.
+    // Writer task — shares the write half with sync senders.
     {
         let cancel = conn_cancel.clone();
+        let write_half = Arc::clone(&write_half);
         tokio::spawn(writer_task(write_half, rx, cancel));
     }
+
+    write_half
 }
 
 /// Read frames from the stream and hand them to `MuxState::dispatch`.
@@ -140,16 +153,19 @@ async fn reader_task(
 /// Drain the inbox channel and write batched frames to the stream.
 ///
 /// After awaiting a single frame, the task greedily collects any frames
-/// already queued on the inbox (`try_recv`) up to `batch_max_frames()` and
-/// hands them all to `write_framed_batch` in one `write_vectored` call. This
-/// turns "one syscall per RTPS submessage" into "one syscall per burst",
-/// letting TCP TSO/GSO segment large coalesced writes on the NIC.
+/// already queued on the inbox (`try_recv`) up to `batch_max_frames()`,
+/// acquires the [`SharedWriteHalf`] mutex, and hands the batch to
+/// `write_framed_batch` in one `write_vectored` call. This turns "one
+/// syscall per RTPS submessage" into "one syscall per burst", letting TCP
+/// TSO/GSO segment large coalesced writes on the NIC. The mutex is held
+/// only for the writev itself, so a synchronous user-thread sender racing
+/// on the same connection is blocked at most one batch.
 ///
 /// Exits when the channel closes (all senders dropped), on a write error,
 /// or on cancellation. Sends a TCP FIN via `shutdown()` before returning
 /// for a graceful close.
 async fn writer_task(
-    mut write_half: AsyncConnWriteHalf,
+    write_half: SharedWriteHalf,
     mut rx: mpsc::Receiver<Vec<u8>>,
     cancel: CancellationToken,
 ) {
@@ -171,11 +187,13 @@ async fn writer_task(
                                 Err(_) => break,
                             }
                         }
-                        if let Err(e) = write_framed_batch(&mut write_half, &batch).await {
+                        let mut wh = write_half.lock().await;
+                        if let Err(e) = write_framed_batch(&mut *wh, &batch).await {
                             // Real I/O failure — peer likely unreachable.
                             warn!("write error: {:?}", e);
                             break;
                         }
+                        drop(wh);
                         batch.clear();
                     }
                     // All senders dropped → no more outbound traffic possible.
@@ -191,22 +209,23 @@ async fn writer_task(
     // before cancel, which would otherwise be lost to the `select!` race.
     // `try_recv` only: we don't await fresh senders here.
     batch.clear();
+    let mut wh = write_half.lock().await;
     while let Ok(frame) = rx.try_recv() {
         batch.push(frame);
         if batch.len() >= max_batch {
-            if write_framed_batch(&mut write_half, &batch).await.is_err() {
+            if write_framed_batch(&mut *wh, &batch).await.is_err() {
                 cancel.cancel();
-                let _ = write_half.shutdown().await;
+                let _ = wh.shutdown().await;
                 return;
             }
             batch.clear();
         }
     }
     if !batch.is_empty() {
-        let _ = write_framed_batch(&mut write_half, &batch).await;
+        let _ = write_framed_batch(&mut *wh, &batch).await;
     }
 
     // Wake the reader and send a graceful TCP FIN.
     cancel.cancel();
-    let _ = write_half.shutdown().await;
+    let _ = wh.shutdown().await;
 }
