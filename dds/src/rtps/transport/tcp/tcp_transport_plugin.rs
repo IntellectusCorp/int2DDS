@@ -36,9 +36,13 @@ use crate::rtps::transport::tcp::tcp_mux_listener::TcpMuxListener;
 use crate::rtps::transport::tcp::tcp_sender::TcpSender;
 use crate::rtps::transport::tcp::tls::TlsConfig;
 
-/// Channel buffer size — matches the sync plugin so backpressure semantics
-/// are identical for the DDS layer.
+/// Crossbeam capacity for discovery + dead-peer channels.
 const CHANNEL_BUFFER_SIZE: usize = 512;
+
+/// Crossbeam capacity for the inbound user_data channel that bridges the
+/// listener-side dispatch into the sync DDS layer. Sized to absorb short
+/// consumer stalls under bursty 1MB/60Hz × ~16 fragment workloads.
+const USER_CHANNEL_CAPACITY: usize = 1024;
 
 /// Default inbound idle timeout. Overridable via the existing `INT2DDS_TCP_*`
 /// env vars (when those helpers exist).
@@ -112,9 +116,8 @@ impl TcpTransportPlugin {
 
         // Crossbeam bridges async → sync. Listener writes to *_tx; the DDS
         // layer reads from *_rx via `take_*_source()`.
-        let user_channel_capacity = crate::common::env::get_tcp_user_channel_capacity();
         let (discovery_tx, discovery_rx) = bounded::<IncomingMessage>(CHANNEL_BUFFER_SIZE);
-        let (user_data_tx, user_data_rx) = bounded::<IncomingMessage>(user_channel_capacity);
+        let (user_data_tx, user_data_rx) = bounded::<IncomingMessage>(USER_CHANNEL_CAPACITY);
         let (dead_peer_tx, dead_peer_rx) = bounded::<SocketAddr>(CHANNEL_BUFFER_SIZE);
 
         // Runtime — worker count overridable via env for ops tuning. Default

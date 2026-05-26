@@ -22,22 +22,14 @@ use crate::rtps::transport::tcp::{
 };
 
 /// Per-connection writer inbox capacity for both outbound (sender-initiated)
-/// and inbound (listener-accepted) conn_actor pairs. Tunes producer-side
-/// backpressure when paired with `INT2DDS_TCP_SEND_MODE=blocking`: a full
-/// inbox makes `blocking_send` park the caller until the writer task drains
-/// a slot, or makes `try_send` return `Full` so the caller drops the frame.
-///
-/// Overridable via `INT2DDS_TCP_INBOX_CAPACITY`. Default 4.
-/// Read once via `OnceLock` so the value is stable across all connections
-/// created in a single run.
-static INBOX_CAPACITY_CACHE: OnceLock<usize> = OnceLock::new();
+/// and inbound (listener-accepted) conn_actor pairs. Sized generously so the
+/// control protocol's KEEPALIVE seed + PORT_RESERVE round-trips never race
+/// the writer_task's first drain, while still applying backpressure on
+/// sustained bursts.
+pub(crate) const INBOX_CAPACITY: usize = 64;
 
 pub(crate) fn inbox_capacity() -> usize {
-    *INBOX_CAPACITY_CACHE.get_or_init(|| {
-        let cap = crate::common::env::get_tcp_inbox_capacity();
-        log::info!("[tcp] INBOX_CAPACITY = {}", cap);
-        cap
-    })
+    INBOX_CAPACITY
 }
 
 /// Per-connection writer batch cap: how many inbox frames the writer task
