@@ -27,8 +27,8 @@ use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::transport::error::TransportErrorCode;
 use crate::rtps::transport::plugin::IncomingMessage;
 use crate::rtps::transport::port_manager::PortManager;
-use crate::rtps::transport::tcp_async::framing::{classify_frame, TcpFrameKind};
-use crate::rtps::transport::tcp_async::protocol::{
+use crate::rtps::transport::tcp::framing::{classify_frame, TcpFrameKind};
+use crate::rtps::transport::tcp::protocol::{
     generate_cookie, ControlMsg, ERR_CODE_IDLE_TIMEOUT, ERR_CODE_INVALID_COOKIE,
     ERR_CODE_INVALID_PORT, MSG_PORT_BIND, MSG_PORT_RESERVE, OP_IDLE_TIMEOUT,
 };

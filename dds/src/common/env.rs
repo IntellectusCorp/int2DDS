@@ -63,10 +63,10 @@ pub fn init_from_env() {
     // - INT2DDS_TCP_INCOMING_IDLE_TIMEOUT: Set idle timeout for incoming TCP connections (milliseconds) - Default: 60000
     // - INT2DDS_TCP_SO_RCVBUF: Force SO_RCVBUF on every TCP socket (bytes). Used by tests to induce backpressure - Default: OS-managed
     // - INT2DDS_TCP_SO_SNDBUF: Force SO_SNDBUF on every TCP socket (bytes). Used by tests to induce backpressure - Default: OS-managed
-    // - INT2DDS_TCP_SEND_MODE: Outbound send mode for tcp_async (try | blocking) - Default: blocking
+    // - INT2DDS_TCP_SEND_MODE: Outbound send mode for tcp (try | blocking) - Default: blocking
     // - INT2DDS_TCP_INBOX_CAPACITY: Per-connection writer mpsc capacity (applies to both outbound and inbound conns) (>= 1) - Default: 4
     // - INT2DDS_TCP_BATCH_MAX_FRAMES: Per-connection writer_task drain cap — how many frames to coalesce into one write_vectored syscall (>= 1) - Default: 64
-    // - INT2DDS_TCP_USER_CHANNEL_CAPACITY: Crossbeam capacity for the inbound user_data channel that bridges tcp_async → sync DDS layer (>= 1) - Default: 512
+    // - INT2DDS_TCP_USER_CHANNEL_CAPACITY: Crossbeam capacity for the inbound user_data channel that bridges tcp → sync DDS layer (>= 1) - Default: 512
     // - INT2DDS_TCP_TLS_ENABLED: Enable TLS for TCP connections (true, false) - Default: false (not yet implemented)
     // - INT2DDS_TCP_TLS_CERT_PATH: TLS certificate file path - Default: none (not yet implemented)
     // - INT2DDS_TCP_TLS_KEY_PATH: TLS private key file path - Default: none (not yet implemented)
@@ -894,7 +894,7 @@ pub fn set_tcp_so_sndbuf(bytes: usize) {
     unsafe { std::env::set_var("INT2DDS_TCP_SO_SNDBUF", bytes.to_string()) };
 }
 
-/// Outbound send-method choice for the tcp_async transport.
+/// Outbound send-method choice for the tcp transport.
 ///
 /// Selects how `TcpSender::send_to` hands a frame to the writer mpsc:
 /// - `Try`: non-blocking `try_send`. On a full inbox the frame is dropped.
@@ -909,7 +909,7 @@ pub enum TcpSendMode {
     Blocking,
 }
 
-/// Get the outbound TCP send mode for the tcp_async transport.
+/// Get the outbound TCP send mode for the tcp transport.
 /// Default: `Blocking` (RTI-like synchronous producer backpressure).
 pub fn get_tcp_send_mode() -> TcpSendMode {
     match std::env::var("INT2DDS_TCP_SEND_MODE")
@@ -932,7 +932,7 @@ pub fn set_tcp_send_mode(mode: TcpSendMode) {
     unsafe { std::env::set_var("INT2DDS_TCP_SEND_MODE", v) };
 }
 
-/// Get the per-connection writer mpsc capacity for tcp_async conn_actor
+/// Get the per-connection writer mpsc capacity for tcp conn_actor
 /// pairs — applies to both sender-initiated (outbound) and listener-accepted
 /// (inbound) connections. Tunes producer-side
 /// backpressure when paired with `INT2DDS_TCP_SEND_MODE=blocking`: a full
@@ -976,7 +976,7 @@ pub fn get_tcp_batch_max_frames() -> usize {
 }
 
 /// Crossbeam capacity for the inbound user_data channel that bridges
-/// tcp_async (listener-side dispatch) → sync DDS layer. When the sync
+/// tcp (listener-side dispatch) → sync DDS layer. When the sync
 /// consumer falls behind, `try_send` failures here cause the listener to
 /// drop RTPS data frames and emit a `TcpChannelFull` warning. Sized to
 /// absorb short consumer stalls under 1MB/60Hz × ~16 frag bursts.

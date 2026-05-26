@@ -1,4 +1,4 @@
-//! Async TCP transport plugin — sync facade over the tcp_async stack.
+//! Async TCP transport plugin — sync facade over the tcp stack.
 //!
 //! `TcpAsyncTransportPlugin` owns a dedicated `tokio::runtime::Runtime` and
 //! bundles together the inbound `TcpMuxListener`, the outbound `TcpSender`,
@@ -30,8 +30,8 @@ use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::plugin::{IncomingMessage, MessageSource, SendTarget, TransportPlugin};
 use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::tcp::tls::TlsConfig;
-use crate::rtps::transport::tcp_async::tcp_mux_listener::TcpMuxListener;
-use crate::rtps::transport::tcp_async::tcp_sender::TcpSender;
+use crate::rtps::transport::tcp::tcp_mux_listener::TcpMuxListener;
+use crate::rtps::transport::tcp::tcp_sender::TcpSender;
 
 /// Channel buffer size — matches the sync plugin so backpressure semantics
 /// are identical for the DDS layer.
@@ -43,7 +43,7 @@ const DEFAULT_INCOMING_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 // ── TcpAsyncTransportPlugin ──────────────────────────────────────────────────
 
-/// Sync facade over the tcp_async stack. Owns the runtime and forwards
+/// Sync facade over the tcp stack. Owns the runtime and forwards
 /// `TransportPlugin` trait calls into the async machinery.
 pub(crate) struct TcpAsyncTransportPlugin {
     #[allow(dead_code)]
@@ -52,7 +52,7 @@ pub(crate) struct TcpAsyncTransportPlugin {
     working_ips: Vec<String>,
     listener_port: u16,
 
-    /// Dedicated runtime — keeps the tcp_async tasks isolated from any
+    /// Dedicated runtime — keeps the tcp tasks isolated from any
     /// runtime the host application might run. Dropped last (after the
     /// listener and sender) so tasks can drain on shutdown.
     runtime: Arc<tokio::runtime::Runtime>,
@@ -109,7 +109,7 @@ impl TcpAsyncTransportPlugin {
         let runtime = Arc::new(
             tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(worker_threads)
-                .thread_name("tcp_async_worker")
+                .thread_name("tcp_worker")
                 .enable_all()
                 .build()
                 .map_err(|e| {

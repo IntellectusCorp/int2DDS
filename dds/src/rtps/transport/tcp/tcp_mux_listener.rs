@@ -22,11 +22,11 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
 use crate::rtps::transport::tcp::tls::TlsConfig;
-use crate::rtps::transport::tcp_async::conn_actor::{inbox_capacity, spawn_conn_actor};
-use crate::rtps::transport::tcp_async::stream::{accept_tls_async, wrap_plain};
+use crate::rtps::transport::tcp::conn_actor::{inbox_capacity, spawn_conn_actor};
+use crate::rtps::transport::tcp::stream::{accept_tls_async, wrap_plain};
 use crate::rtps::{
     common::guid::GuidPrefix,
-    transport::{plugin::IncomingMessage, tcp_async::mux_state::MuxState},
+    transport::{plugin::IncomingMessage, tcp::mux_state::MuxState},
 };
 
 /// How often the prune ticker scans for idle connections. Independent of the
@@ -269,9 +269,9 @@ async fn prune_interval_task(shared: Arc<MuxState>, timeout: Duration, cancel: C
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rtps::transport::tcp_async::framing::write_framed_message;
-    use crate::rtps::transport::tcp_async::mux_state::ConnectionState;
-    use crate::rtps::transport::tcp_async::protocol::{
+    use crate::rtps::transport::tcp::framing::write_framed_message;
+    use crate::rtps::transport::tcp::mux_state::ConnectionState;
+    use crate::rtps::transport::tcp::protocol::{
         ControlMsg, ERR_CODE_IDLE_TIMEOUT, MSG_ERROR, MSG_PEER_HELLO_ACK, OP_IDLE_TIMEOUT,
     };
     use crossbeam_channel::bounded;
