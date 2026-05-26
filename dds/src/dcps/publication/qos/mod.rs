@@ -33,9 +33,9 @@ use crate::{
         DurabilityQosPolicy, DurabilityServiceQosPolicy, EntityFactoryQosPolicy,
         GroupDataQosPolicy, HistoryQosPolicy, LatencyBudgetQosPolicy, LifespanQosPolicy,
         LivelinessQosPolicy, OwnershipQosPolicy, OwnershipStrengthQosPolicy, PartitionQosPolicy,
-        PresentationQosPolicy, Qos, ReliabilityQosPolicy, ReliabilityQosPolicyKind,
-        ResourceLimitsQosPolicy, TransportPriorityQosPolicy, UserDataQosPolicy,
-        WriterDataLifecycleQosPolicy, WriterReliabilityExtensionQosPolicy,
+        PresentationQosPolicy, PublishModeQosPolicy, Qos, ReliabilityQosPolicy,
+        ReliabilityQosPolicyKind, ResourceLimitsQosPolicy, TransportPriorityQosPolicy,
+        UserDataQosPolicy, WriterDataLifecycleQosPolicy, WriterReliabilityExtensionQosPolicy,
     },
 };
 use const_default::ConstDefault;
@@ -63,6 +63,7 @@ pub struct DataWriterQos {
     pub writer_data_lifecycle: WriterDataLifecycleQosPolicy,
     pub data_representation: DataRepresentationQosPolicy,
     pub writer_reliability_extension: WriterReliabilityExtensionQosPolicy,
+    pub publish_mode: PublishModeQosPolicy,
 }
 
 impl Default for DataWriterQos {
@@ -88,6 +89,7 @@ impl Default for DataWriterQos {
             writer_data_lifecycle: WriterDataLifecycleQosPolicy::default(),
             data_representation: DataRepresentationQosPolicy::default(),
             writer_reliability_extension: WriterReliabilityExtensionQosPolicy::default(),
+            publish_mode: PublishModeQosPolicy::default(),
         }
     }
 }
@@ -114,6 +116,7 @@ impl ConstDefault for DataWriterQos {
         writer_data_lifecycle: WriterDataLifecycleQosPolicy::DEFAULT,
         data_representation: DataRepresentationQosPolicy::DEFAULT,
         writer_reliability_extension: WriterReliabilityExtensionQosPolicy::DEFAULT,
+        publish_mode: PublishModeQosPolicy::DEFAULT,
     };
 }
 
