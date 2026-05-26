@@ -887,7 +887,8 @@ impl<'a> CGen<'a> {
                 self.raw(&format!("{}}}\n", indent));
             }
             ResolvedType::Map { key, value, .. } => {
-                let needs_dh = Self::sequence_element_needs_dheader(value);
+                let needs_dh = Self::sequence_element_needs_dheader(key)
+                    || Self::sequence_element_needs_dheader(value);
                 if needs_dh {
                     self.raw(&format!("{}{{ size_t _map_dh = 0;\n", indent));
                     self.raw(&format!(
@@ -1191,7 +1192,8 @@ impl<'a> CGen<'a> {
                 self.raw(&format!("{}}}\n", indent));
             }
             ResolvedType::Map { key, value, .. } => {
-                let needs_dh = Self::sequence_element_needs_dheader(value);
+                let needs_dh = Self::sequence_element_needs_dheader(key)
+                    || Self::sequence_element_needs_dheader(value);
                 if needs_dh {
                     self.raw(&format!("{}{{ uint32_t _map_sz = 0; size_t _map_sp = 0;\n", indent));
                     self.raw(&format!(

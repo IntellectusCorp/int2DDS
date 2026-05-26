@@ -838,7 +838,7 @@ impl<'a> PyGen<'a> {
             ResolvedType::WChar => self.line(&format!("w.write_wchar({})", accessor)),
             ResolvedType::WString { .. } => self.line(&format!("w.write_wstring({})", accessor)),
             ResolvedType::Map { key, value, .. } => {
-                if Self::is_non_primitive_element(value) {
+                if Self::is_non_primitive_element(key) || Self::is_non_primitive_element(value) {
                     self.line("if w._xcdr2:");
                     self.indent += 1;
                     self.line("_map_token = w.write_dheader_begin()");
@@ -1126,7 +1126,7 @@ impl<'a> PyGen<'a> {
             ResolvedType::WChar => self.line(&format!("{} = r.read_wchar()", name)),
             ResolvedType::WString { .. } => self.line(&format!("{} = r.read_wstring()", name)),
             ResolvedType::Map { key, value, .. } => {
-                if Self::is_non_primitive_element(value) {
+                if Self::is_non_primitive_element(key) || Self::is_non_primitive_element(value) {
                     self.line("if r._xcdr2:");
                     self.indent += 1;
                     self.line("_map_dsize, _map_dstart = r.read_dheader()");
@@ -1140,7 +1140,7 @@ impl<'a> PyGen<'a> {
                 self.emit_read_field(value, "_v");
                 self.line(&format!("{}[_k] = _v", name));
                 self.indent -= 1;
-                if Self::is_non_primitive_element(value) {
+                if Self::is_non_primitive_element(key) || Self::is_non_primitive_element(value) {
                     self.line("if r._xcdr2:");
                     self.indent += 1;
                     self.line("r.read_dheader_end(_map_dsize, _map_dstart)");
