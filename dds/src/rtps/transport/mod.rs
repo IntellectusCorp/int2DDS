@@ -37,7 +37,6 @@ pub(crate) mod port_manager;
 pub(crate) mod shm;
 pub(crate) mod socket;
 pub(crate) mod tcp;
-pub(crate) mod tcp_async;
 pub(crate) mod tokens;
 pub(crate) mod transport_config;
 pub(crate) mod udp;

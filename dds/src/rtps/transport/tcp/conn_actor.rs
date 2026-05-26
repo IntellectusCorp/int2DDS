@@ -15,7 +15,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::rtps::transport::tcp_async::{
+use crate::rtps::transport::tcp::{
     framing::{read_framed_message, write_framed_batch},
     mux_state::{ConnectionId, MuxState},
     stream::{AsyncConnReadHalf, AsyncConnStream, AsyncConnWriteHalf},
@@ -35,7 +35,7 @@ static INBOX_CAPACITY_CACHE: OnceLock<usize> = OnceLock::new();
 pub(crate) fn inbox_capacity() -> usize {
     *INBOX_CAPACITY_CACHE.get_or_init(|| {
         let cap = crate::common::env::get_tcp_inbox_capacity();
-        log::info!("[tcp_async] INBOX_CAPACITY = {}", cap);
+        log::info!("[tcp] INBOX_CAPACITY = {}", cap);
         cap
     })
 }
@@ -49,7 +49,7 @@ static BATCH_MAX_FRAMES_CACHE: OnceLock<usize> = OnceLock::new();
 fn batch_max_frames() -> usize {
     *BATCH_MAX_FRAMES_CACHE.get_or_init(|| {
         let cap = crate::common::env::get_tcp_batch_max_frames();
-        log::info!("[tcp_async] BATCH_MAX_FRAMES = {}", cap);
+        log::info!("[tcp] BATCH_MAX_FRAMES = {}", cap);
         cap
     })
 }

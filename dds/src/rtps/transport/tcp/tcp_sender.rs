@@ -34,11 +34,11 @@ use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::tcp::tls::TlsConfig;
-use crate::rtps::transport::tcp_async::conn_actor::{inbox_capacity, spawn_conn_actor};
-use crate::rtps::transport::tcp_async::framing::{read_framed_message, write_framed_message};
-use crate::rtps::transport::tcp_async::mux_state::MuxState;
-use crate::rtps::transport::tcp_async::protocol::ControlMsg;
-use crate::rtps::transport::tcp_async::stream::{connect_tls_async, wrap_plain, AsyncConnStream};
+use crate::rtps::transport::tcp::conn_actor::{inbox_capacity, spawn_conn_actor};
+use crate::rtps::transport::tcp::framing::{read_framed_message, write_framed_message};
+use crate::rtps::transport::tcp::mux_state::MuxState;
+use crate::rtps::transport::tcp::protocol::ControlMsg;
+use crate::rtps::transport::tcp::stream::{connect_tls_async, wrap_plain, AsyncConnStream};
 
 /// Logical port 0 = control connection — carries PEER_HELLO,
 /// PORT_RESERVE, KEEPALIVE; never RTPS data.
@@ -862,7 +862,7 @@ fn addr_to_guid(addr: SocketAddr) -> GuidPrefix {
 mod tests {
     use super::*;
     use crate::rtps::transport::plugin::IncomingMessage;
-    use crate::rtps::transport::tcp_async::tcp_mux_listener::TcpMuxListener;
+    use crate::rtps::transport::tcp::tcp_mux_listener::TcpMuxListener;
     use crossbeam_channel::bounded;
     use std::time::Instant;
 

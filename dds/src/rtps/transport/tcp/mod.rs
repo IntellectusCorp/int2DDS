@@ -1,9 +1,19 @@
-//! TCP transport — shared facilities.
+//! TCP transport.
 //!
-//! The legacy synchronous TCP plugin previously lived here and has been
-//! removed. The async TCP implementation under `tcp_async/` will be folded
-//! into this module in a follow-up step; for now `tcp/` exposes only the
-//! shared TLS configuration that the async plugin and the DCPS bridge
-//! both consume.
+//! Implements the RTPS TCP transport: a multiplexed listener that demuxes
+//! inbound connections into discovery / user-data / control channels, and
+//! a tokio-based sender that fans out outbound traffic via per-peer
+//! conn_actor pairs.
+//!
+//! TLS support is provided by the shared [`tls`] submodule, which is also
+//! consumed by the DCPS bridge for property-driven configuration.
 
+pub(crate) mod conn_actor;
+pub(crate) mod framing;
+pub(crate) mod mux_state;
+pub(crate) mod protocol;
+pub(crate) mod stream;
+pub(crate) mod tcp_mux_listener;
+pub(crate) mod tcp_sender;
+pub(crate) mod tcp_transport_plugin;
 pub(crate) mod tls;
