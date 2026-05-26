@@ -33,13 +33,13 @@ use crate::common::env::{get_tcp_send_mode, TcpSendMode};
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::port_manager::PortManager;
-use crate::rtps::transport::tcp::tls::TlsConfig;
 use crate::rtps::transport::tcp::conn_actor::{inbox_capacity, spawn_conn_actor};
 use crate::rtps::transport::tcp::framing::{read_framed_message, write_framed_message};
 use crate::rtps::transport::tcp::mux_state::MuxState;
 use crate::rtps::transport::tcp::protocol::ControlMsg;
 use crate::rtps::transport::tcp::sender::TcpSenderImpl;
 use crate::rtps::transport::tcp::stream::{connect_tls_async, wrap_plain, AsyncConnStream};
+use crate::rtps::transport::tcp::tls::TlsConfig;
 
 /// Logical port 0 = control connection — carries PEER_HELLO,
 /// PORT_RESERVE, KEEPALIVE; never RTPS data.

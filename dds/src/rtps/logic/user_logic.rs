@@ -251,6 +251,7 @@ impl UserLogic {
                                 if let Err(e) = self.send_rtps_message_to_locators(
                                     reader_proxy.unicast_locator_list(),
                                     &send_buffer,
+                                    Some(&writer.guid()),
                                 ) {
                                     warn!("Failed to send DATA_FRAG for requested change: {:?}", e);
                                 }
@@ -296,6 +297,7 @@ impl UserLogic {
                         if let Err(e) = self.send_rtps_message_to_locators(
                             reader_proxy.unicast_locator_list(),
                             &send_buffer,
+                            Some(&writer.guid()),
                         ) {
                             warn!("Failed to send DATA for requested change: {:?}", e);
                         }
@@ -415,7 +417,7 @@ impl UserLogic {
                             match self.send_data_frag_to_reader_proxy(
                                 &a_change,
                                 reader_proxy,
-                                writer.endpoint_id(),
+                                writer.guid(),
                                 fragment_num,
                                 heartbeat_info,
                                 timestamp,
@@ -484,6 +486,7 @@ impl UserLogic {
                         let send_result = self.send_rtps_message_to_locators(
                             reader_proxy.unicast_locator_list(),
                             &send_buffer,
+                            Some(&writer.guid()),
                         );
                         participant
                             .wire_buffer_pool()
@@ -619,6 +622,7 @@ impl UserLogic {
                                 if let Err(e) = self.send_rtps_message_to_locators(
                                     &[reader_locator.locator()],
                                     &send_buffer,
+                                    Some(&writer.guid()),
                                 ) {
                                     warn!("Failed to send DATA_FRAG message: {:?}", e);
                                 }
@@ -660,9 +664,11 @@ impl UserLogic {
                     )
                     .map_err(|e| RtpsError::new(RtpsErrorCode::Io, e.to_string()))?;
 
-                    if let Err(e) = self
-                        .send_rtps_message_to_locators(&[reader_locator.locator()], &send_buffer)
-                    {
+                    if let Err(e) = self.send_rtps_message_to_locators(
+                        &[reader_locator.locator()],
+                        &send_buffer,
+                        Some(&writer.guid()),
+                    ) {
                         warn!("Failed to send DATA message: {:?}", e);
                         // Continue sending other messages instead of aborting
                     }
@@ -713,7 +719,7 @@ impl UserLogic {
         &self,
         change: &CacheChange,
         reader_proxy: &ReaderProxy,
-        writer_id: EntityId,
+        writer_guid: Guid,
         fragment_num: u32,
         heartbeat_info: Option<(u32, SequenceNumber, SequenceNumber, bool, bool)>,
         timestamp: DateTime<Utc>,
@@ -724,7 +730,7 @@ impl UserLogic {
                 change,
                 reader_proxy.remote_reader_guid(),
                 reader_proxy.remote_group_entity_id(),
-                writer_id,
+                writer_guid.entity_id(),
                 fragment_num,
                 1,
                 change.fragment_size() as u16,
@@ -739,6 +745,7 @@ impl UserLogic {
                 return match self.send_rtps_message_to_locators(
                     reader_proxy.unicast_locator_list(),
                     send_buffer.as_slice(),
+                    Some(&writer_guid),
                 ) {
                     Ok(()) => Ok(true),
                     Err(e) if e.code == RtpsErrorCode::PeerDisconnected => Err(e),
@@ -819,7 +826,7 @@ impl UserLogic {
             );
 
             if let Ok(buf) = buffer {
-                self.send_rtps_message_to_locators(locators, &buf)?;
+                self.send_rtps_message_to_locators(locators, &buf, Some(&writer.guid()))?;
             }
         }
 
@@ -908,7 +915,11 @@ impl UserLogic {
         );
 
         if let Ok(buf) = buffer {
-            self.send_rtps_message_to_locators(reader_proxy.unicast_locator_list(), &buf)?;
+            self.send_rtps_message_to_locators(
+                reader_proxy.unicast_locator_list(),
+                &buf,
+                Some(&writer.guid()),
+            )?;
             writer.increase_heartbeat_count();
             if !reader_proxy.is_first_hb_sent() {
                 reader_proxy.set_first_hb_sent();
@@ -962,9 +973,11 @@ impl UserLogic {
         .map_err(|e| RtpsError::new(RtpsErrorCode::Io, e.to_string()))?;
 
         for buf in buffer_list {
-            if let Err(e) = self
-                .send_rtps_message_to_locators(reader_proxy.unicast_locator_list(), buf.as_slice())
-            {
+            if let Err(e) = self.send_rtps_message_to_locators(
+                reader_proxy.unicast_locator_list(),
+                buf.as_slice(),
+                Some(&local_guid),
+            ) {
                 warn!("Failed to send GAP: {:?}", e);
             }
         }
@@ -990,7 +1003,11 @@ impl UserLogic {
         )
         .map_err(|e| RtpsError::new(RtpsErrorCode::Io, e.to_string()))?;
 
-        self.send_rtps_message_to_locators(reader_proxy.unicast_locator_list(), buffer.as_slice())?;
+        self.send_rtps_message_to_locators(
+            reader_proxy.unicast_locator_list(),
+            buffer.as_slice(),
+            Some(&local_guid),
+        )?;
 
         Ok(())
     }
@@ -1120,14 +1137,13 @@ impl UserLogic {
             )
         })?;
 
-        self.send_rtps_message_to_locators(writer_proxy.unicast_locator_list(), &buffer).map_err(
-            |e| {
+        self.send_rtps_message_to_locators(writer_proxy.unicast_locator_list(), &buffer, None)
+            .map_err(|e| {
                 RtpsError::new(
                     RtpsErrorCode::SerializationError,
                     format!("Failed to send ACKNACK message: {}", e),
                 )
-            },
-        )?;
+            })?;
 
         Ok(())
     }
@@ -1335,7 +1351,18 @@ impl UserLogic {
     /// sides (SHM > TCP > UDP); a peer advertising multiple transports gets
     /// a single copy. Associated fn so `&self`-less closures (e.g. the
     /// NACK_FRAG timer) can route through the same path.
-    fn send_rtps_message_to_locators<'a, T>(&self, locators: T, buffer: &[u8]) -> RtpsResult<()>
+    ///
+    /// `writer_guid` identifies the local DataWriter when the send is
+    /// writer-originated; `None` for reader-originated traffic such as
+    /// ACKNACK / NACK_FRAG. The TCP plugin uses it to pick the sync or
+    /// async send path per the writer's `PublishModeQosPolicy`; other
+    /// transports ignore it.
+    fn send_rtps_message_to_locators<'a, T>(
+        &self,
+        locators: T,
+        buffer: &[u8],
+        writer_guid: Option<&Guid>,
+    ) -> RtpsResult<()>
     where
         T: IntoIterator<Item = &'a Locator>,
     {
@@ -1357,7 +1384,7 @@ impl UserLogic {
         let mut is_sent = false;
         let mut last_error = None;
         for locator in locators {
-            match self.transport.send(buffer, &SendTarget::UserData(locator)) {
+            match self.transport.send(buffer, &SendTarget::UserData { locator, writer_guid }) {
                 Ok(_) => is_sent = true,
                 Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
                     let kind = e.to_string();
@@ -1806,9 +1833,13 @@ impl UnicastMessageProcessor for UserLogic {
                                                     .or_else(|| try_kind(Locator::is_udp))
                                                     .unwrap_or(locs);
                                                 for locator in chosen {
-                                                    match transport_clone
-                                                        .send(&buffer, &SendTarget::UserData(locator))
-                                                    {
+                                                    match transport_clone.send(
+                                                        &buffer,
+                                                        &SendTarget::UserData {
+                                                            locator,
+                                                            writer_guid: None,
+                                                        },
+                                                    ) {
                                                         Ok(_) => {}
                                                         Err(e)
                                                             if e.kind()
@@ -2252,7 +2283,7 @@ impl UnicastMessageProcessor for UserLogic {
                 if let Err(e) = self.send_data_frag_to_reader_proxy(
                     &change,
                     reader_proxy,
-                    writer_id,
+                    writer.guid(),
                     fragment_num,
                     heartbeat_info,
                     timestamp,

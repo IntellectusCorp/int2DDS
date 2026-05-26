@@ -1,11 +1,10 @@
-//! Send-path abstraction shared by the future sync / async TCP senders.
+//! Send-path abstraction shared by the sync and async TCP senders.
 //!
-//! Phase 1-B introduces this trait so the transport plugin can hold both a
-//! synchronous and an asynchronous outbound implementation and dispatch
-//! between them based on each DataWriter's `PublishModeQosPolicy`. Today
-//! only the async implementation exists ([`super::tcp_sender::TcpSender`]),
-//! but the surface is shared so the upcoming sync sender can drop in
-//! without touching the plugin's call sites.
+//! The transport plugin holds both a synchronous and an asynchronous
+//! outbound implementation and dispatches between them based on each
+//! DataWriter's `PublishModeQosPolicy`. The trait gives them a common
+//! surface so the plugin's call sites do not branch on the concrete
+//! sender type.
 //!
 //! ## Design notes
 //!

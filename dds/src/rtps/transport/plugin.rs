@@ -41,7 +41,15 @@ pub(crate) enum SendTarget<'a> {
     /// - TCP: BIND handshake + send on user_data logical port
     /// - Hybrid: route by locator kind (UDP or TCP)
     /// - SHM: route by locator kind (SHM or UDP)
-    UserData(&'a Locator),
+    ///
+    /// `writer_guid` identifies the source DataWriter so the TCP plugin
+    /// can dispatch to the sync or async send path per the writer's
+    /// `PublishModeQosPolicy`. `None` for messages without a local
+    /// DataWriter origin (e.g. reader-side NACK_FRAG); the TCP plugin
+    /// falls back to the default mode (Synchronous) in that case.
+    /// Transports that do not differentiate by writer (UDP, SHM)
+    /// ignore the field.
+    UserData { locator: &'a Locator, writer_guid: Option<&'a Guid> },
 }
 
 /// Unified message received from any transport source.

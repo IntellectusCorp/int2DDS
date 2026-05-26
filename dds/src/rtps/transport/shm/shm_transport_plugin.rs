@@ -170,7 +170,7 @@ impl TransportPlugin for ShmTransportPlugin {
                 self.udp_sender.send(&addr, data)?;
                 Ok(())
             }
-            SendTarget::UserData(locator) => {
+            SendTarget::UserData { locator, writer_guid: _ } => {
                 if locator.is_shm() {
                     let dummy_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
                     self.shm_sender.send(&dummy_addr, data)?;
