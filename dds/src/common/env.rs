@@ -938,14 +938,14 @@ pub fn set_tcp_send_mode(mode: TcpSendMode) {
 /// backpressure when paired with `INT2DDS_TCP_SEND_MODE=blocking`: a full
 /// inbox makes `blocking_send` park the caller until the writer task drains
 /// a slot, or makes `try_send` return `Full` so the caller drops the frame.
-/// Default: 1 (tight backpressure for RTI-like sync semantics). Floor: 1
+/// Default: 4 (tight backpressure for RTI-like sync semantics). Floor: 1
 /// (tokio::sync::mpsc::channel panics on 0).
 pub fn get_tcp_inbox_capacity() -> usize {
     std::env::var("INT2DDS_TCP_INBOX_CAPACITY")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .map(|v| v.max(1))
-        .unwrap_or(1)
+        .unwrap_or(4)
 }
 
 /// Set the per-connection writer mpsc capacity via environment variable.
