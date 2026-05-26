@@ -13,7 +13,7 @@ use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::locator::Locator;
 use crate::rtps::transport::plugin::{IncomingMessage, MessageSource, SendTarget, TransportPlugin};
 use crate::rtps::transport::port_manager::PortManager;
-use crate::rtps::transport::tcp::tcp_transport_plugin::TcpTransportPlugin;
+use crate::rtps::transport::tcp_async::tcp_transport_plugin::TcpAsyncTransportPlugin as TcpTransportPlugin;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 use crate::rtps::transport::udp::udp_sender::UdpSender;
 use crate::rtps::transport::TransportConfig;

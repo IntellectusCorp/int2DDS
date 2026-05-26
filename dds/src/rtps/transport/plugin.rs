@@ -188,19 +188,11 @@ impl TransportPluginFactory {
                 )?;
                 Ok(Box::new(plugin))
             }
-            TransportType::TCP => {
-                use crate::rtps::transport::tcp::tcp_transport_plugin::TcpTransportPlugin;
-                let plugin = TcpTransportPlugin::new_with_tls(
-                    domain_id,
-                    participant_id,
-                    bind_ip,
-                    working_ips,
-                    guid_prefix,
-                    tls_config,
-                )?;
-                Ok(Box::new(plugin))
-            }
-            TransportType::TCPAsync => {
+            TransportType::TCP | TransportType::TCPAsync => {
+                // Step 1 of tcp/ + tcp_async/ unification: both variants route
+                // through the tcp_async plugin. The legacy synchronous tcp
+                // plugin is no longer reachable and will be removed once the
+                // module rename lands.
                 use crate::rtps::transport::tcp_async::tcp_transport_plugin::TcpAsyncTransportPlugin;
                 let plugin = TcpAsyncTransportPlugin::new_with_tls(
                     domain_id,
