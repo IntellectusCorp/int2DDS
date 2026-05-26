@@ -32,10 +32,11 @@ use crate::rtps::common::locator::Locator;
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::plugin::{IncomingMessage, MessageSource, SendTarget, TransportPlugin};
 use crate::rtps::transport::port_manager::PortManager;
+use crate::rtps::transport::tcp::sender::TcpSenderImpl;
 use crate::rtps::transport::tcp::sync_sender::SyncTcpSender;
-use crate::rtps::transport::tcp::tls::TlsConfig;
 use crate::rtps::transport::tcp::tcp_mux_listener::TcpMuxListener;
 use crate::rtps::transport::tcp::tcp_sender::TcpSender;
+use crate::rtps::transport::tcp::tls::TlsConfig;
 
 /// Channel buffer size — matches the sync plugin so backpressure semantics
 /// are identical for the DDS layer.
@@ -76,8 +77,8 @@ pub(crate) struct TcpTransportPlugin {
     /// Maps each registered DataWriter's `EntityId` to the publish mode
     /// captured at writer creation. `send()` consults this map to decide
     /// whether to route through `sender` (async) or `sync_sender` (sync).
-    /// Unregistered writers default to `Synchronous` — matches the
-    /// `PublishModeQosPolicy` default.
+    /// Unregistered writers fall back to the `PublishModeQosPolicy`
+    /// default (currently `Asynchronous`).
     writer_modes: DashMap<EntityId, PublishModeQosPolicyKind>,
 
     /// Inbound side. Wrapped in `Option` so `close()` can take and drop it,
@@ -291,7 +292,7 @@ impl TransportPlugin for TcpTransportPlugin {
                 );
                 self.sender.send_to_discovery(&addr, data)
             }
-            SendTarget::UserData(locator) => {
+            SendTarget::UserData { locator, writer_guid } => {
                 if !locator.is_tcp() {
                     return Err(io::Error::new(io::ErrorKind::Unsupported, locator.kind_name()));
                 }
@@ -299,7 +300,23 @@ impl TransportPlugin for TcpTransportPlugin {
                     std::net::IpAddr::V4(locator.to_ip_v4_addr()),
                     locator.port() as u16,
                 );
-                self.sender.send_to_user_data(&addr, data)
+                // Per-writer dispatch on PublishMode. Unknown writers (no
+                // local DataWriter context, e.g. reader-side NACK_FRAG, or
+                // a writer that has not yet been registered) fall back to
+                // the PublishModeQosPolicy default — currently
+                // `Asynchronous`, which keeps the working async path live
+                // while the sync sender is still a stub.
+                let mode = writer_guid
+                    .and_then(|g| self.writer_modes.get(&g.entity_id()).map(|m| *m))
+                    .unwrap_or_default();
+                match mode {
+                    PublishModeQosPolicyKind::Synchronous => {
+                        self.sync_sender.send_to_user_data(&addr, data)
+                    }
+                    PublishModeQosPolicyKind::Asynchronous => {
+                        self.sender.send_to_user_data(&addr, data)
+                    }
+                }
             }
         }
     }
@@ -351,10 +368,7 @@ impl TransportPlugin for TcpTransportPlugin {
 
     fn register_writer(&self, writer_guid: &Guid, kind: PublishModeQosPolicyKind) {
         self.writer_modes.insert(writer_guid.entity_id(), kind);
-        debug!(
-            "[TcpTransportPlugin] register_writer guid={:?} kind={:?}",
-            writer_guid, kind
-        );
+        debug!("[TcpTransportPlugin] register_writer guid={:?} kind={:?}", writer_guid, kind);
     }
 
     fn unregister_writer(&self, writer_guid: &Guid) {
@@ -495,7 +509,7 @@ mod tests {
         let plugin = make_plugin(next_test_domain());
 
         let locator = Locator::from_tcp_v4(std::net::Ipv4Addr::new(127, 0, 0, 1), 1);
-        let target = SendTarget::UserData(&locator);
+        let target = SendTarget::UserData { locator: &locator, writer_guid: None };
         let _ = plugin.send(b"\x52\x54\x50\x53", &target);
 
         plugin.close();
