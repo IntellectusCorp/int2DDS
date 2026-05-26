@@ -5,6 +5,7 @@ use std::{
     cmp::max,
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 use log::debug;
@@ -36,6 +37,7 @@ pub(crate) struct WriterProxy {
     nackfrag_count: u32,
     expected_sn: SequenceNumber, // Expected next sequence number from writer
     last_heartbeat_count: Option<u32>,
+    last_heartbeat_at: Option<Instant>,
     buffered_change: BTreeSet<CacheChange>, // Changes that reader has not processed yet
     publication_builtin_topic_data: PublicationBuiltinTopicData,
     #[allow(clippy::type_complexity)]
@@ -73,6 +75,7 @@ impl WriterProxy {
             nackfrag_count: 0,
             expected_sn: SequenceNumber::UNKNOWN,
             last_heartbeat_count: None,
+            last_heartbeat_at: None,
             buffered_change: BTreeSet::new(),
             publication_builtin_topic_data,
             status_callback,
@@ -105,6 +108,14 @@ impl WriterProxy {
 
     pub(crate) fn set_last_heartbeat_count(&mut self, count: u32) {
         self.last_heartbeat_count = Some(count);
+    }
+
+    pub(crate) fn last_heartbeat_at(&self) -> Option<Instant> {
+        self.last_heartbeat_at
+    }
+
+    pub(crate) fn set_last_heartbeat_at(&mut self, at: Instant) {
+        self.last_heartbeat_at = Some(at);
     }
 
     pub(crate) fn add_new_changes_from_writer(&mut self, change_from_writer: ChangeFromWriter) {

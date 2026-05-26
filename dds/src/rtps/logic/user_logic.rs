@@ -8,9 +8,10 @@ use log::{debug, trace, warn};
 // use rand::Rng;
 use std::collections::HashMap;
 use std::ops::Add;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::common::instance_handle::InstanceHandle;
+use crate::rtps::common::count_filter::should_accept_count;
 use crate::rtps::common::entity_id::EntityId;
 use crate::rtps::common::guid::{Guid, GuidPrefix};
 use crate::rtps::common::locator::Locator;
@@ -1637,25 +1638,20 @@ impl UnicastMessageProcessor for UserLogic {
                     RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, "WriterProxy not found")
                 })?;
 
-            match writer_proxy.last_heartbeat_count() {
-                Some(prev) => {
-                    if (heartbeat.count.wrapping_sub(prev) as i32) <= 0 {
-                        debug!(
-                                "[UserLogic] [Heartbeat] Ignoring old Heartbeat: count={} <= last_count={}",
-                                heartbeat.count, prev
-                            );
-                        return Ok(());
-                    }
-                }
-                None => {
-                    debug!(
-                        "[UserLogic] [Heartbeat] First Heartbeat received: count={}",
-                        heartbeat.count
-                    );
-                }
+            let now = Instant::now();
+            if !should_accept_count(
+                "[UserLogic] [Heartbeat]",
+                heartbeat.count,
+                writer_proxy.last_heartbeat_count(),
+                writer_proxy.last_heartbeat_at(),
+                false,
+                now,
+            ) {
+                return Ok(());
             }
 
             writer_proxy.set_last_heartbeat_count(heartbeat.count);
+            writer_proxy.set_last_heartbeat_at(now);
 
             let missing_changes =
                 writer_proxy.process_heartbeat(heartbeat.first_sn, heartbeat.last_sn);
@@ -1863,19 +1859,21 @@ impl UnicastMessageProcessor for UserLogic {
             .find(|rp| rp.remote_reader_guid() == remote_reader_guid)
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
 
-        match reader_proxy.last_acknack_count() {
-            Some(prev) => {
-                if (acknack.count.wrapping_sub(prev) as i32) <= 0 {
-                    debug!(
-                        "[UserLogic] [AckNack] Ignoring old ACKNACK: count={} <= last_count={}",
-                        acknack.count, prev
-                    );
-                    return Ok(());
-                }
-            }
-            None => {
-                debug!("[UserLogic] [AckNack] First AckNack received: count={}", acknack.count);
-            }
+        // Preemptive ACKNACK (seqbase == 0, empty bitmap) is an explicit reset
+        // signal and bypasses the count/debounce check.
+        let is_preemptive = acknack.reader_sn_state.bitmap_base() == SequenceNumber::from_i64(0)
+            && acknack.reader_sn_state.num_bits() == 0;
+        let now = Instant::now();
+
+        if !should_accept_count(
+            "[UserLogic] [AckNack]",
+            acknack.count,
+            reader_proxy.last_acknack_count(),
+            reader_proxy.last_acknack_at(),
+            is_preemptive,
+            now,
+        ) {
+            return Ok(());
         }
 
         if acknack.reader_sn_state.bitmap_base() == SequenceNumber::from_i64(0)
@@ -1900,6 +1898,7 @@ impl UnicastMessageProcessor for UserLogic {
         );
 
         reader_proxy.set_last_acknack_count(acknack.count);
+        reader_proxy.set_last_acknack_at(now);
 
         // NACK
         if !missing_seq_numbers.is_empty() {
@@ -2201,22 +2200,20 @@ impl UnicastMessageProcessor for UserLogic {
                 RtpsError::new(RtpsErrorCode::InvalidEntityKind, "Reader proxy not found")
             })?;
 
-        // Check for duplicate NACK_FRAG
-        match reader_proxy.last_nackfrag_count() {
-            Some(prev) => {
-                if (nack_frag.count.wrapping_sub(prev) as i32) <= 0 {
-                    debug!(
-                        "[UserLogic] [NackFrag] Ignoring old NACK_FRAG: count={} <= last_count={}",
-                        nack_frag.count, prev
-                    );
-                    return Ok(());
-                }
-            }
-            None => {
-                debug!("[UserLogic] [NackFrag] First NackFrag received: count={}", nack_frag.count);
-            }
+        // Check for duplicate NACK_FRAG. NACK_FRAG has no preemptive form.
+        let now = Instant::now();
+        if !should_accept_count(
+            "[UserLogic] [NackFrag]",
+            nack_frag.count,
+            reader_proxy.last_nackfrag_count(),
+            reader_proxy.last_nackfrag_at(),
+            false,
+            now,
+        ) {
+            return Ok(());
         }
         reader_proxy.set_last_nackfrag_count(nack_frag.count);
+        reader_proxy.set_last_nackfrag_at(now);
 
         let change = history_cache_guard.get_change(writer_sn).ok_or_else(|| {
             warn!("NACK_FRAG requested missing change SN={:?}", writer_sn);
