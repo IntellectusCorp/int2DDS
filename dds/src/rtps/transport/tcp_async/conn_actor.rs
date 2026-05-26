@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::rtps::transport::tcp_async::{
-    framing::{read_framed_message, write_framed_message},
+    framing::{read_framed_message, write_framed_batch},
     mux_state::{ConnectionId, MuxState},
     stream::{AsyncConnReadHalf, AsyncConnStream, AsyncConnWriteHalf},
 };
@@ -36,6 +36,20 @@ pub(crate) fn inbox_capacity() -> usize {
     *INBOX_CAPACITY_CACHE.get_or_init(|| {
         let cap = crate::common::env::get_tcp_inbox_capacity();
         log::info!("[tcp_async] INBOX_CAPACITY = {}", cap);
+        cap
+    })
+}
+
+/// Per-connection writer batch cap: how many inbox frames the writer task
+/// coalesces into one `write_vectored` call. See
+/// `env::get_tcp_batch_max_frames` for the meaning and tuning notes. Cached
+/// once so the value is stable across all connections in a run.
+static BATCH_MAX_FRAMES_CACHE: OnceLock<usize> = OnceLock::new();
+
+fn batch_max_frames() -> usize {
+    *BATCH_MAX_FRAMES_CACHE.get_or_init(|| {
+        let cap = crate::common::env::get_tcp_batch_max_frames();
+        log::info!("[tcp_async] BATCH_MAX_FRAMES = {}", cap);
         cap
     })
 }
@@ -123,7 +137,13 @@ async fn reader_task(
     shared.remove_connection(conn_id);
 }
 
-/// Drain the inbox channel and write each frame to the stream.
+/// Drain the inbox channel and write batched frames to the stream.
+///
+/// After awaiting a single frame, the task greedily collects any frames
+/// already queued on the inbox (`try_recv`) up to `batch_max_frames()` and
+/// hands them all to `write_framed_batch` in one `write_vectored` call. This
+/// turns "one syscall per RTPS submessage" into "one syscall per burst",
+/// letting TCP TSO/GSO segment large coalesced writes on the NIC.
 ///
 /// Exits when the channel closes (all senders dropped), on a write error,
 /// or on cancellation. Sends a TCP FIN via `shutdown()` before returning
@@ -133,16 +153,30 @@ async fn writer_task(
     mut rx: mpsc::Receiver<Vec<u8>>,
     cancel: CancellationToken,
 ) {
+    let max_batch = batch_max_frames();
+    let mut batch: Vec<Vec<u8>> = Vec::with_capacity(max_batch);
+
     loop {
         tokio::select! {
             maybe_frame = rx.recv() => {
                 match maybe_frame {
                     Some(frame) => {
-                        if let Err(e) = write_framed_message(&mut write_half, &frame).await {
+                        batch.push(frame);
+                        // Greedy drain: pull anything already enqueued without
+                        // yielding. Stops at `max_batch` to bound writev size
+                        // (Linux IOV_MAX = 1024, 3 slices per frame).
+                        while batch.len() < max_batch {
+                            match rx.try_recv() {
+                                Ok(f) => batch.push(f),
+                                Err(_) => break,
+                            }
+                        }
+                        if let Err(e) = write_framed_batch(&mut write_half, &batch).await {
                             // Real I/O failure — peer likely unreachable.
                             warn!("write error: {:?}", e);
                             break;
                         }
+                        batch.clear();
                     }
                     // All senders dropped → no more outbound traffic possible.
                     None => break,
@@ -156,10 +190,20 @@ async fn writer_task(
     // idle-timeout Error pushed by `prune_idle_connections` immediately
     // before cancel, which would otherwise be lost to the `select!` race.
     // `try_recv` only: we don't await fresh senders here.
+    batch.clear();
     while let Ok(frame) = rx.try_recv() {
-        if write_framed_message(&mut write_half, &frame).await.is_err() {
-            break;
+        batch.push(frame);
+        if batch.len() >= max_batch {
+            if write_framed_batch(&mut write_half, &batch).await.is_err() {
+                cancel.cancel();
+                let _ = write_half.shutdown().await;
+                return;
+            }
+            batch.clear();
         }
+    }
+    if !batch.is_empty() {
+        let _ = write_framed_batch(&mut write_half, &batch).await;
     }
 
     // Wake the reader and send a graceful TCP FIN.
