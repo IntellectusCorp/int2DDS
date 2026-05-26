@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
-use std::io::{self, IoSlice};
+use std::io::{self, IoSlice, Write};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
@@ -156,6 +156,109 @@ where
         }
     }
     Ok(payload)
+}
+
+// ── Synchronous (blocking) write helpers ────────────────────────────────────
+//
+// Byte-for-byte compatible with the async writes above; the wire format is
+// identical, only the I/O surface differs. Used by the sync send path,
+// which performs the writev inline on the user thread via a blocking
+// `std::net::TcpStream` (no tokio runtime involvement).
+//
+// There is intentionally no synchronous *read* helper. The receive side is
+// unified to the async listener (the only consumer of `read_framed_message`),
+// so the sync sender's responsibilities end at "produce wire bytes". Any
+// future need to consume responses from the peer (e.g. for a sync handshake)
+// will be routed through the existing async ingress path rather than
+// duplicating read logic here.
+
+/// Write a single framed message to a blocking stream.
+///
+/// Synchronous counterpart of [`write_framed_message`]. Produces an
+/// identical byte stream so the peer's listener — which is always async —
+/// cannot tell whether the sender used the sync or async path.
+pub(crate) fn write_framed_message_sync<W>(stream: &mut W, data: &[u8]) -> io::Result<()>
+where
+    W: Write + ?Sized,
+{
+    if data.len() > MAX_MESSAGE_SIZE {
+        return Err(transport_io_error(
+            TransportErrorCode::TcpFrameTooLarge,
+            format!("Message too large: {} bytes (max: {} bytes)", data.len(), MAX_MESSAGE_SIZE),
+        ));
+    }
+
+    let total_payload = MAGIC_SIZE + data.len();
+    let len_bytes = (total_payload as u32).to_be_bytes();
+
+    let mut bufs = [IoSlice::new(&len_bytes), IoSlice::new(&FRAME_MAGIC), IoSlice::new(data)];
+    let mut slices: &mut [IoSlice<'_>] = &mut bufs;
+    while !slices.is_empty() {
+        match stream.write_vectored(slices)? {
+            0 => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "write_vectored returned 0 mid-frame",
+                ));
+            }
+            n => IoSlice::advance_slices(&mut slices, n),
+        }
+    }
+    Ok(())
+}
+
+/// Write multiple framed messages as a single `write_vectored` batch on a
+/// blocking stream.
+///
+/// Synchronous counterpart of [`write_framed_batch`]. Lets the sync send
+/// path collapse "all fragments of a sample" into one syscall, mirroring
+/// the coalescing the async writer task does. Empty input is a no-op.
+pub(crate) fn write_framed_batch_sync<W>(stream: &mut W, frames: &[Vec<u8>]) -> io::Result<()>
+where
+    W: Write + ?Sized,
+{
+    if frames.is_empty() {
+        return Ok(());
+    }
+
+    // Per-frame length prefixes need stable backing storage so each IoSlice
+    // can borrow a `&[u8; 4]` for the lifetime of the write.
+    let mut lens: Vec<[u8; 4]> = Vec::with_capacity(frames.len());
+    for frame in frames {
+        if frame.len() > MAX_MESSAGE_SIZE {
+            return Err(transport_io_error(
+                TransportErrorCode::TcpFrameTooLarge,
+                format!(
+                    "Message too large: {} bytes (max: {} bytes)",
+                    frame.len(),
+                    MAX_MESSAGE_SIZE
+                ),
+            ));
+        }
+        let total_payload = MAGIC_SIZE + frame.len();
+        lens.push((total_payload as u32).to_be_bytes());
+    }
+
+    let mut bufs: Vec<IoSlice<'_>> = Vec::with_capacity(frames.len() * 3);
+    for (len, frame) in lens.iter().zip(frames.iter()) {
+        bufs.push(IoSlice::new(len));
+        bufs.push(IoSlice::new(&FRAME_MAGIC));
+        bufs.push(IoSlice::new(frame));
+    }
+
+    let mut slices: &mut [IoSlice<'_>] = &mut bufs[..];
+    while !slices.is_empty() {
+        match stream.write_vectored(slices)? {
+            0 => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "write_vectored returned 0 mid-batch",
+                ));
+            }
+            n => IoSlice::advance_slices(&mut slices, n),
+        }
+    }
+    Ok(())
 }
 
 /// Classification of a TCP frame payload
@@ -367,5 +470,92 @@ mod tests {
         // A payload starting with 0x52 but not matching full RTPS magic
         let non_rtps = vec![0x52, 0x00, 0x00, 0x00];
         assert_eq!(classify_frame(&non_rtps), TcpFrameKind::Unknown);
+    }
+
+    // ── Sync write helpers ───────────────────────────────────────────────────
+    //
+    // Sync writes are validated by reading them back with the async reader —
+    // the receive side is async-only, so that is the path bytes will actually
+    // traverse on the peer.
+
+    #[tokio::test]
+    async fn test_sync_write_async_read_roundtrip() {
+        let payload = b"sync wrote, async reads";
+
+        let mut buffer = Vec::new();
+        write_framed_message_sync(&mut buffer, payload).unwrap();
+
+        let mut cursor = Cursor::new(buffer);
+        let read_data = read_framed_message(&mut cursor).await.unwrap();
+        assert_eq!(read_data, payload);
+    }
+
+    #[tokio::test]
+    async fn test_sync_batch_write_async_read_roundtrip() {
+        let messages: Vec<Vec<u8>> = vec![
+            b"alpha".to_vec(),
+            b"beta-second-frame".to_vec(),
+            vec![0xCDu8; 4096],
+            b"".to_vec(),
+            b"tail".to_vec(),
+        ];
+
+        let mut buffer = Vec::new();
+        write_framed_batch_sync(&mut buffer, &messages).unwrap();
+
+        let mut cursor = Cursor::new(buffer);
+        for expected in &messages {
+            let read_data = read_framed_message(&mut cursor).await.unwrap();
+            assert_eq!(&read_data, expected);
+        }
+        assert_eq!(cursor.position() as usize, cursor.get_ref().len());
+    }
+
+    #[test]
+    fn test_write_framed_batch_sync_empty_is_noop() {
+        let mut buffer = Vec::new();
+        write_framed_batch_sync(&mut buffer, &[]).unwrap();
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn test_write_framed_batch_sync_rejects_oversize() {
+        let oversize = vec![0u8; MAX_MESSAGE_SIZE + 1];
+        let frames = vec![b"ok".to_vec(), oversize];
+        let mut buffer = Vec::new();
+        let result = write_framed_batch_sync(&mut buffer, &frames);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+    }
+
+    // ── Wire-byte parity (the real safety net) ───────────────────────────────
+    //
+    // Sync writes must produce the exact same byte stream as async writes so
+    // peers cannot tell the two paths apart. These tests pin that invariant.
+
+    #[tokio::test]
+    async fn test_sync_and_async_writes_byte_identical() {
+        let payload = b"interop check";
+
+        let mut async_buf = Vec::new();
+        write_framed_message(&mut async_buf, payload).await.unwrap();
+
+        let mut sync_buf = Vec::new();
+        write_framed_message_sync(&mut sync_buf, payload).unwrap();
+
+        assert_eq!(async_buf, sync_buf);
+    }
+
+    #[tokio::test]
+    async fn test_sync_and_async_batch_writes_byte_identical() {
+        let frames: Vec<Vec<u8>> = vec![b"f1".to_vec(), vec![0xAA; 1024], b"f3".to_vec()];
+
+        let mut async_buf = Vec::new();
+        write_framed_batch(&mut async_buf, &frames).await.unwrap();
+
+        let mut sync_buf = Vec::new();
+        write_framed_batch_sync(&mut sync_buf, &frames).unwrap();
+
+        assert_eq!(async_buf, sync_buf);
     }
 }
