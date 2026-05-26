@@ -55,7 +55,6 @@ pub enum TransportType {
     UDP,
     /// TCP transport
     TCP,
-    TCPAsync,
     /// Hybrid transport (both UDP and TCP simultaneously)
     Hybrid,
     /// Shared Memory transport
@@ -67,7 +66,6 @@ impl std::fmt::Display for TransportType {
         match self {
             TransportType::UDP => write!(f, "udp"),
             TransportType::TCP => write!(f, "tcp"),
-            TransportType::TCPAsync => write!(f, "tcp_async"),
             TransportType::Hybrid => write!(f, "hybrid"),
             TransportType::SHM => write!(f, "shm"),
         }
@@ -81,7 +79,16 @@ impl std::str::FromStr for TransportType {
         match s.to_lowercase().as_str() {
             "udp" => Ok(TransportType::UDP),
             "tcp" => Ok(TransportType::TCP),
-            "tcp_async" => Ok(TransportType::TCPAsync),
+            // Legacy alias — the `tcp_async` variant has been folded into
+            // the unified `tcp` transport. Still accepted so existing
+            // launch scripts keep working, but emit a one-shot warning.
+            "tcp_async" => {
+                log::warn!(
+                    "[Transport] INT2DDS_TRANSPORT=tcp_async is deprecated; use 'tcp' instead. \
+                     Mapping to TransportType::TCP."
+                );
+                Ok(TransportType::TCP)
+            }
             "hybrid" => Ok(TransportType::Hybrid),
             "shm" => Ok(TransportType::SHM),
             _ => Err(format!(

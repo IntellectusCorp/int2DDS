@@ -1,6 +1,6 @@
 //! Async TCP transport plugin — sync facade over the tcp stack.
 //!
-//! `TcpAsyncTransportPlugin` owns a dedicated `tokio::runtime::Runtime` and
+//! `TcpTransportPlugin` owns a dedicated `tokio::runtime::Runtime` and
 //! bundles together the inbound `TcpMuxListener`, the outbound `TcpSender`,
 //! and the three crossbeam channels (discovery / user data / dead peer)
 //! that bridge async tasks back to the sync DDS layer.
@@ -41,11 +41,11 @@ const CHANNEL_BUFFER_SIZE: usize = 512;
 /// env vars (when those helpers exist).
 const DEFAULT_INCOMING_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
-// ── TcpAsyncTransportPlugin ──────────────────────────────────────────────────
+// ── TcpTransportPlugin ──────────────────────────────────────────────────
 
 /// Sync facade over the tcp stack. Owns the runtime and forwards
 /// `TransportPlugin` trait calls into the async machinery.
-pub(crate) struct TcpAsyncTransportPlugin {
+pub(crate) struct TcpTransportPlugin {
     #[allow(dead_code)]
     domain_id: u32,
     participant_id: u32,
@@ -71,7 +71,7 @@ pub(crate) struct TcpAsyncTransportPlugin {
     dead_peer_rx: Mutex<Option<crossbeam_channel::Receiver<SocketAddr>>>,
 }
 
-impl TcpAsyncTransportPlugin {
+impl TcpTransportPlugin {
     pub(crate) fn new(
         domain_id: u32,
         participant_id: u32,
@@ -137,7 +137,7 @@ impl TcpAsyncTransportPlugin {
             )
             .map_err(|e| {
                 log::error!(
-                    "[TcpAsyncTransportPlugin] Failed to bind TCP listener on port {} \
+                    "[TcpTransportPlugin] Failed to bind TCP listener on port {} \
                      (domain={}): {}. Another participant may already be using this port \
                      on the same host.",
                     physical_port,
@@ -178,7 +178,7 @@ impl TcpAsyncTransportPlugin {
         let listener_port = mux_listener.port();
 
         info!(
-            "[TcpAsyncTransportPlugin] Created (domain={}, pid={}, port={}, workers={})",
+            "[TcpTransportPlugin] Created (domain={}, pid={}, port={}, workers={})",
             domain_id, participant_id, listener_port, worker_threads
         );
 
@@ -204,7 +204,7 @@ impl TcpAsyncTransportPlugin {
         if let Some(public_addr) = crate::common::env::get_tcp_public_addr() {
             if let std::net::IpAddr::V4(v4) = public_addr.ip() {
                 log::info!(
-                    "[TcpAsyncTransportPlugin] WAN mode: advertising public address \
+                    "[TcpTransportPlugin] WAN mode: advertising public address \
                      {} instead of :{}",
                     public_addr,
                     self.listener_port
@@ -212,7 +212,7 @@ impl TcpAsyncTransportPlugin {
                 return vec![Locator::from_tcp_v4(v4, public_addr.port() as u32)];
             }
             log::warn!(
-                "[TcpAsyncTransportPlugin] Public address is not IPv4, \
+                "[TcpTransportPlugin] Public address is not IPv4, \
                  falling back to LAN NICs"
             );
         }
@@ -231,7 +231,7 @@ impl TcpAsyncTransportPlugin {
     }
 }
 
-impl TransportPlugin for TcpAsyncTransportPlugin {
+impl TransportPlugin for TcpTransportPlugin {
     fn send(&self, data: &[u8], target: &SendTarget) -> io::Result<()> {
         match target {
             SendTarget::SPDPDiscovery { initial_peers } => {
@@ -324,11 +324,11 @@ impl TransportPlugin for TcpAsyncTransportPlugin {
         // 2. Tear down the sender's lifecycle tasks (keepalive, orphan prune).
         self.runtime.block_on(self.sender.shutdown());
 
-        debug!("[TcpAsyncTransportPlugin] Closed");
+        debug!("[TcpTransportPlugin] Closed");
     }
 }
 
-impl Drop for TcpAsyncTransportPlugin {
+impl Drop for TcpTransportPlugin {
     fn drop(&mut self) {
         // Best-effort fallback when close() was not called explicitly.
         // We cannot `block_on` inside Drop safely (it panics if Drop runs
@@ -375,8 +375,8 @@ mod tests {
         NEXT.fetch_add(1, Ordering::SeqCst)
     }
 
-    fn make_plugin(domain: u32) -> TcpAsyncTransportPlugin {
-        TcpAsyncTransportPlugin::new(
+    fn make_plugin(domain: u32) -> TcpTransportPlugin {
+        TcpTransportPlugin::new(
             domain,
             0,
             "127.0.0.1".to_string(),

@@ -188,12 +188,9 @@ impl TransportPluginFactory {
                 )?;
                 Ok(Box::new(plugin))
             }
-            TransportType::TCP | TransportType::TCPAsync => {
-                // Both variants currently route through the unified tcp
-                // module; `TransportType::TCPAsync` is queued for removal
-                // in a follow-up commit.
-                use crate::rtps::transport::tcp::tcp_transport_plugin::TcpAsyncTransportPlugin;
-                let plugin = TcpAsyncTransportPlugin::new_with_tls(
+            TransportType::TCP => {
+                use crate::rtps::transport::tcp::tcp_transport_plugin::TcpTransportPlugin;
+                let plugin = TcpTransportPlugin::new_with_tls(
                     domain_id,
                     participant_id,
                     bind_ip,
