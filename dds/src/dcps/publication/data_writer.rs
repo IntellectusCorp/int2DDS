@@ -1622,7 +1622,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
 
         self.add_change(
             ChangeKind::NotAliveDisposed,
-            serialized_key.to_vec(),
+            Vec::new(),
             resolved_handle,
             Some(timestamp.into()),
         )?;
@@ -1669,12 +1669,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                 ChangeKind::NotAliveUnregistered
             };
 
-        self.add_change(
-            change_kind,
-            serialized_key.to_vec(),
-            resolved_handle,
-            Some(timestamp.into()),
-        )?;
+        self.add_change(change_kind, Vec::new(), resolved_handle, Some(timestamp.into()))?;
 
         self.update_liveliness()?;
 
