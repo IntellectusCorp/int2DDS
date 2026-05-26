@@ -28,7 +28,7 @@
 
 use std::io;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::transport::tcp::mux_state::MuxState;
@@ -58,7 +58,12 @@ pub(crate) struct SyncTcpSender {
     /// trips (PORT_RESERVE ack) the same way the async sender does.
     #[allow(dead_code)]
     shared: Arc<MuxState>,
-    // TODO(phase-1-G): outbound connection cache.
+    /// Dead-peer notifier — set once via [`Self::set_dead_peer_tx`]. The
+    /// plugin clones the same channel into the async sender, so the
+    /// receiving side sees a unified stream of peer-loss events regardless
+    /// of which path observed the failure.
+    dead_peer_tx: OnceLock<crossbeam_channel::Sender<SocketAddr>>,
+    // TODO: outbound connection cache.
     //   connections: DashMap<(SocketAddr, u16), Arc<std::sync::Mutex<std::net::TcpStream>>>,
     //   plus per-key setup serialisation so two parallel writers don't
     //   double-handshake to the same peer/logical_port.
@@ -83,7 +88,15 @@ impl SyncTcpSender {
             local_guid_prefix,
             tls_config,
             shared,
+            dead_peer_tx: OnceLock::new(),
         })
+    }
+
+    /// Plug in the dead-peer notifier. Idempotent; subsequent calls are
+    /// no-ops. Mirrors `TcpSender::set_dead_peer_tx` so the plugin can wire
+    /// the same channel into both senders.
+    pub(crate) fn set_dead_peer_tx(&self, tx: crossbeam_channel::Sender<SocketAddr>) {
+        let _ = self.dead_peer_tx.set(tx);
     }
 }
 

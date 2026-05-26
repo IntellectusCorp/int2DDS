@@ -22,13 +22,17 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossbeam_channel::bounded;
+use dashmap::DashMap;
 use log::{debug, info};
 
-use crate::rtps::common::guid::GuidPrefix;
+use crate::dcps::infrastructure::qos_policy::PublishModeQosPolicyKind;
+use crate::rtps::common::entity_id::EntityId;
+use crate::rtps::common::guid::{Guid, GuidPrefix};
 use crate::rtps::common::locator::Locator;
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::plugin::{IncomingMessage, MessageSource, SendTarget, TransportPlugin};
 use crate::rtps::transport::port_manager::PortManager;
+use crate::rtps::transport::tcp::sync_sender::SyncTcpSender;
 use crate::rtps::transport::tcp::tls::TlsConfig;
 use crate::rtps::transport::tcp::tcp_mux_listener::TcpMuxListener;
 use crate::rtps::transport::tcp::tcp_sender::TcpSender;
@@ -57,9 +61,24 @@ pub(crate) struct TcpTransportPlugin {
     /// listener and sender) so tasks can drain on shutdown.
     runtime: Arc<tokio::runtime::Runtime>,
 
-    /// Outbound side. `Arc<TcpSender>` since send paths and connect_tasks
-    /// hold their own clones.
+    /// Async outbound side — queued + coalesced writes via per-connection
+    /// `writer_task`s. Used for any DataWriter whose
+    /// `PublishModeQosPolicy.kind` is `Asynchronous`. `Arc<TcpSender>`
+    /// because send paths and connect_tasks hold their own clones.
     sender: Arc<TcpSender>,
+
+    /// Sync outbound side — blocking writes on the user thread. Used for
+    /// any DataWriter whose `PublishModeQosPolicy.kind` is `Synchronous`.
+    /// Currently a stub (see [`SyncTcpSender`]); the field is wired in so
+    /// dispatch can be flipped on once the real implementation lands.
+    sync_sender: Arc<SyncTcpSender>,
+
+    /// Maps each registered DataWriter's `EntityId` to the publish mode
+    /// captured at writer creation. `send()` consults this map to decide
+    /// whether to route through `sender` (async) or `sync_sender` (sync).
+    /// Unregistered writers default to `Synchronous` — matches the
+    /// `PublishModeQosPolicy` default.
+    writer_modes: DashMap<EntityId, PublishModeQosPolicyKind>,
 
     /// Inbound side. Wrapped in `Option` so `close()` can take and drop it,
     /// firing its cancel token.
@@ -124,7 +143,7 @@ impl TcpTransportPlugin {
 
         // Build listener + sender inside a runtime context — both
         // constructors call `tokio::spawn`, which needs `Handle::current()`.
-        let (mux_listener, sender) = runtime.block_on(async {
+        let (mux_listener, sender, sync_sender) = runtime.block_on(async {
             let listener = TcpMuxListener::bind_and_spawn(
                 physical_port,
                 domain_id,
@@ -163,16 +182,34 @@ impl TcpTransportPlugin {
             let sender = TcpSender::new(
                 domain_id,
                 participant_id,
+                working_ip.clone(),
+                listener_port,
+                guid_prefix,
+                tls_config.clone(),
+                Arc::clone(&shared),
+            );
+
+            sender.set_dead_peer_tx(dead_peer_tx.clone());
+
+            // Sync sender mirrors the async sender's identity inputs so a
+            // future drop-in real implementation can resolve the same
+            // (peer, logical_port) keys and share the MuxState for any
+            // handshake responses that may need to flow back through the
+            // listener. The dead-peer notifier is the same channel, so the
+            // plugin's single receiver sees peer-loss events from whichever
+            // path observed the failure.
+            let sync_sender = SyncTcpSender::new(
+                domain_id,
+                participant_id,
                 working_ip,
                 listener_port,
                 guid_prefix,
                 tls_config,
                 shared,
             );
+            sync_sender.set_dead_peer_tx(dead_peer_tx);
 
-            sender.set_dead_peer_tx(dead_peer_tx);
-
-            Ok::<_, io::Error>((listener, sender))
+            Ok::<_, io::Error>((listener, sender, sync_sender))
         })?;
 
         let listener_port = mux_listener.port();
@@ -189,6 +226,8 @@ impl TcpTransportPlugin {
             listener_port,
             runtime,
             sender,
+            sync_sender,
+            writer_modes: DashMap::new(),
             mux_listener: Mutex::new(Some(mux_listener)),
             discovery_rx: Mutex::new(Some(discovery_rx)),
             user_data_rx: Mutex::new(Some(user_data_rx)),
@@ -308,6 +347,20 @@ impl TransportPlugin for TcpTransportPlugin {
 
     fn participant_id(&self) -> u32 {
         self.participant_id
+    }
+
+    fn register_writer(&self, writer_guid: &Guid, kind: PublishModeQosPolicyKind) {
+        self.writer_modes.insert(writer_guid.entity_id(), kind);
+        debug!(
+            "[TcpTransportPlugin] register_writer guid={:?} kind={:?}",
+            writer_guid, kind
+        );
+    }
+
+    fn unregister_writer(&self, writer_guid: &Guid) {
+        if self.writer_modes.remove(&writer_guid.entity_id()).is_some() {
+            debug!("[TcpTransportPlugin] unregister_writer guid={:?}", writer_guid);
+        }
     }
 
     fn close(&self) {
