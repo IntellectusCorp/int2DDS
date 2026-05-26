@@ -4,7 +4,8 @@
 use std::io;
 use std::net::SocketAddr;
 
-use crate::rtps::common::guid::GuidPrefix;
+use crate::dcps::infrastructure::qos_policy::PublishModeQosPolicyKind;
+use crate::rtps::common::guid::{Guid, GuidPrefix};
 use crate::rtps::common::locator::Locator;
 use crate::rtps::transport::shm::shm_listener::ShmListener;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
@@ -150,6 +151,20 @@ pub(crate) trait TransportPlugin: Send + Sync {
     /// Get the final participant_id (may differ from the initial value
     /// if unicast ports were already in use and participant_id was incremented).
     fn participant_id(&self) -> u32;
+
+    /// Register a DataWriter's [`PublishModeQosPolicyKind`] so the transport
+    /// can route this writer's outbound traffic to the sync or async send
+    /// path. Called by the DDS layer at writer creation time.
+    ///
+    /// Default impl is a no-op; transports that do not differentiate sync
+    /// vs async (UDP, SHM) simply ignore the mode. Only the TCP plugin
+    /// currently overrides this method.
+    fn register_writer(&self, _writer_guid: &Guid, _kind: PublishModeQosPolicyKind) {}
+
+    /// Remove a writer registration. Called by the DDS layer at writer
+    /// destruction so the transport can release any per-writer state.
+    /// Default impl is a no-op.
+    fn unregister_writer(&self, _writer_guid: &Guid) {}
 
     /// Release all resources (sockets, connections, threads).
     fn close(&self);
