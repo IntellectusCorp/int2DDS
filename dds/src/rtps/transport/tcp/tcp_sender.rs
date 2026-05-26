@@ -38,6 +38,7 @@ use crate::rtps::transport::tcp::conn_actor::{inbox_capacity, spawn_conn_actor};
 use crate::rtps::transport::tcp::framing::{read_framed_message, write_framed_message};
 use crate::rtps::transport::tcp::mux_state::MuxState;
 use crate::rtps::transport::tcp::protocol::ControlMsg;
+use crate::rtps::transport::tcp::sender::TcpSenderImpl;
 use crate::rtps::transport::tcp::stream::{connect_tls_async, wrap_plain, AsyncConnStream};
 
 /// Logical port 0 = control connection — carries PEER_HELLO,
@@ -353,6 +354,26 @@ impl TcpSender {
             IpAddr::V4(v4) => v4.is_loopback() || self.working_ip == v4.to_string(),
             IpAddr::V6(_) => false,
         }
+    }
+}
+
+// The send-side trait `TcpSenderImpl` is the unified contract used by
+// `TcpTransportPlugin` to dispatch outbound traffic. `TcpSender` is the
+// asynchronous implementation (queues frames through per-connection
+// `writer_task`s). Methods delegate to the existing inherent ones — the
+// trait impl mainly exists so the plugin can write generic dispatch code
+// alongside the upcoming synchronous sender.
+impl TcpSenderImpl for TcpSender {
+    fn send_to_discovery(self: &Arc<Self>, addr: &SocketAddr, data: &[u8]) -> io::Result<()> {
+        TcpSender::send_to_discovery(self, addr, data)
+    }
+
+    fn send_to_user_data(self: &Arc<Self>, addr: &SocketAddr, data: &[u8]) -> io::Result<()> {
+        TcpSender::send_to_user_data(self, addr, data)
+    }
+
+    fn disconnect_peer(&self, addr: SocketAddr) {
+        TcpSender::disconnect_peer(self, addr)
     }
 }
 
