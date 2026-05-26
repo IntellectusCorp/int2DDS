@@ -34,6 +34,7 @@
 //! |--------|-------------|---------------|
 //! | [`WriterReliabilityExtensionQosPolicy`] | Writer reliability options | DataWriter |
 //! | [`ReaderReliabilityExtensionQosPolicy`] | Reader reliability options | DataReader |
+//! | [`PublishModeQosPolicy`] | Synchronous vs asynchronous write dispatch (RTI-style) | DataWriter |
 //!
 //! # Unsupported QoS Policies
 //!
@@ -111,6 +112,7 @@ const DATAREPRESENTATION_QOS_POLICY_NAME: &str = "DataRepresentation";
 const TYPECONSISTENCYENFORCEMENT_QOS_POLICY_NAME: &str = "TypeConsistencyEnforcement";
 const WRITER_RELIABILITY_EXTENSION_QOS_POLICY_NAME: &str = "WriterReliabilityExtension";
 const READER_RELIABILITY_EXTENSION_QOS_POLICY_NAME: &str = "ReaderReliabilityExtension";
+const PUBLISHMODE_QOS_POLICY_NAME: &str = "PublishMode";
 const PROPERTY_QOS_POLICY_NAME: &str = "Property";
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash, Readable, Writable)]
@@ -2179,6 +2181,79 @@ impl QosPolicy for WriterReliabilityExtensionQosPolicy {
     }
 }
 
+/// Dispatch mode for a DataWriter's `write()` call.
+///
+/// The chosen variant determines whether `write()` performs the network
+/// send inline on the calling thread (`Synchronous`) or hands the sample
+/// off to a publisher thread for batched/coalesced transmission
+/// (`Asynchronous`).
+///
+/// - `Synchronous`: lowest single-sample latency. `write()` performs the
+///   send on the user thread; no thread handoff cost.
+/// - `Asynchronous`: better throughput and decoupled determinism — the
+///   user thread returns as soon as the sample is queued, and a publisher
+///   thread drains the queue and may coalesce multiple samples or
+///   fragments into one network packet.
+#[derive(DdsType, PartialEq, Default, Copy, Eq, PartialOrd, Ord)]
+#[dds_type(crate_path = "crate", no_default, no_partialeq)]
+pub enum PublishModeQosPolicyKind {
+    /// `write()` sends inline on the user thread.
+    #[default]
+    Synchronous,
+    /// `write()` enqueues onto an asynchronous publisher thread.
+    Asynchronous,
+}
+
+impl ConstDefault for PublishModeQosPolicyKind {
+    const DEFAULT: Self = PublishModeQosPolicyKind::Synchronous;
+}
+
+impl PublishModeQosPolicyKind {
+    pub fn from_u32(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Synchronous),
+            1 => Some(Self::Asynchronous),
+            _ => None,
+        }
+    }
+}
+
+/// Sentinel `send_scheduler_name` value selecting the built-in default
+/// send scheduler — data leaves the publisher queue as soon as it is
+/// written, with no rate shaping. Equivalent to "no scheduler".
+pub const DEFAULT_SEND_SCHEDULER_NAME: &str = "";
+
+/// Controls how a DataWriter's `write()` dispatches a sample onto the
+/// network. See [`PublishModeQosPolicyKind`] for the semantic difference.
+///
+/// `send_scheduler_name` is only consulted when `kind == Asynchronous`.
+/// An empty name (the default) selects [`DEFAULT_SEND_SCHEDULER_NAME`] —
+/// the built-in pass-through scheduler that emits queued samples as fast
+/// as the transport accepts them (coalescing only, no rate limit). Other
+/// names refer to user-registered send schedulers (defined via
+/// [`PropertyQosPolicy`] entries on the DomainParticipant).
+///
+/// # Default
+/// - `kind: Synchronous` — latency-optimal; the call returns only after
+///   the sample has been written to the transport.
+/// - `send_scheduler_name: ""` — default scheduler. The field is ignored
+///   when `kind` is `Synchronous`.
+///
+/// This QoS is local to the writer; it is not propagated through SEDP
+/// discovery because it only affects send-side scheduling and has no
+/// effect on wire format or reader behavior.
+#[derive(Debug, Clone, PartialEq, Eq, Default, ConstDefault)]
+pub struct PublishModeQosPolicy {
+    pub kind: PublishModeQosPolicyKind,
+    pub send_scheduler_name: String,
+}
+
+impl QosPolicy for PublishModeQosPolicy {
+    fn name(&self) -> &str {
+        PUBLISHMODE_QOS_POLICY_NAME
+    }
+}
+
 /// Extension to ReliabilityQosPolicy for int2DDS-specific reader reliability options.
 /// This policy provides additional control over reliable communication behavior.
 ///
@@ -2288,5 +2363,39 @@ mod property_qos_tests {
         assert_eq!(QosPolicyId::Property.as_u32(), 25);
         assert_eq!(QosPolicyId::from_u32(25), Some(QosPolicyId::Property));
         assert_eq!(QosPolicyId::Property.as_str(), "Property");
+    }
+}
+
+#[cfg(test)]
+mod publish_mode_qos_tests {
+    use super::*;
+
+    #[test]
+    fn default_is_synchronous_with_empty_scheduler() {
+        let p = PublishModeQosPolicy::default();
+        assert_eq!(p.kind, PublishModeQosPolicyKind::Synchronous);
+        assert_eq!(p.send_scheduler_name, DEFAULT_SEND_SCHEDULER_NAME);
+        assert_eq!(p.send_scheduler_name, "");
+    }
+
+    #[test]
+    fn const_default_matches_runtime_default() {
+        assert_eq!(PublishModeQosPolicy::DEFAULT, PublishModeQosPolicy::default());
+    }
+
+    #[test]
+    fn kind_from_u32_round_trips() {
+        assert_eq!(PublishModeQosPolicyKind::from_u32(0), Some(PublishModeQosPolicyKind::Synchronous));
+        assert_eq!(
+            PublishModeQosPolicyKind::from_u32(1),
+            Some(PublishModeQosPolicyKind::Asynchronous)
+        );
+        assert_eq!(PublishModeQosPolicyKind::from_u32(2), None);
+    }
+
+    #[test]
+    fn policy_name_matches_constant() {
+        let p = PublishModeQosPolicy::default();
+        assert_eq!(p.name(), "PublishMode");
     }
 }
