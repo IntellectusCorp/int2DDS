@@ -74,9 +74,9 @@ pub struct PublicationBuiltinTopicData {
     multicast_locator_list: Vec<Locator>,
     #[dds(id = 0x0073)] // PidDataRepresentation
     data_representation: DataRepresentationQosPolicy,
-    #[dds(optional, id = 0x0069)] // PidTypeIdentifier (DDS-XTypes)
+    #[dds(optional, id = 0x0069)]
     type_identifier: Option<TypeIdentifier>,
-    #[dds(optional, id = 0x0072)] // PidTypeObject (DDS-XTypes)
+    #[dds(optional, id = 0x0072)] // PID_TYPE_OBJECTV1
     type_object: Option<TypeObject>,
     #[dds(non_serialized)]
     writer_reliability_extension: WriterReliabilityExtensionQosPolicy,
