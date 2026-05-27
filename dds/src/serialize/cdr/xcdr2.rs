@@ -456,16 +456,12 @@ impl<'a> DeserializerReader for Xcdr2Deserializer<'a> {
     }
 }
 
-const TYPE_HASH_FLAG: u16 = 0x0001;
-const TYPE_HASH_LENGTH: usize = 14;
-
 fn parse_encapsulation_header(data: &[u8]) -> Result<(Endianness, usize, bool), CdrError> {
     if data.len() < 4 {
         return Err(CdrError::InsufficientData);
     }
 
     let encap_id = u16::from_be_bytes([data[0], data[1]]);
-    let options = u16::from_be_bytes([data[2], data[3]]);
 
     let (endianness, is_xcdr2) = match encap_id {
         0x0000 | 0x0002 => (Endianness::BigEndian, false),
@@ -475,14 +471,5 @@ fn parse_encapsulation_header(data: &[u8]) -> Result<(Endianness, usize, bool), 
         _ => return Err(CdrError::InvalidEncapsulation(encap_id)),
     };
 
-    let mut header_size = 4;
-    if is_xcdr2 && (options & TYPE_HASH_FLAG) != 0 {
-        header_size += TYPE_HASH_LENGTH;
-    }
-
-    if data.len() < header_size {
-        return Err(CdrError::InsufficientData);
-    }
-
-    Ok((endianness, header_size, is_xcdr2))
+    Ok((endianness, 4, is_xcdr2))
 }

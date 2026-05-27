@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
+use std::time::Instant;
+
 use crate::{
     common::builtin::topic::subscription_builtin_topic_data::SubscriptionBuiltinTopicData,
     rtps::{
@@ -22,7 +24,9 @@ pub(crate) struct ReaderProxy {
     expects_inline_qos: bool, // false
     is_active: bool,
     last_acknack_count: Option<u32>,
+    last_acknack_at: Option<Instant>,
     last_nackfrag_count: Option<u32>,
+    last_nackfrag_at: Option<Instant>,
     content_filter_signatures: Option<Vec<FilterSignature>>, // Content filter signatures for this reader
     subscription_builtin_topic_data: SubscriptionBuiltinTopicData,
     last_irrelevant_sn: SequenceNumber, // Sequence numbers <= this value are irrelevant for this reader and should be responded with GAP.
@@ -70,7 +74,9 @@ impl ReaderProxy {
             expects_inline_qos,
             is_active,
             last_acknack_count: None,
+            last_acknack_at: None,
             last_nackfrag_count: None,
+            last_nackfrag_at: None,
             content_filter_signatures: None,
             subscription_builtin_topic_data,
             last_irrelevant_sn,
@@ -197,12 +203,28 @@ impl ReaderProxy {
         self.last_acknack_count = Some(last_acknack_count);
     }
 
+    pub(crate) fn last_acknack_at(&self) -> Option<Instant> {
+        self.last_acknack_at
+    }
+
+    pub(crate) fn set_last_acknack_at(&mut self, at: Instant) {
+        self.last_acknack_at = Some(at);
+    }
+
     pub(crate) fn last_nackfrag_count(&self) -> Option<u32> {
         self.last_nackfrag_count
     }
 
     pub(crate) fn set_last_nackfrag_count(&mut self, last_nackfrag_count: u32) {
         self.last_nackfrag_count = Some(last_nackfrag_count);
+    }
+
+    pub(crate) fn last_nackfrag_at(&self) -> Option<Instant> {
+        self.last_nackfrag_at
+    }
+
+    pub(crate) fn set_last_nackfrag_at(&mut self, at: Instant) {
+        self.last_nackfrag_at = Some(at);
     }
 
     pub(crate) fn content_filter_signatures(&self) -> Option<&Vec<FilterSignature>> {
