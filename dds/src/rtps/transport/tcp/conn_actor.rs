@@ -26,7 +26,7 @@ use crate::rtps::transport::tcp::{
 /// control protocol's KEEPALIVE seed + PORT_RESERVE round-trips never race
 /// the writer_task's first drain, while still applying backpressure on
 /// sustained bursts.
-pub(crate) const INBOX_CAPACITY: usize = 64;
+pub(crate) const INBOX_CAPACITY: usize = 4;
 
 pub(crate) fn inbox_capacity() -> usize {
     INBOX_CAPACITY

@@ -251,28 +251,23 @@ impl TcpSender {
         let key = (addr, logical_port);
 
         if let Some(entry) = self.connections.get(&key) {
-            // Prefer lossless `blocking_send` when the caller is a sync
-            // thread (outside any tokio runtime) — it parks the caller
-            // until the writer task drains a slot, matching RTI-like
-            // synchronous producer backpressure. `blocking_send` panics if
-            // invoked from inside a runtime worker, so when
-            // `Handle::try_current().is_ok()` we fall back to `try_send`
-            // and surface a `WouldBlock` to the caller on a full inbox.
             let in_runtime = tokio::runtime::Handle::try_current().is_ok();
-            let result = if in_runtime {
-                match entry.writer_tx.try_send(data.to_vec()) {
-                    Ok(()) => Ok(()),
-                    Err(mpsc::error::TrySendError::Full(_)) => {
-                        warn!("send to {:?} dropped (writer inbox full)", addr);
-                        return Err(io::Error::new(io::ErrorKind::WouldBlock, "writer inbox full"));
-                    }
-                    Err(mpsc::error::TrySendError::Closed(returned)) => {
-                        Err(mpsc::error::SendError(returned))
-                    }
-                }
-            } else {
-                entry.writer_tx.blocking_send(data.to_vec())
-            };
+            let result
+            //  = if in_runtime {
+            //     match entry.writer_tx.try_send(data.to_vec()) {
+            //         Ok(()) => Ok(()),
+            //         Err(mpsc::error::TrySendError::Full(_)) => {
+            //             warn!("send to {:?} dropped (writer inbox full)", addr);
+            //             return Err(io::Error::new(io::ErrorKind::WouldBlock, "writer inbox full"));
+            //         }
+            //         Err(mpsc::error::TrySendError::Closed(returned)) => {
+            //             Err(mpsc::error::SendError(returned))
+            //         }
+            //     }
+            // } else {
+            //     entry.writer_tx.blocking_send(data.to_vec())
+            // };
+            = entry.writer_tx.blocking_send(data.to_vec());
 
             match result {
                 Ok(()) => return Ok(()),
