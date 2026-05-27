@@ -890,6 +890,18 @@ pub fn set_tcp_so_sndbuf(bytes: usize) {
     unsafe { std::env::set_var("INT2DDS_TCP_SO_SNDBUF", bytes.to_string()) };
 }
 
+/// Enables diagnostic timestamp prints (`[instr] tag=… id=… t_ns=…`) at
+/// pre-instrumented points (perftest send/recv path, RTPS DATA_FRAG
+/// reassembly). Read once at startup so per-call overhead is one atomic load.
+///
+/// Set `INT2DDS_INSTR=1` to enable. Default: off.
+pub fn instr_enabled() -> bool {
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        matches!(std::env::var("INT2DDS_INSTR").ok().as_deref(), Some("1") | Some("true"))
+    })
+}
+
 /// Get the TCP public address for WAN/NAT traversal.
 /// When set, SPDP locators advertise this address instead of the local working IP.
 ///

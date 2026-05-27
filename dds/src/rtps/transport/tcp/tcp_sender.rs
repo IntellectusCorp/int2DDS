@@ -320,6 +320,23 @@ impl TcpSender {
             let payload = data.to_vec();
             return self.runtime_handle.block_on(async move {
                 let mut wh = write_half.lock().await;
+                if crate::common::env::instr_enabled() {
+                    let hash = payload
+                        .iter()
+                        .take(64)
+                        .fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(*b as u32));
+                    eprintln!(
+                        "[instr] tag=P-writev port={} len={} hash={:08x} thread={:?} t_ns={}",
+                        logical_port,
+                        payload.len(),
+                        hash,
+                        std::thread::current().id(),
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_nanos() as u64)
+                            .unwrap_or(0)
+                    );
+                }
                 write_framed_message(&mut *wh, &payload).await
             });
         }
