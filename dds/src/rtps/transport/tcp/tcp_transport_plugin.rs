@@ -22,12 +22,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossbeam_channel::bounded;
-use dashmap::DashMap;
 use log::{debug, info};
 
-use crate::dcps::infrastructure::qos_policy::PublishModeQosPolicyKind;
-use crate::rtps::common::entity_id::EntityId;
-use crate::rtps::common::guid::{Guid, GuidPrefix};
+use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::locator::Locator;
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::plugin::{IncomingMessage, MessageSource, SendTarget, TransportPlugin};
@@ -65,19 +62,10 @@ pub(crate) struct TcpTransportPlugin {
     runtime: Arc<tokio::runtime::Runtime>,
 
     /// Outbound side. `Arc<TcpSender>` because send paths and connect tasks
-    /// hold their own clones. The same sender services both publish modes:
-    /// asynchronous writes flow through the per-connection inbox (queued +
-    /// coalesced by `writer_task`), while synchronous writes acquire the
+    /// hold their own clones. User-data and discovery writes acquire the
     /// connection's shared write half and perform the wire `writev` inline
-    /// on the user thread.
+    /// on the calling thread.
     sender: Arc<TcpSender>,
-
-    /// Maps each registered DataWriter's `EntityId` to the publish mode
-    /// captured at writer creation. `send()` consults this map to decide
-    /// whether to invoke the async or sync send method on `sender`.
-    /// Unregistered writers fall back to the `PublishModeQosPolicy`
-    /// default (`Synchronous`).
-    writer_modes: DashMap<EntityId, PublishModeQosPolicyKind>,
 
     /// Inbound side. Wrapped in `Option` so `close()` can take and drop it,
     /// firing its cancel token.
@@ -206,7 +194,6 @@ impl TcpTransportPlugin {
             listener_port,
             runtime,
             sender,
-            writer_modes: DashMap::new(),
             mux_listener: Mutex::new(Some(mux_listener)),
             discovery_rx: Mutex::new(Some(discovery_rx)),
             user_data_rx: Mutex::new(Some(user_data_rx)),
@@ -270,7 +257,7 @@ impl TransportPlugin for TcpTransportPlugin {
                 );
                 self.sender.send_to_discovery(&addr, data)
             }
-            SendTarget::UserData { locator, writer_guid } => {
+            SendTarget::UserData(locator) => {
                 if !locator.is_tcp() {
                     return Err(io::Error::new(io::ErrorKind::Unsupported, locator.kind_name()));
                 }
@@ -278,21 +265,7 @@ impl TransportPlugin for TcpTransportPlugin {
                     std::net::IpAddr::V4(locator.to_ip_v4_addr()),
                     locator.port() as u16,
                 );
-                // Per-writer dispatch on PublishMode. Unknown writers (no
-                // local DataWriter context, e.g. reader-side NACK_FRAG, or
-                // a writer that has not yet been registered) fall back to
-                // the PublishModeQosPolicy default (`Synchronous`).
-                let mode = writer_guid
-                    .and_then(|g| self.writer_modes.get(&g.entity_id()).map(|m| *m))
-                    .unwrap_or_default();
-                match mode {
-                    PublishModeQosPolicyKind::Synchronous => {
-                        self.sender.send_to_user_data_sync(&addr, data)
-                    }
-                    PublishModeQosPolicyKind::Asynchronous => {
-                        self.sender.send_to_user_data(&addr, data)
-                    }
-                }
+                self.sender.send_to_user_data(&addr, data)
             }
         }
     }
@@ -340,17 +313,6 @@ impl TransportPlugin for TcpTransportPlugin {
 
     fn participant_id(&self) -> u32 {
         self.participant_id
-    }
-
-    fn register_writer(&self, writer_guid: &Guid, kind: PublishModeQosPolicyKind) {
-        self.writer_modes.insert(writer_guid.entity_id(), kind);
-        debug!("[TcpTransportPlugin] register_writer guid={:?} kind={:?}", writer_guid, kind);
-    }
-
-    fn unregister_writer(&self, writer_guid: &Guid) {
-        if self.writer_modes.remove(&writer_guid.entity_id()).is_some() {
-            debug!("[TcpTransportPlugin] unregister_writer guid={:?}", writer_guid);
-        }
     }
 
     fn close(&self) {
@@ -485,7 +447,7 @@ mod tests {
         let plugin = make_plugin(next_test_domain());
 
         let locator = Locator::from_tcp_v4(std::net::Ipv4Addr::new(127, 0, 0, 1), 1);
-        let target = SendTarget::UserData { locator: &locator, writer_guid: None };
+        let target = SendTarget::UserData(&locator);
         let _ = plugin.send(b"\x52\x54\x50\x53", &target);
 
         plugin.close();

@@ -50,64 +50,6 @@ where
     Ok(())
 }
 
-/// Write multiple framed messages as a single `write_vectored` batch.
-///
-/// Each frame uses the same `[length][magic][payload]` layout as
-/// `write_framed_message`, but every frame in `frames` is packed into a flat
-/// `IoSlice` vector and submitted in one call — the kernel sees one large
-/// contiguous send, which lets TSO/GSO segment on the NIC instead of
-/// segmenting once per fragment in software.
-///
-/// Empty `frames` is a no-op. Partial `write_vectored` returns are handled by
-/// advancing the slice cursor until the entire batch drains.
-pub(crate) async fn write_framed_batch<W>(stream: &mut W, frames: &[Vec<u8>]) -> io::Result<()>
-where
-    W: AsyncWrite + Unpin + ?Sized,
-{
-    if frames.is_empty() {
-        return Ok(());
-    }
-
-    // Per-frame length prefixes need stable backing storage so each IoSlice
-    // can borrow a `&[u8; 4]` from it across the await below.
-    let mut lens: Vec<[u8; 4]> = Vec::with_capacity(frames.len());
-    for frame in frames {
-        if frame.len() > MAX_MESSAGE_SIZE {
-            return Err(transport_io_error(
-                TransportErrorCode::TcpFrameTooLarge,
-                format!(
-                    "Message too large: {} bytes (max: {} bytes)",
-                    frame.len(),
-                    MAX_MESSAGE_SIZE
-                ),
-            ));
-        }
-        let total_payload = MAGIC_SIZE + frame.len();
-        lens.push((total_payload as u32).to_be_bytes());
-    }
-
-    let mut bufs: Vec<IoSlice<'_>> = Vec::with_capacity(frames.len() * 3);
-    for (len, frame) in lens.iter().zip(frames.iter()) {
-        bufs.push(IoSlice::new(len));
-        bufs.push(IoSlice::new(&FRAME_MAGIC));
-        bufs.push(IoSlice::new(frame));
-    }
-
-    let mut slices: &mut [IoSlice<'_>] = &mut bufs[..];
-    while !slices.is_empty() {
-        match stream.write_vectored(slices).await? {
-            0 => {
-                return Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "write_vectored returned 0 mid-batch",
-                ));
-            }
-            n => IoSlice::advance_slices(&mut slices, n),
-        }
-    }
-    Ok(())
-}
-
 /// Read a framed message from a TCP stream (completely).
 ///
 /// Format: [4B length (BE)] [4B magic "INT2"] [NB payload]
@@ -231,61 +173,6 @@ mod tests {
             let read_data = read_framed_message(&mut cursor).await.unwrap();
             assert_eq!(&read_data, expected);
         }
-    }
-
-    #[tokio::test]
-    async fn test_write_framed_batch_roundtrip() {
-        let messages: Vec<Vec<u8>> = vec![
-            b"alpha".to_vec(),
-            b"beta-second-frame".to_vec(),
-            vec![0xCDu8; 4096],
-            b"".to_vec(),
-            b"tail".to_vec(),
-        ];
-
-        let mut buffer = Vec::new();
-        write_framed_batch(&mut buffer, &messages).await.unwrap();
-
-        let mut cursor = Cursor::new(buffer);
-        for expected in &messages {
-            let read_data = read_framed_message(&mut cursor).await.unwrap();
-            assert_eq!(&read_data, expected);
-        }
-        // No bytes left over.
-        assert_eq!(cursor.position() as usize, cursor.get_ref().len());
-    }
-
-    #[tokio::test]
-    async fn test_write_framed_batch_matches_per_frame() {
-        let messages: Vec<Vec<u8>> = vec![b"one".to_vec(), b"two".to_vec(), b"three".to_vec()];
-
-        let mut batched = Vec::new();
-        write_framed_batch(&mut batched, &messages).await.unwrap();
-
-        let mut sequential = Vec::new();
-        for msg in &messages {
-            write_framed_message(&mut sequential, msg).await.unwrap();
-        }
-
-        // Batched and per-frame must produce byte-identical streams.
-        assert_eq!(batched, sequential);
-    }
-
-    #[tokio::test]
-    async fn test_write_framed_batch_empty_is_noop() {
-        let mut buffer = Vec::new();
-        write_framed_batch(&mut buffer, &[]).await.unwrap();
-        assert!(buffer.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_write_framed_batch_rejects_oversize() {
-        let oversize = vec![0u8; MAX_MESSAGE_SIZE + 1];
-        let frames = vec![b"ok".to_vec(), oversize];
-        let mut buffer = Vec::new();
-        let result = write_framed_batch(&mut buffer, &frames).await;
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
     }
 
     #[tokio::test]

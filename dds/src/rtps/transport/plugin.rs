@@ -4,8 +4,7 @@
 use std::io;
 use std::net::SocketAddr;
 
-use crate::dcps::infrastructure::qos_policy::PublishModeQosPolicyKind;
-use crate::rtps::common::guid::{Guid, GuidPrefix};
+use crate::rtps::common::guid::GuidPrefix;
 use crate::rtps::common::locator::Locator;
 use crate::rtps::transport::shm::shm_listener::ShmListener;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
@@ -41,15 +40,7 @@ pub(crate) enum SendTarget<'a> {
     /// - TCP: BIND handshake + send on user_data logical port
     /// - Hybrid: route by locator kind (UDP or TCP)
     /// - SHM: route by locator kind (SHM or UDP)
-    ///
-    /// `writer_guid` identifies the source DataWriter so the TCP plugin
-    /// can dispatch to the sync or async send path per the writer's
-    /// `PublishModeQosPolicy`. `None` for messages without a local
-    /// DataWriter origin (e.g. reader-side NACK_FRAG); the TCP plugin
-    /// falls back to the default mode (Synchronous) in that case.
-    /// Transports that do not differentiate by writer (UDP, SHM)
-    /// ignore the field.
-    UserData { locator: &'a Locator, writer_guid: Option<&'a Guid> },
+    UserData(&'a Locator),
 }
 
 /// Unified message received from any transport source.
@@ -159,20 +150,6 @@ pub(crate) trait TransportPlugin: Send + Sync {
     /// Get the final participant_id (may differ from the initial value
     /// if unicast ports were already in use and participant_id was incremented).
     fn participant_id(&self) -> u32;
-
-    /// Register a DataWriter's [`PublishModeQosPolicyKind`] so the transport
-    /// can route this writer's outbound traffic to the sync or async send
-    /// path. Called by the DDS layer at writer creation time.
-    ///
-    /// Default impl is a no-op; transports that do not differentiate sync
-    /// vs async (UDP, SHM) simply ignore the mode. Only the TCP plugin
-    /// currently overrides this method.
-    fn register_writer(&self, _writer_guid: &Guid, _kind: PublishModeQosPolicyKind) {}
-
-    /// Remove a writer registration. Called by the DDS layer at writer
-    /// destruction so the transport can release any per-writer state.
-    /// Default impl is a no-op.
-    fn unregister_writer(&self, _writer_guid: &Guid) {}
 
     /// Release all resources (sockets, connections, threads).
     fn close(&self);

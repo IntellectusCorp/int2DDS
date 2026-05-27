@@ -17,7 +17,7 @@ use crate::{
         instance_handle::InstanceHandle,
     },
     infrastructure::{
-        qos_policy::{PublishModeQosPolicyKind, ReliabilityQosPolicyKind},
+        qos_policy::ReliabilityQosPolicyKind,
         status::{StatusInfo, StatusKind},
     },
     rtps::{
@@ -371,25 +371,6 @@ impl DcpsBridge {
     ) -> Result<(), RtpsError> {
         let _ = self.participant.remove_writer(topic_name, entity_id);
         Ok(())
-    }
-
-    /// Tell the transport layer which sync/async send path to use for the
-    /// given DataWriter. Forwards to the underlying [`TransportPlugin`];
-    /// UDP/SHM/Hybrid plugins ignore the call (default no-op impl), only
-    /// the TCP plugin records the mode in its `writer_modes` registry.
-    pub(crate) fn register_writer_publish_mode(
-        &self,
-        writer_guid: &Guid,
-        kind: PublishModeQosPolicyKind,
-    ) {
-        self.socket.transport().register_writer(writer_guid, kind);
-    }
-
-    /// Symmetric to [`register_writer_publish_mode`]. Called from the
-    /// DataWriter deletion path so the transport can release any
-    /// per-writer state it cached.
-    pub(crate) fn unregister_writer_publish_mode(&self, writer_guid: &Guid) {
-        self.socket.transport().unregister_writer(writer_guid);
     }
 
     pub(crate) fn delete_rtps_reader(
