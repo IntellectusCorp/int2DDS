@@ -147,8 +147,7 @@ impl TransportPlugin for UdpTransportPlugin {
                 }
                 Ok(())
             }
-            SendTarget::SEDPDiscovery(locator)
-            | SendTarget::UserData { locator, writer_guid: _ } => {
+            SendTarget::SEDPDiscovery(locator) | SendTarget::UserData(locator) => {
                 // Encode the rejected locator's kind in the error message so
                 // the RTPS layer can format "X locator found but no X sender
                 // available" without needing to branch on the kind itself.

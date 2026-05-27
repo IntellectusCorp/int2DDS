@@ -63,7 +63,6 @@ pub fn init_from_env() {
     // - INT2DDS_TCP_INCOMING_IDLE_TIMEOUT: Set idle timeout for incoming TCP connections (milliseconds) - Default: 60000
     // - INT2DDS_TCP_SO_RCVBUF: Force SO_RCVBUF on every TCP socket (bytes). Used by tests to induce backpressure - Default: OS-managed
     // - INT2DDS_TCP_SO_SNDBUF: Force SO_SNDBUF on every TCP socket (bytes). Used by tests to induce backpressure - Default: OS-managed
-    // - INT2DDS_TCP_BATCH_MAX_FRAMES: Per-connection writer_task drain cap — how many frames to coalesce into one write_vectored syscall (>= 1) - Default: 64
     // - INT2DDS_TCP_TLS_ENABLED: Enable TLS for TCP connections (true, false) - Default: false (not yet implemented)
     // - INT2DDS_TCP_TLS_CERT_PATH: TLS certificate file path - Default: none (not yet implemented)
     // - INT2DDS_TCP_TLS_KEY_PATH: TLS private key file path - Default: none (not yet implemented)
@@ -889,27 +888,6 @@ pub fn get_tcp_so_sndbuf() -> Option<usize> {
 pub fn set_tcp_so_sndbuf(bytes: usize) {
     log::info!("Environment variable set: INT2DDS_TCP_SO_SNDBUF = {}", bytes);
     unsafe { std::env::set_var("INT2DDS_TCP_SO_SNDBUF", bytes.to_string()) };
-}
-
-/// Maximum number of inbox frames the per-connection `writer_task` coalesces
-/// into a single `write_vectored` syscall. After awaiting the first frame, the
-/// task greedily drains up to this many more with `try_recv` and writes them
-/// all at once as a flat `IoSlice` vector — letting the kernel/NIC apply TSO
-/// across multiple RTPS submessages instead of one syscall per fragment.
-///
-/// Tuning: each frame adds 3 `IoSlice`s, and Linux caps `writev` at `IOV_MAX`
-/// (typically 1024), so values up to ~340 are safe; beyond that the writev
-/// would be split anyway. Larger values increase head-of-line latency for
-/// later connections sharing the runtime.
-///
-/// Default: 64 (≈ 4× a 1MB/16-fragment sample, enough to absorb a burst).
-/// Floor: 1 (1 = legacy per-frame behavior, no batching).
-pub fn get_tcp_batch_max_frames() -> usize {
-    std::env::var("INT2DDS_TCP_BATCH_MAX_FRAMES")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .map(|v| v.max(1))
-        .unwrap_or(64)
 }
 
 /// Get the TCP public address for WAN/NAT traversal.

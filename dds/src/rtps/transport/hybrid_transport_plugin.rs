@@ -203,7 +203,7 @@ impl TransportPlugin for HybridTransportPlugin {
                     Err(io::Error::new(io::ErrorKind::Unsupported, locator.kind_name()))
                 }
             }
-            SendTarget::UserData { locator, writer_guid: _ } => {
+            SendTarget::UserData(locator) => {
                 if locator.is_tcp() {
                     self.tcp_plugin.send(data, target)
                 } else if locator.is_udp() {

@@ -497,9 +497,6 @@ impl Publisher {
                     bridge
                         .delete_rtps_writer(topic_name.clone(), handle.to_guid().entity_id())
                         .map_err(|e| DdsError::Error(e.message))?;
-                    // Release the transport-side PublishMode registration
-                    // recorded when the writer was created.
-                    bridge.unregister_writer_publish_mode(&handle.to_guid());
                 }
                 None => return Err(DdsError::Error("DCPS Bridge is not initialized".to_string())),
             };

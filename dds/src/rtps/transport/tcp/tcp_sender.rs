@@ -60,11 +60,13 @@ const ORPHAN_PRUNE_INTERVAL: Duration = Duration::from_millis(500);
 /// the bookkeeping needed to serialise PORT_RESERVE requests and read their
 /// responses through the control connection's pending_ack slot.
 struct OutboundEntry {
+    /// Control inbox feeding the connection's `writer_task`. Used by the
+    /// reader task and lifecycle tasks (keepalive, PORT_RESERVE) to enqueue
+    /// protocol frames; not used by the user-data send path.
     writer_tx: mpsc::Sender<Vec<u8>>,
-    /// Shared with the connection's `writer_task`. Async writes still go
-    /// through `writer_tx` (queue + batch). Synchronous writes acquire
-    /// this directly via `runtime.block_on(write_half.lock().await)` and
-    /// perform the wire `writev` inline on the user thread.
+    /// User-data writes acquire this directly via
+    /// `runtime.block_on(write_half.lock().await)` and perform the wire
+    /// `writev` inline on the calling thread.
     write_half: SharedWriteHalf,
     control: Option<ControlExtras>,
 }
@@ -217,74 +219,6 @@ impl TcpSender {
     }
 
     /// Send an RTPS frame to a peer's discovery port. Sync, fire-and-forget;
-    /// on cache miss spawns a connect task and queues the frame for delivery
-    /// once the data connection is established.
-    pub(crate) fn send_to_discovery(
-        self: &Arc<Self>,
-        addr: &SocketAddr,
-        data: &[u8],
-    ) -> io::Result<()> {
-        let logical_port =
-            PortManager::get_discovery_traffic_unicast_port(self.domain_id, self.participant_id);
-        self.send_to(*addr, logical_port, data)
-    }
-
-    /// Send an RTPS frame to a peer's user-data port. Same semantics as
-    /// `send_to_discovery`.
-    pub(crate) fn send_to_user_data(
-        self: &Arc<Self>,
-        addr: &SocketAddr,
-        data: &[u8],
-    ) -> io::Result<()> {
-        let logical_port =
-            PortManager::get_user_traffic_unicast_port(self.domain_id, self.participant_id);
-        self.send_to(*addr, logical_port, data)
-    }
-
-    /// Internal: cache lookup → push, or spawn connect with the data queued.
-    fn send_to(
-        self: &Arc<Self>,
-        addr: SocketAddr,
-        logical_port: u16,
-        data: &[u8],
-    ) -> io::Result<()> {
-        let key = (addr, logical_port);
-
-        if let Some(entry) = self.connections.get(&key) {
-            let in_runtime = tokio::runtime::Handle::try_current().is_ok();
-            let result
-            //  = if in_runtime {
-            //     match entry.writer_tx.try_send(data.to_vec()) {
-            //         Ok(()) => Ok(()),
-            //         Err(mpsc::error::TrySendError::Full(_)) => {
-            //             warn!("send to {:?} dropped (writer inbox full)", addr);
-            //             return Err(io::Error::new(io::ErrorKind::WouldBlock, "writer inbox full"));
-            //         }
-            //         Err(mpsc::error::TrySendError::Closed(returned)) => {
-            //             Err(mpsc::error::SendError(returned))
-            //         }
-            //     }
-            // } else {
-            //     entry.writer_tx.blocking_send(data.to_vec())
-            // };
-            = entry.writer_tx.blocking_send(data.to_vec());
-
-            match result {
-                Ok(()) => return Ok(()),
-                Err(mpsc::error::SendError(returned)) => {
-                    // Connection dead — drop guard, evict, then spawn fresh.
-                    drop(entry);
-                    self.connections.remove(&key);
-                    self.spawn_outbound_connect(addr, logical_port, Some(returned));
-                    return Ok(());
-                }
-            }
-        }
-
-        self.spawn_outbound_connect(addr, logical_port, Some(data.to_vec()));
-        Ok(())
-    }
-
     fn spawn_outbound_connect(
         self: &Arc<Self>,
         addr: SocketAddr,
@@ -341,40 +275,38 @@ impl TcpSender {
     }
 }
 
-// ── Synchronous send path ───────────────────────────────────────────────────
+// ── Send path ────────────────────────────────────────────────────────────────
 //
-// Sends a single RTPS frame inline on the user thread. Connections, TLS,
-// keepalive, and the protocol handshake are reused unchanged from the
-// async path; only the wire `write_vectored` is performed synchronously
-// against the shared `SharedWriteHalf`. The user thread waits via
-// `runtime.block_on` until the kernel accepts the bytes.
+// Sends a single RTPS frame inline on the user thread. The connection's
+// `SharedWriteHalf` is locked for the duration of one `write_vectored`
+// syscall; the calling thread waits via `runtime.block_on` until the
+// kernel accepts the bytes. Connections, TLS, keepalive, and the protocol
+// handshake remain on the async task pair created by `spawn_conn_actor`.
 impl TcpSender {
-    pub(crate) fn send_to_discovery_sync(
+    pub(crate) fn send_to_discovery(
         self: &Arc<Self>,
         addr: &SocketAddr,
         data: &[u8],
     ) -> io::Result<()> {
         let logical_port =
             PortManager::get_discovery_traffic_unicast_port(self.domain_id, self.participant_id);
-        self.send_to_sync(*addr, logical_port, data)
+        self.send_to(*addr, logical_port, data)
     }
 
-    pub(crate) fn send_to_user_data_sync(
+    pub(crate) fn send_to_user_data(
         self: &Arc<Self>,
         addr: &SocketAddr,
         data: &[u8],
     ) -> io::Result<()> {
         let logical_port =
             PortManager::get_user_traffic_unicast_port(self.domain_id, self.participant_id);
-        self.send_to_sync(*addr, logical_port, data)
+        self.send_to(*addr, logical_port, data)
     }
 
-    /// Inline writev on the cached connection. If the connection has not
-    /// been established yet, falls back to the async cache-miss path
-    /// (`spawn_outbound_connect`) which queues `data` for delivery after
-    /// the handshake completes. Subsequent sends to the same peer/port
-    /// then take the fast inline path.
-    fn send_to_sync(
+    /// Inline writev on the cached connection. On cache miss, hands the
+    /// frame to `spawn_outbound_connect` which establishes the connection
+    /// and delivers the queued frame after handshake completes.
+    fn send_to(
         self: &Arc<Self>,
         addr: SocketAddr,
         logical_port: u16,
@@ -386,11 +318,6 @@ impl TcpSender {
             let write_half = Arc::clone(&entry.write_half);
             drop(entry);
             let payload = data.to_vec();
-            // `Handle::block_on` polls the future on the caller's thread —
-            // it is not a `spawn` and does not migrate work to a worker. The
-            // `writev` syscall therefore runs inline on the user thread,
-            // matching the synchronous PublishMode contract ("user thread
-            // performs the wire send").
             return self.runtime_handle.block_on(async move {
                 let mut wh = write_half.lock().await;
                 write_framed_message(&mut *wh, &payload).await
@@ -1076,8 +1003,18 @@ mod tests {
         let after_first = sender.connections.len();
         assert!(after_first >= 2, "expected control + data entries in cache, got {}", after_first);
 
-        // Second send — must not grow the cache.
-        sender.send_to_discovery(&target, b"RTPS\x11\x11\x11\x11").expect("second send");
+        // Second send — cache hit path calls `runtime_handle.block_on(...)`,
+        // which panics from inside a tokio runtime. Drive it from a blocking
+        // thread to mimic the DDS write path (sync user thread).
+        let sender_for_blocking = Arc::clone(&sender);
+        let target_clone = target;
+        tokio::task::spawn_blocking(move || {
+            sender_for_blocking
+                .send_to_discovery(&target_clone, b"RTPS\x11\x11\x11\x11")
+                .expect("second send");
+        })
+        .await
+        .expect("spawn_blocking join");
 
         let deadline = Instant::now() + Duration::from_secs(5);
         wait_for_recv(&b_disc_rx, deadline).await.expect("second send did not deliver within 5s");
