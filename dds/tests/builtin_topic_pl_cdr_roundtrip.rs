@@ -261,7 +261,8 @@ fn topic_pid_name_present() {
 const PID_TYPE_IDV1: u16 = 0x0069;
 const PID_TYPE_INFORMATION: u16 = 0x0075;
 
-/// PL_CDR2_LE encapsulation header expected at the start of a 0x0075 payload.
+/// PL_CDR2_LE encapsulation header. A standard 0x0075 payload must NOT begin with
+/// this — Fast-DDS serializes TypeInformation headerless (DHEADER first).
 const PL_CDR2_LE_HEADER: [u8; 4] = [0x00, 0x0b, 0x00, 0x00];
 /// CDR_LE (XCDRv1) encapsulation header expected at the start of 0x0072 / standard 0x0069.
 const CDR_LE_HEADER: [u8; 4] = [0x00, 0x01, 0x00, 0x00];
@@ -309,12 +310,15 @@ fn type_information_parameter_roundtrip() {
     let ti = sample_type_information();
     let bytes = ti.serialize_for_parameter();
 
-    // PL_CDR2_LE encapsulation header.
-    assert_eq!(&bytes[..4], &PL_CDR2_LE_HEADER, "0x0075 must start with PL_CDR2_LE header");
+    // Headerless PL_CDR2: must NOT begin with an encapsulation header.
+    assert_ne!(&bytes[..4], &PL_CDR2_LE_HEADER, "0x0075 must be headerless (no encap header)");
 
-    // After [encap(4)][top DHEADER(4)] the first member EMHEADER must carry member id 0x1001.
-    let emh = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+    // After the top DHEADER(4) the first member EMHEADER must carry member id 0x1001.
+    let emh = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
     assert_eq!(emh & 0x0FFF_FFFF, 0x1001, "first member id must be 0x1001 (minimal)");
+    // Members use LC=5 (the inner DHEADER doubles as NEXTINT), matching Fast-CDR's
+    // wire layout — no redundant length word.
+    assert_eq!(emh >> 28, 5, "TypeInformation members must use LC=5 like Fast-DDS");
 
     let parsed =
         TypeInformation::deserialize_for_parameter(&bytes).expect("0x0075 payload must round-trip");
@@ -354,13 +358,18 @@ fn publication_emits_both_0x0075_and_legacy_0x0069() {
     assert_eq!(count_pid_occurrences(&bytes, PID_TYPE_INFORMATION), 1);
     assert_eq!(count_pid_occurrences(&bytes, PID_TYPE_IDV1), 1);
 
-    // The 0x0075 value uses the PL_CDR2_LE encapsulation header.
+    // The 0x0075 value is headerless PL_CDR2: top DHEADER first, then EMHEADER 0x1001.
     let v75 = find_pid_value(&bytes, PID_TYPE_INFORMATION).expect("0x0075 present");
-    assert_eq!(&v75[..4], &PL_CDR2_LE_HEADER);
+    assert_ne!(&v75[..4], &PL_CDR2_LE_HEADER, "0x0075 must be headerless");
+    let emh = u32::from_le_bytes([v75[4], v75[5], v75[6], v75[7]]);
+    assert_eq!(emh & 0x0FFF_FFFF, 0x1001, "0x0075 first member id must be 0x1001");
 
-    // The legacy 0x0069 value is the headerless TypeInformation body (no encap header).
+    // The legacy 0x0069 value is a single CDR_LE-encapsulated TypeIdentifier.
     let v69 = find_pid_value(&bytes, PID_TYPE_IDV1).expect("0x0069 present");
-    assert_ne!(&v69[..4], &CDR_LE_HEADER, "legacy 0x0069 must stay headerless");
+    assert_eq!(&v69[..4], &CDR_LE_HEADER, "legacy 0x0069 must carry a CDR_LE TypeIdentifier");
+    let expected_tid = TypeIdentifier::MinimalTypeId(EquivalenceHash::new([7; 14]));
+    let tid_bytes = expected_tid.serialize();
+    assert_eq!(&v69[4..4 + tid_bytes.len()], tid_bytes.as_slice());
 }
 
 #[test]

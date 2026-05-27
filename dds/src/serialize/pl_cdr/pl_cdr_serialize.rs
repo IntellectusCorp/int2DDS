@@ -122,7 +122,7 @@ impl PlCdrSerializer {
         self.write_u16(buffer, parameter.id as u16);
 
         // Serialize parameter value payload
-        let param_data = self.serialize_parameter_value(parameter.id, &parameter.value)?;
+        let param_data = self.serialize_parameter_value(&parameter.value)?;
 
         if param_data.len() > u16::MAX as usize {
             return Err(format!(
@@ -156,11 +156,7 @@ impl PlCdrSerializer {
     }
 
     /// Serialize parameter value
-    fn serialize_parameter_value(
-        &self,
-        id: ParameterId,
-        value: &ParameterValue,
-    ) -> Result<Vec<u8>, String> {
+    fn serialize_parameter_value(&self, value: &ParameterValue) -> Result<Vec<u8>, String> {
         // Use buffer pool for parameter serialization (high-frequency operation)
         let mut buffer = PooledBuffer::new(BufferSize::Small);
 
@@ -358,12 +354,8 @@ impl PlCdrSerializer {
                 }
             }
             ParameterValue::TypeInformation(type_info) => {
-                if id == ParameterId::PidTypeIdV1 {
-                    buffer.extend_from_slice(&type_info.serialize());
-                } else {
-                    // 0x0075: standard PL_CDR2 TypeInformation with encapsulation header.
-                    buffer.extend_from_slice(&type_info.serialize_for_parameter());
-                }
+                // 0x0075: headerless PL_CDR2 TypeInformation (no encapsulation header).
+                buffer.extend_from_slice(&type_info.serialize_for_parameter());
                 let padding = (4 - (buffer.len() % 4)) % 4;
                 if padding > 0 {
                     buffer.extend(std::iter::repeat_n(0u8, padding));
@@ -1047,11 +1039,14 @@ impl super::ParsedBuiltinTopicData {
             let type_info = crate::xtypes::TypeInformation::from_type_identifier(type_id.clone());
             parameters.push(PlCdrParameter {
                 id: ParameterId::PidTypeInformation,
-                value: ParameterValue::TypeInformation(type_info.clone()),
+                value: ParameterValue::TypeInformation(type_info),
             });
+            // Legacy 0x0069 carries a single TypeIdentifier (CDR_LE encapsulated),
+            // not a TypeInformation. Fast-DDS gates 0x0075 by vendor, so this keeps
+            // type discovery working with eProsima peers.
             parameters.push(PlCdrParameter {
                 id: ParameterId::PidTypeIdV1,
-                value: ParameterValue::TypeInformation(type_info),
+                value: ParameterValue::TypeIdentifierV1(type_id.clone()),
             });
         }
 
