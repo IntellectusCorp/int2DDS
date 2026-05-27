@@ -1871,6 +1871,38 @@ fn test_xcdr2_btreemap_dheader_roundtrip() {
     assert_eq!(result, value);
 }
 
+#[test]
+fn test_xcdr2_primitive_map_omits_dheader() {
+    use std::collections::BTreeMap;
+
+    let mut hash: HashMap<i32, i32> = HashMap::new();
+    hash.insert(1, 10);
+    hash.insert(2, 20);
+    let mut tree: BTreeMap<i32, i32> = BTreeMap::new();
+    tree.insert(1, 10);
+    tree.insert(2, 20);
+
+    let serialize = |run: &dyn Fn(&mut XcdrSerializer)| {
+        let mut s = XcdrSerializer::new(true, ExtensibilityKind::Final);
+        s.write_encapsulation_header().unwrap();
+        run(&mut s);
+        s.into_bytes()
+    };
+    let hash_bytes = serialize(&|s| hash.serialize_xcdr(s).unwrap());
+    let tree_bytes = serialize(&|s| tree.serialize_xcdr(s).unwrap());
+
+    for bytes in [&hash_bytes, &tree_bytes] {
+        let count = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+        assert_eq!(count, 2, "primitive map must write count, not a DHEADER");
+        assert_eq!(bytes.len(), 24, "primitive map must not contain a DHEADER slot");
+    }
+
+    let mut d = XcdrDeserializer::new(&hash_bytes).unwrap();
+    assert_eq!(HashMap::<i32, i32>::deserialize_xcdr(&mut d).unwrap(), hash);
+    let mut d = XcdrDeserializer::new(&tree_bytes).unwrap();
+    assert_eq!(BTreeMap::<i32, i32>::deserialize_xcdr(&mut d).unwrap(), tree);
+}
+
 #[derive(DdsType)]
 #[dds_type(crate_path = "int2dds", extensibility = "Final")]
 struct TcWireSeq {
