@@ -218,18 +218,40 @@ impl TcpSender {
         let _ = self.dead_peer_tx.set(tx);
     }
 
-    /// Send an RTPS frame to a peer's discovery port. Sync, fire-and-forget;
-    fn spawn_outbound_connect(
+    /// Resolve the connection's shared write half, establishing it on cache
+    /// miss. Blocks the caller (via `send_to`'s `block_on`) until the
+    /// connection is ready. `do_connect_data` internally ensures the shared
+    /// control connection (PEER_HELLO + PORT_RESERVE) before PORT_BIND.
+    async fn ensure_connection(
         self: &Arc<Self>,
         addr: SocketAddr,
         logical_port: u16,
-        initial_data: Option<Vec<u8>>,
-    ) {
-        let me = Arc::clone(self);
-        // `Handle::spawn` instead of `tokio::spawn` — `send_to_*` may be
-        // called from a sync thread that is NOT inside the runtime context
-        // (e.g. the DDS write path or a test thread).
-        self.runtime_handle.spawn(outbound_connect_task(me, addr, logical_port, initial_data));
+    ) -> io::Result<SharedWriteHalf> {
+        let key = (addr, logical_port);
+
+        if let Some(entry) = self.connections.get(&key) {
+            return Ok(Arc::clone(&entry.write_half));
+        }
+
+        let result = if logical_port == CONTROL_LOGICAL_PORT {
+            do_connect_control(self, addr).await.map(|_| ())
+        } else {
+            do_connect_data(self, addr, logical_port).await.map(|_| ())
+        };
+        if let Err(e) = result {
+            warn!(
+                "TcpSender: outbound connect to {:?} (port={}) failed: {:?}",
+                addr, logical_port, e
+            );
+            if let Some(tx) = self.dead_peer_tx.get() {
+                let _ = tx.try_send(addr);
+            }
+            return Err(e);
+        }
+
+        self.connections.get(&key).map(|entry| Arc::clone(&entry.write_half)).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Other, "connect succeeded but cache entry missing")
+        })
     }
 
     /// Tear down every cached connection to `addr` (control + data) and
@@ -303,9 +325,11 @@ impl TcpSender {
         self.send_to(*addr, logical_port, data)
     }
 
-    /// Inline writev on the cached connection. On cache miss, hands the
-    /// frame to `spawn_outbound_connect` which establishes the connection
-    /// and delivers the queued frame after handshake completes.
+    /// Resolve the connection's write half — fast path on cache hit,
+    /// otherwise block until the connection (control + data handshake) is
+    /// established — then perform the wire `writev` inline. All user-data
+    /// writes funnel through this single path, so a peer's fragments always
+    /// reach the wire in the order the caller emits them.
     fn send_to(
         self: &Arc<Self>,
         addr: SocketAddr,
@@ -314,35 +338,16 @@ impl TcpSender {
     ) -> io::Result<()> {
         let key = (addr, logical_port);
 
-        if let Some(entry) = self.connections.get(&key) {
-            let write_half = Arc::clone(&entry.write_half);
-            drop(entry);
-            let payload = data.to_vec();
-            return self.runtime_handle.block_on(async move {
-                let mut wh = write_half.lock().await;
-                if crate::common::env::instr_enabled() {
-                    let hash = payload
-                        .iter()
-                        .take(64)
-                        .fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(*b as u32));
-                    eprintln!(
-                        "[instr] tag=P-writev port={} len={} hash={:08x} thread={:?} t_ns={}",
-                        logical_port,
-                        payload.len(),
-                        hash,
-                        std::thread::current().id(),
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_nanos() as u64)
-                            .unwrap_or(0)
-                    );
-                }
-                write_framed_message(&mut *wh, &payload).await
-            });
-        }
+        let write_half = match self.connections.get(&key) {
+            Some(entry) => Arc::clone(&entry.write_half),
+            None => self.runtime_handle.block_on(self.ensure_connection(addr, logical_port))?,
+        };
 
-        self.spawn_outbound_connect(addr, logical_port, Some(data.to_vec()));
-        Ok(())
+        let payload = data.to_vec();
+        self.runtime_handle.block_on(async move {
+            let mut wh = write_half.lock().await;
+            write_framed_message(&mut *wh, &payload).await
+        })
     }
 }
 
@@ -352,57 +357,6 @@ impl Drop for TcpSender {
         // cancelling the token tells them to exit at their next yield.
         self.cancel.cancel();
     }
-}
-
-// ── outbound_connect_task — single connect, including in-flight guard ────────
-
-async fn outbound_connect_task(
-    sender: Arc<TcpSender>,
-    addr: SocketAddr,
-    logical_port: u16,
-    initial_data: Option<Vec<u8>>,
-) {
-    let key = (addr, logical_port);
-
-    // ── In-flight gate ──────────────────────────────────────────────────
-    let _guard = match acquire_in_flight(&sender, key).await {
-        InFlightAcquisition::Acquired(g) => g,
-        InFlightAcquisition::AlreadyDone => {
-            // Someone else completed (or failed). Re-check cache and push
-            // initial_data if a writer is now available.
-            if let Some(data) = initial_data {
-                if let Some(entry) = sender.connections.get(&key) {
-                    let _ = entry.writer_tx.try_send(data);
-                }
-            }
-            return;
-        }
-    };
-
-    // ── Actual connect ──────────────────────────────────────────────────
-    let result = if logical_port == CONTROL_LOGICAL_PORT {
-        do_connect_control(&sender, addr).await
-    } else {
-        do_connect_data(&sender, addr, logical_port).await
-    };
-
-    match result {
-        Ok(writer_tx) => {
-            if let Some(data) = initial_data {
-                let _ = writer_tx.try_send(data);
-            }
-        }
-        Err(e) => {
-            warn!(
-                "TcpSender: outbound connect to {:?} (port={}) failed: {:?}",
-                addr, logical_port, e
-            );
-            if let Some(tx) = sender.dead_peer_tx.get() {
-                let _ = tx.try_send(addr);
-            }
-        }
-    }
-    // _guard drops → in_flight removed, notify_waiters fires.
 }
 
 /// Atomic acquire — returns `Acquired` if we got the slot, or `AlreadyDone`
@@ -886,6 +840,22 @@ mod tests {
         None
     }
 
+    /// `send_to_*` blocks via `runtime_handle.block_on`, which panics if
+    /// invoked from inside a tokio runtime worker. Production callers are the
+    /// sync DDS write path (outside any runtime); tests run under
+    /// `#[tokio::test]`, so they must drive the send from a blocking thread.
+    async fn blocking_send_discovery(
+        sender: &Arc<TcpSender>,
+        target: SocketAddr,
+        data: &[u8],
+    ) -> io::Result<()> {
+        let sender = Arc::clone(sender);
+        let data = data.to_vec();
+        tokio::task::spawn_blocking(move || sender.send_to_discovery(&target, &data))
+            .await
+            .expect("spawn_blocking join")
+    }
+
     /// Build a bare sender with its own MuxState. The sender does NOT bind
     /// a listener — callers that need a target listener spawn one separately.
     fn make_sender(
@@ -974,7 +944,7 @@ mod tests {
         // Send.
         let target: SocketAddr = format!("127.0.0.1:{}", b_port).parse().unwrap();
         let rtps_data: &[u8] = b"RTPS\x02\x04\x00\x00\x01\x02\x03\x04\x05\x06\x07\x08";
-        sender.send_to_discovery(&target, rtps_data).expect("send");
+        blocking_send_discovery(&sender, target, rtps_data).await.expect("send");
 
         // Listener should eventually receive the RTPS frame on its discovery channel.
         // 5s allows for the full chain: connect → PEER_HELLO + ACK → PORT_RESERVE
@@ -1010,7 +980,9 @@ mod tests {
         let (sender, _) = make_sender(0, [0xAA; 12], 12345);
 
         let target: SocketAddr = format!("127.0.0.1:{}", b_port).parse().unwrap();
-        sender.send_to_discovery(&target, b"RTPS\x00\x00\x00\x00").expect("first send");
+        blocking_send_discovery(&sender, target, b"RTPS\x00\x00\x00\x00")
+            .await
+            .expect("first send");
 
         // Wait until the first frame lands on the listener (proves the cache is populated).
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -1020,18 +992,10 @@ mod tests {
         let after_first = sender.connections.len();
         assert!(after_first >= 2, "expected control + data entries in cache, got {}", after_first);
 
-        // Second send — cache hit path calls `runtime_handle.block_on(...)`,
-        // which panics from inside a tokio runtime. Drive it from a blocking
-        // thread to mimic the DDS write path (sync user thread).
-        let sender_for_blocking = Arc::clone(&sender);
-        let target_clone = target;
-        tokio::task::spawn_blocking(move || {
-            sender_for_blocking
-                .send_to_discovery(&target_clone, b"RTPS\x11\x11\x11\x11")
-                .expect("second send");
-        })
-        .await
-        .expect("spawn_blocking join");
+        // Second send reuses the cached connection.
+        blocking_send_discovery(&sender, target, b"RTPS\x11\x11\x11\x11")
+            .await
+            .expect("second send");
 
         let deadline = Instant::now() + Duration::from_secs(5);
         wait_for_recv(&b_disc_rx, deadline).await.expect("second send did not deliver within 5s");
@@ -1065,7 +1029,7 @@ mod tests {
 
         let (sender, _) = make_sender(0, [0xAA; 12], 12345);
         let target: SocketAddr = format!("127.0.0.1:{}", b_port).parse().unwrap();
-        sender.send_to_discovery(&target, b"RTPS\x00\x00\x00\x00").expect("send");
+        blocking_send_discovery(&sender, target, b"RTPS\x00\x00\x00\x00").await.expect("send");
 
         // Wait for cache to populate.
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -1092,11 +1056,9 @@ mod tests {
         let (sender, _) = make_sender(0, [0xAA; 12], listener_port);
 
         let self_addr: SocketAddr = format!("127.0.0.1:{}", listener_port).parse().unwrap();
-        // send_to is fire-and-forget — spawned task will reject internally.
-        let _ = sender.send_to_discovery(&self_addr, b"RTPS\x00\x00\x00\x00");
-
-        // Give the spawned task a moment to run and reject.
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // `ensure_connection` rejects the self-connect (AddrInUse) before any
+        // cache insert, so the send returns Err and nothing is cached.
+        let _ = blocking_send_discovery(&sender, self_addr, b"RTPS\x00\x00\x00\x00").await;
 
         assert_eq!(sender.connections.len(), 0, "self-connection must not be cached",);
 
