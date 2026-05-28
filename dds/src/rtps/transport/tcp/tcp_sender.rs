@@ -589,7 +589,7 @@ async fn open_stream(sender: &Arc<TcpSender>, addr: SocketAddr) -> io::Result<As
             io::Error::new(io::ErrorKind::TimedOut, format!("tcp connect timeout to {:?}", addr))
         })??;
 
-    let _ = tcp.set_nodelay(true);
+    let _ = tcp.set_nodelay(crate::common::env::get_tcp_nodelay());
 
     // 2. Optional TLS handshake (also timeout-bounded).
     if let Some(cfg) = &sender.tls_config {
