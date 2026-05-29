@@ -5,7 +5,6 @@
 //! participants to enable reader-writer matching.
 
 use std::{
-    net::{SocketAddr, SocketAddrV4},
     sync::{Arc, Mutex, Weak},
     thread::{self, JoinHandle},
     time::{Duration as StdDuration, Instant},
@@ -22,7 +21,7 @@ use crate::{
         },
         instance_handle::InstanceHandle,
     },
-    dcps::{infrastructure::status::StatusKind, topic::type_support::DdsType},
+    dcps::infrastructure::status::StatusKind,
     infrastructure::qos_policy::{DurabilityQosPolicyKind, QosPolicyId, ReliabilityQosPolicyKind},
     rtps::{
         builtin::{
@@ -34,6 +33,7 @@ use crate::{
             },
         },
         common::{
+            count_filter::should_accept_count,
             entity_id::EntityId,
             guid::{Guid, GuidPrefix},
             locator::{
@@ -83,10 +83,7 @@ use crate::{
             },
             sending_handler::{MessageType, SendingHandler},
         },
-        transport::{
-            tcp::tcp_listener::TcpListener, udp::udp_listener::UdpListener, Transport,
-            TransportSender,
-        },
+        transport::plugin::{MessageSource, SendTarget, TransportPlugin},
     },
     serialize::pl_cdr::InlineQosParameters,
     utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
@@ -109,7 +106,7 @@ pub(crate) struct SedpLogic {
     participant: Weak<Participant>,
     builtin_endpoints: Arc<BuiltinEndpoints>,
     spdp_message: Option<Arc<Vec<u8>>>,
-    sender: Option<Arc<TransportSender>>,
+    transport: Arc<dyn TransportPlugin>,
     multicast_listening_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     unicast_listening_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     multicast_listening_waker: Arc<std::sync::OnceLock<Arc<mio::Waker>>>,
@@ -217,14 +214,14 @@ fn is_partition_compatible(requested: &[String], offered: &[String]) -> bool {
 
 /// Initialization
 impl SedpLogic {
-    pub(crate) fn new(participant: Arc<Participant>, sender: Option<Arc<TransportSender>>) -> Self {
+    pub(crate) fn new(participant: Arc<Participant>, transport: Arc<dyn TransportPlugin>) -> Self {
         let builtin_endpoints = participant.builtin_endpoints();
         let timer_handler = TimerHandler::get_instance(participant.guid().prefix());
         Self {
             participant: Arc::downgrade(&participant),
             builtin_endpoints,
             spdp_message: None,
-            sender,
+            transport,
             multicast_listening_handle: Arc::new(Mutex::new(None)),
             unicast_listening_handle: Arc::new(Mutex::new(None)),
             multicast_listening_waker: Arc::new(std::sync::OnceLock::new()),
@@ -245,81 +242,78 @@ impl SedpLogic {
     #[allow(clippy::clone_on_copy)]
     pub(crate) fn start_sedp(
         &self,
-        discovery_multicast_listener: Option<UdpListener>,
-        discovery_unicast_listener: Option<UdpListener>,
-        discovery_tcp_listener: Option<TcpListener>,
+        discovery_multicast_source: Option<MessageSource>,
+        discovery_unicast_source: Option<MessageSource>,
     ) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
 
-        let mut discovery_multicast_listening_task =
-            DiscoveryMulticastListeningTask::new(discovery_multicast_listener, participant.clone());
-        discovery_multicast_listening_task
-            .set_shutdown_waker(self.multicast_listening_waker.clone());
-
         let participant_guid = participant.guid().clone();
 
-        // multicast listening
-        let multicast_handle = thread::Builder::new()
-            .name("discovery_traffic_multicast_listening".to_string())
-            .spawn(move || {
-                // Register thread name for monitoring
-                {
-                    use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::register_current_thread_name_with_guid_prefix(
-                        "discovery_traffic_multicast_listening",
-                        participant_guid.prefix(),
-                    );
-                }
+        // multicast listening (only if transport provides a multicast source)
+        if let Some(multicast_source) = discovery_multicast_source {
+            let mut discovery_multicast_listening_task =
+                DiscoveryMulticastListeningTask::new(participant.clone());
+            discovery_multicast_listening_task
+                .set_shutdown_waker(self.multicast_listening_waker.clone());
 
-                let _ = discovery_multicast_listening_task.multicast_listening();
-                // Cleanup thread from registry before exit
-                {
-                    use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::remove_map_guard();
-                }
-                debug!("discovery multicast listening thread finished");
-            })
-            .expect("Failed to create discovery multicast listening thread");
+            let mc_guid = participant_guid;
+            let multicast_handle = thread::Builder::new()
+                .name("discovery_traffic_multicast_listening".to_string())
+                .spawn(move || {
+                    {
+                        use crate::rtps::task::thread_monitor::ThreadMonitor;
+                        ThreadMonitor::register_current_thread_name_with_guid_prefix(
+                            "discovery_traffic_multicast_listening",
+                            mc_guid.prefix(),
+                        );
+                    }
 
-        // Store multicast handle
-        if let Ok(mut handle_guard) = self.multicast_listening_handle.lock() {
-            *handle_guard = Some(multicast_handle);
+                    let _ =
+                        discovery_multicast_listening_task.multicast_listening(multicast_source);
+                    {
+                        use crate::rtps::task::thread_monitor::ThreadMonitor;
+                        ThreadMonitor::remove_map_guard();
+                    }
+                    debug!("discovery multicast listening thread finished");
+                })
+                .expect("Failed to create discovery multicast listening thread");
+
+            if let Ok(mut handle_guard) = self.multicast_listening_handle.lock() {
+                *handle_guard = Some(multicast_handle);
+            }
         }
 
-        let mut discovery_unicast_listening_task = DiscoveryUnicastListeningTask::new(
-            discovery_unicast_listener,
-            discovery_tcp_listener,
-            participant.clone(),
-        );
-        discovery_unicast_listening_task.set_shutdown_waker(self.unicast_listening_waker.clone());
+        // unicast listening (only if transport provides a unicast source)
+        if let Some(unicast_source) = discovery_unicast_source {
+            let mut discovery_unicast_listening_task =
+                DiscoveryUnicastListeningTask::new(participant.clone());
+            discovery_unicast_listening_task
+                .set_shutdown_waker(self.unicast_listening_waker.clone());
 
-        // unicast listening
-        let unicast_guid = participant_guid;
-        let unicast_handle = thread::Builder::new()
-            .name("discovery_traffic_unicast_listening".to_string())
-            .spawn(move || {
-                // Register thread name for monitoring
-                {
-                    use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::register_current_thread_name_with_guid_prefix(
-                        "discovery_traffic_unicast_listening",
-                        unicast_guid.prefix(),
-                    );
-                }
+            let unicast_guid = participant_guid;
+            let unicast_handle = thread::Builder::new()
+                .name("discovery_traffic_unicast_listening".to_string())
+                .spawn(move || {
+                    {
+                        use crate::rtps::task::thread_monitor::ThreadMonitor;
+                        ThreadMonitor::register_current_thread_name_with_guid_prefix(
+                            "discovery_traffic_unicast_listening",
+                            unicast_guid.prefix(),
+                        );
+                    }
 
-                let _ = discovery_unicast_listening_task.unicast_listening();
-                // Cleanup thread from registry before exit
-                {
-                    use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::remove_map_guard();
-                }
-                debug!("discovery unicast listening thread finished");
-            })
-            .expect("Failed to create discovery unicast listening thread");
+                    let _ = discovery_unicast_listening_task.unicast_listening(unicast_source);
+                    {
+                        use crate::rtps::task::thread_monitor::ThreadMonitor;
+                        ThreadMonitor::remove_map_guard();
+                    }
+                    debug!("discovery unicast listening thread finished");
+                })
+                .expect("Failed to create discovery unicast listening thread");
 
-        // Store unicast handle
-        if let Ok(mut handle_guard) = self.unicast_listening_handle.lock() {
-            *handle_guard = Some(unicast_handle);
+            if let Ok(mut handle_guard) = self.unicast_listening_handle.lock() {
+                *handle_guard = Some(unicast_handle);
+            }
         }
 
         Ok(())
@@ -1257,57 +1251,50 @@ impl SedpLogic {
         spdp_discovered_participant_data: Arc<SPDPDiscoveredParticipantData>,
         data: Option<Arc<Vec<u8>>>,
     ) -> RtpsResult<()> {
-        let logic_start_time = Instant::now();
-        match data {
-            Some(data) => {
-                let mut list: Vec<SPDPDiscoveredParticipantData> = Vec::new();
-                let participant = self.get_upgraded_participant()?;
+        let data =
+            data.ok_or_else(|| RtpsError::new(RtpsErrorCode::DataNotSet, "Data is not set"))?;
+        let participant = self.get_upgraded_participant()?;
+        let remote_prefix = spdp_discovered_participant_data.guid_prefix();
 
-                match participant.remote_participant_proxy_datas().lock() {
-                    Ok(remote_participant_datas) => {
-                        // Send SPDP message to everyone
-                        for remote_participant_data in remote_participant_datas.iter() {
-                            if spdp_discovered_participant_data.guid_prefix()
-                                != remote_participant_data.guid_prefix()
-                            {
-                                continue;
-                            }
-                            list.push(remote_participant_data.clone());
-                        }
+        let mut filtered_list: Vec<SPDPDiscoveredParticipantData> = Vec::new();
+        match participant.remote_participant_proxy_datas().lock() {
+            Ok(remote_participant_datas) => {
+                // Filter to the target remote participant
+                for remote_participant_data in remote_participant_datas.iter() {
+                    if remote_prefix != remote_participant_data.guid_prefix() {
+                        continue;
                     }
-                    Err(e) => {
-                        return Err(RtpsError::new(
-                            RtpsErrorCode::LockError,
-                            format!("Failed to lock remote_participant_datas: {:?}", e),
-                        ));
-                    }
+                    filtered_list.push(remote_participant_data.clone());
                 }
-
-                for remote_participant_data in list.iter() {
-                    if let Err(e) = self.send_to_participant_metatraffic_locators(
-                        &data,
-                        remote_participant_data.participant_guid(),
-                        "spdp",
-                    ) {
-                        warn!("Failed to send SPDP discovery message: {:?}", e);
-                    }
-                }
-
-                let start_time = Instant::now();
-                let _ = self.register_send_timer(
-                    Some(start_time),
-                    logic_start_time,
-                    duration,
-                    MessageType::PeriodicParticipantDataUnicast(
-                        Some(start_time),
-                        duration,
-                        spdp_discovered_participant_data.clone(),
-                        Some(data.clone()),
-                    ),
-                );
             }
-            None => return Err(RtpsError::new(RtpsErrorCode::DataNotSet, "Data is not set")),
-        };
+            Err(e) => {
+                return Err(RtpsError::new(
+                    RtpsErrorCode::LockError,
+                    format!("Failed to lock remote_participant_datas: {:?}", e),
+                ));
+            }
+        }
+
+        // In case timer had not been removed after remote participant was unmatched
+        if filtered_list.is_empty() {
+            if let Ok(handler) = self.timer_handler.lock() {
+                handler.remove_timer(TimerId::SedpScheduledMessage {
+                    remote_prefix,
+                    writer_entity_id: EntityId::SPDP_BUILTIN_PARTICIPANT_WRITER,
+                });
+            }
+            return Ok(());
+        }
+
+        for remote_participant_data in filtered_list.iter() {
+            if let Err(e) = self.send_to_participant_metatraffic_locators(
+                &data,
+                remote_participant_data.participant_guid(),
+                "spdp",
+            ) {
+                warn!("Failed to send SPDP discovery message: {:?}", e);
+            }
+        }
         Ok(())
     }
 
@@ -1322,7 +1309,6 @@ impl SedpLogic {
         guid_prefix: Arc<GuidPrefix>,
         entity_id: EntityId,
     ) -> RtpsResult<bool> {
-        let logic_start_time = Instant::now();
         // Get reader and writer corresponding to entity
         let participant = self.get_upgraded_participant()?;
 
@@ -1361,7 +1347,8 @@ impl SedpLogic {
         };
 
         let mut is_sent = false;
-        let mut retry: bool = false;
+        let mut peer_disconnected = false;
+        let mut matched_any = false;
 
         let participant_guid = {
             let local_participant_data = participant.local_participant_proxy_data();
@@ -1370,13 +1357,14 @@ impl SedpLogic {
 
         match writer.reader_proxies().lock() {
             Ok(reader_proxies) => {
-                for reader_proxy in reader_proxies.iter() {
+                'outer: for reader_proxy in reader_proxies.iter() {
                     if reader_proxy.remote_reader_guid().prefix() != *guid_prefix {
                         continue;
                     }
                     if !reader_proxy.is_active() {
                         continue;
                     }
+                    matched_any = true;
                     let buffer = MessageCreator::create_heartbeat_message(
                         participant_guid.prefix(),
                         reader_proxy.remote_reader_guid().prefix(),
@@ -1391,31 +1379,36 @@ impl SedpLogic {
                     match buffer {
                         Ok(buffer) => {
                             for locator in reader_proxy.unicast_locator_list() {
-                                if locator.kind() == 1 {
-                                    //UDPv4
-                                    let socket_addr = SocketAddr::V4(SocketAddrV4::new(
-                                        locator.to_ip_v4_addr(),
-                                        locator.port() as u16,
-                                    ));
-                                    if let Some(ref sender) = self.sender {
-                                        if let Err(e) = sender.send(&socket_addr, &buffer) {
-                                            warn!("Failed to send SEDP heartbeat: {:?}", e);
-                                        } else {
-                                            is_sent = true;
-                                        }
-                                    } else {
-                                        debug!("UDP sender not available, skipping SEDP heartbeat");
+                                // SEDP heartbeat is a UDP/TCP-only path
+                                if !locator.is_udp() && !locator.is_tcp() {
+                                    continue;
+                                }
+                                match self
+                                    .transport
+                                    .send(&buffer, &SendTarget::SEDPDiscovery(&locator))
+                                {
+                                    Ok(_) => {
+                                        is_sent = true;
                                     }
-                                };
+                                    Err(e) => {
+                                        let disconnected = matches!(
+                                            e.kind(),
+                                            std::io::ErrorKind::BrokenPipe
+                                                | std::io::ErrorKind::ConnectionReset
+                                                | std::io::ErrorKind::ConnectionRefused
+                                        );
+                                        if disconnected {
+                                            peer_disconnected = true;
+                                            break 'outer;
+                                        }
+                                        warn!("Failed to send SEDP heartbeat: {:?}", e);
+                                    }
+                                }
                             }
                             writer.increase_heartbeat_count();
-                            if writer.last_change_sequence_number() != SequenceNumber::ZERO {
-                                retry = true;
-                            }
                         }
                         Err(e) => {
                             warn!("Failed to create SEDP heartbeat message: {:?}", e);
-                            // Continue to next reader proxy instead of failing entirely
                         }
                     }
                 }
@@ -1428,94 +1421,50 @@ impl SedpLogic {
             }
         }
 
-        if retry {
-            let start_time = Instant::now();
-            if entity_id == EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER {
-                self.register_send_timer(
-                    Some(start_time),
-                    logic_start_time,
-                    duration,
-                    MessageType::PeriodicPublicationHeartbeat(
-                        Some(start_time),
-                        duration,
-                        guid_prefix.clone(),
-                    ),
-                )?;
-            } else if entity_id == EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_WRITER {
-                self.register_send_timer(
-                    Some(start_time),
-                    logic_start_time,
-                    duration,
-                    MessageType::PeriodicSubscriptionHeartbeat(
-                        Some(start_time),
-                        duration,
-                        guid_prefix.clone(),
-                    ),
-                )?;
-            } else if entity_id == EntityId::SEDP_BUILTIN_TOPICS_WRITER {
-                self.register_send_timer(
-                    Some(start_time),
-                    logic_start_time,
-                    duration,
-                    MessageType::PeriodicSedpTopicHeartbeat(
-                        Some(start_time),
-                        duration,
-                        guid_prefix.clone(),
-                    ),
-                )?;
-            } else {
-                return Err(RtpsError::new(
-                    RtpsErrorCode::InvalidEntityKind,
-                    format!("Invalid entity id: {:?}", entity_id),
-                ))?;
+        if peer_disconnected {
+            let peer_guid = Guid::new(*guid_prefix, EntityId::PARTICIPANT);
+            let _ = participant.unmatch_with_remote_participant(&peer_guid);
+        }
+
+        // In case not peer_disconnected & timer had not been removed after remote participant was unmatched
+        if !matched_any {
+            if let Ok(handler) = self.timer_handler.lock() {
+                handler.remove_timer(TimerId::SedpScheduledMessage {
+                    remote_prefix: *guid_prefix,
+                    writer_entity_id: entity_id,
+                });
             }
         }
+
         Ok(is_sent)
     }
 
-    fn register_send_timer(
+    // Register a repeating timer that pushes `message` to the sending queue every `duration`.
+    // Keyed by (remote_prefix, writer_entity_id) so each (remote, builtin writer) pair has at
+    // most one active periodic schedule. Cleanup happens in unmatch_with_remote_participant.
+    pub(crate) fn register_periodic_send_timer(
         &self,
-        start_time: Option<Instant>,
-        logic_start_time: Instant,
+        remote_prefix: GuidPrefix,
+        writer_entity_id: EntityId,
         duration: StdDuration,
         message: MessageType,
     ) -> RtpsResult<()> {
-        let elapsed = logic_start_time.elapsed();
-        let remaining_duration = match start_time {
-            Some(start_time) => {
-                let elapsed = start_time.elapsed();
-                duration.checked_sub(elapsed).unwrap_or(StdDuration::from_millis(0))
-            }
-            None => duration.checked_sub(elapsed).unwrap_or(StdDuration::from_millis(0)),
-        };
-
-        let participant = self.get_upgraded_participant()?;
         let participant_weak = self.participant.clone();
-
-        let timer_id = TimerId::SedpScheduledMessage {
-            guid_prefix: participant.guid().prefix(),
-            elapsed_nano: logic_start_time.elapsed().as_nanos() as u64,
-        };
+        let timer_id = TimerId::SedpScheduledMessage { remote_prefix, writer_entity_id };
 
         let message = Arc::new(message);
         if let Ok(timer_handler) = self.timer_handler.lock() {
-            timer_handler.add_timer(
-                timer_id,
-                remaining_duration,
-                false, // one-shot timer
-                {
-                    let message = message.clone();
-                    move || {
-                        if let Some(participant) = participant_weak.upgrade() {
-                            if !participant.is_terminated() {
-                                let sending_handler =
-                                    SendingHandler::get_instance(participant, None, None);
-                                sending_handler.push_message_and_wake((*message).clone());
-                            }
+            timer_handler.add_timer(timer_id, duration, true, {
+                let message = message.clone();
+                move || {
+                    if let Some(participant) = participant_weak.upgrade() {
+                        if !participant.is_terminated() {
+                            let sending_handler = SendingHandler::get_instance(participant, None);
+                            sending_handler.push_message_and_wake((*message).clone());
                         }
                     }
-                },
-            );
+                }
+            });
         } else {
             error!("Failed to acquire timer handler lock for SEDP message sending");
         }
@@ -1613,6 +1562,38 @@ impl SedpLogic {
             }
             Err(e) => {
                 warn!("Failed to create SEDP AckNack message: {:?}", e);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn send_sedp_gap_for_vec(
+        &self,
+        remote_guid: Guid,
+        reader_entity_id: EntityId,
+        writer_entity_id: EntityId,
+        mut gap_list: Vec<SequenceNumber>,
+    ) -> RtpsResult<()> {
+        if gap_list.is_empty() {
+            return Ok(());
+        }
+
+        let participant = self.get_upgraded_participant()?;
+
+        let buffer_list = MessageCreator::create_multiple_gap_msgs(
+            participant.guid(),
+            remote_guid,
+            reader_entity_id,
+            writer_entity_id,
+            &mut gap_list,
+        )
+        .map_err(|e| RtpsError::new(RtpsErrorCode::Io, e.to_string()))?;
+
+        for buf in buffer_list {
+            if let Err(e) = self.send_to_participant_metatraffic_locators(&buf, remote_guid, "GAP")
+            {
+                warn!("Failed to send SEDP GAP message: {:?}", e);
             }
         }
 
@@ -1744,9 +1725,17 @@ impl SedpLogic {
             );
             return Ok(false);
         };
-
         for locator in remote_participant_data.metatraffic_unicast_locator_list() {
-            self.send_to_single_locator(buffer, locator.clone(), message_type)?;
+            match self.send_to_single_locator(buffer, locator.clone(), message_type) {
+                Ok(()) => (),
+                Err(e) if e.code == RtpsErrorCode::PeerDisconnected => {
+                    let _ = participant.unmatch_with_remote_participant(
+                        &remote_participant_data.participant_guid(),
+                    );
+                    return Ok(false);
+                }
+                Err(_) => (),
+            }
         }
         Ok(true)
     }
@@ -1763,10 +1752,22 @@ impl SedpLogic {
             .lock()
             .map_err(|_| RtpsError::new(RtpsErrorCode::LockError, None))?;
 
+        let mut disconnected_participants: Vec<Guid> = Vec::new();
         for remote_participant_data in remote_participant_datas_guard.iter() {
             for locator in remote_participant_data.metatraffic_unicast_locator_list() {
-                self.send_to_single_locator(buffer, locator.clone(), message_type)?;
+                match self.send_to_single_locator(buffer, locator.clone(), message_type) {
+                    Ok(()) => (),
+                    Err(e) if e.code == RtpsErrorCode::PeerDisconnected => {
+                        disconnected_participants.push(remote_participant_data.participant_guid());
+                        break;
+                    }
+                    Err(_) => (),
+                }
             }
+        }
+        drop(remote_participant_datas_guard);
+        for guid in disconnected_participants {
+            let _ = participant.unmatch_with_remote_participant(&guid);
         }
 
         Ok(())
@@ -1778,44 +1779,19 @@ impl SedpLogic {
         locator: Locator,
         message_type: &str,
     ) -> RtpsResult<()> {
-        match locator.kind() {
-            // Both UDP and TCP use IPv4 addressing
-            LOCATOR_KIND_UDP_V4 | LOCATOR_KIND_TCP_V4 => {
-                let socket_addr = SocketAddr::V4(SocketAddrV4::new(
-                    locator.to_ip_v4_addr(),
-                    locator.port() as u16,
-                ));
-
-                if let Some(ref sender) = self.sender {
-                    sender.send(&socket_addr, buffer).map_err(|e| {
-                        RtpsError::new(
-                            RtpsErrorCode::NotSent,
-                            format!(
-                                "[{}] SEDP Logic: Failed to send message to {}: {}",
-                                message_type, socket_addr, e
-                            ),
-                        )
-                    })?;
-                    debug!(
-                        "[{}] SEDP Logic: {} message sent to {} (transport: {})",
-                        message_type,
-                        message_type,
-                        socket_addr,
-                        if locator.kind() == LOCATOR_KIND_TCP_V4 { "TCP" } else { "UDP" }
-                    );
-                } else {
-                    debug!("UDP sender not available, skipping SEDP message");
-                }
-            }
-            _ => {
-                debug!(
-                    "[{}] SEDP Logic: Unsupported locator kind: {}",
-                    message_type,
-                    locator.kind()
-                );
-            }
-        }
-
+        self.transport.send(buffer, &SendTarget::SEDPDiscovery(&locator)).map_err(|e| {
+            let code = match e.kind() {
+                std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionRefused => RtpsErrorCode::PeerDisconnected,
+                _ => RtpsErrorCode::NotSent,
+            };
+            RtpsError::new(
+                code,
+                format!("[{}] SEDP Logic: Failed to send message: {}", message_type, e),
+            )
+        })?;
+        debug!("[{}] SEDP Logic: message sent via transport plugin", message_type);
         Ok(())
     }
 }
@@ -2028,6 +2004,23 @@ impl UnicastMessageProcessor for SedpLogic {
 
             let payload = data.serialized_data();
 
+            let store_wire_in_cache = |endpoint_guid: Guid| {
+                let instance_handle = InstanceHandle::from_guid(&endpoint_guid);
+                let reader = builtin_endpoint_pair.reader();
+                if let Ok(mut cache_guard) = reader.reader_cache().lock() {
+                    let mut cache_change = cache_guard.acquire_change();
+                    cache_change.reset(
+                        ChangeKind::Alive,
+                        writer_guid,
+                        instance_handle,
+                        data.writer_sn,
+                        message_receiver.get_source_timestamp(),
+                    );
+                    cache_change.set_owned_payload(payload.as_ref().to_vec());
+                    let _ = cache_guard.add_change(cache_change);
+                }
+            };
+
             if data.writer_id == EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER {
                 let writer_data = SEDPMessage::<DiscoveredWriterData>::from_serialized_payload(
                     payload.as_ref(),
@@ -2040,25 +2033,7 @@ impl UnicastMessageProcessor for SedpLogic {
                     )
                 })?;
 
-                if let Ok(serialized_data) = writer_data.publication_builtin_topic_data.serialize()
-                {
-                    let instance_handle = InstanceHandle::from_guid(
-                        &writer_data.publication_builtin_topic_data.endpoint_guid(),
-                    );
-                    let reader = builtin_endpoint_pair.reader();
-                    if let Ok(mut cache_guard) = reader.reader_cache().lock() {
-                        let mut cache_change = cache_guard.acquire_change();
-                        cache_change.reset(
-                            ChangeKind::Alive,
-                            writer_guid,
-                            instance_handle,
-                            data.writer_sn,
-                            message_receiver.get_source_timestamp(),
-                        );
-                        cache_change.set_owned_payload(serialized_data.to_vec());
-                        let _ = cache_guard.add_change(cache_change);
-                    }
-                }
+                store_wire_in_cache(writer_data.publication_builtin_topic_data.endpoint_guid());
 
                 debug!("SEDP Logic: DiscoveredWriterData: {:?}", writer_data);
                 return self.handle_publication_builtin_topic_data(
@@ -2077,25 +2052,7 @@ impl UnicastMessageProcessor for SedpLogic {
                     )
                 })?;
 
-                if let Ok(serialized_data) = reader_data.subscription_builtin_topic_data.serialize()
-                {
-                    let instance_handle = InstanceHandle::from_guid(
-                        &reader_data.subscription_builtin_topic_data.endpoint_guid(),
-                    );
-                    let reader = builtin_endpoint_pair.reader();
-                    if let Ok(mut cache_guard) = reader.reader_cache().lock() {
-                        let mut cache_change = cache_guard.acquire_change();
-                        cache_change.reset(
-                            ChangeKind::Alive,
-                            writer_guid,
-                            instance_handle,
-                            data.writer_sn,
-                            message_receiver.get_source_timestamp(),
-                        );
-                        cache_change.set_owned_payload(serialized_data.to_vec());
-                        let _ = cache_guard.add_change(cache_change);
-                    }
-                }
+                store_wire_in_cache(reader_data.subscription_builtin_topic_data.endpoint_guid());
 
                 debug!("SEDP Logic: DiscoveredReaderData: {:?}", reader_data);
                 return self.handle_subscription_builtin_topic_data(
@@ -2203,22 +2160,21 @@ impl UnicastMessageProcessor for SedpLogic {
             .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::RtpsEntityNotFound, None))?;
 
-        // Check for duplicate Heartbeat
-        match writer_proxy.last_heartbeat_count() {
-            Some(prev) => {
-                if (heartbeat.count.wrapping_sub(prev) as i32) <= 0 {
-                    debug!(
-                        "[SEDP] [Heartbeat] Ignoring old Heartbeat: count={} <= last_count={}",
-                        heartbeat.count, prev
-                    );
-                    return Ok(());
-                }
-            }
-            None => {
-                debug!("[SEDP] [Heartbeat] First Heartbeat received: count={}", heartbeat.count);
-            }
+        // Check for duplicate Heartbeat. A non-increasing count is accepted
+        // once enough time has passed (peer assumed to have reset).
+        let now = Instant::now();
+        if !should_accept_count(
+            "[SEDP] [Heartbeat]",
+            heartbeat.count,
+            writer_proxy.last_heartbeat_count(),
+            writer_proxy.last_heartbeat_at(),
+            false,
+            now,
+        ) {
+            return Ok(());
         }
         writer_proxy.set_last_heartbeat_count(heartbeat.count);
+        writer_proxy.set_last_heartbeat_at(now);
 
         let missing_changes = writer_proxy.process_heartbeat(heartbeat.first_sn, heartbeat.last_sn);
         let bitmap_base = writer_proxy.expected_sn();
@@ -2304,21 +2260,22 @@ impl UnicastMessageProcessor for SedpLogic {
             .find(|rp| rp.remote_reader_guid() == remote_reader_guid)
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
 
-        match reader_proxy.last_acknack_count() {
-            Some(prev) => {
-                if (acknack.count.wrapping_sub(prev) as i32) <= 0 {
-                    debug!(
-                        "[SEDP] [AckNack] Ignoring old AckNack: count={} <= last_count={}",
-                        acknack.count, prev
-                    );
-                    return Ok(());
-                }
-            }
-            None => {
-                debug!("[SEDP] [AckNack] First AckNack received: count={}", acknack.count);
-            }
+        // Preemptive ACKNACK (RTPS 8.4.12.2) carries seqbase < 1 as an explicit
+        // reset signal and bypasses the count/debounce check.
+        let is_preemptive = acknack.reader_sn_state.bitmap_base().to_i64() < 1;
+        let now = Instant::now();
+        if !should_accept_count(
+            "[SEDP] [AckNack]",
+            acknack.count,
+            reader_proxy.last_acknack_count(),
+            reader_proxy.last_acknack_at(),
+            is_preemptive,
+            now,
+        ) {
+            return Ok(());
         }
         reader_proxy.set_last_acknack_count(acknack.count);
+        reader_proxy.set_last_acknack_at(now);
         drop(reader_proxies_guard);
 
         let missing_sequence_numbers = acknack.reader_sn_state.extract_numbers();
@@ -2333,15 +2290,31 @@ impl UnicastMessageProcessor for SedpLogic {
         }
 
         let mut missing_changes = Vec::new();
+        let mut gap_sns: Vec<SequenceNumber> = Vec::new();
         let writer_cache = local_writer.writer_cache();
 
         {
             let cache_guard = writer_cache.lock().unwrap();
             for seq_num in missing_sequence_numbers {
-                if let Some(change) = cache_guard.get_change(seq_num) {
-                    missing_changes.push(change);
+                match cache_guard.get_change(seq_num) {
+                    Some(change) => missing_changes.push(change),
+                    None => gap_sns.push(seq_num),
                 }
             }
+        }
+
+        if !gap_sns.is_empty() {
+            debug!(
+                "[SEDP] GAP for {} missing SN(s) not in cache, remote: {:?}",
+                gap_sns.len(),
+                remote_reader_guid
+            );
+            self.send_sedp_gap_for_vec(
+                remote_reader_guid,
+                acknack.reader_id,
+                acknack.writer_id,
+                gap_sns,
+            )?;
         }
 
         if !missing_changes.is_empty() {
@@ -2426,143 +2399,7 @@ impl UnicastMessageProcessor for SedpLogic {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, thread};
-
-    use crate::rtps::{
-        entities::{entity::Entity, participant::Participant},
-        logic::spdp_logic::SpdpLogic,
-        task::{
-            discovery_traffic::{
-                discovery_multicast_listening_task::DiscoveryMulticastListeningTask,
-                discovery_unicast_listening_task::DiscoveryUnicastListeningTask,
-            },
-            sending_handler::SendingHandler,
-        },
-        transport::{socket::Socket, TransportConfig},
-    };
-    use crate::test_utils::unique_domain_id;
-
-    // Remote DDS must be running
-    // For sedp_send test, need sedp-related writer's reader locator, reader proxy
-    // And need remote_participant_proxy_datas in participant
-    // So run discovery_multicast_listening_task
-    // Automatically proceeds to send sedp message(HEARTBEAT)
-    #[test]
-    #[ignore]
-    fn test_send_sedp_message() {
-        env_logger::builder().filter_level(log::LevelFilter::Debug).init();
-
-        let domain_id = unique_domain_id() as u32;
-        let mut socket = Socket::new(domain_id, TransportConfig::default()); //domain_id 0
-        socket.create_socket();
-        let participant =
-            Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ips()));
-
-        // Socket reset required??
-        // socket.close();
-        // return;
-        let _ = SendingHandler::get_instance(
-            participant.clone(),
-            Some(socket.sender()),
-            socket.tcp_sender(),
-        );
-
-        //discovery multicast port : 7400
-        //discovery unicast port :  7410
-        //user traffic multicast port : 7401
-        //user traffic unicast port : 7411
-        let mut discovery_multicast_listening_task = DiscoveryMulticastListeningTask::new(
-            socket.discovery_multicast_listener(),
-            participant.clone(),
-        );
-        //multicast listening
-        thread::Builder::new()
-            .name("discovery_traffic_multicast_listening".to_string())
-            .spawn(move || {
-                // Register thread name for monitoring
-                {
-                    use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::register_current_thread_name_with_guid_prefix(
-                        "discovery_traffic_multicast_listening",
-                        participant.guid().prefix(),
-                    );
-                }
-
-                let _ = discovery_multicast_listening_task.multicast_listening();
-                eprintln!("discovery multicast listening thread finished");
-            })
-            .expect("Failed to create discovery multicast listening thread");
-
-        // Code to verify that errors are being sent
-        thread::sleep(std::time::Duration::from_secs(100));
-    }
-
-    // Remote DDS must be running
-    // SPDP, SEDP execution test
-    #[test]
-    #[ignore]
-    fn test_process_sedp() {
-        env_logger::builder().filter_level(log::LevelFilter::Info).init();
-
-        let domain_id = unique_domain_id() as u32;
-        let mut socket = Socket::new(domain_id, TransportConfig::default()); //domain_id 0
-        socket.create_socket();
-        let participant =
-            Arc::new(Participant::new(domain_id, socket.participant_id(), socket.working_ips()));
-
-        let _ = SendingHandler::get_instance(participant.clone(), Some(socket.sender()), None);
-
-        //spdp multicast
-        let spdp_logic = SpdpLogic::new(
-            participant.clone(),
-            Some(socket.sender()),
-            None,
-            Vec::new(), // No initial peers for test
-        );
-        spdp_logic.trigger_send_spdp_multicast().unwrap();
-        //discovery multicast port : 7400
-        //discovery unicast port :  7410
-        //user traffic multicast port : 7401
-        //user traffic unicast port : 7411
-        let mut discovery_multicast_listening_task = DiscoveryMulticastListeningTask::new(
-            socket.discovery_multicast_listener(),
-            participant.clone(),
-        );
-        let participant_guid = participant.clone().guid();
-        //multicast listening
-        thread::Builder::new()
-            .name("discovery_traffic_multicast_listening".to_string())
-            .spawn(move || {
-                // Register thread name for monitoring
-                {
-                    use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::register_current_thread_name_with_guid_prefix(
-                        "discovery_traffic_multicast_listening",
-                        participant_guid.prefix(),
-                    );
-                }
-
-                let _ = discovery_multicast_listening_task.multicast_listening();
-                eprintln!("discovery multicast listening thread finished");
-            })
-            .expect("Failed to create discovery multicast listening thread");
-
-        let mut discovery_unicast_listening_task = DiscoveryUnicastListeningTask::new(
-            socket.discovery_unicast_listener(),
-            socket.discovery_tcp_listener(),
-            participant.clone(),
-        );
-
-        //unicast listening
-        thread::Builder::new()
-            .name("discovery_traffic_unicast_listening".to_string())
-            .spawn(move || {
-                let _ = discovery_unicast_listening_task.unicast_listening();
-                eprintln!("discovery unicast listening thread finished");
-            })
-            .expect("Failed to create discovery unicast listening thread");
-
-        // Wait for other threads
-        thread::sleep(std::time::Duration::from_secs(100));
-    }
+    // TODO: Tests need updating to use TransportPlugin + MessageSource pattern.
+    // Previous tests used removed Socket methods (create_socket, sender, discovery_multicast_listener, etc.)
+    // These will be updated when DcpsBridge migration (Phase 5+) is complete.
 }

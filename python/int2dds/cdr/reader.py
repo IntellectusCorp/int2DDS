@@ -375,12 +375,19 @@ class CdrReader:
             data_length = 4
         elif lc == 3:
             data_length = 8
-        elif lc in (4, 5):
+        elif lc == 4:
             data_length = self.read_u32()
-        elif lc == 6:
-            data_length = self.read_u32() * 4 + 4
-        else:  # lc == 7
-            data_length = self.read_u32() * 8 + 4
+        else:
+            if self._pos + 4 > len(self._buf):
+                raise CdrUnderflowError("NEXTINT extends beyond buffer")
+            fmt = "<I" if self._le else ">I"
+            nextint = struct.unpack_from(fmt, self._buf, self._pos)[0]
+            if lc == 5:
+                data_length = nextint
+            elif lc == 6:
+                data_length = 4 + 4 * nextint
+            else:  # lc == 7
+                data_length = 4 + 8 * nextint
 
         return member_id, data_length, must_understand
 

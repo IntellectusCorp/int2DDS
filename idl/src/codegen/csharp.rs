@@ -399,7 +399,11 @@ impl<'a> CsGen<'a> {
             ExtensibilityKind::Appendable => "Appendable",
             ExtensibilityKind::Mutable => "Mutable",
         };
+        let needs_union_dh = !matches!(u.extensibility, ExtensibilityKind::Final);
         self.line(&format!("var w = new CdrWriter(Extensibility.{}, xcdr2: xcdr2);", union_ext));
+        if needs_union_dh {
+            self.line("var _udt = w.DheaderBegin();");
+        }
         self.line(&format!("w.{}(Discriminator);", disc_write));
         self.line("switch (Discriminator)");
         self.line("{");
@@ -425,6 +429,9 @@ impl<'a> CsGen<'a> {
         }
         self.indent -= 1;
         self.line("}");
+        if needs_union_dh {
+            self.line("w.DheaderFinalize(_udt);");
+        }
         self.line("return w.ToBytes();");
         self.indent -= 1;
         self.line("}");
@@ -435,6 +442,9 @@ impl<'a> CsGen<'a> {
         self.line("{");
         self.indent += 1;
         self.line(&format!("var obj = new {}();", class_name));
+        if needs_union_dh {
+            self.line("var (_uSz, _uSp) = r.ReadDheader();");
+        }
         self.line(&format!("obj.Discriminator = r.{}();", disc_read));
         self.line("switch (obj.Discriminator)");
         self.line("{");
@@ -460,6 +470,9 @@ impl<'a> CsGen<'a> {
         }
         self.indent -= 1;
         self.line("}");
+        if needs_union_dh {
+            self.line("r.ReadDheaderEnd(_uSz, _uSp);");
+        }
         self.line("return obj;");
         self.indent -= 1;
         self.line("}");
@@ -469,6 +482,9 @@ impl<'a> CsGen<'a> {
         self.line("internal void SerializeCdrInline(CdrWriter w)");
         self.line("{");
         self.indent += 1;
+        if needs_union_dh {
+            self.line("var _udt = w.DheaderBegin();");
+        }
         self.line(&format!("w.{}(Discriminator);", disc_write));
         self.line("switch (Discriminator)");
         self.line("{");
@@ -494,6 +510,9 @@ impl<'a> CsGen<'a> {
         }
         self.indent -= 1;
         self.line("}");
+        if needs_union_dh {
+            self.line("w.DheaderFinalize(_udt);");
+        }
         self.indent -= 1;
         self.line("}");
 
@@ -803,6 +822,8 @@ impl<'a> CsGen<'a> {
             ResolvedType::Sequence { element, .. } => {
                 let non_prim = Self::is_non_primitive_element(element);
                 if non_prim {
+                    self.line("{");
+                    self.indent += 1;
                     self.line("var _seqDt = w.DheaderBegin();");
                 }
                 self.line(&format!("w.WriteSeqHeader((uint){}.Count);", accessor));
@@ -814,11 +835,15 @@ impl<'a> CsGen<'a> {
                 self.line("}");
                 if non_prim {
                     self.line("w.DheaderFinalize(_seqDt);");
+                    self.indent -= 1;
+                    self.line("}");
                 }
             }
             ResolvedType::Array { element, .. } => {
                 let non_prim = Self::is_non_primitive_element(element);
                 if non_prim {
+                    self.line("{");
+                    self.indent += 1;
                     self.line("var _arrDt = w.DheaderBegin();");
                 }
                 self.line(&format!("foreach (var _item in {})", accessor));
@@ -829,9 +854,18 @@ impl<'a> CsGen<'a> {
                 self.line("}");
                 if non_prim {
                     self.line("w.DheaderFinalize(_arrDt);");
+                    self.indent -= 1;
+                    self.line("}");
                 }
             }
             ResolvedType::Map { key, value, .. } => {
+                let non_prim = Self::is_non_primitive_element(key)
+                    || Self::is_non_primitive_element(value);
+                if non_prim {
+                    self.line("{");
+                    self.indent += 1;
+                    self.line("var _mapDt = w.DheaderBegin();");
+                }
                 self.line(&format!("w.WriteSeqHeader((uint){}.Count);", accessor));
                 self.line(&format!("foreach (var _entry in {})", accessor));
                 self.line("{");
@@ -840,6 +874,11 @@ impl<'a> CsGen<'a> {
                 self.emit_write_field(value, "_entry.Value");
                 self.indent -= 1;
                 self.line("}");
+                if non_prim {
+                    self.line("w.DheaderFinalize(_mapDt);");
+                    self.indent -= 1;
+                    self.line("}");
+                }
             }
         }
     }
@@ -1139,6 +1178,16 @@ impl<'a> CsGen<'a> {
                 let count_var = format!("_{name}Count");
                 let cs_key = self.type_to_csharp(key);
                 let cs_val = self.type_to_csharp(value);
+                let non_prim = Self::is_non_primitive_element(key)
+                    || Self::is_non_primitive_element(value);
+                let size_var = format!("_{name}MapSize");
+                let start_var = format!("_{name}MapStart");
+                if non_prim {
+                    self.line(&format!(
+                        "var ({}, {}) = r.ReadDheader();",
+                        size_var, start_var
+                    ));
+                }
                 self.line(&format!("var {} = r.ReadSeqHeader();", count_var));
                 self.line(&format!(
                     "{}.{} = new Dictionary<{}, {}>((int){});",
@@ -1152,6 +1201,9 @@ impl<'a> CsGen<'a> {
                 self.line(&format!("{}.{}[_k] = _v;", obj, name));
                 self.indent -= 1;
                 self.line("}");
+                if non_prim {
+                    self.line(&format!("r.ReadDheaderEnd({}, {});", size_var, start_var));
+                }
             }
         }
     }
@@ -1273,6 +1325,16 @@ impl<'a> CsGen<'a> {
                 let count_var = format!("{var_name}Count");
                 let cs_key = self.type_to_csharp(key);
                 let cs_val = self.type_to_csharp(value);
+                let non_prim = Self::is_non_primitive_element(key)
+                    || Self::is_non_primitive_element(value);
+                let size_var = format!("{var_name}MapSize");
+                let start_var = format!("{var_name}MapStart");
+                if non_prim {
+                    self.line(&format!(
+                        "var ({}, {}) = r.ReadDheader();",
+                        size_var, start_var
+                    ));
+                }
                 self.line(&format!("var {} = r.ReadSeqHeader();", count_var));
                 self.line(&format!(
                     "var {} = new Dictionary<{}, {}>((int){});",
@@ -1286,6 +1348,9 @@ impl<'a> CsGen<'a> {
                 self.line(&format!("{}[_mk] = _mv;", var_name));
                 self.indent -= 1;
                 self.line("}");
+                if non_prim {
+                    self.line(&format!("r.ReadDheaderEnd({}, {});", size_var, start_var));
+                }
             }
         }
     }

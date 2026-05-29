@@ -228,37 +228,67 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
                 }
             };
 
-        let sending_handler =
-            SendingHandler::get_instance(self.get_upgraded_participant()?, None, None);
+        let participant = self.get_upgraded_participant()?;
+        let sending_handler = SendingHandler::get_instance(participant.clone(), None);
+        let remote_prefix = spdp_discovered_participant_data.guid_prefix();
+        let period = heartbeat_period.to_std_duration();
+        let spdp_payload = self.create_spdp_message()?;
 
+        // Send each SPDP message to the discovered participant before registering periodic timers
+        // since timer is not triggered immediately after registration
         sending_handler.push_message_and_wake(MessageType::PeriodicParticipantDataUnicast(
             None,
-            heartbeat_period.to_std_duration(),
+            period,
             spdp_discovered_participant_data.clone(),
-            self.create_spdp_message()?,
+            spdp_payload.clone(),
         ));
 
         sending_handler.push_message_and_wake(MessageType::PeriodicPublicationHeartbeat(
             None,
-            heartbeat_period.to_std_duration(),
-            Arc::new(spdp_discovered_participant_data.guid_prefix()),
+            period,
+            Arc::new(remote_prefix),
         ));
 
         sending_handler.push_message_and_wake(MessageType::PeriodicSubscriptionHeartbeat(
             None,
-            heartbeat_period.to_std_duration(),
-            Arc::new(spdp_discovered_participant_data.guid_prefix()),
+            period,
+            Arc::new(remote_prefix),
         ));
 
-        sending_handler.push_message_and_wake(MessageType::P2pHeartbeat(Some(
-            spdp_discovered_participant_data.guid_prefix(),
-        )));
+        sending_handler.push_message_and_wake(MessageType::P2pHeartbeat(Some(remote_prefix)));
 
         // sending_handler.push_message_and_wake(MessageType::PeriodicSedpTopicHeartbeat(
         //     None,
         //     heartbeat_period.to_std_duration().clone(),
         //     spdp_discovered_participant_data.clone(),
         // ));
+
+        let (_, sedp_logic_arc, _) = participant.get_logics();
+        if let Some(sedp_logic) = sedp_logic_arc.as_ref().as_ref() {
+            let _ = sedp_logic.register_periodic_send_timer(
+                remote_prefix,
+                EntityId::SPDP_BUILTIN_PARTICIPANT_WRITER,
+                period,
+                MessageType::PeriodicParticipantDataUnicast(
+                    None,
+                    period,
+                    spdp_discovered_participant_data.clone(),
+                    spdp_payload,
+                ),
+            );
+            let _ = sedp_logic.register_periodic_send_timer(
+                remote_prefix,
+                EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER,
+                period,
+                MessageType::PeriodicPublicationHeartbeat(None, period, Arc::new(remote_prefix)),
+            );
+            let _ = sedp_logic.register_periodic_send_timer(
+                remote_prefix,
+                EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_WRITER,
+                period,
+                MessageType::PeriodicSubscriptionHeartbeat(None, period, Arc::new(remote_prefix)),
+            );
+        }
 
         Ok(())
     }

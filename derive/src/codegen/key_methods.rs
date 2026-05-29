@@ -10,7 +10,6 @@ pub struct KeyFieldInfo {
 pub fn generate_key_methods(
     key_field_info: Option<&KeyFieldInfo>,
     full_type: &proc_macro2::TokenStream,
-    _field_deserialization: &proc_macro2::TokenStream,
     crate_path: &proc_macro2::TokenStream,
 ) -> (proc_macro2::TokenStream, proc_macro2::TokenStream, proc_macro2::TokenStream) {
     if let Some(key_info) = key_field_info {
