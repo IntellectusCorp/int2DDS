@@ -173,14 +173,25 @@ impl Xcdr2Serializer {
         let must_bit: u32 = if must_understand { 0x8000_0000 } else { 0 };
 
         let (lc_word, nextint) = self.select_lc(len, lc_hint);
+        let lc = lc_word >> 28;
 
         let emh = must_bit | lc_word | (member_id & 0x0FFF_FFFF);
-        if let Some(ni) = nextint {
-            self.insert_nextint_slot_at(emh_pos + 4);
-            self.write_dheader_at(emh_pos, emh);
-            self.write_dheader_at(emh_pos + 4, ni);
-        } else {
-            self.write_dheader_at(emh_pos, emh);
+        match lc {
+            // LC=4: separate NEXTINT slot before payload
+            4 => {
+                let ni = nextint.expect("LC=4 always has NEXTINT");
+                self.insert_nextint_slot_at(emh_pos + 4);
+                self.write_dheader_at(emh_pos, emh);
+                self.write_dheader_at(emh_pos + 4, ni);
+            }
+            // LC=5/6/7: NEXTINT overlaps with payload's first 4 bytes
+            5 | 6 | 7 => {
+                self.write_dheader_at(emh_pos, emh);
+            }
+            // LC=0..=3: no NEXTINT
+            _ => {
+                self.write_dheader_at(emh_pos, emh);
+            }
         }
         Ok(())
     }
@@ -445,16 +456,12 @@ impl<'a> DeserializerReader for Xcdr2Deserializer<'a> {
     }
 }
 
-const TYPE_HASH_FLAG: u16 = 0x0001;
-const TYPE_HASH_LENGTH: usize = 14;
-
 fn parse_encapsulation_header(data: &[u8]) -> Result<(Endianness, usize, bool), CdrError> {
     if data.len() < 4 {
         return Err(CdrError::InsufficientData);
     }
 
     let encap_id = u16::from_be_bytes([data[0], data[1]]);
-    let options = u16::from_be_bytes([data[2], data[3]]);
 
     let (endianness, is_xcdr2) = match encap_id {
         0x0000 | 0x0002 => (Endianness::BigEndian, false),
@@ -464,14 +471,5 @@ fn parse_encapsulation_header(data: &[u8]) -> Result<(Endianness, usize, bool), 
         _ => return Err(CdrError::InvalidEncapsulation(encap_id)),
     };
 
-    let mut header_size = 4;
-    if is_xcdr2 && (options & TYPE_HASH_FLAG) != 0 {
-        header_size += TYPE_HASH_LENGTH;
-    }
-
-    if data.len() < header_size {
-        return Err(CdrError::InsufficientData);
-    }
-
-    Ok((endianness, header_size, is_xcdr2))
+    Ok((endianness, 4, is_xcdr2))
 }

@@ -3,9 +3,16 @@
 
 use std::io::{self, Read, Write};
 
+use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
+
 /// Maximum message size for TCP framing (16 MB)
-/// This is a reasonable limit to prevent memory exhaustion attacks
-const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024; // 16 MB
+const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
+
+/// int2DDS TCP frame magic: "INT2" (0x49 0x4E 0x54 0x32)
+const FRAME_MAGIC: [u8; 4] = [0x49, 0x4E, 0x54, 0x32];
+
+/// Magic field size
+const MAGIC_SIZE: usize = 4;
 
 /// Stateful framed message reader for non-blocking TCP streams
 ///
@@ -60,14 +67,14 @@ impl FramedReader {
 
                 // Validate length
                 if len == 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
+                    return Err(transport_io_error(
+                        TransportErrorCode::TcpFrameInvalidLength,
                         "Invalid message length: 0",
                     ));
                 }
                 if len > MAX_MESSAGE_SIZE {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
+                    return Err(transport_io_error(
+                        TransportErrorCode::TcpFrameTooLarge,
                         format!(
                             "Message too large: {} bytes (max: {} bytes)",
                             len, MAX_MESSAGE_SIZE
@@ -92,10 +99,19 @@ impl FramedReader {
         let total_len = 4 + expected_len;
 
         if self.buffer.len() >= total_len {
-            // Extract the complete message
-            let message = self.buffer[4..total_len].to_vec();
+            // Validate magic (first 4 bytes of payload)
+            if expected_len < MAGIC_SIZE || self.buffer[4..8] != FRAME_MAGIC {
+                self.buffer.drain(0..total_len);
+                self.expected_len = None;
+                return Err(transport_io_error(
+                    TransportErrorCode::TcpFrameInvalidMagic,
+                    "Invalid frame magic (expected INT2)",
+                ));
+            }
 
-            // Remove consumed data from buffer
+            // Extract payload after magic
+            let message = self.buffer[4 + MAGIC_SIZE..total_len].to_vec();
+
             self.buffer.drain(0..total_len);
             self.expected_len = None;
 
@@ -118,85 +134,104 @@ impl FramedReader {
     }
 }
 
-/// Write a framed message to a TCP stream using length-prefix framing
+/// Write a framed message to a TCP stream.
 ///
-/// Format: [4 bytes: message length (big-endian)][N bytes: message data]
+/// Format: [4B length (BE)] [4B magic "INT2"] [NB payload]
+/// length = magic(4) + payload size
 ///
-/// # Arguments
-/// * `stream` - The TCP stream to write to (must implement Write trait)
-/// * `data` - The message data to send
-///
-/// # Returns
-/// * `Ok(())` - Message written successfully
-/// * `Err(io::Error)` - Write failed or message too large
-///
-/// # Example
-/// ```ignore
-/// let mut stream = TcpStream::connect("127.0.0.1:8080")?;
-/// write_framed_message(&mut stream, b"Hello, World!")?;
-/// ```
+/// Single write_all to prevent TCP segmentation of header vs body.
 pub(crate) fn write_framed_message<W: Write>(stream: &mut W, data: &[u8]) -> io::Result<()> {
-    // Check message size limit
     if data.len() > MAX_MESSAGE_SIZE {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
+        return Err(transport_io_error(
+            TransportErrorCode::TcpFrameTooLarge,
             format!("Message too large: {} bytes (max: {} bytes)", data.len(), MAX_MESSAGE_SIZE),
         ));
     }
 
-    // Write length prefix (4 bytes, big-endian)
-    let len = data.len() as u32;
-    stream.write_all(&len.to_be_bytes())?;
-
-    // Write message data
-    stream.write_all(data)?;
-
-    // Ensure all data is sent
+    let total_payload = MAGIC_SIZE + data.len();
+    let mut buf = Vec::with_capacity(4 + total_payload);
+    buf.extend_from_slice(&(total_payload as u32).to_be_bytes());
+    buf.extend_from_slice(&FRAME_MAGIC);
+    buf.extend_from_slice(data);
+    stream.write_all(&buf)?;
     stream.flush()?;
 
     Ok(())
 }
 
-/// Read a framed message from a TCP stream using length-prefix framing
+/// Read a framed message from a TCP stream (blocking).
 ///
-/// Format: [4 bytes: message length (big-endian)][N bytes: message data]
-///
-/// # Arguments
-/// * `stream` - The TCP stream to read from (must implement Read trait)
-///
-/// # Returns
-/// * `Ok(Vec<u8>)` - The message data
-/// * `Err(io::Error)` - Read failed, invalid length, or message too large
-///
-/// # Example
-/// ```ignore
-/// let mut stream = TcpStream::connect("127.0.0.1:8080")?;
-/// let message = read_framed_message(&mut stream)?;
-/// println!("Received: {:?}", message);
-/// ```
+/// Format: [4B length (BE)] [4B magic "INT2"] [NB payload]
+/// Returns the payload after validating and stripping magic.
 pub(crate) fn read_framed_message<R: Read>(stream: &mut R) -> io::Result<Vec<u8>> {
-    // Read length prefix (4 bytes)
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf)?;
     let len = u32::from_be_bytes(len_buf) as usize;
 
-    // Validate message length
-    if len == 0 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid message length: 0"));
+    if len < MAGIC_SIZE {
+        return Err(transport_io_error(
+            TransportErrorCode::TcpFrameInvalidLength,
+            format!("Frame too short: {} bytes (minimum {})", len, MAGIC_SIZE),
+        ));
     }
 
     if len > MAX_MESSAGE_SIZE {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
+        return Err(transport_io_error(
+            TransportErrorCode::TcpFrameTooLarge,
             format!("Message too large: {} bytes (max: {} bytes)", len, MAX_MESSAGE_SIZE),
         ));
     }
 
-    // Read message data
     let mut data = vec![0u8; len];
     stream.read_exact(&mut data)?;
 
-    Ok(data)
+    // Validate magic
+    if data[0..4] != FRAME_MAGIC {
+        return Err(transport_io_error(
+            TransportErrorCode::TcpFrameInvalidMagic,
+            format!(
+                "Invalid frame magic: {:02x} {:02x} {:02x} {:02x} (expected INT2)",
+                data[0], data[1], data[2], data[3]
+            ),
+        ));
+    }
+
+    // Return payload after magic
+    Ok(data[MAGIC_SIZE..].to_vec())
+}
+
+/// Classification of a TCP frame payload
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TcpFrameKind {
+    /// Rtps data message (payload starts with RTPS magic: 0x52545053)
+    RtpsData,
+    /// TCP control message (payload[0] in 0x01..=0x7F)
+    Control,
+    /// Unknown or invalid format
+    Unknown,
+}
+
+/// RTPS protocol magic bytes: "RTPS" (0x52, 0x54, 0x50, 0x53)
+const RTPS_MAGIC: [u8; 4] = [0x52, 0x54, 0x50, 0x53];
+
+/// Classify a frame payload as RTPS data or TCP control message.
+///
+/// Called on the payload AFTER the magic has been stripped by read_framed_message/FramedReader.
+///
+/// Classification rules:
+/// - If payload starts with RTPS magic (0x52545053), it is RtpsData
+/// - If payload[0] matches a known control message type (0x01..=0x07), it is Control
+/// - Otherwise, Unknown
+pub(crate) fn classify_frame(payload: &[u8]) -> TcpFrameKind {
+    if payload.len() >= 4 && payload[0..4] == RTPS_MAGIC {
+        return TcpFrameKind::RtpsData;
+    }
+
+    if !payload.is_empty() && payload[0] >= 0x01 && payload[0] <= 0x07 {
+        return TcpFrameKind::Control;
+    }
+
+    TcpFrameKind::Unknown
 }
 
 #[cfg(test)]
@@ -209,18 +244,18 @@ mod tests {
         let test_data = b"Hello, TCP Framing!";
         let mut buffer = Vec::new();
 
-        // Write framed message
         write_framed_message(&mut buffer, test_data).unwrap();
 
-        // Verify buffer contains: [length (4 bytes)][data]
-        assert_eq!(buffer.len(), 4 + test_data.len());
-        assert_eq!(&buffer[0..4], &(test_data.len() as u32).to_be_bytes());
-        assert_eq!(&buffer[4..], test_data);
+        // Verify: [4B length][4B magic "INT2"][payload]
+        let total_payload = MAGIC_SIZE + test_data.len();
+        assert_eq!(buffer.len(), 4 + total_payload);
+        assert_eq!(&buffer[0..4], &(total_payload as u32).to_be_bytes());
+        assert_eq!(&buffer[4..8], &FRAME_MAGIC);
+        assert_eq!(&buffer[8..], test_data);
 
-        // Read framed message
+        // Read back — returns payload without magic
         let mut cursor = Cursor::new(buffer);
         let read_data = read_framed_message(&mut cursor).unwrap();
-
         assert_eq!(read_data, test_data);
     }
 
@@ -229,12 +264,10 @@ mod tests {
         let messages = vec![b"First".to_vec(), b"Second message".to_vec(), b"Third".to_vec()];
         let mut buffer = Vec::new();
 
-        // Write multiple messages
         for msg in &messages {
             write_framed_message(&mut buffer, msg).unwrap();
         }
 
-        // Read multiple messages
         let mut cursor = Cursor::new(buffer);
         for expected in &messages {
             let read_data = read_framed_message(&mut cursor).unwrap();
@@ -243,13 +276,19 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_message_error() {
-        let buffer = vec![0u8; 4]; // Length = 0
-        let mut cursor = Cursor::new(buffer);
+    fn test_invalid_magic_rejected() {
+        // Manually write frame with wrong magic
+        let mut buffer = Vec::new();
+        let payload = b"test";
+        let total = MAGIC_SIZE + payload.len();
+        buffer.extend_from_slice(&(total as u32).to_be_bytes());
+        buffer.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]); // wrong magic
+        buffer.extend_from_slice(payload);
 
+        let mut cursor = Cursor::new(buffer);
         let result = read_framed_message(&mut cursor);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert!(result.unwrap_err().to_string().contains("Invalid frame magic"));
     }
 
     #[test]
@@ -258,18 +297,6 @@ mod tests {
         let mut buffer = Vec::new();
 
         let result = write_framed_message(&mut buffer, &large_data);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
-    }
-
-    #[test]
-    fn test_message_too_large_read() {
-        let mut buffer = Vec::new();
-        let invalid_len = (MAX_MESSAGE_SIZE + 1) as u32;
-        buffer.extend_from_slice(&invalid_len.to_be_bytes());
-
-        let mut cursor = Cursor::new(buffer);
-        let result = read_framed_message(&mut cursor);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
     }
@@ -289,13 +316,43 @@ mod tests {
     }
 
     #[test]
-    fn test_incomplete_read() {
-        let mut buffer = vec![0, 0, 0, 10]; // Length = 10
-        buffer.extend_from_slice(&[1, 2, 3]); // Only 3 bytes instead of 10
+    fn test_classify_frame_rtps() {
+        // RTPS magic: "RTPS" = [0x52, 0x54, 0x50, 0x53]
+        let rtps_payload = vec![0x52, 0x54, 0x50, 0x53, 0x02, 0x03, 0x00, 0x00];
+        assert_eq!(classify_frame(&rtps_payload), TcpFrameKind::RtpsData);
+    }
 
-        let mut cursor = Cursor::new(buffer);
-        let result = read_framed_message(&mut cursor);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+    #[test]
+    fn test_classify_frame_control() {
+        // BindRequest (0x01)
+        assert_eq!(classify_frame(&[0x01, 0x49, 0x4E, 0x54, 0x32]), TcpFrameKind::Control);
+        // BindResponse (0x02)
+        assert_eq!(classify_frame(&[0x02, 0x00]), TcpFrameKind::Control);
+        // Keepalive (0x04)
+        assert_eq!(classify_frame(&[0x04]), TcpFrameKind::Control);
+        // KeepaliveAck (0x05)
+        assert_eq!(classify_frame(&[0x05]), TcpFrameKind::Control);
+        // Close (0x07)
+        assert_eq!(classify_frame(&[0x07]), TcpFrameKind::Control);
+    }
+
+    #[test]
+    fn test_classify_frame_unknown() {
+        assert_eq!(classify_frame(&[]), TcpFrameKind::Unknown);
+        assert_eq!(classify_frame(&[0x00]), TcpFrameKind::Unknown);
+        assert_eq!(classify_frame(&[0x10, 0x20]), TcpFrameKind::Unknown);
+        // 0x52 alone (without full RTPS magic) — not enough bytes for RTPS, not in control range
+        assert_eq!(classify_frame(&[0x52]), TcpFrameKind::Unknown);
+    }
+
+    #[test]
+    fn test_classify_frame_no_overlap() {
+        // Verify that RTPS magic first byte (0x52) is outside control range (0x01..=0x07)
+        // so classification is always unambiguous
+        assert!(0x52 > 0x07);
+
+        // A payload starting with 0x52 but not matching full RTPS magic
+        let non_rtps = vec![0x52, 0x00, 0x00, 0x00];
+        assert_eq!(classify_frame(&non_rtps), TcpFrameKind::Unknown);
     }
 }

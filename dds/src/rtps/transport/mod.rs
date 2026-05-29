@@ -30,6 +30,9 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
+pub(crate) mod error;
+pub(crate) mod hybrid_transport_plugin;
+pub(crate) mod plugin;
 pub(crate) mod port_manager;
 pub(crate) mod shm;
 pub(crate) mod socket;
@@ -41,8 +44,6 @@ pub(crate) mod udp;
 pub(crate) use transport_config::TransportConfig;
 
 use std::env;
-use std::io;
-use std::net::SocketAddr;
 use std::sync::OnceLock;
 
 /// Transport protocol type
@@ -101,137 +102,4 @@ pub fn get_transport_type() -> TransportType {
         log::info!("[Transport] Using transport type: {:?}", transport);
         transport
     })
-}
-
-/// Transport trait for abstracting network transport mechanisms (UDP, TCP, etc.)
-///
-/// This trait defines the common interface that all transport implementations must provide.
-/// It allows the DDS layer to work with different transport protocols without knowing
-/// the specific implementation details.
-pub(crate) trait Transport: Send + Sync {
-    /// Send data to a specific address
-    ///
-    /// # Arguments
-    /// * `addr` - The destination socket address
-    /// * `data` - The data buffer to send
-    ///
-    /// # Returns
-    /// Number of bytes sent or an IO error
-    fn send(&self, addr: &SocketAddr, data: &[u8]) -> io::Result<usize>;
-
-    /// Send discovery message via multicast
-    ///
-    /// Note: TCP does not support multicast, so TCP implementations should return an error.
-    ///
-    /// # Arguments
-    /// * `domain_id` - The DDS domain ID (used to determine multicast port)
-    /// * `data` - The data buffer to send
-    ///
-    /// # Returns
-    /// Number of bytes sent or an IO error
-    fn send_multicast(&self, domain_id: u32, data: &[u8]) -> io::Result<usize>;
-
-    /// Get the local port number used by this transport
-    fn port(&self) -> u16;
-
-    /// Get the transport type (UDP or TCP)
-    fn transport_type(&self) -> TransportType;
-
-    /// Close the transport and release resources
-    fn close(self);
-}
-
-/// Listener trait for abstracting network listeners
-///
-/// This trait provides access to the underlying socket for event-driven I/O
-/// using mio. Different transport types return different socket types.
-pub(crate) trait Listener: Send {
-    /// Get a mutable reference to the UDP socket (if applicable)
-    ///
-    /// Returns Some for UDP listeners, None for TCP listeners
-    fn socket_udp(&mut self) -> Option<&mut mio::net::UdpSocket>;
-
-    /// Get a mutable reference to the TCP listener socket (if applicable)
-    ///
-    /// Returns Some for TCP listeners, None for UDP listeners
-    fn socket_tcp(&mut self) -> Option<&mut mio::net::TcpListener>;
-
-    /// Get the local port number
-    fn port(&self) -> u16;
-
-    /// Close the listener and release resources
-    fn close(&mut self);
-}
-
-/// Transport sender enum that can hold either UDP, TCP, or SHM sender
-///
-/// This enum allows the Socket struct to work with different transport types
-/// without knowing the specific implementation at compile time.
-#[derive(Debug)]
-pub(crate) enum TransportSender {
-    /// UDP transport sender
-    Udp(udp::UdpSender),
-    /// TCP transport sender
-    Tcp(tcp::TcpSender),
-    /// Shared Memory transport sender
-    Shm(shm::ShmSender),
-}
-
-impl TransportSender {
-    /// Force close the socket even when there are other Arc references.
-    /// This can be called with &self, unlike close() which requires ownership.
-    pub(crate) fn force_close(&self) {
-        match self {
-            TransportSender::Udp(sender) => sender.force_close(),
-            TransportSender::Tcp(_sender) => {
-                // TCP sender doesn't support force_close yet
-                log::warn!("[TransportSender] force_close not implemented for TCP");
-            }
-            TransportSender::Shm(sender) => {
-                sender.force_close();
-            }
-        }
-    }
-}
-
-impl Transport for TransportSender {
-    fn send(&self, addr: &SocketAddr, data: &[u8]) -> io::Result<usize> {
-        match self {
-            TransportSender::Udp(sender) => sender.send(addr, data),
-            TransportSender::Tcp(sender) => sender.send(addr, data),
-            TransportSender::Shm(sender) => sender.send(addr, data),
-        }
-    }
-
-    fn send_multicast(&self, domain_id: u32, data: &[u8]) -> io::Result<usize> {
-        match self {
-            TransportSender::Udp(sender) => sender.send_multicast(domain_id, data),
-            TransportSender::Tcp(sender) => sender.send_multicast(domain_id, data),
-            TransportSender::Shm(sender) => sender.send_multicast(domain_id, data),
-        }
-    }
-
-    fn port(&self) -> u16 {
-        match self {
-            TransportSender::Udp(sender) => sender.port(),
-            TransportSender::Tcp(sender) => sender.port(),
-            TransportSender::Shm(sender) => sender.port(),
-        }
-    }
-
-    fn transport_type(&self) -> TransportType {
-        match self {
-            TransportSender::Udp(sender) => sender.transport_type(),
-            TransportSender::Tcp(sender) => sender.transport_type(),
-            TransportSender::Shm(sender) => sender.transport_type(),
-        }
-    }
-
-    fn close(self) {
-        match self {
-            TransportSender::Udp(sender) => sender.close(),
-            TransportSender::Tcp(sender) => sender.close(),
-            TransportSender::Shm(sender) => sender.close(),
-        }
-    }
 }

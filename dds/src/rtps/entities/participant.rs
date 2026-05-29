@@ -10,8 +10,6 @@
 use std::{
     collections::HashMap,
     fmt::Debug,
-    net::Ipv4Addr,
-    str::FromStr,
     sync::{atomic::AtomicBool, Arc, Mutex, OnceLock},
 };
 
@@ -63,11 +61,9 @@ use crate::{
             sedp_logic::SedpLogic, spdp_logic::SpdpLogic, user_logic::UserLogic,
             wlp_logic::WlpLogic,
         },
-        transport::{
-            get_transport_type, port_manager::PortManager, TransportSender, TransportType,
-        },
+        transport::plugin::TransportPlugin,
     },
-    utils::timer::timer_handler::TimerHandler,
+    utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
 };
 
 #[derive(Clone)]
@@ -132,10 +128,19 @@ impl Entity for Participant {
 }
 
 impl Participant {
+    /// Create a new Participant.
+    ///
+    /// `metatraffic_unicast_locators` / `default_unicast_locators` are the
+    /// locators this participant advertises to peers over SPDP. The caller
+    /// (typically `DcpsBridge`) obtains them from the owning `TransportPlugin`
+    /// so that locator generation stays encapsulated in the transport layer —
+    /// `Participant` intentionally has no knowledge of transport types.
     pub(crate) fn new(
         domain_id: DomainId,
         participant_id: ParticipantId,
         working_ips: Vec<String>,
+        metatraffic_unicast_locators: Vec<Locator>,
+        default_unicast_locators: Vec<Locator>,
     ) -> Self {
         let guid = Guid::new(Guid::generate_unique_guid_prefix(), EntityId::PARTICIPANT);
 
@@ -145,12 +150,12 @@ impl Participant {
             Participant::init_builtin_endpoints(),
         );
 
-        Self::init_locators(
-            &working_ips,
-            &mut local_participant_proxy_data,
-            domain_id,
-            participant_id,
-        );
+        for locator in metatraffic_unicast_locators {
+            local_participant_proxy_data.add_metatraffic_unicast_locator(locator);
+        }
+        for locator in default_unicast_locators {
+            local_participant_proxy_data.add_default_unicast_locator(locator);
+        }
 
         let local_participant_proxy_data = Arc::new(local_participant_proxy_data);
         let builtin_endpoints = Arc::new(BuiltinEndpoints::new(guid));
@@ -195,92 +200,6 @@ impl Participant {
         endpointset.add(BuiltinEndpointFlag::DISC_BUILTIN_ENDPOINT_TOPICS_ANNOUNCER);
         endpointset.add(BuiltinEndpointFlag::DISC_BUILTIN_ENDPOINT_TOPICS_DETECTOR);
         endpointset
-    }
-
-    /// Initialize locators for participant proxy data based on transport type.
-    /// Registers locators for all available NIC IPs.
-    fn init_locators(
-        working_ips: &Vec<String>,
-        local_participant_proxy_data: &mut SPDPDiscoveredParticipantData,
-        domain_id: DomainId,
-        participant_id: ParticipantId,
-    ) {
-        let transport_type = get_transport_type();
-        let metatraffic_port =
-            PortManager::get_discovery_traffic_unicast_port(domain_id, participant_id) as u32;
-        let user_port =
-            PortManager::get_user_traffic_unicast_port(domain_id, participant_id) as u32;
-
-        // Env override replaces every NIC IP with a single advertised IP
-        if let Some(ext_ip) = crate::common::env::get_external_address() {
-            Self::add_locators_for_ip(
-                local_participant_proxy_data,
-                transport_type,
-                ext_ip,
-                metatraffic_port,
-                user_port,
-            );
-            return;
-        }
-
-        for working_ip in working_ips {
-            let Ok(ip) = Ipv4Addr::from_str(working_ip) else {
-                continue;
-            };
-            Self::add_locators_for_ip(
-                local_participant_proxy_data,
-                transport_type,
-                ip,
-                metatraffic_port,
-                user_port,
-            );
-        }
-    }
-
-    fn add_locators_for_ip(
-        local_participant_proxy_data: &mut SPDPDiscoveredParticipantData,
-        transport_type: TransportType,
-        ip: Ipv4Addr,
-        metatraffic_port: u32,
-        user_port: u32,
-    ) {
-        match transport_type {
-            TransportType::UDP => {
-                local_participant_proxy_data.add_metatraffic_unicast_locator(
-                    Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port),
-                );
-                local_participant_proxy_data
-                    .add_default_unicast_locator(Locator::from_ip_v4_addr_and_port(&ip, user_port));
-            }
-            TransportType::TCP => {
-                local_participant_proxy_data
-                    .add_metatraffic_unicast_locator(Locator::from_tcp_v4(ip, metatraffic_port));
-                local_participant_proxy_data
-                    .add_default_unicast_locator(Locator::from_tcp_v4(ip, user_port));
-            }
-            TransportType::Hybrid => {
-                // Add both UDP and TCP locators
-                local_participant_proxy_data.add_metatraffic_unicast_locator(
-                    Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port),
-                );
-                local_participant_proxy_data
-                    .add_default_unicast_locator(Locator::from_ip_v4_addr_and_port(&ip, user_port));
-                local_participant_proxy_data
-                    .add_metatraffic_unicast_locator(Locator::from_tcp_v4(ip, metatraffic_port));
-                local_participant_proxy_data
-                    .add_default_unicast_locator(Locator::from_tcp_v4(ip, user_port));
-            }
-            TransportType::SHM => {
-                // metatraffic uses UDP. For default user-data, advertise both
-                local_participant_proxy_data.add_metatraffic_unicast_locator(
-                    Locator::from_ip_v4_addr_and_port(&ip, metatraffic_port),
-                );
-                local_participant_proxy_data
-                    .add_default_unicast_locator(Locator::from_shm(&ip, user_port));
-                local_participant_proxy_data
-                    .add_default_unicast_locator(Locator::from_ip_v4_addr_and_port(&ip, user_port));
-            }
-        }
     }
 
     pub(crate) fn builtin_endpoints(&self) -> Arc<BuiltinEndpoints> {
@@ -905,6 +824,22 @@ impl Participant {
             terminated_participant_guid.prefix(),
         )?;
 
+        // Remove SEDP periodic timers tied to this remote
+        let remote_prefix = terminated_participant_guid.prefix();
+        if let Ok(handler) = TimerHandler::get_instance(self.guid().prefix()).lock() {
+            for writer_entity_id in [
+                EntityId::SPDP_BUILTIN_PARTICIPANT_WRITER,
+                EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER,
+                EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_WRITER,
+                EntityId::SEDP_BUILTIN_TOPICS_WRITER,
+            ] {
+                handler.remove_timer(TimerId::SedpScheduledMessage {
+                    remote_prefix,
+                    writer_entity_id,
+                });
+            }
+        }
+
         info!("Successfully unmatched with remote participant: {:?}", terminated_participant_guid);
         Ok(())
     }
@@ -1006,43 +941,39 @@ impl Participant {
     }
 
     /// Initialize all logic instances. Must be called immediately after creating Participant.
-    /// This creates SPDP, SEDP, User, and WLP logic instances using the provided sender.
+    /// This creates SPDP, SEDP, User, and WLP logic instances using the provided transport.
+    ///
+    /// `property` is consulted first for `int2dds.initial_peers`; if absent, falls back to the
+    /// `INT2DDS_INITIAL_PEERS` environment variable.
     pub(crate) fn init_logics(
         self: &Arc<Self>,
-        sender: Arc<TransportSender>,
-        tcp_sender: Option<Arc<TransportSender>>,
-        shm_sender: Option<Arc<TransportSender>>,
+        transport: Arc<dyn TransportPlugin>,
+        property: &crate::infrastructure::qos_policy::PropertyQosPolicy,
     ) {
-        // Get initial peers from environment for TCP/Hybrid discovery
-        let initial_peers = crate::common::env::get_initial_peers();
+        // Prefer initial_peers from PropertyQosPolicy; fall back to env var.
+        let initial_peers = property
+            .find_property("int2dds.initial_peers")
+            .map(crate::common::env::parse_initial_peers)
+            .unwrap_or_else(crate::common::env::get_initial_peers);
         if !initial_peers.is_empty() {
             log::info!("Configured initial peers for SPDP: {:?}", initial_peers);
         }
 
         // Create SPDP logic
-        let spdp_logic = Arc::new(Some(SpdpLogic::new(
-            self.clone(),
-            Some(sender.clone()),
-            tcp_sender.clone(),
-            initial_peers,
-        )));
+        let spdp_logic =
+            Arc::new(Some(SpdpLogic::new(self.clone(), transport.clone(), initial_peers)));
         let _ = self.spdp_logic.set(spdp_logic);
 
         // Create SEDP logic
-        let sedp_logic = Arc::new(Some(SedpLogic::new(self.clone(), Some(sender.clone()))));
+        let sedp_logic = Arc::new(Some(SedpLogic::new(self.clone(), transport.clone())));
         let _ = self.sedp_logic.set(sedp_logic);
 
         // Create User logic
-        let user_logic = Arc::new(Some(UserLogic::new(
-            self.clone(),
-            Some(sender.clone()),
-            tcp_sender.clone(),
-            shm_sender,
-        )));
+        let user_logic = Arc::new(Some(UserLogic::new(self.clone(), transport.clone())));
         let _ = self.user_logic.set(user_logic);
 
         // Create WLP logic
-        let wlp_logic = WlpLogic::new(self.clone(), sender);
+        let wlp_logic = WlpLogic::new(self.clone(), transport);
         let _ = self.wlp_logic.set(wlp_logic);
     }
 

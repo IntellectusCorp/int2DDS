@@ -8,9 +8,10 @@ use log::{debug, trace, warn};
 // use rand::Rng;
 use std::collections::HashMap;
 use std::ops::Add;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::common::instance_handle::InstanceHandle;
+use crate::rtps::common::count_filter::should_accept_count;
 use crate::rtps::common::entity_id::EntityId;
 use crate::rtps::common::guid::{Guid, GuidPrefix};
 use crate::rtps::common::locator::Locator;
@@ -46,10 +47,7 @@ use crate::rtps::messages::submessages::heartbeat::Heartbeat;
 use crate::rtps::messages::submessages::nack_frag::NackFrag;
 use crate::rtps::task::sending_handler::{MessageType, SendingHandler};
 use crate::rtps::task::user_traffic::user_unicast_listening_task::UserUnicastListeningTask;
-use crate::rtps::transport::shm::ShmListener;
-use crate::rtps::transport::tcp::TcpListener;
-use crate::rtps::transport::udp::udp_listener::UdpListener;
-use crate::rtps::transport::{Transport, TransportSender};
+use crate::rtps::transport::plugin::{MessageSource, SendTarget, TransportPlugin};
 use crate::rtps::{
     entities::participant::Participant, messages::message_receiver::MessageReceiver,
 };
@@ -58,7 +56,6 @@ use crate::utils::timer::{timer_handler::TimerHandler, timer_id::TimerId};
 use dashmap::DashMap;
 use mio::Waker;
 
-use std::net::{SocketAddr, SocketAddrV4};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::thread::{self, JoinHandle};
 
@@ -66,9 +63,7 @@ use std::thread::{self, JoinHandle};
 #[derive(Clone)]
 pub(crate) struct UserLogic {
     participant: Weak<Participant>,
-    sender: Option<Arc<TransportSender>>,
-    tcp_sender: Option<Arc<TransportSender>>,
-    shm_sender: Option<Arc<TransportSender>>,
+    transport: Arc<dyn TransportPlugin>,
     fragment_buffers: Arc<DashMap<(Guid, SequenceNumber), FragmentBuffer>>,
     unicast_listening_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     unicast_listening_waker: Arc<OnceLock<Arc<Waker>>>,
@@ -76,17 +71,10 @@ pub(crate) struct UserLogic {
 
 // Initialization
 impl UserLogic {
-    pub(crate) fn new(
-        participant: Arc<Participant>,
-        sender: Option<Arc<TransportSender>>,
-        tcp_sender: Option<Arc<TransportSender>>,
-        shm_sender: Option<Arc<TransportSender>>,
-    ) -> Self {
+    pub(crate) fn new(participant: Arc<Participant>, transport: Arc<dyn TransportPlugin>) -> Self {
         Self {
             participant: Arc::downgrade(&participant),
-            sender,
-            tcp_sender,
-            shm_sender,
+            transport,
             fragment_buffers: Arc::new(DashMap::new()),
             unicast_listening_handle: Arc::new(Mutex::new(None)),
             unicast_listening_waker: Arc::new(OnceLock::new()),
@@ -103,51 +91,39 @@ impl UserLogic {
     pub(crate) fn start_user_traffic(
         &self,
         domain_id: DomainId,
-        user_multicast_listener: Option<UdpListener>,
-        user_unicast_listener: Option<UdpListener>,
-        tcp_listener: Option<TcpListener>,
-        shm_listener: Option<ShmListener>,
-        sender: Arc<TransportSender>,
+        user_unicast_source: Option<MessageSource>,
     ) -> RtpsResult<()> {
-        let participant = self.get_upgraded_participant()?;
+        if let Some(unicast_source) = user_unicast_source {
+            let participant = self.get_upgraded_participant()?;
 
-        let mut user_unicast_listening_task = UserUnicastListeningTask::new(
-            user_unicast_listener,
-            tcp_listener,
-            shm_listener,
-            participant.clone(),
-        );
+            let mut user_unicast_listening_task =
+                UserUnicastListeningTask::new(participant.clone());
+            user_unicast_listening_task.set_shutdown_waker(self.unicast_listening_waker.clone());
+            let participant_guid = participant.guid();
 
-        user_unicast_listening_task.set_shutdown_waker(self.unicast_listening_waker.clone());
+            let unicast_handle = thread::Builder::new()
+                .name("user_traffic_unicast_listening".to_string())
+                .spawn(move || {
+                    {
+                        use crate::rtps::task::thread_monitor::ThreadMonitor;
+                        ThreadMonitor::register_current_thread_name_with_guid_prefix(
+                            "user_traffic_unicast_listening",
+                            participant_guid.prefix(),
+                        );
+                    }
 
-        let participant_guid = participant.guid();
+                    let _ = user_unicast_listening_task.unicast_listening(unicast_source);
+                    {
+                        use crate::rtps::task::thread_monitor::ThreadMonitor;
+                        ThreadMonitor::remove_map_guard();
+                    }
+                    debug!("user unicast listening thread finished");
+                })
+                .expect("Failed to create user unicast listening thread");
 
-        // unicast listening
-        let unicast_handle = thread::Builder::new()
-            .name("user_traffic_unicast_listening".to_string())
-            .spawn(move || {
-                // Register thread name for monitoring
-                {
-                    use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::register_current_thread_name_with_guid_prefix(
-                        "user_traffic_unicast_listening",
-                        participant_guid.prefix(),
-                    );
-                }
-
-                let _ = user_unicast_listening_task.unicast_listening();
-                // Cleanup thread from registry before exit
-                {
-                    use crate::rtps::task::thread_monitor::ThreadMonitor;
-                    ThreadMonitor::remove_map_guard();
-                }
-                debug!("user unicast listening thread finished");
-            })
-            .expect("Failed to create user unicast listening thread");
-
-        // Store unicast handle
-        if let Ok(mut handle_guard) = self.unicast_listening_handle.lock() {
-            *handle_guard = Some(unicast_handle);
+            if let Ok(mut handle_guard) = self.unicast_listening_handle.lock() {
+                *handle_guard = Some(unicast_handle);
+            }
         }
 
         Ok(())
@@ -365,6 +341,7 @@ impl UserLogic {
         })?;
 
         let participant = self.get_upgraded_participant()?;
+        let mut disconnected_peer: Option<GuidPrefix> = None;
 
         // Send unsent CacheChanges to matched readers
         for reader_proxy in reader_proxies.iter_mut() {
@@ -436,7 +413,7 @@ impl UserLogic {
                                 ));
                             }
 
-                            if self.send_data_frag_to_reader_proxy(
+                            match self.send_data_frag_to_reader_proxy(
                                 &a_change,
                                 reader_proxy,
                                 writer.endpoint_id(),
@@ -445,10 +422,22 @@ impl UserLogic {
                                 timestamp,
                                 &mut send_buffer,
                             ) {
-                                writer.increase_heartbeat_count();
-                                if !reader_proxy.is_first_hb_sent() {
-                                    reader_proxy.set_first_hb_sent();
+                                Ok(true) => {
+                                    writer.increase_heartbeat_count();
+                                    if !reader_proxy.is_first_hb_sent() {
+                                        reader_proxy.set_first_hb_sent();
+                                    }
                                 }
+                                Err(e) if e.code == RtpsErrorCode::PeerDisconnected => {
+                                    warn!(
+                                        "[DataFrag] Peer disconnected for reader {:?}",
+                                        reader_proxy.remote_reader_guid()
+                                    );
+                                    disconnected_peer =
+                                        Some(reader_proxy.remote_reader_guid().prefix());
+                                    break;
+                                }
+                                _ => {}
                             }
                         }
 
@@ -493,12 +482,10 @@ impl UserLogic {
                         )
                         .map_err(|e| RtpsError::new(RtpsErrorCode::Io, e.to_string()))?;
 
-                        let send_ok = self
-                            .send_rtps_message_to_locators(
-                                reader_proxy.unicast_locator_list(),
-                                &send_buffer,
-                            )
-                            .is_ok();
+                        let send_result = self.send_rtps_message_to_locators(
+                            reader_proxy.unicast_locator_list(),
+                            &send_buffer,
+                        );
                         participant
                             .wire_buffer_pool()
                             .lock()
@@ -509,11 +496,23 @@ impl UserLogic {
                                 )
                             })?
                             .release(send_buffer);
-                        if send_ok {
-                            writer.increase_heartbeat_count();
-                            if !reader_proxy.is_first_hb_sent() {
-                                reader_proxy.set_first_hb_sent();
+                        match send_result {
+                            Ok(()) => {
+                                writer.increase_heartbeat_count();
+                                if !reader_proxy.is_first_hb_sent() {
+                                    reader_proxy.set_first_hb_sent();
+                                }
                             }
+                            Err(e) if e.code == RtpsErrorCode::PeerDisconnected => {
+                                warn!(
+                                    "[Data] Peer disconnected for reader {:?}",
+                                    reader_proxy.remote_reader_guid()
+                                );
+                                disconnected_peer =
+                                    Some(reader_proxy.remote_reader_guid().prefix());
+                                break;
+                            }
+                            Err(_) => {}
                         }
                     }
                 } else {
@@ -528,6 +527,11 @@ impl UserLogic {
         }
 
         drop(reader_proxies);
+
+        if let Some(prefix) = disconnected_peer {
+            let guid = Guid::new(prefix, EntityId::PARTICIPANT);
+            let _ = participant.unmatch_with_remote_participant(&guid);
+        }
 
         // Periodic heartbeat timer resuming when new changes are sent
         if !writer.heartbeat_timer_running() {
@@ -705,6 +709,7 @@ impl UserLogic {
         Ok(())
     }
 
+    /// Returns Ok(true) if sent, Ok(false) if skipped, Err(PeerDisconnected) if peer is gone.
     fn send_data_frag_to_reader_proxy(
         &self,
         change: &CacheChange,
@@ -714,7 +719,7 @@ impl UserLogic {
         heartbeat_info: Option<(u32, SequenceNumber, SequenceNumber, bool, bool)>,
         timestamp: DateTime<Utc>,
         send_buffer: &mut Vec<u8>,
-    ) -> bool {
+    ) -> RtpsResult<bool> {
         if let Some(fragment_data) = change.get_fragment_data(fragment_num) {
             let result = MessageCreator::create_data_frag_msg(
                 change,
@@ -731,14 +736,18 @@ impl UserLogic {
                 send_buffer,
             );
 
-            return if result.is_ok() {
-                self.send_rtps_message_to_locators(reader_proxy.unicast_locator_list(), send_buffer)
-                    .is_ok()
-            } else {
-                false
-            };
+            if result.is_ok() {
+                return match self.send_rtps_message_to_locators(
+                    reader_proxy.unicast_locator_list(),
+                    send_buffer.as_slice(),
+                ) {
+                    Ok(()) => Ok(true),
+                    Err(e) if e.code == RtpsErrorCode::PeerDisconnected => Err(e),
+                    Err(_) => Ok(false),
+                };
+            }
         }
-        false
+        Ok(false)
     }
 
     // Sending heartbeat message to all matched reader proxies of the given writer
@@ -1323,124 +1332,68 @@ impl UserLogic {
         }
     }
 
-    fn send_rtps_message_to_locators<'a, T>(&self, locators: T, buffer: &[u8]) -> RtpsResult<()>
-    where
-        T: IntoIterator<Item = &'a Locator>,
-    {
-        Self::send_via_senders(
-            locators,
-            buffer,
-            self.shm_sender.as_ref(),
-            self.tcp_sender.as_ref(),
-            self.sender.as_ref(),
-        )
-    }
-
     /// Send `buffer` via the highest-priority transport reachable on both
     /// sides (SHM > TCP > UDP); a peer advertising multiple transports gets
     /// a single copy. Associated fn so `&self`-less closures (e.g. the
     /// NACK_FRAG timer) can route through the same path.
-    fn send_via_senders<'a, T>(
-        locators: T,
-        buffer: &[u8],
-        shm_sender: Option<&Arc<TransportSender>>,
-        tcp_sender: Option<&Arc<TransportSender>>,
-        udp_sender: Option<&Arc<TransportSender>>,
-    ) -> RtpsResult<()>
+    fn send_rtps_message_to_locators<'a, T>(&self, locators: T, buffer: &[u8]) -> RtpsResult<()>
     where
         T: IntoIterator<Item = &'a Locator>,
     {
         let locators: Vec<&Locator> = locators.into_iter().collect();
-        let pick = |kind: fn(&Locator) -> bool, have_sender: bool| -> Option<Vec<&Locator>> {
-            (have_sender && locators.iter().any(|l| kind(l)))
-                .then(|| locators.iter().copied().filter(|l| kind(l)).collect())
+
+        let pick = |is_kind: fn(&Locator) -> bool| -> Option<Vec<&Locator>> {
+            let v: Vec<&Locator> = locators
+                .iter()
+                .copied()
+                .filter(|l| is_kind(l) && self.transport.can_handle(l))
+                .collect();
+            (!v.is_empty()).then_some(v)
         };
-        let locators = pick(Locator::is_shm, shm_sender.is_some())
-            .or_else(|| pick(Locator::is_tcp, tcp_sender.is_some()))
-            .or_else(|| pick(Locator::is_udp, udp_sender.is_some()))
+        let locators: Vec<&Locator> = pick(Locator::is_shm)
+            .or_else(|| pick(Locator::is_tcp))
+            .or_else(|| pick(Locator::is_udp))
             .unwrap_or(locators);
 
         let mut is_sent = false;
         let mut last_error = None;
-
         for locator in locators {
-            if locator.is_shm() {
-                if let Some(shm) = shm_sender {
-                    // SHM doesn't use socket addresses, but Transport trait requires
-                    // one. Routing is done internally via shared memory.
-                    let dummy_addr =
-                        SocketAddr::V4(SocketAddrV4::new(std::net::Ipv4Addr::new(127, 0, 0, 1), 0));
-                    match shm.send(&dummy_addr, buffer) {
-                        Ok(_) => is_sent = true,
-                        Err(e) => {
-                            warn!("[UserLogic] Failed to send SHM message: {:?}", e);
-                            last_error = Some(e);
-                            continue;
-                        }
-                    }
-                } else {
-                    warn!("[UserLogic] SHM locator found but no SHM sender available");
+            match self.transport.send(buffer, &SendTarget::UserData(locator)) {
+                Ok(_) => is_sent = true,
+                Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
+                    let kind = e.to_string();
+                    warn!("[UserLogic] {} locator found but no {} sender available", kind, kind);
                     continue;
                 }
-            } else if locator.is_tcp() {
-                if let Some(tcp) = tcp_sender {
-                    let socket_addr = SocketAddr::V4(SocketAddrV4::new(
-                        locator.to_ip_v4_addr(),
-                        locator.port() as u16,
-                    ));
-                    match tcp.send(&socket_addr, buffer) {
-                        Ok(_) => {
-                            is_sent = true;
-                            debug!("[UserLogic] Sent message via TCP to {:?}", socket_addr);
+                Err(e) => {
+                    warn!("[UserLogic] Failed to send to locator {:?}: {:?}", locator, e);
+                    match e.kind() {
+                        std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionRefused => {
+                            return Err(RtpsError::new(
+                                RtpsErrorCode::PeerDisconnected,
+                                format!(
+                                    "[UserLogic] Peer disconnected at locator {:?}: {}",
+                                    locator, e
+                                ),
+                            ));
                         }
-                        Err(e) => {
-                            warn!(
-                                "[UserLogic] Failed to send TCP message to {:?}: {:?}",
-                                socket_addr, e
-                            );
+                        _ => {
                             last_error = Some(e);
                             continue;
                         }
                     }
-                } else {
-                    warn!(
-                        "[UserLogic] TCP locator found but no TCP sender available: {:?}",
-                        locator
-                    );
-                    continue;
-                }
-            } else if locator.is_udp() {
-                let socket_addr = SocketAddr::V4(SocketAddrV4::new(
-                    locator.to_ip_v4_addr(),
-                    locator.port() as u16,
-                ));
-                if let Some(udp) = udp_sender {
-                    match udp.send(&socket_addr, buffer) {
-                        Ok(_) => is_sent = true,
-                        Err(e) => {
-                            warn!("Failed to send message to locator {:?}: {:?}", socket_addr, e);
-                            last_error = Some(e);
-                            continue;
-                        }
-                    }
-                } else {
-                    debug!("UDP sender not available, skipping UDP locator");
-                    continue;
                 }
             }
         }
-
         if !is_sent {
-            if let Some(err) = last_error {
-                return Err(RtpsError::new(RtpsErrorCode::Io, err.to_string()));
+            return Err(if let Some(err) = last_error {
+                RtpsError::new(RtpsErrorCode::Io, err.to_string())
             } else {
-                return Err(RtpsError::new(
-                    RtpsErrorCode::InvalidEntityKind,
-                    "No valid locators found",
-                ));
-            }
+                RtpsError::new(RtpsErrorCode::InvalidEntityKind, "No valid locators found")
+            });
         }
-
         Ok(())
     }
 
@@ -1692,25 +1645,20 @@ impl UnicastMessageProcessor for UserLogic {
                     RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, "WriterProxy not found")
                 })?;
 
-            match writer_proxy.last_heartbeat_count() {
-                Some(prev) => {
-                    if (heartbeat.count.wrapping_sub(prev) as i32) <= 0 {
-                        debug!(
-                                "[UserLogic] [Heartbeat] Ignoring old Heartbeat: count={} <= last_count={}",
-                                heartbeat.count, prev
-                            );
-                        return Ok(());
-                    }
-                }
-                None => {
-                    debug!(
-                        "[UserLogic] [Heartbeat] First Heartbeat received: count={}",
-                        heartbeat.count
-                    );
-                }
+            let now = Instant::now();
+            if !should_accept_count(
+                "[UserLogic] [Heartbeat]",
+                heartbeat.count,
+                writer_proxy.last_heartbeat_count(),
+                writer_proxy.last_heartbeat_at(),
+                false,
+                now,
+            ) {
+                return Ok(());
             }
 
             writer_proxy.set_last_heartbeat_count(heartbeat.count);
+            writer_proxy.set_last_heartbeat_at(now);
 
             let missing_changes =
                 writer_proxy.process_heartbeat(heartbeat.first_sn, heartbeat.last_sn);
@@ -1787,10 +1735,7 @@ impl UnicastMessageProcessor for UserLogic {
                     let writer_proxies_clone = writer_proxies.clone();
                     let stateful_reader_guid = stateful_reader.guid();
                     let participant = participant.clone();
-                    // Capture all three senders so the timer closure can route
-                    let shm_sender_clone = self.shm_sender.clone();
-                    let tcp_sender_clone = self.tcp_sender.clone();
-                    let udp_sender_clone = self.sender.clone();
+                    let transport_clone = self.transport.clone();
                     let last_sn = heartbeat.last_sn;
                     let missing_fragments_clone = missing_fragments.clone();
                     let remote_writer_guid = writer_proxy.remote_writer_guid();
@@ -1836,28 +1781,61 @@ impl UnicastMessageProcessor for UserLogic {
                                             missing_changes.clone(),
                                         ));
 
-                                        if let Ok(buffer) = MessageCreator::create_nackfrag_msg(
-                                            participant.guid(),
-                                            current_writer_proxy.remote_writer_guid(),
-                                            stateful_reader_guid.entity_id(),
-                                            current_writer_proxy.remote_writer_guid().entity_id(),
-                                            last_sn,
-                                            missing_fragments_clone.as_ref().unwrap().clone(),
-                                            current_writer_proxy.nackfrag_count(),
-                                            acknack_info,
-                                        ) {
-                                            let _ = Self::send_via_senders(
-                                                current_writer_proxy.unicast_locator_list(),
-                                                &buffer,
-                                                shm_sender_clone.as_ref(),
-                                                tcp_sender_clone.as_ref(),
-                                                udp_sender_clone.as_ref(),
-                                            );
+                                            if let Ok(buffer) = MessageCreator::create_nackfrag_msg(
+                                                participant.guid(),
+                                                current_writer_proxy.remote_writer_guid(),
+                                                stateful_reader_guid.entity_id(),
+                                                current_writer_proxy
+                                                    .remote_writer_guid()
+                                                    .entity_id(),
+                                                last_sn,
+                                                missing_fragments_clone.as_ref().unwrap().clone(),
+                                                current_writer_proxy.nackfrag_count(),
+                                                acknack_info,
+                                            ) {
+                                                // Same SHM > TCP > UDP priority filter as
+                                                // send_rtps_message_to_locators, with can_handle
+                                                // guarding the local-side reachability.
+                                                let locs: Vec<&Locator> =
+                                                    current_writer_proxy.unicast_locator_list().iter().collect();
+                                                let try_kind = |is_kind: fn(&Locator) -> bool| -> Option<Vec<&Locator>> {
+                                                    let v: Vec<&Locator> = locs.iter().copied()
+                                                        .filter(|l| is_kind(l) && transport_clone.can_handle(l))
+                                                        .collect();
+                                                    (!v.is_empty()).then_some(v)
+                                                };
+                                                let chosen: Vec<&Locator> = try_kind(Locator::is_shm)
+                                                    .or_else(|| try_kind(Locator::is_tcp))
+                                                    .or_else(|| try_kind(Locator::is_udp))
+                                                    .unwrap_or(locs);
+                                                for locator in chosen {
+                                                    match transport_clone
+                                                        .send(&buffer, &SendTarget::UserData(locator))
+                                                    {
+                                                        Ok(_) => {}
+                                                        Err(e)
+                                                            if e.kind()
+                                                                == std::io::ErrorKind::Unsupported =>
+                                                        {
+                                                            let kind = e.to_string();
+                                                            warn!(
+                                                                "[UserLogic] {} locator found but no {} sender available",
+                                                                kind, kind
+                                                            );
+                                                        }
+                                                        Err(e) => {
+                                                            warn!(
+                                                                "[UserLogic] Failed to send NACK_FRAG: {:?}",
+                                                                e
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
-                                }
-                            },
-                        );
+                                },
+                            );
                     }
                 }
             }
@@ -1888,19 +1866,21 @@ impl UnicastMessageProcessor for UserLogic {
             .find(|rp| rp.remote_reader_guid() == remote_reader_guid)
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
 
-        match reader_proxy.last_acknack_count() {
-            Some(prev) => {
-                if (acknack.count.wrapping_sub(prev) as i32) <= 0 {
-                    debug!(
-                        "[UserLogic] [AckNack] Ignoring old ACKNACK: count={} <= last_count={}",
-                        acknack.count, prev
-                    );
-                    return Ok(());
-                }
-            }
-            None => {
-                debug!("[UserLogic] [AckNack] First AckNack received: count={}", acknack.count);
-            }
+        // Preemptive ACKNACK (seqbase == 0, empty bitmap) is an explicit reset
+        // signal and bypasses the count/debounce check.
+        let is_preemptive = acknack.reader_sn_state.bitmap_base() == SequenceNumber::from_i64(0)
+            && acknack.reader_sn_state.num_bits() == 0;
+        let now = Instant::now();
+
+        if !should_accept_count(
+            "[UserLogic] [AckNack]",
+            acknack.count,
+            reader_proxy.last_acknack_count(),
+            reader_proxy.last_acknack_at(),
+            is_preemptive,
+            now,
+        ) {
+            return Ok(());
         }
 
         if acknack.reader_sn_state.bitmap_base() == SequenceNumber::from_i64(0)
@@ -1925,6 +1905,7 @@ impl UnicastMessageProcessor for UserLogic {
         );
 
         reader_proxy.set_last_acknack_count(acknack.count);
+        reader_proxy.set_last_acknack_at(now);
 
         // NACK
         if !missing_seq_numbers.is_empty() {
@@ -1940,7 +1921,7 @@ impl UnicastMessageProcessor for UserLogic {
 
             if delay_duration.is_zero() {
                 // No delay - send immediately
-                let handler = SendingHandler::get_instance(participant.clone(), None, None);
+                let handler = SendingHandler::get_instance(participant.clone(), None);
                 handler.push_message_and_wake(MessageType::UserRequestedChanges(
                     acknack.writer_id,
                     remote_reader_guid,
@@ -2212,22 +2193,20 @@ impl UnicastMessageProcessor for UserLogic {
                 RtpsError::new(RtpsErrorCode::InvalidEntityKind, "Reader proxy not found")
             })?;
 
-        // Check for duplicate NACK_FRAG
-        match reader_proxy.last_nackfrag_count() {
-            Some(prev) => {
-                if (nack_frag.count.wrapping_sub(prev) as i32) <= 0 {
-                    debug!(
-                        "[UserLogic] [NackFrag] Ignoring old NACK_FRAG: count={} <= last_count={}",
-                        nack_frag.count, prev
-                    );
-                    return Ok(());
-                }
-            }
-            None => {
-                debug!("[UserLogic] [NackFrag] First NackFrag received: count={}", nack_frag.count);
-            }
+        // Check for duplicate NACK_FRAG. NACK_FRAG has no preemptive form.
+        let now = Instant::now();
+        if !should_accept_count(
+            "[UserLogic] [NackFrag]",
+            nack_frag.count,
+            reader_proxy.last_nackfrag_count(),
+            reader_proxy.last_nackfrag_at(),
+            false,
+            now,
+        ) {
+            return Ok(());
         }
         reader_proxy.set_last_nackfrag_count(nack_frag.count);
+        reader_proxy.set_last_nackfrag_at(now);
 
         let change = history_cache_guard.get_change(writer_sn).ok_or_else(|| {
             warn!("NACK_FRAG requested missing change SN={:?}", writer_sn);
@@ -2260,7 +2239,7 @@ impl UnicastMessageProcessor for UserLogic {
             .acquire();
         for fragment_num in requested_fragments {
             if fragment_num >= 1 && fragment_num <= total_frags {
-                self.send_data_frag_to_reader_proxy(
+                if let Err(e) = self.send_data_frag_to_reader_proxy(
                     &change,
                     reader_proxy,
                     writer_id,
@@ -2268,7 +2247,15 @@ impl UnicastMessageProcessor for UserLogic {
                     heartbeat_info,
                     timestamp,
                     &mut send_buffer,
-                );
+                ) {
+                    if e.code == RtpsErrorCode::PeerDisconnected {
+                        warn!(
+                            "[NackFrag] Peer disconnected during retransmit for reader {:?}",
+                            reader_proxy.remote_reader_guid()
+                        );
+                        break;
+                    }
+                }
             }
         }
         participant

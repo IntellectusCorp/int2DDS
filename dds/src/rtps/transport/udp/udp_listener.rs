@@ -13,7 +13,6 @@ use crate::rtps::common::locator::{Locator, MULTICAST_IP};
 use crate::rtps::transport::udp::recv_arena::{
     RecvArena, DEFAULT_RECV_ARENA_CHUNK_BYTES, MAX_UDP_PACKET_BYTES,
 };
-use crate::rtps::transport::Listener;
 
 // One arena per listener; reused across every incoming datagram on this socket.
 fn new_recv_arena() -> RecvArena {
@@ -240,29 +239,5 @@ impl UdpListener {
             }
             drop(socket);
         }
-    }
-}
-
-/// Implementation of Listener trait for UdpListener
-///
-/// This allows UdpListener to be used through the generic Listener interface,
-/// enabling transport-agnostic listener management.
-impl Listener for UdpListener {
-    fn socket_udp(&mut self) -> Option<&mut mio::net::UdpSocket> {
-        self.socket.as_mut()
-    }
-
-    fn socket_tcp(&mut self) -> Option<&mut mio::net::TcpListener> {
-        // UDP listener doesn't have a TCP socket
-        None
-    }
-
-    fn port(&self) -> u16 {
-        self.port
-    }
-
-    fn close(&mut self) {
-        // Call the UdpListener's own close method
-        UdpListener::close(self)
     }
 }

@@ -19,7 +19,7 @@ use crate::rtps::entities::entity::Entity;
 use crate::rtps::entities::participant::Participant;
 use crate::rtps::logic::wlp_logic::WlpLogic;
 use crate::rtps::task::sending_task::SendingTask;
-use crate::rtps::transport::TransportSender;
+use crate::rtps::transport::plugin::TransportPlugin;
 
 #[derive(Debug, Clone)]
 pub(crate) enum MessageType {
@@ -37,7 +37,7 @@ pub(crate) enum MessageType {
     ),
     PeriodicPublicationHeartbeat(Option<Instant>, StdDuration, Arc<GuidPrefix>),
     PeriodicSubscriptionHeartbeat(Option<Instant>, StdDuration, Arc<GuidPrefix>),
-    PeriodicSedpTopicHeartbeat(Option<Instant>, StdDuration, Arc<GuidPrefix>),
+    // PeriodicSedpTopicHeartbeat(Option<Instant>, StdDuration, Arc<GuidPrefix>),
     // Not used anymore since asynchronous sending can cause participant to be already removed
     // when the task is executed, so now sent synchronously via SendingTask method
     // SedpTerminateEndpoint(Guid, Arc<CacheChange>),
@@ -56,8 +56,7 @@ pub(crate) static INSTANCE: OnceLock<Mutex<HashMap<Guid, Arc<SendingHandler>>>> 
 pub(crate) struct SendingHandler {
     // Immutable fields - no lock needed
     participant: Weak<Participant>,
-    udp_sender: Mutex<Option<Arc<TransportSender>>>,
-    tcp_sender: Mutex<Option<Arc<TransportSender>>>,
+    transport: Mutex<Option<Arc<dyn TransportPlugin>>>,
 
     // Mutable fields - use interior mutability
     sending_task: Mutex<Option<Arc<Mutex<SendingTask>>>>,
@@ -71,15 +70,10 @@ pub(crate) struct SendingHandler {
 }
 
 impl SendingHandler {
-    fn new(
-        participant: Arc<Participant>,
-        udp_sender: Option<Arc<TransportSender>>,
-        tcp_sender: Option<Arc<TransportSender>>,
-    ) -> Self {
+    fn new(participant: Arc<Participant>, transport: Option<Arc<dyn TransportPlugin>>) -> Self {
         Self {
             participant: Arc::downgrade(&participant),
-            udp_sender: Mutex::new(udp_sender),
-            tcp_sender: Mutex::new(tcp_sender),
+            transport: Mutex::new(transport),
             sending_task: Mutex::new(None),
             sending_thread_join_handle: Mutex::new(None),
             waker: Mutex::new(None),
@@ -89,8 +83,7 @@ impl SendingHandler {
 
     pub(crate) fn get_instance(
         participant: Arc<Participant>,
-        udp_sender: Option<Arc<TransportSender>>,
-        tcp_sender: Option<Arc<TransportSender>>,
+        transport: Option<Arc<dyn TransportPlugin>>,
     ) -> Arc<SendingHandler> {
         let map_mutex = INSTANCE.get_or_init(|| Mutex::new(HashMap::new()));
 
@@ -102,7 +95,7 @@ impl SendingHandler {
             panic!("Failed to acquire sending handler map lock");
         }
 
-        let new_handler = SendingHandler::new(participant.clone(), udp_sender, tcp_sender);
+        let new_handler = SendingHandler::new(participant.clone(), transport);
         new_handler.spawn_event_loop();
         let handler_arc = Arc::new(new_handler);
 
@@ -129,13 +122,16 @@ impl SendingHandler {
     fn spawn_event_loop(&self) {
         let mut sending_task_guard = self.sending_task.lock().expect("Failed to lock sending_task");
         if sending_task_guard.is_none() {
-            let udp_sender = self.udp_sender.lock().ok().and_then(|g| g.clone());
-            let tcp_sender = self.tcp_sender.lock().ok().and_then(|g| g.clone());
+            let transport = self
+                .transport
+                .lock()
+                .ok()
+                .and_then(|g| g.clone())
+                .expect("Transport must be set before spawning event loop");
 
             let sending_task = SendingTask::new(
                 self.participant.upgrade().expect("Participant already dropped"),
-                udp_sender,
-                tcp_sender,
+                transport,
             );
             let waker = sending_task.waker();
             *sending_task_guard = Some(Arc::new(Mutex::new(sending_task)));
@@ -272,11 +268,8 @@ impl SendingHandler {
             queue.clear();
         }
 
-        if let Ok(mut sender_guard) = self.udp_sender.lock() {
-            *sender_guard = None;
-        }
-        if let Ok(mut sender_guard) = self.tcp_sender.lock() {
-            *sender_guard = None;
+        if let Ok(mut transport_guard) = self.transport.lock() {
+            *transport_guard = None;
         }
 
         Ok(())

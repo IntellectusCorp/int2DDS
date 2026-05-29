@@ -13,7 +13,6 @@ use crate::rtps::transport::shm::platform::{shm_segment_name, SharedMemory};
 use crate::rtps::transport::shm::ring_buffer::{
     get_buffer_size, RingBufferHeader, RingBufferReader,
 };
-use crate::rtps::transport::Listener;
 use log::{debug, info, warn};
 
 /// Maximum message size for SHM transport
@@ -131,26 +130,5 @@ impl ShmListener {
 impl Drop for ShmListener {
     fn drop(&mut self) {
         self.close();
-    }
-}
-
-impl Listener for ShmListener {
-    fn socket_udp(&mut self) -> Option<&mut mio::net::UdpSocket> {
-        // SHM listener doesn't have a UDP socket
-        None
-    }
-
-    fn socket_tcp(&mut self) -> Option<&mut mio::net::TcpListener> {
-        // SHM listener doesn't have a TCP socket
-        None
-    }
-
-    fn port(&self) -> u16 {
-        // SHM doesn't use ports
-        0
-    }
-
-    fn close(&mut self) {
-        ShmListener::close(self)
     }
 }
