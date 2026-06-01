@@ -267,6 +267,8 @@ impl DcpsBridge {
         #[allow(unused_assignments)]
         let mut writer: Option<Arc<dyn Writer + Send + Sync>> = None;
 
+        let fragment_size = crate::common::env::get_fragment_size();
+
         if publication_builtin_topic_data.is_reliable() {
             let _writer = StatefulWriter::new(
                 datawriter_guid,
@@ -275,7 +277,7 @@ impl DcpsBridge {
                 ReliabilityQosPolicyKind::Reliable,
                 topic_kind,
                 datawriter_guid.entity_id(),
-                65000,
+                fragment_size,
                 f,
                 publication_builtin_topic_data.clone(),
                 Arc::downgrade(&self.participant),
@@ -291,7 +293,7 @@ impl DcpsBridge {
                 datawriter_guid.entity_id(),
                 true,
                 RtpsDuration::new(2, 0),
-                65000,
+                fragment_size,
                 f,
                 publication_builtin_topic_data.clone(),
                 Arc::downgrade(&self.participant),
