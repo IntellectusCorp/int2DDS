@@ -7,9 +7,20 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::serialize::xcdr::ExtensibilityKind;
+use crate::xtypes::type_object::EquivalenceHash;
+use crate::xtypes::type_registry::TypeRegistry;
 use crate::xtypes::{
     CompleteEnumeratedType, CompleteStructType, CompleteTypeObject, TypeIdentifier,
 };
+
+/// Context threaded through the registry-aware builder to resolve nested type
+/// references into fully-populated `Arc<DynamicType>` values, with memoization
+/// and a recursion stack to break cycles.
+struct BuildCtx<'a> {
+    registry: &'a TypeRegistry,
+    memo: HashMap<EquivalenceHash, Arc<DynamicType>>,
+    stack: Vec<EquivalenceHash>,
+}
 
 /// Error type for DynamicType operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,9 +115,29 @@ impl DynamicType {
         type_object: Arc<CompleteTypeObject>,
         type_identifier: TypeIdentifier,
     ) -> Result<Self, DynamicTypeError> {
+        Self::build_from_object(type_object, type_identifier, None)
+    }
+
+    /// Create a DynamicType resolving nested composite members against a
+    /// `TypeRegistry`, populating `TypeRef` with full metadata for nested
+    /// struct/enum and collection element types.
+    pub fn from_type_object_with_registry(
+        type_object: Arc<CompleteTypeObject>,
+        type_identifier: TypeIdentifier,
+        registry: &TypeRegistry,
+    ) -> Result<Self, DynamicTypeError> {
+        let mut ctx = BuildCtx { registry, memo: HashMap::new(), stack: Vec::new() };
+        Self::build_from_object(type_object, type_identifier, Some(&mut ctx))
+    }
+
+    fn build_from_object(
+        type_object: Arc<CompleteTypeObject>,
+        type_identifier: TypeIdentifier,
+        ctx: Option<&mut BuildCtx>,
+    ) -> Result<Self, DynamicTypeError> {
         match type_object.as_ref() {
             CompleteTypeObject::Struct(struct_type) => {
-                Self::from_struct_type(struct_type, type_identifier, type_object.clone())
+                Self::from_struct_type(struct_type, type_identifier, type_object.clone(), ctx)
             }
             CompleteTypeObject::Enum(enum_type) => {
                 Self::from_enum_type(enum_type, type_identifier, type_object.clone())
@@ -122,6 +153,7 @@ impl DynamicType {
         struct_type: &CompleteStructType,
         type_identifier: TypeIdentifier,
         type_object: Arc<CompleteTypeObject>,
+        mut ctx: Option<&mut BuildCtx>,
     ) -> Result<Self, DynamicTypeError> {
         let type_name = struct_type.header.detail.type_name.clone();
         let extensibility = Self::convert_extensibility(struct_type.struct_flags.extensibility());
@@ -132,7 +164,8 @@ impl DynamicType {
         let mut member_by_id = HashMap::new();
 
         for (index, member) in struct_type.member_seq.iter().enumerate() {
-            let member_type = Self::type_from_identifier(&member.common.member_type_id)?;
+            let member_type =
+                Self::type_from_identifier(&member.common.member_type_id, ctx.as_deref_mut())?;
             let descriptor = MemberDescriptor {
                 name: Arc::from(member.detail.name.as_str()),
                 member_id: member.common.member_id,
@@ -206,7 +239,14 @@ impl DynamicType {
     }
 
     /// Create a DynamicType for a primitive TypeIdentifier.
-    fn type_from_identifier(type_id: &TypeIdentifier) -> Result<DynamicTypeKind, DynamicTypeError> {
+    ///
+    /// When `ctx` is `Some`, nested composite references (`CompleteTypeId` /
+    /// `MinimalTypeId`) are resolved against the registry into `TypeRef`;
+    /// otherwise they remain unresolved `ExternalType` (legacy behavior).
+    fn type_from_identifier(
+        type_id: &TypeIdentifier,
+        mut ctx: Option<&mut BuildCtx>,
+    ) -> Result<DynamicTypeKind, DynamicTypeError> {
         match type_id {
             TypeIdentifier::Boolean => Ok(DynamicTypeKind::Primitive(PrimitiveKind::Boolean)),
             TypeIdentifier::Byte => Ok(DynamicTypeKind::Primitive(PrimitiveKind::Byte)),
@@ -238,39 +278,35 @@ impl DynamicType {
                 Ok(DynamicTypeKind::WString { bound: Some(*bound) })
             }
             TypeIdentifier::PlainSequenceSmall { element_identifier, bound, .. } => {
-                let element_type = Self::type_from_identifier(element_identifier)?;
+                let element_type = Self::type_from_identifier(element_identifier, ctx)?;
                 Ok(DynamicTypeKind::Sequence {
                     element_type: Box::new(element_type),
                     bound: if *bound == 0 { None } else { Some(*bound as u32) },
                 })
             }
             TypeIdentifier::PlainSequenceLarge { element_identifier, bound, .. } => {
-                let element_type = Self::type_from_identifier(element_identifier)?;
+                let element_type = Self::type_from_identifier(element_identifier, ctx)?;
                 Ok(DynamicTypeKind::Sequence {
                     element_type: Box::new(element_type),
                     bound: if *bound == 0 { None } else { Some(*bound) },
                 })
             }
             TypeIdentifier::PlainArraySmall { element_identifier, array_bound_seq, .. } => {
-                let element_type = Self::type_from_identifier(element_identifier)?;
+                let element_type = Self::type_from_identifier(element_identifier, ctx)?;
                 Ok(DynamicTypeKind::Array {
                     element_type: Box::new(element_type),
                     dimensions: array_bound_seq.iter().map(|&d| d as u32).collect(),
                 })
             }
             TypeIdentifier::PlainArrayLarge { element_identifier, array_bound_seq, .. } => {
-                let element_type = Self::type_from_identifier(element_identifier)?;
+                let element_type = Self::type_from_identifier(element_identifier, ctx)?;
                 Ok(DynamicTypeKind::Array {
                     element_type: Box::new(element_type),
                     dimensions: array_bound_seq.clone(),
                 })
             }
-            TypeIdentifier::CompleteTypeId(_) => {
-                // This references another type by hash - return as external reference
-                Ok(DynamicTypeKind::ExternalType { type_identifier: type_id.clone() })
-            }
-            TypeIdentifier::MinimalTypeId(_) => {
-                Ok(DynamicTypeKind::ExternalType { type_identifier: type_id.clone() })
+            TypeIdentifier::CompleteTypeId(hash) | TypeIdentifier::MinimalTypeId(hash) => {
+                Self::resolve_nested(type_id, hash, ctx.as_deref_mut())
             }
             TypeIdentifier::None => {
                 Err(DynamicTypeError::UnsupportedType("None type identifier".to_string()))
@@ -280,6 +316,41 @@ impl DynamicType {
                 type_id
             ))),
         }
+    }
+
+    /// Resolve a hash-based nested type reference. Without a registry context
+    /// it stays an unresolved `ExternalType`. With one, it builds (and memoizes)
+    /// the full nested `DynamicType` as `TypeRef`, leaving cyclic back-edges as
+    /// `ExternalType` to terminate recursion.
+    fn resolve_nested(
+        type_id: &TypeIdentifier,
+        hash: &EquivalenceHash,
+        ctx: Option<&mut BuildCtx>,
+    ) -> Result<DynamicTypeKind, DynamicTypeError> {
+        let ctx = match ctx {
+            Some(ctx) => ctx,
+            None => return Ok(DynamicTypeKind::ExternalType { type_identifier: type_id.clone() }),
+        };
+
+        if let Some(existing) = ctx.memo.get(hash) {
+            return Ok(DynamicTypeKind::TypeRef(existing.clone()));
+        }
+        if ctx.stack.contains(hash) {
+            // Cyclic back-edge: keep unresolved to terminate recursion.
+            return Ok(DynamicTypeKind::ExternalType { type_identifier: type_id.clone() });
+        }
+
+        let object = match ctx.registry.lookup_complete(hash) {
+            Some(object) => Arc::new(object.clone()),
+            None => return Ok(DynamicTypeKind::ExternalType { type_identifier: type_id.clone() }),
+        };
+
+        ctx.stack.push(*hash);
+        let nested = Self::build_from_object(object, type_id.clone(), Some(&mut *ctx));
+        ctx.stack.pop();
+        let nested = Arc::new(nested?);
+        ctx.memo.insert(*hash, nested.clone());
+        Ok(DynamicTypeKind::TypeRef(nested))
     }
 
     // ========================================================================
@@ -392,6 +463,18 @@ pub enum DynamicTypeKind {
     Array { element_type: Box<DynamicTypeKind>, dimensions: Vec<u32> },
     /// Reference to an external type by TypeIdentifier (for nested structs)
     ExternalType { type_identifier: TypeIdentifier },
+    /// Resolved nested composite type holding full metadata
+    TypeRef(Arc<DynamicType>),
+}
+
+impl DynamicTypeKind {
+    /// Get the resolved nested type (if this is a `TypeRef`).
+    pub fn as_type_ref(&self) -> Option<&Arc<DynamicType>> {
+        match self {
+            DynamicTypeKind::TypeRef(t) => Some(t),
+            _ => None,
+        }
+    }
 }
 
 /// Descriptor for struct type members.

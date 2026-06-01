@@ -11,8 +11,8 @@ use crate::dcps::core::error::{DdsError, DdsResult};
 use crate::dcps::topic::type_support::SerializationFormat;
 use crate::rtps::common::types::SerializedData;
 use crate::serialize::cdr::{
-    CdrDeserializer, CdrError, CdrSerializer, ExtensibilityKind, PrimitiveSerialize,
-    StringSerialize, Xcdr2Deserializer, Xcdr2Serializer,
+    CdrDeserializer, CdrError, CdrSerializer, ExtensibilityKind, PlCdrMemberHeader,
+    PrimitiveSerialize, StringSerialize, Xcdr2Deserializer, Xcdr2Serializer,
 };
 use crate::serialize::{BufferManager, DeserializerReader};
 
@@ -179,7 +179,13 @@ fn member_value_or_default<'a>(
 }
 
 fn is_primitive_kind(kind: &DynamicTypeKind) -> bool {
-    matches!(kind, DynamicTypeKind::Primitive(_) | DynamicTypeKind::Enum(_))
+    match kind {
+        DynamicTypeKind::Primitive(_) | DynamicTypeKind::Enum(_) => true,
+        DynamicTypeKind::TypeRef(inner) => {
+            matches!(inner.kind(), DynamicTypeKind::Primitive(_) | DynamicTypeKind::Enum(_))
+        }
+        _ => false,
+    }
 }
 
 fn serialize_atomic_value<S, F>(
@@ -337,6 +343,9 @@ where
         DynamicTypeKind::Struct(struct_desc) => {
             Err(nested_struct_deserialization_error(struct_desc))
         }
+        DynamicTypeKind::TypeRef(_) => Err(DdsError::Error(
+            "TypeRef must be handled by the format-specific deserialization path".to_string(),
+        )),
         DynamicTypeKind::ExternalType { .. } => Err(external_type_deserialization_error(type_kind)),
         DynamicTypeKind::Sequence { .. } | DynamicTypeKind::Array { .. } => Err(DdsError::Error(
             "deserialize_atomic_value called with collection; use format-specific path".to_string(),
@@ -365,6 +374,21 @@ fn deserialize_value_cdr(
             }
             Ok(DynamicValue::Array(items))
         }
+        DynamicTypeKind::TypeRef(inner) => match inner.kind() {
+            DynamicTypeKind::Struct(_) => {
+                let nested = deserialize_struct_cdr(deserializer, inner)?;
+                Ok(DynamicValue::Struct(Box::new(nested)))
+            }
+            DynamicTypeKind::Enum(enum_desc) => {
+                let value = deserializer.deserialize_i32().map_err(cdr_error)?;
+                let name = enum_desc
+                    .get_literal_by_value(value)
+                    .map(|literal| literal.name.clone())
+                    .unwrap_or_default();
+                Ok(DynamicValue::Enum { name, value })
+            }
+            other => deserialize_atomic_value(deserializer, other),
+        },
         other => deserialize_atomic_value(deserializer, other),
     }
 }
@@ -372,6 +396,7 @@ fn deserialize_value_cdr(
 fn deserialize_value_xcdr2(
     deserializer: &mut Xcdr2Deserializer,
     type_kind: &DynamicTypeKind,
+    extensibility: ExtensibilityKind,
 ) -> DdsResult<DynamicValue> {
     match type_kind {
         DynamicTypeKind::Sequence { element_type, .. } => {
@@ -381,7 +406,7 @@ fn deserialize_value_xcdr2(
             let len = deserializer.deserialize_u32().map_err(cdr_error)? as usize;
             let mut items = Vec::with_capacity(len);
             for _ in 0..len {
-                items.push(deserialize_value_xcdr2(deserializer, element_type)?);
+                items.push(deserialize_value_xcdr2(deserializer, element_type, extensibility)?);
             }
             Ok(DynamicValue::Sequence(items))
         }
@@ -392,10 +417,28 @@ fn deserialize_value_xcdr2(
             let total_size: u32 = dimensions.iter().product();
             let mut items = Vec::with_capacity(total_size as usize);
             for _ in 0..total_size {
-                items.push(deserialize_value_xcdr2(deserializer, element_type)?);
+                items.push(deserialize_value_xcdr2(deserializer, element_type, extensibility)?);
             }
             Ok(DynamicValue::Array(items))
         }
+        DynamicTypeKind::TypeRef(inner) => match inner.kind() {
+            DynamicTypeKind::Struct(_) => {
+                // Nested structs are framed with the message-level extensibility
+                // (matching the serializer's single-mode framing), not the
+                // nested type's own declared extensibility.
+                let nested = deserialize_struct_xcdr(deserializer, inner, extensibility)?;
+                Ok(DynamicValue::Struct(Box::new(nested)))
+            }
+            DynamicTypeKind::Enum(enum_desc) => {
+                let value = deserializer.deserialize_i32().map_err(cdr_error)?;
+                let name = enum_desc
+                    .get_literal_by_value(value)
+                    .map(|literal| literal.name.clone())
+                    .unwrap_or_default();
+                Ok(DynamicValue::Enum { name, value })
+            }
+            other => deserialize_atomic_value(deserializer, other),
+        },
         other => deserialize_atomic_value(deserializer, other),
     }
 }
@@ -459,8 +502,25 @@ fn deserialize_struct_members_cdr(
 ) -> DdsResult<HashMap<Arc<str>, DynamicValue>> {
     let mut values = HashMap::new();
     for member in struct_desc.members() {
-        let value = deserialize_value_cdr(deserializer, &member.member_type)?;
-        values.insert(member.name.clone(), value);
+        if member.is_optional {
+            match deserializer.read_parameter_header().map_err(cdr_error)? {
+                PlCdrMemberHeader::Short { length: 0, .. }
+                | PlCdrMemberHeader::Long { length: 0, .. } => {}
+                PlCdrMemberHeader::Short { .. } | PlCdrMemberHeader::Long { .. } => {
+                    let value = deserialize_value_cdr(deserializer, &member.member_type)?;
+                    values.insert(member.name.clone(), value);
+                }
+                PlCdrMemberHeader::Sentinel => {
+                    return Err(DdsError::Error(format!(
+                        "Unexpected PID_SENTINEL while reading optional field `{}`",
+                        member.name
+                    )));
+                }
+            }
+        } else {
+            let value = deserialize_value_cdr(deserializer, &member.member_type)?;
+            values.insert(member.name.clone(), value);
+        }
     }
     Ok(values)
 }
@@ -468,11 +528,21 @@ fn deserialize_struct_members_cdr(
 fn deserialize_struct_members_xcdr2(
     deserializer: &mut Xcdr2Deserializer,
     struct_desc: &StructDescriptor,
+    extensibility: ExtensibilityKind,
 ) -> DdsResult<HashMap<Arc<str>, DynamicValue>> {
     let mut values = HashMap::new();
     for member in struct_desc.members() {
-        let value = deserialize_value_xcdr2(deserializer, &member.member_type)?;
-        values.insert(member.name.clone(), value);
+        if member.is_optional {
+            let present = deserializer.deserialize_bool().map_err(cdr_error)?;
+            if present {
+                let value =
+                    deserialize_value_xcdr2(deserializer, &member.member_type, extensibility)?;
+                values.insert(member.name.clone(), value);
+            }
+        } else {
+            let value = deserialize_value_xcdr2(deserializer, &member.member_type, extensibility)?;
+            values.insert(member.name.clone(), value);
+        }
     }
     Ok(values)
 }
@@ -522,14 +592,30 @@ fn deserialize_cdr(bytes: &[u8], dynamic_type: &Arc<DynamicType>) -> DdsResult<D
 }
 
 fn serialize_struct_cdr(serializer: &mut CdrSerializer, data: &DynamicData) -> DdsResult<()> {
-    let struct_desc = data
-        .dynamic_type()
+    let dynamic_type = data.dynamic_type();
+    if matches!(dynamic_type.extensibility(), ExtensibilityKind::Mutable) {
+        return Err(cdr_mutable_unsupported_error());
+    }
+    let struct_desc = dynamic_type
         .as_struct()
         .ok_or_else(|| DdsError::Error("Expected struct type".to_string()))?;
 
     let mut nested = serialize_struct_cdr;
     for member in struct_desc.members() {
-        if let Some(value) = member_value_or_default(data, member) {
+        if member.is_optional {
+            let member_id = member.member_id;
+            let must_understand = member.is_must_understand;
+            let value = data.get_value(&member.name);
+            serializer
+                .write_member_with_v1(member_id, must_understand, |s| {
+                    if let Some(value) = value {
+                        serialize_value_cdr(s, value, &mut nested)
+                            .map_err(|e| CdrError::SerializationError(e.to_string()))?;
+                    }
+                    Ok(())
+                })
+                .map_err(cdr_error)?;
+        } else if let Some(value) = member_value_or_default(data, member) {
             serialize_value_cdr(serializer, &value, &mut nested)?;
         }
     }
@@ -541,12 +627,21 @@ fn deserialize_struct_cdr(
     deserializer: &mut CdrDeserializer,
     dynamic_type: &Arc<DynamicType>,
 ) -> DdsResult<DynamicData> {
+    if matches!(dynamic_type.extensibility(), ExtensibilityKind::Mutable) {
+        return Err(cdr_mutable_unsupported_error());
+    }
     let struct_desc = dynamic_type
         .as_struct()
         .ok_or_else(|| DdsError::Error("Expected struct type".to_string()))?;
 
     let values = deserialize_struct_members_cdr(deserializer, struct_desc)?;
     Ok(DynamicData::with_values(dynamic_type.clone(), values))
+}
+
+fn cdr_mutable_unsupported_error() -> DdsError {
+    DdsError::Error(
+        "CDR (XCDR1) serialization of Mutable structs (PL_CDR) is not supported".to_string(),
+    )
 }
 
 fn serialize_xcdr(
@@ -564,6 +659,35 @@ fn deserialize_xcdr(bytes: &[u8], dynamic_type: &Arc<DynamicType>) -> DdsResult<
     deserialize_struct_xcdr(&mut deserializer, dynamic_type, dynamic_type.extensibility())
 }
 
+/// Serialize struct members inline (Final/Appendable). Optionals are framed by
+/// a presence bool per XCDR2; non-optionals are written directly.
+fn serialize_members_xcdr2_inline<F>(
+    serializer: &mut Xcdr2Serializer,
+    data: &DynamicData,
+    struct_desc: &StructDescriptor,
+    nested: &mut F,
+) -> DdsResult<()>
+where
+    F: FnMut(&mut Xcdr2Serializer, &DynamicData) -> DdsResult<()>,
+{
+    for member in struct_desc.members() {
+        if member.is_optional {
+            match data.get_value(&member.name) {
+                Some(value) => {
+                    serializer.serialize_bool(true).map_err(cdr_error)?;
+                    serialize_value_xcdr2(serializer, value, &member.member_type, nested)?;
+                }
+                None => {
+                    serializer.serialize_bool(false).map_err(cdr_error)?;
+                }
+            }
+        } else if let Some(value) = member_value_or_default(data, member) {
+            serialize_value_xcdr2(serializer, &value, &member.member_type, nested)?;
+        }
+    }
+    Ok(())
+}
+
 fn serialize_struct_xcdr(
     serializer: &mut Xcdr2Serializer,
     data: &DynamicData,
@@ -574,27 +698,17 @@ fn serialize_struct_xcdr(
         .as_struct()
         .ok_or_else(|| DdsError::Error("Expected struct type".to_string()))?;
 
+    let mut nested = |serializer: &mut Xcdr2Serializer, inner: &DynamicData| {
+        serialize_struct_xcdr(serializer, inner, extensibility)
+    };
+
     match extensibility {
         ExtensibilityKind::Final => {
-            let mut nested = |serializer: &mut Xcdr2Serializer, inner: &DynamicData| {
-                serialize_struct_xcdr(serializer, inner, extensibility)
-            };
-            for member in struct_desc.members() {
-                if let Some(value) = member_value_or_default(data, member) {
-                    serialize_value_xcdr2(serializer, &value, &member.member_type, &mut nested)?;
-                }
-            }
+            serialize_members_xcdr2_inline(serializer, data, struct_desc, &mut nested)?;
         }
         ExtensibilityKind::Appendable => {
             let size_pos = serializer.begin_struct().map_err(cdr_error)?;
-            let mut nested = |serializer: &mut Xcdr2Serializer, inner: &DynamicData| {
-                serialize_struct_xcdr(serializer, inner, extensibility)
-            };
-            for member in struct_desc.members() {
-                if let Some(value) = member_value_or_default(data, member) {
-                    serialize_value_xcdr2(serializer, &value, &member.member_type, &mut nested)?;
-                }
-            }
+            serialize_members_xcdr2_inline(serializer, data, struct_desc, &mut nested)?;
             serializer.end_struct(size_pos).map_err(cdr_error)?;
         }
         ExtensibilityKind::Mutable => {
@@ -603,12 +717,10 @@ fn serialize_struct_xcdr(
             for member in struct_desc.members() {
                 if let Some(value) = member_value_or_default(data, member) {
                     let member_id = member.member_id;
+                    let must_understand = member.is_must_understand;
                     let member_type = member.member_type.clone();
                     serializer
-                        .write_member_with(member_id, false, |s| {
-                            let mut nested = |s: &mut Xcdr2Serializer, inner: &DynamicData| {
-                                serialize_struct_xcdr(s, inner, extensibility)
-                            };
+                        .write_member_with(member_id, must_understand, |s| {
                             serialize_value_xcdr2(s, &value, &member_type, &mut nested)
                                 .map_err(|e| CdrError::SerializationError(e.to_string()))
                         })
@@ -636,11 +748,11 @@ fn deserialize_struct_xcdr(
 
     match extensibility {
         ExtensibilityKind::Final => {
-            values = deserialize_struct_members_xcdr2(deserializer, struct_desc)?;
+            values = deserialize_struct_members_xcdr2(deserializer, struct_desc, extensibility)?;
         }
         ExtensibilityKind::Appendable => {
             let (object_size, start_pos) = deserializer.begin_struct().map_err(cdr_error)?;
-            values = deserialize_struct_members_xcdr2(deserializer, struct_desc)?;
+            values = deserialize_struct_members_xcdr2(deserializer, struct_desc, extensibility)?;
             deserializer.end_struct(object_size, start_pos).map_err(cdr_error)?;
         }
         ExtensibilityKind::Mutable => {
@@ -652,7 +764,8 @@ fn deserialize_struct_xcdr(
                     deserializer.read_member_header_full().map_err(cdr_error)?;
 
                 if let Some(member) = struct_desc.get_member_by_id(member_id) {
-                    let value = deserialize_value_xcdr2(deserializer, &member.member_type)?;
+                    let value =
+                        deserialize_value_xcdr2(deserializer, &member.member_type, extensibility)?;
                     values.insert(member.name.clone(), value);
                 } else if must_understand {
                     return Err(DdsError::Error(format!(
@@ -675,9 +788,426 @@ fn deserialize_struct_xcdr(
 mod tests {
     use super::*;
     use crate::xtypes::{
-        CompleteStructMember, CompleteStructType, CompleteTypeObject, EquivalenceHash, MemberFlag,
-        PlainCollectionHeader, TypeFlag, TypeIdentifier,
+        CompleteEnumeratedLiteral, CompleteEnumeratedType, CompleteStructMember,
+        CompleteStructType, CompleteTypeObject, EnumeratedLiteralFlag, EquivalenceHash, MemberFlag,
+        PlainCollectionHeader, TryConstructKind, TypeFlag, TypeIdentifier, TypeRegistry,
     };
+
+    fn member_flag(is_optional: bool, is_key: bool, is_must_understand: bool) -> MemberFlag {
+        MemberFlag::new(
+            TryConstructKind::Discard,
+            false,
+            is_optional,
+            is_must_understand,
+            is_key,
+            false,
+        )
+    }
+
+    fn xcdr_format(ext: ExtensibilityKind) -> SerializationFormat {
+        SerializationFormat::Xcdr { extensibility_kind: ext, use_delimiters: false }
+    }
+
+    fn tf(ext: ExtensibilityKind) -> TypeFlag {
+        let x = match ext {
+            ExtensibilityKind::Final => crate::xtypes::ExtensibilityKind::Final,
+            ExtensibilityKind::Appendable => crate::xtypes::ExtensibilityKind::Appendable,
+            ExtensibilityKind::Mutable => crate::xtypes::ExtensibilityKind::Mutable,
+        };
+        TypeFlag::new(x, false, false)
+    }
+
+    fn inner_struct(ext: ExtensibilityKind) -> (CompleteTypeObject, EquivalenceHash) {
+        let mut inner = CompleteStructType::new(tf(ext), "Inner".into(), None);
+        inner.add_member(CompleteStructMember::new(
+            0,
+            member_flag(false, false, false),
+            TypeIdentifier::Int32,
+            "a".to_string(),
+        ));
+        inner.add_member(CompleteStructMember::new(
+            1,
+            member_flag(false, false, false),
+            TypeIdentifier::Int32,
+            "b".to_string(),
+        ));
+        let obj = CompleteTypeObject::Struct(inner);
+        let hash = EquivalenceHash::compute(&obj.serialize());
+        (obj, hash)
+    }
+
+    /// Build a "Color" enum CompleteTypeObject (RED=0, GREEN=1, BLUE=2).
+    fn color_enum() -> (CompleteTypeObject, EquivalenceHash) {
+        let mut e = CompleteEnumeratedType::new(tf(ExtensibilityKind::Final), "Color".into(), 32);
+        e.add_literal(CompleteEnumeratedLiteral::new(0, EnumeratedLiteralFlag(0), "RED".into()));
+        e.add_literal(CompleteEnumeratedLiteral::new(1, EnumeratedLiteralFlag(0), "GREEN".into()));
+        e.add_literal(CompleteEnumeratedLiteral::new(2, EnumeratedLiteralFlag(0), "BLUE".into()));
+        let obj = CompleteTypeObject::Enum(e);
+        let hash = EquivalenceHash::compute(&obj.serialize());
+        (obj, hash)
+    }
+
+    fn build_with_registry(outer: CompleteTypeObject, registry: &TypeRegistry) -> Arc<DynamicType> {
+        Arc::new(
+            DynamicType::from_type_object_with_registry(
+                Arc::new(outer),
+                TypeIdentifier::None,
+                registry,
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn test_nested_struct_roundtrip_all_formats() {
+        let run = |label: &str, outer_ext: ExtensibilityKind, format: SerializationFormat| {
+            // Inner shares the outer's extensibility: the serializer frames the
+            // whole message with one mode, so nested types follow suit.
+            let (inner_obj, inner_hash) = inner_struct(outer_ext);
+            let mut registry = TypeRegistry::new();
+            registry.register_complete(inner_hash, "Inner".into(), inner_obj.clone());
+
+            let mut outer = CompleteStructType::new(tf(outer_ext), "Outer".into(), None);
+            outer.add_member(CompleteStructMember::new(
+                0,
+                member_flag(false, false, false),
+                TypeIdentifier::Int32,
+                "id".to_string(),
+            ));
+            outer.add_member(CompleteStructMember::new(
+                1,
+                member_flag(false, false, false),
+                TypeIdentifier::CompleteTypeId(inner_hash),
+                "child".to_string(),
+            ));
+            let outer_dt = build_with_registry(CompleteTypeObject::Struct(outer), &registry);
+
+            // The nested member must have resolved into a TypeRef.
+            assert!(matches!(
+                outer_dt.get_member("child").unwrap().member_type,
+                DynamicTypeKind::TypeRef(_)
+            ));
+
+            let inner_dt =
+                Arc::new(DynamicType::from_type_object(inner_obj, TypeIdentifier::None).unwrap());
+            let mut inner = DynamicData::new(inner_dt);
+            inner.set("a", 11i32).unwrap();
+            inner.set("b", 22i32).unwrap();
+
+            let mut data = DynamicData::new(outer_dt.clone());
+            data.set("id", 7i32).unwrap();
+            data.set_value("child", DynamicValue::Struct(Box::new(inner))).unwrap();
+
+            let bytes = serialize_dynamic_data(&data, &format)
+                .unwrap_or_else(|e| panic!("{label} serialize: {e:?}"));
+            let back = deserialize_dynamic_data(&bytes, &outer_dt)
+                .unwrap_or_else(|e| panic!("{label} deserialize ({} bytes): {e:?}", bytes.len()));
+
+            assert_eq!(back.get::<i32>("id").unwrap(), 7);
+            match back.get_value("child").unwrap() {
+                DynamicValue::Struct(child) => {
+                    assert_eq!(child.get::<i32>("a").unwrap(), 11);
+                    assert_eq!(child.get::<i32>("b").unwrap(), 22);
+                }
+                other => panic!("expected nested struct, got {:?}", other),
+            }
+        };
+
+        // CDR: Final/Appendable only (Mutable=PL_CDR is out of scope).
+        run("cdr-final", ExtensibilityKind::Final, SerializationFormat::Cdr);
+        run("cdr-appendable", ExtensibilityKind::Appendable, SerializationFormat::Cdr);
+        // XCDR2: Final/Appendable/Mutable, inner is Appendable (extensibility-fix coverage).
+        run("xcdr2-final", ExtensibilityKind::Final, xcdr_format(ExtensibilityKind::Final));
+        run(
+            "xcdr2-appendable",
+            ExtensibilityKind::Appendable,
+            xcdr_format(ExtensibilityKind::Appendable),
+        );
+        run("xcdr2-mutable", ExtensibilityKind::Mutable, xcdr_format(ExtensibilityKind::Mutable));
+    }
+
+    #[test]
+    fn test_vec_of_struct_roundtrip() {
+        let run = |format: SerializationFormat, count: usize| {
+            let (inner_obj, inner_hash) = inner_struct(ExtensibilityKind::Final);
+            let mut registry = TypeRegistry::new();
+            registry.register_complete(inner_hash, "Inner".into(), inner_obj.clone());
+
+            let mut outer =
+                CompleteStructType::new(tf(ExtensibilityKind::Final), "HasVec".into(), None);
+            outer.add_member(CompleteStructMember::new(
+                0,
+                member_flag(false, false, false),
+                TypeIdentifier::PlainSequenceLarge {
+                    header: PlainCollectionHeader::default(),
+                    bound: 0,
+                    element_identifier: Box::new(TypeIdentifier::CompleteTypeId(inner_hash)),
+                },
+                "items".to_string(),
+            ));
+            let outer_dt = build_with_registry(CompleteTypeObject::Struct(outer), &registry);
+            let inner_dt =
+                Arc::new(DynamicType::from_type_object(inner_obj, TypeIdentifier::None).unwrap());
+
+            let items: Vec<DynamicValue> = (0..count)
+                .map(|i| {
+                    let mut inner = DynamicData::new(inner_dt.clone());
+                    inner.set("a", i as i32).unwrap();
+                    inner.set("b", (i as i32) * 10).unwrap();
+                    DynamicValue::Struct(Box::new(inner))
+                })
+                .collect();
+
+            let mut data = DynamicData::new(outer_dt.clone());
+            data.set_value("items", DynamicValue::Sequence(items)).unwrap();
+
+            let bytes = serialize_dynamic_data(&data, &format).unwrap();
+            let back = deserialize_dynamic_data(&bytes, &outer_dt).unwrap();
+
+            match back.get_value("items").unwrap() {
+                DynamicValue::Sequence(items) => {
+                    assert_eq!(items.len(), count);
+                    for (i, item) in items.iter().enumerate() {
+                        match item {
+                            DynamicValue::Struct(child) => {
+                                assert_eq!(child.get::<i32>("a").unwrap(), i as i32);
+                                assert_eq!(child.get::<i32>("b").unwrap(), (i as i32) * 10);
+                            }
+                            other => panic!("expected struct element, got {:?}", other),
+                        }
+                    }
+                }
+                other => panic!("expected sequence, got {:?}", other),
+            }
+        };
+
+        for count in [0usize, 1, 3] {
+            run(SerializationFormat::Cdr, count);
+            run(xcdr_format(ExtensibilityKind::Final), count);
+        }
+    }
+
+    #[test]
+    fn test_array_of_struct_roundtrip() {
+        let run = |format: SerializationFormat| {
+            let (inner_obj, inner_hash) = inner_struct(ExtensibilityKind::Final);
+            let mut registry = TypeRegistry::new();
+            registry.register_complete(inner_hash, "Inner".into(), inner_obj.clone());
+
+            let mut outer =
+                CompleteStructType::new(tf(ExtensibilityKind::Final), "HasArray".into(), None);
+            outer.add_member(CompleteStructMember::new(
+                0,
+                member_flag(false, false, false),
+                TypeIdentifier::PlainArrayLarge {
+                    header: PlainCollectionHeader::default(),
+                    array_bound_seq: vec![2],
+                    element_identifier: Box::new(TypeIdentifier::CompleteTypeId(inner_hash)),
+                },
+                "items".to_string(),
+            ));
+            let outer_dt = build_with_registry(CompleteTypeObject::Struct(outer), &registry);
+            let inner_dt =
+                Arc::new(DynamicType::from_type_object(inner_obj, TypeIdentifier::None).unwrap());
+
+            let items: Vec<DynamicValue> = (0..2)
+                .map(|i| {
+                    let mut inner = DynamicData::new(inner_dt.clone());
+                    inner.set("a", i as i32).unwrap();
+                    inner.set("b", (i as i32) + 100).unwrap();
+                    DynamicValue::Struct(Box::new(inner))
+                })
+                .collect();
+
+            let mut data = DynamicData::new(outer_dt.clone());
+            data.set_value("items", DynamicValue::Array(items)).unwrap();
+
+            let bytes = serialize_dynamic_data(&data, &format).unwrap();
+            let back = deserialize_dynamic_data(&bytes, &outer_dt).unwrap();
+
+            match back.get_value("items").unwrap() {
+                DynamicValue::Array(items) => {
+                    assert_eq!(items.len(), 2);
+                    for (i, item) in items.iter().enumerate() {
+                        match item {
+                            DynamicValue::Struct(child) => {
+                                assert_eq!(child.get::<i32>("a").unwrap(), i as i32);
+                                assert_eq!(child.get::<i32>("b").unwrap(), (i as i32) + 100);
+                            }
+                            other => panic!("expected struct element, got {:?}", other),
+                        }
+                    }
+                }
+                other => panic!("expected array, got {:?}", other),
+            }
+        };
+
+        run(SerializationFormat::Cdr);
+        run(xcdr_format(ExtensibilityKind::Final));
+    }
+
+    #[test]
+    fn test_nested_enum_name_resolution_and_vec_enum_has_no_dheader() {
+        let (enum_obj, enum_hash) = color_enum();
+        let mut registry = TypeRegistry::new();
+        registry.register_complete(enum_hash, "Color".into(), enum_obj);
+
+        // A struct with a single `tags: sequence<Color>` member, Final.
+        let mut outer =
+            CompleteStructType::new(tf(ExtensibilityKind::Final), "EnumList".into(), None);
+        outer.add_member(CompleteStructMember::new(
+            0,
+            member_flag(false, false, false),
+            TypeIdentifier::CompleteTypeId(enum_hash),
+            "color".to_string(),
+        ));
+        outer.add_member(CompleteStructMember::new(
+            1,
+            member_flag(false, false, false),
+            TypeIdentifier::PlainSequenceLarge {
+                header: PlainCollectionHeader::default(),
+                bound: 0,
+                element_identifier: Box::new(TypeIdentifier::CompleteTypeId(enum_hash)),
+            },
+            "tags".to_string(),
+        ));
+        let outer_dt = build_with_registry(CompleteTypeObject::Struct(outer), &registry);
+
+        let mut data = DynamicData::new(outer_dt.clone());
+        data.set_value("color", DynamicValue::Enum { name: String::new(), value: 2 }).unwrap();
+        data.set_value(
+            "tags",
+            DynamicValue::Sequence(vec![
+                DynamicValue::Enum { name: String::new(), value: 1 },
+                DynamicValue::Enum { name: String::new(), value: 0 },
+            ]),
+        )
+        .unwrap();
+
+        let bytes = serialize_dynamic_data(&data, &xcdr_format(ExtensibilityKind::Final)).unwrap();
+        assert_eq!(bytes.len(), 20, "Vec<enum> should not have a collection DHEADER");
+
+        let back = deserialize_dynamic_data(&bytes, &outer_dt).unwrap();
+        match back.get_value("color").unwrap() {
+            DynamicValue::Enum { name, value } => {
+                assert_eq!(*value, 2);
+                assert_eq!(name, "BLUE", "enum literal name should be resolved");
+            }
+            other => panic!("expected enum, got {:?}", other),
+        }
+        match back.get_value("tags").unwrap() {
+            DynamicValue::Sequence(items) => {
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0], DynamicValue::Enum { name: "GREEN".into(), value: 1 });
+                assert_eq!(items[1], DynamicValue::Enum { name: "RED".into(), value: 0 });
+            }
+            other => panic!("expected sequence, got {:?}", other),
+        }
+    }
+
+    /// Build "Opt { id: i32, opt: @optional i32 }" with the given extensibility.
+    fn optional_type(ext: ExtensibilityKind) -> Arc<DynamicType> {
+        let mut s = CompleteStructType::new(tf(ext), "Opt".into(), None);
+        s.add_member(CompleteStructMember::new(
+            0,
+            member_flag(false, false, false),
+            TypeIdentifier::Int32,
+            "id".to_string(),
+        ));
+        s.add_member(CompleteStructMember::new(
+            1,
+            member_flag(true, false, false),
+            TypeIdentifier::Int32,
+            "opt".to_string(),
+        ));
+        Arc::new(
+            DynamicType::from_type_object(CompleteTypeObject::Struct(s), TypeIdentifier::None)
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn test_optional_cdr_uses_pid_header() {
+        let dt = optional_type(ExtensibilityKind::Final);
+
+        let mut present = DynamicData::new(dt.clone());
+        present.set("id", 5i32).unwrap();
+        present.set("opt", 9i32).unwrap();
+        let present_bytes = serialize_dynamic_data(&present, &SerializationFormat::Cdr).unwrap();
+
+        let mut absent = DynamicData::new(dt.clone());
+        absent.set("id", 5i32).unwrap();
+        let absent_bytes = serialize_dynamic_data(&absent, &SerializationFormat::Cdr).unwrap();
+
+        // encap(4) + id(4) + PID header(4) [+ value(4) if present].
+        assert_eq!(present_bytes.len(), 16);
+        assert_eq!(absent_bytes.len(), 12);
+        // Absent: a length-0 short PID member header (member_id 1), NOT a bool.
+        assert_eq!(&absent_bytes[8..12], &[1, 0, 0, 0]);
+        // Present: same header but length 4.
+        assert_eq!(&present_bytes[8..12], &[1, 0, 4, 0]);
+
+        let back_present = deserialize_dynamic_data(&present_bytes, &dt).unwrap();
+        assert_eq!(back_present.get::<i32>("opt").unwrap(), 9);
+        let back_absent = deserialize_dynamic_data(&absent_bytes, &dt).unwrap();
+        assert!(back_absent.get_value("opt").is_none());
+    }
+
+    #[test]
+    fn test_optional_xcdr2_final_uses_presence_bool() {
+        let dt = optional_type(ExtensibilityKind::Final);
+        let format = xcdr_format(ExtensibilityKind::Final);
+
+        let mut present = DynamicData::new(dt.clone());
+        present.set("id", 5i32).unwrap();
+        present.set("opt", 9i32).unwrap();
+        let present_bytes = serialize_dynamic_data(&present, &format).unwrap();
+
+        let mut absent = DynamicData::new(dt.clone());
+        absent.set("id", 5i32).unwrap();
+        let absent_bytes = serialize_dynamic_data(&absent, &format).unwrap();
+
+        // The presence bool sits right after encap(4) + id(4).
+        assert_eq!(present_bytes[8], 1, "present optional should write bool(true)");
+        assert_eq!(absent_bytes[8], 0, "absent optional should write bool(false)");
+
+        let back_present = deserialize_dynamic_data(&present_bytes, &dt).unwrap();
+        assert_eq!(back_present.get::<i32>("opt").unwrap(), 9);
+        let back_absent = deserialize_dynamic_data(&absent_bytes, &dt).unwrap();
+        assert!(back_absent.get_value("opt").is_none());
+    }
+
+    #[test]
+    fn test_optional_xcdr2_mutable_uses_header_presence() {
+        let dt = optional_type(ExtensibilityKind::Mutable);
+        let format = xcdr_format(ExtensibilityKind::Mutable);
+
+        let mut present = DynamicData::new(dt.clone());
+        present.set("id", 5i32).unwrap();
+        present.set("opt", 9i32).unwrap();
+        let present_bytes = serialize_dynamic_data(&present, &format).unwrap();
+
+        let mut absent = DynamicData::new(dt.clone());
+        absent.set("id", 5i32).unwrap();
+        let absent_bytes = serialize_dynamic_data(&absent, &format).unwrap();
+
+        // Presence is expressed by emitting (or not) the member's EMHEADER.
+        assert!(present_bytes.len() > absent_bytes.len());
+
+        let back_present = deserialize_dynamic_data(&present_bytes, &dt).unwrap();
+        assert_eq!(back_present.get::<i32>("opt").unwrap(), 9);
+        let back_absent = deserialize_dynamic_data(&absent_bytes, &dt).unwrap();
+        assert!(back_absent.get_value("opt").is_none());
+    }
+
+    #[test]
+    fn test_cdr_mutable_struct_is_unsupported() {
+        let dt = optional_type(ExtensibilityKind::Mutable);
+        let mut data = DynamicData::new(dt.clone());
+        data.set("id", 1i32).unwrap();
+        let error = serialize_dynamic_data(&data, &SerializationFormat::Cdr).unwrap_err();
+        assert!(format!("{:?}", error).contains("Mutable"));
+    }
 
     fn create_test_type() -> Arc<DynamicType> {
         let mut struct_type = CompleteStructType::new(

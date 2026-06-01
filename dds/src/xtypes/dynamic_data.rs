@@ -315,6 +315,10 @@ impl DynamicValue {
             DynamicTypeKind::Struct(_) => DynamicValue::Null, // Cannot create without type info
             DynamicTypeKind::Enum(_) => DynamicValue::Enum { name: String::new(), value: 0 },
             DynamicTypeKind::ExternalType { .. } => DynamicValue::Null,
+            DynamicTypeKind::TypeRef(inner) => match inner.kind() {
+                DynamicTypeKind::Enum(_) => DynamicValue::Enum { name: String::new(), value: 0 },
+                _ => DynamicValue::Null,
+            },
         }
     }
 }
