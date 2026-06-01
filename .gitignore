@@ -48,6 +48,16 @@ yarn-error.log
 *.js.map
 *.tsbuildinfo
 
+# Java / JVM
+*.class
+*.jar
+*.war
+*.ear
+*.nar
+.gradle/
+hs_err_pid*
+replay_pid*
+
 # Rust
 debug/
 target/
