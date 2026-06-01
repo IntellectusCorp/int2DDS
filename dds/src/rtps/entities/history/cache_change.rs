@@ -4,7 +4,11 @@
 //! stored in reader or writer history caches. Changes include the sequence number,
 //! data payload, instance handle, and metadata.
 
-use std::collections::HashSet;
+use std::{
+    collections::HashSet,
+    sync::atomic::{AtomicU64, Ordering},
+    time::Instant,
+};
 
 use bytes::Bytes;
 
@@ -31,6 +35,59 @@ use crate::{
 pub(crate) enum DataPayload {
     Owned(Vec<u8>),
     Shared(Bytes),
+}
+
+static DATA_BYTES_PROFILE_COUNT: AtomicU64 = AtomicU64::new(0);
+static DATA_BYTES_PROFILE_OWNED_COUNT: AtomicU64 = AtomicU64::new(0);
+static DATA_BYTES_PROFILE_SHARED_COUNT: AtomicU64 = AtomicU64::new(0);
+static DATA_BYTES_PROFILE_OWNED_US: AtomicU64 = AtomicU64::new(0);
+static DATA_BYTES_PROFILE_SHARED_US: AtomicU64 = AtomicU64::new(0);
+static DATA_BYTES_PROFILE_TOTAL_US: AtomicU64 = AtomicU64::new(0);
+static DATA_BYTES_PROFILE_BYTES: AtomicU64 = AtomicU64::new(0);
+
+fn data_bytes_profile_enabled() -> bool {
+    std::env::var_os("RMW_INT2DDS_PROFILE").is_some()
+}
+
+fn elapsed_us(start: Instant, end: Instant) -> u64 {
+    end.duration_since(start).as_micros() as u64
+}
+
+fn record_data_bytes_profile(is_owned: bool, bytes: usize, branch_us: u64, total_us: u64) {
+    let n = DATA_BYTES_PROFILE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    DATA_BYTES_PROFILE_TOTAL_US.fetch_add(total_us, Ordering::Relaxed);
+    DATA_BYTES_PROFILE_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+    if is_owned {
+        DATA_BYTES_PROFILE_OWNED_COUNT.fetch_add(1, Ordering::Relaxed);
+        DATA_BYTES_PROFILE_OWNED_US.fetch_add(branch_us, Ordering::Relaxed);
+    } else {
+        DATA_BYTES_PROFILE_SHARED_COUNT.fetch_add(1, Ordering::Relaxed);
+        DATA_BYTES_PROFILE_SHARED_US.fetch_add(branch_us, Ordering::Relaxed);
+    }
+
+    if n % 300 == 0 {
+        let divisor = n as f64;
+        let owned_count = DATA_BYTES_PROFILE_OWNED_COUNT.load(Ordering::Relaxed);
+        let shared_count = DATA_BYTES_PROFILE_SHARED_COUNT.load(Ordering::Relaxed);
+        eprintln!(
+            "INT2DDS_DATA_BYTES_PROFILE count={} owned={} shared={} total_avg_us={:.3} owned_avg_us={:.3} shared_avg_us={:.3} avg_bytes={:.1}",
+            n,
+            owned_count,
+            shared_count,
+            DATA_BYTES_PROFILE_TOTAL_US.load(Ordering::Relaxed) as f64 / divisor,
+            if owned_count > 0 {
+                DATA_BYTES_PROFILE_OWNED_US.load(Ordering::Relaxed) as f64 / owned_count as f64
+            } else {
+                0.0
+            },
+            if shared_count > 0 {
+                DATA_BYTES_PROFILE_SHARED_US.load(Ordering::Relaxed) as f64 / shared_count as f64
+            } else {
+                0.0
+            },
+            DATA_BYTES_PROFILE_BYTES.load(Ordering::Relaxed) as f64 / divisor,
+        );
+    }
 }
 
 impl Clone for DataPayload {
@@ -203,6 +260,39 @@ impl CacheChange {
         self.data_payload.as_slice()
     }
 
+    pub(crate) fn data_bytes(&self) -> Bytes {
+        let profile = data_bytes_profile_enabled();
+        let total_t0 = Instant::now();
+        match &self.data_payload {
+            DataPayload::Owned(v) => {
+                let branch_t0 = Instant::now();
+                let bytes = Bytes::copy_from_slice(v);
+                if profile {
+                    record_data_bytes_profile(
+                        true,
+                        v.len(),
+                        elapsed_us(branch_t0, Instant::now()),
+                        elapsed_us(total_t0, Instant::now()),
+                    );
+                }
+                bytes
+            }
+            DataPayload::Shared(b) => {
+                let branch_t0 = Instant::now();
+                let bytes = b.clone();
+                if profile {
+                    record_data_bytes_profile(
+                        false,
+                        b.len(),
+                        elapsed_us(branch_t0, Instant::now()),
+                        elapsed_us(total_t0, Instant::now()),
+                    );
+                }
+                bytes
+            }
+        }
+    }
+
     /// Mutable access to the owned Vec buffer.
     /// Used by writer serialization and non-fragmented reader reception.
     pub(crate) fn data_mut(&mut self) -> &mut Vec<u8> {
@@ -210,11 +300,6 @@ impl CacheChange {
             DataPayload::Owned(v) => v,
             DataPayload::Shared(_) => unreachable!("data_mut called on shared payload"),
         }
-    }
-
-    /// Replace payload with an owned Vec (fragment assembly single-reader move).
-    pub(crate) fn set_owned_payload(&mut self, data: Vec<u8>) {
-        self.data_payload = DataPayload::Owned(data);
     }
 
     /// Set a shared payload for zero-copy multi-reader delivery.

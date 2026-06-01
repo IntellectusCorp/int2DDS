@@ -255,6 +255,10 @@ typedef struct Int2DdsPublisherQos Int2DdsPublisherQos;
  */
 typedef struct Int2DdsSampleSeq Int2DdsSampleSeq;
 
+typedef struct Int2DdsSerializedLoan Int2DdsSerializedLoan;
+
+typedef struct Int2DdsSerializedWriteLoan Int2DdsSerializedWriteLoan;
+
 /**
  * Opaque handle to a StatusCondition
  * `inner` is used by WaitSet (trait object), `kind` provides concrete access.
@@ -1458,6 +1462,20 @@ Int2DdsRet int2dds_write_serialized(const struct Int2DdsDataWriter *writer,
                                     uintptr_t data_len,
                                     const uint8_t *key,
                                     uintptr_t key_len);
+
+Int2DdsRet int2dds_prepare_serialized_write(const struct Int2DdsDataWriter *writer,
+                                            uintptr_t capacity,
+                                            uint8_t **data_out,
+                                            uintptr_t *capacity_out,
+                                            struct Int2DdsSerializedWriteLoan **loan_out);
+
+Int2DdsRet int2dds_commit_serialized_write(const struct Int2DdsDataWriter *writer,
+                                           struct Int2DdsSerializedWriteLoan *loan,
+                                           uintptr_t actual_size,
+                                           const uint8_t *key,
+                                           uintptr_t key_len);
+
+Int2DdsRet int2dds_abort_serialized_write(struct Int2DdsSerializedWriteLoan *loan);
 
 /**
  * Write pre-serialized data with an explicit source timestamp.
@@ -2744,6 +2762,33 @@ Int2DdsRet int2dds_take_serialized(const struct Int2DdsDataReader *reader,
                                    uintptr_t buffer_capacity,
                                    uintptr_t *actual_size_out,
                                    bool *valid_data_out);
+
+/**
+ * Take pre-serialized data and loan the returned byte slice to the caller.
+ *
+ * The returned `data_out` pointer remains valid until `loan_out` is passed to
+ * `int2dds_return_serialized_loan`. This avoids copying the payload into a
+ * caller-owned buffer for consumers that immediately deserialize the bytes.
+ *
+ * # Safety
+ * - `reader` must be a valid datareader
+ * - `data_out`, `actual_size_out`, `valid_data_out`, and `loan_out` must be valid pointers
+ * - if `*loan_out` is non-null, the caller must return it exactly once
+ */
+Int2DdsRet int2dds_take_serialized_loaned(const struct Int2DdsDataReader *reader,
+                                          const uint8_t **data_out,
+                                          uintptr_t *actual_size_out,
+                                          bool *valid_data_out,
+                                          struct Int2DdsSerializedLoan **loan_out);
+
+/**
+ * Return a serialized data loan produced by `int2dds_take_serialized_loaned`.
+ *
+ * # Safety
+ * - `loan` must be null or a pointer returned by `int2dds_take_serialized_loaned`
+ * - `loan` must not be used after this call
+ */
+Int2DdsRet int2dds_return_serialized_loan(struct Int2DdsSerializedLoan *loan);
 
 /**
  * Read pre-serialized data from a DataReader without removing from cache.

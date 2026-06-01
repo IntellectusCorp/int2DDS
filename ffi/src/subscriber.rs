@@ -15,6 +15,7 @@
 use std::ffi::CStr;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use int2dds::{
     core::time::Duration,
     infrastructure::status::StatusMask,
@@ -25,6 +26,10 @@ use int2dds::{
 };
 
 use crate::data::Int2DdsData;
+
+pub struct Int2DdsSerializedLoan {
+    data: Bytes,
+}
 
 // Sample state masks
 pub const INT2DDS_SAMPLE_STATE_READ: u32 = 0x0001;
@@ -1003,7 +1008,7 @@ pub unsafe extern "C" fn int2dds_take_serialized(
 
     let reader_ref = &*reader;
 
-    let (serialized_data, sample_info) = match reader_ref.inner.take_next_serialized() {
+    let (serialized_data, sample_info) = match reader_ref.inner.take_next_serialized_bytes() {
         Ok(result) => result,
         Err(int2dds::dcps::core::error::DdsError::NoData) => {
             *valid_data_out = false;
@@ -1026,6 +1031,74 @@ pub unsafe extern "C" fn int2dds_take_serialized(
 
     std::ptr::copy_nonoverlapping(serialized_data.as_ptr(), buffer, serialized_data.len());
 
+    INT2DDS_RET_OK
+}
+
+/// Take pre-serialized data and loan the returned byte slice to the caller.
+///
+/// The returned `data_out` pointer remains valid until `loan_out` is passed to
+/// `int2dds_return_serialized_loan`. This avoids copying the payload into a
+/// caller-owned buffer for consumers that immediately deserialize the bytes.
+///
+/// # Safety
+/// - `reader` must be a valid datareader
+/// - `data_out`, `actual_size_out`, `valid_data_out`, and `loan_out` must be valid pointers
+/// - if `*loan_out` is non-null, the caller must return it exactly once
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_take_serialized_loaned(
+    reader: *const Int2DdsDataReader,
+    data_out: *mut *const u8,
+    actual_size_out: *mut usize,
+    valid_data_out: *mut bool,
+    loan_out: *mut *mut Int2DdsSerializedLoan,
+) -> Int2DdsRet {
+    check_null!(reader);
+    check_null!(data_out);
+    check_null!(actual_size_out);
+    check_null!(valid_data_out);
+    check_null!(loan_out);
+
+    *data_out = std::ptr::null();
+    *actual_size_out = 0;
+    *valid_data_out = false;
+    *loan_out = std::ptr::null_mut();
+
+    let reader_ref = &*reader;
+
+    let (serialized_data, sample_info) = match reader_ref.inner.take_next_serialized_bytes() {
+        Ok(result) => result,
+        Err(int2dds::dcps::core::error::DdsError::NoData) => {
+            return INT2DDS_RET_NO_DATA;
+        }
+        Err(e) => return dds_error_to_code(&e),
+    };
+
+    *valid_data_out = sample_info.valid_data;
+    *actual_size_out = serialized_data.len();
+
+    if !sample_info.valid_data {
+        return INT2DDS_RET_OK;
+    }
+
+    let loan = Box::new(Int2DdsSerializedLoan { data: serialized_data });
+    *data_out = loan.data.as_ptr();
+    *loan_out = Box::into_raw(loan);
+
+    INT2DDS_RET_OK
+}
+
+/// Return a serialized data loan produced by `int2dds_take_serialized_loaned`.
+///
+/// # Safety
+/// - `loan` must be null or a pointer returned by `int2dds_take_serialized_loaned`
+/// - `loan` must not be used after this call
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_return_serialized_loan(
+    loan: *mut Int2DdsSerializedLoan,
+) -> Int2DdsRet {
+    if !loan.is_null() {
+        drop(Box::from_raw(loan));
+    }
     INT2DDS_RET_OK
 }
 

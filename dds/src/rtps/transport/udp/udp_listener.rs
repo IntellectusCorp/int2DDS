@@ -8,11 +8,44 @@ use network_interface::{Addr, NetworkInterface, NetworkInterfaceConfig};
 use socket2::{Domain, Protocol, SockAddr, Socket as Socket2, Type};
 use std::env;
 use std::net::UdpSocket as StdUdpSocket;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use crate::rtps::common::locator::{Locator, MULTICAST_IP};
 use crate::rtps::transport::udp::recv_arena::{
     RecvArena, DEFAULT_RECV_ARENA_CHUNK_BYTES, MAX_UDP_PACKET_BYTES,
 };
+
+static UDP_RECV_PROFILE_COUNT: AtomicU64 = AtomicU64::new(0);
+static UDP_RECV_PROFILE_RECVFROM_US: AtomicU64 = AtomicU64::new(0);
+static UDP_RECV_PROFILE_COMMIT_US: AtomicU64 = AtomicU64::new(0);
+static UDP_RECV_PROFILE_TOTAL_US: AtomicU64 = AtomicU64::new(0);
+
+fn udp_recv_profile_enabled() -> bool {
+    std::env::var_os("RMW_INT2DDS_PROFILE").is_some()
+}
+
+fn elapsed_us(start: Instant, end: Instant) -> u64 {
+    end.duration_since(start).as_micros() as u64
+}
+
+fn record_udp_recv_profile(recvfrom_us: u64, commit_us: u64, total_us: u64) {
+    let n = UDP_RECV_PROFILE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    UDP_RECV_PROFILE_RECVFROM_US.fetch_add(recvfrom_us, Ordering::Relaxed);
+    UDP_RECV_PROFILE_COMMIT_US.fetch_add(commit_us, Ordering::Relaxed);
+    UDP_RECV_PROFILE_TOTAL_US.fetch_add(total_us, Ordering::Relaxed);
+
+    if n % 4096 == 0 {
+        let divisor = n as f64;
+        eprintln!(
+            "INT2DDS_UDP_RECV_PROFILE count={} total_avg_us={:.3} recvfrom_avg_us={:.3} commit_avg_us={:.3}",
+            n,
+            UDP_RECV_PROFILE_TOTAL_US.load(Ordering::Relaxed) as f64 / divisor,
+            UDP_RECV_PROFILE_RECVFROM_US.load(Ordering::Relaxed) as f64 / divisor,
+            UDP_RECV_PROFILE_COMMIT_US.load(Ordering::Relaxed) as f64 / divisor,
+        );
+    }
+}
 
 // One arena per listener; reused across every incoming datagram on this socket.
 fn new_recv_arena() -> RecvArena {
@@ -196,12 +229,24 @@ impl UdpListener {
     }
 
     pub(crate) fn get_message(&mut self) -> Option<(Bytes, SocketAddr)> {
+        let profile = udp_recv_profile_enabled();
+        let total_t0 = Instant::now();
         // Reserve a slot inside the arena's current chunk; this is the buffer recv_from writes into.
         let slot = self.recv_arena.reserve_packet_slot();
+        let recvfrom_t0 = Instant::now();
         match self.socket.as_mut().unwrap().recv_from(slot) {
             Ok((nbytes, sender)) => {
+                let recvfrom_us = if profile { elapsed_us(recvfrom_t0, Instant::now()) } else { 0 };
                 // Freeze only the bytes actually written; the zero-filled tail is truncated so the next reservation can reuse the capacity.
+                let commit_t0 = Instant::now();
                 let bytes = self.recv_arena.commit_received_packet(nbytes);
+                if profile {
+                    record_udp_recv_profile(
+                        recvfrom_us,
+                        elapsed_us(commit_t0, Instant::now()),
+                        elapsed_us(total_t0, Instant::now()),
+                    );
+                }
                 Some((bytes, sender))
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
