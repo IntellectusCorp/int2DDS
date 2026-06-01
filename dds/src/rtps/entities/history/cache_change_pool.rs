@@ -30,4 +30,9 @@ impl CacheChangePool {
     pub(crate) fn release(&mut self, change: CacheChange) {
         self.free_changes.push(change);
     }
+
+    // debug: current pooled buffer count
+    pub(crate) fn len(&self) -> usize {
+        self.free_changes.len()
+    }
 }
