@@ -57,6 +57,10 @@ pub enum LcHint {
     Auto,
     SeqMul4,
     SeqMul8,
+    /// The member value begins with its own 4-byte DHEADER (an APPENDABLE/MUTABLE
+    /// nested type). Emit LC=5 and let that DHEADER double as the EMHEADER's
+    /// NEXTINT, matching Fast-CDR (no redundant length word).
+    Dheader,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,7 +153,7 @@ impl MemberHeader {
             2 => (4u32, 4usize),
             3 => (8u32, 4usize),
             4 => (read_nextint(data)?, 8usize),
-            5 => (read_nextint(data)?, 4usize),
+            5 => (4u32 + read_nextint(data)?, 4usize),
             6 => (4u32 + 4 * read_nextint(data)?, 4usize),
             7 => (4u32 + 8 * read_nextint(data)?, 4usize),
             _ => return Err(SerializationError::InvalidMemberHeader),
