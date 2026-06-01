@@ -8,7 +8,7 @@ use log::{debug, trace, warn};
 // use rand::Rng;
 use std::collections::HashMap;
 use std::ops::Add;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::common::instance_handle::InstanceHandle;
 use crate::rtps::common::entity_id::EntityId;
@@ -27,7 +27,6 @@ use crate::rtps::entities::history::writer_history::WriterHistoryCache;
 use crate::rtps::entities::reader::{
     FragmentInfo, Reader, StatefulReader, StatelessReader, WriterProxy,
 };
-use crate::rtps::entities::writer::reader_locator::ReaderLocator;
 use crate::rtps::entities::writer::reader_proxy::ReaderProxy;
 use crate::rtps::entities::writer::{StatefulWriter, StatelessWriter, Writer};
 use crate::rtps::logic::common::{
@@ -55,8 +54,237 @@ use crate::utils::timer::{timer_handler::TimerHandler, timer_id::TimerId};
 use dashmap::DashMap;
 use mio::Waker;
 
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex, OnceLock, Weak,
+};
 use std::thread::{self, JoinHandle};
+
+static SEND_PROFILE_CHANGE_COUNT: AtomicU64 = AtomicU64::new(0);
+static SEND_PROFILE_FRAG_COUNT: AtomicU64 = AtomicU64::new(0);
+static SEND_PROFILE_ACQUIRE_US: AtomicU64 = AtomicU64::new(0);
+static SEND_PROFILE_FRAGMENT_LOOKUP_US: AtomicU64 = AtomicU64::new(0);
+static SEND_PROFILE_MESSAGE_BUILD_US: AtomicU64 = AtomicU64::new(0);
+static SEND_PROFILE_ROUTE_SEND_US: AtomicU64 = AtomicU64::new(0);
+static SEND_PROFILE_RELEASE_US: AtomicU64 = AtomicU64::new(0);
+static SEND_PROFILE_TOTAL_US: AtomicU64 = AtomicU64::new(0);
+static ROUTE_PROFILE_COUNT: AtomicU64 = AtomicU64::new(0);
+static ROUTE_PROFILE_SELECT_US: AtomicU64 = AtomicU64::new(0);
+static ROUTE_PROFILE_DISPATCH_US: AtomicU64 = AtomicU64::new(0);
+static ROUTE_PROFILE_TOTAL_US: AtomicU64 = AtomicU64::new(0);
+static DATAFRAG_PROFILE_COUNT: AtomicU64 = AtomicU64::new(0);
+static DATAFRAG_PROFILE_MATCH_US: AtomicU64 = AtomicU64::new(0);
+static DATAFRAG_PROFILE_BUFFER_US: AtomicU64 = AtomicU64::new(0);
+static DATAFRAG_PROFILE_PROXY_US: AtomicU64 = AtomicU64::new(0);
+static DATAFRAG_PROFILE_COMPLETE_US: AtomicU64 = AtomicU64::new(0);
+static DATAFRAG_PROFILE_TOTAL_US: AtomicU64 = AtomicU64::new(0);
+static DATAFRAG_COMPLETE_PROFILE_COUNT: AtomicU64 = AtomicU64::new(0);
+static DATAFRAG_COMPLETE_PROFILE_META_US: AtomicU64 = AtomicU64::new(0);
+static DATAFRAG_COMPLETE_PROFILE_REMOVE_US: AtomicU64 = AtomicU64::new(0);
+static DATAFRAG_COMPLETE_PROFILE_ASSEMBLE_US: AtomicU64 = AtomicU64::new(0);
+static DATAFRAG_COMPLETE_PROFILE_WRAP_US: AtomicU64 = AtomicU64::new(0);
+static DATAFRAG_COMPLETE_PROFILE_DELIVER_US: AtomicU64 = AtomicU64::new(0);
+static DATAFRAG_COMPLETE_PROFILE_TOTAL_US: AtomicU64 = AtomicU64::new(0);
+static SEND_UNSENT_STATELESS_PROFILE_COUNT: AtomicU64 = AtomicU64::new(0);
+static SEND_UNSENT_STATELESS_PROFILE_TASKS_US: AtomicU64 = AtomicU64::new(0);
+static SEND_UNSENT_STATELESS_PROFILE_TASK_LOCK_US: AtomicU64 = AtomicU64::new(0);
+static SEND_UNSENT_STATELESS_PROFILE_TASK_GROUP_US: AtomicU64 = AtomicU64::new(0);
+static SEND_UNSENT_STATELESS_PROFILE_TASK_COLLECT_US: AtomicU64 = AtomicU64::new(0);
+static SEND_UNSENT_STATELESS_PROFILE_PARTICIPANT_US: AtomicU64 = AtomicU64::new(0);
+static SEND_UNSENT_STATELESS_PROFILE_LOOP_US: AtomicU64 = AtomicU64::new(0);
+static SEND_UNSENT_STATELESS_PROFILE_SEND_LOOP_US: AtomicU64 = AtomicU64::new(0);
+static SEND_UNSENT_STATELESS_PROFILE_UPDATE_US: AtomicU64 = AtomicU64::new(0);
+static SEND_UNSENT_STATELESS_PROFILE_UPDATE_LOCK_US: AtomicU64 = AtomicU64::new(0);
+static SEND_UNSENT_STATELESS_PROFILE_UPDATE_SCAN_US: AtomicU64 = AtomicU64::new(0);
+static SEND_UNSENT_STATELESS_PROFILE_TOTAL_US: AtomicU64 = AtomicU64::new(0);
+static SEND_UNSENT_STATELESS_PROFILE_GROUPS: AtomicU64 = AtomicU64::new(0);
+static SEND_UNSENT_STATELESS_PROFILE_READERS: AtomicU64 = AtomicU64::new(0);
+static SEND_UNSENT_STATELESS_PROFILE_CHANGES: AtomicU64 = AtomicU64::new(0);
+static SEND_UNSENT_STATELESS_PROFILE_DETAIL_PRINTS: AtomicU64 = AtomicU64::new(0);
+
+fn send_profile_enabled() -> bool {
+    std::env::var_os("RMW_INT2DDS_PROFILE").is_some()
+}
+
+fn elapsed_us(start: Instant, end: Instant) -> u64 {
+    end.duration_since(start).as_micros() as u64
+}
+
+fn record_route_profile(select_us: u64, dispatch_us: u64, total_us: u64) {
+    let n = ROUTE_PROFILE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    ROUTE_PROFILE_SELECT_US.fetch_add(select_us, Ordering::Relaxed);
+    ROUTE_PROFILE_DISPATCH_US.fetch_add(dispatch_us, Ordering::Relaxed);
+    ROUTE_PROFILE_TOTAL_US.fetch_add(total_us, Ordering::Relaxed);
+
+    if n % 4096 == 0 {
+        let divisor = n as f64;
+        eprintln!(
+            "INT2DDS_ROUTE_PROFILE count={} total_avg_us={:.3} select_avg_us={:.3} dispatch_avg_us={:.3}",
+            n,
+            ROUTE_PROFILE_TOTAL_US.load(Ordering::Relaxed) as f64 / divisor,
+            ROUTE_PROFILE_SELECT_US.load(Ordering::Relaxed) as f64 / divisor,
+            ROUTE_PROFILE_DISPATCH_US.load(Ordering::Relaxed) as f64 / divisor,
+        );
+    }
+}
+
+fn record_fragmented_change_profile(
+    fragments: u64,
+    acquire_us: u64,
+    fragment_lookup_us: u64,
+    message_build_us: u64,
+    route_send_us: u64,
+    release_us: u64,
+    total_us: u64,
+) {
+    let n = SEND_PROFILE_CHANGE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    SEND_PROFILE_FRAG_COUNT.fetch_add(fragments, Ordering::Relaxed);
+    SEND_PROFILE_ACQUIRE_US.fetch_add(acquire_us, Ordering::Relaxed);
+    SEND_PROFILE_FRAGMENT_LOOKUP_US.fetch_add(fragment_lookup_us, Ordering::Relaxed);
+    SEND_PROFILE_MESSAGE_BUILD_US.fetch_add(message_build_us, Ordering::Relaxed);
+    SEND_PROFILE_ROUTE_SEND_US.fetch_add(route_send_us, Ordering::Relaxed);
+    SEND_PROFILE_RELEASE_US.fetch_add(release_us, Ordering::Relaxed);
+    SEND_PROFILE_TOTAL_US.fetch_add(total_us, Ordering::Relaxed);
+
+    if n % 50 == 0 {
+        let divisor = n as f64;
+        eprintln!(
+            "INT2DDS_SEND_PROFILE count={} avg_frags={:.3} total_avg_us={:.3} acquire_avg_us={:.3} fragment_lookup_avg_us={:.3} message_build_avg_us={:.3} route_send_avg_us={:.3} release_avg_us={:.3}",
+            n,
+            SEND_PROFILE_FRAG_COUNT.load(Ordering::Relaxed) as f64 / divisor,
+            SEND_PROFILE_TOTAL_US.load(Ordering::Relaxed) as f64 / divisor,
+            SEND_PROFILE_ACQUIRE_US.load(Ordering::Relaxed) as f64 / divisor,
+            SEND_PROFILE_FRAGMENT_LOOKUP_US.load(Ordering::Relaxed) as f64 / divisor,
+            SEND_PROFILE_MESSAGE_BUILD_US.load(Ordering::Relaxed) as f64 / divisor,
+            SEND_PROFILE_ROUTE_SEND_US.load(Ordering::Relaxed) as f64 / divisor,
+            SEND_PROFILE_RELEASE_US.load(Ordering::Relaxed) as f64 / divisor,
+        );
+    }
+}
+
+fn record_datafrag_profile(
+    match_us: u64,
+    buffer_us: u64,
+    proxy_us: u64,
+    complete_us: u64,
+    total_us: u64,
+) {
+    let n = DATAFRAG_PROFILE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    DATAFRAG_PROFILE_MATCH_US.fetch_add(match_us, Ordering::Relaxed);
+    DATAFRAG_PROFILE_BUFFER_US.fetch_add(buffer_us, Ordering::Relaxed);
+    DATAFRAG_PROFILE_PROXY_US.fetch_add(proxy_us, Ordering::Relaxed);
+    DATAFRAG_PROFILE_COMPLETE_US.fetch_add(complete_us, Ordering::Relaxed);
+    DATAFRAG_PROFILE_TOTAL_US.fetch_add(total_us, Ordering::Relaxed);
+
+    if n % 4096 == 0 {
+        let divisor = n as f64;
+        eprintln!(
+            "INT2DDS_DATAFRAG_PROFILE count={} total_avg_us={:.3} match_avg_us={:.3} buffer_avg_us={:.3} proxy_avg_us={:.3} complete_avg_us={:.3}",
+            n,
+            DATAFRAG_PROFILE_TOTAL_US.load(Ordering::Relaxed) as f64 / divisor,
+            DATAFRAG_PROFILE_MATCH_US.load(Ordering::Relaxed) as f64 / divisor,
+            DATAFRAG_PROFILE_BUFFER_US.load(Ordering::Relaxed) as f64 / divisor,
+            DATAFRAG_PROFILE_PROXY_US.load(Ordering::Relaxed) as f64 / divisor,
+            DATAFRAG_PROFILE_COMPLETE_US.load(Ordering::Relaxed) as f64 / divisor,
+        );
+    }
+}
+
+fn record_datafrag_complete_profile(
+    meta_us: u64,
+    remove_us: u64,
+    assemble_us: u64,
+    wrap_us: u64,
+    deliver_us: u64,
+    total_us: u64,
+) {
+    let n = DATAFRAG_COMPLETE_PROFILE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    DATAFRAG_COMPLETE_PROFILE_META_US.fetch_add(meta_us, Ordering::Relaxed);
+    DATAFRAG_COMPLETE_PROFILE_REMOVE_US.fetch_add(remove_us, Ordering::Relaxed);
+    DATAFRAG_COMPLETE_PROFILE_ASSEMBLE_US.fetch_add(assemble_us, Ordering::Relaxed);
+    DATAFRAG_COMPLETE_PROFILE_WRAP_US.fetch_add(wrap_us, Ordering::Relaxed);
+    DATAFRAG_COMPLETE_PROFILE_DELIVER_US.fetch_add(deliver_us, Ordering::Relaxed);
+    DATAFRAG_COMPLETE_PROFILE_TOTAL_US.fetch_add(total_us, Ordering::Relaxed);
+
+    if n % 50 == 0 {
+        let divisor = n as f64;
+        eprintln!(
+            "INT2DDS_DATAFRAG_COMPLETE_PROFILE count={} total_avg_us={:.3} meta_avg_us={:.3} remove_avg_us={:.3} assemble_avg_us={:.3} wrap_avg_us={:.3} deliver_avg_us={:.3}",
+            n,
+            DATAFRAG_COMPLETE_PROFILE_TOTAL_US.load(Ordering::Relaxed) as f64 / divisor,
+            DATAFRAG_COMPLETE_PROFILE_META_US.load(Ordering::Relaxed) as f64 / divisor,
+            DATAFRAG_COMPLETE_PROFILE_REMOVE_US.load(Ordering::Relaxed) as f64 / divisor,
+            DATAFRAG_COMPLETE_PROFILE_ASSEMBLE_US.load(Ordering::Relaxed) as f64 / divisor,
+            DATAFRAG_COMPLETE_PROFILE_WRAP_US.load(Ordering::Relaxed) as f64 / divisor,
+            DATAFRAG_COMPLETE_PROFILE_DELIVER_US.load(Ordering::Relaxed) as f64 / divisor,
+        );
+    }
+}
+
+fn record_send_unsent_stateless_profile(
+    tasks_us: u64,
+    task_lock_us: u64,
+    task_group_us: u64,
+    task_collect_us: u64,
+    participant_us: u64,
+    loop_us: u64,
+    send_loop_us: u64,
+    update_us: u64,
+    update_lock_us: u64,
+    update_scan_us: u64,
+    total_us: u64,
+    groups: u64,
+    readers: u64,
+    changes: u64,
+) {
+    let n = SEND_UNSENT_STATELESS_PROFILE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    SEND_UNSENT_STATELESS_PROFILE_TASKS_US.fetch_add(tasks_us, Ordering::Relaxed);
+    SEND_UNSENT_STATELESS_PROFILE_TASK_LOCK_US.fetch_add(task_lock_us, Ordering::Relaxed);
+    SEND_UNSENT_STATELESS_PROFILE_TASK_GROUP_US.fetch_add(task_group_us, Ordering::Relaxed);
+    SEND_UNSENT_STATELESS_PROFILE_TASK_COLLECT_US.fetch_add(task_collect_us, Ordering::Relaxed);
+    SEND_UNSENT_STATELESS_PROFILE_PARTICIPANT_US.fetch_add(participant_us, Ordering::Relaxed);
+    SEND_UNSENT_STATELESS_PROFILE_LOOP_US.fetch_add(loop_us, Ordering::Relaxed);
+    SEND_UNSENT_STATELESS_PROFILE_SEND_LOOP_US.fetch_add(send_loop_us, Ordering::Relaxed);
+    SEND_UNSENT_STATELESS_PROFILE_UPDATE_US.fetch_add(update_us, Ordering::Relaxed);
+    SEND_UNSENT_STATELESS_PROFILE_UPDATE_LOCK_US.fetch_add(update_lock_us, Ordering::Relaxed);
+    SEND_UNSENT_STATELESS_PROFILE_UPDATE_SCAN_US.fetch_add(update_scan_us, Ordering::Relaxed);
+    SEND_UNSENT_STATELESS_PROFILE_TOTAL_US.fetch_add(total_us, Ordering::Relaxed);
+    SEND_UNSENT_STATELESS_PROFILE_GROUPS.fetch_add(groups, Ordering::Relaxed);
+    SEND_UNSENT_STATELESS_PROFILE_READERS.fetch_add(readers, Ordering::Relaxed);
+    SEND_UNSENT_STATELESS_PROFILE_CHANGES.fetch_add(changes, Ordering::Relaxed);
+
+    if n % 50 == 0 {
+        let divisor = n as f64;
+        eprintln!(
+            "INT2DDS_SEND_UNSENT_STATELESS_PROFILE count={} total_avg_us={:.3} tasks_avg_us={:.3} task_lock_avg_us={:.3} task_group_avg_us={:.3} task_collect_avg_us={:.3} participant_avg_us={:.3} loop_avg_us={:.3} send_loop_avg_us={:.3} update_avg_us={:.3} update_lock_avg_us={:.3} update_scan_avg_us={:.3} groups_avg={:.3} readers_avg={:.3} changes_avg={:.3}",
+            n,
+            SEND_UNSENT_STATELESS_PROFILE_TOTAL_US.load(Ordering::Relaxed) as f64 / divisor,
+            SEND_UNSENT_STATELESS_PROFILE_TASKS_US.load(Ordering::Relaxed) as f64 / divisor,
+            SEND_UNSENT_STATELESS_PROFILE_TASK_LOCK_US.load(Ordering::Relaxed) as f64 / divisor,
+            SEND_UNSENT_STATELESS_PROFILE_TASK_GROUP_US.load(Ordering::Relaxed) as f64 / divisor,
+            SEND_UNSENT_STATELESS_PROFILE_TASK_COLLECT_US.load(Ordering::Relaxed) as f64 / divisor,
+            SEND_UNSENT_STATELESS_PROFILE_PARTICIPANT_US.load(Ordering::Relaxed) as f64 / divisor,
+            SEND_UNSENT_STATELESS_PROFILE_LOOP_US.load(Ordering::Relaxed) as f64 / divisor,
+            SEND_UNSENT_STATELESS_PROFILE_SEND_LOOP_US.load(Ordering::Relaxed) as f64 / divisor,
+            SEND_UNSENT_STATELESS_PROFILE_UPDATE_US.load(Ordering::Relaxed) as f64 / divisor,
+            SEND_UNSENT_STATELESS_PROFILE_UPDATE_LOCK_US.load(Ordering::Relaxed) as f64 / divisor,
+            SEND_UNSENT_STATELESS_PROFILE_UPDATE_SCAN_US.load(Ordering::Relaxed) as f64 / divisor,
+            SEND_UNSENT_STATELESS_PROFILE_GROUPS.load(Ordering::Relaxed) as f64 / divisor,
+            SEND_UNSENT_STATELESS_PROFILE_READERS.load(Ordering::Relaxed) as f64 / divisor,
+            SEND_UNSENT_STATELESS_PROFILE_CHANGES.load(Ordering::Relaxed) as f64 / divisor,
+        );
+    }
+}
+
+fn dedup_exact_locators<'a>(locators: Vec<&'a Locator>) -> Vec<&'a Locator> {
+    let mut unique_locators = Vec::with_capacity(locators.len());
+    for locator in locators {
+        if !unique_locators.iter().any(|existing| *existing == locator) {
+            unique_locators.push(locator);
+        }
+    }
+    unique_locators
+}
 
 #[allow(dead_code)]
 #[derive(Clone)]
@@ -545,19 +773,97 @@ impl UserLogic {
         writer: &StatelessWriter,
         cache: &WriterHistoryCache,
     ) -> RtpsResult<()> {
-        let reader_tasks: Vec<(ReaderLocator, Vec<Arc<CacheChange>>)> = {
+        let profile = send_profile_enabled();
+        let total_t0 = Instant::now();
+        #[derive(Debug)]
+        struct ReaderLocatorSendGroup {
+            guid_prefix: GuidPrefix,
+            remote_entity_id: EntityId,
+            locator: Locator,
+            highest_sent_change_sn: SequenceNumber,
+        }
+
+        let tasks_t0 = Instant::now();
+        let mut task_lock_us = 0;
+        let mut task_group_us = 0;
+        let mut task_collect_us = 0;
+        let mut task_groups = 0;
+        let mut task_readers = 0;
+        let mut task_changes = 0;
+        let reader_tasks: Vec<(ReaderLocatorSendGroup, Vec<Arc<CacheChange>>)> = {
             let reader_locators = writer.reader_locator();
+            let lock_t0 = Instant::now();
             let reader_locators_guard = reader_locators.lock().map_err(|e| {
                 RtpsError::new(
                     RtpsErrorCode::LockError,
                     format!("Failed to acquire reader_locators lock: {}", e),
                 )
             })?;
+            if profile {
+                task_lock_us = elapsed_us(lock_t0, Instant::now());
+            }
 
-            let mut tasks = Vec::new();
+            let group_t0 = Instant::now();
+            let mut groups: Vec<ReaderLocatorSendGroup> = Vec::new();
             for reader_locator in reader_locators_guard.iter() {
+                if let Some(group) = groups.iter_mut().find(|group| {
+                    group.guid_prefix == reader_locator.guid_prefix()
+                        && group.remote_entity_id == reader_locator.remote_entity_id()
+                        && group.locator == reader_locator.locator()
+                }) {
+                    group.highest_sent_change_sn =
+                        group.highest_sent_change_sn.min(reader_locator.highest_sent_change_sn());
+                } else {
+                    groups.push(ReaderLocatorSendGroup {
+                        guid_prefix: reader_locator.guid_prefix(),
+                        remote_entity_id: reader_locator.remote_entity_id(),
+                        locator: reader_locator.locator(),
+                        highest_sent_change_sn: reader_locator.highest_sent_change_sn(),
+                    });
+                }
+            }
+            if profile {
+                task_group_us = elapsed_us(group_t0, Instant::now());
+                task_groups = groups.len() as u64;
+                task_readers = groups
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, group)| {
+                        !groups[..*index].iter().any(|previous| {
+                            previous.guid_prefix == group.guid_prefix
+                                && previous.remote_entity_id == group.remote_entity_id
+                        })
+                    })
+                    .count() as u64;
+                if SEND_UNSENT_STATELESS_PROFILE_DETAIL_PRINTS.fetch_add(1, Ordering::Relaxed) < 4 {
+                    let details = groups
+                        .iter()
+                        .map(|group| {
+                            format!(
+                                "reader={:02x?}:{:02x?}:{:02x} locator_kind={} locator={}:{} highest_sn={:?}",
+                                group.guid_prefix,
+                                group.remote_entity_id.entity_key,
+                                u8::from(group.remote_entity_id.entity_kind),
+                                group.locator.kind(),
+                                group.locator.to_ip_v4_addr_string(),
+                                group.locator.port(),
+                                group.highest_sent_change_sn,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    eprintln!(
+                        "INT2DDS_SEND_UNSENT_GROUP_DETAIL groups={} readers={} {}",
+                        task_groups, task_readers, details
+                    );
+                }
+            }
+
+            let collect_t0 = Instant::now();
+            let mut tasks = Vec::new();
+            for group in groups {
                 let mut changes_to_send = Vec::new();
-                let mut current_sn = reader_locator.highest_sent_change_sn();
+                let mut current_sn = group.highest_sent_change_sn;
 
                 // Collect cache changes not yet sent to the Remote Reader (Arc clone occurs)
                 while let Some(change) = cache.next_change_after(current_sn) {
@@ -566,25 +872,39 @@ impl UserLogic {
                 }
 
                 if !changes_to_send.is_empty() {
-                    tasks.push((reader_locator.clone(), changes_to_send));
+                    if profile {
+                        task_changes += changes_to_send.len() as u64;
+                    }
+                    tasks.push((group, changes_to_send));
                 }
+            }
+            if profile {
+                task_collect_us = elapsed_us(collect_t0, Instant::now());
             }
             tasks
         };
+        let tasks_us = if profile { elapsed_us(tasks_t0, Instant::now()) } else { 0 };
 
         if reader_tasks.is_empty() {
             return Ok(()); // Nothing to send
         }
 
+        let participant_t0 = Instant::now();
         let participant = self.get_upgraded_participant()?;
+        let participant_us = if profile { elapsed_us(participant_t0, Instant::now()) } else { 0 };
 
-        for (reader_locator, changes) in reader_tasks.iter() {
+        let loop_t0 = Instant::now();
+        let send_loop_t0 = Instant::now();
+        for (reader_group, changes) in reader_tasks.iter() {
             for change in changes.iter() {
                 // Create DATA or DATA_FRAG message
                 if change.is_fragmented() {
+                    let profile = send_profile_enabled();
+                    let change_t0 = Instant::now();
                     let timestamp = Utc::now();
 
                     // Reuse a single send buffer across every fragment of this change.
+                    let acquire_t0 = Instant::now();
                     let mut send_buffer = participant
                         .wire_buffer_pool()
                         .lock()
@@ -595,14 +915,24 @@ impl UserLogic {
                             )
                         })?
                         .acquire();
+                    let acquire_us =
+                        if profile { elapsed_us(acquire_t0, Instant::now()) } else { 0 };
+                    let mut fragment_lookup_us = 0;
+                    let mut message_build_us = 0;
+                    let mut route_send_us = 0;
 
                     // Send each fragment as DATA_FRAG submessage immediately
                     for fragment_num in 1..=change.total_fragments() {
+                        let lookup_t0 = Instant::now();
                         if let Some(fragment_data) = change.get_fragment_data(fragment_num) {
+                            if profile {
+                                fragment_lookup_us += elapsed_us(lookup_t0, Instant::now());
+                            }
+                            let build_t0 = Instant::now();
                             let result = MessageCreator::create_data_frag_msg(
                                 change,
-                                Guid::new(reader_locator.guid_prefix(), EntityId::PARTICIPANT),
-                                reader_locator.remote_entity_id(),
+                                Guid::new(reader_group.guid_prefix, EntityId::PARTICIPANT),
+                                reader_group.remote_entity_id,
                                 writer.endpoint_id(),
                                 fragment_num,
                                 1,
@@ -613,19 +943,29 @@ impl UserLogic {
                                 timestamp,
                                 &mut send_buffer,
                             );
+                            if profile {
+                                message_build_us += elapsed_us(build_t0, Instant::now());
+                            }
 
                             if result.is_ok() {
                                 // Send fragmented message immediately
+                                let route_t0 = Instant::now();
                                 if let Err(e) = self.send_rtps_message_to_locators(
-                                    &[reader_locator.locator()],
+                                    [&reader_group.locator],
                                     &send_buffer,
                                 ) {
                                     warn!("Failed to send DATA_FRAG message: {:?}", e);
                                 }
+                                if profile {
+                                    route_send_us += elapsed_us(route_t0, Instant::now());
+                                }
                             }
+                        } else if profile {
+                            fragment_lookup_us += elapsed_us(lookup_t0, Instant::now());
                         }
                     }
 
+                    let release_t0 = Instant::now();
                     participant
                         .wire_buffer_pool()
                         .lock()
@@ -636,6 +976,17 @@ impl UserLogic {
                             )
                         })?
                         .release(send_buffer);
+                    if profile {
+                        record_fragmented_change_profile(
+                            change.total_fragments() as u64,
+                            acquire_us,
+                            fragment_lookup_us,
+                            message_build_us,
+                            route_send_us,
+                            elapsed_us(release_t0, Instant::now()),
+                            elapsed_us(change_t0, Instant::now()),
+                        );
+                    }
                 } else {
                     // Send as regular DATA message
                     let mut send_buffer = participant
@@ -650,8 +1001,8 @@ impl UserLogic {
                         .acquire();
                     MessageCreator::create_data_msg(
                         change,
-                        Guid::new(reader_locator.guid_prefix(), EntityId::PARTICIPANT),
-                        reader_locator.remote_entity_id(),
+                        Guid::new(reader_group.guid_prefix, EntityId::PARTICIPANT),
+                        reader_group.remote_entity_id,
                         writer.endpoint_id(),
                         None, // No heartbeat
                         true, // Use inline QoS (default)
@@ -660,8 +1011,8 @@ impl UserLogic {
                     )
                     .map_err(|e| RtpsError::new(RtpsErrorCode::Io, e.to_string()))?;
 
-                    if let Err(e) = self
-                        .send_rtps_message_to_locators(&[reader_locator.locator()], &send_buffer)
+                    if let Err(e) =
+                        self.send_rtps_message_to_locators([&reader_group.locator], &send_buffer)
                     {
                         warn!("Failed to send DATA message: {:?}", e);
                         // Continue sending other messages instead of aborting
@@ -679,30 +1030,63 @@ impl UserLogic {
                 }
             }
         }
+        let send_loop_us = if profile { elapsed_us(send_loop_t0, Instant::now()) } else { 0 };
 
+        let update_t0 = Instant::now();
+        let mut update_lock_us = 0;
+        let mut update_scan_us = 0;
         {
             let reader_locators = writer.reader_locator();
+            let update_lock_t0 = Instant::now();
             let mut reader_locators_guard = reader_locators.lock().map_err(|e| {
                 RtpsError::new(
                     RtpsErrorCode::LockError,
                     format!("Failed to acquire reader_locators lock for update: {}", e),
                 )
             })?;
+            if profile {
+                update_lock_us = elapsed_us(update_lock_t0, Instant::now());
+            }
 
+            let update_scan_t0 = Instant::now();
             for (task_reader, changes) in reader_tasks.iter() {
                 if let Some(last_change) = changes.last() {
                     let last_sn = last_change.sequence_number();
 
-                    // Find and update matching reader_locator
-                    if let Some(reader_locator) = reader_locators_guard.iter_mut().find(|rl| {
-                        rl.guid_prefix() == task_reader.guid_prefix()
-                            && rl.remote_entity_id() == task_reader.remote_entity_id()
-                            && rl.locator() == task_reader.locator()
+                    // Mark every exact duplicate locator for this remote reader with the last sent change.
+                    for reader_locator in reader_locators_guard.iter_mut().filter(|rl| {
+                        rl.guid_prefix() == task_reader.guid_prefix
+                            && rl.remote_entity_id() == task_reader.remote_entity_id
+                            && rl.locator() == task_reader.locator
                     }) {
                         reader_locator.set_highest_sent_change_sn(last_sn);
                     }
                 }
             }
+            if profile {
+                update_scan_us = elapsed_us(update_scan_t0, Instant::now());
+            }
+        }
+        let update_us = if profile { elapsed_us(update_t0, Instant::now()) } else { 0 };
+        let loop_us = if profile { elapsed_us(loop_t0, Instant::now()) } else { 0 };
+
+        if profile {
+            record_send_unsent_stateless_profile(
+                tasks_us,
+                task_lock_us,
+                task_group_us,
+                task_collect_us,
+                participant_us,
+                loop_us,
+                send_loop_us,
+                update_us,
+                update_lock_us,
+                update_scan_us,
+                elapsed_us(total_t0, Instant::now()),
+                task_groups,
+                task_readers,
+                task_changes,
+            );
         }
 
         Ok(())
@@ -1341,8 +1725,10 @@ impl UserLogic {
     where
         T: IntoIterator<Item = &'a Locator>,
     {
-        let locators: Vec<&Locator> = locators.into_iter().collect();
-
+        let profile = send_profile_enabled();
+        let total_t0 = Instant::now();
+        let select_t0 = Instant::now();
+        let locators = dedup_exact_locators(locators.into_iter().collect());
         let pick = |is_kind: fn(&Locator) -> bool| -> Option<Vec<&Locator>> {
             let v: Vec<&Locator> = locators
                 .iter()
@@ -1355,9 +1741,11 @@ impl UserLogic {
             .or_else(|| pick(Locator::is_tcp))
             .or_else(|| pick(Locator::is_udp))
             .unwrap_or(locators);
+        let select_us = if profile { elapsed_us(select_t0, Instant::now()) } else { 0 };
 
         let mut is_sent = false;
         let mut last_error = None;
+        let dispatch_t0 = Instant::now();
         for locator in locators {
             match self.transport.send(buffer, &SendTarget::UserData(locator)) {
                 Ok(_) => is_sent = true,
@@ -1388,6 +1776,12 @@ impl UserLogic {
                 }
             }
         }
+        let dispatch_us = if profile { elapsed_us(dispatch_t0, Instant::now()) } else { 0 };
+
+        if profile {
+            record_route_profile(select_us, dispatch_us, elapsed_us(total_t0, Instant::now()));
+        }
+
         if !is_sent {
             return Err(if let Some(err) = last_error {
                 RtpsError::new(RtpsErrorCode::Io, err.to_string())
@@ -1998,14 +2392,23 @@ impl UnicastMessageProcessor for UserLogic {
         data_frag: &DataFrag,
         message_receiver: &MessageReceiver,
     ) -> RtpsResult<()> {
+        let profile = send_profile_enabled();
+        let total_t0 = Instant::now();
+        let mut match_us = 0;
+        let mut buffer_us = 0;
+        let mut proxy_us = 0;
         let source_timestamp = message_receiver.get_source_timestamp();
         let remote_writer_guid = Guid::new(rtps_header.guid_prefix(), data_frag.writer_id);
 
         let key = (remote_writer_guid, data_frag.writer_sn);
         let total_size = data_frag.sample_size;
 
+        let match_t0 = Instant::now();
         let matched_readers: Vec<Arc<dyn Reader + Send + Sync>> =
             self.get_matched_readers(remote_writer_guid, data_frag.reader_id)?;
+        if profile {
+            match_us = elapsed_us(match_t0, Instant::now());
+        }
 
         if matched_readers.is_empty() {
             debug!(
@@ -2022,6 +2425,7 @@ impl UnicastMessageProcessor for UserLogic {
         }
 
         // Copy fragment data using DashMap entry API
+        let buffer_t0 = Instant::now();
         {
             let mut buffer = self.fragment_buffers.entry(key).or_insert_with(|| {
                 FragmentBuffer::new(data_frag.writer_sn, total_size, data_frag.fragment_size)
@@ -2051,8 +2455,12 @@ impl UnicastMessageProcessor for UserLogic {
                 }
             }
         } // buffer RefMut is automatically dropped here
+        if profile {
+            buffer_us = elapsed_us(buffer_t0, Instant::now());
+        }
 
         // For StatefulReader case, update WriterProxy's ChangeFromWriter state for all matched readers
+        let proxy_t0 = Instant::now();
         for reader in &matched_readers {
             if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
                 // Query buffer information from DashMap again
@@ -2079,23 +2487,32 @@ impl UnicastMessageProcessor for UserLogic {
                 }
             }
         }
+        if profile {
+            proxy_us = elapsed_us(proxy_t0, Instant::now());
+        }
 
         // Check if all fragments have been received and process
+        let complete_t0 = Instant::now();
         if let Some(buffer_ref) = self.fragment_buffers.get(&key) {
             if buffer_ref.all_fragments_received() {
+                let completed_t0 = Instant::now();
+                let meta_t0 = Instant::now();
                 let total_fragments = buffer_ref.total_fragments;
                 let received_fragments = buffer_ref.received_fragments.clone();
                 let is_complete = buffer_ref.all_fragments_received();
+                let meta_us = if profile { elapsed_us(meta_t0, Instant::now()) } else { 0 };
 
                 // Drop buffer_ref to release DashMap lock
                 drop(buffer_ref);
 
                 // Move payload from buffer without cloning
+                let remove_t0 = Instant::now();
                 let removed = self.fragment_buffers.remove(&key);
                 if removed.is_none() {
                     return Ok(());
                 }
                 let (_, buffer) = removed.unwrap();
+                let remove_us = if profile { elapsed_us(remove_t0, Instant::now()) } else { 0 };
                 // Use timestamp from first fragment, fallback to current message
                 let assembled_timestamp = buffer.source_timestamp.or(source_timestamp);
                 if assembled_timestamp.is_none() {
@@ -2105,18 +2522,18 @@ impl UnicastMessageProcessor for UserLogic {
                     ));
                 }
 
+                let assemble_t0 = Instant::now();
                 let assembled_vec = buffer.assemble();
+                let assemble_us = if profile { elapsed_us(assemble_t0, Instant::now()) } else { 0 };
 
-                // Multi-reader: wrap in `Bytes` for zero-copy sharing
-                // Single-reader: move Vec directly into CacheChange
-                let mut owned_payload = None;
-                let shared_payload = if matched_readers.len() > 1 {
-                    Some(bytes::Bytes::from(assembled_vec))
-                } else {
-                    owned_payload = Some(assembled_vec);
-                    None
-                };
+                // Keep assembled fragmented payloads in shared storage. The non-fragmented DATA
+                // path already stores socket-backed bytes this way, and serialized RMW take can
+                // clone Bytes without copying the full payload.
+                let wrap_t0 = Instant::now();
+                let shared_payload = bytes::Bytes::from(assembled_vec);
+                let wrap_us = if profile { elapsed_us(wrap_t0, Instant::now()) } else { 0 };
 
+                let deliver_t0 = Instant::now();
                 for (_reader_idx, reader) in matched_readers.iter().enumerate() {
                     let mut ownership_strength = None;
                     if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>()
@@ -2141,13 +2558,7 @@ impl UnicastMessageProcessor for UserLogic {
                         Vec::new(),
                         assembled_timestamp,
                     );
-                    if let Some(ref shared) = shared_payload {
-                        // Multi-reader: share via `Bytes` clone (refcount bump, 0 copy)
-                        assembled_change.set_shared_payload(shared.clone());
-                    } else if let Some(vec) = owned_payload.take() {
-                        // Single reader: move Vec directly (0 copy)
-                        assembled_change.set_owned_payload(vec);
-                    }
+                    assembled_change.set_shared_payload(shared_payload.clone());
 
                     assembled_change.set_ownership_strength(ownership_strength);
 
@@ -2163,10 +2574,29 @@ impl UnicastMessageProcessor for UserLogic {
                         }),
                     );
                 }
+                let deliver_us = if profile { elapsed_us(deliver_t0, Instant::now()) } else { 0 };
 
-                // Remove completed fragment buffer
-                self.fragment_buffers.remove(&key);
+                if profile {
+                    record_datafrag_complete_profile(
+                        meta_us,
+                        remove_us,
+                        assemble_us,
+                        wrap_us,
+                        deliver_us,
+                        elapsed_us(completed_t0, Instant::now()),
+                    );
+                }
             }
+        }
+        if profile {
+            let complete_us = elapsed_us(complete_t0, Instant::now());
+            record_datafrag_profile(
+                match_us,
+                buffer_us,
+                proxy_us,
+                complete_us,
+                elapsed_us(total_t0, Instant::now()),
+            );
         }
 
         Ok(())
@@ -2339,5 +2769,53 @@ impl UnicastMessageProcessor for UserLogic {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    #[test]
+    fn dedup_exact_locators_removes_only_identical_entries() {
+        let udp_a = Locator::from_ip_v4_addr_and_port(&Ipv4Addr::new(192, 168, 0, 10), 7400);
+        let udp_b = Locator::from_ip_v4_addr_and_port(&Ipv4Addr::new(192, 168, 0, 11), 7400);
+        let tcp_a = Locator::from_tcp_v4(Ipv4Addr::new(192, 168, 0, 10), 7400);
+        let locators = vec![&udp_a, &udp_a, &udp_b, &tcp_a, &tcp_a];
+
+        let unique = dedup_exact_locators(locators);
+
+        assert_eq!(unique, vec![&udp_a, &udp_b, &tcp_a]);
+    }
+
+    #[test]
+    fn dedup_exact_locators_keeps_distinct_udp_interfaces() {
+        let udp_a = Locator::from_ip_v4_addr_and_port(&Ipv4Addr::new(192, 168, 0, 10), 7400);
+        let udp_b = Locator::from_ip_v4_addr_and_port(&Ipv4Addr::new(192, 168, 0, 11), 7400);
+
+        let selected = dedup_exact_locators(vec![&udp_a, &udp_b]);
+
+        assert_eq!(selected, vec![&udp_a, &udp_b]);
+    }
+
+    #[test]
+    fn dedup_exact_locators_keeps_distinct_transport_locators() {
+        let udp = Locator::from_ip_v4_addr_and_port(&Ipv4Addr::new(192, 168, 0, 10), 7400);
+        let tcp = Locator::from_tcp_v4(Ipv4Addr::new(192, 168, 0, 10), 7400);
+
+        let selected = dedup_exact_locators(vec![&udp, &tcp]);
+
+        assert_eq!(selected, vec![&udp, &tcp]);
+    }
+
+    #[test]
+    fn dedup_exact_locators_keeps_shm_and_udp_locators() {
+        let udp = Locator::from_ip_v4_addr_and_port(&Ipv4Addr::new(192, 168, 0, 10), 7400);
+        let shm = Locator::from_shm(&Ipv4Addr::new(192, 168, 0, 10), 7400);
+
+        let selected = dedup_exact_locators(vec![&udp, &shm]);
+
+        assert_eq!(selected, vec![&udp, &shm]);
     }
 }

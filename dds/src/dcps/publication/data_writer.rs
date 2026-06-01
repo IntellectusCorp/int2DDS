@@ -24,9 +24,10 @@ use std::{
     fmt::Debug,
     marker::PhantomData,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, RwLock, Weak,
     },
+    time::Instant,
 };
 
 use arc_swap::ArcSwap;
@@ -72,6 +73,7 @@ use crate::{
             time::RtpsTime,
             types::{ChangeKind, SerializedData},
         },
+        entities::history::cache_change::CacheChange,
         entities::writer::Writer as RtpsWriter,
         logic::wlp_logic::WlpLogic,
     },
@@ -81,6 +83,67 @@ use crate::{
     },
     DdsType,
 };
+
+pub struct SerializedWriteLoan {
+    change: CacheChange,
+}
+
+static SERIALIZED_COMMIT_PROFILE_COUNT: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_COMMIT_PROFILE_TIMESTAMP_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_COMMIT_PROFILE_RESOLVE_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_COMMIT_PROFILE_FRAGMENT_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_COMMIT_PROFILE_CACHE_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_COMMIT_PROFILE_LIVELINESS_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_COMMIT_PROFILE_TOTAL_US: AtomicU64 = AtomicU64::new(0);
+
+fn serialized_commit_profile_enabled() -> bool {
+    std::env::var_os("RMW_INT2DDS_PROFILE").is_some()
+}
+
+fn elapsed_us(start: Instant, end: Instant) -> u64 {
+    end.duration_since(start).as_micros() as u64
+}
+
+fn record_serialized_commit_profile(
+    timestamp_us: u64,
+    resolve_us: u64,
+    fragment_us: u64,
+    cache_us: u64,
+    liveliness_us: u64,
+    total_us: u64,
+) {
+    let n = SERIALIZED_COMMIT_PROFILE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    SERIALIZED_COMMIT_PROFILE_TIMESTAMP_US.fetch_add(timestamp_us, Ordering::Relaxed);
+    SERIALIZED_COMMIT_PROFILE_RESOLVE_US.fetch_add(resolve_us, Ordering::Relaxed);
+    SERIALIZED_COMMIT_PROFILE_FRAGMENT_US.fetch_add(fragment_us, Ordering::Relaxed);
+    SERIALIZED_COMMIT_PROFILE_CACHE_US.fetch_add(cache_us, Ordering::Relaxed);
+    SERIALIZED_COMMIT_PROFILE_LIVELINESS_US.fetch_add(liveliness_us, Ordering::Relaxed);
+    SERIALIZED_COMMIT_PROFILE_TOTAL_US.fetch_add(total_us, Ordering::Relaxed);
+
+    if n % 300 == 0 {
+        let divisor = n as f64;
+        eprintln!(
+            "INT2DDS_SERIALIZED_COMMIT_PROFILE count={} total_avg_us={:.3} timestamp_avg_us={:.3} resolve_avg_us={:.3} fragment_avg_us={:.3} cache_avg_us={:.3} liveliness_avg_us={:.3}",
+            n,
+            SERIALIZED_COMMIT_PROFILE_TOTAL_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_COMMIT_PROFILE_TIMESTAMP_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_COMMIT_PROFILE_RESOLVE_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_COMMIT_PROFILE_FRAGMENT_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_COMMIT_PROFILE_CACHE_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_COMMIT_PROFILE_LIVELINESS_US.load(Ordering::Relaxed) as f64 / divisor,
+        );
+    }
+}
+
+impl SerializedWriteLoan {
+    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.change.data_mut().as_mut_ptr()
+    }
+
+    pub fn capacity(&mut self) -> usize {
+        self.change.data_mut().capacity()
+    }
+}
 
 use super::{data_writer_listener::DataWriterListener, publisher::Publisher, qos::DataWriterQos};
 
@@ -863,6 +926,95 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         )?;
 
         self.update_liveliness()?;
+
+        Ok(())
+    }
+
+    pub fn prepare_serialized_write(&self, capacity: usize) -> DdsResult<SerializedWriteLoan> {
+        self.is_enabled()?;
+        let mut change = {
+            let mut datawriter_cache =
+                self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+            datawriter_cache.acquire_change()
+        };
+
+        let data = change.data_mut();
+        data.clear();
+        if data.capacity() < capacity {
+            data.reserve(capacity - data.capacity());
+        }
+
+        Ok(SerializedWriteLoan { change })
+    }
+
+    pub fn commit_serialized_write(
+        &self,
+        mut loan: SerializedWriteLoan,
+        actual_size: usize,
+        serialized_key: Option<&[u8]>,
+    ) -> DdsResult<()> {
+        let profile = serialized_commit_profile_enabled();
+        let total_t0 = Instant::now();
+        if actual_size > loan.change.data_mut().capacity() {
+            return Err(DdsError::BadParameter);
+        }
+
+        let timestamp_t0 = Instant::now();
+        let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
+        self.is_enabled()?;
+        Self::validate_timestamp(&timestamp)?;
+        let timestamp_us = if profile { elapsed_us(timestamp_t0, Instant::now()) } else { 0 };
+
+        let resolve_t0 = Instant::now();
+        let key_info = match serialized_key {
+            Some(key_bytes) if !key_bytes.is_empty() => {
+                let key_data: SerializedData = Arc::from(key_bytes);
+                let computed_handle = Self::compute_instance_handle_from_key(key_bytes);
+                Some((key_data, computed_handle))
+            }
+            _ => None,
+        };
+
+        let (instance_handle, _) =
+            self.resolve_write_instance(key_info, InstanceHandle::NIL, timestamp)?;
+        let resolve_us = if profile { elapsed_us(resolve_t0, Instant::now()) } else { 0 };
+
+        let fragment_t0 = Instant::now();
+        let rtps_writer = self.get_rtps_writer()?;
+        let seq_num = rtps_writer.allocate_sequence_number();
+        loan.change.reset(
+            ChangeKind::Alive,
+            rtps_writer.guid(),
+            instance_handle,
+            seq_num,
+            Some(timestamp.into()),
+        );
+        unsafe {
+            loan.change.data_mut().set_len(actual_size);
+        }
+        loan.change.apply_fragmentation(rtps_writer.data_max_size_serialized() as usize);
+        let fragment_us = if profile { elapsed_us(fragment_t0, Instant::now()) } else { 0 };
+
+        let cache_t0 = Instant::now();
+        let mut datawriter_cache =
+            self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        datawriter_cache.add_change_with_cleanup(Arc::new(loan.change))?;
+        let cache_us = if profile { elapsed_us(cache_t0, Instant::now()) } else { 0 };
+
+        let liveliness_t0 = Instant::now();
+        self.update_liveliness()?;
+        let liveliness_us = if profile { elapsed_us(liveliness_t0, Instant::now()) } else { 0 };
+
+        if profile {
+            record_serialized_commit_profile(
+                timestamp_us,
+                resolve_us,
+                fragment_us,
+                cache_us,
+                liveliness_us,
+                elapsed_us(total_t0, Instant::now()),
+            );
+        }
 
         Ok(())
     }

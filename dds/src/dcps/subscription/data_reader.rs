@@ -26,6 +26,7 @@
 //! - **Status Notifications**: Callbacks for data available, subscription matched, etc.
 
 use arc_swap::ArcSwap;
+use bytes::Bytes;
 use std::{
     any::{Any, TypeId},
     cmp::Ordering as CmpOrdering,
@@ -33,9 +34,10 @@ use std::{
     fmt::Debug,
     marker::PhantomData,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, RwLock, Weak,
     },
+    time::Instant,
 };
 
 use super::{
@@ -97,6 +99,107 @@ use crate::{
     },
     utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
 };
+
+static SERIALIZED_TAKE_PROFILE_COUNT: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_PROFILE_PRECHECK_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_PROFILE_GET_CHANGES_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_PROFILE_SORT_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_PROFILE_FILTER_SETUP_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_PROFILE_INSTANCE_INFO_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_PROFILE_LOOP_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_PROFILE_CLEANUP_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_PROFILE_TOTAL_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_LOOP_PROFILE_COUNT: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_LOOP_PROFILE_SAMPLE_STATE_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_LOOP_PROFILE_INFO_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_LOOP_PROFILE_MATCH_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_LOOP_PROFILE_DATA_BYTES_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_LOOP_PROFILE_SAMPLE_INFO_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_LOOP_PROFILE_REMOVE_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_LOOP_PROFILE_PUSH_US: AtomicU64 = AtomicU64::new(0);
+static SERIALIZED_TAKE_LOOP_PROFILE_TOTAL_US: AtomicU64 = AtomicU64::new(0);
+
+fn serialized_take_profile_enabled() -> bool {
+    std::env::var_os("RMW_INT2DDS_PROFILE").is_some()
+}
+
+fn elapsed_us(start: Instant, end: Instant) -> u64 {
+    end.duration_since(start).as_micros() as u64
+}
+
+fn record_serialized_take_profile(
+    precheck_us: u64,
+    get_changes_us: u64,
+    sort_us: u64,
+    filter_setup_us: u64,
+    instance_info_us: u64,
+    loop_us: u64,
+    cleanup_us: u64,
+    total_us: u64,
+) {
+    let n = SERIALIZED_TAKE_PROFILE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    SERIALIZED_TAKE_PROFILE_PRECHECK_US.fetch_add(precheck_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_PROFILE_GET_CHANGES_US.fetch_add(get_changes_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_PROFILE_SORT_US.fetch_add(sort_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_PROFILE_FILTER_SETUP_US.fetch_add(filter_setup_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_PROFILE_INSTANCE_INFO_US.fetch_add(instance_info_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_PROFILE_LOOP_US.fetch_add(loop_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_PROFILE_CLEANUP_US.fetch_add(cleanup_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_PROFILE_TOTAL_US.fetch_add(total_us, Ordering::Relaxed);
+
+    if n % 300 == 0 {
+        let divisor = n as f64;
+        eprintln!(
+            "INT2DDS_SERIALIZED_TAKE_PROFILE count={} total_avg_us={:.3} precheck_avg_us={:.3} get_changes_avg_us={:.3} sort_avg_us={:.3} filter_setup_avg_us={:.3} instance_info_avg_us={:.3} loop_avg_us={:.3} cleanup_avg_us={:.3}",
+            n,
+            SERIALIZED_TAKE_PROFILE_TOTAL_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_PROFILE_PRECHECK_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_PROFILE_GET_CHANGES_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_PROFILE_SORT_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_PROFILE_FILTER_SETUP_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_PROFILE_INSTANCE_INFO_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_PROFILE_LOOP_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_PROFILE_CLEANUP_US.load(Ordering::Relaxed) as f64 / divisor,
+        );
+    }
+}
+
+fn record_serialized_take_loop_profile(
+    sample_state_us: u64,
+    info_us: u64,
+    match_us: u64,
+    data_bytes_us: u64,
+    sample_info_us: u64,
+    remove_us: u64,
+    push_us: u64,
+    total_us: u64,
+) {
+    let n = SERIALIZED_TAKE_LOOP_PROFILE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    SERIALIZED_TAKE_LOOP_PROFILE_SAMPLE_STATE_US.fetch_add(sample_state_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_LOOP_PROFILE_INFO_US.fetch_add(info_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_LOOP_PROFILE_MATCH_US.fetch_add(match_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_LOOP_PROFILE_DATA_BYTES_US.fetch_add(data_bytes_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_LOOP_PROFILE_SAMPLE_INFO_US.fetch_add(sample_info_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_LOOP_PROFILE_REMOVE_US.fetch_add(remove_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_LOOP_PROFILE_PUSH_US.fetch_add(push_us, Ordering::Relaxed);
+    SERIALIZED_TAKE_LOOP_PROFILE_TOTAL_US.fetch_add(total_us, Ordering::Relaxed);
+
+    if n % 300 == 0 {
+        let divisor = n as f64;
+        eprintln!(
+            "INT2DDS_SERIALIZED_TAKE_LOOP_PROFILE count={} total_avg_us={:.3} sample_state_avg_us={:.3} info_avg_us={:.3} match_avg_us={:.3} data_bytes_avg_us={:.3} sample_info_avg_us={:.3} remove_avg_us={:.3} push_avg_us={:.3}",
+            n,
+            SERIALIZED_TAKE_LOOP_PROFILE_TOTAL_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_LOOP_PROFILE_SAMPLE_STATE_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_LOOP_PROFILE_INFO_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_LOOP_PROFILE_MATCH_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_LOOP_PROFILE_DATA_BYTES_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_LOOP_PROFILE_SAMPLE_INFO_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_LOOP_PROFILE_REMOVE_US.load(Ordering::Relaxed) as f64 / divisor,
+            SERIALIZED_TAKE_LOOP_PROFILE_PUSH_US.load(Ordering::Relaxed) as f64 / divisor,
+        );
+    }
+}
 
 // Pub/Sub must contain multiple types of DataWriter/Reader<Foo>,
 // so we use trait objects for runtime polymorphism instead of generics
@@ -2350,6 +2453,18 @@ impl<Foo: DdsType> DataReader<Foo> {
         results.into_iter().next().ok_or(DdsError::NoData)
     }
 
+    /// Take a single pre-serialized sample without copying shared receive payloads.
+    pub fn take_next_serialized_bytes(&self) -> DdsResult<(Bytes, SampleInfo)> {
+        let results = self.read_or_take_serialized_bytes(
+            1,
+            &[SampleStateKind::NOT_READ_SAMPLE_STATE],
+            &[ViewStateKind::ANY_VIEW_STATE],
+            &[InstanceStateKind::ANY_INSTANCE_STATE],
+            true,
+        )?;
+        results.into_iter().next().ok_or(DdsError::NoData)
+    }
+
     fn read_or_take_serialized(
         &self,
         max_samples: i32,
@@ -2358,6 +2473,29 @@ impl<Foo: DdsType> DataReader<Foo> {
         instance_states: &[InstanceStateKind],
         take: bool,
     ) -> DdsResult<Vec<(Arc<[u8]>, SampleInfo)>> {
+        self.read_or_take_serialized_bytes(
+            max_samples,
+            sample_states,
+            view_states,
+            instance_states,
+            take,
+        )
+        .map(|results| {
+            results.into_iter().map(|(data, info)| (Arc::from(data.as_ref()), info)).collect()
+        })
+    }
+
+    fn read_or_take_serialized_bytes(
+        &self,
+        max_samples: i32,
+        sample_states: &[SampleStateKind],
+        view_states: &[ViewStateKind],
+        instance_states: &[InstanceStateKind],
+        take: bool,
+    ) -> DdsResult<Vec<(Bytes, SampleInfo)>> {
+        let profile = serialized_take_profile_enabled();
+        let total_t0 = Instant::now();
+        let precheck_t0 = Instant::now();
         self.is_enabled()?;
 
         if max_samples == 0 {
@@ -2365,16 +2503,22 @@ impl<Foo: DdsType> DataReader<Foo> {
         }
 
         self.set_read_communication_status(false)?;
-        let mut result: Vec<(Arc<[u8]>, SampleInfo)> = Vec::new();
+        let precheck_us = if profile { elapsed_us(precheck_t0, Instant::now()) } else { 0 };
+        let mut result: Vec<(Bytes, SampleInfo)> = Vec::new();
         let mut remaining = if max_samples == -1 { i32::MAX } else { max_samples };
 
+        let get_changes_t0 = Instant::now();
         let mut changes = self.get_available_changes()?;
+        let get_changes_us = if profile { elapsed_us(get_changes_t0, Instant::now()) } else { 0 };
 
+        let sort_t0 = Instant::now();
         if !changes.is_empty() {
             self.sort_changes_by_timestamp(&mut changes)?;
         }
+        let sort_us = if profile { elapsed_us(sort_t0, Instant::now()) } else { 0 };
 
         // Get ContentFilteredTopic expression for serialized path filtering
+        let filter_setup_t0 = Instant::now();
         let (cft_expression, cft_parameters) = if let Some(cft) = &self.content_filtered_topic {
             let cft = cft
                 .upgrade()
@@ -2387,16 +2531,33 @@ impl<Foo: DdsType> DataReader<Foo> {
         } else {
             (None, Vec::new())
         };
+        let filter_setup_us = if profile { elapsed_us(filter_setup_t0, Instant::now()) } else { 0 };
 
+        let instance_info_t0 = Instant::now();
         let instance_infos = self.get_instance_infos()?;
+        let instance_info_us =
+            if profile { elapsed_us(instance_info_t0, Instant::now()) } else { 0 };
 
+        let loop_t0 = Instant::now();
+        let mut loop_sample_state_us = 0;
+        let mut loop_info_us = 0;
+        let mut loop_match_us = 0;
+        let mut loop_data_bytes_us = 0;
+        let mut loop_sample_info_us = 0;
+        let mut loop_remove_us = 0;
+        let mut loop_push_us = 0;
         for change in changes.iter() {
             if remaining <= 0 {
                 break;
             }
 
+            let sample_state_t0 = Instant::now();
             let sample_state =
                 self.get_sample_state(&change.writer_guid(), &change.sequence_number())?;
+            if profile {
+                loop_sample_state_us += elapsed_us(sample_state_t0, Instant::now());
+            }
+            let info_t0 = Instant::now();
             let info = match instance_infos.get(&change.instance_handle()) {
                 Some(info) => info,
                 None => &InstanceInfo {
@@ -2408,12 +2569,19 @@ impl<Foo: DdsType> DataReader<Foo> {
                     pending_notification: false,
                 },
             };
+            if profile {
+                loop_info_us += elapsed_us(info_t0, Instant::now());
+            }
 
+            let match_t0 = Instant::now();
             if !sample_states.matches(sample_state)
                 || !view_states.matches(info.view_state)
                 || !instance_states.matches(info.instance_state)
             {
                 continue;
+            }
+            if profile {
+                loop_match_us += elapsed_us(match_t0, Instant::now());
             }
 
             let has_valid_data = match change.kind() {
@@ -2423,7 +2591,11 @@ impl<Foo: DdsType> DataReader<Foo> {
                 | ChangeKind::NotAliveDisposedUnregistered => false,
             };
 
-            let serialized_data = Arc::from(change.data_value());
+            let data_bytes_t0 = Instant::now();
+            let serialized_data = change.data_bytes();
+            if profile {
+                loop_data_bytes_us += elapsed_us(data_bytes_t0, Instant::now());
+            }
 
             // ContentFilteredTopic filter for serialized path
             if let Some(cft_expr) = &cft_expression {
@@ -2442,6 +2614,7 @@ impl<Foo: DdsType> DataReader<Foo> {
                 }
             }
 
+            let sample_info_t0 = Instant::now();
             let sample_info = SampleInfo {
                 sample_state,
                 view_state: info.view_state,
@@ -2459,17 +2632,42 @@ impl<Foo: DdsType> DataReader<Foo> {
                 publication_handle: InstanceHandle::from_guid(&change.writer_guid()),
                 valid_data: has_valid_data,
             };
+            if profile {
+                loop_sample_info_us += elapsed_us(sample_info_t0, Instant::now());
+            }
 
+            let remove_t0 = Instant::now();
             if take {
                 self.remove_change(change.clone())?;
             } else {
                 self.mark_sample_as_read(&change.writer_guid(), change.sequence_number())?;
             }
+            if profile {
+                loop_remove_us += elapsed_us(remove_t0, Instant::now());
+            }
 
+            let push_t0 = Instant::now();
             result.push((serialized_data, sample_info));
             remaining -= 1;
+            if profile {
+                loop_push_us += elapsed_us(push_t0, Instant::now());
+            }
+        }
+        let loop_us = if profile { elapsed_us(loop_t0, Instant::now()) } else { 0 };
+        if profile {
+            record_serialized_take_loop_profile(
+                loop_sample_state_us,
+                loop_info_us,
+                loop_match_us,
+                loop_data_bytes_us,
+                loop_sample_info_us,
+                loop_remove_us,
+                loop_push_us,
+                loop_us,
+            );
         }
 
+        let cleanup_t0 = Instant::now();
         for sample_info in self.drain_pending_notifications(
             &instance_infos,
             sample_states,
@@ -2478,7 +2676,7 @@ impl<Foo: DdsType> DataReader<Foo> {
             None,
             remaining,
         )? {
-            result.push((Arc::from(Vec::new().as_slice()), sample_info));
+            result.push((Bytes::new(), sample_info));
         }
 
         for (_, sample_info) in &result {
@@ -2486,10 +2684,23 @@ impl<Foo: DdsType> DataReader<Foo> {
         }
 
         self.reevaluate_all_conditions()?;
+        let cleanup_us = if profile { elapsed_us(cleanup_t0, Instant::now()) } else { 0 };
 
         if result.is_empty() {
             Err(DdsError::NoData)
         } else {
+            if profile {
+                record_serialized_take_profile(
+                    precheck_us,
+                    get_changes_us,
+                    sort_us,
+                    filter_setup_us,
+                    instance_info_us,
+                    loop_us,
+                    cleanup_us,
+                    elapsed_us(total_t0, Instant::now()),
+                );
+            }
             Ok(result)
         }
     }
