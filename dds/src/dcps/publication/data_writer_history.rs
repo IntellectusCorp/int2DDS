@@ -145,11 +145,6 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
         // Consume the Arc by value so Arc::try_unwrap succeeds (refcount == 1).
         if let Some(evicted) = removed {
             self.try_release_evicted(evicted);
-            // debug: watch for monotonic growth (serialized path never acquires)
-            let pool_len = self.pool.len();
-            if pool_len % 100 == 0 {
-                eprintln!("[pool] free_changes len = {}", pool_len);
-            }
         }
 
         if lifespan_duration.is_some() {
@@ -336,6 +331,12 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
     /// Acquire a CacheChange from the pool (capacity preserved from previous use).
     pub(crate) fn acquire_change(&mut self) -> CacheChange {
         self.pool.acquire()
+    }
+
+    // current number of pooled (free) changes
+    #[cfg(test)]
+    pub(crate) fn pool_len(&self) -> usize {
+        self.pool.len()
     }
 
     /// Try to release an evicted Arc<CacheChange> back to the pool.
