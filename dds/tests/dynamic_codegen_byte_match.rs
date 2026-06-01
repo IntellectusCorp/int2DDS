@@ -11,7 +11,8 @@ use std::sync::Arc;
 
 use int2dds::dcps::topic::type_support::{DdsType, SerializationFormat};
 use int2dds::serialize::cdr::{
-    CdrSerialize, CdrSerializer, ExtensibilityKind, Xcdr2Serializer, XcdrSerialize,
+    CdrSerialize, CdrSerializer, ExtensibilityKind, Xcdr2Serializer, XcdrDeserialize,
+    XcdrDeserializer, XcdrSerialize,
 };
 use int2dds::serialize::{BufferManager, DeserializerReader};
 use int2dds::xtypes::{
@@ -99,6 +100,27 @@ nested_family!(InnerFinal, OuterFinal, "Final");
 nested_family!(InnerApp, OuterApp, "Appendable");
 nested_family!(InnerMut, OuterMut, "Mutable");
 
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final")]
+struct OuterFinalChildApp {
+    id: i32,
+    child: InnerApp,
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+struct OuterAppChildFinal {
+    id: i32,
+    child: InnerFinal,
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final")]
+struct OuterFinalChildMut {
+    id: i32,
+    child: InnerMut,
+}
+
 fn build_dynamic_nested(outer_dt: &Arc<DynamicType>, inner_dt: &Arc<DynamicType>) -> DynamicData {
     let mut child = DynamicData::new(inner_dt.clone());
     child.set("a", 1i32).unwrap();
@@ -161,6 +183,77 @@ fn nested_byte_match_xcdr_mutable() {
         dynamic_bytes(&dynamic, &format),
         concrete_xcdr(&concrete, ExtensibilityKind::Mutable)
     );
+}
+
+#[test]
+fn nested_byte_match_xcdr_mixed_final_outer_app_inner() {
+    let (outer_dt, inner_dt) = nested_types::<OuterFinalChildApp, InnerApp>();
+    let dynamic = build_dynamic_nested(&outer_dt, &inner_dt);
+    let concrete = OuterFinalChildApp { id: 7, child: InnerApp { a: 1, b: 2 } };
+    let format = xcdr_format(ExtensibilityKind::Final);
+    assert_eq!(
+        dynamic_bytes(&dynamic, &format),
+        concrete_xcdr(&concrete, ExtensibilityKind::Final)
+    );
+}
+
+#[test]
+fn nested_byte_match_xcdr_mixed_app_outer_final_inner() {
+    let (outer_dt, inner_dt) = nested_types::<OuterAppChildFinal, InnerFinal>();
+    let dynamic = build_dynamic_nested(&outer_dt, &inner_dt);
+    let concrete = OuterAppChildFinal { id: 7, child: InnerFinal { a: 1, b: 2 } };
+    let format = xcdr_format(ExtensibilityKind::Appendable);
+    assert_eq!(
+        dynamic_bytes(&dynamic, &format),
+        concrete_xcdr(&concrete, ExtensibilityKind::Appendable)
+    );
+}
+
+#[test]
+fn nested_byte_match_xcdr_mixed_final_outer_mut_inner() {
+    let (outer_dt, inner_dt) = nested_types::<OuterFinalChildMut, InnerMut>();
+    let dynamic = build_dynamic_nested(&outer_dt, &inner_dt);
+    let concrete = OuterFinalChildMut { id: 7, child: InnerMut { a: 1, b: 2 } };
+    let format = xcdr_format(ExtensibilityKind::Final);
+    assert_eq!(
+        dynamic_bytes(&dynamic, &format),
+        concrete_xcdr(&concrete, ExtensibilityKind::Final)
+    );
+}
+
+#[test]
+fn mixed_inner_appendable_is_delimited() {
+    let (mixed_dt, app_inner_dt) = nested_types::<OuterFinalChildApp, InnerApp>();
+    let mixed = build_dynamic_nested(&mixed_dt, &app_inner_dt);
+    let mixed_bytes = dynamic_bytes(&mixed, &xcdr_format(ExtensibilityKind::Final));
+
+    let (final_dt, final_inner_dt) = nested_types::<OuterFinal, InnerFinal>();
+    let uniform = build_dynamic_nested(&final_dt, &final_inner_dt);
+    let uniform_bytes = dynamic_bytes(&uniform, &xcdr_format(ExtensibilityKind::Final));
+
+    // Layout: [encap(4) | id(4)] [inner DHEADER(4)] [a(4) | b(4)]. The all-Final
+    // case omits the inner DHEADER; the mixed case inserts it before a,b.
+    assert_eq!(mixed_bytes.len(), uniform_bytes.len() + 4, "inner DHEADER must be present");
+    assert_eq!(mixed_bytes[..8], uniform_bytes[..8], "encap + id prefix unchanged");
+    assert_eq!(mixed_bytes[8..12], [8, 0, 0, 0], "inner DHEADER = object size 8 (LE)");
+    assert_eq!(mixed_bytes[12..], uniform_bytes[8..], "inner fields a,b unchanged");
+}
+
+#[test]
+fn mixed_codegen_roundtrip_reads_inner_dheader() {
+    let (outer_dt, inner_dt) = nested_types::<OuterFinalChildApp, InnerApp>();
+    let dynamic = build_dynamic_nested(&outer_dt, &inner_dt);
+    let concrete = OuterFinalChildApp { id: 7, child: InnerApp { a: 1, b: 2 } };
+
+    let dyn_bytes = dynamic_bytes(&dynamic, &xcdr_format(ExtensibilityKind::Final));
+    let concrete_bytes = concrete_xcdr(&concrete, ExtensibilityKind::Final);
+    assert_eq!(dyn_bytes, concrete_bytes, "dynamic and codegen wire must be identical");
+
+    let mut d = XcdrDeserializer::new(&dyn_bytes).unwrap();
+    let back = OuterFinalChildApp::deserialize_xcdr(&mut d).unwrap();
+    assert_eq!(back.id, 7);
+    assert_eq!(back.child.a, 1);
+    assert_eq!(back.child.b, 2);
 }
 
 #[derive(DdsType)]

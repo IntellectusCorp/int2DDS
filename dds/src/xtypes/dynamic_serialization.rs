@@ -396,7 +396,6 @@ fn deserialize_value_cdr(
 fn deserialize_value_xcdr2(
     deserializer: &mut Xcdr2Deserializer,
     type_kind: &DynamicTypeKind,
-    extensibility: ExtensibilityKind,
 ) -> DdsResult<DynamicValue> {
     match type_kind {
         DynamicTypeKind::Sequence { element_type, .. } => {
@@ -406,7 +405,7 @@ fn deserialize_value_xcdr2(
             let len = deserializer.deserialize_u32().map_err(cdr_error)? as usize;
             let mut items = Vec::with_capacity(len);
             for _ in 0..len {
-                items.push(deserialize_value_xcdr2(deserializer, element_type, extensibility)?);
+                items.push(deserialize_value_xcdr2(deserializer, element_type)?);
             }
             Ok(DynamicValue::Sequence(items))
         }
@@ -417,16 +416,13 @@ fn deserialize_value_xcdr2(
             let total_size: u32 = dimensions.iter().product();
             let mut items = Vec::with_capacity(total_size as usize);
             for _ in 0..total_size {
-                items.push(deserialize_value_xcdr2(deserializer, element_type, extensibility)?);
+                items.push(deserialize_value_xcdr2(deserializer, element_type)?);
             }
             Ok(DynamicValue::Array(items))
         }
         DynamicTypeKind::TypeRef(inner) => match inner.kind() {
             DynamicTypeKind::Struct(_) => {
-                // Nested structs are framed with the message-level extensibility
-                // (matching the serializer's single-mode framing), not the
-                // nested type's own declared extensibility.
-                let nested = deserialize_struct_xcdr(deserializer, inner, extensibility)?;
+                let nested = deserialize_struct_xcdr(deserializer, inner)?;
                 Ok(DynamicValue::Struct(Box::new(nested)))
             }
             DynamicTypeKind::Enum(enum_desc) => {
@@ -528,19 +524,17 @@ fn deserialize_struct_members_cdr(
 fn deserialize_struct_members_xcdr2(
     deserializer: &mut Xcdr2Deserializer,
     struct_desc: &StructDescriptor,
-    extensibility: ExtensibilityKind,
 ) -> DdsResult<HashMap<Arc<str>, DynamicValue>> {
     let mut values = HashMap::new();
     for member in struct_desc.members() {
         if member.is_optional {
             let present = deserializer.deserialize_bool().map_err(cdr_error)?;
             if present {
-                let value =
-                    deserialize_value_xcdr2(deserializer, &member.member_type, extensibility)?;
+                let value = deserialize_value_xcdr2(deserializer, &member.member_type)?;
                 values.insert(member.name.clone(), value);
             }
         } else {
-            let value = deserialize_value_xcdr2(deserializer, &member.member_type, extensibility)?;
+            let value = deserialize_value_xcdr2(deserializer, &member.member_type)?;
             values.insert(member.name.clone(), value);
         }
     }
@@ -650,13 +644,13 @@ fn serialize_xcdr(
 ) -> DdsResult<SerializedData> {
     let mut serializer = Xcdr2Serializer::with_capacity(true, extensibility, 256);
     serializer.write_encapsulation_header().map_err(cdr_error)?;
-    serialize_struct_xcdr(&mut serializer, data, extensibility)?;
+    serialize_struct_xcdr(&mut serializer, data)?;
     Ok(Arc::from(serializer.into_bytes().into_boxed_slice()))
 }
 
 fn deserialize_xcdr(bytes: &[u8], dynamic_type: &Arc<DynamicType>) -> DdsResult<DynamicData> {
     let mut deserializer = Xcdr2Deserializer::new(bytes).map_err(cdr_error)?;
-    deserialize_struct_xcdr(&mut deserializer, dynamic_type, dynamic_type.extensibility())
+    deserialize_struct_xcdr(&mut deserializer, dynamic_type)
 }
 
 /// Serialize struct members inline (Final/Appendable). Optionals are framed by
@@ -688,19 +682,14 @@ where
     Ok(())
 }
 
-fn serialize_struct_xcdr(
-    serializer: &mut Xcdr2Serializer,
-    data: &DynamicData,
-    extensibility: ExtensibilityKind,
-) -> DdsResult<()> {
+fn serialize_struct_xcdr(serializer: &mut Xcdr2Serializer, data: &DynamicData) -> DdsResult<()> {
+    let extensibility = data.dynamic_type().extensibility();
     let struct_desc = data
         .dynamic_type()
         .as_struct()
         .ok_or_else(|| DdsError::Error("Expected struct type".to_string()))?;
 
-    let mut nested = |serializer: &mut Xcdr2Serializer, inner: &DynamicData| {
-        serialize_struct_xcdr(serializer, inner, extensibility)
-    };
+    let mut nested = serialize_struct_xcdr;
 
     match extensibility {
         ExtensibilityKind::Final => {
@@ -738,8 +727,8 @@ fn serialize_struct_xcdr(
 fn deserialize_struct_xcdr(
     deserializer: &mut Xcdr2Deserializer,
     dynamic_type: &Arc<DynamicType>,
-    extensibility: ExtensibilityKind,
 ) -> DdsResult<DynamicData> {
+    let extensibility = dynamic_type.extensibility();
     let struct_desc = dynamic_type
         .as_struct()
         .ok_or_else(|| DdsError::Error("Expected struct type".to_string()))?;
@@ -748,11 +737,11 @@ fn deserialize_struct_xcdr(
 
     match extensibility {
         ExtensibilityKind::Final => {
-            values = deserialize_struct_members_xcdr2(deserializer, struct_desc, extensibility)?;
+            values = deserialize_struct_members_xcdr2(deserializer, struct_desc)?;
         }
         ExtensibilityKind::Appendable => {
             let (object_size, start_pos) = deserializer.begin_struct().map_err(cdr_error)?;
-            values = deserialize_struct_members_xcdr2(deserializer, struct_desc, extensibility)?;
+            values = deserialize_struct_members_xcdr2(deserializer, struct_desc)?;
             deserializer.end_struct(object_size, start_pos).map_err(cdr_error)?;
         }
         ExtensibilityKind::Mutable => {
@@ -764,8 +753,7 @@ fn deserialize_struct_xcdr(
                     deserializer.read_member_header_full().map_err(cdr_error)?;
 
                 if let Some(member) = struct_desc.get_member_by_id(member_id) {
-                    let value =
-                        deserialize_value_xcdr2(deserializer, &member.member_type, extensibility)?;
+                    let value = deserialize_value_xcdr2(deserializer, &member.member_type)?;
                     values.insert(member.name.clone(), value);
                 } else if must_understand {
                     return Err(DdsError::Error(format!(
@@ -924,6 +912,64 @@ mod tests {
             xcdr_format(ExtensibilityKind::Appendable),
         );
         run("xcdr2-mutable", ExtensibilityKind::Mutable, xcdr_format(ExtensibilityKind::Mutable));
+    }
+
+    #[test]
+    fn test_nested_struct_mixed_extensibility_roundtrip() {
+        // Outer and inner differ in extensibility. Per XTypes §7.4.3.1 each is
+        // framed by its own kind, so the inner must round-trip with (or without)
+        // its own DHEADER independent of the enclosing message's mode.
+        let run = |label: &str, outer_ext: ExtensibilityKind, inner_ext: ExtensibilityKind| {
+            let (inner_obj, inner_hash) = inner_struct(inner_ext);
+            let mut registry = TypeRegistry::new();
+            registry.register_complete(inner_hash, "Inner".into(), inner_obj.clone());
+
+            let mut outer = CompleteStructType::new(tf(outer_ext), "Outer".into(), None);
+            outer.add_member(CompleteStructMember::new(
+                0,
+                member_flag(false, false, false),
+                TypeIdentifier::Int32,
+                "id".to_string(),
+            ));
+            outer.add_member(CompleteStructMember::new(
+                1,
+                member_flag(false, false, false),
+                TypeIdentifier::CompleteTypeId(inner_hash),
+                "child".to_string(),
+            ));
+            let outer_dt = build_with_registry(CompleteTypeObject::Struct(outer), &registry);
+
+            let inner_dt =
+                Arc::new(DynamicType::from_type_object(inner_obj, TypeIdentifier::None).unwrap());
+            let mut inner = DynamicData::new(inner_dt);
+            inner.set("a", 11i32).unwrap();
+            inner.set("b", 22i32).unwrap();
+
+            let mut data = DynamicData::new(outer_dt.clone());
+            data.set("id", 7i32).unwrap();
+            data.set_value("child", DynamicValue::Struct(Box::new(inner))).unwrap();
+
+            // The message-level format follows the outer (top-level) type.
+            let format = xcdr_format(outer_ext);
+            let bytes = serialize_dynamic_data(&data, &format)
+                .unwrap_or_else(|e| panic!("{label} serialize: {e:?}"));
+            let back = deserialize_dynamic_data(&bytes, &outer_dt)
+                .unwrap_or_else(|e| panic!("{label} deserialize ({} bytes): {e:?}", bytes.len()));
+
+            assert_eq!(back.get::<i32>("id").unwrap(), 7, "{label} id");
+            match back.get_value("child").unwrap() {
+                DynamicValue::Struct(child) => {
+                    assert_eq!(child.get::<i32>("a").unwrap(), 11, "{label} child.a");
+                    assert_eq!(child.get::<i32>("b").unwrap(), 22, "{label} child.b");
+                }
+                other => panic!("{label}: expected nested struct, got {:?}", other),
+            }
+        };
+
+        run("final/appendable", ExtensibilityKind::Final, ExtensibilityKind::Appendable);
+        run("appendable/final", ExtensibilityKind::Appendable, ExtensibilityKind::Final);
+        run("final/mutable", ExtensibilityKind::Final, ExtensibilityKind::Mutable);
+        run("appendable/mutable", ExtensibilityKind::Appendable, ExtensibilityKind::Mutable);
     }
 
     #[test]
