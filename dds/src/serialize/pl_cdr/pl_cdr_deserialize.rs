@@ -33,6 +33,19 @@ use crate::{
 
 use super::{reader::PlCdrReader, MAX_PARAMETER_ITERATIONS};
 
+/// Returns true if `data` begins with a recognized CDR/XCDR encapsulation header
+/// (the 2-byte big-endian encoding identifier). Used to distinguish standard
+/// XTypes PID payloads from legacy headerless int2DDS bodies.
+fn has_encapsulation_header(data: &[u8]) -> bool {
+    if data.len() < 4 {
+        return false;
+    }
+    matches!(
+        u16::from_be_bytes([data[0], data[1]]),
+        0x0000 | 0x0001 | 0x0002 | 0x0003 | 0x0006 | 0x0007 | 0x0008 | 0x0009 | 0x000A | 0x000B
+    )
+}
+
 pub struct PlCdrParser {
     endianness: Endianness,
 }
@@ -654,14 +667,35 @@ impl PlCdrParser {
                 })
             }
             ParameterId::PidTypeInformation => {
-                match crate::xtypes::TypeInformation::deserialize(data) {
-                    Ok((type_info, _consumed)) => ParameterValue::TypeInformation(type_info),
-                    Err(_) => match TypeIdentifier::deserialize(data) {
-                        Ok((type_id, _consumed)) => ParameterValue::TypeInformation(
-                            crate::xtypes::TypeInformation::from_type_identifier(type_id),
-                        ),
+                match crate::xtypes::TypeInformation::deserialize_for_parameter(data) {
+                    Ok(type_info) => ParameterValue::TypeInformation(type_info),
+                    Err(_) => match crate::xtypes::TypeInformation::deserialize(data) {
+                        Ok((type_info, _consumed)) => ParameterValue::TypeInformation(type_info),
                         Err(e) => {
-                            warn!("Failed to parse TypeInformation: {}", e);
+                            warn!("Failed to parse TypeInformation (0x0075): {}", e);
+                            ParameterValue::Unknown(data)
+                        }
+                    },
+                }
+            }
+            ParameterId::PidTypeIdV1 => {
+                let standard = if has_encapsulation_header(data) {
+                    TypeIdentifier::deserialize(&data[4..]).ok().map(|(tid, _)| tid)
+                } else {
+                    None
+                };
+                match standard {
+                    Some(type_id) => ParameterValue::TypeIdentifierV1(type_id),
+                    None => match crate::xtypes::TypeInformation::deserialize(data) {
+                        Ok((type_info, _)) => {
+                            let mut tid = type_info.minimal.typeid_with_size.type_id;
+                            if tid == TypeIdentifier::None {
+                                tid = type_info.complete.typeid_with_size.type_id;
+                            }
+                            ParameterValue::TypeIdentifierV1(tid)
+                        }
+                        Err(e) => {
+                            warn!("Failed to parse PID_TYPE_IDV1: {}", e);
                             ParameterValue::Unknown(data)
                         }
                     },
@@ -703,8 +737,12 @@ impl PlCdrParser {
                 }
             }
             ParameterId::PidTypeObject => {
-                // TypeObject: first byte indicates Minimal (0xF2) or Complete (0xF1)
-                match TypeObject::deserialize(data) {
+                let result = if has_encapsulation_header(data) {
+                    TypeObject::deserialize(&data[4..]).or_else(|_| TypeObject::deserialize(data))
+                } else {
+                    TypeObject::deserialize(data)
+                };
+                match result {
                     Ok((type_obj, _consumed)) => ParameterValue::TypeObject(type_obj),
                     Err(e) => {
                         warn!("Failed to parse TypeObject: {}", e);

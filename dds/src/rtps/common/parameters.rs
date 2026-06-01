@@ -25,7 +25,7 @@ use crate::{
             types::{Count, GroupInfo, ProtocolVersion, VendorId},
         },
     },
-    xtypes::{TypeInformation, TypeObject},
+    xtypes::{TypeIdentifier, TypeInformation, TypeObject},
 };
 
 // pub type ParameterId = i16;
@@ -128,7 +128,8 @@ pub enum ParameterId {
     PidDataRepresentation = 0x0073,
 
     /* DDS-XTypes 1.3 */
-    PidTypeInformation = 0x0069,
+    PidTypeIdV1 = 0x0069,
+    PidTypeInformation = 0x0075,
     PidTypeConsistencyEnforcement = 0x0074,
 
     UNKNOWN = 0xffff,
@@ -364,6 +365,7 @@ pub enum ParameterValue<'a> {
     DurabilityService(DurabilityServiceQosPolicy),
     DataRepresentation(DataRepresentationQosPolicy),
     TypeInformation(TypeInformation),
+    TypeIdentifierV1(TypeIdentifier),
     TypeConsistencyEnforcement(TypeConsistencyEnforcementQosPolicy),
     TypeObject(TypeObject),
     KeyHash([u8; 16]),
