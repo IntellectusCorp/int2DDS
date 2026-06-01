@@ -227,39 +227,29 @@ impl Xcdr2Serializer {
         Ok(())
     }
 
-    /// Begin struct serialization (write DHEADER placeholder if needed)
+    /// Begin struct serialization by writing a DHEADER placeholder.
+    ///
+    /// Per XTypes §7.4.3.1 framing follows the extensibility of the object being
+    /// serialized, so the *caller* decides whether to call this (only
+    /// APPENDABLE/MUTABLE are delimited). When called, a DHEADER is always
+    /// reserved — independent of the serializer's top-level extensibility — to
+    /// stay symmetric with the deserializer and correctly frame nested types
+    /// whose extensibility differs from the message-level one.
     pub fn begin_struct(&mut self) -> Result<usize, CdrError> {
-        match self.extensibility_kind {
-            ExtensibilityKind::Final => Ok(0), // No header needed
-            ExtensibilityKind::Appendable | ExtensibilityKind::Mutable => {
-                // Align BEFORE recording size_pos so that backpatching in
-                // end_struct writes to the actual DHEADER position, not into
-                // alignment padding bytes.
-                self.align(4);
-                let size_pos = self.buffer.len();
-                let bytes = to_bytes_u32(0, self.endianness);
-                self.buffer.extend_from_slice(&bytes); // placeholder
-                Ok(size_pos)
-            }
-        }
+        self.align(4);
+        let size_pos = self.buffer.len();
+        let bytes = to_bytes_u32(0, self.endianness);
+        self.buffer.extend_from_slice(&bytes); // placeholder
+        Ok(size_pos)
     }
 
-    /// End struct serialization (backpatch size if needed)
+    /// End struct serialization (backpatch the DHEADER reserved by begin_struct).
     pub fn end_struct(&mut self, size_pos: usize) -> Result<(), CdrError> {
-        match self.extensibility_kind {
-            ExtensibilityKind::Final => Ok(()), // No backpatching needed
-            ExtensibilityKind::Appendable | ExtensibilityKind::Mutable => {
-                // begin_struct always reserved a 4-byte DHEADER placeholder at
-                // size_pos (which may legitimately be 0 when the struct is the very
-                // first thing in the buffer, e.g. a headerless parameter payload),
-                // so always backpatch — never gate on `size_pos > 0`.
-                let current_pos = self.buffer.len();
-                let object_size = (current_pos - size_pos - 4) as u32;
-                let size_bytes = to_bytes_u32(object_size, self.endianness);
-                self.buffer[size_pos..size_pos + 4].copy_from_slice(&size_bytes);
-                Ok(())
-            }
-        }
+        let current_pos = self.buffer.len();
+        let object_size = (current_pos - size_pos - 4) as u32;
+        let size_bytes = to_bytes_u32(object_size, self.endianness);
+        self.buffer[size_pos..size_pos + 4].copy_from_slice(&size_bytes);
+        Ok(())
     }
 }
 
