@@ -2638,7 +2638,45 @@ impl DomainParticipant {
         &self,
         type_object: crate::xtypes::TypeObject,
     ) -> DdsResult<crate::xtypes::DynamicTypeSupport> {
-        crate::xtypes::DynamicTypeSupport::from_type_object(type_object)
+        let registry = self.get_rtps_participant()?.type_registry();
+        let guard = registry.read().map_err(|e| DdsError::Error(e.to_string()))?;
+        crate::xtypes::DynamicTypeSupport::from_type_object_with_registry(type_object, &guard)
+    }
+
+    /// Build a dynamic `Topic` for a topic discovered over SEDP, using the
+    /// TypeObject that a remote publisher/subscriber advertised inline.
+    pub fn create_topic_from_discovered_type(&self, topic_name: &str) -> DdsResult<Topic> {
+        let type_object = self.discovered_type_object(topic_name).ok_or_else(|| {
+            DdsError::Error(format!(
+                "No discovered TypeObject available for topic '{}'",
+                topic_name
+            ))
+        })?;
+        let type_support = Arc::new(self.create_dynamic_type_from_type_object(type_object)?);
+        self.create_topic_dynamic(
+            topic_name,
+            type_support,
+            TopicQos::default(),
+            None,
+            StatusMask::default(),
+        )
+    }
+
+    /// Find an inline TypeObject advertised for `topic_name` by any discovered
+    /// remote publication or subscription.
+    fn discovered_type_object(&self, topic_name: &str) -> Option<crate::xtypes::TypeObject> {
+        let rtps_participant = self.get_rtps_participant().ok()?;
+        if let Some(bucket) = rtps_participant.remote_publications().get(topic_name) {
+            if let Some(obj) = bucket.values().find_map(|b| b.type_object().cloned()) {
+                return Some(obj);
+            }
+        }
+        if let Some(bucket) = rtps_participant.remote_subscriptions().get(topic_name) {
+            if let Some(obj) = bucket.values().find_map(|b| b.type_object().cloned()) {
+                return Some(obj);
+            }
+        }
+        None
     }
 
     pub(crate) fn register_type(

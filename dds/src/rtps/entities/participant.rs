@@ -64,6 +64,7 @@ use crate::{
         transport::plugin::TransportPlugin,
     },
     utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
+    xtypes::{new_shared_registry, SharedTypeRegistry},
 };
 
 #[derive(Clone)]
@@ -95,6 +96,9 @@ pub struct Participant {
 
     remote_publications: Arc<DashMap<String, HashMap<Guid, PublicationBuiltinTopicData>>>,
     remote_subscriptions: Arc<DashMap<String, HashMap<Guid, SubscriptionBuiltinTopicData>>>,
+
+    // Dynamic-type registry populated from discovered TypeObjects.
+    type_registry: SharedTypeRegistry,
 
     liveliness_monitor: Arc<Mutex<Option<LivelinessMonitor>>>,
     working_ips: Vec<String>,
@@ -177,6 +181,7 @@ impl Participant {
             current_entity_id: Arc::new(Mutex::new([0, 0, 0])),
             remote_publications: Arc::new(DashMap::new()),
             remote_subscriptions: Arc::new(DashMap::new()),
+            type_registry: new_shared_registry(),
             working_ips,
             terminated: Arc::new(AtomicBool::new(false)),
             liveliness_monitor: Arc::new(Mutex::new(None)),
@@ -226,6 +231,10 @@ impl Participant {
         &self,
     ) -> Arc<DashMap<String, HashMap<Guid, SubscriptionBuiltinTopicData>>> {
         self.remote_subscriptions.clone()
+    }
+
+    pub(crate) fn type_registry(&self) -> SharedTypeRegistry {
+        self.type_registry.clone()
     }
 
     pub(crate) fn working_ips(&self) -> Vec<String> {
