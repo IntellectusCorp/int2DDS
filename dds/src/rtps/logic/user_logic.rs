@@ -416,7 +416,7 @@ impl UserLogic {
                             match self.send_data_frag_to_reader_proxy(
                                 &a_change,
                                 reader_proxy,
-                                writer.guid(),
+                                writer.endpoint_id(),
                                 fragment_num,
                                 heartbeat_info,
                                 timestamp,
@@ -714,7 +714,7 @@ impl UserLogic {
         &self,
         change: &CacheChange,
         reader_proxy: &ReaderProxy,
-        writer_guid: Guid,
+        writer_id: EntityId,
         fragment_num: u32,
         heartbeat_info: Option<(u32, SequenceNumber, SequenceNumber, bool, bool)>,
         timestamp: DateTime<Utc>,
@@ -725,7 +725,7 @@ impl UserLogic {
                 change,
                 reader_proxy.remote_reader_guid(),
                 reader_proxy.remote_group_entity_id(),
-                writer_guid.entity_id(),
+                writer_id,
                 fragment_num,
                 1,
                 change.fragment_size() as u16,
@@ -737,11 +737,10 @@ impl UserLogic {
             );
 
             if result.is_ok() {
-                let send_result = self.send_rtps_message_to_locators(
+                return match self.send_rtps_message_to_locators(
                     reader_proxy.unicast_locator_list(),
                     send_buffer.as_slice(),
-                );
-                return match send_result {
+                ) {
                     Ok(()) => Ok(true),
                     Err(e) if e.code == RtpsErrorCode::PeerDisconnected => Err(e),
                     Err(_) => Ok(false),
@@ -2250,7 +2249,7 @@ impl UnicastMessageProcessor for UserLogic {
                 if let Err(e) = self.send_data_frag_to_reader_proxy(
                     &change,
                     reader_proxy,
-                    writer.guid(),
+                    writer_id,
                     fragment_num,
                     heartbeat_info,
                     timestamp,
