@@ -87,7 +87,7 @@ use crate::{
     },
     serialize::pl_cdr::InlineQosParameters,
     utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
-    xtypes::check_structural_compatibility,
+    xtypes::{check_structural_compatibility, TypeObject},
 };
 
 enum MatchType {
@@ -595,6 +595,8 @@ impl SedpLogic {
             );
         }
 
+        Self::register_discovered_type(&participant, subscription_builtin_topic_data.type_object());
+
         participant
             .remote_subscriptions()
             .entry(topic_name)
@@ -920,6 +922,14 @@ impl SedpLogic {
 
 /// Publication Handling (Local Reader <-> Remote Writer)
 impl SedpLogic {
+    fn register_discovered_type(participant: &Participant, type_object: Option<&TypeObject>) {
+        if let Some(type_object) = type_object {
+            if let Ok(mut registry) = participant.type_registry().write() {
+                registry.register_type_object(type_object.clone());
+            }
+        }
+    }
+
     fn handle_publication_builtin_topic_data(
         &self,
         publication_builtin_topic_data: PublicationBuiltinTopicData,
@@ -968,6 +978,8 @@ impl SedpLogic {
                 topic_name
             );
         }
+
+        Self::register_discovered_type(&participant, publication_builtin_topic_data.type_object());
 
         participant
             .remote_publications()

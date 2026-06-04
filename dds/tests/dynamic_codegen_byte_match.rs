@@ -18,8 +18,9 @@ use int2dds::serialize::cdr::{
 use int2dds::serialize::{BufferManager, DeserializerReader};
 use int2dds::xtypes::{
     serialize_dynamic_data, CompleteStructMember, CompleteStructType, CompleteTypeObject,
-    DynamicData, DynamicType, DynamicValue, EquivalenceHash, HasTypeObject, MemberFlag,
-    PlainCollectionHeader, TryConstructKind, TypeFlag, TypeIdentifier, TypeRegistry,
+    DynamicData, DynamicType, DynamicTypeSupport, DynamicValue, EquivalenceHash, HasTypeObject,
+    MemberFlag, PlainCollectionHeader, TryConstructKind, TypeFlag, TypeIdentifier, TypeObject,
+    TypeRegistry,
 };
 
 fn hash_of(id: &TypeIdentifier) -> EquivalenceHash {
@@ -469,6 +470,82 @@ fn enum_bit_bound_codegen_roundtrip() {
     assert_eq!(back.v8, Small8::C);
     assert_eq!(back.v16, Small16::Z);
     assert_eq!(back.list, vec![Small8::A, Small8::B]);
+}
+
+fn enum_holder_type_object() -> TypeObject {
+    let small8_hash = hash_of(&Small8::type_identifier());
+    let small16_hash = hash_of(&Small16::type_identifier());
+    let flag = || MemberFlag::new(TryConstructKind::Discard, false, false, false, false, false);
+
+    let mut outer = CompleteStructType::new(
+        TypeFlag::new(int2dds::xtypes::ExtensibilityKind::Final, false, false),
+        "EnumHolderSupport".into(),
+        None,
+    );
+    outer.add_member(CompleteStructMember::new(
+        0,
+        flag(),
+        TypeIdentifier::CompleteTypeId(small8_hash),
+        "v8".to_string(),
+    ));
+    outer.add_member(CompleteStructMember::new(
+        1,
+        flag(),
+        TypeIdentifier::CompleteTypeId(small16_hash),
+        "v16".to_string(),
+    ));
+    outer.add_member(CompleteStructMember::new(
+        2,
+        flag(),
+        TypeIdentifier::PlainSequenceLarge {
+            header: PlainCollectionHeader::default(),
+            bound: 0,
+            element_identifier: Box::new(TypeIdentifier::CompleteTypeId(small8_hash)),
+        },
+        "list".to_string(),
+    ));
+    TypeObject::Complete(CompleteTypeObject::Struct(outer))
+}
+
+fn enum_holder_registry() -> TypeRegistry {
+    let mut registry = TypeRegistry::new();
+    registry.register_complete(
+        hash_of(&Small8::type_identifier()),
+        "Small8".into(),
+        Small8::complete_type_object(),
+    );
+    registry.register_complete(
+        hash_of(&Small16::type_identifier()),
+        "Small16".into(),
+        Small16::complete_type_object(),
+    );
+    registry
+}
+
+#[test]
+fn support_with_registry_resolves_nested_enum_width() {
+    let support = DynamicTypeSupport::from_type_object_with_registry(
+        enum_holder_type_object(),
+        &enum_holder_registry(),
+    )
+    .unwrap();
+    let dynamic = build_dynamic_enum_holder(support.dynamic_type());
+    assert_eq!(
+        dynamic_bytes(&dynamic, &SerializationFormat::Cdr),
+        concrete_cdr(&concrete_enum_holder())
+    );
+}
+
+#[test]
+fn support_without_registry_does_not_resolve_nested_enum_width() {
+    let support = DynamicTypeSupport::from_type_object(enum_holder_type_object()).unwrap();
+    let dynamic = build_dynamic_enum_holder(support.dynamic_type());
+    let codegen = concrete_cdr(&concrete_enum_holder());
+
+    match serialize_dynamic_data(&dynamic, &SerializationFormat::Cdr) {
+        Ok(bytes) => assert_ne!(bytes.to_vec(), codegen),
+        Err(_) => {}
+    }
 }
 
 #[derive(DdsType)]
