@@ -22,6 +22,10 @@ use crate::{
     subscription::data_reader_history::ReaderChangeId,
 };
 
+// Upper bound on pooled idle changes when history is effectively unbounded
+// (KEEP_ALL with unlimited resource limits reports max_samples as i32::MAX).
+const MAX_POOL_CAP: usize = 1024;
+
 #[derive(Debug)]
 #[allow(clippy::type_complexity)]
 pub struct ReaderHistoryCache {
@@ -126,6 +130,14 @@ impl ReaderHistoryCache {
         datareader_cache: Weak<Mutex<dyn dcps_history_cache + Send + Sync>>,
     ) {
         self.datareader_cache = Some(datareader_cache);
+        // Size the pool to the history's steady-state working set so released
+        // changes are retained; with cap 0 the pool drops everything.
+        if let Some(cache) = self.datareader_cache.as_ref().and_then(|w| w.upgrade()) {
+            if let Ok(guard) = cache.lock() {
+                let depth = guard.get_max_samples().max(0) as usize;
+                self.pool.set_cap(depth.min(MAX_POOL_CAP));
+            }
+        }
     }
 
     /// Add CacheChange to ReaderHistoryCache.

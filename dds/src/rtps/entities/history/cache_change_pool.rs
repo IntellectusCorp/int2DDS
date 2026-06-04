@@ -29,6 +29,12 @@ impl CacheChangePool {
         Self { idle_changes, cap: capacity }
     }
 
+    // Raise the retention ceiling. Already-held idle changes are kept;
+    // the new cap only bounds future releases. cap 0 retains nothing.
+    pub(crate) fn set_cap(&mut self, cap: usize) {
+        self.cap = cap;
+    }
+
     /// Acquire a CacheChange from the pool. If empty, creates a new one.
     /// The returned change's data_value retains its previous capacity.
     pub(crate) fn acquire(&mut self) -> CacheChange {
