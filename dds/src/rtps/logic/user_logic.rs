@@ -2073,11 +2073,13 @@ impl UnicastMessageProcessor for UserLogic {
                         .iter_mut()
                         .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
                     {
-                        // Update fragment information
+                        // Update fragment information with this submessage's range
+                        let frag_start = data_frag.fragment_starting_num;
+                        let frag_end = frag_start + data_frag.fragments_in_submessage as u32;
                         writer_proxy.mark_frag_received(
                             data_frag.writer_sn,
                             buffer_ref.total_fragments,
-                            buffer_ref.received_fragments.clone(),
+                            frag_start..frag_end,
                         );
                     }
                 }
@@ -2088,7 +2090,9 @@ impl UnicastMessageProcessor for UserLogic {
         if let Some(buffer_ref) = self.fragment_buffers.get(&key) {
             if buffer_ref.all_fragments_received() {
                 let total_fragments = buffer_ref.total_fragments;
-                let received_fragments = buffer_ref.received_fragments.clone();
+                // complete here; delivery FragmentInfo's set is unused when is_complete
+                let received_fragments: std::collections::HashSet<u32> =
+                    std::collections::HashSet::new();
                 let is_complete = buffer_ref.all_fragments_received();
 
                 // Drop buffer_ref to release DashMap lock
