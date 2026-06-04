@@ -616,34 +616,12 @@ impl UserLogic {
                             );
 
                             if result.is_ok() {
-                                if crate::common::env::instr_enabled() {
-                                    eprintln!(
-                                        "[instr] tag=P-frag-start sn={} frag={} t_ns={}",
-                                        change.sequence_number().to_i64(),
-                                        fragment_num,
-                                        std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .map(|d| d.as_nanos() as u64)
-                                            .unwrap_or(0)
-                                    );
-                                }
                                 // Send fragmented message immediately
                                 if let Err(e) = self.send_rtps_message_to_locators(
                                     &[reader_locator.locator()],
                                     &send_buffer,
                                 ) {
                                     warn!("Failed to send DATA_FRAG message: {:?}", e);
-                                }
-                                if crate::common::env::instr_enabled() {
-                                    eprintln!(
-                                        "[instr] tag=P-frag-done sn={} frag={} t_ns={}",
-                                        change.sequence_number().to_i64(),
-                                        fragment_num,
-                                        std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .map(|d| d.as_nanos() as u64)
-                                            .unwrap_or(0)
-                                    );
                                 }
                             }
                         }
@@ -759,32 +737,10 @@ impl UserLogic {
             );
 
             if result.is_ok() {
-                if crate::common::env::instr_enabled() {
-                    eprintln!(
-                        "[instr] tag=P-frag-start sn={} frag={} t_ns={}",
-                        change.sequence_number().to_i64(),
-                        fragment_num,
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_nanos() as u64)
-                            .unwrap_or(0)
-                    );
-                }
                 let send_result = self.send_rtps_message_to_locators(
                     reader_proxy.unicast_locator_list(),
                     send_buffer.as_slice(),
                 );
-                if crate::common::env::instr_enabled() {
-                    eprintln!(
-                        "[instr] tag=P-frag-done sn={} frag={} t_ns={}",
-                        change.sequence_number().to_i64(),
-                        fragment_num,
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_nanos() as u64)
-                            .unwrap_or(0)
-                    );
-                }
                 return match send_result {
                     Ok(()) => Ok(true),
                     Err(e) if e.code == RtpsErrorCode::PeerDisconnected => Err(e),
@@ -2040,20 +1996,6 @@ impl UnicastMessageProcessor for UserLogic {
         data_frag: &DataFrag,
         message_receiver: &MessageReceiver,
     ) -> RtpsResult<()> {
-        if crate::common::env::instr_enabled() {
-            eprintln!(
-                "[instr] tag=S-frag-recv writer={:?} src={} sn={} frag={} t_ns={}",
-                data_frag.writer_id,
-                message_receiver.sender_addr(),
-                data_frag.writer_sn.to_i64(),
-                data_frag.fragment_starting_num,
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos() as u64)
-                    .unwrap_or(0)
-            );
-        }
-
         let source_timestamp = message_receiver.get_source_timestamp();
         let remote_writer_guid = Guid::new(rtps_header.guid_prefix(), data_frag.writer_id);
 
@@ -2139,16 +2081,6 @@ impl UnicastMessageProcessor for UserLogic {
         // Check if all fragments have been received and process
         if let Some(buffer_ref) = self.fragment_buffers.get(&key) {
             if buffer_ref.all_fragments_received() {
-                if crate::common::env::instr_enabled() {
-                    eprintln!(
-                        "[instr] tag=S-last-frag id={} t_ns={}",
-                        data_frag.writer_sn.to_i64(),
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_nanos() as u64)
-                            .unwrap_or(0)
-                    );
-                }
                 let total_fragments = buffer_ref.total_fragments;
                 let received_fragments = buffer_ref.received_fragments.clone();
                 let is_complete = buffer_ref.all_fragments_received();
@@ -2232,17 +2164,6 @@ impl UnicastMessageProcessor for UserLogic {
 
                 // Remove completed fragment buffer
                 self.fragment_buffers.remove(&key);
-
-                if crate::common::env::instr_enabled() {
-                    eprintln!(
-                        "[instr] tag=S-dispatched id={} t_ns={}",
-                        data_frag.writer_sn.to_i64(),
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_nanos() as u64)
-                            .unwrap_or(0)
-                    );
-                }
             }
         }
 

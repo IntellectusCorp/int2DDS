@@ -82,7 +82,7 @@ pub(crate) fn spawn_conn_actor(
     {
         let cancel = conn_cancel.clone();
         let write_half = Arc::clone(&write_half);
-        tokio::spawn(writer_task(write_half, rx, cancel, conn_id));
+        tokio::spawn(writer_task(write_half, rx, cancel));
     }
 
     write_half
@@ -142,7 +142,6 @@ async fn writer_task(
     write_half: SharedWriteHalf,
     mut rx: mpsc::Receiver<Vec<u8>>,
     cancel: CancellationToken,
-    conn_id: ConnectionId,
 ) {
     loop {
         tokio::select! {
@@ -150,22 +149,6 @@ async fn writer_task(
                 match maybe_frame {
                     Some(frame) => {
                         let mut wh = write_half.lock().await;
-                        if crate::common::env::instr_enabled() {
-                            let hash = frame
-                                .iter()
-                                .take(64)
-                                .fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(*b as u32));
-                            eprintln!(
-                                "[instr] tag=P-wtask-write conn={} len={} hash={:08x} t_ns={}",
-                                conn_id,
-                                frame.len(),
-                                hash,
-                                std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map(|d| d.as_nanos() as u64)
-                                    .unwrap_or(0)
-                            );
-                        }
                         if let Err(e) = write_framed_message(&mut *wh, &frame).await {
                             warn!("write error: {:?}", e);
                             break;
