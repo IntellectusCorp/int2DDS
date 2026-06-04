@@ -353,6 +353,22 @@ impl Participant {
         self.builtin_endpoints.sedp_builtin_topics_reader.clone()
     }
 
+    pub(crate) fn type_lookup_request_writer(&self) -> Arc<StatefulWriter> {
+        self.builtin_endpoints.type_lookup_request_writer.clone()
+    }
+
+    pub(crate) fn type_lookup_request_reader(&self) -> Arc<StatefulReader> {
+        self.builtin_endpoints.type_lookup_request_reader.clone()
+    }
+
+    pub(crate) fn type_lookup_reply_writer(&self) -> Arc<StatefulWriter> {
+        self.builtin_endpoints.type_lookup_reply_writer.clone()
+    }
+
+    pub(crate) fn type_lookup_reply_reader(&self) -> Arc<StatefulReader> {
+        self.builtin_endpoints.type_lookup_reply_reader.clone()
+    }
+
     pub(crate) fn domain_id(&self) -> DomainId {
         self.domain_id
     }
