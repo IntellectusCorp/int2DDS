@@ -121,6 +121,32 @@ struct OuterFinalChildMut {
     child: InnerMut,
 }
 
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds")]
+#[repr(u8)]
+enum Small8 {
+    A,
+    B,
+    C,
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds")]
+#[repr(i16)]
+enum Small16 {
+    X,
+    Y,
+    Z,
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final")]
+struct EnumHolder {
+    v8: Small8,
+    v16: Small16,
+    list: Vec<Small8>,
+}
+
 fn build_dynamic_nested(outer_dt: &Arc<DynamicType>, inner_dt: &Arc<DynamicType>) -> DynamicData {
     let mut child = DynamicData::new(inner_dt.clone());
     child.set("a", 1i32).unwrap();
@@ -332,6 +358,108 @@ fn vec_of_struct_byte_match_xcdr_final() {
         dynamic_bytes(&dynamic, &format),
         concrete_xcdr(&concrete, ExtensibilityKind::Final)
     );
+}
+
+fn enum_holder_dynamic_type() -> Arc<DynamicType> {
+    use int2dds::xtypes::HasTypeObject;
+    let small8_hash = hash_of(&Small8::type_identifier());
+    let small16_hash = hash_of(&Small16::type_identifier());
+
+    let mut registry = TypeRegistry::new();
+    registry.register_complete(small8_hash, "Small8".into(), Small8::complete_type_object());
+    registry.register_complete(small16_hash, "Small16".into(), Small16::complete_type_object());
+
+    let flag = || MemberFlag::new(TryConstructKind::Discard, false, false, false, false, false);
+    let mut outer = CompleteStructType::new(
+        TypeFlag::new(int2dds::xtypes::ExtensibilityKind::Final, false, false),
+        "EnumHolder".into(),
+        None,
+    );
+    outer.add_member(CompleteStructMember::new(
+        0,
+        flag(),
+        TypeIdentifier::CompleteTypeId(small8_hash),
+        "v8".to_string(),
+    ));
+    outer.add_member(CompleteStructMember::new(
+        1,
+        flag(),
+        TypeIdentifier::CompleteTypeId(small16_hash),
+        "v16".to_string(),
+    ));
+    outer.add_member(CompleteStructMember::new(
+        2,
+        flag(),
+        TypeIdentifier::PlainSequenceLarge {
+            header: PlainCollectionHeader::default(),
+            bound: 0,
+            element_identifier: Box::new(TypeIdentifier::CompleteTypeId(small8_hash)),
+        },
+        "list".to_string(),
+    ));
+
+    Arc::new(
+        DynamicType::from_type_object_with_registry(
+            Arc::new(CompleteTypeObject::Struct(outer)),
+            TypeIdentifier::None,
+            &registry,
+        )
+        .unwrap(),
+    )
+}
+
+#[test]
+fn codegen_emits_repr_bit_bound() {
+    use int2dds::xtypes::HasTypeObject;
+    let bound = |obj: CompleteTypeObject| match obj {
+        CompleteTypeObject::Enum(e) => e.header.common.bit_bound,
+        other => panic!("expected enum type object, got {:?}", other),
+    };
+    assert_eq!(bound(Small8::complete_type_object()), 8, "#[repr(u8)] enum -> bit_bound 8");
+    assert_eq!(bound(Small16::complete_type_object()), 16, "#[repr(i16)] enum -> bit_bound 16");
+}
+
+fn build_dynamic_enum_holder(dt: &Arc<DynamicType>) -> DynamicData {
+    let e = |value: i32| DynamicValue::Enum { name: String::new(), value };
+    let mut data = DynamicData::new(dt.clone());
+    data.set_value("v8", e(2)).unwrap();
+    data.set_value("v16", e(2)).unwrap();
+    data.set_value("list", DynamicValue::Sequence(vec![e(0), e(1)])).unwrap();
+    data
+}
+
+fn concrete_enum_holder() -> EnumHolder {
+    EnumHolder { v8: Small8::C, v16: Small16::Z, list: vec![Small8::A, Small8::B] }
+}
+
+#[test]
+fn enum_bit_bound_byte_match_cdr() {
+    let dynamic = build_dynamic_enum_holder(&enum_holder_dynamic_type());
+    assert_eq!(
+        dynamic_bytes(&dynamic, &SerializationFormat::Cdr),
+        concrete_cdr(&concrete_enum_holder())
+    );
+}
+
+#[test]
+fn enum_bit_bound_byte_match_xcdr_final() {
+    let dynamic = build_dynamic_enum_holder(&enum_holder_dynamic_type());
+    let format = xcdr_format(ExtensibilityKind::Final);
+    assert_eq!(
+        dynamic_bytes(&dynamic, &format),
+        concrete_xcdr(&concrete_enum_holder(), ExtensibilityKind::Final)
+    );
+}
+
+#[test]
+fn enum_bit_bound_codegen_roundtrip() {
+    let dynamic = build_dynamic_enum_holder(&enum_holder_dynamic_type());
+    let bytes = dynamic_bytes(&dynamic, &xcdr_format(ExtensibilityKind::Final));
+    let mut d = XcdrDeserializer::new(&bytes).unwrap();
+    let back = EnumHolder::deserialize_xcdr(&mut d).unwrap();
+    assert_eq!(back.v8, Small8::C);
+    assert_eq!(back.v16, Small16::Z);
+    assert_eq!(back.list, vec![Small8::A, Small8::B]);
 }
 
 #[derive(DdsType)]

@@ -188,9 +188,54 @@ fn is_primitive_kind(kind: &DynamicTypeKind) -> bool {
     }
 }
 
+fn enum_wire_width(bit_bound: u16) -> u8 {
+    if bit_bound <= 8 {
+        1
+    } else if bit_bound <= 16 {
+        2
+    } else {
+        4
+    }
+}
+
+fn enum_bit_bound(type_kind: &DynamicTypeKind) -> Option<u16> {
+    match type_kind {
+        DynamicTypeKind::Enum(desc) => Some(desc.bit_bound()),
+        DynamicTypeKind::TypeRef(inner) => match inner.kind() {
+            DynamicTypeKind::Enum(desc) => Some(desc.bit_bound()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn serialize_enum_value<S: PrimitiveSerialize>(
+    serializer: &mut S,
+    value: i32,
+    bit_bound: u16,
+) -> Result<(), CdrError> {
+    match enum_wire_width(bit_bound) {
+        1 => serializer.serialize_i8(value as i8),
+        2 => serializer.serialize_i16(value as i16),
+        _ => serializer.serialize_i32(value),
+    }
+}
+
+fn deserialize_enum_value<D: ValueDeserializer>(
+    deserializer: &mut D,
+    bit_bound: u16,
+) -> Result<i32, CdrError> {
+    Ok(match enum_wire_width(bit_bound) {
+        1 => deserializer.deserialize_i8()? as i32,
+        2 => deserializer.deserialize_i16()? as i32,
+        _ => deserializer.deserialize_i32()?,
+    })
+}
+
 fn serialize_atomic_value<S, F>(
     serializer: &mut S,
     value: &DynamicValue,
+    type_kind: &DynamicTypeKind,
     serialize_nested_struct: &mut F,
 ) -> DdsResult<()>
 where
@@ -213,7 +258,10 @@ where
         DynamicValue::Byte(v) => serializer.serialize_u8(*v).map_err(cdr_error),
         DynamicValue::String(v) => serializer.serialize_string(v).map_err(cdr_error),
         DynamicValue::WString(v) => serializer.serialize_wstring16(v).map_err(cdr_error),
-        DynamicValue::Enum { value, .. } => serializer.serialize_i32(*value).map_err(cdr_error),
+        DynamicValue::Enum { value, .. } => {
+            let bit_bound = enum_bit_bound(type_kind).unwrap_or(32);
+            serialize_enum_value(serializer, *value, bit_bound).map_err(cdr_error)
+        }
         DynamicValue::Struct(inner) => serialize_nested_struct(serializer, inner),
         DynamicValue::Null => Ok(()),
         // Sequence/Array/Optional handled by callers with format-specific logic
@@ -229,6 +277,7 @@ where
 fn serialize_value_cdr<F>(
     serializer: &mut CdrSerializer,
     value: &DynamicValue,
+    type_kind: &DynamicTypeKind,
     serialize_nested_struct: &mut F,
 ) -> DdsResult<()>
 where
@@ -236,24 +285,32 @@ where
 {
     match value {
         DynamicValue::Sequence(items) => {
+            let element_type = match type_kind {
+                DynamicTypeKind::Sequence { element_type, .. } => element_type.as_ref(),
+                _ => return Err(DdsError::Error("type mismatch: expected Sequence".to_string())),
+            };
             serializer.serialize_u32(items.len() as u32).map_err(cdr_error)?;
             for item in items {
-                serialize_value_cdr(serializer, item, serialize_nested_struct)?;
+                serialize_value_cdr(serializer, item, element_type, serialize_nested_struct)?;
             }
             Ok(())
         }
         DynamicValue::Array(items) => {
+            let element_type = match type_kind {
+                DynamicTypeKind::Array { element_type, .. } => element_type.as_ref(),
+                _ => return Err(DdsError::Error("type mismatch: expected Array".to_string())),
+            };
             for item in items {
-                serialize_value_cdr(serializer, item, serialize_nested_struct)?;
+                serialize_value_cdr(serializer, item, element_type, serialize_nested_struct)?;
             }
             Ok(())
         }
         DynamicValue::Optional(Some(inner)) => {
             serializer.serialize_bool(true).map_err(cdr_error)?;
-            serialize_value_cdr(serializer, inner, serialize_nested_struct)
+            serialize_value_cdr(serializer, inner, type_kind, serialize_nested_struct)
         }
         DynamicValue::Optional(None) => serializer.serialize_bool(false).map_err(cdr_error),
-        other => serialize_atomic_value(serializer, other, serialize_nested_struct),
+        other => serialize_atomic_value(serializer, other, type_kind, serialize_nested_struct),
     }
 }
 
@@ -317,7 +374,7 @@ where
             serialize_value_xcdr2(serializer, inner, type_kind, serialize_nested_struct)
         }
         DynamicValue::Optional(None) => serializer.serialize_bool(false).map_err(cdr_error),
-        other => serialize_atomic_value(serializer, other, serialize_nested_struct),
+        other => serialize_atomic_value(serializer, other, type_kind, serialize_nested_struct),
     }
 }
 
@@ -336,9 +393,14 @@ where
         DynamicTypeKind::WString { .. } => {
             Ok(DynamicValue::WString(deserializer.deserialize_wstring16().map_err(cdr_error)?))
         }
-        DynamicTypeKind::Enum(_) => {
-            let value = deserializer.deserialize_i32().map_err(cdr_error)?;
-            Ok(DynamicValue::Enum { name: String::new(), value })
+        DynamicTypeKind::Enum(enum_desc) => {
+            let value =
+                deserialize_enum_value(deserializer, enum_desc.bit_bound()).map_err(cdr_error)?;
+            let name = enum_desc
+                .get_literal_by_value(value)
+                .map(|literal| literal.name.clone())
+                .unwrap_or_default();
+            Ok(DynamicValue::Enum { name, value })
         }
         DynamicTypeKind::Struct(struct_desc) => {
             Err(nested_struct_deserialization_error(struct_desc))
@@ -380,7 +442,8 @@ fn deserialize_value_cdr(
                 Ok(DynamicValue::Struct(Box::new(nested)))
             }
             DynamicTypeKind::Enum(enum_desc) => {
-                let value = deserializer.deserialize_i32().map_err(cdr_error)?;
+                let value = deserialize_enum_value(deserializer, enum_desc.bit_bound())
+                    .map_err(cdr_error)?;
                 let name = enum_desc
                     .get_literal_by_value(value)
                     .map(|literal| literal.name.clone())
@@ -426,7 +489,8 @@ fn deserialize_value_xcdr2(
                 Ok(DynamicValue::Struct(Box::new(nested)))
             }
             DynamicTypeKind::Enum(enum_desc) => {
-                let value = deserializer.deserialize_i32().map_err(cdr_error)?;
+                let value = deserialize_enum_value(deserializer, enum_desc.bit_bound())
+                    .map_err(cdr_error)?;
                 let name = enum_desc
                     .get_literal_by_value(value)
                     .map(|literal| literal.name.clone())
@@ -603,14 +667,14 @@ fn serialize_struct_cdr(serializer: &mut CdrSerializer, data: &DynamicData) -> D
             serializer
                 .write_member_with_v1(member_id, must_understand, |s| {
                     if let Some(value) = value {
-                        serialize_value_cdr(s, value, &mut nested)
+                        serialize_value_cdr(s, value, &member.member_type, &mut nested)
                             .map_err(|e| CdrError::SerializationError(e.to_string()))?;
                     }
                     Ok(())
                 })
                 .map_err(cdr_error)?;
         } else if let Some(value) = member_value_or_default(data, member) {
-            serialize_value_cdr(serializer, &value, &mut nested)?;
+            serialize_value_cdr(serializer, &value, &member.member_type, &mut nested)?;
         }
     }
 
@@ -1149,6 +1213,61 @@ mod tests {
             }
             other => panic!("expected sequence, got {:?}", other),
         }
+    }
+
+    fn enum_with_bound(name: &str, bit_bound: u16) -> (CompleteTypeObject, EquivalenceHash) {
+        let mut e =
+            CompleteEnumeratedType::new(tf(ExtensibilityKind::Final), name.into(), bit_bound);
+        e.add_literal(CompleteEnumeratedLiteral::new(0, EnumeratedLiteralFlag(0), "A".into()));
+        e.add_literal(CompleteEnumeratedLiteral::new(1, EnumeratedLiteralFlag(0), "B".into()));
+        e.add_literal(CompleteEnumeratedLiteral::new(2, EnumeratedLiteralFlag(0), "C".into()));
+        let obj = CompleteTypeObject::Enum(e);
+        let hash = EquivalenceHash::compute(&obj.serialize());
+        (obj, hash)
+    }
+
+    #[test]
+    fn test_enum_bit_bound_width_and_roundtrip() {
+        let run = |bit_bound: u16, width: usize| {
+            let (enum_obj, enum_hash) = enum_with_bound("E", bit_bound);
+            let mut registry = TypeRegistry::new();
+            registry.register_complete(enum_hash, "E".into(), enum_obj);
+
+            let mut outer =
+                CompleteStructType::new(tf(ExtensibilityKind::Final), "Holder".into(), None);
+            outer.add_member(CompleteStructMember::new(
+                0,
+                member_flag(false, false, false),
+                TypeIdentifier::CompleteTypeId(enum_hash),
+                "c".to_string(),
+            ));
+            let outer_dt = build_with_registry(CompleteTypeObject::Struct(outer), &registry);
+
+            let mut data = DynamicData::new(outer_dt.clone());
+            data.set_value("c", DynamicValue::Enum { name: String::new(), value: 2 }).unwrap();
+
+            let bytes =
+                serialize_dynamic_data(&data, &xcdr_format(ExtensibilityKind::Final)).unwrap();
+            assert_eq!(
+                bytes.len(),
+                4 + width,
+                "bit_bound {} should use {}-byte holder",
+                bit_bound,
+                width
+            );
+
+            let back = deserialize_dynamic_data(&bytes, &outer_dt).unwrap();
+            match back.get_value("c").unwrap() {
+                DynamicValue::Enum { value, name } => {
+                    assert_eq!(*value, 2);
+                    assert_eq!(name, "C", "literal name resolved after narrow-width read");
+                }
+                other => panic!("expected enum, got {:?}", other),
+            }
+        };
+        run(8, 1);
+        run(16, 2);
+        run(32, 4);
     }
 
     /// Build "Opt { id: i32, opt: @optional i32 }" with the given extensibility.

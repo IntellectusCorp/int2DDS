@@ -423,9 +423,11 @@ pub fn generate_has_type_object_enum_impl(
     name: &syn::Ident,
     variants: &syn::punctuated::Punctuated<syn::Variant, syn::token::Comma>,
     type_config: &DdsTypeConfig,
+    disc_type: DiscriminantType,
 ) -> proc_macro2::TokenStream {
     let crate_path = &type_config.crate_path;
     let type_name_str = name.to_string();
+    let bit_bound = disc_type.bit_bound();
 
     let literal_flag_expr = |variant: &syn::Variant| {
         if crate::codegen::utils::variant_is_default_literal(variant) {
@@ -493,7 +495,7 @@ pub fn generate_has_type_object_enum_impl(
             fn minimal_type_object() -> #crate_path::xtypes::MinimalTypeObject {
                 let mut enum_type = #crate_path::xtypes::MinimalEnumeratedType::new(
                     #crate_path::xtypes::TypeFlag::default(),
-                    32, // bit_bound for i32
+                    #bit_bound,
                 );
                 #(enum_type.add_literal(#minimal_literals);)*
                 #crate_path::xtypes::MinimalTypeObject::Enum(enum_type)
@@ -503,7 +505,7 @@ pub fn generate_has_type_object_enum_impl(
                 let mut enum_type = #crate_path::xtypes::CompleteEnumeratedType::new(
                     #crate_path::xtypes::TypeFlag::default(),
                     #type_name_str.to_string(),
-                    32, // bit_bound for i32
+                    #bit_bound,
                 );
                 #(enum_type.add_literal(#complete_literals);)*
                 #crate_path::xtypes::CompleteTypeObject::Enum(enum_type)
