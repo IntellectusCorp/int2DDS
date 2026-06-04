@@ -371,6 +371,15 @@ impl ParsedBuiltinTopicData {
                     }
                 }
             }
+            ParameterId::PidTypeIdV1 => {
+                if self.type_identifier.is_none() {
+                    if let ParameterValue::TypeIdentifierV1(type_id) = parameter.value {
+                        if type_id != TypeIdentifier::None {
+                            self.type_identifier = Some(type_id);
+                        }
+                    }
+                }
+            }
             ParameterId::PidTypeConsistencyEnforcement => {
                 if let ParameterValue::TypeConsistencyEnforcement(tce) = parameter.value {
                     self.type_consistency_enforcement = Some(tce);

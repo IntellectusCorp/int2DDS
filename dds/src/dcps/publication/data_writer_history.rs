@@ -333,6 +333,12 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
         self.pool.acquire()
     }
 
+    // current number of pooled (free) changes
+    #[cfg(test)]
+    pub(crate) fn pool_len(&self) -> usize {
+        self.pool.len()
+    }
+
     // Must be called immediately after DataWriterHistoryCache creation.
     pub(crate) fn set_datawriter(&mut self, data_writer: Weak<DataWriter<Foo>>) {
         self.data_writer = data_writer;

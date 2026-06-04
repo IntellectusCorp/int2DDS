@@ -2,7 +2,8 @@
 //!
 //! Provides `Int2DdsTypeInfo` for building DDS-XTypes TypeIdentifier and TypeObject
 //! from field descriptions. This enables the FFI layer to send type information
-//! during discovery (PidTypeInformation 0x0069 and PidTypeObject 0x0072).
+//! during discovery (sent as PID_TYPE_INFORMATION 0x0075 + legacy 0x0069, and
+//! PID_TYPE_OBJECTV1 0x0072).
 //!
 //! ## Usage from C
 //!
