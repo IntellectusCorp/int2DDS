@@ -100,10 +100,6 @@ impl MessageReceiver {
         }
     }
 
-    pub(crate) fn sender_addr(&self) -> SocketAddr {
-        self.sender_addr
-    }
-
     pub(crate) fn get_source_timestamp(&self) -> Option<RtpsTime> {
         if self.have_timestamp {
             Some(self.timestamp)
