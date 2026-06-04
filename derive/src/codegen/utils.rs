@@ -365,6 +365,14 @@ pub enum DiscriminantType {
 }
 
 impl DiscriminantType {
+    pub fn bit_bound(&self) -> u16 {
+        match self {
+            DiscriminantType::I32 => 32,
+            DiscriminantType::I16 => 16,
+            DiscriminantType::U8 | DiscriminantType::Bool => 8,
+        }
+    }
+
     /// Get the Rust type name for this discriminant type
     pub fn rust_type(&self) -> &'static str {
         match self {
