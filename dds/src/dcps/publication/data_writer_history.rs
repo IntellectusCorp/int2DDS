@@ -333,6 +333,12 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
         self.pool.acquire()
     }
 
+    // current number of pooled (free) changes
+    #[cfg(test)]
+    pub(crate) fn pool_len(&self) -> usize {
+        self.pool.len()
+    }
+
     /// Try to release an evicted Arc<CacheChange> back to the pool.
     /// Returns the change to the pool only if Arc refcount is 1.
     fn try_release_evicted(&mut self, evicted: Arc<CacheChange>) {
