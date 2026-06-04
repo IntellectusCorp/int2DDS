@@ -56,6 +56,23 @@ pub(crate) struct TcpTransportPlugin {
     working_ips: Vec<String>,
     listener_port: u16,
 
+    /// Configured SPDP initial peers. TCP is connection-oriented and firewall
+    /// rules are provisioned per ip:port, so when this is non-empty we only
+    /// dial the operator-declared peer addresses — a peer's other advertised
+    /// locators (e.g. an unroutable virtual-NIC address) are ignored. This is
+    /// the intended TCP setup: both participants list each other, with one
+    /// reachable address per peer.
+    ///
+    /// Empty means dial every advertised locator (no-initial-peers fallback).
+    ///
+    /// TODO: two cases are not handled yet and need RTPS-layer locator
+    /// selection (pick a single locator per remote participant) plus an
+    /// `accept_unknown_peers` QoS:
+    ///   - listing several addresses for the *same* peer — both would be
+    ///     dialed, yielding duplicate connections (so keep one address/peer);
+    ///   - dialing a discovered peer that is not in this list at all.
+    initial_peers: Vec<SocketAddr>,
+
     /// Dedicated runtime — keeps the tcp tasks isolated from any
     /// runtime the host application might run. Dropped last (after the
     /// listener and sender) so tasks can drain on shutdown.
@@ -101,6 +118,12 @@ impl TcpTransportPlugin {
     ) -> io::Result<Self> {
         let physical_port = crate::common::env::get_tcp_port()
             .unwrap_or_else(|| PortManager::get_tcp_physical_port(domain_id));
+
+        // Read from env for the dial gate. The pure-TCP "initial peers
+        // required" check lives in `DcpsBridge::new`, which resolves them from
+        // the QoS property as well (this env read does not see property-only
+        // peers — unifying that source is part of the future fallback work).
+        let initial_peers = crate::common::env::get_initial_peers();
 
         // Crossbeam bridges async → sync. Listener writes to *_tx; the DDS
         // layer reads from *_rx via `take_*_source()`.
@@ -192,6 +215,7 @@ impl TcpTransportPlugin {
             participant_id,
             working_ips,
             listener_port,
+            initial_peers,
             runtime,
             sender,
             mux_listener: Mutex::new(Some(mux_listener)),
@@ -234,6 +258,14 @@ impl TcpTransportPlugin {
             .map(|ip| Locator::from_tcp_v4(ip, self.listener_port as u32))
             .collect()
     }
+
+    /// Whether an outbound dial to `addr` is permitted under the initial-peers
+    /// policy. With initial peers configured, only those addresses are dialed
+    /// (so unreachable advertised locators are never attempted); with none
+    /// configured, every advertised locator is allowed as a fallback.
+    fn should_dial(&self, addr: &SocketAddr) -> bool {
+        self.initial_peers.is_empty() || self.initial_peers.contains(addr)
+    }
 }
 
 impl TransportPlugin for TcpTransportPlugin {
@@ -255,6 +287,13 @@ impl TransportPlugin for TcpTransportPlugin {
                     std::net::IpAddr::V4(locator.to_ip_v4_addr()),
                     locator.port() as u16,
                 );
+                if !self.should_dial(&addr) {
+                    log::debug!(
+                        "[TcpTransportPlugin] SEDP: skip non-initial-peer locator {}",
+                        addr
+                    );
+                    return Ok(());
+                }
                 self.sender.send_to_discovery(&addr, data)
             }
             SendTarget::UserData(locator) => {
@@ -265,6 +304,13 @@ impl TransportPlugin for TcpTransportPlugin {
                     std::net::IpAddr::V4(locator.to_ip_v4_addr()),
                     locator.port() as u16,
                 );
+                if !self.should_dial(&addr) {
+                    log::debug!(
+                        "[TcpTransportPlugin] UserData: skip non-initial-peer locator {}",
+                        addr
+                    );
+                    return Ok(());
+                }
                 self.sender.send_to_user_data(&addr, data)
             }
         }
