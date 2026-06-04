@@ -79,16 +79,6 @@ impl std::str::FromStr for TransportType {
         match s.to_lowercase().as_str() {
             "udp" => Ok(TransportType::UDP),
             "tcp" => Ok(TransportType::TCP),
-            // Legacy alias — the `tcp_async` variant has been folded into
-            // the unified `tcp` transport. Still accepted so existing
-            // launch scripts keep working, but emit a one-shot warning.
-            "tcp_async" => {
-                log::warn!(
-                    "[Transport] INT2DDS_TRANSPORT=tcp_async is deprecated; use 'tcp' instead. \
-                     Mapping to TransportType::TCP."
-                );
-                Ok(TransportType::TCP)
-            }
             "hybrid" => Ok(TransportType::Hybrid),
             "shm" => Ok(TransportType::SHM),
             _ => Err(format!(

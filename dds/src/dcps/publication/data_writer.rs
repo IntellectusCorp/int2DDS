@@ -288,12 +288,9 @@ impl<Foo: 'static + Clone> EnableChild for DataWriter<Foo> {
 
         let mut dcps_bridge = participant.get_dcps_bridge()?;
         let rtps_writer = match dcps_bridge.as_mut() {
-            Some(dcps_bridge) => {
-                let writer = dcps_bridge
-                    .create_rtps_writer(publication_builtin_topic_data, Some(status_callback))
-                    .map_err(|e| DdsError::Error(e.message))?;
-                writer
-            }
+            Some(dcps_bridge) => dcps_bridge
+                .create_rtps_writer(publication_builtin_topic_data, Some(status_callback))
+                .map_err(|e| DdsError::Error(e.message))?,
             None => return Err(DdsError::Error("DCPS Bridge is not initialized".to_string())),
         };
 
