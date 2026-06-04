@@ -585,6 +585,41 @@ fn deserialize_struct_members_cdr(
     Ok(values)
 }
 
+fn deserialize_struct_members_mutable_cdr(
+    deserializer: &mut CdrDeserializer,
+    struct_desc: &StructDescriptor,
+) -> DdsResult<HashMap<Arc<str>, DynamicValue>> {
+    let mut values = HashMap::new();
+    while !deserializer.is_at_sentinel() {
+        let (member_id, member_length, must_understand) =
+            match deserializer.read_parameter_header().map_err(cdr_error)? {
+                PlCdrMemberHeader::Sentinel => break,
+                PlCdrMemberHeader::Short { pid, length, must_understand } => {
+                    (pid as u32, length as u32, must_understand)
+                }
+                PlCdrMemberHeader::Long { member_id, length, must_understand } => {
+                    (member_id, length, must_understand)
+                }
+            };
+
+        let member_start = deserializer.get_position();
+        if let Some(member) = struct_desc.get_member_by_id(member_id) {
+            let value = deserialize_value_cdr(deserializer, &member.member_type)?;
+            values.insert(member.name.clone(), value);
+        } else if must_understand {
+            return Err(DdsError::Error(format!("Unknown required member with id {}", member_id)));
+        } else {
+            deserializer.skip(member_length as usize).map_err(cdr_error)?;
+        }
+
+        let consumed = deserializer.get_position() - member_start;
+        if consumed < member_length as usize {
+            deserializer.skip(member_length as usize - consumed).map_err(cdr_error)?;
+        }
+    }
+    Ok(values)
+}
+
 fn deserialize_struct_members_xcdr2(
     deserializer: &mut Xcdr2Deserializer,
     struct_desc: &StructDescriptor,
@@ -651,14 +686,30 @@ fn deserialize_cdr(bytes: &[u8], dynamic_type: &Arc<DynamicType>) -> DdsResult<D
 
 fn serialize_struct_cdr(serializer: &mut CdrSerializer, data: &DynamicData) -> DdsResult<()> {
     let dynamic_type = data.dynamic_type();
-    if matches!(dynamic_type.extensibility(), ExtensibilityKind::Mutable) {
-        return Err(cdr_mutable_unsupported_error());
-    }
     let struct_desc = dynamic_type
         .as_struct()
         .ok_or_else(|| DdsError::Error("Expected struct type".to_string()))?;
 
     let mut nested = serialize_struct_cdr;
+
+    if matches!(dynamic_type.extensibility(), ExtensibilityKind::Mutable) {
+        for member in struct_desc.members() {
+            if let Some(value) = member_value_or_default(data, member) {
+                let member_id = member.member_id;
+                let must_understand = member.is_must_understand;
+                let member_type = member.member_type.clone();
+                serializer
+                    .write_member_with_v1(member_id, must_understand, |s| {
+                        serialize_value_cdr(s, &value, &member_type, &mut nested)
+                            .map_err(|e| CdrError::SerializationError(e.to_string()))
+                    })
+                    .map_err(cdr_error)?;
+            }
+        }
+        serializer.end_mutable_struct().map_err(cdr_error)?;
+        return Ok(());
+    }
+
     for member in struct_desc.members() {
         if member.is_optional {
             let member_id = member.member_id;
@@ -685,21 +736,16 @@ fn deserialize_struct_cdr(
     deserializer: &mut CdrDeserializer,
     dynamic_type: &Arc<DynamicType>,
 ) -> DdsResult<DynamicData> {
-    if matches!(dynamic_type.extensibility(), ExtensibilityKind::Mutable) {
-        return Err(cdr_mutable_unsupported_error());
-    }
     let struct_desc = dynamic_type
         .as_struct()
         .ok_or_else(|| DdsError::Error("Expected struct type".to_string()))?;
 
-    let values = deserialize_struct_members_cdr(deserializer, struct_desc)?;
+    let values = if matches!(dynamic_type.extensibility(), ExtensibilityKind::Mutable) {
+        deserialize_struct_members_mutable_cdr(deserializer, struct_desc)?
+    } else {
+        deserialize_struct_members_cdr(deserializer, struct_desc)?
+    };
     Ok(DynamicData::with_values(dynamic_type.clone(), values))
-}
-
-fn cdr_mutable_unsupported_error() -> DdsError {
-    DdsError::Error(
-        "CDR (XCDR1) serialization of Mutable structs (PL_CDR) is not supported".to_string(),
-    )
 }
 
 fn serialize_xcdr(
@@ -965,9 +1011,11 @@ mod tests {
             }
         };
 
-        // CDR: Final/Appendable only (Mutable=PL_CDR is out of scope).
+        // CDR (XCDR1): Final/Appendable (PLAIN_CDR) and Mutable (PL_CDR); the
+        // mutable case nests a mutable inner, exercising recursive PL_CDR framing.
         run("cdr-final", ExtensibilityKind::Final, SerializationFormat::Cdr);
         run("cdr-appendable", ExtensibilityKind::Appendable, SerializationFormat::Cdr);
+        run("cdr-mutable", ExtensibilityKind::Mutable, SerializationFormat::Cdr);
         // XCDR2: Final/Appendable/Mutable, inner is Appendable (extensibility-fix coverage).
         run("xcdr2-final", ExtensibilityKind::Final, xcdr_format(ExtensibilityKind::Final));
         run(
@@ -1366,12 +1414,33 @@ mod tests {
     }
 
     #[test]
-    fn test_cdr_mutable_struct_is_unsupported() {
+    fn test_cdr_mutable_struct_pl_cdr_roundtrip() {
         let dt = optional_type(ExtensibilityKind::Mutable);
-        let mut data = DynamicData::new(dt.clone());
-        data.set("id", 1i32).unwrap();
-        let error = serialize_dynamic_data(&data, &SerializationFormat::Cdr).unwrap_err();
-        assert!(format!("{:?}", error).contains("Mutable"));
+
+        // Absent optional: only `id` is emitted, terminated by PID_SENTINEL.
+        let mut absent = DynamicData::new(dt.clone());
+        absent.set("id", 1i32).unwrap();
+        let absent_bytes = serialize_dynamic_data(&absent, &SerializationFormat::Cdr).unwrap();
+
+        // Present optional adds another PID member, so the wire is strictly longer.
+        let mut present = DynamicData::new(dt.clone());
+        present.set("id", 1i32).unwrap();
+        present.set("opt", 7i32).unwrap();
+        let present_bytes = serialize_dynamic_data(&present, &SerializationFormat::Cdr).unwrap();
+        assert!(present_bytes.len() > absent_bytes.len());
+
+        // Both end with PID_SENTINEL (0x3F02, LE) + zero length.
+        for bytes in [&absent_bytes, &present_bytes] {
+            assert_eq!(bytes[bytes.len() - 4..], [0x02, 0x3F, 0x00, 0x00]);
+        }
+
+        let back_absent = deserialize_dynamic_data(&absent_bytes, &dt).unwrap();
+        assert_eq!(back_absent.get::<i32>("id").unwrap(), 1);
+        assert!(back_absent.get_value("opt").is_none());
+
+        let back_present = deserialize_dynamic_data(&present_bytes, &dt).unwrap();
+        assert_eq!(back_present.get::<i32>("id").unwrap(), 1);
+        assert_eq!(back_present.get::<i32>("opt").unwrap(), 7);
     }
 
     fn create_test_type() -> Arc<DynamicType> {

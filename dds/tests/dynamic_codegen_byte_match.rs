@@ -4,8 +4,8 @@
 //!
 //! This is the strongest guarantee that the dynamic path produces exactly the
 //! same wire bytes as `#[derive(DdsType)]`. Covered: nested struct + `Vec<inner>`
-//! across CDR(Final/Appendable) and XCDR2 Final/Appendable/Mutable, plus optional
-//! members across all four distinct optional encodings.
+//! across CDR(Final/Appendable/Mutable=PL_CDR) and XCDR2 Final/Appendable/Mutable,
+//! plus optional members across all distinct optional encodings.
 
 use std::sync::Arc;
 
@@ -209,6 +209,14 @@ fn nested_byte_match_xcdr_mutable() {
         dynamic_bytes(&dynamic, &format),
         concrete_xcdr(&concrete, ExtensibilityKind::Mutable)
     );
+}
+
+#[test]
+fn nested_byte_match_cdr_mutable() {
+    let (outer_dt, inner_dt) = nested_types::<OuterMut, InnerMut>();
+    let dynamic = build_dynamic_nested(&outer_dt, &inner_dt);
+    let concrete = OuterMut { id: 7, child: InnerMut { a: 1, b: 2 } };
+    assert_eq!(dynamic_bytes(&dynamic, &SerializationFormat::Cdr), concrete_cdr(&concrete));
 }
 
 #[test]
@@ -521,6 +529,21 @@ fn optional_byte_match_xcdr_final() {
             dynamic_bytes(&dynamic, &format),
             concrete_xcdr(&concrete, ExtensibilityKind::Final),
             "XCDR2 Final optional mismatch for {:?}",
+            opt
+        );
+    }
+}
+
+#[test]
+fn optional_byte_match_cdr_mutable() {
+    let dt = standalone_type::<OptMut>();
+    for opt in [Some(9i32), None] {
+        let dynamic = build_dynamic_opt(&dt, opt);
+        let concrete = OptMut { id: 5, opt };
+        assert_eq!(
+            dynamic_bytes(&dynamic, &SerializationFormat::Cdr),
+            concrete_cdr(&concrete),
+            "CDR (PL_CDR) mutable optional mismatch for {:?}",
             opt
         );
     }
