@@ -89,6 +89,25 @@ impl DcpsBridge {
             .and_then(|v| v.parse().ok())
             .unwrap_or_else(crate::rtps::transport::get_transport_type);
 
+        // Pure TCP has no multicast, so discovery cannot bootstrap without
+        // initial peers. Require them up front (resolved from QoS property or
+        // env, matching SPDP setup) and fail fast on a clear message rather
+        // than silently never discovering anyone. Hybrid is exempt — it
+        // discovers over UDP multicast.
+        if matches!(transport_type, crate::rtps::transport::TransportType::TCP) {
+            let initial_peers = property
+                .find_property("int2dds.initial_peers")
+                .map(crate::common::env::parse_initial_peers)
+                .unwrap_or_else(crate::common::env::get_initial_peers);
+            if initial_peers.is_empty() {
+                panic!(
+                    "TCP transport requires initial peers: TCP has no multicast for discovery. \
+                     Set INT2DDS_INITIAL_PEERS (or the int2dds.initial_peers QoS property) to the \
+                     peer's ip:port."
+                );
+            }
+        }
+
         // Build optional TLS config from the same PropertyQosPolicy.
         // A partial/invalid TLS config is a hard error so misconfiguration
         // surfaces immediately instead of silently falling back to plain TCP.
