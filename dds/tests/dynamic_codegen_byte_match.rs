@@ -5,14 +5,15 @@
 //! This is the strongest guarantee that the dynamic path produces exactly the
 //! same wire bytes as `#[derive(DdsType)]`. Covered: nested struct + `Vec<inner>`
 //! across CDR(Final/Appendable/Mutable=PL_CDR) and XCDR2 Final/Appendable/Mutable,
-//! plus optional members across all distinct optional encodings.
+//! plus optional members across all distinct optional encodings, and
+//! union/bitset members.
 
 use std::sync::Arc;
 
 use int2dds::dcps::topic::type_support::{DdsType, SerializationFormat};
 use int2dds::serialize::cdr::{
-    CdrSerialize, CdrSerializer, ExtensibilityKind, Xcdr2Serializer, XcdrDeserialize,
-    XcdrDeserializer, XcdrSerialize,
+    CdrSerialize, CdrSerializer, ExtensibilityKind, PrimitiveSerialize, Xcdr2Serializer,
+    XcdrDeserialize, XcdrDeserializer, XcdrSerialize,
 };
 use int2dds::serialize::{BufferManager, DeserializerReader};
 use int2dds::xtypes::{
@@ -579,4 +580,147 @@ fn optional_byte_match_xcdr_mutable() {
             opt
         );
     }
+}
+
+fn final_holder_with_member<I: HasTypeObject>(member_name: &str) -> Arc<DynamicType> {
+    let inner_complete = I::complete_type_object();
+    let inner_hash = EquivalenceHash::compute(&inner_complete.serialize());
+
+    let mut registry = TypeRegistry::new();
+    registry.register_complete(inner_hash, "Inner".into(), inner_complete);
+
+    let mut outer = CompleteStructType::new(
+        TypeFlag::new(int2dds::xtypes::ExtensibilityKind::Final, false, false),
+        "Holder".into(),
+        None,
+    );
+    outer.add_member(CompleteStructMember::new(
+        0,
+        MemberFlag::new(TryConstructKind::Discard, false, false, false, false, false),
+        TypeIdentifier::CompleteTypeId(inner_hash),
+        member_name.to_string(),
+    ));
+    Arc::new(
+        DynamicType::from_type_object_with_registry(
+            Arc::new(CompleteTypeObject::Struct(outer)),
+            TypeIdentifier::None,
+            &registry,
+        )
+        .unwrap(),
+    )
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final")]
+#[repr(i32)]
+enum UnionFinal {
+    A(i32),
+    B(i32),
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Mutable")]
+#[repr(i32)]
+enum UnionMut {
+    A(i32),
+    B(i32),
+}
+
+fn union_data(dt: &Arc<DynamicType>, disc: i32, value: i32) -> DynamicData {
+    let mut data = DynamicData::new(dt.clone());
+    data.set_value(
+        "u",
+        DynamicValue::Union {
+            discriminator: Box::new(DynamicValue::Int32(disc)),
+            value: Box::new(DynamicValue::Int32(value)),
+        },
+    )
+    .unwrap();
+    data
+}
+
+#[test]
+fn union_byte_match_cdr_final() {
+    let dt = final_holder_with_member::<UnionFinal>("u");
+    assert_eq!(
+        dynamic_bytes(&union_data(&dt, 0, 11), &SerializationFormat::Cdr),
+        concrete_cdr(&UnionFinal::A(11)),
+        "union case A"
+    );
+    assert_eq!(
+        dynamic_bytes(&union_data(&dt, 1, 22), &SerializationFormat::Cdr),
+        concrete_cdr(&UnionFinal::B(22)),
+        "union case B"
+    );
+}
+
+#[test]
+fn union_byte_match_xcdr_final() {
+    let dt = final_holder_with_member::<UnionFinal>("u");
+    let format = xcdr_format(ExtensibilityKind::Final);
+    assert_eq!(
+        dynamic_bytes(&union_data(&dt, 0, 11), &format),
+        concrete_xcdr(&UnionFinal::A(11), ExtensibilityKind::Final),
+        "union case A"
+    );
+    assert_eq!(
+        dynamic_bytes(&union_data(&dt, 1, 22), &format),
+        concrete_xcdr(&UnionFinal::B(22), ExtensibilityKind::Final),
+        "union case B"
+    );
+}
+
+#[test]
+fn union_byte_match_cdr_mutable() {
+    let dt = final_holder_with_member::<UnionMut>("u");
+    assert_eq!(
+        dynamic_bytes(&union_data(&dt, 1, 22), &SerializationFormat::Cdr),
+        concrete_cdr(&UnionMut::B(22)),
+    );
+}
+
+#[test]
+fn union_byte_match_xcdr_mutable() {
+    let dt = final_holder_with_member::<UnionMut>("u");
+    let format = xcdr_format(ExtensibilityKind::Final);
+    assert_eq!(
+        dynamic_bytes(&union_data(&dt, 1, 22), &format),
+        concrete_xcdr(&UnionMut::B(22), ExtensibilityKind::Final),
+    );
+}
+
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", bitset)]
+struct BitsetByteMatch {
+    #[dds(bitfield = 3)]
+    a: u8,
+    #[dds(bitfield = 5)]
+    b: u8,
+}
+
+fn bitset_data(dt: &Arc<DynamicType>, packed: u64) -> DynamicData {
+    let mut data = DynamicData::new(dt.clone());
+    data.set_value("s", DynamicValue::Bitset(packed)).unwrap();
+    data
+}
+
+#[test]
+fn bitset_byte_match_cdr() {
+    let dt = final_holder_with_member::<BitsetByteMatch>("s");
+    let packed = 5u64 | (9u64 << 3); // a = 5 (3 bits), b = 9 (5 bits)
+    assert_eq!(
+        dynamic_bytes(&bitset_data(&dt, packed), &SerializationFormat::Cdr),
+        concrete_cdr(&BitsetByteMatch { a: 5, b: 9 }),
+    );
+}
+
+#[test]
+fn bitset_byte_match_xcdr_final() {
+    let dt = final_holder_with_member::<BitsetByteMatch>("s");
+    let packed = 5u64 | (9u64 << 3);
+    let format = xcdr_format(ExtensibilityKind::Final);
+    assert_eq!(
+        dynamic_bytes(&bitset_data(&dt, packed), &format),
+        concrete_xcdr(&BitsetByteMatch { a: 5, b: 9 }, ExtensibilityKind::Final),
+    );
 }

@@ -219,6 +219,15 @@ pub enum DynamicValue {
         name: String,
         value: i32,
     },
+    /// Union value: the discriminator and the selected branch value
+    Union {
+        discriminator: Box<DynamicValue>,
+        value: Box<DynamicValue>,
+    },
+    /// Bitmask value (packed set of flag bits)
+    Bitmask(u64),
+    /// Bitset value (packed named bitfields)
+    Bitset(u64),
     /// Nested struct
     Struct(Box<DynamicData>),
     /// Sequence (dynamic array)
@@ -251,6 +260,9 @@ impl DynamicValue {
             DynamicValue::String(_) => "String",
             DynamicValue::WString(_) => "WString",
             DynamicValue::Enum { .. } => "Enum",
+            DynamicValue::Union { .. } => "Union",
+            DynamicValue::Bitmask(_) => "Bitmask",
+            DynamicValue::Bitset(_) => "Bitset",
             DynamicValue::Struct(_) => "Struct",
             DynamicValue::Sequence(_) => "Sequence",
             DynamicValue::Array(_) => "Array",
@@ -314,9 +326,14 @@ impl DynamicValue {
             }
             DynamicTypeKind::Struct(_) => DynamicValue::Null, // Cannot create without type info
             DynamicTypeKind::Enum(_) => DynamicValue::Enum { name: String::new(), value: 0 },
+            DynamicTypeKind::Union(_) => DynamicValue::Null, // Cannot create without a selection
+            DynamicTypeKind::Bitmask(_) => DynamicValue::Bitmask(0),
+            DynamicTypeKind::Bitset(_) => DynamicValue::Bitset(0),
             DynamicTypeKind::ExternalType { .. } => DynamicValue::Null,
             DynamicTypeKind::TypeRef(inner) => match inner.kind() {
                 DynamicTypeKind::Enum(_) => DynamicValue::Enum { name: String::new(), value: 0 },
+                DynamicTypeKind::Bitmask(_) => DynamicValue::Bitmask(0),
+                DynamicTypeKind::Bitset(_) => DynamicValue::Bitset(0),
                 _ => DynamicValue::Null,
             },
         }
@@ -342,6 +359,11 @@ impl fmt::Display for DynamicValue {
             DynamicValue::String(v) => write!(f, "\"{}\"", v),
             DynamicValue::WString(v) => write!(f, "L\"{}\"", v),
             DynamicValue::Enum { name, value } => write!(f, "{}({})", name, value),
+            DynamicValue::Union { discriminator, value } => {
+                write!(f, "union({} => {})", discriminator, value)
+            }
+            DynamicValue::Bitmask(bits) => write!(f, "bitmask(0x{:x})", bits),
+            DynamicValue::Bitset(bits) => write!(f, "bitset(0x{:x})", bits),
             DynamicValue::Struct(data) => write!(f, "{} {{ ... }}", data.type_name()),
             DynamicValue::Sequence(items) => write!(f, "[{} items]", items.len()),
             DynamicValue::Array(items) => write!(f, "[{} items]", items.len()),

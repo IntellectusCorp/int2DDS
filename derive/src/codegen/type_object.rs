@@ -528,6 +528,22 @@ pub fn generate_has_type_object_union_impl(
     let crate_path = &type_config.crate_path;
     let type_name_str = name.to_string();
 
+    let union_ext_kind = match type_config
+        .extensibility
+        .unwrap_or(crate::codegen::type_config::ExtensibilityKind::Appendable)
+    {
+        crate::codegen::type_config::ExtensibilityKind::Final => {
+            quote! { #crate_path::xtypes::ExtensibilityKind::Final }
+        }
+        crate::codegen::type_config::ExtensibilityKind::Appendable => {
+            quote! { #crate_path::xtypes::ExtensibilityKind::Appendable }
+        }
+        crate::codegen::type_config::ExtensibilityKind::Mutable => {
+            quote! { #crate_path::xtypes::ExtensibilityKind::Mutable }
+        }
+    };
+    let union_flags = quote! { #crate_path::xtypes::TypeFlag::new(#union_ext_kind, false, false) };
+
     let disc_type_id = match disc_type {
         DiscriminantType::I32 => quote! { #crate_path::xtypes::TypeIdentifier::Int32 },
         DiscriminantType::I16 => quote! { #crate_path::xtypes::TypeIdentifier::Int16 },
@@ -597,7 +613,7 @@ pub fn generate_has_type_object_union_impl(
 
             fn minimal_type_object() -> #crate_path::xtypes::MinimalTypeObject {
                 let mut union_type = #crate_path::xtypes::MinimalUnionType::new(
-                    #crate_path::xtypes::TypeFlag::default(),
+                    #union_flags,
                     #crate_path::xtypes::MemberFlag::default(),
                     #disc_type_id,
                 );
@@ -607,7 +623,7 @@ pub fn generate_has_type_object_union_impl(
 
             fn complete_type_object() -> #crate_path::xtypes::CompleteTypeObject {
                 let mut union_type = #crate_path::xtypes::CompleteUnionType::new(
-                    #crate_path::xtypes::TypeFlag::default(),
+                    #union_flags,
                     #crate_path::xtypes::MemberFlag::default(),
                     #disc_type_id,
                     #type_name_str.to_string(),
