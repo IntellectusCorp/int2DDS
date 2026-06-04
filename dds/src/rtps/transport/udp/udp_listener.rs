@@ -196,22 +196,13 @@ impl UdpListener {
     }
 
     pub(crate) fn get_message(&mut self) -> Option<(Bytes, SocketAddr)> {
-        // Reserve a slot inside the arena's current chunk; this is the buffer recv_from writes into.
-        let slot = self.recv_arena.reserve_packet_slot();
-        match self.socket.as_mut().unwrap().recv_from(slot) {
-            Ok((nbytes, sender)) => {
-                // Freeze only the bytes actually written; the zero-filled tail is truncated so the next reservation can reuse the capacity.
-                let bytes = self.recv_arena.commit_received_packet(nbytes);
-                Some((bytes, sender))
-            }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // Nothing to read; give back the slot so idle polls don't accumulate dead tails.
-                self.recv_arena.release_unused_slot();
-                None
-            }
+        // The arena owns recv: it routes the syscall through a reusable scratch
+        // buffer, then hands back a zero-copy Bytes view into its chunk.
+        match self.recv_arena.recv_from(self.socket.as_ref().unwrap()) {
+            Ok(pair) => Some(pair),
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => None,
             Err(e) => {
                 error!("UDPListener::get_message failed: {e:?}");
-                self.recv_arena.release_unused_slot();
                 None
             }
         }

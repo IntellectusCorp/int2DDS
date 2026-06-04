@@ -363,6 +363,13 @@ impl TypeIdentifier {
         buffer
     }
 
+    /// Serialize as a PID_TYPE_IDV1 (0x0069) parameter payload: a CDR_LE (XCDRv1)
+    pub fn serialize_for_parameter_v1(&self) -> Vec<u8> {
+        let mut buffer = vec![0x00, 0x01, 0x00, 0x00];
+        self.serialize_into(&mut buffer);
+        buffer
+    }
+
     /// Serialize the TypeIdentifier into a buffer.
     pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
         // Write discriminator
@@ -3081,6 +3088,25 @@ impl TypeIdentifierWithSize {
         pos += 4;
         Ok((TypeIdentifierWithSize { type_id, typeobject_serialized_size }, pos))
     }
+
+    /// Write as an APPENDABLE (DELIMIT_CDR2) struct: DHEADER + type_id union + u32 size.
+    fn write_xcdr2(&self, s: &mut Xcdr2Serializer) -> Result<(), CdrError> {
+        let pos = s.begin_struct()?;
+        s.buffer_mut().extend_from_slice(&self.type_id.serialize());
+        s.serialize_u32(self.typeobject_serialized_size)?;
+        s.end_struct(pos)
+    }
+
+    /// Read an APPENDABLE (DELIMIT_CDR2) TypeIdentifierWithSize.
+    fn read_xcdr2(d: &mut Xcdr2Deserializer) -> Result<Self, CdrError> {
+        let (size, start) = d.begin_struct()?;
+        let (type_id, consumed) = TypeIdentifier::deserialize(&d.get_data()[d.get_position()..])
+            .map_err(|_| CdrError::DeserializationError("TypeIdentifier".to_string()))?;
+        d.set_position(d.get_position() + consumed);
+        let typeobject_serialized_size = d.deserialize_u32()?;
+        d.end_struct(size, start)?;
+        Ok(TypeIdentifierWithSize { type_id, typeobject_serialized_size })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3113,7 +3139,9 @@ impl TypeIdentifierWithDependencies {
         pos += 4;
 
         let count = if dep_count < 0 { 0 } else { dep_count as usize };
-        let mut dependent_typeids = Vec::with_capacity(count);
+        // Grow on demand instead of pre-allocating `count` elements: a corrupt
+        // count from the wire must not drive an unbounded allocation.
+        let mut dependent_typeids = Vec::new();
         for _ in 0..count {
             let (dep, consumed) = TypeIdentifierWithSize::deserialize(&data[pos..])?;
             pos += consumed;
@@ -3122,6 +3150,57 @@ impl TypeIdentifierWithDependencies {
 
         Ok((TypeIdentifierWithDependencies { typeid_with_size, dependent_typeids }, pos))
     }
+
+    /// Write as an APPENDABLE (DELIMIT_CDR2) struct: DHEADER + typeid_with_size +
+    /// i32 dependent_typeid_count + dependent_typeids sequence.
+    fn write_xcdr2(&self, s: &mut Xcdr2Serializer) -> Result<(), CdrError> {
+        let pos = s.begin_struct()?;
+        self.typeid_with_size.write_xcdr2(s)?;
+        s.serialize_i32(self.dependent_typeids.len() as i32)?;
+        // sequence<TypeIdentifierWithSize>: XCDR2 prefixes non-primitive collections
+        // with a DHEADER, then the element count, then the elements.
+        let seq_pos = s.reserve_dheader();
+        let seq_start = s.position();
+        s.serialize_i32(self.dependent_typeids.len() as i32)?;
+        for dep in &self.dependent_typeids {
+            dep.write_xcdr2(s)?;
+        }
+        let seq_len = (s.position() - seq_start) as u32;
+        s.write_dheader_at(seq_pos, seq_len);
+        s.end_struct(pos)
+    }
+
+    /// Read an APPENDABLE (DELIMIT_CDR2) TypeIdentifierWithDependencies.
+    fn read_xcdr2(d: &mut Xcdr2Deserializer) -> Result<Self, CdrError> {
+        let (size, start) = d.begin_struct()?;
+        let typeid_with_size = TypeIdentifierWithSize::read_xcdr2(d)?;
+        let _dependent_typeid_count = d.deserialize_i32()?;
+        let _seq = d.begin_struct()?; // sequence DHEADER
+        let count = d.deserialize_i32()?;
+        let n = if count < 0 { 0 } else { count as usize };
+        // Grow on demand; never pre-allocate `n` from an untrusted wire count.
+        let mut dependent_typeids = Vec::new();
+        for _ in 0..n {
+            dependent_typeids.push(TypeIdentifierWithSize::read_xcdr2(d)?);
+        }
+        d.end_struct(size, start)?;
+        Ok(TypeIdentifierWithDependencies { typeid_with_size, dependent_typeids })
+    }
+}
+
+/// If `data` begins with a recognized CDR/XCDR encapsulation header (2-byte
+/// big-endian encoding id), return the body after it plus the indicated
+/// endianness. Otherwise return `data` unchanged and assume little-endian.
+/// Used to tolerate legacy headerless-vs-headered TypeInformation payloads.
+fn strip_optional_encapsulation(data: &[u8]) -> (&[u8], bool) {
+    if data.len() >= 4 {
+        match u16::from_be_bytes([data[0], data[1]]) {
+            0x0000 | 0x0002 | 0x0006 | 0x0008 | 0x000A => return (&data[4..], false),
+            0x0001 | 0x0003 | 0x0007 | 0x0009 | 0x000B => return (&data[4..], true),
+            _ => {}
+        }
+    }
+    (data, true)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3170,6 +3249,77 @@ impl TypeInformation {
         let (complete, consumed) = TypeIdentifierWithDependencies::deserialize(&data[pos..])?;
         pos += consumed;
         Ok((TypeInformation { minimal, complete }, pos))
+    }
+
+    /// Serialize as a PID_TYPE_INFORMATION (0x0075) parameter payload. Per Fast-DDS
+    /// (QosPoliciesSerializer<TypeInformationParameter>) this is a *headerless* XCDR2
+    /// PL_CDR2 (little-endian) body: a top-level DHEADER, then members @id 0x1001
+    /// (minimal) and @id 0x1002 (complete). Unlike 0x0069/0x0072, there is NO
+    /// encapsulation header — the wire bytes begin directly with the DHEADER.
+    pub fn serialize_for_parameter(&self) -> Vec<u8> {
+        let mut s = Xcdr2Serializer::new(true, crate::serialize::cdr::ExtensibilityKind::Mutable);
+        let build = |s: &mut Xcdr2Serializer| -> Result<(), CdrError> {
+            let top = s.begin_struct()?;
+            // minimal/complete are APPENDABLE (each starts with a DHEADER); emit LC=5
+            // so that DHEADER serves as the EMHEADER NEXTINT, matching Fast-CDR.
+            s.write_member_with_lc(0x1001, false, LcHint::Dheader, |ser| {
+                self.minimal.write_xcdr2(ser)
+            })?;
+            s.write_member_with_lc(0x1002, false, LcHint::Dheader, |ser| {
+                self.complete.write_xcdr2(ser)
+            })?;
+            s.end_struct(top)
+        };
+        let _ = build(&mut s);
+        s.into_buffer()
+    }
+
+    /// Parse a PID_TYPE_INFORMATION (0x0075) parameter payload.
+    ///
+    /// The standard (Fast-DDS) layout is headerless little-endian PL_CDR2. A legacy
+    /// int2DDS payload that still carries a PL_CDR2 encapsulation header is tolerated
+    /// by stripping it first.
+    pub fn deserialize_for_parameter(data: &[u8]) -> Result<Self, String> {
+        let (body, little_endian) = strip_optional_encapsulation(data);
+        let mut d = Xcdr2Deserializer::new_without_header(body, little_endian);
+        let (top_size, top_start) = d.begin_struct().map_err(|e| format!("{:?}", e))?;
+        let top_end = top_start + top_size as usize;
+
+        let mut minimal: Option<TypeIdentifierWithDependencies> = None;
+        let mut complete: Option<TypeIdentifierWithDependencies> = None;
+        while d.get_position() < top_end {
+            let (mid, mlen, _mu) = d.read_member_header_full().map_err(|e| format!("{:?}", e))?;
+            let member_start = d.get_position();
+            match mid {
+                0x1001 => {
+                    minimal = Some(
+                        TypeIdentifierWithDependencies::read_xcdr2(&mut d)
+                            .map_err(|e| format!("{:?}", e))?,
+                    )
+                }
+                0x1002 => {
+                    complete = Some(
+                        TypeIdentifierWithDependencies::read_xcdr2(&mut d)
+                            .map_err(|e| format!("{:?}", e))?,
+                    )
+                }
+                _ => {}
+            }
+            // Re-sync to the member boundary declared by the EMHEADER regardless of
+            // how much the body parser consumed (forward compatibility, unknown members).
+            d.set_position(member_start + mlen as usize);
+        }
+
+        let empty = || {
+            TypeIdentifierWithDependencies::new(TypeIdentifierWithSize::new(
+                TypeIdentifier::None,
+                0,
+            ))
+        };
+        Ok(TypeInformation {
+            minimal: minimal.unwrap_or_else(empty),
+            complete: complete.unwrap_or_else(empty),
+        })
     }
 }
 
@@ -3357,6 +3507,14 @@ impl TypeObject {
     /// Format: [EK_MINIMAL/EK_COMPLETE] [TypeObject data...]
     pub fn serialize(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
+        self.serialize_into(&mut buffer);
+        buffer
+    }
+
+    /// Serialize as a PID_TYPE_OBJECTV1 (0x0072) parameter payload: a CDR_LE (XCDRv1)
+    /// encapsulation header followed by the legacy TypeObject body.
+    pub fn serialize_for_parameter(&self) -> Vec<u8> {
+        let mut buffer = vec![0x00, 0x01, 0x00, 0x00];
         self.serialize_into(&mut buffer);
         buffer
     }
@@ -3555,10 +3713,11 @@ impl_array_has_type_object! {
 // ============================================================================
 
 use crate::serialize::cdr::{
-    CdrDeserialize, CdrResult, CdrSerialize, CdrSerializer, CdrSerializerCommon,
+    CdrDeserialize, CdrError, CdrResult, CdrSerialize, CdrSerializer, CdrSerializerCommon, LcHint,
     PrimitiveSerialize, Xcdr2Deserializer, Xcdr2Serializer, XcdrDeserialize, XcdrResult,
     XcdrSerialize,
 };
+use crate::serialize::DeserializerReader;
 
 impl CdrSerialize for TypeIdentifier {
     fn serialize_cdr(&self, serializer: &mut CdrSerializer) -> CdrResult<()> {

@@ -197,6 +197,11 @@ impl Xcdr2Serializer {
     }
 
     fn select_lc(&self, len: u32, hint: LcHint) -> (u32, Option<u32>) {
+        // The value already wrote its own DHEADER as its first 4 bytes; reuse it as
+        // the NEXTINT (LC=5, byte-length form) instead of inserting a separate one.
+        if let LcHint::Dheader = hint {
+            return (5u32 << 28, None);
+        }
         match len {
             1 => (0u32 << 28, None),
             2 => (1u32 << 28, None),
@@ -244,15 +249,14 @@ impl Xcdr2Serializer {
         match self.extensibility_kind {
             ExtensibilityKind::Final => Ok(()), // No backpatching needed
             ExtensibilityKind::Appendable | ExtensibilityKind::Mutable => {
-                if size_pos > 0 {
-                    let current_pos = self.buffer.len();
-                    let object_size = (current_pos - size_pos - 4) as u32;
-
-                    // Backpatch the size
-                    let size_bytes = to_bytes_u32(object_size, self.endianness);
-
-                    self.buffer[size_pos..size_pos + 4].copy_from_slice(&size_bytes);
-                }
+                // begin_struct always reserved a 4-byte DHEADER placeholder at
+                // size_pos (which may legitimately be 0 when the struct is the very
+                // first thing in the buffer, e.g. a headerless parameter payload),
+                // so always backpatch — never gate on `size_pos > 0`.
+                let current_pos = self.buffer.len();
+                let object_size = (current_pos - size_pos - 4) as u32;
+                let size_bytes = to_bytes_u32(object_size, self.endianness);
+                self.buffer[size_pos..size_pos + 4].copy_from_slice(&size_bytes);
                 Ok(())
             }
         }
