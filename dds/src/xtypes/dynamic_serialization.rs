@@ -19,6 +19,7 @@ use crate::serialize::{BufferManager, DeserializerReader};
 use super::dynamic_data::{DynamicData, DynamicValue};
 use super::dynamic_type::{
     DynamicType, DynamicTypeKind, MemberDescriptor, PrimitiveKind, StructDescriptor,
+    UnionDescriptor,
 };
 
 trait ValueDeserializer {
@@ -179,13 +180,112 @@ fn member_value_or_default<'a>(
 }
 
 fn is_primitive_kind(kind: &DynamicTypeKind) -> bool {
-    match kind {
-        DynamicTypeKind::Primitive(_) | DynamicTypeKind::Enum(_) => true,
-        DynamicTypeKind::TypeRef(inner) => {
-            matches!(inner.kind(), DynamicTypeKind::Primitive(_) | DynamicTypeKind::Enum(_))
-        }
-        _ => false,
+    fn is_scalar(kind: &DynamicTypeKind) -> bool {
+        matches!(
+            kind,
+            DynamicTypeKind::Primitive(_)
+                | DynamicTypeKind::Enum(_)
+                | DynamicTypeKind::Bitmask(_)
+                | DynamicTypeKind::Bitset(_)
+        )
     }
+    match kind {
+        DynamicTypeKind::TypeRef(inner) => is_scalar(inner.kind()),
+        other => is_scalar(other),
+    }
+}
+
+/// Unwrap a `TypeRef` to its underlying kind (composite metadata), leaving other
+/// kinds untouched.
+fn resolved_kind(kind: &DynamicTypeKind) -> &DynamicTypeKind {
+    match kind {
+        DynamicTypeKind::TypeRef(inner) => inner.kind(),
+        other => other,
+    }
+}
+
+/// Resolve a union kind (directly or via `TypeRef`) into its descriptor and the
+/// extensibility used to frame it.
+fn as_union_kind(kind: &DynamicTypeKind) -> Option<(&UnionDescriptor, ExtensibilityKind)> {
+    match kind {
+        DynamicTypeKind::Union(desc) => Some((desc, ExtensibilityKind::Final)),
+        DynamicTypeKind::TypeRef(inner) => match inner.kind() {
+            DynamicTypeKind::Union(desc) => Some((desc, inner.extensibility())),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Wire width in bytes for a packed integer (bitmask/bitset) of `bits` bits.
+fn packed_wire_width(bits: u16) -> u8 {
+    if bits <= 8 {
+        1
+    } else if bits <= 16 {
+        2
+    } else if bits <= 32 {
+        4
+    } else {
+        8
+    }
+}
+
+fn serialize_packed<S: PrimitiveSerialize>(
+    serializer: &mut S,
+    bits: u64,
+    width: u8,
+) -> Result<(), CdrError> {
+    match width {
+        1 => serializer.serialize_u8(bits as u8),
+        2 => serializer.serialize_u16(bits as u16),
+        4 => serializer.serialize_u32(bits as u32),
+        _ => serializer.serialize_u64(bits),
+    }
+}
+
+fn deserialize_packed<D: ValueDeserializer>(
+    deserializer: &mut D,
+    width: u8,
+) -> Result<u64, CdrError> {
+    Ok(match width {
+        1 => deserializer.deserialize_u8()? as u64,
+        2 => deserializer.deserialize_u16()? as u64,
+        4 => deserializer.deserialize_u32()? as u64,
+        _ => deserializer.deserialize_u64()?,
+    })
+}
+
+/// Extract the integer value of a union discriminator for case-label matching.
+fn discriminator_as_i64(value: &DynamicValue) -> DdsResult<i64> {
+    Ok(match value {
+        DynamicValue::Boolean(v) => *v as i64,
+        DynamicValue::Int8(v) => *v as i64,
+        DynamicValue::Int16(v) => *v as i64,
+        DynamicValue::Int32(v) => *v as i64,
+        DynamicValue::Int64(v) => *v,
+        DynamicValue::Uint8(v) => *v as i64,
+        DynamicValue::Uint16(v) => *v as i64,
+        DynamicValue::Uint32(v) => *v as i64,
+        DynamicValue::Uint64(v) => *v as i64,
+        DynamicValue::Char8(v) => *v as i64,
+        DynamicValue::Byte(v) => *v as i64,
+        DynamicValue::Enum { value, .. } => *value as i64,
+        other => {
+            return Err(DdsError::Error(format!(
+                "invalid union discriminator value: {}",
+                other.type_kind()
+            )))
+        }
+    })
+}
+
+fn select_union_member<'a>(
+    union_desc: &'a UnionDescriptor,
+    discriminator: i64,
+) -> DdsResult<&'a super::dynamic_type::UnionMemberDescriptor> {
+    union_desc.select_member(discriminator).ok_or_else(|| {
+        DdsError::Error(format!("no union member matches discriminator {}", discriminator))
+    })
 }
 
 fn enum_wire_width(bit_bound: u16) -> u8 {
@@ -263,7 +363,25 @@ where
             serialize_enum_value(serializer, *value, bit_bound).map_err(cdr_error)
         }
         DynamicValue::Struct(inner) => serialize_nested_struct(serializer, inner),
+        DynamicValue::Bitmask(bits) => {
+            let width = match resolved_kind(type_kind) {
+                DynamicTypeKind::Bitmask(desc) => packed_wire_width(desc.bit_bound),
+                _ => 8,
+            };
+            serialize_packed(serializer, *bits, width).map_err(cdr_error)
+        }
+        DynamicValue::Bitset(bits) => {
+            let width = match resolved_kind(type_kind) {
+                DynamicTypeKind::Bitset(desc) => packed_wire_width(desc.total_bits()),
+                _ => 8,
+            };
+            serialize_packed(serializer, *bits, width).map_err(cdr_error)
+        }
         DynamicValue::Null => Ok(()),
+        // Union handled by callers (format-specific framing).
+        DynamicValue::Union { .. } => Err(DdsError::Error(
+            "serialize_atomic_value called with union; use format-specific path".to_string(),
+        )),
         // Sequence/Array/Optional handled by callers with format-specific logic
         DynamicValue::Sequence(_) | DynamicValue::Array(_) | DynamicValue::Optional(_) => {
             Err(DdsError::Error(
@@ -310,6 +428,19 @@ where
             serialize_value_cdr(serializer, inner, type_kind, serialize_nested_struct)
         }
         DynamicValue::Optional(None) => serializer.serialize_bool(false).map_err(cdr_error),
+        DynamicValue::Union { discriminator, value } => {
+            let (union_desc, _ext) = as_union_kind(type_kind)
+                .ok_or_else(|| DdsError::Error("type mismatch: expected Union".to_string()))?;
+            serialize_value_cdr(
+                serializer,
+                discriminator,
+                union_desc.discriminator_type(),
+                serialize_nested_struct,
+            )?;
+            let disc = discriminator_as_i64(discriminator)?;
+            let member = select_union_member(union_desc, disc)?;
+            serialize_value_cdr(serializer, value, &member.member_type, serialize_nested_struct)
+        }
         other => serialize_atomic_value(serializer, other, type_kind, serialize_nested_struct),
     }
 }
@@ -374,7 +505,66 @@ where
             serialize_value_xcdr2(serializer, inner, type_kind, serialize_nested_struct)
         }
         DynamicValue::Optional(None) => serializer.serialize_bool(false).map_err(cdr_error),
+        DynamicValue::Union { discriminator, value } => {
+            let (union_desc, ext) = as_union_kind(type_kind)
+                .ok_or_else(|| DdsError::Error("type mismatch: expected Union".to_string()))?;
+            serialize_union_xcdr2(
+                serializer,
+                discriminator,
+                value,
+                union_desc,
+                ext,
+                serialize_nested_struct,
+            )
+        }
         other => serialize_atomic_value(serializer, other, type_kind, serialize_nested_struct),
+    }
+}
+
+fn serialize_union_xcdr2<F>(
+    serializer: &mut Xcdr2Serializer,
+    discriminator: &DynamicValue,
+    value: &DynamicValue,
+    union_desc: &UnionDescriptor,
+    extensibility: ExtensibilityKind,
+    nested: &mut F,
+) -> DdsResult<()>
+where
+    F: FnMut(&mut Xcdr2Serializer, &DynamicData) -> DdsResult<()>,
+{
+    let disc = discriminator_as_i64(discriminator)?;
+    let member = select_union_member(union_desc, disc)?;
+    let disc_type = union_desc.discriminator_type();
+
+    match extensibility {
+        ExtensibilityKind::Final => {
+            serialize_value_xcdr2(serializer, discriminator, disc_type, nested)?;
+            serialize_value_xcdr2(serializer, value, &member.member_type, nested)
+        }
+        ExtensibilityKind::Appendable => {
+            let size_pos = serializer.begin_struct().map_err(cdr_error)?;
+            serialize_value_xcdr2(serializer, discriminator, disc_type, nested)?;
+            serialize_value_xcdr2(serializer, value, &member.member_type, nested)?;
+            serializer.end_struct(size_pos).map_err(cdr_error)
+        }
+        ExtensibilityKind::Mutable => {
+            let size_pos = serializer.begin_struct().map_err(cdr_error)?;
+            let branch_id = member.index as u32 + 1;
+            let member_type = member.member_type.clone();
+            serializer
+                .write_member_with(0, false, |s| {
+                    serialize_value_xcdr2(s, discriminator, disc_type, nested)
+                        .map_err(|e| CdrError::SerializationError(e.to_string()))
+                })
+                .map_err(cdr_error)?;
+            serializer
+                .write_member_with(branch_id, false, |s| {
+                    serialize_value_xcdr2(s, value, &member_type, nested)
+                        .map_err(|e| CdrError::SerializationError(e.to_string()))
+                })
+                .map_err(cdr_error)?;
+            serializer.end_struct(size_pos).map_err(cdr_error)
+        }
     }
 }
 
@@ -405,6 +595,19 @@ where
         DynamicTypeKind::Struct(struct_desc) => {
             Err(nested_struct_deserialization_error(struct_desc))
         }
+        DynamicTypeKind::Bitmask(desc) => {
+            let bits = deserialize_packed(deserializer, packed_wire_width(desc.bit_bound))
+                .map_err(cdr_error)?;
+            Ok(DynamicValue::Bitmask(bits))
+        }
+        DynamicTypeKind::Bitset(desc) => {
+            let bits = deserialize_packed(deserializer, packed_wire_width(desc.total_bits()))
+                .map_err(cdr_error)?;
+            Ok(DynamicValue::Bitset(bits))
+        }
+        DynamicTypeKind::Union(_) => Err(DdsError::Error(
+            "Union must be handled by the format-specific deserialization path".to_string(),
+        )),
         DynamicTypeKind::TypeRef(_) => Err(DdsError::Error(
             "TypeRef must be handled by the format-specific deserialization path".to_string(),
         )),
@@ -450,10 +653,23 @@ fn deserialize_value_cdr(
                     .unwrap_or_default();
                 Ok(DynamicValue::Enum { name, value })
             }
+            DynamicTypeKind::Union(union_desc) => deserialize_union_cdr(deserializer, union_desc),
             other => deserialize_atomic_value(deserializer, other),
         },
         other => deserialize_atomic_value(deserializer, other),
     }
+}
+
+/// Deserialize an XCDR1 (PLAIN) union: discriminator then the selected branch.
+fn deserialize_union_cdr(
+    deserializer: &mut CdrDeserializer,
+    union_desc: &UnionDescriptor,
+) -> DdsResult<DynamicValue> {
+    let discriminator = deserialize_value_cdr(deserializer, union_desc.discriminator_type())?;
+    let disc = discriminator_as_i64(&discriminator)?;
+    let member = select_union_member(union_desc, disc)?;
+    let value = deserialize_value_cdr(deserializer, &member.member_type)?;
+    Ok(DynamicValue::Union { discriminator: Box::new(discriminator), value: Box::new(value) })
 }
 
 fn deserialize_value_xcdr2(
@@ -497,9 +713,66 @@ fn deserialize_value_xcdr2(
                     .unwrap_or_default();
                 Ok(DynamicValue::Enum { name, value })
             }
+            DynamicTypeKind::Union(union_desc) => {
+                deserialize_union_xcdr2(deserializer, union_desc, inner.extensibility())
+            }
             other => deserialize_atomic_value(deserializer, other),
         },
         other => deserialize_atomic_value(deserializer, other),
+    }
+}
+
+/// Deserialize a union under XCDR2, mirroring `serialize_union_xcdr2` /
+/// `generate_union_xcdr_deserialize_impl`.
+fn deserialize_union_xcdr2(
+    deserializer: &mut Xcdr2Deserializer,
+    union_desc: &UnionDescriptor,
+    extensibility: ExtensibilityKind,
+) -> DdsResult<DynamicValue> {
+    let disc_type = union_desc.discriminator_type();
+    match extensibility {
+        ExtensibilityKind::Final => {
+            let discriminator = deserialize_value_xcdr2(deserializer, disc_type)?;
+            let disc = discriminator_as_i64(&discriminator)?;
+            let member = select_union_member(union_desc, disc)?;
+            let value = deserialize_value_xcdr2(deserializer, &member.member_type)?;
+            Ok(DynamicValue::Union {
+                discriminator: Box::new(discriminator),
+                value: Box::new(value),
+            })
+        }
+        ExtensibilityKind::Appendable => {
+            let (object_size, start_pos) = deserializer.begin_struct().map_err(cdr_error)?;
+            let discriminator = deserialize_value_xcdr2(deserializer, disc_type)?;
+            let disc = discriminator_as_i64(&discriminator)?;
+            let member = select_union_member(union_desc, disc)?;
+            let value = deserialize_value_xcdr2(deserializer, &member.member_type)?;
+            deserializer.end_struct(object_size, start_pos).map_err(cdr_error)?;
+            Ok(DynamicValue::Union {
+                discriminator: Box::new(discriminator),
+                value: Box::new(value),
+            })
+        }
+        ExtensibilityKind::Mutable => {
+            let (object_size, start_pos) = deserializer.begin_struct().map_err(cdr_error)?;
+            let (disc_id, _len) = deserializer.read_member_header().map_err(cdr_error)?;
+            if disc_id != 0 {
+                return Err(DdsError::Error(format!(
+                    "expected union discriminator member id 0, got {}",
+                    disc_id
+                )));
+            }
+            let discriminator = deserialize_value_xcdr2(deserializer, disc_type)?;
+            let disc = discriminator_as_i64(&discriminator)?;
+            let member = select_union_member(union_desc, disc)?;
+            let (_branch_id, _branch_len) = deserializer.read_member_header().map_err(cdr_error)?;
+            let value = deserialize_value_xcdr2(deserializer, &member.member_type)?;
+            deserializer.end_struct(object_size, start_pos).map_err(cdr_error)?;
+            Ok(DynamicValue::Union {
+                discriminator: Box::new(discriminator),
+                value: Box::new(value),
+            })
+        }
     }
 }
 
@@ -886,9 +1159,11 @@ fn deserialize_struct_xcdr(
 mod tests {
     use super::*;
     use crate::xtypes::{
+        CompleteBitfield, CompleteBitflag, CompleteBitmaskType, CompleteBitsetType,
         CompleteEnumeratedLiteral, CompleteEnumeratedType, CompleteStructMember,
-        CompleteStructType, CompleteTypeObject, EnumeratedLiteralFlag, EquivalenceHash, MemberFlag,
-        PlainCollectionHeader, TryConstructKind, TypeFlag, TypeIdentifier, TypeRegistry,
+        CompleteStructType, CompleteTypeObject, CompleteUnionMember, CompleteUnionType,
+        EnumeratedLiteralFlag, EquivalenceHash, MemberFlag, PlainCollectionHeader,
+        TryConstructKind, TypeFlag, TypeIdentifier, TypeRegistry,
     };
 
     fn member_flag(is_optional: bool, is_key: bool, is_must_understand: bool) -> MemberFlag {
@@ -1640,5 +1915,200 @@ mod tests {
         assert!(
             format!("{:?}", error).contains("External type deserialization is not supported yet")
         );
+    }
+
+    fn default_member_flag() -> MemberFlag {
+        MemberFlag::new(TryConstructKind::Discard, false, false, false, false, true)
+    }
+
+    fn union_holder(union_ext: ExtensibilityKind) -> Arc<DynamicType> {
+        let mut u = CompleteUnionType::new(
+            tf(union_ext),
+            member_flag(false, false, false),
+            TypeIdentifier::Int32,
+            "MyUnion".into(),
+        );
+        u.add_member(CompleteUnionMember::new(
+            1,
+            member_flag(false, false, false),
+            TypeIdentifier::Int32,
+            vec![0],
+            "a".into(),
+        ));
+        u.add_member(CompleteUnionMember::new(
+            2,
+            member_flag(false, false, false),
+            TypeIdentifier::Int32,
+            vec![1],
+            "b".into(),
+        ));
+        u.add_member(CompleteUnionMember::new(
+            3,
+            default_member_flag(),
+            TypeIdentifier::Int32,
+            vec![],
+            "c".into(),
+        ));
+        let union_obj = CompleteTypeObject::Union(u);
+        let union_hash = EquivalenceHash::compute(&union_obj.serialize());
+
+        let mut registry = TypeRegistry::new();
+        registry.register_complete(union_hash, "MyUnion".into(), union_obj);
+
+        let mut outer =
+            CompleteStructType::new(tf(ExtensibilityKind::Final), "UHolder".into(), None);
+        outer.add_member(CompleteStructMember::new(
+            0,
+            member_flag(false, false, false),
+            TypeIdentifier::CompleteTypeId(union_hash),
+            "u".to_string(),
+        ));
+        build_with_registry(CompleteTypeObject::Struct(outer), &registry)
+    }
+
+    #[test]
+    fn test_union_roundtrip_all_formats() {
+        let run = |label: &str, union_ext: ExtensibilityKind, format: SerializationFormat| {
+            let outer_dt = union_holder(union_ext);
+            assert!(
+                matches!(
+                    outer_dt.get_member("u").unwrap().member_type,
+                    DynamicTypeKind::TypeRef(_)
+                ),
+                "{label}: union member should resolve to a TypeRef"
+            );
+
+            // case a (label 0), case b (label 1), and the default (no label).
+            let cases = [
+                (DynamicValue::Int32(0), DynamicValue::Int32(11)),
+                (DynamicValue::Int32(1), DynamicValue::Int32(22)),
+                (DynamicValue::Int32(99), DynamicValue::Int32(33)),
+            ];
+            for (disc, val) in cases {
+                let mut data = DynamicData::new(outer_dt.clone());
+                data.set_value(
+                    "u",
+                    DynamicValue::Union {
+                        discriminator: Box::new(disc.clone()),
+                        value: Box::new(val.clone()),
+                    },
+                )
+                .unwrap();
+
+                let bytes = serialize_dynamic_data(&data, &format)
+                    .unwrap_or_else(|e| panic!("{label} serialize: {e:?}"));
+                let back = deserialize_dynamic_data(&bytes, &outer_dt).unwrap_or_else(|e| {
+                    panic!("{label} deserialize ({} bytes): {e:?}", bytes.len())
+                });
+
+                match back.get_value("u").unwrap() {
+                    DynamicValue::Union { discriminator, value } => {
+                        assert_eq!(**discriminator, disc, "{label} discriminator");
+                        assert_eq!(**value, val, "{label} value");
+                    }
+                    other => panic!("{label}: expected union, got {:?}", other),
+                }
+            }
+        };
+
+        for ext in
+            [ExtensibilityKind::Final, ExtensibilityKind::Appendable, ExtensibilityKind::Mutable]
+        {
+            run("cdr", ext, SerializationFormat::Cdr);
+            run("xcdr2", ext, xcdr_format(ExtensibilityKind::Final));
+        }
+    }
+
+    /// Build a bitmask `MyBitmask` (bit_bound 16) inside a Final `BMHolder { m }`.
+    fn bitmask_holder() -> Arc<DynamicType> {
+        let mut bm =
+            CompleteBitmaskType::new(tf(ExtensibilityKind::Appendable), "MyBitmask".into(), 16);
+        for (pos, name) in [(0u16, "FLAG0"), (1, "FLAG1"), (2, "FLAG2")] {
+            bm.add_flag(CompleteBitflag::new(pos, member_flag(false, false, false), name.into()));
+        }
+        let obj = CompleteTypeObject::Bitmask(bm);
+        let hash = EquivalenceHash::compute(&obj.serialize());
+
+        let mut registry = TypeRegistry::new();
+        registry.register_complete(hash, "MyBitmask".into(), obj);
+
+        let mut outer =
+            CompleteStructType::new(tf(ExtensibilityKind::Final), "BMHolder".into(), None);
+        outer.add_member(CompleteStructMember::new(
+            0,
+            member_flag(false, false, false),
+            TypeIdentifier::CompleteTypeId(hash),
+            "m".to_string(),
+        ));
+        build_with_registry(CompleteTypeObject::Struct(outer), &registry)
+    }
+
+    #[test]
+    fn test_bitmask_roundtrip_uses_bound_width() {
+        let outer_dt = bitmask_holder();
+        for format in [SerializationFormat::Cdr, xcdr_format(ExtensibilityKind::Final)] {
+            let mut data = DynamicData::new(outer_dt.clone());
+            data.set_value("m", DynamicValue::Bitmask(0b101)).unwrap();
+
+            let bytes = serialize_dynamic_data(&data, &format).unwrap();
+            // encap(4) + u16(2): bit_bound 16 picks a 2-byte holder.
+            assert_eq!(bytes.len(), 6, "bit_bound 16 should serialize as u16");
+
+            let back = deserialize_dynamic_data(&bytes, &outer_dt).unwrap();
+            assert_eq!(*back.get_value("m").unwrap(), DynamicValue::Bitmask(0b101));
+        }
+    }
+
+    /// Build a bitset `MyBitset { a: 3 bits, b: 5 bits }` (8 bits → u8 holder)
+    /// inside a Final `BSHolder { s }`.
+    fn bitset_holder() -> Arc<DynamicType> {
+        let mut bs = CompleteBitsetType::new(tf(ExtensibilityKind::Appendable), "MyBitset".into());
+        bs.add_field(CompleteBitfield::new(
+            0,
+            member_flag(false, false, false),
+            3,
+            TypeIdentifier::Uint8,
+            "a".into(),
+        ));
+        bs.add_field(CompleteBitfield::new(
+            3,
+            member_flag(false, false, false),
+            5,
+            TypeIdentifier::Uint8,
+            "b".into(),
+        ));
+        let obj = CompleteTypeObject::Bitset(bs);
+        let hash = EquivalenceHash::compute(&obj.serialize());
+
+        let mut registry = TypeRegistry::new();
+        registry.register_complete(hash, "MyBitset".into(), obj);
+
+        let mut outer =
+            CompleteStructType::new(tf(ExtensibilityKind::Final), "BSHolder".into(), None);
+        outer.add_member(CompleteStructMember::new(
+            0,
+            member_flag(false, false, false),
+            TypeIdentifier::CompleteTypeId(hash),
+            "s".to_string(),
+        ));
+        build_with_registry(CompleteTypeObject::Struct(outer), &registry)
+    }
+
+    #[test]
+    fn test_bitset_roundtrip_uses_total_bits_width() {
+        let outer_dt = bitset_holder();
+        // a = 5 (3 bits), b = 9 (5 bits) packed at offsets 0 and 3.
+        let packed = 5u64 | (9u64 << 3);
+        for format in [SerializationFormat::Cdr, xcdr_format(ExtensibilityKind::Final)] {
+            let mut data = DynamicData::new(outer_dt.clone());
+            data.set_value("s", DynamicValue::Bitset(packed)).unwrap();
+
+            let bytes = serialize_dynamic_data(&data, &format).unwrap();
+            // encap(4) + u8(1): 8 total bits picks a 1-byte holder.
+            assert_eq!(bytes.len(), 5, "8 total bits should serialize as u8");
+
+            let back = deserialize_dynamic_data(&bytes, &outer_dt).unwrap();
+            assert_eq!(*back.get_value("s").unwrap(), DynamicValue::Bitset(packed));
+        }
     }
 }
