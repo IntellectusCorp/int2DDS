@@ -3038,15 +3038,6 @@ Int2DdsRet int2dds_create_topic_with_field_descriptors(const struct Int2DdsParti
                                                        uintptr_t field_count,
                                                        struct Int2DdsTopic **topic_out);
 
-/**
- * Create a new type info builder.
- *
- * # Safety
- * - `type_name` must be a valid null-terminated C string
- * - `extensibility`: 0 = Final, 1 = Appendable, 2 = Mutable
- * - `out` must be a valid pointer to a null pointer
- * - The returned type info must be freed with `int2dds_type_info_destroy`
- */
 Int2DdsRet int2dds_type_info_create(const char *type_name,
                                     int32_t extensibility,
                                     struct Int2DdsTypeInfo **out);
@@ -3084,6 +3075,18 @@ Int2DdsRet int2dds_type_info_add_named_type_field(struct Int2DdsTypeInfo *type_i
                                                   const char *field_name,
                                                   const char *type_hash_name,
                                                   int32_t flags);
+
+Int2DdsRet int2dds_type_info_add_sequence_of_named_field(struct Int2DdsTypeInfo *type_info,
+                                                         const char *field_name,
+                                                         const char *element_hash_name,
+                                                         uint32_t bound,
+                                                         int32_t flags);
+
+Int2DdsRet int2dds_type_info_add_array_of_named_field(struct Int2DdsTypeInfo *type_info,
+                                                      const char *field_name,
+                                                      const char *element_hash_name,
+                                                      uint32_t array_size,
+                                                      int32_t flags);
 
 /**
  * Destroy a type info builder.
