@@ -1,8 +1,13 @@
-//! TCP stream abstraction for plain and TLS-encrypted connections.
+//! Connection stream that unifies plain TCP and TLS behind one type.
 //!
-//! Provides a trait that abstracts over plain TCP and TLS streams,
-//! allowing the transport layer to switch between them without changing
-//! connection management or framing logic.
+//! `AsyncConnStream` lets the rest of the TCP transport read, write, and split
+//! a connection without caring whether it is plaintext or TLS-encrypted: the
+//! Plain/Tls branch is resolved once here, and every downstream task just uses
+//! the `AsyncRead` / `AsyncWrite` impls. `into_split` yields owned read/write
+//! halves so the conn_actor's reader and writer tasks can each own one end, and
+//! the write half forwards vectored writes (`writev`) used by the framing path.
+//! TLS handshakes are performed here by `accept_tls_async` (server side) and
+//! `connect_tls_async` (client side).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -16,13 +21,15 @@ use rustls::{ClientConfig, ServerConfig};
 
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 
+/// A connection that is either plain TCP or TLS, exposed through one uniform
+/// `AsyncRead` / `AsyncWrite` interface.
 pub(crate) enum AsyncConnStream {
     Plain(TcpStream),
     Tls(TlsStream<TcpStream>),
 }
 
 impl AsyncConnStream {
-    /// Remote peer's socket address (works for both Plain and TLS).
+    /// Remote peer's socket address.
     pub(crate) fn peer_addr(&self) -> io::Result<SocketAddr> {
         match self {
             Self::Plain(t) => t.peer_addr(),
@@ -40,10 +47,13 @@ impl AsyncConnStream {
         }
     }
 
+    /// Whether this connection is TLS-encrypted.
     pub(crate) fn is_tls(&self) -> bool {
         matches!(self, Self::Tls(_))
     }
 
+    /// Split into owned read/write halves so the reader and writer tasks can
+    /// run independently on the same connection.
     pub(crate) fn into_split(self) -> (AsyncConnReadHalf, AsyncConnWriteHalf) {
         match self {
             Self::Plain(s) => {
@@ -51,7 +61,7 @@ impl AsyncConnStream {
                 (AsyncConnReadHalf::Plain(r), AsyncConnWriteHalf::Plain(w))
             }
             Self::Tls(s) => {
-                let (r, w) = tokio::io::split(s); // TlsStream에는 into_split 없음
+                let (r, w) = tokio::io::split(s); // TlsStream has no into_split
                 (AsyncConnReadHalf::Tls(r), AsyncConnWriteHalf::Tls(w))
             }
         }
@@ -104,6 +114,7 @@ impl AsyncWrite for AsyncConnStream {
     }
 }
 
+/// Read half of a split `AsyncConnStream` — owned by the reader task.
 pub(crate) enum AsyncConnReadHalf {
     Plain(tokio::net::tcp::OwnedReadHalf),
     Tls(tokio::io::ReadHalf<TlsStream<TcpStream>>),
@@ -122,6 +133,8 @@ impl AsyncRead for AsyncConnReadHalf {
     }
 }
 
+/// Write half of a split `AsyncConnStream` — owned by the writer task;
+/// forwards vectored writes (`writev`) for the framing path.
 pub(crate) enum AsyncConnWriteHalf {
     Plain(tokio::net::tcp::OwnedWriteHalf),
     Tls(tokio::io::WriteHalf<TlsStream<TcpStream>>),
@@ -178,10 +191,12 @@ impl AsyncWrite for AsyncConnWriteHalf {
     }
 }
 
+/// Wrap an already-connected TCP stream as a plaintext `AsyncConnStream`.
 pub(crate) fn wrap_plain(tcp: TcpStream) -> AsyncConnStream {
     AsyncConnStream::Plain(tcp)
 }
 
+/// Server-side TLS handshake over an accepted TCP stream.
 pub(crate) async fn accept_tls_async(
     tcp: TcpStream,
     cfg: Arc<ServerConfig>,
@@ -194,6 +209,7 @@ pub(crate) async fn accept_tls_async(
     Ok(AsyncConnStream::Tls(TlsStream::Server(server_stream)))
 }
 
+/// Client-side TLS handshake, validating the server against `server_name` (SNI).
 pub(crate) async fn connect_tls_async(
     tcp: TcpStream,
     config: Arc<ClientConfig>,

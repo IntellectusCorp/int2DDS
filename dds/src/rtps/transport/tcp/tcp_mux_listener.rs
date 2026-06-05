@@ -1,14 +1,11 @@
 //! Inbound side of the TCP mux transport.
 //!
-//! `TcpMuxListener` bundles the listener-side tasks (accept loop, idle prune)
-//! and the cancel handle that ties them together. It exposes the shared
-//! `MuxState` via `shared()` so the sender and external consumers can reach
-//! the same per-connection bookkeeping.
+//! `TcpMuxListener` owns the listener-side tasks (accept loop, idle prune) and
+//! exposes the shared `MuxState` via `shared()`.
 //!
-//! The accept loop spawns one short-lived `handshake_and_register_task` per
-//! accepted connection — the TLS handshake happens off the accept loop so a
-//! slow handshake does not stall new accepts. Each accepted connection then
-//! gets its own conn_actor pair via `spawn_conn_actor`.
+//! The accept loop spawns a short-lived `handshake_and_register_task` per
+//! connection so a slow TLS handshake does not stall new accepts; each
+//! connection then gets its own conn_actor pair via `spawn_conn_actor`.
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -34,10 +31,8 @@ use crate::rtps::{
 /// gets cleaned up within ~500 ms.
 const PRUNE_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
-/// TCP multiplexed listener — owns the listener-side tasks (accept loop,
-/// idle prune) and the cancel handle that ties them together. The shared
-/// `MuxState` is exposed via `shared()` for the sender and external
-/// consumers.
+/// TCP multiplexed listener — owns the listener-side tasks and the shared
+/// `MuxState`.
 ///
 /// Dropping or calling `shutdown()` cancels all tasks; cancellation
 /// propagates into every conn_actor pair via child tokens.

@@ -100,14 +100,14 @@ where
     Ok(payload)
 }
 
-/// Classification of a TCP frame payload
+/// Classified kind of a TCP frame payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TcpFrameKind {
-    /// Rtps data message (payload starts with RTPS magic: 0x52545053)
+    /// Payload starts with RTPS magic (0x52545053).
     RtpsData,
-    /// TCP control message (payload[0] in 0x01..=0x7F)
+    /// Control message (payload[0] in 0x01..=0x7F).
     Control,
-    /// Unknown or invalid format
+    /// Unrecognized payload.
     Unknown,
 }
 

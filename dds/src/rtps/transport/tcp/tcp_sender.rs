@@ -1,18 +1,15 @@
 //! Outbound side of the TCP mux transport.
 //!
-//! `TcpSender` owns the outbound connection cache and the lifecycle of
-//! the conn_actor pairs created via outbound connects. It exposes sync
-//! `send_to_*` methods for the DDS layer; on cache miss the call spawns
-//! an `outbound_connect_task` that performs TCP + (optional) TLS + the
-//! 3-way protocol handshake (PEER_HELLO → PORT_RESERVE → PORT_BIND) before
-//! handing the resulting stream to a conn_actor pair.
+//! `TcpSender` owns the outbound connection cache and conn_actor lifecycles,
+//! exposing sync `send_to_*` methods for the DDS layer. On cache miss a
+//! connect runs TCP + (optional) TLS + the 3-way handshake
+//! (PEER_HELLO → PORT_RESERVE → PORT_BIND), then hands the stream to a
+//! conn_actor pair.
 //!
-//! The PORT_RESERVE_ACK round-trip uses the single-slot oneshot mailbox
-//! installed in `MuxState::ConnectionEntry::pending_ack`: the sender
-//! registers a `oneshot::Sender`, dispatches the request through the
-//! control connection's writer, then awaits the receiver. The reader
-//! task hands incoming responses to `MuxState::dispatch`, which routes
-//! them to the slot via `handle_control_frame`.
+//! PORT_RESERVE replies travel through the single-slot oneshot mailbox in
+//! `MuxState::ConnectionEntry::pending_ack`: the sender registers the
+//! `oneshot::Sender`, writes the request, then awaits the reply that the
+//! reader task routes back via `MuxState::dispatch`.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::Ordering;
@@ -76,8 +73,8 @@ struct ControlExtras {
     /// Same `Arc` that lives in `MuxState::ConnectionEntry::pending_ack`.
     /// dispatch installs the response; the awaiting connect_task takes it.
     pending_ack: Arc<StdMutex<Option<oneshot::Sender<ControlMsg>>>>,
-    /// Async lock that serialises one PORT_RESERVE round-trip at a time so
-    /// concurrent requests don't clobber each other's `pending_ack` slot.
+    /// Lets only one PORT_RESERVE round-trip run at a time, so concurrent
+    /// requests don't clobber each other's `pending_ack` slot.
     request_lock: Arc<TokioMutex<()>>,
 }
 
@@ -90,9 +87,10 @@ struct ControlConnHandle {
 
 // ── In-flight connect guard ─────────────────────────────────────────────────
 
-/// Drop-guard for the in-flight connect entry. Removes the entry from
-/// `in_flight` and notifies waiters when the connect_task ends — works
-/// even on panic / cancel.
+/// Guard that prevents duplicate concurrent connects to the same peer.
+/// While it lives, the peer is marked "connecting" in `in_flight` so other
+/// tasks wait instead of opening a second connection. On drop (success,
+/// error, panic, or cancel) it clears the mark and wakes the waiters.
 struct InFlightGuard {
     map: Arc<DashMap<(SocketAddr, u16), Arc<Notify>>>,
     key: (SocketAddr, u16),
@@ -106,10 +104,12 @@ impl Drop for InFlightGuard {
     }
 }
 
+/// Result of trying to claim the connect slot for a peer.
 enum InFlightAcquisition {
-    /// We won the race — caller must do the connect.
+    /// We claimed the slot — the caller must perform the connect.
     Acquired(InFlightGuard),
-    /// Another task already finished. Caller should re-check the cache.
+    /// Another task was already connecting (we waited for it) — the caller
+    /// should just re-check the cache.
     AlreadyDone,
 }
 
@@ -127,33 +127,26 @@ pub(crate) struct TcpSender {
     connect_timeout: Duration,
     handshake_timeout: Duration,
     keepalive_interval: Duration,
-    /// Per-keepalive ACK deadline. The previous keepalive is considered
-    /// "missed" if `last_keepalive_ack_at - last_keepalive_sent_at` exceeds
-    /// this on the next tick. Must be ≤ `keepalive_interval` for the per-tick
-    /// evaluation to make sense.
     keepalive_timeout: Duration,
     max_missed_keepalives: u32,
 
     tls_config: Option<Arc<TlsConfig>>,
-
-    /// Shared mux state — outbound connections also live in `shared.connections`.
     shared: Arc<MuxState>,
 
-    /// Outbound cache: (peer_addr, logical_port) → writer + control extras.
+    /// Outbound connection cache, keyed by (addr, logical_port).
     connections: Arc<DashMap<(SocketAddr, u16), OutboundEntry>>,
 
-    /// In-flight connect guard — prevents duplicate concurrent connects to
-    /// the same key.
+    /// Marks peers currently being connected, so duplicate concurrent
+    /// connects to the same peer are prevented. See `InFlightGuard`.
     in_flight: Arc<DashMap<(SocketAddr, u16), Arc<Notify>>>,
 
-    /// Set once by the plugin during init to receive dead-peer events.
+    /// Dead-peer notifier, installed once by the plugin during init.
     dead_peer_tx: OnceLock<crossbeam_channel::Sender<SocketAddr>>,
 
-    /// Handle to the tokio runtime we live on. Captured at construction
-    /// time (which always happens inside a runtime context). Used to spawn
-    /// `outbound_connect_task` from sync `send_to_*` calls — `tokio::spawn`
-    /// would panic there because the sync caller is not in runtime context,
-    /// but `Handle::spawn` carries the runtime reference with it.
+    /// Handle to the runtime, saved when the sender is built.
+    /// The sync `send_to_*` methods run outside the runtime, so they cannot
+    /// use `tokio::spawn` (it would panic). They use this handle instead to
+    /// run async work (`block_on`) and start connect tasks.
     runtime_handle: tokio::runtime::Handle,
 
     cancel: CancellationToken,
@@ -680,19 +673,15 @@ async fn port_bind_handshake(
 
 /// Per-tick keepalive cycle on every outbound control connection.
 ///
-/// Liveness model: each `ConnectionEntry` carries `last_keepalive_sent_at`
-/// (written here after each push) and `last_keepalive_ack_at` (written by
-/// `mux_state::handle_control_frame` when a KEEPALIVE_ACK arrives). On every
-/// tick we compare the two:
+/// Each tick judges the previous round-trip from `last_keepalive_sent_at`
+/// (set here) and `last_keepalive_ack_at` (set by `mux_state` on
+/// KEEPALIVE_ACK):
+/// - timely (`ack_at >= sent_at` and gap ≤ `keepalive_timeout`) → reset
+///   `missed_keepalives`.
+/// - otherwise → increment it; past `max_missed_keepalives` the peer is
+///   declared dead and torn down via `disconnect_peer`.
 ///
-/// - If `ack_at >= sent_at` AND the gap ≤ `keepalive_timeout` → previous
-///   round-trip was timely → reset `missed_keepalives` to 0.
-/// - Else (ACK never arrived, arrived late, or arrived before our latest send)
-///   → increment `missed_keepalives`. If it exceeds `max_missed_keepalives`
-///   the peer is declared dead and torn down via `disconnect_peer`.
-///
-/// Then a fresh KEEPALIVE is pushed and `last_keepalive_sent_at` is set to
-/// `now`, starting the next cycle.
+/// Then a fresh KEEPALIVE is pushed and `last_keepalive_sent_at` set to `now`.
 async fn keepalive_interval_task(sender: Arc<TcpSender>, cancel: CancellationToken) {
     let mut ticker = tokio::time::interval(sender.keepalive_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -775,8 +764,8 @@ async fn keepalive_interval_task(sender: Arc<TcpSender>, cancel: CancellationTok
     }
 }
 
-/// Sweep cache entries whose mpsc channel has been closed (typically because
-/// the conn_actor exited). Avoids stale writer_tx accumulating on dead links.
+/// Drop cache entries whose writer channel is closed (conn_actor exited),
+/// so stale entries don't pile up on dead links.
 async fn orphan_prune_interval_task(sender: Arc<TcpSender>, cancel: CancellationToken) {
     let mut ticker = tokio::time::interval(ORPHAN_PRUNE_INTERVAL);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
