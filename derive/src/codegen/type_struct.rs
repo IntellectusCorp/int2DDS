@@ -637,6 +637,18 @@ fn generate_unified_type_support_impl(
                     <#full_type as #crate_path::xtypes::HasTypeObject>::complete_type_object()
                 ))
             }
+
+            fn get_type_object_closure(&self) -> Vec<(#crate_path::xtypes::TypeIdentifier, #crate_path::xtypes::TypeObject)> {
+                let mut out = Vec::new();
+                out.push((
+                    <#full_type as #crate_path::xtypes::HasTypeObject>::type_identifier(),
+                    #crate_path::xtypes::TypeObject::Complete(
+                        <#full_type as #crate_path::xtypes::HasTypeObject>::complete_type_object()
+                    ),
+                ));
+                <#full_type as #crate_path::xtypes::HasTypeObject>::collect_nested_type_objects(&mut out);
+                out
+            }
         }
     }
 }

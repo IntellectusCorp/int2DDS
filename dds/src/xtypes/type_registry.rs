@@ -38,6 +38,15 @@ impl TypeRegistry {
 
     pub fn register_type_object(&mut self, type_obj: TypeObject) {
         let hash = type_obj.compute_hash();
+        self.register_type_object_keyed(hash, type_obj);
+    }
+
+    pub fn register_type_object_with_id(&mut self, id: &TypeIdentifier, type_obj: TypeObject) {
+        let hash = id.equivalence_hash().copied().unwrap_or_else(|| type_obj.compute_hash());
+        self.register_type_object_keyed(hash, type_obj);
+    }
+
+    fn register_type_object_keyed(&mut self, hash: EquivalenceHash, type_obj: TypeObject) {
         match type_obj {
             TypeObject::Complete(c) => {
                 let deps = referenced_hashes(&c);

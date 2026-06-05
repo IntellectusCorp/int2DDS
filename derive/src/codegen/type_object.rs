@@ -168,6 +168,42 @@ fn build_type_ann_builtin(
     }
 }
 
+/// Generate the `HasTypeObject::collect_nested_type_objects` method body.
+fn generate_collect_nested(
+    crate_path: &proc_macro2::TokenStream,
+    type_name_str: &str,
+    field_types: &[&syn::Type],
+) -> proc_macro2::TokenStream {
+    let fallback_use = if field_types.is_empty() {
+        quote! {}
+    } else {
+        quote! { use #crate_path::xtypes::nested_closure::CollectFallback as _; }
+    };
+    quote! {
+        fn collect_nested_type_objects(
+            out: &mut Vec<(#crate_path::xtypes::TypeIdentifier, #crate_path::xtypes::TypeObject)>,
+        ) {
+            #fallback_use
+            let __id = #crate_path::xtypes::TypeIdentifier::MinimalTypeId(
+                #crate_path::xtypes::EquivalenceHash::compute(#type_name_str.as_bytes())
+            );
+            if let Some(__h) = __id.equivalence_hash().copied() {
+                if out.iter().any(|(__i, _)| __i.equivalence_hash() == Some(&__h)) {
+                    return;
+                }
+            }
+            out.push((
+                __id,
+                #crate_path::xtypes::TypeObject::Complete(Self::complete_type_object()),
+            ));
+            #(
+                #crate_path::xtypes::nested_closure::Probe::<#field_types>(::core::marker::PhantomData)
+                    .collect_nested(out);
+            )*
+        }
+    }
+}
+
 /// Generate HasTypeObject implementation for a struct.
 pub fn generate_has_type_object_impl(
     name: &syn::Ident,
@@ -310,6 +346,17 @@ pub fn generate_has_type_object_impl(
     let ty_generics = &gc.ty_generics;
     let where_clause = &gc.where_clause;
 
+    let collect_nested_impl = if gc.has_type_params {
+        quote! {}
+    } else {
+        let nested_field_types: Vec<&syn::Type> = fields
+            .iter()
+            .filter(|f| !parse_field_attributes(f).non_serialized)
+            .map(|f| &f.ty)
+            .collect();
+        generate_collect_nested(crate_path, &type_name_str, &nested_field_types)
+    };
+
     let type_identifier_impl = if gc.has_type_params {
         // Generic types cannot use static OnceLock; compute each time
         quote! {
@@ -363,6 +410,8 @@ pub fn generate_has_type_object_impl(
             fn dds_type_name() -> &'static str {
                 #type_name_str
             }
+
+            #collect_nested_impl
         }
     }
 }
@@ -377,6 +426,7 @@ pub fn generate_has_type_object_alias_impl(
     let crate_path = &type_config.crate_path;
     let type_name_str = name.to_string();
     let related_type = type_to_identifier(inner_ty, crate_path, false);
+    let collect_nested_impl = generate_collect_nested(crate_path, &type_name_str, &[inner_ty]);
 
     quote! {
         impl #crate_path::xtypes::HasTypeObject for #name {
@@ -414,6 +464,8 @@ pub fn generate_has_type_object_alias_impl(
             fn dds_type_name() -> &'static str {
                 #type_name_str
             }
+
+            #collect_nested_impl
         }
     }
 }
@@ -478,6 +530,8 @@ pub fn generate_has_type_object_enum_impl(
         })
         .collect();
 
+    let collect_nested_impl = generate_collect_nested(crate_path, &type_name_str, &[]);
+
     quote! {
         impl #crate_path::xtypes::HasTypeObject for #name {
             fn type_identifier() -> #crate_path::xtypes::TypeIdentifier {
@@ -514,6 +568,8 @@ pub fn generate_has_type_object_enum_impl(
             fn dds_type_name() -> &'static str {
                 #type_name_str
             }
+
+            #collect_nested_impl
         }
     }
 }
@@ -599,6 +655,11 @@ pub fn generate_has_type_object_union_impl(
         })
         .collect();
 
+    let nested_field_types: Vec<&syn::Type> =
+        variants.iter().filter(|v| variant_has_data(v)).filter_map(get_variant_type).collect();
+    let collect_nested_impl =
+        generate_collect_nested(crate_path, &type_name_str, &nested_field_types);
+
     quote! {
         impl #crate_path::xtypes::HasTypeObject for #name {
             fn type_identifier() -> #crate_path::xtypes::TypeIdentifier {
@@ -635,6 +696,8 @@ pub fn generate_has_type_object_union_impl(
             fn dds_type_name() -> &'static str {
                 #type_name_str
             }
+
+            #collect_nested_impl
         }
     }
 }
@@ -683,6 +746,8 @@ pub fn generate_has_type_object_bitmask_impl(
         })
         .collect();
 
+    let collect_nested_impl = generate_collect_nested(crate_path, &type_name_str, &[]);
+
     quote! {
         impl #crate_path::xtypes::HasTypeObject for #name {
             fn type_identifier() -> #crate_path::xtypes::TypeIdentifier {
@@ -717,6 +782,8 @@ pub fn generate_has_type_object_bitmask_impl(
             fn dds_type_name() -> &'static str {
                 #type_name_str
             }
+
+            #collect_nested_impl
         }
     }
 }
@@ -776,6 +843,8 @@ pub fn generate_has_type_object_bitset_impl(
         })
         .collect();
 
+    let collect_nested_impl = generate_collect_nested(crate_path, &type_name_str, &[]);
+
     quote! {
         impl #crate_path::xtypes::HasTypeObject for #name {
             fn type_identifier() -> #crate_path::xtypes::TypeIdentifier {
@@ -808,6 +877,8 @@ pub fn generate_has_type_object_bitset_impl(
             fn dds_type_name() -> &'static str {
                 #type_name_str
             }
+
+            #collect_nested_impl
         }
     }
 }
