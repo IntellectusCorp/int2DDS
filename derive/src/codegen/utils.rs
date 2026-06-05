@@ -134,11 +134,24 @@ pub fn parse_field_attributes(field: &syn::Field) -> FieldConfig {
         }
     }
 
+    if is_option_type(&field.ty) {
+        config.optional = true;
+    }
+
     if config.key && config.non_serialized {
         let field_name =
             field.ident.as_ref().map(ToString::to_string).unwrap_or_else(|| "<anon>".to_string());
         panic!(
             "Field '{}' cannot be both #[dds(key)] and #[dds(non_serialized)] (XTypes 7.3.1.2.1.14)",
+            field_name
+        );
+    }
+
+    if config.key && config.optional {
+        let field_name =
+            field.ident.as_ref().map(ToString::to_string).unwrap_or_else(|| "<anon>".to_string());
+        panic!(
+            "Field '{}' cannot be both #[dds(key)] and optional: keyed members cannot be optional (XTypes 7.2.2.4.4.4.7)",
             field_name
         );
     }
