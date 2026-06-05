@@ -6,6 +6,7 @@
 
 use crate::rtps::common::time::RtpsTime;
 use bytes::Bytes;
+use smallvec::SmallVec;
 use speedy::{Context, Error, Readable, Writable, Writer};
 use std::io;
 use std::time::Instant;
@@ -310,6 +311,14 @@ impl FragmentBuffer {
         }
         result
     }
+
+    // Collect fragment chunks in fragment order without copying. Each chunk is a
+    // refcounted slice of the original socket buffer, so this only moves Bytes
+    // handles. Used by the scatter-gather receive path to avoid a per-sample
+    // contiguous reassembly allocation.
+    pub(crate) fn into_chunks(self) -> SmallVec<[Bytes; 16]> {
+        self.fragments.into_iter().flatten().collect()
+    }
 }
 
 #[cfg(test)]
@@ -419,6 +428,24 @@ mod tests {
 
         assert!(buffer.all_fragments_received());
         assert_eq!(buffer.assemble(), vec![10, 11, 20, 21, 30]);
+    }
+
+    #[test]
+    fn test_fragment_buffer_into_chunks_in_fragment_order() {
+        let mut buffer = three_fragment_buffer();
+        buffer.copy_fragment_data(3, Bytes::from_static(&[30]));
+        buffer.copy_fragment_data(1, Bytes::from_static(&[10, 11]));
+        buffer.copy_fragment_data(2, Bytes::from_static(&[20, 21]));
+
+        let chunks = buffer.into_chunks();
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(&chunks[0][..], &[10, 11]);
+        assert_eq!(&chunks[1][..], &[20, 21]);
+        assert_eq!(&chunks[2][..], &[30]);
+
+        // Concatenation must equal the contiguous assembly.
+        let flat: Vec<u8> = chunks.iter().flat_map(|c| c.iter().copied()).collect();
+        assert_eq!(flat, vec![10, 11, 20, 21, 30]);
     }
 
     #[test]
