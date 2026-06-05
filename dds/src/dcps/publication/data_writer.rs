@@ -283,6 +283,10 @@ impl<Foo: 'static + Clone> EnableChild for DataWriter<Foo> {
         if let Some(type_obj) = self.type_support.get_type_object() {
             publication_builtin_topic_data.set_type_object(Some(type_obj));
         }
+        if let Ok(rtps_participant) = participant.get_rtps_participant() {
+            rtps_participant
+                .register_local_type_objects(&self.type_support.get_type_object_closure());
+        }
 
         let status_callback = self.create_status_callback()?;
 

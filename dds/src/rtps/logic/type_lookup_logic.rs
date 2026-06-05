@@ -122,8 +122,8 @@ impl SedpLogic {
             TypeLookupReturn::GetTypes(GetTypesOut { types }) => {
                 let mut still_missing: Vec<TypeIdentifier> = Vec::new();
                 if let Ok(mut registry) = participant.type_registry().write() {
-                    for (_, type_object) in &types {
-                        registry.register_type_object(type_object.clone());
+                    for (type_id, type_object) in &types {
+                        registry.register_type_object_with_id(type_id, type_object.clone());
                     }
                     for (type_id, _) in &types {
                         if let Some(hash) = type_id.equivalence_hash() {

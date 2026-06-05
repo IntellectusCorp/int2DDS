@@ -245,6 +245,20 @@ impl Participant {
         }
     }
 
+    pub(crate) fn register_local_type_objects(
+        &self,
+        objects: &[(crate::xtypes::TypeIdentifier, crate::xtypes::TypeObject)],
+    ) {
+        if objects.is_empty() {
+            return;
+        }
+        if let Ok(mut registry) = self.type_registry.write() {
+            for (id, obj) in objects {
+                registry.register_type_object_with_id(id, obj.clone());
+            }
+        }
+    }
+
     pub(crate) fn fetch_type_via_lookup(
         &self,
         remote_prefix: GuidPrefix,

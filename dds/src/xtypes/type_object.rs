@@ -3571,6 +3571,27 @@ pub trait HasTypeObject {
 
     /// Get the type name as used in IDL/DDS.
     fn dds_type_name() -> &'static str;
+
+    fn collect_nested_type_objects(_out: &mut Vec<(TypeIdentifier, TypeObject)>) {}
+}
+
+pub mod nested_closure {
+    use super::{HasTypeObject, TypeIdentifier, TypeObject};
+
+    pub struct Probe<T>(pub core::marker::PhantomData<T>);
+
+    /// Fallback for field types that do NOT implement `HasTypeObject`.
+    pub trait CollectFallback {
+        fn collect_nested(&self, _out: &mut Vec<(TypeIdentifier, TypeObject)>) {}
+    }
+    impl<T> CollectFallback for Probe<T> {}
+
+    /// Preferred path for field types that implement `HasTypeObject`.
+    impl<T: HasTypeObject> Probe<T> {
+        pub fn collect_nested(&self, out: &mut Vec<(TypeIdentifier, TypeObject)>) {
+            T::collect_nested_type_objects(out);
+        }
+    }
 }
 
 // ============================================================================
@@ -3654,6 +3675,10 @@ impl<T: HasTypeObject> HasTypeObject for Vec<T> {
     fn dds_type_name() -> &'static str {
         "sequence"
     }
+
+    fn collect_nested_type_objects(out: &mut Vec<(TypeIdentifier, TypeObject)>) {
+        T::collect_nested_type_objects(out);
+    }
 }
 
 impl<T: HasTypeObject> HasTypeObject for Option<T> {
@@ -3671,6 +3696,32 @@ impl<T: HasTypeObject> HasTypeObject for Option<T> {
 
     fn dds_type_name() -> &'static str {
         T::dds_type_name()
+    }
+
+    fn collect_nested_type_objects(out: &mut Vec<(TypeIdentifier, TypeObject)>) {
+        T::collect_nested_type_objects(out);
+    }
+}
+
+impl<T: HasTypeObject> HasTypeObject for Box<T> {
+    fn type_identifier() -> TypeIdentifier {
+        T::type_identifier()
+    }
+
+    fn minimal_type_object() -> MinimalTypeObject {
+        T::minimal_type_object()
+    }
+
+    fn complete_type_object() -> CompleteTypeObject {
+        T::complete_type_object()
+    }
+
+    fn dds_type_name() -> &'static str {
+        T::dds_type_name()
+    }
+
+    fn collect_nested_type_objects(out: &mut Vec<(TypeIdentifier, TypeObject)>) {
+        T::collect_nested_type_objects(out);
     }
 }
 
@@ -3697,6 +3748,10 @@ macro_rules! impl_array_has_type_object {
 
                 fn dds_type_name() -> &'static str {
                     "array"
+                }
+
+                fn collect_nested_type_objects(out: &mut Vec<(TypeIdentifier, TypeObject)>) {
+                    T::collect_nested_type_objects(out);
                 }
             }
         )*

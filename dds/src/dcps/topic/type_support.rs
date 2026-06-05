@@ -161,6 +161,15 @@ pub trait TypeSupport: Send + Sync + 'static {
         None
     }
 
+    /// Get this type's `TypeObject` plus the transitive
+    /// closure of every nested composite it references.
+    fn get_type_object_closure(&self) -> Vec<(TypeIdentifier, TypeObject)> {
+        match (self.get_type_identifier(), self.get_type_object()) {
+            (Some(id), Some(obj)) => vec![(id, obj)],
+            _ => Vec::new(),
+        }
+    }
+
     fn register_type(
         self: Arc<Self>,
         participant: &mut DomainParticipant,
