@@ -659,6 +659,67 @@ fn optional_byte_match_xcdr_mutable() {
     }
 }
 
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final")]
+struct BareOptFinal {
+    id: i32,
+    opt: Option<i32>,
+}
+
+#[test]
+fn bare_option_field_is_marked_optional_in_metadata() {
+    let CompleteTypeObject::Struct(s) = BareOptFinal::complete_type_object() else {
+        panic!("expected a struct type object");
+    };
+    let opt = s.member_seq.iter().find(|m| m.detail.name == "opt").expect("opt member present");
+    assert!(
+        opt.common.member_flags.is_optional(),
+        "a bare Option<T> field must carry the IS_OPTIONAL member flag"
+    );
+    let id = s.member_seq.iter().find(|m| m.detail.name == "id").expect("id member present");
+    assert!(!id.common.member_flags.is_optional(), "a non-Option field must not be optional");
+}
+
+#[test]
+fn bare_option_matches_explicit_optional_wire() {
+    for opt in [Some(9i32), None] {
+        assert_eq!(
+            concrete_cdr(&BareOptFinal { id: 5, opt }),
+            concrete_cdr(&OptFinal { id: 5, opt }),
+            "bare Option<T> must encode identically to #[dds(optional)] (CDR) for {:?}",
+            opt
+        );
+        assert_eq!(
+            concrete_xcdr(&BareOptFinal { id: 5, opt }, ExtensibilityKind::Final),
+            concrete_xcdr(&OptFinal { id: 5, opt }, ExtensibilityKind::Final),
+            "bare Option<T> must encode identically to #[dds(optional)] (XCDR) for {:?}",
+            opt
+        );
+    }
+}
+
+#[test]
+fn bare_option_byte_match_dynamic() {
+    let dt = standalone_type::<BareOptFinal>();
+    let xcdr = xcdr_format(ExtensibilityKind::Final);
+    for opt in [Some(9i32), None] {
+        let dynamic = build_dynamic_opt(&dt, opt);
+        let concrete = BareOptFinal { id: 5, opt };
+        assert_eq!(
+            dynamic_bytes(&dynamic, &SerializationFormat::Cdr),
+            concrete_cdr(&concrete),
+            "bare Option<T> CDR dynamic/codegen mismatch for {:?}",
+            opt
+        );
+        assert_eq!(
+            dynamic_bytes(&dynamic, &xcdr),
+            concrete_xcdr(&concrete, ExtensibilityKind::Final),
+            "bare Option<T> XCDR2 Final dynamic/codegen mismatch for {:?}",
+            opt
+        );
+    }
+}
+
 fn final_holder_with_member<I: HasTypeObject>(member_name: &str) -> Arc<DynamicType> {
     let inner_complete = I::complete_type_object();
     let inner_hash = EquivalenceHash::compute(&inner_complete.serialize());
