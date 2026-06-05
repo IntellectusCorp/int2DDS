@@ -44,7 +44,15 @@ struct NestedRoot {
     leaf: NestedLeaf,
 }
 
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+struct SeqRoot {
+    id: i32,
+    leaves: Vec<NestedLeaf>,
+}
+
 const TOPIC: &str = "type_lookup_nested_probe";
+const SEQ_TOPIC: &str = "type_lookup_sequence_probe";
 
 #[test]
 fn consumer_resolves_nested_member_via_type_lookup() {
@@ -109,4 +117,75 @@ fn consumer_resolves_nested_member_via_type_lookup() {
         "nested 'leaf' member must resolve to a TypeRef over the wire, got {:?}",
         leaf.member_type
     );
+}
+
+#[test]
+fn consumer_resolves_sequence_member_via_type_lookup() {
+    unsafe { std::env::set_var("INT2DDS_DISABLE_INLINE_TYPE_OBJECT", "1") };
+
+    let domain = next_domain_id();
+    let factory = DomainParticipantFactory::get_instance();
+
+    let producer = factory
+        .create_participant(domain, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+    let topic = producer
+        .create_topic::<SeqRoot>(
+            SEQ_TOPIC,
+            "SeqRoot",
+            TopicQos::default(),
+            None,
+            StatusMask::default(),
+        )
+        .unwrap();
+    let publisher =
+        producer.create_publisher(PublisherQos::default(), None, StatusMask::default()).unwrap();
+    let _writer = publisher
+        .create_datawriter::<SeqRoot>(
+            &topic,
+            DataWriterQos {
+                reliability: ReliabilityQosPolicy {
+                    kind: ReliabilityQosPolicyKind::Reliable,
+                    max_blocking_time: Duration { sec: 1, nanosec: 0 },
+                },
+                ..Default::default()
+            },
+            None,
+            StatusMask::default(),
+        )
+        .unwrap();
+
+    let consumer = factory
+        .create_participant(domain, DomainParticipantQos::default(), None, StatusMask::default())
+        .unwrap();
+
+    let mut support = None;
+    for _ in 0..100 {
+        if let Ok(s) = consumer.create_dynamic_type_support_from_discovered_type(SEQ_TOPIC) {
+            support = Some(s);
+            break;
+        }
+        sleep(StdDuration::from_millis(100));
+    }
+
+    let support = support.expect(
+        "consumer must fetch the SeqRoot closure via TypeLookup and build its type support",
+    );
+
+    let dynamic_type = support.dynamic_type();
+    let struct_desc = dynamic_type.as_struct().expect("SeqRoot must be a struct");
+    let leaves = struct_desc
+        .members()
+        .iter()
+        .find(|m| &*m.name == "leaves")
+        .expect("'leaves' member present");
+
+    match &leaves.member_type {
+        DynamicTypeKind::Sequence { element_type, .. } => assert!(
+            matches!(element_type.as_ref(), DynamicTypeKind::TypeRef(_)),
+            "sequence element must resolve to a TypeRef over the wire, got {:?}",
+            element_type
+        ),
+        other => panic!("'leaves' member must be a Sequence, got {:?}", other),
+    }
 }
