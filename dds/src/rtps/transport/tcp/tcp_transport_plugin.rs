@@ -1,20 +1,12 @@
-//! Async TCP transport plugin — sync facade over the tcp stack.
+//! Sync facade over the async tcp stack.
 //!
-//! `TcpTransportPlugin` owns a dedicated `tokio::runtime::Runtime` and
-//! bundles together the inbound `TcpMuxListener`, the outbound `TcpSender`,
-//! and the three crossbeam channels (discovery / user data / dead peer)
-//! that bridge async tasks back to the sync DDS layer.
+//! Owns a dedicated runtime and bundles the inbound `TcpMuxListener`, the
+//! outbound `TcpSender`, and the three crossbeam channels (discovery / user
+//! data / dead peer) that bridge async tasks back to the sync DDS layer.
 //!
-//! The `TransportPlugin` trait is sync — all methods take `&self`. Inside
-//! this plugin:
-//! - `send(...)` calls `sender.send_to_*()` which is sync (mpsc::try_send).
-//! - `take_*_source()` returns a stored crossbeam Receiver (take-once).
-//! - `close()` awaits the listener + sender shutdowns under `block_on`.
-//!
-//! Construction happens inside `runtime.block_on(...)` because the
-//! listener / sender constructors call `tokio::spawn`, which needs a
-//! runtime context. After construction returns, the plugin is fully
-//! usable from sync code.
+//! The `TransportPlugin` trait is sync. Construction runs inside
+//! `runtime.block_on(...)` because the listener / sender constructors call
+//! `tokio::spawn`, which needs a runtime context.
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -36,19 +28,16 @@ use crate::rtps::transport::tcp::tls::TlsConfig;
 /// Crossbeam capacity for discovery + dead-peer channels.
 const CHANNEL_BUFFER_SIZE: usize = 512;
 
-/// Crossbeam capacity for the inbound user_data channel that bridges the
-/// listener-side dispatch into the sync DDS layer. Sized to absorb short
-/// consumer stalls under bursty 1MB/60Hz × ~16 fragment workloads.
+/// Crossbeam capacity for the inbound user_data channel. Sized to absorb
+/// short consumer stalls under bursty fragmented workloads.
 const USER_CHANNEL_CAPACITY: usize = 1024;
 
-/// Default inbound idle timeout. Overridable via the existing `INT2DDS_TCP_*`
-/// env vars (when those helpers exist).
+/// Default inbound idle timeout.
 const DEFAULT_INCOMING_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 // ── TcpTransportPlugin ──────────────────────────────────────────────────
 
-/// Sync facade over the tcp stack. Owns the runtime and forwards
-/// `TransportPlugin` trait calls into the async machinery.
+/// Sync facade owning the runtime and forwarding trait calls to the async stack.
 pub(crate) struct TcpTransportPlugin {
     #[allow(dead_code)]
     domain_id: u32,
@@ -56,36 +45,21 @@ pub(crate) struct TcpTransportPlugin {
     working_ips: Vec<String>,
     listener_port: u16,
 
-    /// Configured SPDP initial peers. TCP is connection-oriented and firewall
-    /// rules are provisioned per ip:port, so when this is non-empty we only
-    /// dial the operator-declared peer addresses — a peer's other advertised
-    /// locators (e.g. an unroutable virtual-NIC address) are ignored. This is
-    /// the intended TCP setup: both participants list each other, with one
-    /// reachable address per peer.
-    ///
-    /// Empty means dial every advertised locator (no-initial-peers fallback).
-    ///
-    /// TODO: two cases are not handled yet and need RTPS-layer locator
-    /// selection (pick a single locator per remote participant) plus an
-    /// `accept_unknown_peers` QoS:
-    ///   - listing several addresses for the *same* peer — both would be
-    ///     dialed, yielding duplicate connections (so keep one address/peer);
-    ///   - dialing a discovered peer that is not in this list at all.
+    /// Configured SPDP initial peers — the dial gate. When non-empty, only
+    /// these operator-declared addresses are dialed; a peer's other advertised
+    /// locators are ignored. Empty falls back to dialing every advertised
+    /// locator. Expects one reachable address per peer.
     initial_peers: Vec<SocketAddr>,
 
-    /// Dedicated runtime — keeps the tcp tasks isolated from any
-    /// runtime the host application might run. Dropped last (after the
-    /// listener and sender) so tasks can drain on shutdown.
+    /// runtime isolating tcp tasks. Dropped last (after listener
+    /// and sender) so tasks can drain on shutdown.
     runtime: Arc<tokio::runtime::Runtime>,
 
-    /// Outbound side. `Arc<TcpSender>` because send paths and connect tasks
-    /// hold their own clones. User-data and discovery writes acquire the
-    /// connection's shared write half and perform the wire `writev` inline
-    /// on the calling thread.
+    /// Outbound side. `Arc` because send paths and connect tasks hold clones.
     sender: Arc<TcpSender>,
 
-    /// Inbound side. Wrapped in `Option` so `close()` can take and drop it,
-    /// firing its cancel token.
+    /// Inbound side. `Option` so `close()` can take and drop it, firing its
+    /// cancel token.
     mux_listener: Mutex<Option<TcpMuxListener>>,
 
     /// Take-once receivers handed out via `take_*_source()`.

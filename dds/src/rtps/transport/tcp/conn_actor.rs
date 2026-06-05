@@ -1,14 +1,12 @@
 //! Per-connection actor: owns one TCP/TLS stream and runs a reader/writer
 //! task pair against it.
 //!
-//! `spawn_conn_actor` splits the stream into independent halves, spawns a
-//! reader task that hands incoming frames to `MuxState::dispatch`, and a
-//! writer task that serialises control-plane frames (keepalive,
-//! PORT_RESERVE, peer-hello replies) from an mpsc inbox onto the wire.
-//! User-data frames bypass the inbox and are written inline by the sender
-//! against the returned [`SharedWriteHalf`]; the writer task is therefore
-//! a low-rate path. The actor lifecycle is self-managed via a child
-//! `CancellationToken` shared by both tasks.
+//! The reader hands incoming frames to `MuxState::dispatch`; the writer
+//! drains an mpsc inbox of control-plane frames (keepalive, PORT_RESERVE,
+//! peer-hello replies) onto the wire. User-data frames bypass the inbox and
+//! are written inline against the returned [`SharedWriteHalf`], so the
+//! writer is a low-rate path. Both tasks share a child `CancellationToken`
+//! so the pair always tears down together.
 
 use std::sync::Arc;
 

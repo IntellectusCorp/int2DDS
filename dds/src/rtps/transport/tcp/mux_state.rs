@@ -1,15 +1,14 @@
-//! Shared state for the TCP mux listener.
+//! Per-connection state shared across the tasks that drive a connection.
 //!
-//! `MuxState` owns the per-connection bookkeeping and the protocol dispatch
-//! logic. It is held in an `Arc` and shared across all conn_actor tasks; the
-//! actors call `dispatch` to route inbound frames and use the `Sender` halves
-//! of the discovery / user-data crossbeam channels to bridge into the sync
-//! DDS layer.
-//!
-//! Compared to the sync version in `tcp/tcp_mux_listener.rs`, the per-entry
-//! `Arc<AtomicBool>` shutdown flags are replaced with a per-connection
-//! `CancellationToken` that the conn_actor pair shares; pruning a connection
-//! is now a `cancel.cancel()` call rather than a polled flag.
+//! Each TCP connection is driven by several tasks at once — the reader/writer
+//! task pair plus the keepalive and prune tasks — and they all need to see
+//! the same connection state.
+//! `MuxState` is that single source of truth: held in an `Arc`,
+//! it keeps one `ConnectionEntry` per connection (state, remote
+//! addr, writer inbox, cancel token, keepalive timing) and routes inbound
+//! frames via `dispatch` — RTPS data to the DDS layer through the crossbeam
+//! senders, control frames to their handlers. A connection is torn down by
+//! firing its `CancellationToken`.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -35,39 +34,31 @@ use crate::rtps::transport::tcp::protocol::{
 
 // ── ID + state types ─────────────────────────────────────────────────────────
 
-/// Unique identifier for an accepted connection (replaces the sync version's
-/// mio::Token). Issued monotonically by `MuxState::next_conn_id`.
+/// Unique connection id, issued monotonically by `MuxState::next_conn_id`.
 pub(crate) type ConnectionId = usize;
 
 /// Connection state machine — drives which dispatch handler runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConnectionState {
-    /// Waiting for the first PEER_HELLO or PORT_BIND frame.
+    /// Awaiting the first PEER_HELLO(Control conn) or PORT_BIND frame(Data conn).
     AwaitingFirstMessage,
-    /// PEER_HELLO done — control connection (PORT_RESERVE / KEEPALIVE).
+    /// Control connection: PORT_RESERVE / KEEPALIVE.
     Control,
-    /// PORT_BIND done — data connection (RTPS frames).
+    /// Data connection: RTPS frames.
     Active,
     Closing,
 }
 
-/// Who initiated this connection. Used by `prune_idle_connections` to skip
-/// outbound entries: their lifecycle is owned by `TcpSender` (eviction on
-/// mpsc-Closed, keepalive-failure disconnect, orphan_prune) — and worse, an
-/// outbound data conn receives almost no inbound traffic, so `last_activity`
-/// never refreshes and the idle prune would fire on a perfectly healthy
-/// send-only stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConnectionDirection {
     /// Accepted by the listener — peer initiated.
     Inbound,
-    /// Initiated by `TcpSender::do_connect_*` — we initiated.
+    /// Initiated by `TcpSender::do_connect_*`.
     Outbound,
 }
 
-/// Per-peer grouping: tracks which connections (control / discovery /
-/// user-data) belong to the same remote participant. Lets `remove_peer`
-/// tear down all three together.
+/// Groups the control / discovery / user-data connections of one remote
+/// participant so `remove_peer` can tear down all three together.
 #[derive(Debug, Default)]
 pub(crate) struct PeerConnectionGroup {
     pub(crate) control_conn: Option<ConnectionId>,
@@ -93,10 +84,7 @@ impl PeerConnectionGroup {
     }
 }
 
-/// Per-connection bookkeeping shared across the actor pair and the prune
-/// task. `writer_tx` is the conn_actor's inbox; pushing into it sends a
-/// frame on this connection. `cancel` is the actor pair's child token —
-/// cancelling it tears the pair down.
+/// Per-connection bookkeeping shared across the actor pair and the prune task.
 pub(crate) struct ConnectionEntry {
     pub(crate) remote_addr: SocketAddr,
     pub(crate) state: ConnectionState,
@@ -104,33 +92,29 @@ pub(crate) struct ConnectionEntry {
     pub(crate) bound_logical_port: Option<u16>,
     pub(crate) remote_guid_prefix: Option<GuidPrefix>,
     pub(crate) last_activity: Instant,
-    /// Outbound inbox of the conn_actor for this connection.
+    /// conn_actor inbox: pushing a frame here sends it on this connection.
     pub(crate) writer_tx: mpsc::Sender<Vec<u8>>,
-    /// Cancellation handle for the conn_actor pair.
+    /// Child token for the actor pair; cancelling it tears the pair down.
     pub(crate) cancel: CancellationToken,
     pub(crate) pending_ack: Option<Arc<Mutex<Option<oneshot::Sender<ControlMsg>>>>>,
-    /// Consecutive keepalive intervals where the peer's KEEPALIVE_ACK did
-    /// NOT arrive within `keepalive_timeout`. Maintained entirely by the
-    /// sender's keepalive_interval_task (this module only observes); peer
-    /// is declared dead once the count exceeds `max_missed_keepalives`.
+    /// Consecutive intervals where KEEPALIVE_ACK missed `keepalive_timeout`.
+    /// Maintained by the sender's keepalive_interval_task (this module only
+    /// observes); peer is declared dead past `max_missed_keepalives`.
     pub(crate) missed_keepalives: AtomicU32,
 
-    /// Timestamp of the last KEEPALIVE the sender pushed on this connection.
-    /// Set by `TcpSender::keepalive_interval_task` after each `try_send`.
-    /// `None` before the first tick.
+    /// When the sender last pushed a KEEPALIVE. Set by
+    /// `TcpSender::keepalive_interval_task`; `None` before the first tick.
     pub(crate) last_keepalive_sent_at: Mutex<Option<Instant>>,
 
-    /// Timestamp of the most recent KEEPALIVE_ACK observed by `dispatch`.
-    /// Set by `handle_control_frame::KeepaliveAck`. `None` before the first
-    /// ACK ever arrives. The sender compares this with `last_keepalive_sent_at`
-    /// to decide whether the previous round-trip met the timeout.
+    /// When `dispatch` last saw a KEEPALIVE_ACK; `None` until the first ACK.
+    /// The sender compares it with `last_keepalive_sent_at` to judge whether
+    /// the previous round-trip met the timeout.
     pub(crate) last_keepalive_ack_at: Mutex<Option<Instant>>,
 }
 
 // ── MuxState ─────────────────────────────────────────────────────────────────
 
-/// Thread-safe shared state for the mux listener. Held in an `Arc` and
-/// referenced by every conn_actor and timer task.
+/// Thread-safe shared state for the mux listener.
 pub(crate) struct MuxState {
     pub(crate) domain_id: u32,
     pub(crate) participant_id: u32,
@@ -147,8 +131,7 @@ pub(crate) struct MuxState {
 
     pub(crate) next_conn_id: AtomicUsize,
 
-    /// Crossbeam senders — the async→sync bridge for inbound RTPS data.
-    /// The sync DDS layer owns the matching receivers.
+    /// Async→sync bridge for inbound RTPS data; the DDS layer owns the receivers.
     discovery_tx: Sender<IncomingMessage>,
     user_data_tx: Sender<IncomingMessage>,
 }
@@ -833,9 +816,7 @@ fn send_control(writer_tx: &mpsc::Sender<Vec<u8>>, msg: &ControlMsg) {
 mod tests {
     use super::*;
 
-    /// `PeerConnectionGroup` correctly tracks which connection roles are
-    /// occupied and reports `has_data_conns` based on the discovery / user
-    /// slots being populated.
+    /// `PeerConnectionGroup` tracks occupied roles and reports `has_data_conns`.
     #[test]
     fn peer_connection_group_all_tokens() {
         let mut group = PeerConnectionGroup::new();
