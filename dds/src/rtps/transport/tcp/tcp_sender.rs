@@ -840,22 +840,6 @@ mod tests {
         None
     }
 
-    /// `send_to_*` blocks via `runtime_handle.block_on`, which panics if
-    /// invoked from inside a tokio runtime worker. Production callers are the
-    /// sync DDS write path (outside any runtime); tests run under
-    /// `#[tokio::test]`, so they must drive the send from a blocking thread.
-    async fn blocking_send_discovery(
-        sender: &Arc<TcpSender>,
-        target: SocketAddr,
-        data: &[u8],
-    ) -> io::Result<()> {
-        let sender = Arc::clone(sender);
-        let data = data.to_vec();
-        tokio::task::spawn_blocking(move || sender.send_to_discovery(&target, &data))
-            .await
-            .expect("spawn_blocking join")
-    }
-
     /// Build a bare sender with its own MuxState. The sender does NOT bind
     /// a listener — callers that need a target listener spawn one separately.
     fn make_sender(
@@ -875,6 +859,22 @@ mod tests {
             shared,
         );
         (sender, d_rx)
+    }
+
+    /// `send_to_*` blocks via `runtime_handle.block_on`, which panics if
+    /// invoked from inside a tokio runtime worker. Production callers are the
+    /// sync DDS write path (outside any runtime); tests run under
+    /// `#[tokio::test]`, so they must drive the send from a blocking thread.
+    async fn blocking_send_discovery(
+        sender: &Arc<TcpSender>,
+        target: SocketAddr,
+        data: &[u8],
+    ) -> io::Result<()> {
+        let sender = Arc::clone(sender);
+        let data = data.to_vec();
+        tokio::task::spawn_blocking(move || sender.send_to_discovery(&target, &data))
+            .await
+            .expect("spawn_blocking join")
     }
 
     // ── construction smoke ───────────────────────────────────────────────────
