@@ -40,6 +40,10 @@ impl TypeRegistry {
         let hash = type_obj.compute_hash();
         match type_obj {
             TypeObject::Complete(c) => {
+                let deps = referenced_hashes(&c);
+                if !deps.is_empty() {
+                    self.dependencies.insert(hash, deps);
+                }
                 let name = extract_complete_type_name(&c);
                 self.register_complete(hash, name, c);
             }
@@ -87,6 +91,68 @@ impl TypeRegistry {
             Some(deps) => deps.iter().filter(|d| !self.contains(d)).cloned().collect(),
             None => Vec::new(),
         }
+    }
+
+    pub fn complete_closure(
+        &self,
+        hash: &EquivalenceHash,
+    ) -> Vec<(EquivalenceHash, CompleteTypeObject)> {
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut stack = vec![*hash];
+        while let Some(h) = stack.pop() {
+            if !seen.insert(h) {
+                continue;
+            }
+            if let Some(obj) = self.complete_objects.get(&h) {
+                out.push((h, obj.clone()));
+                if let Some(deps) = self.dependencies.get(&h) {
+                    stack.extend(deps.iter().copied());
+                }
+            }
+        }
+        out
+    }
+}
+
+pub(crate) fn referenced_hashes(obj: &CompleteTypeObject) -> Vec<EquivalenceHash> {
+    let mut hashes = Vec::new();
+    let mut push = |id: &TypeIdentifier| collect_from_identifier(id, &mut hashes);
+    match obj {
+        CompleteTypeObject::Struct(s) => {
+            for m in &s.member_seq {
+                push(&m.common.member_type_id);
+            }
+        }
+        CompleteTypeObject::Union(u) => {
+            push(&u.discriminator.type_id);
+            for m in &u.member_seq {
+                push(&m.common.member_type_id);
+            }
+        }
+        CompleteTypeObject::Alias(a) => {
+            push(&a.body.related_type);
+        }
+        CompleteTypeObject::Enum(_)
+        | CompleteTypeObject::Bitmask(_)
+        | CompleteTypeObject::Bitset(_) => {}
+    }
+    hashes
+}
+
+fn collect_from_identifier(id: &TypeIdentifier, out: &mut Vec<EquivalenceHash>) {
+    if let Some(hash) = id.equivalence_hash() {
+        out.push(*hash);
+        return;
+    }
+    match id {
+        TypeIdentifier::PlainSequenceSmall { element_identifier, .. }
+        | TypeIdentifier::PlainSequenceLarge { element_identifier, .. }
+        | TypeIdentifier::PlainArraySmall { element_identifier, .. }
+        | TypeIdentifier::PlainArrayLarge { element_identifier, .. } => {
+            collect_from_identifier(element_identifier, out);
+        }
+        _ => {}
     }
 }
 
@@ -188,5 +254,61 @@ mod tests {
         assert_eq!(missing.len(), 2);
         assert!(missing.contains(&hash_b));
         assert!(missing.contains(&hash_c));
+    }
+
+    fn nested_pair() -> (CompleteTypeObject, EquivalenceHash, CompleteTypeObject, EquivalenceHash) {
+        let inner = CompleteTypeObject::Struct(CompleteStructType::new(
+            TypeFlag::new(ExtensibilityKind::Final, false, false),
+            "Inner".to_string(),
+            None,
+        ));
+        let inner_hash = EquivalenceHash::compute(&inner.serialize());
+
+        let mut outer_struct = CompleteStructType::new(
+            TypeFlag::new(ExtensibilityKind::Final, false, false),
+            "Outer".to_string(),
+            None,
+        );
+        outer_struct.add_member(CompleteStructMember::new(
+            0,
+            MemberFlag::default(),
+            TypeIdentifier::CompleteTypeId(inner_hash),
+            "child".to_string(),
+        ));
+        let outer = CompleteTypeObject::Struct(outer_struct);
+        let outer_hash = EquivalenceHash::compute(&outer.serialize());
+        (inner, inner_hash, outer, outer_hash)
+    }
+
+    #[test]
+    fn register_records_dependencies_and_full_closure() {
+        let mut registry = TypeRegistry::new();
+        let (inner, inner_hash, outer, outer_hash) = nested_pair();
+
+        registry.register_type_object(TypeObject::Complete(inner));
+        registry.register_type_object(TypeObject::Complete(outer));
+
+        // register_type_object walked the outer member and recorded inner as a dep.
+        assert_eq!(registry.get_dependencies(&outer_hash), Some(&vec![inner_hash]));
+        assert!(registry.missing_dependencies(&outer_hash).is_empty());
+
+        let closure = registry.complete_closure(&outer_hash);
+        assert_eq!(closure.len(), 2);
+        assert!(closure.iter().any(|(h, _)| *h == outer_hash));
+        assert!(closure.iter().any(|(h, _)| *h == inner_hash));
+    }
+
+    #[test]
+    fn closure_and_missing_when_inner_absent() {
+        let mut registry = TypeRegistry::new();
+        let (_inner, inner_hash, outer, outer_hash) = nested_pair();
+
+        registry.register_type_object(TypeObject::Complete(outer));
+
+        assert_eq!(registry.missing_dependencies(&outer_hash), vec![inner_hash]);
+        // The closure only yields what is resolvable locally.
+        let closure = registry.complete_closure(&outer_hash);
+        assert_eq!(closure.len(), 1);
+        assert_eq!(closure[0].0, outer_hash);
     }
 }

@@ -596,6 +596,11 @@ impl SedpLogic {
         }
 
         Self::register_discovered_type(&participant, subscription_builtin_topic_data.type_object());
+        self.maybe_request_discovered_type(
+            endpoint_guid.prefix(),
+            subscription_builtin_topic_data.type_identifier(),
+            subscription_builtin_topic_data.type_object().is_some(),
+        );
 
         participant
             .remote_subscriptions()
@@ -980,6 +985,11 @@ impl SedpLogic {
         }
 
         Self::register_discovered_type(&participant, publication_builtin_topic_data.type_object());
+        self.maybe_request_discovered_type(
+            endpoint_guid.prefix(),
+            publication_builtin_topic_data.type_identifier(),
+            publication_builtin_topic_data.type_object().is_some(),
+        );
 
         participant
             .remote_publications()
@@ -1927,7 +1937,7 @@ impl SedpLogic {
 
     /// Updates the writer proxy when data is received from a matched writer.
     /// Marks the change as received and increments the expected sequence number.
-    fn mark_as_received_in_writer_proxy(
+    pub(crate) fn mark_as_received_in_writer_proxy(
         &self,
         reader: &Arc<StatefulReader>,
         writer_guid: Guid,
@@ -1980,6 +1990,10 @@ impl UnicastMessageProcessor for SedpLogic {
         if data.writer_id == EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_WRITER {
             debug!("[SedpLogic] P2P data, skipping in sedp_logic");
             return Ok(());
+        }
+
+        if Self::is_type_lookup_data(data) {
+            return self.handle_type_lookup_data(rtps_header, data);
         }
 
         debug!("[data] entity id - reader: {:?}, writer: {:?}", data.reader_id, data.writer_id);

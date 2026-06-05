@@ -2643,15 +2643,9 @@ impl DomainParticipant {
         crate::xtypes::DynamicTypeSupport::from_type_object_with_registry(type_object, &guard)
     }
 
-    /// Build a dynamic `Topic` for a topic discovered over SEDP, using the
-    /// TypeObject that a remote publisher/subscriber advertised inline.
+    /// Build a dynamic `Topic` for a topic discovered over SEDP.
     pub fn create_topic_from_discovered_type(&self, topic_name: &str) -> DdsResult<Topic> {
-        let type_object = self.discovered_type_object(topic_name).ok_or_else(|| {
-            DdsError::Error(format!(
-                "No discovered TypeObject available for topic '{}'",
-                topic_name
-            ))
-        })?;
+        let type_object = self.discovered_type_object(topic_name)?;
         let type_support = Arc::new(self.create_dynamic_type_from_type_object(type_object)?);
         self.create_topic_dynamic(
             topic_name,
@@ -2662,21 +2656,60 @@ impl DomainParticipant {
         )
     }
 
-    /// Find an inline TypeObject advertised for `topic_name` by any discovered
-    /// remote publication or subscription.
-    fn discovered_type_object(&self, topic_name: &str) -> Option<crate::xtypes::TypeObject> {
-        let rtps_participant = self.get_rtps_participant().ok()?;
+    /// Resolve the TypeObject for `topic_name`
+    fn discovered_type_object(&self, topic_name: &str) -> DdsResult<crate::xtypes::TypeObject> {
+        let rtps_participant = self.get_rtps_participant()?;
+
+        // Inline TypeObject advertised by a remote publication/subscription.
         if let Some(bucket) = rtps_participant.remote_publications().get(topic_name) {
             if let Some(obj) = bucket.values().find_map(|b| b.type_object().cloned()) {
-                return Some(obj);
+                return Ok(obj);
             }
         }
         if let Some(bucket) = rtps_participant.remote_subscriptions().get(topic_name) {
             if let Some(obj) = bucket.values().find_map(|b| b.type_object().cloned()) {
-                return Some(obj);
+                return Ok(obj);
             }
         }
-        None
+
+        // Otherwise locate the advertised TypeIdentifier and its origin prefix.
+        let mut discovered: Option<(
+            crate::rtps::common::guid::GuidPrefix,
+            crate::xtypes::TypeIdentifier,
+        )> = None;
+        if let Some(bucket) = rtps_participant.remote_publications().get(topic_name) {
+            for b in bucket.values() {
+                if let Some(id) = b.type_identifier() {
+                    discovered = Some((b.endpoint_guid().prefix(), id.clone()));
+                    break;
+                }
+            }
+        }
+        if discovered.is_none() {
+            if let Some(bucket) = rtps_participant.remote_subscriptions().get(topic_name) {
+                for b in bucket.values() {
+                    if let Some(id) = b.type_identifier() {
+                        discovered = Some((b.endpoint_guid().prefix(), id.clone()));
+                        break;
+                    }
+                }
+            }
+        }
+
+        let (remote_prefix, type_id) = discovered.ok_or_else(|| {
+            DdsError::Error(format!("No discovered type advertised for topic '{}'", topic_name))
+        })?;
+
+        // Resolve from the registry (populated by an earlier TypeLookup reply).
+        if let Ok(registry) = rtps_participant.type_registry().read() {
+            if let Some(obj) = registry.resolve_type(&type_id) {
+                return Ok(crate::xtypes::TypeObject::Complete(obj.clone()));
+            }
+        }
+
+        // Not available yet: fetch it and ask the caller to retry.
+        rtps_participant.fetch_type_via_lookup(remote_prefix, type_id);
+        Err(DdsError::PreconditionNotMet)
     }
 
     pub(crate) fn register_type(
