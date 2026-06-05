@@ -315,6 +315,11 @@ impl<'a> Xcdr2Deserializer<'a> {
         self.position
     }
 
+    // Backing slice. xcdr2 input is always contiguous (no fragment reassembly).
+    pub fn get_data(&self) -> &[u8] {
+        self.data
+    }
+
     /// Align position to boundary (accounting for removed header)
     /// XCDR2 limits maximum alignment to 4 bytes to reduce padding
     /// XCDR1 (CDR) allows full alignment (up to 8 bytes for double/i64/u64)
@@ -439,8 +444,8 @@ impl<'a> DeserializerReader for Xcdr2Deserializer<'a> {
         self.check_available(size)
     }
 
-    fn get_data(&self) -> &[u8] {
-        self.data
+    fn copy_bytes_at(&self, offset: usize, out: &mut [u8]) {
+        out.copy_from_slice(&self.data[offset..offset + out.len()]);
     }
 
     fn get_position(&self) -> usize {
