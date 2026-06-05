@@ -2643,10 +2643,18 @@ impl DomainParticipant {
         crate::xtypes::DynamicTypeSupport::from_type_object_with_registry(type_object, &guard)
     }
 
+    pub fn create_dynamic_type_support_from_discovered_type(
+        &self,
+        topic_name: &str,
+    ) -> DdsResult<crate::xtypes::DynamicTypeSupport> {
+        let type_object = self.discovered_type_object(topic_name)?;
+        self.create_dynamic_type_from_type_object(type_object)
+    }
+
     /// Build a dynamic `Topic` for a topic discovered over SEDP.
     pub fn create_topic_from_discovered_type(&self, topic_name: &str) -> DdsResult<Topic> {
-        let type_object = self.discovered_type_object(topic_name)?;
-        let type_support = Arc::new(self.create_dynamic_type_from_type_object(type_object)?);
+        let type_support =
+            Arc::new(self.create_dynamic_type_support_from_discovered_type(topic_name)?);
         self.create_topic_dynamic(
             topic_name,
             type_support,

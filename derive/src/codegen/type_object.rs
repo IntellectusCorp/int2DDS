@@ -21,31 +21,46 @@ fn type_to_identifier(
     crate_path: &proc_macro2::TokenStream,
     as_char: bool,
 ) -> proc_macro2::TokenStream {
-    let method = get_serialization_method(ty);
+    if let syn::Type::Array(array) = ty {
+        let inner_id = type_to_identifier(&array.elem, crate_path, as_char);
+        let size = &array.len;
+        return quote! {
+            #crate_path::xtypes::TypeIdentifier::PlainArrayLarge {
+                header: #crate_path::xtypes::PlainCollectionHeader::default(),
+                array_bound_seq: vec![#size as u32],
+                element_identifier: Box::new(#inner_id),
+            }
+        };
+    }
 
-    if as_char {
-        // Override only u8 / [u8; N] cases. Other types fall through to the
-        // normal mapping below.
-        if matches!(method, SerializationMethod::U8) {
-            return quote! { #crate_path::xtypes::TypeIdentifier::Char8 };
-        }
-        if matches!(method, SerializationMethod::U8Array) {
-            if let syn::Type::Array(array) = ty {
-                let size = &array.len;
-                return quote! {
-                    #crate_path::xtypes::TypeIdentifier::PlainArrayLarge {
-                        header: #crate_path::xtypes::PlainCollectionHeader::default(),
-                        array_bound_seq: vec![#size as u32],
-                        element_identifier: Box::new(
-                            #crate_path::xtypes::TypeIdentifier::Char8
-                        ),
+    if let syn::Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.last() {
+            let wrapper = segment.ident.to_string();
+            if matches!(wrapper.as_str(), "Vec" | "Option" | "Box") {
+                if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                    if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
+                        let inner_id = type_to_identifier(inner_ty, crate_path, false);
+                        if wrapper == "Vec" {
+                            return quote! {
+                                #crate_path::xtypes::TypeIdentifier::PlainSequenceLarge {
+                                    header: #crate_path::xtypes::PlainCollectionHeader::default(),
+                                    bound: 0,
+                                    element_identifier: Box::new(#inner_id),
+                                }
+                            };
+                        }
+                        return inner_id;
                     }
-                };
+                }
             }
         }
     }
 
-    match method {
+    if as_char && matches!(get_serialization_method(ty), SerializationMethod::U8) {
+        return quote! { #crate_path::xtypes::TypeIdentifier::Char8 };
+    }
+
+    match get_serialization_method(ty) {
         SerializationMethod::Bool => quote! { #crate_path::xtypes::TypeIdentifier::Boolean },
         SerializationMethod::U8 => quote! { #crate_path::xtypes::TypeIdentifier::Byte },
         SerializationMethod::I8 => quote! { #crate_path::xtypes::TypeIdentifier::Int8 },
@@ -60,74 +75,11 @@ fn type_to_identifier(
         SerializationMethod::Char => quote! { #crate_path::xtypes::TypeIdentifier::Char8 },
         SerializationMethod::String => quote! { #crate_path::xtypes::TypeIdentifier::String8 },
         SerializationMethod::WString => quote! { #crate_path::xtypes::TypeIdentifier::String16 },
-        SerializationMethod::VecU8
-        | SerializationMethod::VecU16
-        | SerializationMethod::VecU32
-        | SerializationMethod::VecU64
-        | SerializationMethod::VecI8
-        | SerializationMethod::VecI16
-        | SerializationMethod::VecI32
-        | SerializationMethod::VecI64
-        | SerializationMethod::VecF32
-        | SerializationMethod::VecF64
-        | SerializationMethod::VecBool
-        | SerializationMethod::VecChar
-        | SerializationMethod::VecString => {
-            // Get inner type for sequences
-            if let syn::Type::Path(type_path) = ty {
-                if let Some(segment) = type_path.path.segments.last() {
-                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-                        if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
-                            let inner_id = type_to_identifier(inner_ty, crate_path, false);
-                            return quote! {
-                                #crate_path::xtypes::TypeIdentifier::PlainSequenceLarge {
-                                    header: #crate_path::xtypes::PlainCollectionHeader::default(),
-                                    bound: 0,
-                                    element_identifier: Box::new(#inner_id),
-                                }
-                            };
-                        }
-                    }
-                }
-            }
-            // Fallback
-            quote! { #crate_path::xtypes::TypeIdentifier::None }
-        }
-        SerializationMethod::U8Array
-        | SerializationMethod::U16Array
-        | SerializationMethod::U32Array
-        | SerializationMethod::U64Array
-        | SerializationMethod::I8Array
-        | SerializationMethod::I16Array
-        | SerializationMethod::I32Array
-        | SerializationMethod::I64Array
-        | SerializationMethod::F32Array
-        | SerializationMethod::F64Array
-        | SerializationMethod::BoolArray
-        | SerializationMethod::CharArray
-        | SerializationMethod::StringArray => {
-            // Arrays - get size from type
-            if let syn::Type::Array(array) = ty {
-                let inner_id = type_to_identifier(&array.elem, crate_path, false);
-                let size = &array.len;
-                return quote! {
-                    #crate_path::xtypes::TypeIdentifier::PlainArrayLarge {
-                        header: #crate_path::xtypes::PlainCollectionHeader::default(),
-                        array_bound_seq: vec![#size as u32],
-                        element_identifier: Box::new(#inner_id),
-                    }
-                };
-            }
-            // Fallback
-            quote! { #crate_path::xtypes::TypeIdentifier::None }
-        }
-        // Fallback for complex types (structs, enums, etc.)
-        SerializationMethod::Fallback => {
-            // For complex types that may or may not implement HasTypeObject,
-            // use a static approach based on type name hash
+        // Composite (struct / enum / union): name-based MinimalTypeId, matching
+        // the id under which `collect_nested_type_objects` registers the child.
+        _ => {
             let type_str = quote!(#ty).to_string();
             quote! {
-                // Use type name to create a minimal identifier
                 #crate_path::xtypes::TypeIdentifier::MinimalTypeId(
                     #crate_path::xtypes::EquivalenceHash::compute(#type_str.as_bytes())
                 )
