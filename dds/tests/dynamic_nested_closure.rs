@@ -114,6 +114,47 @@ fn nested_members_resolve_to_typeref() {
     }
 }
 
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+struct Collections {
+    leaves: Vec<Leaf>,
+    fixed: [Leaf; 3],
+    boxed: Box<Leaf>,
+}
+
+#[test]
+fn composite_collection_elements_resolve_to_typeref() {
+    let registry = registry_with::<Collections>();
+    let dt = DynamicType::from_type_object_with_registry(
+        Arc::new(Collections::complete_type_object()),
+        Collections::type_identifier(),
+        &registry,
+    )
+    .expect("build Collections dynamic type");
+
+    match member(&dt, "leaves") {
+        DynamicTypeKind::Sequence { element_type, .. } => assert!(
+            matches!(element_type.as_ref(), DynamicTypeKind::TypeRef(_)),
+            "Vec<Leaf> element must resolve to TypeRef, got {:?}",
+            element_type
+        ),
+        other => panic!("leaves must be a Sequence, got {:?}", other),
+    }
+    match member(&dt, "fixed") {
+        DynamicTypeKind::Array { element_type, .. } => assert!(
+            matches!(element_type.as_ref(), DynamicTypeKind::TypeRef(_)),
+            "[Leaf; 3] element must resolve to TypeRef, got {:?}",
+            element_type
+        ),
+        other => panic!("fixed must be an Array, got {:?}", other),
+    }
+    assert!(
+        matches!(member(&dt, "boxed"), DynamicTypeKind::TypeRef(_)),
+        "Box<Leaf> must resolve to TypeRef, got {:?}",
+        member(&dt, "boxed")
+    );
+}
+
 #[test]
 fn unregistered_nested_stays_external() {
     // With an empty registry the same build leaves nested members external,
