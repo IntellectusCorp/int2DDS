@@ -12,16 +12,12 @@ use crate::xtypes::dynamic_type::{DynamicType, DynamicTypeError, DynamicTypeKind
 /// Dynamic data container - stores field values at runtime.
 #[derive(Debug, Clone)]
 pub struct DynamicData {
-    /// The type descriptor
     dynamic_type: Arc<DynamicType>,
-    /// Field values by name. Keys use `Arc<str>` so they can be cheaply
-    /// shared with `MemberDescriptor::name` (refcount bump instead of alloc).
     values: HashMap<Arc<str>, DynamicValue>,
 }
 
 impl PartialEq for DynamicData {
     fn eq(&self, other: &Self) -> bool {
-        // Compare type names and values (not Arc pointers)
         self.dynamic_type.type_name() == other.dynamic_type.type_name()
             && self.values == other.values
     }
@@ -50,10 +46,6 @@ impl DynamicData {
     pub fn type_name(&self) -> &str {
         self.dynamic_type.type_name()
     }
-
-    // ========================================================================
-    // Type-safe value access
-    // ========================================================================
 
     /// Get a field value with type conversion.
     pub fn get<T: FromDynamicValue>(&self, field: &str) -> Result<T, DynamicTypeError> {
@@ -112,10 +104,6 @@ impl DynamicData {
         T::from_dynamic(current_value)
     }
 
-    // ========================================================================
-    // Raw value access
-    // ========================================================================
-
     /// Get a raw DynamicValue by field name.
     pub fn get_value(&self, field: &str) -> Option<&DynamicValue> {
         self.values.get(field)
@@ -153,10 +141,6 @@ impl DynamicData {
         self.values.clear();
     }
 
-    // ========================================================================
-    // Iteration
-    // ========================================================================
-
     /// Iterate over all field values.
     pub fn iter_fields(&self) -> impl Iterator<Item = (&str, &DynamicValue)> {
         self.values.iter().map(|(k, v)| (k.as_ref(), v))
@@ -190,9 +174,6 @@ impl DynamicData {
 /// Represents any DDS value at runtime.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DynamicValue {
-    // ========================================================================
-    // Primitives
-    // ========================================================================
     Boolean(bool),
     Int8(i8),
     Int16(i16),
@@ -206,13 +187,9 @@ pub enum DynamicValue {
     Float64(f64),
     Char8(char),
     Byte(u8),
-
-    // ========================================================================
-    // Complex types
-    // ========================================================================
     /// UTF-8 string
     String(String),
-    /// Wide string (stored as String for simplicity)
+    /// Wide string
     WString(String),
     /// Enum value with name and numeric value
     Enum {
@@ -234,6 +211,8 @@ pub enum DynamicValue {
     Sequence(Vec<DynamicValue>),
     /// Fixed-size array
     Array(Vec<DynamicValue>),
+    /// Map (ordered key-value pairs)
+    Map(Vec<(DynamicValue, DynamicValue)>),
     /// Optional value
     Optional(Option<Box<DynamicValue>>),
     /// Null/unset value
@@ -266,6 +245,7 @@ impl DynamicValue {
             DynamicValue::Struct(_) => "Struct",
             DynamicValue::Sequence(_) => "Sequence",
             DynamicValue::Array(_) => "Array",
+            DynamicValue::Map(_) => "Map",
             DynamicValue::Optional(_) => "Optional",
             DynamicValue::Null => "Null",
         }
@@ -319,6 +299,7 @@ impl DynamicValue {
             DynamicTypeKind::String { .. } => DynamicValue::String(String::new()),
             DynamicTypeKind::WString { .. } => DynamicValue::WString(String::new()),
             DynamicTypeKind::Sequence { .. } => DynamicValue::Sequence(Vec::new()),
+            DynamicTypeKind::Map { .. } => DynamicValue::Map(Vec::new()),
             DynamicTypeKind::Array { dimensions, element_type } => {
                 let total_size: u32 = dimensions.iter().product();
                 let default_element = Self::default_for_kind(element_type);
@@ -367,16 +348,13 @@ impl fmt::Display for DynamicValue {
             DynamicValue::Struct(data) => write!(f, "{} {{ ... }}", data.type_name()),
             DynamicValue::Sequence(items) => write!(f, "[{} items]", items.len()),
             DynamicValue::Array(items) => write!(f, "[{} items]", items.len()),
+            DynamicValue::Map(entries) => write!(f, "{{{} entries}}", entries.len()),
             DynamicValue::Optional(Some(v)) => write!(f, "Some({})", v),
             DynamicValue::Optional(None) => write!(f, "None"),
             DynamicValue::Null => write!(f, "null"),
         }
     }
 }
-
-// ============================================================================
-// Type conversion traits
-// ============================================================================
 
 /// Trait for types that can be converted from DynamicValue.
 pub trait FromDynamicValue: Sized {
@@ -387,10 +365,6 @@ pub trait FromDynamicValue: Sized {
 pub trait IntoDynamicValue {
     fn into_dynamic(self) -> DynamicValue;
 }
-
-// ============================================================================
-// FromDynamicValue implementations
-// ============================================================================
 
 impl FromDynamicValue for bool {
     fn from_dynamic(value: &DynamicValue) -> Result<Self, DynamicTypeError> {
@@ -580,6 +554,25 @@ impl<T: FromDynamicValue> FromDynamicValue for Vec<T> {
     }
 }
 
+impl<K, V> FromDynamicValue for HashMap<K, V>
+where
+    K: FromDynamicValue + Eq + std::hash::Hash,
+    V: FromDynamicValue,
+{
+    fn from_dynamic(value: &DynamicValue) -> Result<Self, DynamicTypeError> {
+        match value {
+            DynamicValue::Map(entries) => entries
+                .iter()
+                .map(|(k, v)| Ok((K::from_dynamic(k)?, V::from_dynamic(v)?)))
+                .collect(),
+            _ => Err(DynamicTypeError::ConversionError(format!(
+                "Cannot convert {} to HashMap",
+                value.type_kind()
+            ))),
+        }
+    }
+}
+
 impl<T: FromDynamicValue> FromDynamicValue for Option<T> {
     fn from_dynamic(value: &DynamicValue) -> Result<Self, DynamicTypeError> {
         match value {
@@ -598,10 +591,6 @@ impl FromDynamicValue for DynamicValue {
         Ok(value.clone())
     }
 }
-
-// ============================================================================
-// IntoDynamicValue implementations
-// ============================================================================
 
 impl IntoDynamicValue for bool {
     fn into_dynamic(self) -> DynamicValue {
@@ -690,6 +679,18 @@ impl IntoDynamicValue for &str {
 impl<T: IntoDynamicValue> IntoDynamicValue for Vec<T> {
     fn into_dynamic(self) -> DynamicValue {
         DynamicValue::Sequence(self.into_iter().map(|v| v.into_dynamic()).collect())
+    }
+}
+
+impl<K, V> IntoDynamicValue for HashMap<K, V>
+where
+    K: IntoDynamicValue,
+    V: IntoDynamicValue,
+{
+    fn into_dynamic(self) -> DynamicValue {
+        DynamicValue::Map(
+            self.into_iter().map(|(k, v)| (k.into_dynamic(), v.into_dynamic())).collect(),
+        )
     }
 }
 
