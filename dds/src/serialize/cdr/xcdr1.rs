@@ -1,5 +1,7 @@
+use bytes::Bytes;
 use speedy::Endianness;
 
+use super::cdr_input::CdrInput;
 use super::{CdrError, ExtensibilityKind};
 use crate::serialize::core::endianness_from_bool;
 use crate::serialize::{
@@ -187,7 +189,7 @@ pub enum PlCdrMemberHeader {
 
 pub struct CdrDeserializer<'a> {
     pub(super) endianness: Endianness,
-    pub(super) data: &'a [u8],
+    pub(super) input: CdrInput<'a>,
     pub(super) position: usize,
 }
 
@@ -205,11 +207,37 @@ impl<'a> CdrDeserializer<'a> {
             _ => return Err(CdrError::InvalidEncapsulation(encap_id)),
         };
 
-        Ok(Self { endianness, data: &data[4..], position: 0 })
+        Ok(Self { endianness, input: CdrInput::Contiguous(&data[4..]), position: 0 })
     }
 
     pub fn new_without_header(data: &'a [u8], little_endian: bool) -> Self {
-        Self { endianness: endianness_from_bool(little_endian), data, position: 0 }
+        Self {
+            endianness: endianness_from_bool(little_endian),
+            input: CdrInput::Contiguous(data),
+            position: 0,
+        }
+    }
+
+    // Fragment receive path: deserialize directly across fragment chunks with no
+    // contiguous reassembly buffer. Reads the 4-byte encapsulation header from the
+    // chunks (like `new`), then exposes the body via `skip` so positions stay
+    // body-relative.
+    pub fn new_chained(chunks: &'a [Bytes]) -> Result<Self, CdrError> {
+        let total: usize = chunks.iter().map(|c| c.len()).sum();
+        if total < 4 {
+            return Err(CdrError::InsufficientData);
+        }
+
+        let header = CdrInput::Chained { chunks, skip: 0 }.read_array::<4>(0);
+        let encap_id = u16::from_be_bytes([header[0], header[1]]);
+
+        let endianness = match encap_id {
+            0x0000 | 0x0002 => Endianness::BigEndian,
+            0x0001 | 0x0003 => Endianness::LittleEndian,
+            _ => return Err(CdrError::InvalidEncapsulation(encap_id)),
+        };
+
+        Ok(Self { endianness, input: CdrInput::Chained { chunks, skip: 4 }, position: 0 })
     }
 
     pub(super) fn align(&mut self, alignment: usize) {
@@ -218,7 +246,7 @@ impl<'a> CdrDeserializer<'a> {
 
     #[inline]
     pub(super) fn check_available(&self, size: usize) -> Result<(), CdrError> {
-        if self.position + size > self.data.len() {
+        if self.position + size > self.input.len() {
             Err(CdrError::InsufficientData)
         } else {
             Ok(())
@@ -229,14 +257,10 @@ impl<'a> CdrDeserializer<'a> {
         self.align(4);
         self.check_available(4)?;
 
-        let pid_bytes: [u8; 2] = self.data[self.position..self.position + 2]
-            .try_into()
-            .map_err(|_| CdrError::InsufficientData)?;
+        let pid_bytes = self.input.read_array::<2>(self.position);
         let pid = from_bytes_u16(pid_bytes, self.endianness);
 
-        let len_bytes: [u8; 2] = self.data[self.position + 2..self.position + 4]
-            .try_into()
-            .map_err(|_| CdrError::InsufficientData)?;
+        let len_bytes = self.input.read_array::<2>(self.position + 2);
         let length = from_bytes_u16(len_bytes, self.endianness);
 
         let raw_pid = pid & 0x3FFF;
@@ -252,14 +276,10 @@ impl<'a> CdrDeserializer<'a> {
             self.position += 4;
             self.check_available(8)?;
 
-            let id_bytes: [u8; 4] = self.data[self.position..self.position + 4]
-                .try_into()
-                .map_err(|_| CdrError::InsufficientData)?;
+            let id_bytes = self.input.read_array::<4>(self.position);
             let member_id = from_bytes_u32(id_bytes, self.endianness);
 
-            let mlen_bytes: [u8; 4] = self.data[self.position + 4..self.position + 8]
-                .try_into()
-                .map_err(|_| CdrError::InsufficientData)?;
+            let mlen_bytes = self.input.read_array::<4>(self.position + 4);
             let member_length = from_bytes_u32(mlen_bytes, self.endianness);
 
             self.position += 8;
@@ -276,13 +296,10 @@ impl<'a> CdrDeserializer<'a> {
     }
 
     pub fn is_at_sentinel(&self) -> bool {
-        if self.position + 4 > self.data.len() {
+        if self.position + 4 > self.input.len() {
             return false;
         }
-        let pid_bytes: [u8; 2] = match self.data[self.position..self.position + 2].try_into() {
-            Ok(b) => b,
-            Err(_) => return false,
-        };
+        let pid_bytes = self.input.read_array::<2>(self.position);
         let pid = from_bytes_u16(pid_bytes, self.endianness);
         (pid & 0x3FFF) == (PID_SENTINEL & 0x3FFF)
     }
@@ -301,8 +318,8 @@ impl<'a> DeserializerReader for CdrDeserializer<'a> {
         self.check_available(size)
     }
 
-    fn get_data(&self) -> &[u8] {
-        self.data
+    fn copy_bytes_at(&self, offset: usize, out: &mut [u8]) {
+        self.input.copy_to(offset, out);
     }
 
     fn get_position(&self) -> usize {
@@ -319,5 +336,60 @@ impl<'a> DeserializerReader for CdrDeserializer<'a> {
 
     fn align(&mut self, alignment: usize) {
         self.align(alignment);
+    }
+}
+
+#[cfg(test)]
+mod chained_tests {
+    use super::*;
+
+    // Split a byte buffer into chunks of the given sizes.
+    fn split(buf: &[u8], sizes: &[usize]) -> Vec<Bytes> {
+        let mut out = Vec::new();
+        let mut pos = 0;
+        for &n in sizes {
+            out.push(Bytes::copy_from_slice(&buf[pos..pos + n]));
+            pos += n;
+        }
+        assert_eq!(pos, buf.len(), "chunk sizes must cover the whole buffer");
+        out
+    }
+
+    // A hand-built little-endian CDR buffer: 4-byte encap header + body holding a
+    // u64, a length-prefixed byte sequence, padding, then a second u64. The second
+    // u64 forces 8-byte alignment after an odd position.
+    fn sample_buffer() -> Vec<u8> {
+        let mut buf = vec![0x00, 0x01, 0x00, 0x00]; // CDR_LE encapsulation
+        buf.extend_from_slice(&0x0102030405060708u64.to_le_bytes()); // body 0..8
+        buf.extend_from_slice(&3u32.to_le_bytes()); // seq length, body 8..12
+        buf.extend_from_slice(&[0xAA, 0xBB, 0xCC]); // seq bytes, body 12..15
+        buf.push(0x00); // pad to 8-byte body alignment, body 15
+        buf.extend_from_slice(&0x1112131415161718u64.to_le_bytes()); // body 16..24
+        buf
+    }
+
+    fn read_fields(de: &mut CdrDeserializer) -> (u64, Vec<u8>, u64) {
+        let a = de.deserialize_u64().unwrap();
+        let seq = de.deserialize_byte_sequence().unwrap();
+        let b = de.deserialize_u64().unwrap();
+        (a, seq, b)
+    }
+
+    #[test]
+    fn chained_matches_contiguous_with_header_and_alignment() {
+        let buf = sample_buffer();
+
+        let mut contig = CdrDeserializer::new(&buf).unwrap();
+        let expected = read_fields(&mut contig);
+        assert_eq!(expected.0, 0x0102030405060708);
+        assert_eq!(expected.1, vec![0xAA, 0xBB, 0xCC]);
+        assert_eq!(expected.2, 0x1112131415161718);
+
+        // Awkward split: the first u64 (absolute bytes 4..12) spans three chunks.
+        let chunks = split(&buf, &[5, 6, 4, 8, 5]);
+        let mut chained = CdrDeserializer::new_chained(&chunks).unwrap();
+        let got = read_fields(&mut chained);
+
+        assert_eq!(got, expected);
     }
 }

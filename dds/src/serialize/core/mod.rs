@@ -1,7 +1,6 @@
 // Core serialization modules
 mod alignment;
 mod bounded_types;
-mod buffer_pool;
 mod collections;
 mod endianness;
 mod errors;
@@ -12,7 +11,6 @@ pub mod xcdr;
 // Re-export everything from submodules
 pub use alignment::*;
 pub use bounded_types::*;
-pub use buffer_pool::*;
 pub use collections::*;
 pub use endianness::*;
 pub use errors::*;

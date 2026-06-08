@@ -68,8 +68,8 @@ impl<'a> DeserializerReader for CdrDeserializer<'a> {
         self.check_available(size)
     }
 
-    fn get_data(&self) -> &[u8] {
-        self.data
+    fn copy_bytes_at(&self, offset: usize, out: &mut [u8]) {
+        out.copy_from_slice(&self.data[offset..offset + out.len()]);
     }
 
     fn get_position(&self) -> usize {
