@@ -14,10 +14,17 @@ use crate::{
             rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult},
             sequence::SequenceNumber,
         },
-        entities::history::{cache_change::CacheChange, history_cache::HistoryCache},
+        entities::history::{
+            cache_change::CacheChange, cache_change_pool::CacheChangePool,
+            history_cache::HistoryCache,
+        },
     },
     subscription::data_reader_history::ReaderChangeId,
 };
+
+// Upper bound on pooled idle changes when history is effectively unbounded
+// (KEEP_ALL with unlimited resource limits reports max_samples as i32::MAX).
+const MAX_POOL_CAP: usize = 1024;
 
 #[derive(Debug)]
 #[allow(clippy::type_complexity)]
@@ -27,14 +34,26 @@ pub struct ReaderHistoryCache {
     // Builtin endpoints do not have associated DDS entity at the moment, optional for now.
     // Use dyn trait object to erase the type parameter.
     datareader_cache: Option<Weak<Mutex<dyn dcps_history_cache + Send + Sync>>>,
+    pool: CacheChangePool,
 }
 
 impl HistoryCache for ReaderHistoryCache {
     fn remove_change(&mut self, a_change: Arc<CacheChange>) -> RtpsResult<()> {
-        self.changes.retain(|change| {
-            (change.writer_guid() != a_change.writer_guid())
-                || (change.sequence_number() != a_change.sequence_number())
-        });
+        // Locate by identity, then remove(pos) so ownership of the Arc comes back
+        // to us (retain would drop silently and lose the pool-return chance).
+        let removed = self
+            .changes
+            .iter()
+            .position(|c| {
+                c.writer_guid() == a_change.writer_guid()
+                    && c.sequence_number() == a_change.sequence_number()
+            })
+            .map(|pos| self.changes.remove(pos));
+        // Release caller's Arc first so the vec's Arc can try_unwrap on its own.
+        self.pool.try_release(a_change);
+        if let Some(change) = removed {
+            self.pool.try_release(change);
+        }
         Ok(())
     }
 
@@ -85,7 +104,14 @@ impl ReaderHistoryCache {
             owner_id,
             changes: Vec::new(),
             datareader_cache: datareader_cache.map(|arc| Arc::downgrade(&arc)),
+            // Pool starts empty; fills up as evictions return changes through try_release.
+            // Steady-state size converges to history depth.
+            pool: CacheChangePool::with_capacity(0),
         }
+    }
+
+    pub(crate) fn acquire_change(&mut self) -> CacheChange {
+        self.pool.acquire()
     }
 
     pub(crate) fn get_change(
@@ -104,6 +130,14 @@ impl ReaderHistoryCache {
         datareader_cache: Weak<Mutex<dyn dcps_history_cache + Send + Sync>>,
     ) {
         self.datareader_cache = Some(datareader_cache);
+        // Size the pool to the history's steady-state working set so released
+        // changes are retained; with cap 0 the pool drops everything.
+        if let Some(cache) = self.datareader_cache.as_ref().and_then(|w| w.upgrade()) {
+            if let Ok(guard) = cache.lock() {
+                let depth = guard.get_max_samples().max(0) as usize;
+                self.pool.set_cap(depth.min(MAX_POOL_CAP));
+            }
+        }
     }
 
     /// Add CacheChange to ReaderHistoryCache.
@@ -148,7 +182,8 @@ impl ReaderHistoryCache {
             // Built-in endpoint: Resource limits & History QoS not applied
             // Therefore arbitrarily limit size
             if self.changes.len() >= BUILTIN_ENDPOINT_HISTORYCACHE_CAPACITY {
-                self.changes.remove(0);
+                let removed = self.changes.remove(0);
+                self.pool.try_release(removed);
             }
 
             let shared = Arc::new(a_change);
@@ -163,14 +198,21 @@ impl ReaderHistoryCache {
         }
     }
 
-    /// Remove changes by the given change IDs.
+    // Remove changes by the given change IDs.
     pub(crate) fn remove_change_by_id_set(
         &mut self,
         change_id_set: HashSet<ReaderChangeId>,
     ) -> RtpsResult<()> {
-        self.changes.retain(|change| {
-            !change_id_set.contains(&(change.writer_guid(), change.sequence_number()))
-        });
+        let mut i = 0;
+        while i < self.changes.len() {
+            let id = (self.changes[i].writer_guid(), self.changes[i].sequence_number());
+            if change_id_set.contains(&id) {
+                let removed = self.changes.remove(i);
+                self.pool.try_release(removed);
+            } else {
+                i += 1;
+            }
+        }
         Ok(())
     }
 }

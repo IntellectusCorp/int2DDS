@@ -1,14 +1,6 @@
 use speedy::Endianness;
 
-use crate::{
-    rtps::{
-        builtin::data::content_filtered_topic::ContentFilterInfo,
-        common::parameters::{ParameterId, ParameterList},
-    },
-    serialize::core::PooledBuffer,
-};
-
-use super::PARAMETER_ALIGNMENT;
+use crate::rtps::builtin::data::content_filtered_topic::ContentFilterInfo;
 
 /// Serializer specifically designed for inline QoS parameters in RTPS DATA messages
 pub struct InlineQosSerializer {
@@ -21,69 +13,6 @@ impl InlineQosSerializer {
         Self {
             endianness: if big_endian { Endianness::BigEndian } else { Endianness::LittleEndian },
         }
-    }
-
-    /// Serialize inline QoS parameters from ParameterList to raw bytes
-    pub fn serialize_parameter_list(&self, parameters: &ParameterList) -> Result<Vec<u8>, String> {
-        let params = parameters.parameters();
-        if params.is_empty() {
-            // debug!("Empty parameter list - returning empty bytes");
-            return Ok(Vec::new());
-        }
-
-        let estimated_capacity: usize = params
-            .iter()
-            .take_while(|p| p.parameter_id() != ParameterId::PidSentinel)
-            .map(|p| {
-                let value_len = p.value().len();
-                let padding =
-                    (PARAMETER_ALIGNMENT - (value_len % PARAMETER_ALIGNMENT)) % PARAMETER_ALIGNMENT;
-                4 + value_len + padding // 4 = param_id (2) + length (2)
-            })
-            .sum::<usize>()
-            + 4; // sentinel
-
-        // Use buffer pool for inline QoS serialization
-        let mut buffer = PooledBuffer::with_capacity(estimated_capacity);
-
-        for param in params {
-            if param.parameter_id() == ParameterId::PidSentinel {
-                break;
-            }
-
-            self.write_u16(&mut buffer, param.parameter_id() as u16);
-            let param_value = param.value();
-            self.write_u16(&mut buffer, param_value.len() as u16);
-            buffer.extend_from_slice(param_value);
-
-            // Add padding to align to 4-byte boundary
-            self.add_padding(&mut buffer, param_value.len());
-        }
-
-        // Add sentinel parameter
-        self.write_u16(&mut buffer, ParameterId::PidSentinel as u16);
-        self.write_u16(&mut buffer, 0); // length = 0
-
-        // debug!("Completed inline QoS serialization: {} bytes", buffer.len());
-        Ok(buffer.into_vec())
-    }
-
-    /// Add padding to align to 4-byte boundary
-    fn add_padding(&self, buffer: &mut Vec<u8>, data_len: usize) {
-        let padding =
-            (PARAMETER_ALIGNMENT - (data_len % PARAMETER_ALIGNMENT)) % PARAMETER_ALIGNMENT;
-        for _ in 0..padding {
-            buffer.push(0);
-        }
-    }
-
-    /// Write u16 with endianness consideration
-    fn write_u16(&self, buffer: &mut Vec<u8>, value: u16) {
-        let bytes = match self.endianness {
-            Endianness::LittleEndian => value.to_le_bytes(),
-            Endianness::BigEndian => value.to_be_bytes(),
-        };
-        buffer.extend_from_slice(&bytes);
     }
 
     /// Write u32 with endianness consideration
@@ -115,8 +44,7 @@ impl InlineQosSerializer {
         let num_signatures = content_filter_info.filter_signatures.len();
         let capacity = 8 + (4 * num_bitmaps) + (16 * num_signatures);
 
-        // Use buffer pool for content filter info serialization
-        let mut buffer = PooledBuffer::with_capacity(capacity);
+        let mut buffer: Vec<u8> = Vec::with_capacity(capacity);
 
         // numBitmaps
         self.write_u32(&mut buffer, num_bitmaps as u32);
@@ -134,6 +62,73 @@ impl InlineQosSerializer {
             buffer.extend_from_slice(signature);
         }
 
-        Ok(buffer.into_vec())
+        Ok(buffer)
+    }
+}
+
+// Wire-format snapshots: bytes must stay identical across refactors that
+// claim to preserve wire compatibility (DDS-RTPS 2.5 section 9.6.4.1).
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rtps::builtin::data::content_filtered_topic::ContentFilterInfo;
+
+    #[test]
+    fn serialize_content_filter_info_little_endian_single_entry() {
+        let info = ContentFilterInfo {
+            filter_result: vec![0x12345678],
+            filter_signatures: vec![[0xAA; 16]],
+        };
+        let bytes = InlineQosSerializer::new(false).serialize_content_filter_info(&info).unwrap();
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&1u32.to_le_bytes()); // numBitmaps
+        expected.extend_from_slice(&0x12345678i32.to_le_bytes()); // bitmap[0]
+        expected.extend_from_slice(&1u32.to_le_bytes()); // numSignatures
+        expected.extend_from_slice(&[0xAA; 16]); // signature[0]
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn serialize_content_filter_info_little_endian_empty() {
+        let info = ContentFilterInfo { filter_result: vec![], filter_signatures: vec![] };
+        let bytes = InlineQosSerializer::new(false).serialize_content_filter_info(&info).unwrap();
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&0u32.to_le_bytes());
+        expected.extend_from_slice(&0u32.to_le_bytes());
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn serialize_content_filter_info_little_endian_two_entries() {
+        let info = ContentFilterInfo {
+            filter_result: vec![-1, 1],
+            filter_signatures: vec![[0x11; 16], [0x22; 16]],
+        };
+        let bytes = InlineQosSerializer::new(false).serialize_content_filter_info(&info).unwrap();
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&2u32.to_le_bytes());
+        expected.extend_from_slice(&(-1i32).to_le_bytes());
+        expected.extend_from_slice(&1i32.to_le_bytes());
+        expected.extend_from_slice(&2u32.to_le_bytes());
+        expected.extend_from_slice(&[0x11; 16]);
+        expected.extend_from_slice(&[0x22; 16]);
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn serialize_content_filter_info_big_endian_single_entry() {
+        let info =
+            ContentFilterInfo { filter_result: vec![1], filter_signatures: vec![[0xAA; 16]] };
+        let bytes = InlineQosSerializer::new(true).serialize_content_filter_info(&info).unwrap();
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&1u32.to_be_bytes());
+        expected.extend_from_slice(&1i32.to_be_bytes());
+        expected.extend_from_slice(&1u32.to_be_bytes());
+        expected.extend_from_slice(&[0xAA; 16]);
+        assert_eq!(bytes, expected);
     }
 }
