@@ -102,6 +102,23 @@ impl TypeRegistry {
         }
     }
 
+    pub fn transitive_dependency_hashes(&self, roots: &[EquivalenceHash]) -> Vec<EquivalenceHash> {
+        let mut out = Vec::new();
+        let mut seen: std::collections::HashSet<EquivalenceHash> = roots.iter().copied().collect();
+        let mut stack: Vec<EquivalenceHash> = roots.iter().rev().copied().collect();
+        while let Some(h) = stack.pop() {
+            if let Some(deps) = self.dependencies.get(&h) {
+                for &dep in deps {
+                    if seen.insert(dep) {
+                        out.push(dep);
+                        stack.push(dep);
+                    }
+                }
+            }
+        }
+        out
+    }
+
     pub fn complete_closure(
         &self,
         hash: &EquivalenceHash,
@@ -305,6 +322,20 @@ mod tests {
         assert_eq!(closure.len(), 2);
         assert!(closure.iter().any(|(h, _)| *h == outer_hash));
         assert!(closure.iter().any(|(h, _)| *h == inner_hash));
+    }
+
+    #[test]
+    fn transitive_deps_exclude_roots_and_list_children() {
+        let mut registry = TypeRegistry::new();
+        let (inner, inner_hash, outer, outer_hash) = nested_pair();
+        registry.register_type_object(TypeObject::Complete(inner));
+        registry.register_type_object(TypeObject::Complete(outer));
+
+        let deps = registry.transitive_dependency_hashes(&[outer_hash]);
+        assert_eq!(deps, vec![inner_hash], "root excluded, transitive child listed");
+
+        // A leaf with no dependencies yields nothing.
+        assert!(registry.transitive_dependency_hashes(&[inner_hash]).is_empty());
     }
 
     #[test]

@@ -19,9 +19,41 @@ pub const TYPE_LOOKUP_GETTYPES_HASH: i32 = 0x018252d3;
 /// Operation discriminator for `getTypeDependencies`.
 pub const TYPE_LOOKUP_GETTYPE_DEPENDENCIES_HASH: i32 = 0x05aafb31;
 
-// ---------------------------------------------------------------------------
-// Primitive wire helpers (little-endian)
-// ---------------------------------------------------------------------------
+pub const MAX_DEPENDENCIES_PER_REPLY: usize = 75;
+
+/// Fixed continuation-point length used by Fast-DDS (`sequence<octet, 32>`).
+const CONTINUATION_POINT_LEN: usize = 32;
+
+/// Decode a continuation point (big-endian counter) into a chunk index.
+pub fn continuation_point_index(continuation_point: &[u8]) -> usize {
+    continuation_point.iter().fold(0usize, |acc, &b| (acc << 8) | b as usize)
+}
+
+pub fn continuation_point_for(index: usize) -> Vec<u8> {
+    let mut cp = vec![0u8; CONTINUATION_POINT_LEN];
+    let bytes = index.to_be_bytes();
+    cp[CONTINUATION_POINT_LEN - bytes.len()..].copy_from_slice(&bytes);
+    cp
+}
+
+pub fn chunk_dependencies(
+    all: Vec<TypeIdentifierWithSize>,
+    continuation_point: &[u8],
+) -> GetTypeDependenciesOut {
+    if all.len() < MAX_DEPENDENCIES_PER_REPLY {
+        return GetTypeDependenciesOut { dependent_typeids: all, continuation_point: Vec::new() };
+    }
+    let index = continuation_point_index(continuation_point);
+    let start = index * MAX_DEPENDENCIES_PER_REPLY;
+    let end = (start + MAX_DEPENDENCIES_PER_REPLY).min(all.len());
+    let dependent_typeids = all.get(start..end).map(<[_]>::to_vec).unwrap_or_default();
+    let next = if start + MAX_DEPENDENCIES_PER_REPLY > all.len() {
+        Vec::new()
+    } else {
+        continuation_point_for(index + 1)
+    };
+    GetTypeDependenciesOut { dependent_typeids, continuation_point: next }
+}
 
 fn write_u32(buffer: &mut Vec<u8>, value: u32) {
     buffer.extend_from_slice(&value.to_le_bytes());
@@ -60,12 +92,8 @@ fn read_string(data: &[u8], pos: &mut usize) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| "Invalid UTF-8 in string".to_string())
 }
 
-// ---------------------------------------------------------------------------
-// SampleIdentity / RPC headers
-// ---------------------------------------------------------------------------
-
 /// DDS-RPC `SampleIdentity`: correlates a reply with its originating request.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SampleIdentity {
     pub writer_guid: Guid,
     pub sequence_number: SequenceNumber,
@@ -143,10 +171,6 @@ impl ReplyHeader {
         Ok(Self { related_request_id, remote_exception_code })
     }
 }
-
-// ---------------------------------------------------------------------------
-// Operation payloads
-// ---------------------------------------------------------------------------
 
 fn write_type_ids(buffer: &mut Vec<u8>, type_ids: &[TypeIdentifier]) {
     write_u32(buffer, type_ids.len() as u32);
@@ -259,10 +283,6 @@ impl GetTypesOut {
         Ok(Self { types })
     }
 }
-
-// ---------------------------------------------------------------------------
-// Request / Reply envelopes
-// ---------------------------------------------------------------------------
 
 /// Operation call union carried by a [`TypeLookupRequest`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -462,6 +482,55 @@ mod tests {
         };
         let bytes = reply.serialize();
         assert_eq!(TypeLookupReply::deserialize(&bytes).unwrap(), reply);
+    }
+
+    fn dep(seed: &[u8]) -> TypeIdentifierWithSize {
+        TypeIdentifierWithSize::new(
+            TypeIdentifier::CompleteTypeId(EquivalenceHash::compute(seed)),
+            1,
+        )
+    }
+
+    #[test]
+    fn continuation_point_roundtrip() {
+        for index in [0usize, 1, 2, 75, 1234] {
+            let cp = continuation_point_for(index);
+            assert_eq!(cp.len(), 32);
+            assert_eq!(continuation_point_index(&cp), index);
+        }
+        // Empty continuation point decodes to the first chunk.
+        assert_eq!(continuation_point_index(&[]), 0);
+    }
+
+    #[test]
+    fn chunk_dependencies_single_reply_under_limit() {
+        let all: Vec<_> = (0..MAX_DEPENDENCIES_PER_REPLY as u8 - 1).map(|i| dep(&[i])).collect();
+        let out = chunk_dependencies(all.clone(), &[]);
+        assert_eq!(out.dependent_typeids, all);
+        assert!(out.continuation_point.is_empty());
+    }
+
+    #[test]
+    fn chunk_dependencies_pages_in_order_until_drained() {
+        let total = MAX_DEPENDENCIES_PER_REPLY * 2 + 10;
+        let all: Vec<_> = (0..total as u16).map(|i| dep(&i.to_le_bytes())).collect();
+
+        let mut cp = Vec::new();
+        let mut collected = Vec::new();
+        let mut rounds = 0;
+        loop {
+            let out = chunk_dependencies(all.clone(), &cp);
+            assert!(out.dependent_typeids.len() <= MAX_DEPENDENCIES_PER_REPLY);
+            collected.extend(out.dependent_typeids);
+            rounds += 1;
+            if out.continuation_point.is_empty() {
+                break;
+            }
+            cp = out.continuation_point;
+            assert!(rounds < 10, "continuation must terminate");
+        }
+        assert_eq!(rounds, 3);
+        assert_eq!(collected, all, "paged chunks reassemble to the full list in order");
     }
 
     #[test]
