@@ -6,12 +6,10 @@
 
 use crate::rtps::common::time::RtpsTime;
 use bytes::Bytes;
+use smallvec::SmallVec;
 use speedy::{Context, Error, Readable, Writable, Writer};
+use std::io;
 use std::time::Instant;
-use std::{
-    collections::{BTreeMap, HashSet},
-    io,
-};
 
 use crate::rtps::{
     common::{
@@ -237,8 +235,10 @@ impl<C: Context> Writable<C> for DataFrag<'_> {
 pub(crate) struct FragmentBuffer {
     pub sequence_number: SequenceNumber,
     pub total_size: u32,
-    pub fragments: BTreeMap<u32, Bytes>,
-    pub received_fragments: HashSet<u32>,
+    // dense slot array indexed by fragment_num - 1
+    pub fragments: Vec<Option<Bytes>>,
+    // number of filled slots, for completion check
+    pub received_count: u32,
     pub total_fragments: u32,
     pub fragment_size: u16,
     pub source_timestamp: Option<RtpsTime>,
@@ -260,8 +260,8 @@ impl FragmentBuffer {
         Self {
             sequence_number,
             total_size,
-            fragments: BTreeMap::new(),
-            received_fragments: HashSet::new(),
+            fragments: vec![None; total_fragments as usize],
+            received_count: 0,
             total_fragments,
             fragment_size,
             source_timestamp: None,
@@ -271,18 +271,12 @@ impl FragmentBuffer {
     }
 
     pub(crate) fn all_fragments_received(&self) -> bool {
-        self.received_fragments.len() == self.total_fragments as usize
+        self.received_count == self.total_fragments
     }
 
-    pub(crate) fn mark_fragment_received(&mut self, fragment_num: u32) {
-        self.received_fragments.insert(fragment_num);
-    }
-
-    /// Store a fragment's payload without copying.
-    ///
-    /// `data` is a `Bytes` sub-slice of the original socket buffer; inserting
-    /// it into the `BTreeMap` is a refcount bump, not a data copy. Returns
-    /// `false` if the fragment number or size is invalid.
+    // Store a fragment's payload without copying. `data` is a `Bytes` sub-slice
+    // of the original socket buffer, so storing it is a refcount bump. Returns
+    // false if the fragment number or size is invalid.
     pub(crate) fn copy_fragment_data(&mut self, fragment_num: u32, data: Bytes) -> bool {
         if fragment_num == 0 || fragment_num > self.total_fragments {
             return false;
@@ -297,20 +291,33 @@ impl FragmentBuffer {
             return false;
         }
 
-        self.fragments.insert(fragment_num, data);
-        self.received_fragments.insert(fragment_num);
+        let idx = (fragment_num - 1) as usize;
+        // count only the first arrival so retransmits do not over-count
+        if self.fragments[idx].is_none() {
+            self.received_count += 1;
+        }
+        self.fragments[idx] = Some(data);
         self.last_updated = Instant::now();
         true
     }
 
-    /// Assemble all fragments into a contiguous Vec.
-    /// BTreeMap iteration is sorted by key (fragment_num), guaranteeing correct order.
+    // Assemble all fragments into a contiguous Vec. Slot order is fragment order.
     pub(crate) fn assemble(self) -> Vec<u8> {
         let mut result = Vec::with_capacity(self.total_size as usize);
-        for (_num, data) in self.fragments {
-            result.extend_from_slice(&data);
+        for slot in self.fragments {
+            if let Some(data) = slot {
+                result.extend_from_slice(&data);
+            }
         }
         result
+    }
+
+    // Collect fragment chunks in fragment order without copying. Each chunk is a
+    // refcounted slice of the original socket buffer, so this only moves Bytes
+    // handles. Used by the scatter-gather receive path to avoid a per-sample
+    // contiguous reassembly allocation.
+    pub(crate) fn into_chunks(self) -> SmallVec<[Bytes; 16]> {
+        self.fragments.into_iter().flatten().collect()
     }
 }
 
@@ -404,5 +411,75 @@ mod tests {
         if let Err(err) = result {
             assert_eq!(err.code, RtpsErrorCode::InvalidSubmessageBody);
         }
+    }
+
+    // total_size 5, fragment_size 2 -> 3 fragments: [_,_][_,_][_]
+    fn three_fragment_buffer() -> FragmentBuffer {
+        FragmentBuffer::new(SequenceNumber::new(0, 1), 5, 2)
+    }
+
+    #[test]
+    fn test_fragment_buffer_assembles_in_fragment_order() {
+        let mut buffer = three_fragment_buffer();
+        // Insert out of order with distinct bytes per fragment
+        assert!(buffer.copy_fragment_data(3, Bytes::from_static(&[30])));
+        assert!(buffer.copy_fragment_data(1, Bytes::from_static(&[10, 11])));
+        assert!(buffer.copy_fragment_data(2, Bytes::from_static(&[20, 21])));
+
+        assert!(buffer.all_fragments_received());
+        assert_eq!(buffer.assemble(), vec![10, 11, 20, 21, 30]);
+    }
+
+    #[test]
+    fn test_fragment_buffer_into_chunks_in_fragment_order() {
+        let mut buffer = three_fragment_buffer();
+        buffer.copy_fragment_data(3, Bytes::from_static(&[30]));
+        buffer.copy_fragment_data(1, Bytes::from_static(&[10, 11]));
+        buffer.copy_fragment_data(2, Bytes::from_static(&[20, 21]));
+
+        let chunks = buffer.into_chunks();
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(&chunks[0][..], &[10, 11]);
+        assert_eq!(&chunks[1][..], &[20, 21]);
+        assert_eq!(&chunks[2][..], &[30]);
+
+        // Concatenation must equal the contiguous assembly.
+        let flat: Vec<u8> = chunks.iter().flat_map(|c| c.iter().copied()).collect();
+        assert_eq!(flat, vec![10, 11, 20, 21, 30]);
+    }
+
+    #[test]
+    fn test_fragment_buffer_incomplete_until_all_received() {
+        let mut buffer = three_fragment_buffer();
+        assert!(buffer.copy_fragment_data(1, Bytes::from_static(&[10, 11])));
+        assert!(!buffer.all_fragments_received());
+        assert!(buffer.copy_fragment_data(2, Bytes::from_static(&[20, 21])));
+        assert!(!buffer.all_fragments_received());
+        assert!(buffer.copy_fragment_data(3, Bytes::from_static(&[30])));
+        assert!(buffer.all_fragments_received());
+    }
+
+    #[test]
+    fn test_fragment_buffer_duplicate_does_not_complete() {
+        let mut buffer = three_fragment_buffer();
+        buffer.copy_fragment_data(1, Bytes::from_static(&[10, 11]));
+        buffer.copy_fragment_data(1, Bytes::from_static(&[10, 11])); // duplicate
+        buffer.copy_fragment_data(2, Bytes::from_static(&[20, 21]));
+        // Only 2 distinct fragments; fragment 3 still missing
+        assert!(!buffer.all_fragments_received());
+    }
+
+    #[test]
+    fn test_fragment_buffer_rejects_out_of_range() {
+        let mut buffer = three_fragment_buffer();
+        assert!(!buffer.copy_fragment_data(0, Bytes::from_static(&[0])));
+        assert!(!buffer.copy_fragment_data(4, Bytes::from_static(&[0])));
+    }
+
+    #[test]
+    fn test_fragment_buffer_rejects_oversized() {
+        let mut buffer = three_fragment_buffer();
+        // fragment 1 allows at most fragment_size (2) bytes
+        assert!(!buffer.copy_fragment_data(1, Bytes::from_static(&[1, 2, 3])));
     }
 }

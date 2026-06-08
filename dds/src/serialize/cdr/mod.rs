@@ -1,3 +1,4 @@
+mod cdr_input;
 pub mod deserializer;
 pub mod serializer;
 pub mod xcdr1;
