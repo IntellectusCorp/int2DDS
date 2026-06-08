@@ -54,6 +54,10 @@ pub const INT2DDS_FIELD_FLOAT64: i32 = 12;
 pub const INT2DDS_FIELD_STRING: i32 = 13;
 pub const INT2DDS_FIELD_CHAR16: i32 = 14;
 pub const INT2DDS_FIELD_WSTRING: i32 = 15;
+pub const INT2DDS_FIELD_NESTED: i32 = 16;
+pub const INT2DDS_FIELD_SEQUENCE: i32 = 17;
+pub const INT2DDS_FIELD_ARRAY: i32 = 18;
+pub const INT2DDS_FIELD_MAP: i32 = 19;
 pub const INT2DDS_MEMBER_KEY: i32 = 1 << 0;
 pub const INT2DDS_MEMBER_OPTIONAL: i32 = 1 << 1;
 pub const INT2DDS_MEMBER_MUST_UNDERSTAND: i32 = 1 << 2;
@@ -369,6 +373,18 @@ pub unsafe extern "C" fn int2dds_type_info_add_array_of_named_field(
 
     ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags });
 
+    INT2DDS_RET_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_type_info_to_type_object(
+    type_info: *const Int2DdsTypeInfo,
+    out: *mut *mut crate::dynamic::Int2DdsTypeObject,
+) -> Int2DdsRet {
+    check_null!(type_info);
+    check_null!(out);
+    let to = (*type_info).build_type_object();
+    *out = Box::into_raw(Box::new(crate::dynamic::Int2DdsTypeObject::from_type_object(to)));
     INT2DDS_RET_OK
 }
 
