@@ -898,6 +898,67 @@ ffi.cdef("""
         uint32_t mask,
         Int2DdsDataReader **reader_out
     );
+
+    /* === Dynamic types: TypeObject introspection + DynamicData decoding === */
+    typedef struct Int2DdsTypeObject Int2DdsTypeObject;
+    typedef struct Int2DdsPublicationBuiltinData Int2DdsPublicationBuiltinData;
+    typedef struct Int2DdsTypeInfo Int2DdsTypeInfo;
+    typedef struct Int2DdsDynamicData Int2DdsDynamicData;
+
+    typedef struct Int2DdsMemberInfo {
+        uint32_t member_id;
+        int32_t kind;
+        int32_t flags;
+    } Int2DdsMemberInfo;
+
+    /* Discovery */
+    Int2DdsRet int2dds_get_builtin_subscriber(const Int2DdsParticipant *participant, Int2DdsSubscriber **out);
+    Int2DdsRet int2dds_take_publication_data(const Int2DdsSubscriber *builtin_sub, const char *topic_name_filter, int32_t timeout_ms, Int2DdsPublicationBuiltinData **out);
+    void int2dds_publication_data_destroy(Int2DdsPublicationBuiltinData *p);
+    Int2DdsRet int2dds_publication_data_topic_name(const Int2DdsPublicationBuiltinData *p, char *buf, uintptr_t buf_len, uintptr_t *out_len);
+    Int2DdsRet int2dds_publication_data_type_name(const Int2DdsPublicationBuiltinData *p, char *buf, uintptr_t buf_len, uintptr_t *out_len);
+    Int2DdsRet int2dds_publication_data_take_type_object(const Int2DdsPublicationBuiltinData *p, Int2DdsTypeObject **out);
+    Int2DdsRet int2dds_wait_for_type_object(const Int2DdsParticipant *participant, const char *topic_name, int32_t timeout_ms, Int2DdsTypeObject **type_obj_out, char *type_name_buf, uintptr_t type_name_buf_len, uintptr_t *out_len);
+
+    /* TypeObject introspection */
+    void int2dds_type_object_destroy(Int2DdsTypeObject *t);
+    Int2DdsRet int2dds_type_object_extensibility(const Int2DdsTypeObject *t, int32_t *out);
+    Int2DdsRet int2dds_type_object_member_count(const Int2DdsTypeObject *t, uint32_t *out);
+    Int2DdsRet int2dds_type_object_member_info(const Int2DdsTypeObject *t, uint32_t index, Int2DdsMemberInfo *out);
+    Int2DdsRet int2dds_type_object_member_name(const Int2DdsTypeObject *t, uint32_t index, char *buf, uintptr_t buf_len, uintptr_t *out_len);
+    Int2DdsRet int2dds_type_object_find_member(const Int2DdsTypeObject *t, const char *name, uint32_t *index_out);
+    Int2DdsRet int2dds_create_topic_with_type_object(const Int2DdsParticipant *participant, const char *topic_name, const char *type_name, const Int2DdsTypeObject *type_obj, const Int2DdsTopicQos *qos, Int2DdsTopic **out);
+
+    /* TypeInfo builder */
+    Int2DdsRet int2dds_type_info_create(const char *type_name, int32_t extensibility, Int2DdsTypeInfo **out);
+    Int2DdsRet int2dds_type_info_add_field(Int2DdsTypeInfo *type_info, const char *field_name, int32_t field_type, int32_t flags);
+    Int2DdsRet int2dds_type_info_add_sequence_field(Int2DdsTypeInfo *type_info, const char *field_name, int32_t element_type, uint32_t bound, int32_t flags);
+    Int2DdsRet int2dds_type_info_add_array_field(Int2DdsTypeInfo *type_info, const char *field_name, int32_t element_type, uint32_t array_size, int32_t flags);
+    Int2DdsRet int2dds_type_info_add_named_type_field(Int2DdsTypeInfo *type_info, const char *field_name, const char *type_hash_name, int32_t flags);
+    Int2DdsRet int2dds_type_info_add_sequence_of_named_field(Int2DdsTypeInfo *type_info, const char *field_name, const char *element_hash_name, uint32_t bound, int32_t flags);
+    Int2DdsRet int2dds_type_info_add_array_of_named_field(Int2DdsTypeInfo *type_info, const char *field_name, const char *element_hash_name, uint32_t array_size, int32_t flags);
+    void int2dds_type_info_destroy(Int2DdsTypeInfo *type_info);
+    Int2DdsRet int2dds_type_info_to_type_object(const Int2DdsTypeInfo *type_info, Int2DdsTypeObject **out);
+    Int2DdsRet int2dds_create_topic_with_type_info(const Int2DdsParticipant *participant, const char *topic_name, const Int2DdsTypeInfo *type_info, const Int2DdsTopicQos *qos, Int2DdsTopic **out);
+
+    /* DynamicData decoding (dotted/indexed field paths, e.g. "pos.x", "items[2]") */
+    Int2DdsRet int2dds_dynamic_data_from_sample(const Int2DdsParticipant *participant, const uint8_t *bytes, uintptr_t len, const Int2DdsTypeObject *type_obj, Int2DdsDynamicData **out);
+    void int2dds_dynamic_data_destroy(Int2DdsDynamicData *d);
+    Int2DdsRet int2dds_dynamic_data_get_bool(const Int2DdsDynamicData *data, const char *field_path, bool *out);
+    Int2DdsRet int2dds_dynamic_data_get_i8(const Int2DdsDynamicData *data, const char *field_path, int8_t *out);
+    Int2DdsRet int2dds_dynamic_data_get_u8(const Int2DdsDynamicData *data, const char *field_path, uint8_t *out);
+    Int2DdsRet int2dds_dynamic_data_get_i16(const Int2DdsDynamicData *data, const char *field_path, int16_t *out);
+    Int2DdsRet int2dds_dynamic_data_get_u16(const Int2DdsDynamicData *data, const char *field_path, uint16_t *out);
+    Int2DdsRet int2dds_dynamic_data_get_i32(const Int2DdsDynamicData *data, const char *field_path, int32_t *out);
+    Int2DdsRet int2dds_dynamic_data_get_u32(const Int2DdsDynamicData *data, const char *field_path, uint32_t *out);
+    Int2DdsRet int2dds_dynamic_data_get_i64(const Int2DdsDynamicData *data, const char *field_path, int64_t *out);
+    Int2DdsRet int2dds_dynamic_data_get_u64(const Int2DdsDynamicData *data, const char *field_path, uint64_t *out);
+    Int2DdsRet int2dds_dynamic_data_get_f32(const Int2DdsDynamicData *data, const char *field_path, float *out);
+    Int2DdsRet int2dds_dynamic_data_get_f64(const Int2DdsDynamicData *data, const char *field_path, double *out);
+    Int2DdsRet int2dds_dynamic_data_get_char8(const Int2DdsDynamicData *data, const char *field_path, uint8_t *out);
+    Int2DdsRet int2dds_dynamic_data_get_string(const Int2DdsDynamicData *data, const char *field_path, char *out_buf, uintptr_t buf_cap, uintptr_t *out_len);
+    Int2DdsRet int2dds_dynamic_data_get_len(const Int2DdsDynamicData *data, const char *field_path, uintptr_t *out);
+    Int2DdsRet int2dds_dynamic_data_get_member(const Int2DdsDynamicData *data, const char *field_path, Int2DdsDynamicData **out);
 """)
 
 

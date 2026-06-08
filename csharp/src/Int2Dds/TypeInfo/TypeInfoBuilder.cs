@@ -112,6 +112,52 @@ namespace Int2Dds.TypeInfo
         }
 
         /// <summary>
+        /// Adds a sequence-of-named-type field (sequence whose elements are a nested type).
+        /// </summary>
+        public unsafe TypeInfoBuilder AddSequenceOfNamedField(string fieldName, string elementHashName, uint bound = 0, bool isKey = false)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            var nameBytes = Encoding.UTF8.GetBytes(fieldName + '\0');
+            var typeBytes = Encoding.UTF8.GetBytes(elementHashName + '\0');
+            fixed (byte* pName = nameBytes)
+            fixed (byte* pType = typeBytes)
+            {
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_type_info_add_sequence_of_named_field(_handle, pName, pType, bound, isKey ? 1 : 0));
+            }
+            return this;
+        }
+
+        /// <summary>
+        /// Adds an array-of-named-type field (fixed array whose elements are a nested type).
+        /// </summary>
+        public unsafe TypeInfoBuilder AddArrayOfNamedField(string fieldName, string elementHashName, uint arraySize, bool isKey = false)
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            var nameBytes = Encoding.UTF8.GetBytes(fieldName + '\0');
+            var typeBytes = Encoding.UTF8.GetBytes(elementHashName + '\0');
+            fixed (byte* pName = nameBytes)
+            fixed (byte* pType = typeBytes)
+            {
+                ReturnCodeHelper.CheckReturn(
+                    NativeMethods.int2dds_type_info_add_array_of_named_field(_handle, pName, pType, arraySize, isKey ? 1 : 0));
+            }
+            return this;
+        }
+
+        /// <summary>
+        /// Builds a standalone TypeObject (for local introspection / dynamic decoding).
+        /// The builder remains usable afterwards.
+        /// </summary>
+        public Xtypes.DynamicTypeObject ToTypeObject()
+        {
+            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            ReturnCodeHelper.CheckReturn(
+                NativeMethods.int2dds_type_info_to_type_object(_handle, out IntPtr typeObj));
+            return new Xtypes.DynamicTypeObject(typeObj);
+        }
+
+        /// <summary>
         /// Finalizes the builder and returns the native type info handle.
         /// The caller takes ownership of the handle (for passing to create_topic_with_type_info).
         /// After calling Build(), this builder must not be used further.
