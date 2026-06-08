@@ -70,17 +70,42 @@ pub fn chunk_dependencies(
     GetTypeDependenciesOut { dependent_typeids, continuation_point: next }
 }
 
-fn write_type_ids(s: &mut Xcdr2Serializer, type_ids: &[TypeIdentifier]) -> Result<(), CdrError> {
-    s.serialize_u32(type_ids.len() as u32)?;
-    for type_id in type_ids {
-        type_id.serialize_into(s.buffer_mut());
-    }
+fn write_nonprimitive_seq<F>(
+    s: &mut Xcdr2Serializer,
+    count: usize,
+    write_elems: F,
+) -> Result<(), CdrError>
+where
+    F: FnOnce(&mut Xcdr2Serializer) -> Result<(), CdrError>,
+{
+    let dheader_pos = s.reserve_dheader();
+    let start = s.position();
+    s.serialize_u32(count as u32)?;
+    write_elems(s)?;
+    let len = (s.position() - start) as u32;
+    s.write_dheader_at(dheader_pos, len);
     Ok(())
 }
 
+/// Consume a non-primitive sequence DHEADER and return the element count.
+fn read_nonprimitive_seq_count(d: &mut Xcdr2Deserializer) -> Result<usize, CdrError> {
+    d.begin_struct()?; // sequence DHEADER
+    Ok(d.deserialize_u32()? as usize)
+}
+
+fn write_type_ids(s: &mut Xcdr2Serializer, type_ids: &[TypeIdentifier]) -> Result<(), CdrError> {
+    write_nonprimitive_seq(s, type_ids.len(), |s| {
+        for type_id in type_ids {
+            type_id.serialize_into(s.buffer_mut());
+        }
+        Ok(())
+    })
+}
+
 fn read_type_ids(d: &mut Xcdr2Deserializer) -> Result<Vec<TypeIdentifier>, CdrError> {
-    let count = d.deserialize_u32()? as usize;
-    let mut type_ids = Vec::with_capacity(count);
+    let count = read_nonprimitive_seq_count(d)?;
+    // Grow on demand; never pre-allocate from an untrusted wire count.
+    let mut type_ids = Vec::new();
     for _ in 0..count {
         let pos = d.get_position();
         let (type_id, consumed) = TypeIdentifier::deserialize(&d.get_data()[pos..])
@@ -250,11 +275,12 @@ impl GetTypeDependenciesOut {
     fn write(&self, s: &mut Xcdr2Serializer) -> Result<(), CdrError> {
         let top = s.begin_struct()?;
         s.write_member_with_lc(hashid("dependent_typeids"), false, LcHint::Auto, |s| {
-            s.serialize_u32(self.dependent_typeids.len() as u32)?;
-            for dep in &self.dependent_typeids {
-                dep.serialize_into(s.buffer_mut());
-            }
-            Ok(())
+            write_nonprimitive_seq(s, self.dependent_typeids.len(), |s| {
+                for dep in &self.dependent_typeids {
+                    dep.serialize_into(s.buffer_mut());
+                }
+                Ok(())
+            })
         })?;
         s.write_member_with_lc(hashid("continuation_point"), false, LcHint::Auto, |s| {
             write_octet_seq(s, &self.continuation_point)
@@ -269,8 +295,8 @@ impl GetTypeDependenciesOut {
         let id_cp = hashid("continuation_point");
         read_mutable_members(d, |d, member_id| {
             if member_id == id_deps {
-                let count = d.deserialize_u32()? as usize;
-                dependent_typeids = Vec::with_capacity(count);
+                let count = read_nonprimitive_seq_count(d)?;
+                dependent_typeids = Vec::new();
                 for _ in 0..count {
                     let pos = d.get_position();
                     let (dep, consumed) = TypeIdentifierWithSize::deserialize(&d.get_data()[pos..])
@@ -329,12 +355,13 @@ impl GetTypesOut {
     fn write(&self, s: &mut Xcdr2Serializer) -> Result<(), CdrError> {
         let top = s.begin_struct()?;
         s.write_member_with_lc(hashid("types"), false, LcHint::Auto, |s| {
-            s.serialize_u32(self.types.len() as u32)?;
-            for (type_id, type_object) in &self.types {
-                type_id.serialize_into(s.buffer_mut());
-                type_object.serialize_into(s.buffer_mut());
-            }
-            Ok(())
+            write_nonprimitive_seq(s, self.types.len(), |s| {
+                for (type_id, type_object) in &self.types {
+                    type_id.serialize_into(s.buffer_mut());
+                    type_object.serialize_into(s.buffer_mut());
+                }
+                Ok(())
+            })
         })?;
         s.end_struct(top)
     }
@@ -344,8 +371,8 @@ impl GetTypesOut {
         let id_types = hashid("types");
         read_mutable_members(d, |d, member_id| {
             if member_id == id_types {
-                let count = d.deserialize_u32()? as usize;
-                types = Vec::with_capacity(count);
+                let count = read_nonprimitive_seq_count(d)?;
+                types = Vec::new();
                 for _ in 0..count {
                     let mut pos = d.get_position();
                     let (type_id, consumed) = TypeIdentifier::deserialize(&d.get_data()[pos..])
