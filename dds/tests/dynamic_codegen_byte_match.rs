@@ -8,6 +8,7 @@
 //! plus optional members across all distinct optional encodings, and
 //! union/bitset members.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use int2dds::dcps::topic::type_support::{DdsType, SerializationFormat};
@@ -17,10 +18,10 @@ use int2dds::serialize::cdr::{
 };
 use int2dds::serialize::{BufferManager, DeserializerReader};
 use int2dds::xtypes::{
-    serialize_dynamic_data, CompleteStructMember, CompleteStructType, CompleteTypeObject,
-    DynamicData, DynamicType, DynamicTypeSupport, DynamicValue, EquivalenceHash, HasTypeObject,
-    MemberFlag, PlainCollectionHeader, TryConstructKind, TypeFlag, TypeIdentifier, TypeObject,
-    TypeRegistry,
+    serialize_dynamic_data, CollectionElementFlag, CompleteStructMember, CompleteStructType,
+    CompleteTypeObject, DynamicData, DynamicType, DynamicTypeSupport, DynamicValue,
+    EquivalenceHash, HasTypeObject, MemberFlag, PlainCollectionHeader, TryConstructKind, TypeFlag,
+    TypeIdentifier, TypeObject, TypeRegistry,
 };
 
 fn hash_of(id: &TypeIdentifier) -> EquivalenceHash {
@@ -659,6 +660,67 @@ fn optional_byte_match_xcdr_mutable() {
     }
 }
 
+#[derive(DdsType)]
+#[dds_type(crate_path = "int2dds", extensibility = "Final")]
+struct BareOptFinal {
+    id: i32,
+    opt: Option<i32>,
+}
+
+#[test]
+fn bare_option_field_is_marked_optional_in_metadata() {
+    let CompleteTypeObject::Struct(s) = BareOptFinal::complete_type_object() else {
+        panic!("expected a struct type object");
+    };
+    let opt = s.member_seq.iter().find(|m| m.detail.name == "opt").expect("opt member present");
+    assert!(
+        opt.common.member_flags.is_optional(),
+        "a bare Option<T> field must carry the IS_OPTIONAL member flag"
+    );
+    let id = s.member_seq.iter().find(|m| m.detail.name == "id").expect("id member present");
+    assert!(!id.common.member_flags.is_optional(), "a non-Option field must not be optional");
+}
+
+#[test]
+fn bare_option_matches_explicit_optional_wire() {
+    for opt in [Some(9i32), None] {
+        assert_eq!(
+            concrete_cdr(&BareOptFinal { id: 5, opt }),
+            concrete_cdr(&OptFinal { id: 5, opt }),
+            "bare Option<T> must encode identically to #[dds(optional)] (CDR) for {:?}",
+            opt
+        );
+        assert_eq!(
+            concrete_xcdr(&BareOptFinal { id: 5, opt }, ExtensibilityKind::Final),
+            concrete_xcdr(&OptFinal { id: 5, opt }, ExtensibilityKind::Final),
+            "bare Option<T> must encode identically to #[dds(optional)] (XCDR) for {:?}",
+            opt
+        );
+    }
+}
+
+#[test]
+fn bare_option_byte_match_dynamic() {
+    let dt = standalone_type::<BareOptFinal>();
+    let xcdr = xcdr_format(ExtensibilityKind::Final);
+    for opt in [Some(9i32), None] {
+        let dynamic = build_dynamic_opt(&dt, opt);
+        let concrete = BareOptFinal { id: 5, opt };
+        assert_eq!(
+            dynamic_bytes(&dynamic, &SerializationFormat::Cdr),
+            concrete_cdr(&concrete),
+            "bare Option<T> CDR dynamic/codegen mismatch for {:?}",
+            opt
+        );
+        assert_eq!(
+            dynamic_bytes(&dynamic, &xcdr),
+            concrete_xcdr(&concrete, ExtensibilityKind::Final),
+            "bare Option<T> XCDR2 Final dynamic/codegen mismatch for {:?}",
+            opt
+        );
+    }
+}
+
 fn final_holder_with_member<I: HasTypeObject>(member_name: &str) -> Arc<DynamicType> {
     let inner_complete = I::complete_type_object();
     let inner_hash = EquivalenceHash::compute(&inner_complete.serialize());
@@ -799,5 +861,95 @@ fn bitset_byte_match_xcdr_final() {
     assert_eq!(
         dynamic_bytes(&bitset_data(&dt, packed), &format),
         concrete_xcdr(&BitsetByteMatch { a: 5, b: 9 }, ExtensibilityKind::Final),
+    );
+}
+
+fn map_holder_dynamic_type(
+    key_id: TypeIdentifier,
+    value_id: TypeIdentifier,
+    inner: Option<(EquivalenceHash, CompleteTypeObject)>,
+) -> Arc<DynamicType> {
+    let mut registry = TypeRegistry::new();
+    if let Some((hash, obj)) = inner {
+        registry.register_complete(hash, "Inner".into(), obj);
+    }
+    let mut outer = CompleteStructType::new(
+        TypeFlag::new(int2dds::xtypes::ExtensibilityKind::Final, false, false),
+        "MapHolder".into(),
+        None,
+    );
+    outer.add_member(CompleteStructMember::new(
+        0,
+        MemberFlag::new(TryConstructKind::Discard, false, false, false, false, false),
+        TypeIdentifier::PlainMapLarge {
+            header: PlainCollectionHeader::default(),
+            bound: 0,
+            key_flags: CollectionElementFlag::default(),
+            key_identifier: Box::new(key_id),
+            element_identifier: Box::new(value_id),
+        },
+        "m".to_string(),
+    ));
+    Arc::new(
+        DynamicType::from_type_object_with_registry(
+            Arc::new(CompleteTypeObject::Struct(outer)),
+            TypeIdentifier::None,
+            &registry,
+        )
+        .unwrap(),
+    )
+}
+
+#[test]
+fn map_primitive_byte_match_cdr_and_xcdr() {
+    let dt = map_holder_dynamic_type(TypeIdentifier::Int32, TypeIdentifier::Int32, None);
+    let mut data = DynamicData::new(dt.clone());
+    data.set_value(
+        "m",
+        DynamicValue::Map(vec![
+            (DynamicValue::Int32(1), DynamicValue::Int32(10)),
+            (DynamicValue::Int32(2), DynamicValue::Int32(20)),
+        ]),
+    )
+    .unwrap();
+
+    let map = BTreeMap::from([(1i32, 10i32), (2i32, 20i32)]);
+
+    assert_eq!(dynamic_bytes(&data, &SerializationFormat::Cdr), concrete_cdr(&map), "CDR");
+    assert_eq!(
+        dynamic_bytes(&data, &xcdr_format(ExtensibilityKind::Final)),
+        concrete_xcdr(&map, ExtensibilityKind::Final),
+        "XCDR2 (both primitive: no DHEADER)"
+    );
+}
+
+#[test]
+fn map_struct_value_byte_match_cdr_and_xcdr() {
+    let inner_complete = InnerFinal::complete_type_object();
+    let inner_hash = EquivalenceHash::compute(&inner_complete.serialize());
+    let dt = map_holder_dynamic_type(
+        TypeIdentifier::Int32,
+        TypeIdentifier::CompleteTypeId(inner_hash),
+        Some((inner_hash, inner_complete)),
+    );
+    let inner_dt = standalone_type::<InnerFinal>();
+
+    let entry = |k: i32, a: i32, b: i32| {
+        let mut e = DynamicData::new(inner_dt.clone());
+        e.set("a", a).unwrap();
+        e.set("b", b).unwrap();
+        (DynamicValue::Int32(k), DynamicValue::Struct(Box::new(e)))
+    };
+    let mut data = DynamicData::new(dt.clone());
+    data.set_value("m", DynamicValue::Map(vec![entry(1, 10, 11), entry(2, 20, 22)])).unwrap();
+
+    let map =
+        BTreeMap::from([(1i32, InnerFinal { a: 10, b: 11 }), (2i32, InnerFinal { a: 20, b: 22 })]);
+
+    assert_eq!(dynamic_bytes(&data, &SerializationFormat::Cdr), concrete_cdr(&map), "CDR");
+    assert_eq!(
+        dynamic_bytes(&data, &xcdr_format(ExtensibilityKind::Final)),
+        concrete_xcdr(&map, ExtensibilityKind::Final),
+        "XCDR2 (non-primitive value: DHEADER)"
     );
 }

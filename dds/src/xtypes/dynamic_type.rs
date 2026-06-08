@@ -14,9 +14,6 @@ use crate::xtypes::{
     CompleteTypeObject, CompleteUnionType, TypeIdentifier,
 };
 
-/// Context threaded through the registry-aware builder to resolve nested type
-/// references into fully-populated `Arc<DynamicType>` values, with memoization
-/// and a recursion stack to break cycles.
 struct BuildCtx<'a> {
     registry: &'a TypeRegistry,
     memo: HashMap<EquivalenceHash, Arc<DynamicType>>,
@@ -119,9 +116,6 @@ impl DynamicType {
         Self::build_from_object(type_object, type_identifier, None)
     }
 
-    /// Create a DynamicType resolving nested composite members against a
-    /// `TypeRegistry`, populating `TypeRef` with full metadata for nested
-    /// struct/enum and collection element types.
     pub fn from_type_object_with_registry(
         type_object: Arc<CompleteTypeObject>,
         type_identifier: TypeIdentifier,
@@ -347,10 +341,6 @@ impl DynamicType {
     }
 
     /// Create a DynamicType for a primitive TypeIdentifier.
-    ///
-    /// When `ctx` is `Some`, nested composite references (`CompleteTypeId` /
-    /// `MinimalTypeId`) are resolved against the registry into `TypeRef`;
-    /// otherwise they remain unresolved `ExternalType` (legacy behavior).
     fn type_from_identifier(
         type_id: &TypeIdentifier,
         mut ctx: Option<&mut BuildCtx>,
@@ -413,23 +403,33 @@ impl DynamicType {
                     dimensions: array_bound_seq.clone(),
                 })
             }
+            TypeIdentifier::PlainMapSmall { key_identifier, element_identifier, bound, .. } => {
+                let key_type = Self::type_from_identifier(key_identifier, ctx.as_deref_mut())?;
+                let value_type = Self::type_from_identifier(element_identifier, ctx)?;
+                Ok(DynamicTypeKind::Map {
+                    key_type: Box::new(key_type),
+                    value_type: Box::new(value_type),
+                    bound: if *bound == 0 { None } else { Some(*bound as u32) },
+                })
+            }
+            TypeIdentifier::PlainMapLarge { key_identifier, element_identifier, bound, .. } => {
+                let key_type = Self::type_from_identifier(key_identifier, ctx.as_deref_mut())?;
+                let value_type = Self::type_from_identifier(element_identifier, ctx)?;
+                Ok(DynamicTypeKind::Map {
+                    key_type: Box::new(key_type),
+                    value_type: Box::new(value_type),
+                    bound: if *bound == 0 { None } else { Some(*bound) },
+                })
+            }
             TypeIdentifier::CompleteTypeId(hash) | TypeIdentifier::MinimalTypeId(hash) => {
                 Self::resolve_nested(type_id, hash, ctx.as_deref_mut())
             }
             TypeIdentifier::None => {
                 Err(DynamicTypeError::UnsupportedType("None type identifier".to_string()))
             }
-            _ => Err(DynamicTypeError::UnsupportedType(format!(
-                "Unsupported TypeIdentifier: {:?}",
-                type_id
-            ))),
         }
     }
 
-    /// Resolve a hash-based nested type reference. Without a registry context
-    /// it stays an unresolved `ExternalType`. With one, it builds (and memoizes)
-    /// the full nested `DynamicType` as `TypeRef`, leaving cyclic back-edges as
-    /// `ExternalType` to terminate recursion.
     fn resolve_nested(
         type_id: &TypeIdentifier,
         hash: &EquivalenceHash,
@@ -460,10 +460,6 @@ impl DynamicType {
         ctx.memo.insert(*hash, nested.clone());
         Ok(DynamicTypeKind::TypeRef(nested))
     }
-
-    // ========================================================================
-    // Public API
-    // ========================================================================
 
     /// Get the type name.
     pub fn type_name(&self) -> &str {
@@ -599,6 +595,8 @@ pub enum DynamicTypeKind {
     Sequence { element_type: Box<DynamicTypeKind>, bound: Option<u32> },
     /// Array (fixed-size)
     Array { element_type: Box<DynamicTypeKind>, dimensions: Vec<u32> },
+    /// Map (key-value collection)
+    Map { key_type: Box<DynamicTypeKind>, value_type: Box<DynamicTypeKind>, bound: Option<u32> },
     /// Reference to an external type by TypeIdentifier (for nested structs)
     ExternalType { type_identifier: TypeIdentifier },
     /// Resolved nested composite type holding full metadata

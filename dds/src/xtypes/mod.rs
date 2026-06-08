@@ -67,8 +67,9 @@ pub use dynamic_type::{
 };
 pub use dynamic_type_support::DynamicTypeSupport;
 pub use type_lookup::{
-    GetTypeDependenciesIn, GetTypeDependenciesOut, GetTypesIn, GetTypesOut, ReplyHeader,
-    RequestHeader, SampleIdentity, TypeLookupCall, TypeLookupReply, TypeLookupRequest,
-    TypeLookupReturn,
+    chunk_dependencies, continuation_point_for, continuation_point_index, GetTypeDependenciesIn,
+    GetTypeDependenciesOut, GetTypesIn, GetTypesOut, ReplyHeader, RequestHeader, SampleIdentity,
+    TypeLookupCall, TypeLookupReply, TypeLookupRequest, TypeLookupReturn,
+    MAX_DEPENDENCIES_PER_REPLY,
 };
 pub use type_registry::{new_shared_registry, SharedTypeRegistry, TypeRegistry};

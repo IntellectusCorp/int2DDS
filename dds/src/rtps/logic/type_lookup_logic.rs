@@ -21,6 +21,7 @@ use crate::{
             entity_id::EntityId,
             guid::{Guid, GuidPrefix},
             rtps_error_code::RtpsResult,
+            sequence::SequenceNumber,
             time::RtpsTime,
             types::ChangeKind,
         },
@@ -35,7 +36,8 @@ use crate::{
 };
 
 use crate::xtypes::{
-    GetTypeDependenciesIn, GetTypesIn, TypeIdentifier, TypeIdentifierWithSize, TypeObject,
+    chunk_dependencies, GetTypeDependenciesIn, GetTypesIn, TypeIdentifier, TypeIdentifierWithSize,
+    TypeObject,
 };
 
 impl SedpLogic {
@@ -93,9 +95,12 @@ impl SedpLogic {
             TypeLookupCall::GetTypes(GetTypesIn { type_ids }) => {
                 TypeLookupReturn::GetTypes(self.serve_get_types(type_ids))
             }
-            TypeLookupCall::GetTypeDependencies(GetTypeDependenciesIn { type_ids, .. }) => {
-                TypeLookupReturn::GetTypeDependencies(self.serve_get_type_dependencies(type_ids))
-            }
+            TypeLookupCall::GetTypeDependencies(GetTypeDependenciesIn {
+                type_ids,
+                continuation_point,
+            }) => TypeLookupReturn::GetTypeDependencies(
+                self.serve_get_type_dependencies(type_ids, continuation_point),
+            ),
         };
 
         let reply = TypeLookupReply {
@@ -146,13 +151,43 @@ impl SedpLogic {
             }
             TypeLookupReturn::GetTypeDependencies(GetTypeDependenciesOut {
                 dependent_typeids,
-                ..
+                continuation_point,
             }) => {
-                let type_ids = dependent_typeids.into_iter().map(|d| d.type_id).collect::<Vec<_>>();
-                if !type_ids.is_empty() {
-                    let prefix = reply.header.related_request_id.writer_guid.prefix();
-                    let _ = self.request_get_types(prefix, type_ids);
+                let related = &reply.header.related_request_id;
+                let pending =
+                    self.type_lookup_pending.lock().ok().and_then(|mut map| map.remove(related));
+                let prefix = pending
+                    .as_ref()
+                    .map(|(p, _)| *p)
+                    .unwrap_or_else(|| related.writer_guid.prefix());
+
+                let mut needed: Vec<TypeIdentifier> = Vec::new();
+                if let Ok(registry) = participant.type_registry().read() {
+                    for dep in &dependent_typeids {
+                        let unknown = dep
+                            .type_id
+                            .equivalence_hash()
+                            .map(|h| !registry.contains(h))
+                            .unwrap_or(true);
+                        if unknown && !needed.contains(&dep.type_id) {
+                            needed.push(dep.type_id.clone());
+                        }
+                    }
                 }
+
+                if continuation_point.is_empty() {
+                    // All dependencies enumerated: fetch them plus the root itself.
+                    if let Some((_, root)) = pending {
+                        if !needed.contains(&root) {
+                            needed.push(root);
+                        }
+                    }
+                } else if let Some((_, root)) = pending {
+                    // More dependencies remain: page the next round for the same root.
+                    let _ = self.request_get_type_dependencies(prefix, root, continuation_point);
+                }
+
+                let _ = self.request_get_types(prefix, needed);
                 Ok(())
             }
         }
@@ -178,32 +213,29 @@ impl SedpLogic {
         GetTypesOut { types }
     }
 
-    /// Replier helper: list each requested id's direct dependencies (with sizes).
-    fn serve_get_type_dependencies(&self, type_ids: &[TypeIdentifier]) -> GetTypeDependenciesOut {
+    fn serve_get_type_dependencies(
+        &self,
+        type_ids: &[TypeIdentifier],
+        continuation_point: &[u8],
+    ) -> GetTypeDependenciesOut {
         let mut dependent_typeids: Vec<TypeIdentifierWithSize> = Vec::new();
         if let Ok(participant) = self.get_upgraded_participant() {
             if let Ok(registry) = participant.type_registry().read() {
-                for type_id in type_ids {
-                    if let Some(hash) = type_id.equivalence_hash() {
-                        if let Some(deps) = registry.get_dependencies(hash) {
-                            for dep in deps {
-                                let size = registry
-                                    .lookup_complete(dep)
-                                    .map(|o| {
-                                        TypeObject::Complete(o.clone()).serialize().len() as u32
-                                    })
-                                    .unwrap_or(0);
-                                dependent_typeids.push(TypeIdentifierWithSize::new(
-                                    TypeIdentifier::CompleteTypeId(*dep),
-                                    size,
-                                ));
-                            }
-                        }
-                    }
+                let roots: Vec<_> =
+                    type_ids.iter().filter_map(|id| id.equivalence_hash().copied()).collect();
+                for dep in registry.transitive_dependency_hashes(&roots) {
+                    let size = registry
+                        .lookup_complete(&dep)
+                        .map(|o| TypeObject::Complete(o.clone()).serialize().len() as u32)
+                        .unwrap_or(0);
+                    dependent_typeids.push(TypeIdentifierWithSize::new(
+                        TypeIdentifier::CompleteTypeId(dep),
+                        size,
+                    ));
                 }
             }
         }
-        GetTypeDependenciesOut { dependent_typeids, continuation_point: Vec::new() }
+        chunk_dependencies(dependent_typeids, continuation_point)
     }
 
     /// Requester: send a `getTypes` request for `type_ids` to `remote_prefix`.
@@ -216,14 +248,9 @@ impl SedpLogic {
         if type_ids.is_empty() {
             return Ok(());
         }
-        let participant = self.get_upgraded_participant()?;
-        let writer = participant.type_lookup_request_writer();
         let call = TypeLookupCall::GetTypes(GetTypesIn { type_ids });
-
-        let change = writer.new_change_with_rpc_callback(
-            ChangeKind::Alive,
-            InstanceHandle::NIL,
-            Some(RtpsTime::now()),
+        self.send_type_lookup_request(
+            remote_prefix,
             Box::new(move |writer_guid, seq| {
                 let request = TypeLookupRequest {
                     header: RequestHeader {
@@ -234,18 +261,58 @@ impl SedpLogic {
                 };
                 request.serialize()
             }),
+        )
+    }
+
+    pub(crate) fn request_get_type_dependencies(
+        &self,
+        remote_prefix: GuidPrefix,
+        root: TypeIdentifier,
+        continuation_point: Vec<u8>,
+    ) -> RtpsResult<()> {
+        let pending = self.type_lookup_pending.clone();
+        let input = GetTypeDependenciesIn { type_ids: vec![root.clone()], continuation_point };
+        self.send_type_lookup_request(
+            remote_prefix,
+            Box::new(move |writer_guid, seq| {
+                let request_id = SampleIdentity::new(writer_guid, seq);
+                if let Ok(mut map) = pending.lock() {
+                    map.insert(request_id.clone(), (remote_prefix, root));
+                }
+                let request = TypeLookupRequest {
+                    header: RequestHeader { request_id, instance_name: String::new() },
+                    data: TypeLookupCall::GetTypeDependencies(input),
+                };
+                request.serialize()
+            }),
+        )
+    }
+
+    /// Build a request sample from `data_fn`, cache it on the request writer, and
+    /// send it to `remote_prefix` over the metatraffic path.
+    fn send_type_lookup_request<'a>(
+        &self,
+        remote_prefix: GuidPrefix,
+        data_fn: Box<dyn FnOnce(Guid, SequenceNumber) -> Vec<u8> + 'a>,
+    ) -> RtpsResult<()> {
+        let participant = self.get_upgraded_participant()?;
+        let writer = participant.type_lookup_request_writer();
+        let change = writer.new_change_with_rpc_callback(
+            ChangeKind::Alive,
+            InstanceHandle::NIL,
+            Some(RtpsTime::now()),
+            data_fn,
         );
         let cache_change = Arc::new(change);
         if let Ok(mut cache) = writer.writer_cache().lock() {
             let _ = cache.add_change_builtin(cache_change.clone());
         }
-
         let remote_reader_guid = Guid::new(remote_prefix, EntityId::TYPE_LOOKUP_REQUEST_READER);
-        self.send_type_lookup_sample_change(
+        self.send_sedp_data_message(
+            cache_change,
             remote_reader_guid,
             EntityId::TYPE_LOOKUP_REQUEST_READER,
             EntityId::TYPE_LOOKUP_REQUEST_WRITER,
-            cache_change,
         )
     }
 
@@ -268,7 +335,7 @@ impl SedpLogic {
         if already {
             return;
         }
-        let _ = self.request_get_types(remote_prefix, vec![type_id.clone()]);
+        let _ = self.request_get_type_dependencies(remote_prefix, type_id.clone(), Vec::new());
     }
 
     /// Build a CacheChange for `payload`, track it on `writer`, and send it.
@@ -290,22 +357,6 @@ impl SedpLogic {
         if let Ok(mut cache) = writer.writer_cache().lock() {
             let _ = cache.add_change_builtin(cache_change.clone());
         }
-        self.send_type_lookup_sample_change(
-            remote_reader_guid,
-            reader_entity_id,
-            writer_entity_id,
-            cache_change,
-        )
-    }
-
-    /// Send an already-cached TypeLookup CacheChange over the metatraffic path.
-    fn send_type_lookup_sample_change(
-        &self,
-        remote_reader_guid: Guid,
-        reader_entity_id: EntityId,
-        writer_entity_id: EntityId,
-        cache_change: Arc<crate::rtps::entities::history::cache_change::CacheChange>,
-    ) -> RtpsResult<()> {
         self.send_sedp_data_message(
             cache_change,
             remote_reader_guid,
