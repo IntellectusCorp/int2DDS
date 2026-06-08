@@ -87,15 +87,16 @@ impl<'a> CdrDeserializer<'a> {
 
         self.check_available(length)?;
 
-        // String data (including null terminator)
-        let string_data = &self.data[self.position..self.position + length];
+        // String data (including null terminator). Borrowed on the contiguous
+        // path (no copy); only chained input gathers into an owned buffer.
+        let string_data = self.input.bytes(self.position, length);
         self.position += length;
 
         // Remove null terminator if present
         let string_bytes = if string_data.last() == Some(&0) {
             &string_data[..string_data.len() - 1]
         } else {
-            string_data
+            &string_data[..]
         };
 
         // Optimized: validate UTF-8 without copying, then convert to String

@@ -2113,7 +2113,11 @@ impl UnicastMessageProcessor for UserLogic {
                     ));
                 }
 
-                let shared_payload = bytes::Bytes::from(buffer.assemble());
+                // Scatter-gather: keep fragment chunks as-is instead of assembling
+                // a contiguous buffer. One shared cache per sample so any contiguous
+                // fallback materializes at most once across all readers.
+                let chunks = buffer.into_chunks();
+                let cached = std::sync::Arc::new(std::sync::OnceLock::new());
 
                 for reader in matched_readers.iter() {
                     let mut ownership_strength = None;
@@ -2142,7 +2146,7 @@ impl UnicastMessageProcessor for UserLogic {
                         data_frag.writer_sn,
                         assembled_timestamp,
                     );
-                    assembled_change.set_shared_payload(shared_payload.clone());
+                    assembled_change.set_chained_payload(chunks.clone(), cached.clone());
                     assembled_change.set_ownership_strength(ownership_strength);
 
                     let _ = self.deliver_change_to_reader(
