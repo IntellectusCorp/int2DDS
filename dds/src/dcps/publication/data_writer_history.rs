@@ -144,7 +144,7 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
         // Release evicted change back to pool for buffer reuse.
         // Consume the Arc by value so Arc::try_unwrap succeeds (refcount == 1).
         if let Some(evicted) = removed {
-            self.try_release_evicted(evicted);
+            self.pool.try_release(evicted);
         }
 
         if lifespan_duration.is_some() {
@@ -337,14 +337,6 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
     #[cfg(test)]
     pub(crate) fn pool_len(&self) -> usize {
         self.pool.len()
-    }
-
-    /// Try to release an evicted Arc<CacheChange> back to the pool.
-    /// Returns the change to the pool only if Arc refcount is 1.
-    fn try_release_evicted(&mut self, evicted: Arc<CacheChange>) {
-        if let Ok(change) = Arc::try_unwrap(evicted) {
-            self.pool.release(change);
-        }
     }
 
     // Must be called immediately after DataWriterHistoryCache creation.
