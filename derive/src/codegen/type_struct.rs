@@ -519,6 +519,31 @@ fn quote_deserialize_impl(
                 }
             }
         }
+
+        fn deserialize_chained(&self, chunks: &[#crate_path::bytes::Bytes], format: Option<&#crate_path::dcps::topic::type_support::SerializationFormat>) -> #crate_path::dcps::core::error::DdsResult<Box<dyn std::any::Any>> {
+            // Classic CDR fragments deserialize directly across chunks (no contiguous
+            // reassembly). Peek the encapsulation id in the leading chunk to confirm.
+            if let Some(first) = chunks.first() {
+                if first.len() >= 2 {
+                    let encoding_id = u16::from_be_bytes([first[0], first[1]]);
+                    if matches!(encoding_id, 0x0000 | 0x0001) {
+                        use #crate_path::serialize::cdr::{CdrDeserialize, CdrDeserializer};
+                        let mut deserializer = CdrDeserializer::new_chained(chunks)
+                            .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+                        let result = <#full_type as CdrDeserialize>::deserialize_cdr(&mut deserializer)
+                            .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+                        return Ok(Box::new(result));
+                    }
+                }
+            }
+            // XCDR2/PL_CDR/builtin: materialize once, then delegate to deserialize.
+            let total: usize = chunks.iter().map(|c| c.len()).sum();
+            let mut buf = Vec::with_capacity(total);
+            for c in chunks {
+                buf.extend_from_slice(c);
+            }
+            self.deserialize(&buf, format)
+        }
     }
 }
 
