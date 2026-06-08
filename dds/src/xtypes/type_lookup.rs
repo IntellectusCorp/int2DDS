@@ -16,8 +16,8 @@
 
 use crate::rtps::common::{guid::Guid, sequence::SequenceNumber};
 use crate::serialize::cdr::{
-    CdrError, CdrSerializerCommon, ExtensibilityKind, LcHint, PrimitiveSerialize, StringSerialize,
-    Xcdr2Deserializer, Xcdr2Serializer,
+    CdrError, CdrSerializerCommon, ExtensibilityKind, LcHint, PrimitiveSerialize,
+    SequenceSerialize, StringSerialize, Xcdr2Deserializer, Xcdr2Serializer,
 };
 use crate::serialize::DeserializerReader;
 
@@ -114,24 +114,6 @@ fn read_type_ids(d: &mut Xcdr2Deserializer) -> Result<Vec<TypeIdentifier>, CdrEr
         type_ids.push(type_id);
     }
     Ok(type_ids)
-}
-
-fn write_octet_seq(s: &mut Xcdr2Serializer, bytes: &[u8]) -> Result<(), CdrError> {
-    s.serialize_u32(bytes.len() as u32)?;
-    s.buffer_mut().extend_from_slice(bytes);
-    Ok(())
-}
-
-fn read_octet_seq(d: &mut Xcdr2Deserializer) -> Result<Vec<u8>, CdrError> {
-    let len = d.deserialize_u32()? as usize;
-    let pos = d.get_position();
-    let data = d.get_data();
-    if pos + len > data.len() {
-        return Err(CdrError::InsufficientData);
-    }
-    let out = data[pos..pos + len].to_vec();
-    d.set_position(pos + len);
-    Ok(out)
 }
 
 fn read_mutable_members<F>(d: &mut Xcdr2Deserializer, mut handle: F) -> Result<(), CdrError>
@@ -240,7 +222,7 @@ impl GetTypeDependenciesIn {
             write_type_ids(s, &self.type_ids)
         })?;
         s.write_member_with_lc(hashid("continuation_point"), false, LcHint::Auto, |s| {
-            write_octet_seq(s, &self.continuation_point)
+            s.serialize_byte_sequence(&self.continuation_point)
         })?;
         s.end_struct(top)
     }
@@ -254,7 +236,7 @@ impl GetTypeDependenciesIn {
             if member_id == id_type_ids {
                 type_ids = read_type_ids(d)?;
             } else if member_id == id_cp {
-                continuation_point = read_octet_seq(d)?;
+                continuation_point = d.deserialize_byte_sequence()?;
             } else {
                 return Ok(false);
             }
@@ -283,7 +265,7 @@ impl GetTypeDependenciesOut {
             })
         })?;
         s.write_member_with_lc(hashid("continuation_point"), false, LcHint::Auto, |s| {
-            write_octet_seq(s, &self.continuation_point)
+            s.serialize_byte_sequence(&self.continuation_point)
         })?;
         s.end_struct(top)
     }
@@ -305,7 +287,7 @@ impl GetTypeDependenciesOut {
                     dependent_typeids.push(dep);
                 }
             } else if member_id == id_cp {
-                continuation_point = read_octet_seq(d)?;
+                continuation_point = d.deserialize_byte_sequence()?;
             } else {
                 return Ok(false);
             }

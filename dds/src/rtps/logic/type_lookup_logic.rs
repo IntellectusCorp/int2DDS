@@ -21,6 +21,7 @@ use crate::{
             entity_id::EntityId,
             guid::{Guid, GuidPrefix},
             rtps_error_code::RtpsResult,
+            sequence::SequenceNumber,
             time::RtpsTime,
             types::ChangeKind,
         },
@@ -247,14 +248,9 @@ impl SedpLogic {
         if type_ids.is_empty() {
             return Ok(());
         }
-        let participant = self.get_upgraded_participant()?;
-        let writer = participant.type_lookup_request_writer();
         let call = TypeLookupCall::GetTypes(GetTypesIn { type_ids });
-
-        let change = writer.new_change_with_rpc_callback(
-            ChangeKind::Alive,
-            InstanceHandle::NIL,
-            Some(RtpsTime::now()),
+        self.send_type_lookup_request(
+            remote_prefix,
             Box::new(move |writer_guid, seq| {
                 let request = TypeLookupRequest {
                     header: RequestHeader {
@@ -265,18 +261,6 @@ impl SedpLogic {
                 };
                 request.serialize()
             }),
-        );
-        let cache_change = Arc::new(change);
-        if let Ok(mut cache) = writer.writer_cache().lock() {
-            let _ = cache.add_change_builtin(cache_change.clone());
-        }
-
-        let remote_reader_guid = Guid::new(remote_prefix, EntityId::TYPE_LOOKUP_REQUEST_READER);
-        self.send_type_lookup_sample_change(
-            remote_reader_guid,
-            EntityId::TYPE_LOOKUP_REQUEST_READER,
-            EntityId::TYPE_LOOKUP_REQUEST_WRITER,
-            cache_change,
         )
     }
 
@@ -286,15 +270,10 @@ impl SedpLogic {
         root: TypeIdentifier,
         continuation_point: Vec<u8>,
     ) -> RtpsResult<()> {
-        let participant = self.get_upgraded_participant()?;
-        let writer = participant.type_lookup_request_writer();
         let pending = self.type_lookup_pending.clone();
         let input = GetTypeDependenciesIn { type_ids: vec![root.clone()], continuation_point };
-
-        let change = writer.new_change_with_rpc_callback(
-            ChangeKind::Alive,
-            InstanceHandle::NIL,
-            Some(RtpsTime::now()),
+        self.send_type_lookup_request(
+            remote_prefix,
             Box::new(move |writer_guid, seq| {
                 let request_id = SampleIdentity::new(writer_guid, seq);
                 if let Ok(mut map) = pending.lock() {
@@ -306,18 +285,34 @@ impl SedpLogic {
                 };
                 request.serialize()
             }),
+        )
+    }
+
+    /// Build a request sample from `data_fn`, cache it on the request writer, and
+    /// send it to `remote_prefix` over the metatraffic path.
+    fn send_type_lookup_request<'a>(
+        &self,
+        remote_prefix: GuidPrefix,
+        data_fn: Box<dyn FnOnce(Guid, SequenceNumber) -> Vec<u8> + 'a>,
+    ) -> RtpsResult<()> {
+        let participant = self.get_upgraded_participant()?;
+        let writer = participant.type_lookup_request_writer();
+        let change = writer.new_change_with_rpc_callback(
+            ChangeKind::Alive,
+            InstanceHandle::NIL,
+            Some(RtpsTime::now()),
+            data_fn,
         );
         let cache_change = Arc::new(change);
         if let Ok(mut cache) = writer.writer_cache().lock() {
             let _ = cache.add_change_builtin(cache_change.clone());
         }
-
         let remote_reader_guid = Guid::new(remote_prefix, EntityId::TYPE_LOOKUP_REQUEST_READER);
-        self.send_type_lookup_sample_change(
+        self.send_sedp_data_message(
+            cache_change,
             remote_reader_guid,
             EntityId::TYPE_LOOKUP_REQUEST_READER,
             EntityId::TYPE_LOOKUP_REQUEST_WRITER,
-            cache_change,
         )
     }
 
@@ -362,22 +357,6 @@ impl SedpLogic {
         if let Ok(mut cache) = writer.writer_cache().lock() {
             let _ = cache.add_change_builtin(cache_change.clone());
         }
-        self.send_type_lookup_sample_change(
-            remote_reader_guid,
-            reader_entity_id,
-            writer_entity_id,
-            cache_change,
-        )
-    }
-
-    /// Send an already-cached TypeLookup CacheChange over the metatraffic path.
-    fn send_type_lookup_sample_change(
-        &self,
-        remote_reader_guid: Guid,
-        reader_entity_id: EntityId,
-        writer_entity_id: EntityId,
-        cache_change: Arc<crate::rtps::entities::history::cache_change::CacheChange>,
-    ) -> RtpsResult<()> {
         self.send_sedp_data_message(
             cache_change,
             remote_reader_guid,

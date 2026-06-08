@@ -26,6 +26,17 @@ use int2dds::{
 
 use super::error::*;
 
+/// Decode a C string argument to `&str`, returning `INT2DDS_RET_INVALID_ARGUMENT`
+/// when it is not valid UTF-8. Caller must have already null-checked the pointer.
+macro_rules! cstr_arg {
+    ($ptr:expr) => {
+        match CStr::from_ptr($ptr).to_str() {
+            Ok(s) => s,
+            Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+        }
+    };
+}
+
 /// Field type constants for C FFI.
 pub const INT2DDS_FIELD_BOOL: i32 = 0;
 pub const INT2DDS_FIELD_BYTE: i32 = 1;
@@ -161,6 +172,22 @@ fn named_type_identifier(hash_name: &str) -> TypeIdentifier {
     TypeIdentifier::MinimalTypeId(EquivalenceHash::compute(hash_name.as_bytes()))
 }
 
+fn plain_sequence_id(element: TypeIdentifier, bound: u32) -> TypeIdentifier {
+    TypeIdentifier::PlainSequenceLarge {
+        header: PlainCollectionHeader::default(),
+        bound,
+        element_identifier: Box::new(element),
+    }
+}
+
+fn plain_array_id(element: TypeIdentifier, array_size: u32) -> TypeIdentifier {
+    TypeIdentifier::PlainArrayLarge {
+        header: PlainCollectionHeader::default(),
+        array_bound_seq: vec![array_size],
+        element_identifier: Box::new(element),
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_create(
     type_name: *const std::os::raw::c_char,
@@ -170,10 +197,7 @@ pub unsafe extern "C" fn int2dds_type_info_create(
     check_null!(type_name);
     check_null!(out);
 
-    let name_str = match CStr::from_ptr(type_name).to_str() {
-        Ok(s) => s,
-        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
-    };
+    let name_str = cstr_arg!(type_name);
 
     let ext_kind = match extensibility {
         0 => ExtensibilityKind::Final,
@@ -234,21 +258,14 @@ pub unsafe extern "C" fn int2dds_type_info_add_sequence_field(
 
     let ti = &mut *type_info;
 
-    let name_str = match CStr::from_ptr(field_name).to_str() {
-        Ok(s) => s,
-        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
-    };
+    let name_str = cstr_arg!(field_name);
 
     let element_id = match field_type_to_type_identifier(element_type) {
         Some(id) => id,
         None => return INT2DDS_RET_INVALID_ARGUMENT,
     };
 
-    let type_id = TypeIdentifier::PlainSequenceLarge {
-        header: PlainCollectionHeader::default(),
-        bound,
-        element_identifier: Box::new(element_id),
-    };
+    let type_id = plain_sequence_id(element_id, bound);
 
     ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags });
 
@@ -269,21 +286,14 @@ pub unsafe extern "C" fn int2dds_type_info_add_array_field(
 
     let ti = &mut *type_info;
 
-    let name_str = match CStr::from_ptr(field_name).to_str() {
-        Ok(s) => s,
-        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
-    };
+    let name_str = cstr_arg!(field_name);
 
     let element_id = match field_type_to_type_identifier(element_type) {
         Some(id) => id,
         None => return INT2DDS_RET_INVALID_ARGUMENT,
     };
 
-    let type_id = TypeIdentifier::PlainArrayLarge {
-        header: PlainCollectionHeader::default(),
-        array_bound_seq: vec![array_size],
-        element_identifier: Box::new(element_id),
-    };
+    let type_id = plain_array_id(element_id, array_size);
 
     ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags });
 
@@ -304,15 +314,8 @@ pub unsafe extern "C" fn int2dds_type_info_add_named_type_field(
 
     let ti = &mut *type_info;
 
-    let name_str = match CStr::from_ptr(field_name).to_str() {
-        Ok(s) => s,
-        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
-    };
-
-    let hash_name = match CStr::from_ptr(type_hash_name).to_str() {
-        Ok(s) => s,
-        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
-    };
+    let name_str = cstr_arg!(field_name);
+    let hash_name = cstr_arg!(type_hash_name);
 
     let type_id = named_type_identifier(hash_name);
 
@@ -335,21 +338,10 @@ pub unsafe extern "C" fn int2dds_type_info_add_sequence_of_named_field(
 
     let ti = &mut *type_info;
 
-    let name_str = match CStr::from_ptr(field_name).to_str() {
-        Ok(s) => s,
-        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
-    };
+    let name_str = cstr_arg!(field_name);
+    let hash_name = cstr_arg!(element_hash_name);
 
-    let hash_name = match CStr::from_ptr(element_hash_name).to_str() {
-        Ok(s) => s,
-        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
-    };
-
-    let type_id = TypeIdentifier::PlainSequenceLarge {
-        header: PlainCollectionHeader::default(),
-        bound,
-        element_identifier: Box::new(named_type_identifier(hash_name)),
-    };
+    let type_id = plain_sequence_id(named_type_identifier(hash_name), bound);
 
     ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags });
 
@@ -370,21 +362,10 @@ pub unsafe extern "C" fn int2dds_type_info_add_array_of_named_field(
 
     let ti = &mut *type_info;
 
-    let name_str = match CStr::from_ptr(field_name).to_str() {
-        Ok(s) => s,
-        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
-    };
+    let name_str = cstr_arg!(field_name);
+    let hash_name = cstr_arg!(element_hash_name);
 
-    let hash_name = match CStr::from_ptr(element_hash_name).to_str() {
-        Ok(s) => s,
-        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
-    };
-
-    let type_id = TypeIdentifier::PlainArrayLarge {
-        header: PlainCollectionHeader::default(),
-        array_bound_seq: vec![array_size],
-        element_identifier: Box::new(named_type_identifier(hash_name)),
-    };
+    let type_id = plain_array_id(named_type_identifier(hash_name), array_size);
 
     ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags });
 

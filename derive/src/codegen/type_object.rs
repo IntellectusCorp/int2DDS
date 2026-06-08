@@ -11,11 +11,32 @@ use crate::codegen::utils::{
     SerializationMethod,
 };
 
+fn name_based_minimal_id(
+    crate_path: &proc_macro2::TokenStream,
+    name_str: &str,
+) -> proc_macro2::TokenStream {
+    quote! {
+        #crate_path::xtypes::TypeIdentifier::MinimalTypeId(
+            #crate_path::xtypes::EquivalenceHash::compute(#name_str.as_bytes())
+        )
+    }
+}
+
+fn xtypes_extensibility_tokens(
+    extensibility: Option<crate::codegen::type_config::ExtensibilityKind>,
+    crate_path: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    use crate::codegen::type_config::ExtensibilityKind;
+    match extensibility.unwrap_or_default() {
+        ExtensibilityKind::Final => quote! { #crate_path::xtypes::ExtensibilityKind::Final },
+        ExtensibilityKind::Appendable => {
+            quote! { #crate_path::xtypes::ExtensibilityKind::Appendable }
+        }
+        ExtensibilityKind::Mutable => quote! { #crate_path::xtypes::ExtensibilityKind::Mutable },
+    }
+}
+
 /// Generate TypeIdentifier expression for a Rust type.
-///
-/// `as_char`: when true and the type is `u8` / `[u8; N]`, advertise it as
-/// `Char8` (resp. `Char8` array element) in XTypes metadata so that codegen
-/// from other languages — which keep IDL `char` as native char — can match.
 fn type_to_identifier(
     ty: &syn::Type,
     crate_path: &proc_macro2::TokenStream,
@@ -79,11 +100,7 @@ fn type_to_identifier(
         // the id under which `collect_nested_type_objects` registers the child.
         _ => {
             let type_str = quote!(#ty).to_string();
-            quote! {
-                #crate_path::xtypes::TypeIdentifier::MinimalTypeId(
-                    #crate_path::xtypes::EquivalenceHash::compute(#type_str.as_bytes())
-                )
-            }
+            name_based_minimal_id(crate_path, &type_str)
         }
     }
 }
@@ -131,14 +148,13 @@ fn generate_collect_nested(
     } else {
         quote! { use #crate_path::xtypes::nested_closure::CollectFallback as _; }
     };
+    let id_expr = name_based_minimal_id(crate_path, type_name_str);
     quote! {
         fn collect_nested_type_objects(
             out: &mut Vec<(#crate_path::xtypes::TypeIdentifier, #crate_path::xtypes::TypeObject)>,
         ) {
             #fallback_use
-            let __id = #crate_path::xtypes::TypeIdentifier::MinimalTypeId(
-                #crate_path::xtypes::EquivalenceHash::compute(#type_name_str.as_bytes())
-            );
+            let __id = #id_expr;
             if let Some(__h) = __id.equivalence_hash().copied() {
                 if out.iter().any(|(__i, _)| __i.equivalence_hash() == Some(&__h)) {
                     return;
@@ -175,11 +191,8 @@ pub fn generate_has_type_object_impl(
     let base_type_expr = if let Some(pf) = parent_field {
         let parent_type = &pf.ty;
         let parent_type_str = quote!(#parent_type).to_string();
-        quote! {
-            Some(#crate_path::xtypes::TypeIdentifier::MinimalTypeId(
-                #crate_path::xtypes::EquivalenceHash::compute(#parent_type_str.as_bytes())
-            ))
-        }
+        let parent_id = name_based_minimal_id(crate_path, &parent_type_str);
+        quote! { Some(#parent_id) }
     } else {
         quote! { None }
     };
@@ -278,17 +291,7 @@ pub fn generate_has_type_object_impl(
         .collect();
 
     // Determine extensibility kind (default: Appendable)
-    let ext_kind = match type_config.extensibility.unwrap_or_default() {
-        crate::codegen::type_config::ExtensibilityKind::Final => {
-            quote! { #crate_path::xtypes::ExtensibilityKind::Final }
-        }
-        crate::codegen::type_config::ExtensibilityKind::Appendable => {
-            quote! { #crate_path::xtypes::ExtensibilityKind::Appendable }
-        }
-        crate::codegen::type_config::ExtensibilityKind::Mutable => {
-            quote! { #crate_path::xtypes::ExtensibilityKind::Mutable }
-        }
-    };
+    let ext_kind = xtypes_extensibility_tokens(type_config.extensibility, crate_path);
     let is_nested = type_config.nested;
     let is_autoid_hash =
         matches!(type_config.autoid, Some(crate::codegen::utils::AutoIdKind::Hash));
@@ -536,20 +539,7 @@ pub fn generate_has_type_object_union_impl(
     let crate_path = &type_config.crate_path;
     let type_name_str = name.to_string();
 
-    let union_ext_kind = match type_config
-        .extensibility
-        .unwrap_or(crate::codegen::type_config::ExtensibilityKind::Appendable)
-    {
-        crate::codegen::type_config::ExtensibilityKind::Final => {
-            quote! { #crate_path::xtypes::ExtensibilityKind::Final }
-        }
-        crate::codegen::type_config::ExtensibilityKind::Appendable => {
-            quote! { #crate_path::xtypes::ExtensibilityKind::Appendable }
-        }
-        crate::codegen::type_config::ExtensibilityKind::Mutable => {
-            quote! { #crate_path::xtypes::ExtensibilityKind::Mutable }
-        }
-    };
+    let union_ext_kind = xtypes_extensibility_tokens(type_config.extensibility, crate_path);
     let union_flags = quote! { #crate_path::xtypes::TypeFlag::new(#union_ext_kind, false, false) };
 
     let disc_type_id = match disc_type {
