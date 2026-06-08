@@ -57,9 +57,6 @@ pub enum LcHint {
     Auto,
     SeqMul4,
     SeqMul8,
-    /// The member value begins with its own 4-byte DHEADER (an APPENDABLE/MUTABLE
-    /// nested type). Emit LC=5 and let that DHEADER double as the EMHEADER's
-    /// NEXTINT, matching Fast-CDR (no redundant length word).
     Dheader,
 }
 

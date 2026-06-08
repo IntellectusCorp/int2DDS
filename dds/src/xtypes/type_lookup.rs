@@ -5,67 +5,135 @@
 //! peer's `TypeIdentifier` (via `TypeInformation`) can fetch the missing
 //! `TypeObject`s and complete its local `TypeRegistry`.
 //!
-//! The encoding here is a plain little-endian layout that reuses the existing
-//! `TypeIdentifier`/`TypeObject` (de)serializers. Both ends of an int2DDS
-//! exchange use it symmetrically; the operation discriminators match the
-//! Fast-DDS hash constants to ease future interoperability.
+//! `TypeLookupTypes.idl`: a 4-byte PLAIN_CDR2 encapsulation header, `@final`
+//! `TypeLookup_Request`/`TypeLookup_Reply` carrying `@final` RPC headers, the
+//! operation-hash `TypeLookup_Call`/`TypeLookup_Return` unions (the reply
+//! nests a `*_Result` union with a `RETCODE_OK` discriminator), and `@mutable`
+//! `*_In`/`*_Out` structs whose `@hashid` members use EMHEADER encoding. The
+//! leaf `TypeIdentifier`/`TypeObject`/`TypeIdentifierWithSize` payloads reuse
+//! their existing serializers, matching how SEDP already places them on the
+//! wire.
 
 use crate::rtps::common::{guid::Guid, sequence::SequenceNumber};
+use crate::serialize::cdr::{
+    CdrError, CdrSerializerCommon, ExtensibilityKind, LcHint, PrimitiveSerialize,
+    SequenceSerialize, StringSerialize, Xcdr2Deserializer, Xcdr2Serializer,
+};
+use crate::serialize::DeserializerReader;
 
 use super::type_object::{TypeIdentifier, TypeIdentifierWithSize, TypeObject};
 
-/// Operation discriminator for `getTypes` (Fast-DDS `TypeLookup_getTypes_Hash`).
+/// Operation discriminator for `getTypes`.
 pub const TYPE_LOOKUP_GETTYPES_HASH: i32 = 0x018252d3;
 /// Operation discriminator for `getTypeDependencies`.
 pub const TYPE_LOOKUP_GETTYPE_DEPENDENCIES_HASH: i32 = 0x05aafb31;
 
-// ---------------------------------------------------------------------------
-// Primitive wire helpers (little-endian)
-// ---------------------------------------------------------------------------
+const RETCODE_OK: i32 = 0;
 
-fn write_u32(buffer: &mut Vec<u8>, value: u32) {
-    buffer.extend_from_slice(&value.to_le_bytes());
+pub const MAX_DEPENDENCIES_PER_REPLY: usize = 75;
+
+const CONTINUATION_POINT_LEN: usize = 32;
+
+fn hashid(name: &str) -> u32 {
+    let digest = md5::compute(name.as_bytes());
+    u32::from_le_bytes([digest[0], digest[1], digest[2], digest[3]]) & 0x0FFF_FFFF
 }
 
-fn read_u32(data: &[u8], pos: &mut usize) -> Result<u32, String> {
-    if data.len() < *pos + 4 {
-        return Err("Insufficient data for u32".to_string());
+/// Decode a continuation point (big-endian counter) into a chunk index.
+pub fn continuation_point_index(continuation_point: &[u8]) -> usize {
+    continuation_point.iter().fold(0usize, |acc, &b| (acc << 8) | b as usize)
+}
+
+pub fn continuation_point_for(index: usize) -> Vec<u8> {
+    let mut cp = vec![0u8; CONTINUATION_POINT_LEN];
+    let bytes = index.to_be_bytes();
+    cp[CONTINUATION_POINT_LEN - bytes.len()..].copy_from_slice(&bytes);
+    cp
+}
+
+pub fn chunk_dependencies(
+    all: Vec<TypeIdentifierWithSize>,
+    continuation_point: &[u8],
+) -> GetTypeDependenciesOut {
+    if all.len() < MAX_DEPENDENCIES_PER_REPLY {
+        return GetTypeDependenciesOut { dependent_typeids: all, continuation_point: Vec::new() };
     }
-    let v = u32::from_le_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
-    *pos += 4;
-    Ok(v)
+    let index = continuation_point_index(continuation_point);
+    let start = index * MAX_DEPENDENCIES_PER_REPLY;
+    let end = (start + MAX_DEPENDENCIES_PER_REPLY).min(all.len());
+    let dependent_typeids = all.get(start..end).map(<[_]>::to_vec).unwrap_or_default();
+    let next = if start + MAX_DEPENDENCIES_PER_REPLY > all.len() {
+        Vec::new()
+    } else {
+        continuation_point_for(index + 1)
+    };
+    GetTypeDependenciesOut { dependent_typeids, continuation_point: next }
 }
 
-fn write_bytes(buffer: &mut Vec<u8>, bytes: &[u8]) {
-    write_u32(buffer, bytes.len() as u32);
-    buffer.extend_from_slice(bytes);
+fn write_nonprimitive_seq<F>(
+    s: &mut Xcdr2Serializer,
+    count: usize,
+    write_elems: F,
+) -> Result<(), CdrError>
+where
+    F: FnOnce(&mut Xcdr2Serializer) -> Result<(), CdrError>,
+{
+    let dheader_pos = s.reserve_dheader();
+    let start = s.position();
+    s.serialize_u32(count as u32)?;
+    write_elems(s)?;
+    let len = (s.position() - start) as u32;
+    s.write_dheader_at(dheader_pos, len);
+    Ok(())
 }
 
-fn read_bytes(data: &[u8], pos: &mut usize) -> Result<Vec<u8>, String> {
-    let len = read_u32(data, pos)? as usize;
-    if data.len() < *pos + len {
-        return Err("Insufficient data for byte sequence".to_string());
+/// Consume a non-primitive sequence DHEADER and return the element count.
+fn read_nonprimitive_seq_count(d: &mut Xcdr2Deserializer) -> Result<usize, CdrError> {
+    d.begin_struct()?; // sequence DHEADER
+    Ok(d.deserialize_u32()? as usize)
+}
+
+fn write_type_ids(s: &mut Xcdr2Serializer, type_ids: &[TypeIdentifier]) -> Result<(), CdrError> {
+    write_nonprimitive_seq(s, type_ids.len(), |s| {
+        for type_id in type_ids {
+            type_id.serialize_into(s.buffer_mut());
+        }
+        Ok(())
+    })
+}
+
+fn read_type_ids(d: &mut Xcdr2Deserializer) -> Result<Vec<TypeIdentifier>, CdrError> {
+    let count = read_nonprimitive_seq_count(d)?;
+    // Grow on demand; never pre-allocate from an untrusted wire count.
+    let mut type_ids = Vec::new();
+    for _ in 0..count {
+        let pos = d.get_position();
+        let (type_id, consumed) = TypeIdentifier::deserialize(&d.get_data()[pos..])
+            .map_err(CdrError::DeserializationError)?;
+        d.set_position(pos + consumed);
+        type_ids.push(type_id);
     }
-    let out = data[*pos..*pos + len].to_vec();
-    *pos += len;
-    Ok(out)
+    Ok(type_ids)
 }
 
-fn write_string(buffer: &mut Vec<u8>, value: &str) {
-    write_bytes(buffer, value.as_bytes());
+fn read_mutable_members<F>(d: &mut Xcdr2Deserializer, mut handle: F) -> Result<(), CdrError>
+where
+    F: FnMut(&mut Xcdr2Deserializer, u32) -> Result<bool, CdrError>,
+{
+    let (object_size, start) = d.begin_struct()?;
+    let end = start + object_size as usize;
+    while d.get_position() < end {
+        let (member_id, member_length) = d.read_member_header()?;
+        let value_start = d.get_position();
+        if !handle(d, member_id)? {
+            d.set_position(value_start);
+            d.skip(member_length as usize)?;
+        }
+    }
+    d.end_struct(object_size, start)
 }
 
-fn read_string(data: &[u8], pos: &mut usize) -> Result<String, String> {
-    let bytes = read_bytes(data, pos)?;
-    String::from_utf8(bytes).map_err(|_| "Invalid UTF-8 in string".to_string())
-}
-
-// ---------------------------------------------------------------------------
-// SampleIdentity / RPC headers
-// ---------------------------------------------------------------------------
-
-/// DDS-RPC `SampleIdentity`: correlates a reply with its originating request.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SampleIdentity {
     pub writer_guid: Guid,
     pub sequence_number: SequenceNumber,
@@ -76,22 +144,24 @@ impl SampleIdentity {
         Self { writer_guid, sequence_number }
     }
 
-    pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
-        buffer.extend_from_slice(&self.writer_guid.to_bytes());
-        buffer.extend_from_slice(&self.sequence_number.high.to_le_bytes());
-        buffer.extend_from_slice(&self.sequence_number.low.to_le_bytes());
+    fn write(&self, s: &mut Xcdr2Serializer) -> Result<(), CdrError> {
+        s.buffer_mut().extend_from_slice(&self.writer_guid.to_bytes());
+        s.serialize_i32(self.sequence_number.high)?;
+        s.serialize_u32(self.sequence_number.low)?;
+        Ok(())
     }
 
-    pub fn deserialize(data: &[u8], pos: &mut usize) -> Result<Self, String> {
-        if data.len() < *pos + 24 {
-            return Err("Insufficient data for SampleIdentity".to_string());
+    fn read(d: &mut Xcdr2Deserializer) -> Result<Self, CdrError> {
+        let pos = d.get_position();
+        let data = d.get_data();
+        if pos + 16 > data.len() {
+            return Err(CdrError::InsufficientData);
         }
         let mut guid_bytes = [0u8; 16];
-        guid_bytes.copy_from_slice(&data[*pos..*pos + 16]);
-        *pos += 16;
-        let high = i32::from_le_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
-        *pos += 4;
-        let low = read_u32(data, pos)?;
+        guid_bytes.copy_from_slice(&data[pos..pos + 16]);
+        d.set_position(pos + 16);
+        let high = d.deserialize_i32()?;
+        let low = d.deserialize_u32()?;
         Ok(Self {
             writer_guid: Guid::from_bytes(guid_bytes),
             sequence_number: SequenceNumber::new(high, low),
@@ -107,14 +177,14 @@ pub struct RequestHeader {
 }
 
 impl RequestHeader {
-    pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
-        self.request_id.serialize_into(buffer);
-        write_string(buffer, &self.instance_name);
+    fn write(&self, s: &mut Xcdr2Serializer) -> Result<(), CdrError> {
+        self.request_id.write(s)?;
+        s.serialize_string(&self.instance_name)
     }
 
-    pub fn deserialize(data: &[u8], pos: &mut usize) -> Result<Self, String> {
-        let request_id = SampleIdentity::deserialize(data, pos)?;
-        let instance_name = read_string(data, pos)?;
+    fn read(d: &mut Xcdr2Deserializer) -> Result<Self, CdrError> {
+        let request_id = SampleIdentity::read(d)?;
+        let instance_name = d.deserialize_string()?;
         Ok(Self { request_id, instance_name })
     }
 }
@@ -127,46 +197,18 @@ pub struct ReplyHeader {
 }
 
 impl ReplyHeader {
-    pub fn serialize_into(&self, buffer: &mut Vec<u8>) {
-        self.related_request_id.serialize_into(buffer);
-        buffer.extend_from_slice(&self.remote_exception_code.to_le_bytes());
+    fn write(&self, s: &mut Xcdr2Serializer) -> Result<(), CdrError> {
+        self.related_request_id.write(s)?;
+        s.serialize_i32(self.remote_exception_code)
     }
 
-    pub fn deserialize(data: &[u8], pos: &mut usize) -> Result<Self, String> {
-        let related_request_id = SampleIdentity::deserialize(data, pos)?;
-        if data.len() < *pos + 4 {
-            return Err("Insufficient data for ReplyHeader exception code".to_string());
-        }
-        let remote_exception_code =
-            i32::from_le_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
-        *pos += 4;
+    fn read(d: &mut Xcdr2Deserializer) -> Result<Self, CdrError> {
+        let related_request_id = SampleIdentity::read(d)?;
+        let remote_exception_code = d.deserialize_i32()?;
         Ok(Self { related_request_id, remote_exception_code })
     }
 }
 
-// ---------------------------------------------------------------------------
-// Operation payloads
-// ---------------------------------------------------------------------------
-
-fn write_type_ids(buffer: &mut Vec<u8>, type_ids: &[TypeIdentifier]) {
-    write_u32(buffer, type_ids.len() as u32);
-    for type_id in type_ids {
-        type_id.serialize_into(buffer);
-    }
-}
-
-fn read_type_ids(data: &[u8], pos: &mut usize) -> Result<Vec<TypeIdentifier>, String> {
-    let count = read_u32(data, pos)? as usize;
-    let mut type_ids = Vec::new();
-    for _ in 0..count {
-        let (type_id, consumed) = TypeIdentifier::deserialize(&data[*pos..])?;
-        *pos += consumed;
-        type_ids.push(type_id);
-    }
-    Ok(type_ids)
-}
-
-/// `getTypeDependencies` input: the type ids to resolve plus a continuation token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GetTypeDependenciesIn {
     pub type_ids: Vec<TypeIdentifier>,
@@ -174,14 +216,32 @@ pub struct GetTypeDependenciesIn {
 }
 
 impl GetTypeDependenciesIn {
-    fn serialize_into(&self, buffer: &mut Vec<u8>) {
-        write_type_ids(buffer, &self.type_ids);
-        write_bytes(buffer, &self.continuation_point);
+    fn write(&self, s: &mut Xcdr2Serializer) -> Result<(), CdrError> {
+        let top = s.begin_struct()?;
+        s.write_member_with_lc(hashid("type_ids"), false, LcHint::Auto, |s| {
+            write_type_ids(s, &self.type_ids)
+        })?;
+        s.write_member_with_lc(hashid("continuation_point"), false, LcHint::Auto, |s| {
+            s.serialize_byte_sequence(&self.continuation_point)
+        })?;
+        s.end_struct(top)
     }
 
-    fn deserialize(data: &[u8], pos: &mut usize) -> Result<Self, String> {
-        let type_ids = read_type_ids(data, pos)?;
-        let continuation_point = read_bytes(data, pos)?;
+    fn read(d: &mut Xcdr2Deserializer) -> Result<Self, CdrError> {
+        let mut type_ids = Vec::new();
+        let mut continuation_point = Vec::new();
+        let id_type_ids = hashid("type_ids");
+        let id_cp = hashid("continuation_point");
+        read_mutable_members(d, |d, member_id| {
+            if member_id == id_type_ids {
+                type_ids = read_type_ids(d)?;
+            } else if member_id == id_cp {
+                continuation_point = d.deserialize_byte_sequence()?;
+            } else {
+                return Ok(false);
+            }
+            Ok(true)
+        })?;
         Ok(Self { type_ids, continuation_point })
     }
 }
@@ -194,23 +254,45 @@ pub struct GetTypeDependenciesOut {
 }
 
 impl GetTypeDependenciesOut {
-    fn serialize_into(&self, buffer: &mut Vec<u8>) {
-        write_u32(buffer, self.dependent_typeids.len() as u32);
-        for dep in &self.dependent_typeids {
-            dep.serialize_into(buffer);
-        }
-        write_bytes(buffer, &self.continuation_point);
+    fn write(&self, s: &mut Xcdr2Serializer) -> Result<(), CdrError> {
+        let top = s.begin_struct()?;
+        s.write_member_with_lc(hashid("dependent_typeids"), false, LcHint::Auto, |s| {
+            write_nonprimitive_seq(s, self.dependent_typeids.len(), |s| {
+                for dep in &self.dependent_typeids {
+                    dep.serialize_into(s.buffer_mut());
+                }
+                Ok(())
+            })
+        })?;
+        s.write_member_with_lc(hashid("continuation_point"), false, LcHint::Auto, |s| {
+            s.serialize_byte_sequence(&self.continuation_point)
+        })?;
+        s.end_struct(top)
     }
 
-    fn deserialize(data: &[u8], pos: &mut usize) -> Result<Self, String> {
-        let count = read_u32(data, pos)? as usize;
+    fn read(d: &mut Xcdr2Deserializer) -> Result<Self, CdrError> {
         let mut dependent_typeids = Vec::new();
-        for _ in 0..count {
-            let (dep, consumed) = TypeIdentifierWithSize::deserialize(&data[*pos..])?;
-            *pos += consumed;
-            dependent_typeids.push(dep);
-        }
-        let continuation_point = read_bytes(data, pos)?;
+        let mut continuation_point = Vec::new();
+        let id_deps = hashid("dependent_typeids");
+        let id_cp = hashid("continuation_point");
+        read_mutable_members(d, |d, member_id| {
+            if member_id == id_deps {
+                let count = read_nonprimitive_seq_count(d)?;
+                dependent_typeids = Vec::new();
+                for _ in 0..count {
+                    let pos = d.get_position();
+                    let (dep, consumed) = TypeIdentifierWithSize::deserialize(&d.get_data()[pos..])
+                        .map_err(CdrError::DeserializationError)?;
+                    d.set_position(pos + consumed);
+                    dependent_typeids.push(dep);
+                }
+            } else if member_id == id_cp {
+                continuation_point = d.deserialize_byte_sequence()?;
+            } else {
+                return Ok(false);
+            }
+            Ok(true)
+        })?;
         Ok(Self { dependent_typeids, continuation_point })
     }
 }
@@ -222,12 +304,26 @@ pub struct GetTypesIn {
 }
 
 impl GetTypesIn {
-    fn serialize_into(&self, buffer: &mut Vec<u8>) {
-        write_type_ids(buffer, &self.type_ids);
+    fn write(&self, s: &mut Xcdr2Serializer) -> Result<(), CdrError> {
+        let top = s.begin_struct()?;
+        s.write_member_with_lc(hashid("type_ids"), false, LcHint::Auto, |s| {
+            write_type_ids(s, &self.type_ids)
+        })?;
+        s.end_struct(top)
     }
 
-    fn deserialize(data: &[u8], pos: &mut usize) -> Result<Self, String> {
-        Ok(Self { type_ids: read_type_ids(data, pos)? })
+    fn read(d: &mut Xcdr2Deserializer) -> Result<Self, CdrError> {
+        let mut type_ids = Vec::new();
+        let id_type_ids = hashid("type_ids");
+        read_mutable_members(d, |d, member_id| {
+            if member_id == id_type_ids {
+                type_ids = read_type_ids(d)?;
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        })?;
+        Ok(Self { type_ids })
     }
 }
 
@@ -238,31 +334,46 @@ pub struct GetTypesOut {
 }
 
 impl GetTypesOut {
-    fn serialize_into(&self, buffer: &mut Vec<u8>) {
-        write_u32(buffer, self.types.len() as u32);
-        for (type_id, type_object) in &self.types {
-            type_id.serialize_into(buffer);
-            type_object.serialize_into(buffer);
-        }
+    fn write(&self, s: &mut Xcdr2Serializer) -> Result<(), CdrError> {
+        let top = s.begin_struct()?;
+        s.write_member_with_lc(hashid("types"), false, LcHint::Auto, |s| {
+            write_nonprimitive_seq(s, self.types.len(), |s| {
+                for (type_id, type_object) in &self.types {
+                    type_id.serialize_into(s.buffer_mut());
+                    type_object.serialize_into(s.buffer_mut());
+                }
+                Ok(())
+            })
+        })?;
+        s.end_struct(top)
     }
 
-    fn deserialize(data: &[u8], pos: &mut usize) -> Result<Self, String> {
-        let count = read_u32(data, pos)? as usize;
+    fn read(d: &mut Xcdr2Deserializer) -> Result<Self, CdrError> {
         let mut types = Vec::new();
-        for _ in 0..count {
-            let (type_id, consumed) = TypeIdentifier::deserialize(&data[*pos..])?;
-            *pos += consumed;
-            let (type_object, consumed) = TypeObject::deserialize(&data[*pos..])?;
-            *pos += consumed;
-            types.push((type_id, type_object));
-        }
+        let id_types = hashid("types");
+        read_mutable_members(d, |d, member_id| {
+            if member_id == id_types {
+                let count = read_nonprimitive_seq_count(d)?;
+                types = Vec::new();
+                for _ in 0..count {
+                    let mut pos = d.get_position();
+                    let (type_id, consumed) = TypeIdentifier::deserialize(&d.get_data()[pos..])
+                        .map_err(CdrError::DeserializationError)?;
+                    pos += consumed;
+                    let (type_object, consumed) = TypeObject::deserialize(&d.get_data()[pos..])
+                        .map_err(CdrError::DeserializationError)?;
+                    pos += consumed;
+                    d.set_position(pos);
+                    types.push((type_id, type_object));
+                }
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        })?;
         Ok(Self { types })
     }
 }
-
-// ---------------------------------------------------------------------------
-// Request / Reply envelopes
-// ---------------------------------------------------------------------------
 
 /// Operation call union carried by a [`TypeLookupRequest`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -279,25 +390,33 @@ impl TypeLookupCall {
         }
     }
 
-    fn serialize_into(&self, buffer: &mut Vec<u8>) {
-        buffer.extend_from_slice(&self.discriminator().to_le_bytes());
+    fn write(&self, s: &mut Xcdr2Serializer) -> Result<(), CdrError> {
+        let top = s.begin_struct()?;
+        s.serialize_i32(self.discriminator())?;
         match self {
-            TypeLookupCall::GetTypes(v) => v.serialize_into(buffer),
-            TypeLookupCall::GetTypeDependencies(v) => v.serialize_into(buffer),
+            TypeLookupCall::GetTypes(v) => v.write(s)?,
+            TypeLookupCall::GetTypeDependencies(v) => v.write(s)?,
         }
+        s.end_struct(top)
     }
 
-    fn deserialize(data: &[u8], pos: &mut usize) -> Result<Self, String> {
-        let disc = read_discriminator(data, pos)?;
-        match disc {
-            TYPE_LOOKUP_GETTYPES_HASH => {
-                Ok(TypeLookupCall::GetTypes(GetTypesIn::deserialize(data, pos)?))
+    fn read(d: &mut Xcdr2Deserializer) -> Result<Self, CdrError> {
+        let (object_size, start) = d.begin_struct()?;
+        let disc = d.deserialize_i32()?;
+        let value = match disc {
+            TYPE_LOOKUP_GETTYPES_HASH => TypeLookupCall::GetTypes(GetTypesIn::read(d)?),
+            TYPE_LOOKUP_GETTYPE_DEPENDENCIES_HASH => {
+                TypeLookupCall::GetTypeDependencies(GetTypeDependenciesIn::read(d)?)
             }
-            TYPE_LOOKUP_GETTYPE_DEPENDENCIES_HASH => Ok(TypeLookupCall::GetTypeDependencies(
-                GetTypeDependenciesIn::deserialize(data, pos)?,
-            )),
-            other => Err(format!("Unknown TypeLookup call discriminator: 0x{:08x}", other)),
-        }
+            other => {
+                return Err(CdrError::DeserializationError(format!(
+                    "Unknown TypeLookup call discriminator: 0x{:08x}",
+                    other
+                )))
+            }
+        };
+        d.end_struct(object_size, start)?;
+        Ok(value)
     }
 }
 
@@ -316,35 +435,40 @@ impl TypeLookupReturn {
         }
     }
 
-    fn serialize_into(&self, buffer: &mut Vec<u8>) {
-        buffer.extend_from_slice(&self.discriminator().to_le_bytes());
+    fn write(&self, s: &mut Xcdr2Serializer) -> Result<(), CdrError> {
+        let top = s.begin_struct()?;
+        s.serialize_i32(self.discriminator())?;
+        let result = s.begin_struct()?;
+        s.serialize_i32(RETCODE_OK)?;
         match self {
-            TypeLookupReturn::GetTypes(v) => v.serialize_into(buffer),
-            TypeLookupReturn::GetTypeDependencies(v) => v.serialize_into(buffer),
+            TypeLookupReturn::GetTypes(v) => v.write(s)?,
+            TypeLookupReturn::GetTypeDependencies(v) => v.write(s)?,
         }
+        s.end_struct(result)?;
+        s.end_struct(top)
     }
 
-    fn deserialize(data: &[u8], pos: &mut usize) -> Result<Self, String> {
-        let disc = read_discriminator(data, pos)?;
-        match disc {
-            TYPE_LOOKUP_GETTYPES_HASH => {
-                Ok(TypeLookupReturn::GetTypes(GetTypesOut::deserialize(data, pos)?))
+    fn read(d: &mut Xcdr2Deserializer) -> Result<Self, CdrError> {
+        let (object_size, start) = d.begin_struct()?;
+        let disc = d.deserialize_i32()?;
+        let (result_size, result_start) = d.begin_struct()?;
+        let _retcode = d.deserialize_i32()?;
+        let value = match disc {
+            TYPE_LOOKUP_GETTYPES_HASH => TypeLookupReturn::GetTypes(GetTypesOut::read(d)?),
+            TYPE_LOOKUP_GETTYPE_DEPENDENCIES_HASH => {
+                TypeLookupReturn::GetTypeDependencies(GetTypeDependenciesOut::read(d)?)
             }
-            TYPE_LOOKUP_GETTYPE_DEPENDENCIES_HASH => Ok(TypeLookupReturn::GetTypeDependencies(
-                GetTypeDependenciesOut::deserialize(data, pos)?,
-            )),
-            other => Err(format!("Unknown TypeLookup return discriminator: 0x{:08x}", other)),
-        }
+            other => {
+                return Err(CdrError::DeserializationError(format!(
+                    "Unknown TypeLookup return discriminator: 0x{:08x}",
+                    other
+                )))
+            }
+        };
+        d.end_struct(result_size, result_start)?;
+        d.end_struct(object_size, start)?;
+        Ok(value)
     }
-}
-
-fn read_discriminator(data: &[u8], pos: &mut usize) -> Result<i32, String> {
-    if data.len() < *pos + 4 {
-        return Err("Insufficient data for discriminator".to_string());
-    }
-    let v = i32::from_le_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
-    *pos += 4;
-    Ok(v)
 }
 
 /// A TypeLookup request sample.
@@ -356,17 +480,21 @@ pub struct TypeLookupRequest {
 
 impl TypeLookupRequest {
     pub fn serialize(&self) -> Vec<u8> {
-        let mut buffer = Vec::new();
-        self.header.serialize_into(&mut buffer);
-        self.data.serialize_into(&mut buffer);
-        buffer
+        let mut s = Xcdr2Serializer::new(true, ExtensibilityKind::Final);
+        let write = |s: &mut Xcdr2Serializer| -> Result<(), CdrError> {
+            s.write_encapsulation_header()?;
+            self.header.write(s)?;
+            self.data.write(s)
+        };
+        let _ = write(&mut s);
+        s.into_buffer()
     }
 
     pub fn deserialize(data: &[u8]) -> Result<Self, String> {
-        let mut pos = 0;
-        let header = RequestHeader::deserialize(data, &mut pos)?;
-        let call = TypeLookupCall::deserialize(data, &mut pos)?;
-        Ok(Self { header, data: call })
+        let mut d = Xcdr2Deserializer::new(data).map_err(|e| format!("{:?}", e))?;
+        let header = RequestHeader::read(&mut d).map_err(|e| format!("{:?}", e))?;
+        let data = TypeLookupCall::read(&mut d).map_err(|e| format!("{:?}", e))?;
+        Ok(Self { header, data })
     }
 }
 
@@ -379,17 +507,21 @@ pub struct TypeLookupReply {
 
 impl TypeLookupReply {
     pub fn serialize(&self) -> Vec<u8> {
-        let mut buffer = Vec::new();
-        self.header.serialize_into(&mut buffer);
-        self.data.serialize_into(&mut buffer);
-        buffer
+        let mut s = Xcdr2Serializer::new(true, ExtensibilityKind::Final);
+        let write = |s: &mut Xcdr2Serializer| -> Result<(), CdrError> {
+            s.write_encapsulation_header()?;
+            self.header.write(s)?;
+            self.data.write(s)
+        };
+        let _ = write(&mut s);
+        s.into_buffer()
     }
 
     pub fn deserialize(data: &[u8]) -> Result<Self, String> {
-        let mut pos = 0;
-        let header = ReplyHeader::deserialize(data, &mut pos)?;
-        let ret = TypeLookupReturn::deserialize(data, &mut pos)?;
-        Ok(Self { header, data: ret })
+        let mut d = Xcdr2Deserializer::new(data).map_err(|e| format!("{:?}", e))?;
+        let header = ReplyHeader::read(&mut d).map_err(|e| format!("{:?}", e))?;
+        let data = TypeLookupReturn::read(&mut d).map_err(|e| format!("{:?}", e))?;
+        Ok(Self { header, data })
     }
 }
 
@@ -415,6 +547,65 @@ mod tests {
             None,
         );
         TypeObject::Complete(CompleteTypeObject::Struct(struct_type))
+    }
+
+    fn dep(seed: &[u8]) -> TypeIdentifierWithSize {
+        TypeIdentifierWithSize::new(
+            TypeIdentifier::CompleteTypeId(EquivalenceHash::compute(seed)),
+            1,
+        )
+    }
+
+    #[test]
+    fn encapsulation_header_is_plain_cdr2_le() {
+        let request = TypeLookupRequest {
+            header: RequestHeader { request_id: sample_identity(), instance_name: String::new() },
+            data: TypeLookupCall::GetTypes(GetTypesIn { type_ids: vec![] }),
+        };
+        let bytes = request.serialize();
+        // PLAIN_CDR2 little-endian encapsulation id (0x0007), options 0x0000.
+        assert_eq!(&bytes[0..4], &[0x00, 0x07, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn continuation_point_roundtrip() {
+        for index in [0usize, 1, 2, 75, 1234] {
+            let cp = continuation_point_for(index);
+            assert_eq!(cp.len(), 32);
+            assert_eq!(continuation_point_index(&cp), index);
+        }
+        assert_eq!(continuation_point_index(&[]), 0);
+    }
+
+    #[test]
+    fn chunk_dependencies_single_reply_under_limit() {
+        let all: Vec<_> = (0..MAX_DEPENDENCIES_PER_REPLY as u8 - 1).map(|i| dep(&[i])).collect();
+        let out = chunk_dependencies(all.clone(), &[]);
+        assert_eq!(out.dependent_typeids, all);
+        assert!(out.continuation_point.is_empty());
+    }
+
+    #[test]
+    fn chunk_dependencies_pages_in_order_until_drained() {
+        let total = MAX_DEPENDENCIES_PER_REPLY * 2 + 10;
+        let all: Vec<_> = (0..total as u16).map(|i| dep(&i.to_le_bytes())).collect();
+
+        let mut cp = Vec::new();
+        let mut collected = Vec::new();
+        let mut rounds = 0;
+        loop {
+            let out = chunk_dependencies(all.clone(), &cp);
+            assert!(out.dependent_typeids.len() <= MAX_DEPENDENCIES_PER_REPLY);
+            collected.extend(out.dependent_typeids);
+            rounds += 1;
+            if out.continuation_point.is_empty() {
+                break;
+            }
+            cp = out.continuation_point;
+            assert!(rounds < 10, "continuation must terminate");
+        }
+        assert_eq!(rounds, 3);
+        assert_eq!(collected, all, "paged chunks reassemble to the full list in order");
     }
 
     #[test]
@@ -473,6 +664,26 @@ mod tests {
             data: TypeLookupReturn::GetTypes(GetTypesOut {
                 types: vec![(TypeIdentifier::CompleteTypeId(hash), type_object)],
             }),
+        };
+        let bytes = reply.serialize();
+        assert_eq!(TypeLookupReply::deserialize(&bytes).unwrap(), reply);
+    }
+
+    #[test]
+    fn reply_get_types_multi_pair_roundtrip() {
+        // Exercise a larger payload to cover EMHEADER length-code selection.
+        let type_object = sample_type_object();
+        let types: Vec<_> = (0..5u8)
+            .map(|i| {
+                (
+                    TypeIdentifier::CompleteTypeId(EquivalenceHash::compute(&[i])),
+                    type_object.clone(),
+                )
+            })
+            .collect();
+        let reply = TypeLookupReply {
+            header: ReplyHeader { related_request_id: sample_identity(), remote_exception_code: 0 },
+            data: TypeLookupReturn::GetTypes(GetTypesOut { types }),
         };
         let bytes = reply.serialize();
         assert_eq!(TypeLookupReply::deserialize(&bytes).unwrap(), reply);
