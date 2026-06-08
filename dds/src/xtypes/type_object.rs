@@ -3251,17 +3251,10 @@ impl TypeInformation {
         Ok((TypeInformation { minimal, complete }, pos))
     }
 
-    /// Serialize as a PID_TYPE_INFORMATION (0x0075) parameter payload. Per Fast-DDS
-    /// (QosPoliciesSerializer<TypeInformationParameter>) this is a *headerless* XCDR2
-    /// PL_CDR2 (little-endian) body: a top-level DHEADER, then members @id 0x1001
-    /// (minimal) and @id 0x1002 (complete). Unlike 0x0069/0x0072, there is NO
-    /// encapsulation header — the wire bytes begin directly with the DHEADER.
     pub fn serialize_for_parameter(&self) -> Vec<u8> {
         let mut s = Xcdr2Serializer::new(true, crate::serialize::cdr::ExtensibilityKind::Mutable);
         let build = |s: &mut Xcdr2Serializer| -> Result<(), CdrError> {
             let top = s.begin_struct()?;
-            // minimal/complete are APPENDABLE (each starts with a DHEADER); emit LC=5
-            // so that DHEADER serves as the EMHEADER NEXTINT, matching Fast-CDR.
             s.write_member_with_lc(0x1001, false, LcHint::Dheader, |ser| {
                 self.minimal.write_xcdr2(ser)
             })?;
@@ -3275,10 +3268,6 @@ impl TypeInformation {
     }
 
     /// Parse a PID_TYPE_INFORMATION (0x0075) parameter payload.
-    ///
-    /// The standard (Fast-DDS) layout is headerless little-endian PL_CDR2. A legacy
-    /// int2DDS payload that still carries a PL_CDR2 encapsulation header is tolerated
-    /// by stripping it first.
     pub fn deserialize_for_parameter(data: &[u8]) -> Result<Self, String> {
         let (body, little_endian) = strip_optional_encapsulation(data);
         let mut d = Xcdr2Deserializer::new_without_header(body, little_endian);
