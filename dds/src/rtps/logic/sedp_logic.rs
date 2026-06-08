@@ -2006,16 +2006,17 @@ impl UnicastMessageProcessor for SedpLogic {
 
             let store_wire_in_cache = |endpoint_guid: Guid| {
                 let instance_handle = InstanceHandle::from_guid(&endpoint_guid);
-                let cache_change = CacheChange::new(
-                    ChangeKind::Alive,
-                    writer_guid,
-                    instance_handle,
-                    data.writer_sn,
-                    payload.as_ref().to_vec(),
-                    message_receiver.get_source_timestamp(),
-                );
                 let reader = builtin_endpoint_pair.reader();
                 if let Ok(mut cache_guard) = reader.reader_cache().lock() {
+                    let mut cache_change = cache_guard.acquire_change();
+                    cache_change.reset(
+                        ChangeKind::Alive,
+                        writer_guid,
+                        instance_handle,
+                        data.writer_sn,
+                        message_receiver.get_source_timestamp(),
+                    );
+                    cache_change.set_owned_payload(payload.as_ref().to_vec());
                     let _ = cache_guard.add_change(cache_change);
                 }
             };
