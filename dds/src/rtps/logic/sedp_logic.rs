@@ -5,6 +5,7 @@
 //! participants to enable reader-writer matching.
 
 use std::{
+    collections::HashMap,
     sync::{Arc, Mutex, Weak},
     thread::{self, JoinHandle},
     time::{Duration as StdDuration, Instant},
@@ -87,7 +88,7 @@ use crate::{
     },
     serialize::pl_cdr::InlineQosParameters,
     utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
-    xtypes::{check_structural_compatibility, TypeObject},
+    xtypes::{check_structural_compatibility, SampleIdentity, TypeIdentifier, TypeObject},
 };
 
 enum MatchType {
@@ -112,6 +113,12 @@ pub(crate) struct SedpLogic {
     multicast_listening_waker: Arc<std::sync::OnceLock<Arc<mio::Waker>>>,
     unicast_listening_waker: Arc<std::sync::OnceLock<Arc<mio::Waker>>>,
     timer_handler: Arc<Mutex<TimerHandler>>,
+    /// Correlates an outstanding `getTypeDependencies` request (by its
+    /// `SampleIdentity`) with the remote prefix and root `TypeIdentifier` being
+    /// resolved, so the reply can re-issue the next continuation round and add
+    /// the root to the final `getTypes` batch.
+    pub(crate) type_lookup_pending:
+        Arc<Mutex<HashMap<SampleIdentity, (GuidPrefix, TypeIdentifier)>>>,
 }
 
 fn validate_endpoint_compatibility<L>(
@@ -227,6 +234,7 @@ impl SedpLogic {
             multicast_listening_waker: Arc::new(std::sync::OnceLock::new()),
             unicast_listening_waker: Arc::new(std::sync::OnceLock::new()),
             timer_handler,
+            type_lookup_pending: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
