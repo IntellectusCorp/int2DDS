@@ -111,6 +111,23 @@ pub trait TypeSupport: Send + Sync + 'static {
         format: Option<&SerializationFormat>,
     ) -> DdsResult<Box<dyn Any>>;
 
+    // Deserialize from non-contiguous fragment chunks (scatter-gather receive
+    // path). Default materializes the chunks into a contiguous buffer and
+    // delegates to `deserialize`; the derive macro overrides this to read classic
+    // CDR directly across chunks. Slice order is fragment order.
+    fn deserialize_chained(
+        &self,
+        chunks: &[bytes::Bytes],
+        format: Option<&SerializationFormat>,
+    ) -> DdsResult<Box<dyn Any>> {
+        let total: usize = chunks.iter().map(|c| c.len()).sum();
+        let mut buf = Vec::with_capacity(total);
+        for c in chunks {
+            buf.extend_from_slice(c);
+        }
+        self.deserialize(&buf, format)
+    }
+
     /// Serialize into an existing buffer, reusing its capacity.
     /// The buffer is cleared and filled with serialized data (including encapsulation header).
     /// Default implementation delegates to `serialize()` (no buffer reuse).

@@ -24,38 +24,61 @@ use crate::serialize::DeserializerReader;
 #[derive(DdsType, Eq)]
 #[dds_type(crate_path = "crate", no_default, extensibility = "Mutable")]
 pub struct PublicationBuiltinTopicData {
-    #[dds(key)]
+    #[dds(key, id = 0x005a)] // PidEndpointGuid
     endpoint_guid: Guid,
+    #[dds(non_serialized)] // derived from endpoint_guid; never on the wire
     key: BuiltinTopicKey,
+    #[dds(non_serialized)] // derived from endpoint_guid prefix
     participant_key: BuiltinTopicKey,
+    #[dds(id = 0x0005)] // PidTopicName
     topic_name: String,
+    #[dds(id = 0x0007)] // PidTypeName
     type_name: String,
+    #[dds(id = 0x001d)] // PidDurability
     durability: DurabilityQosPolicy,
+    #[dds(id = 0x001e)] // PidDurabilityService
     durability_service: DurabilityServiceQosPolicy,
+    #[dds(id = 0x0023)] // PidDeadline
     deadline: DeadlineQosPolicy,
+    #[dds(id = 0x0027)] // PidLatencyBudget
     latency_budget: LatencyBudgetQosPolicy,
+    #[dds(id = 0x001b)] // PidLiveliness
     liveliness: LivelinessQosPolicy,
+    #[dds(id = 0x001a)] // PidReliability
     reliability: ReliabilityQosPolicy,
+    #[dds(id = 0x002b)] // PidLifespan
     lifespan: LifespanQosPolicy,
+    #[dds(id = 0x002c)] // PidUserData
     user_data: UserDataQosPolicy,
+    #[dds(id = 0x001f)] // PidOwnership
     ownership: OwnershipQosPolicy,
+    #[dds(id = 0x0006)] // PidOwnershipStrength
     ownership_strength: OwnershipStrengthQosPolicy,
+    #[dds(id = 0x0025)] // PidDestinationOrder
     destination_order: DestinationOrderQosPolicy,
+    #[dds(id = 0x0021)] // PidPresentation
     presentation: PresentationQosPolicy,
+    #[dds(id = 0x0029)] // PidPartition
     partition: PartitionQosPolicy,
+    #[dds(id = 0x002e)] // PidTopicData
     topic_data: TopicDataQosPolicy,
+    #[dds(id = 0x002d)] // PidGroupData
     group_data: GroupDataQosPolicy,
-    #[dds(optional)]
+    #[dds(optional, id = 0x0070)] // PidKeyHash
     key_hash: Option<[u8; 16]>,
-    #[dds(optional)]
+    #[dds(optional, id = 0x0060)] // PidTypeMaxSizeSerialized
     type_max_size_serialized: Option<u32>,
+    #[dds(non_serialized)]
     unicast_locator_list: Vec<Locator>,
+    #[dds(non_serialized)]
     multicast_locator_list: Vec<Locator>,
+    #[dds(id = 0x0073)] // PidDataRepresentation
     data_representation: DataRepresentationQosPolicy,
-    #[dds(optional)]
+    #[dds(optional, id = 0x0069)]
     type_identifier: Option<TypeIdentifier>,
-    #[dds(optional)]
+    #[dds(optional, id = 0x0072)] // PID_TYPE_OBJECTV1
     type_object: Option<TypeObject>,
+    #[dds(non_serialized)]
     writer_reliability_extension: WriterReliabilityExtensionQosPolicy,
 }
 

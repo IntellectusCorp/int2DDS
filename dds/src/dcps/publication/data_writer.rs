@@ -24,10 +24,9 @@ use std::{
     fmt::Debug,
     marker::PhantomData,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
         Arc, Mutex, RwLock, Weak,
     },
-    time::Instant,
 };
 
 use arc_swap::ArcSwap;
@@ -73,8 +72,7 @@ use crate::{
             time::RtpsTime,
             types::{ChangeKind, SerializedData},
         },
-        entities::history::cache_change::CacheChange,
-        entities::writer::Writer as RtpsWriter,
+        entities::{history::cache_change::CacheChange, writer::Writer as RtpsWriter},
         logic::wlp_logic::WlpLogic,
     },
     topic::{
@@ -86,53 +84,6 @@ use crate::{
 
 pub struct SerializedWriteLoan {
     change: CacheChange,
-}
-
-static SERIALIZED_COMMIT_PROFILE_COUNT: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_COMMIT_PROFILE_TIMESTAMP_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_COMMIT_PROFILE_RESOLVE_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_COMMIT_PROFILE_FRAGMENT_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_COMMIT_PROFILE_CACHE_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_COMMIT_PROFILE_LIVELINESS_US: AtomicU64 = AtomicU64::new(0);
-static SERIALIZED_COMMIT_PROFILE_TOTAL_US: AtomicU64 = AtomicU64::new(0);
-
-fn serialized_commit_profile_enabled() -> bool {
-    std::env::var_os("RMW_INT2DDS_PROFILE").is_some()
-}
-
-fn elapsed_us(start: Instant, end: Instant) -> u64 {
-    end.duration_since(start).as_micros() as u64
-}
-
-fn record_serialized_commit_profile(
-    timestamp_us: u64,
-    resolve_us: u64,
-    fragment_us: u64,
-    cache_us: u64,
-    liveliness_us: u64,
-    total_us: u64,
-) {
-    let n = SERIALIZED_COMMIT_PROFILE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    SERIALIZED_COMMIT_PROFILE_TIMESTAMP_US.fetch_add(timestamp_us, Ordering::Relaxed);
-    SERIALIZED_COMMIT_PROFILE_RESOLVE_US.fetch_add(resolve_us, Ordering::Relaxed);
-    SERIALIZED_COMMIT_PROFILE_FRAGMENT_US.fetch_add(fragment_us, Ordering::Relaxed);
-    SERIALIZED_COMMIT_PROFILE_CACHE_US.fetch_add(cache_us, Ordering::Relaxed);
-    SERIALIZED_COMMIT_PROFILE_LIVELINESS_US.fetch_add(liveliness_us, Ordering::Relaxed);
-    SERIALIZED_COMMIT_PROFILE_TOTAL_US.fetch_add(total_us, Ordering::Relaxed);
-
-    if n % 300 == 0 {
-        let divisor = n as f64;
-        eprintln!(
-            "INT2DDS_SERIALIZED_COMMIT_PROFILE count={} total_avg_us={:.3} timestamp_avg_us={:.3} resolve_avg_us={:.3} fragment_avg_us={:.3} cache_avg_us={:.3} liveliness_avg_us={:.3}",
-            n,
-            SERIALIZED_COMMIT_PROFILE_TOTAL_US.load(Ordering::Relaxed) as f64 / divisor,
-            SERIALIZED_COMMIT_PROFILE_TIMESTAMP_US.load(Ordering::Relaxed) as f64 / divisor,
-            SERIALIZED_COMMIT_PROFILE_RESOLVE_US.load(Ordering::Relaxed) as f64 / divisor,
-            SERIALIZED_COMMIT_PROFILE_FRAGMENT_US.load(Ordering::Relaxed) as f64 / divisor,
-            SERIALIZED_COMMIT_PROFILE_CACHE_US.load(Ordering::Relaxed) as f64 / divisor,
-            SERIALIZED_COMMIT_PROFILE_LIVELINESS_US.load(Ordering::Relaxed) as f64 / divisor,
-        );
-    }
 }
 
 impl SerializedWriteLoan {
@@ -862,7 +813,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
 
         let (instance_handle, _) = self.resolve_write_instance(key_info, handle, timestamp)?;
 
-        let seq_num = self.add_change_pooled(
+        let seq_num = self.add_change(
             ChangeKind::Alive,
             data as &dyn Any,
             &format,
@@ -918,7 +869,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         let (instance_handle, _) =
             self.resolve_write_instance(key_info, InstanceHandle::NIL, timestamp)?;
 
-        self.add_serialized_change_pooled(
+        self.add_change_serialized(
             ChangeKind::Alive,
             serialized_data,
             instance_handle,
@@ -953,19 +904,14 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         actual_size: usize,
         serialized_key: Option<&[u8]>,
     ) -> DdsResult<()> {
-        let profile = serialized_commit_profile_enabled();
-        let total_t0 = Instant::now();
         if actual_size > loan.change.data_mut().capacity() {
             return Err(DdsError::BadParameter);
         }
 
-        let timestamp_t0 = Instant::now();
         let timestamp = self.get_publisher()?.get_participant()?.get_current_time()?;
         self.is_enabled()?;
         Self::validate_timestamp(&timestamp)?;
-        let timestamp_us = if profile { elapsed_us(timestamp_t0, Instant::now()) } else { 0 };
 
-        let resolve_t0 = Instant::now();
         let key_info = match serialized_key {
             Some(key_bytes) if !key_bytes.is_empty() => {
                 let key_data: SerializedData = Arc::from(key_bytes);
@@ -977,9 +923,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
 
         let (instance_handle, _) =
             self.resolve_write_instance(key_info, InstanceHandle::NIL, timestamp)?;
-        let resolve_us = if profile { elapsed_us(resolve_t0, Instant::now()) } else { 0 };
 
-        let fragment_t0 = Instant::now();
         let rtps_writer = self.get_rtps_writer()?;
         let seq_num = rtps_writer.allocate_sequence_number();
         loan.change.reset(
@@ -993,28 +937,12 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             loan.change.data_mut().set_len(actual_size);
         }
         loan.change.apply_fragmentation(rtps_writer.data_max_size_serialized() as usize);
-        let fragment_us = if profile { elapsed_us(fragment_t0, Instant::now()) } else { 0 };
 
-        let cache_t0 = Instant::now();
         let mut datawriter_cache =
             self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
         datawriter_cache.add_change_with_cleanup(Arc::new(loan.change))?;
-        let cache_us = if profile { elapsed_us(cache_t0, Instant::now()) } else { 0 };
 
-        let liveliness_t0 = Instant::now();
         self.update_liveliness()?;
-        let liveliness_us = if profile { elapsed_us(liveliness_t0, Instant::now()) } else { 0 };
-
-        if profile {
-            record_serialized_commit_profile(
-                timestamp_us,
-                resolve_us,
-                fragment_us,
-                cache_us,
-                liveliness_us,
-                elapsed_us(total_t0, Instant::now()),
-            );
-        }
 
         Ok(())
     }
@@ -1331,61 +1259,15 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         }
     }
 
-    fn add_change(
-        &self,
-        kind: ChangeKind,
-        data: Vec<u8>,
-        handle: InstanceHandle,
-        source_timestamp: Option<RtpsTime>,
-    ) -> DdsResult<SequenceNumber> {
-        let seq_num;
-        {
-            let rtps_writer = self.get_rtps_writer()?;
-            let change = rtps_writer.new_change(kind, data, handle, source_timestamp);
-            seq_num = change.sequence_number();
-            let mut datawriter_cache =
-                self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-            datawriter_cache.add_change_with_cleanup(Arc::new(change))?;
-        }
-        Ok(seq_num)
-    }
-
-    fn add_serialized_change_pooled(
-        &self,
-        kind: ChangeKind,
-        serialized_data: &[u8],
-        handle: InstanceHandle,
-        source_timestamp: Option<RtpsTime>,
-    ) -> DdsResult<SequenceNumber> {
-        let rtps_writer = self.get_rtps_writer()?;
-
-        let mut change = {
-            let mut datawriter_cache =
-                self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-            datawriter_cache.acquire_change()
-        };
-
-        let seq_num = rtps_writer.allocate_sequence_number();
-        change.reset(kind, rtps_writer.guid(), handle, seq_num, source_timestamp);
-        change.data_mut().extend_from_slice(serialized_data);
-        change.apply_fragmentation(rtps_writer.data_max_size_serialized() as usize);
-
-        let mut datawriter_cache =
-            self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-        datawriter_cache.add_change_with_cleanup(Arc::new(change))?;
-
-        Ok(seq_num)
-    }
-
-    /// Pool-based add_change: acquire from pool → reset → serialize_into → add to history.
+    /// Pool-based add_change skeleton: acquire from pool → reset → fill buffer → add to history.
     /// Avoids per-write heap allocation by reusing CacheChange and its internal buffer.
-    fn add_change_pooled(
+    /// `fill` writes the payload into the reused buffer (already cleared by reset).
+    fn add_change_pooled_with(
         &self,
         kind: ChangeKind,
-        data: &dyn Any,
-        format: &SerializationFormat,
         handle: InstanceHandle,
         source_timestamp: Option<RtpsTime>,
+        fill: impl FnOnce(&mut Vec<u8>) -> DdsResult<()>,
     ) -> DdsResult<SequenceNumber> {
         let rtps_writer = self.get_rtps_writer()?;
 
@@ -1399,9 +1281,9 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         // 2. Allocate sequence number
         let seq_num = rtps_writer.allocate_sequence_number();
 
-        // 3. Reset metadata + serialize into reused buffer
+        // 3. Reset metadata + fill the reused buffer
         change.reset(kind, rtps_writer.guid(), handle, seq_num, source_timestamp);
-        self.type_support.serialize_into(data, change.data_mut(), Some(format))?;
+        fill(change.data_mut())?;
         change.apply_fragmentation(rtps_writer.data_max_size_serialized() as usize);
 
         // 4. Add to history (may evict → release back to pool)
@@ -1412,6 +1294,35 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         }
 
         Ok(seq_num)
+    }
+
+    /// Pooled add_change for typed data: fills the buffer via TypeSupport serialization.
+    fn add_change(
+        &self,
+        kind: ChangeKind,
+        data: &dyn Any,
+        format: &SerializationFormat,
+        handle: InstanceHandle,
+        source_timestamp: Option<RtpsTime>,
+    ) -> DdsResult<SequenceNumber> {
+        self.add_change_pooled_with(kind, handle, source_timestamp, |buf| {
+            self.type_support.serialize_into(data, buf, Some(format))
+        })
+    }
+
+    /// Pooled add_change for pre-serialized bytes: copies the bytes into the reused buffer.
+    /// Used by the serialized write path and dispose/unregister (empty payload).
+    fn add_change_serialized(
+        &self,
+        kind: ChangeKind,
+        bytes: &[u8],
+        handle: InstanceHandle,
+        source_timestamp: Option<RtpsTime>,
+    ) -> DdsResult<SequenceNumber> {
+        self.add_change_pooled_with(kind, handle, source_timestamp, |buf| {
+            buf.extend_from_slice(bytes);
+            Ok(())
+        })
     }
 
     fn register_instance_to_datawriter_cache(
@@ -1802,9 +1713,9 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             }
         }
 
-        self.add_change(
+        self.add_change_serialized(
             ChangeKind::NotAliveDisposed,
-            serialized_key.to_vec(),
+            &[],
             resolved_handle,
             Some(timestamp.into()),
         )?;
@@ -1851,12 +1762,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                 ChangeKind::NotAliveUnregistered
             };
 
-        self.add_change(
-            change_kind,
-            serialized_key.to_vec(),
-            resolved_handle,
-            Some(timestamp.into()),
-        )?;
+        self.add_change_serialized(change_kind, &[], resolved_handle, Some(timestamp.into()))?;
 
         self.update_liveliness()?;
 
@@ -2344,6 +2250,7 @@ impl<Foo: 'static + Clone> DataWriterInternal for DataWriter<Foo> {
 mod tests {
     use crate::domain::domain_participant_factory::DomainParticipantFactory;
     use crate::domain::qos::DomainParticipantQos;
+    use crate::infrastructure::qos_policy::HistoryQosPolicyKind;
     use crate::publication::qos::PublisherQos;
     use crate::topic::qos::TopicQos;
     use std::{sync::atomic::AtomicUsize, thread};
@@ -3142,6 +3049,74 @@ mod tests {
                 .offered_deadline_missed_called
                 .load(Ordering::SeqCst),
             "on_offered_deadline_missed should be called when mask contains OFFERED_DEADLINE_MISSED"
+        );
+    }
+
+    // Builds a writer with KeepLast(depth) and returns it plus a way to read the pool size.
+    fn create_pool_test_writer(topic_name: &str, depth: i32) -> DataWriter<TestData> {
+        let factory = DomainParticipantFactory::get_instance();
+        let participant = factory
+            .create_participant(0, DomainParticipantQos::default(), None, StatusMask::default())
+            .unwrap();
+        let topic = participant
+            .create_topic::<TestData>(
+                topic_name,
+                "TestData",
+                TopicQos::default(),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let publisher = participant
+            .create_publisher(PublisherQos::default(), None, StatusMask::default())
+            .unwrap();
+
+        let mut writer_qos = DataWriterQos::default();
+        writer_qos.history.kind = HistoryQosPolicyKind::KeepLast(depth);
+        publisher
+            .create_datawriter::<TestData>(&topic, writer_qos, None, StatusMask::default())
+            .unwrap()
+    }
+
+    // Repeated serialized writes must reuse the pool so the free list stays at the
+    // working-set size. A non-pooled path never acquires, leaving the pre-filled pool
+    // pinned at `depth`; the balanced path drains it well below `depth`.
+    #[test]
+    fn write_serialized_keeps_pool_at_working_set() {
+        let depth = 4;
+        let writer = create_pool_test_writer("PoolSerializedTopic", depth);
+
+        // 4-byte encapsulation header + body; content is not parsed for alive writes
+        let serialized = vec![0u8, 1, 0, 0, 42, 0, 0, 0];
+        for _ in 0..50 {
+            writer.write_serialized(&serialized, None).unwrap();
+        }
+
+        let cache = writer.get_datawriter_cache().unwrap();
+        let pool_len = cache.lock().unwrap().pool_len();
+        assert!(
+            pool_len < depth as usize,
+            "serialized path should keep pool at working-set size, got {pool_len} (depth {depth})"
+        );
+    }
+
+    // Typed writes already go through the pooled path; included as the balanced-path
+    // counterpart to the serialized regression above.
+    #[test]
+    fn write_keeps_pool_at_working_set() {
+        let depth = 4;
+        let writer = create_pool_test_writer("PoolTypedTopic", depth);
+
+        let data = TestData { id: 7 };
+        for _ in 0..50 {
+            writer.write(&data, InstanceHandle::NIL).unwrap();
+        }
+
+        let cache = writer.get_datawriter_cache().unwrap();
+        let pool_len = cache.lock().unwrap().pool_len();
+        assert!(
+            pool_len < depth as usize,
+            "typed path should keep pool at working-set size, got {pool_len} (depth {depth})"
         );
     }
 }

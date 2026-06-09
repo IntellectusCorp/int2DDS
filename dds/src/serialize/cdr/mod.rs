@@ -1,3 +1,4 @@
+mod cdr_input;
 pub mod deserializer;
 pub mod serializer;
 pub mod xcdr1;
@@ -57,6 +58,10 @@ pub enum LcHint {
     Auto,
     SeqMul4,
     SeqMul8,
+    /// The member value begins with its own 4-byte DHEADER (an APPENDABLE/MUTABLE
+    /// nested type). Emit LC=5 and let that DHEADER double as the EMHEADER's
+    /// NEXTINT, matching Fast-CDR (no redundant length word).
+    Dheader,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,15 +147,16 @@ impl MemberHeader {
             Ok(from_bytes_u32(b, endianness))
         };
 
+        // LC=5/6/7: NEXTINT overlaps with payload's first 4 bytes (DDS-XTypes 7.4.3.4.2)
         let (member_length, bytes_consumed) = match lc {
             0 => (1u32, 4usize),
             1 => (2u32, 4usize),
             2 => (4u32, 4usize),
             3 => (8u32, 4usize),
             4 => (read_nextint(data)?, 8usize),
-            5 => (4u32 + read_nextint(data)?, 8usize),
-            6 => (4u32 + 4 * read_nextint(data)?, 8usize),
-            7 => (4u32 + 8 * read_nextint(data)?, 8usize),
+            5 => (4u32 + read_nextint(data)?, 4usize),
+            6 => (4u32 + 4 * read_nextint(data)?, 4usize),
+            7 => (4u32 + 8 * read_nextint(data)?, 4usize),
             _ => return Err(SerializationError::InvalidMemberHeader),
         };
 
@@ -331,6 +337,7 @@ impl<T: XcdrSerialize> XcdrSerialize for Vec<T> {
         // payload (length + elements). Sequences of primitives omit the DHEADER.
         if T::IS_PRIMITIVE {
             serializer.serialize_u32(self.len() as u32)?;
+            serializer.buffer_mut().reserve(self.len() * std::mem::size_of::<T>());
             for item in self {
                 item.serialize_xcdr(serializer)?;
             }
@@ -478,15 +485,25 @@ where
     V: XcdrSerialize,
 {
     fn serialize_xcdr(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()> {
-        // Write map length
-        serializer.serialize_u32(self.len() as u32)?;
-
-        // Write key-value pairs
-        for (key, value) in self {
-            key.serialize_xcdr(serializer)?;
-            value.serialize_xcdr(serializer)?;
+        if K::IS_PRIMITIVE && V::IS_PRIMITIVE {
+            serializer.serialize_u32(self.len() as u32)?;
+            for (key, value) in self {
+                key.serialize_xcdr(serializer)?;
+                value.serialize_xcdr(serializer)?;
+            }
+            Ok(())
+        } else {
+            let dh = serializer.reserve_dheader();
+            let start = serializer.position();
+            serializer.serialize_u32(self.len() as u32)?;
+            for (key, value) in self {
+                key.serialize_xcdr(serializer)?;
+                value.serialize_xcdr(serializer)?;
+            }
+            let size = (serializer.position() - start) as u32;
+            serializer.write_dheader_at(dh, size);
+            Ok(())
         }
-        Ok(())
     }
 }
 
@@ -496,17 +513,26 @@ where
     V: XcdrDeserialize,
 {
     fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
-        // Read map length
-        let len = deserializer.deserialize_u32()? as usize;
-
-        // Read key-value pairs
-        let mut map = HashMap::with_capacity(len);
-        for _ in 0..len {
-            let key = K::deserialize_xcdr(deserializer)?;
-            let value = V::deserialize_xcdr(deserializer)?;
-            map.insert(key, value);
+        if K::IS_PRIMITIVE && V::IS_PRIMITIVE {
+            let len = deserializer.deserialize_u32()? as usize;
+            let mut map = HashMap::with_capacity(len);
+            for _ in 0..len {
+                let key = K::deserialize_xcdr(deserializer)?;
+                let value = V::deserialize_xcdr(deserializer)?;
+                map.insert(key, value);
+            }
+            Ok(map)
+        } else {
+            let _dheader = deserializer.read_dheader()?;
+            let len = deserializer.deserialize_u32()? as usize;
+            let mut map = HashMap::with_capacity(len);
+            for _ in 0..len {
+                let key = K::deserialize_xcdr(deserializer)?;
+                let value = V::deserialize_xcdr(deserializer)?;
+                map.insert(key, value);
+            }
+            Ok(map)
         }
-        Ok(map)
     }
 }
 
@@ -554,15 +580,25 @@ where
     V: XcdrSerialize,
 {
     fn serialize_xcdr(&self, serializer: &mut XcdrSerializer) -> XcdrResult<()> {
-        // Write map length
-        serializer.serialize_u32(self.len() as u32)?;
-
-        // Write key-value pairs
-        for (key, value) in self {
-            key.serialize_xcdr(serializer)?;
-            value.serialize_xcdr(serializer)?;
+        if K::IS_PRIMITIVE && V::IS_PRIMITIVE {
+            serializer.serialize_u32(self.len() as u32)?;
+            for (key, value) in self {
+                key.serialize_xcdr(serializer)?;
+                value.serialize_xcdr(serializer)?;
+            }
+            Ok(())
+        } else {
+            let dh = serializer.reserve_dheader();
+            let start = serializer.position();
+            serializer.serialize_u32(self.len() as u32)?;
+            for (key, value) in self {
+                key.serialize_xcdr(serializer)?;
+                value.serialize_xcdr(serializer)?;
+            }
+            let size = (serializer.position() - start) as u32;
+            serializer.write_dheader_at(dh, size);
+            Ok(())
         }
-        Ok(())
     }
 }
 
@@ -572,17 +608,26 @@ where
     V: XcdrDeserialize,
 {
     fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
-        // Read map length
-        let len = deserializer.deserialize_u32()? as usize;
-
-        // Read key-value pairs
-        let mut map = BTreeMap::new();
-        for _ in 0..len {
-            let key = K::deserialize_xcdr(deserializer)?;
-            let value = V::deserialize_xcdr(deserializer)?;
-            map.insert(key, value);
+        if K::IS_PRIMITIVE && V::IS_PRIMITIVE {
+            let len = deserializer.deserialize_u32()? as usize;
+            let mut map = BTreeMap::new();
+            for _ in 0..len {
+                let key = K::deserialize_xcdr(deserializer)?;
+                let value = V::deserialize_xcdr(deserializer)?;
+                map.insert(key, value);
+            }
+            Ok(map)
+        } else {
+            let _dheader = deserializer.read_dheader()?;
+            let len = deserializer.deserialize_u32()? as usize;
+            let mut map = BTreeMap::new();
+            for _ in 0..len {
+                let key = K::deserialize_xcdr(deserializer)?;
+                let value = V::deserialize_xcdr(deserializer)?;
+                map.insert(key, value);
+            }
+            Ok(map)
         }
-        Ok(map)
     }
 }
 

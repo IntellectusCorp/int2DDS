@@ -23,33 +23,55 @@ use crate::{
 #[derive(DdsType, Eq)]
 #[dds_type(crate_path = "crate", no_default, extensibility = "Mutable")]
 pub struct SubscriptionBuiltinTopicData {
-    #[dds(key)]
+    #[dds(key, id = 0x005a)] // PidEndpointGuid
     endpoint_guid: Guid,
+    #[dds(non_serialized)] // derived from endpoint_guid
     key: BuiltinTopicKey,
+    #[dds(non_serialized)] // derived from endpoint_guid prefix
     participant_key: BuiltinTopicKey,
+    #[dds(id = 0x0005)] // PidTopicName
     topic_name: String,
+    #[dds(id = 0x0007)] // PidTypeName
     type_name: String,
+    #[dds(id = 0x001d)] // PidDurability
     durability: DurabilityQosPolicy,
+    #[dds(id = 0x0023)] // PidDeadline
     deadline: DeadlineQosPolicy,
+    #[dds(id = 0x0027)] // PidLatencyBudget
     latency_budget: LatencyBudgetQosPolicy,
+    #[dds(id = 0x001b)] // PidLiveliness
     liveliness: LivelinessQosPolicy,
+    #[dds(id = 0x001a)] // PidReliability
     reliability: ReliabilityQosPolicy,
+    #[dds(id = 0x001f)] // PidOwnership
     ownership: OwnershipQosPolicy,
+    #[dds(id = 0x0025)] // PidDestinationOrder
     destination_order: DestinationOrderQosPolicy,
+    #[dds(id = 0x002c)] // PidUserData
     user_data: UserDataQosPolicy,
+    #[dds(id = 0x0004)] // PidTimeBasedFilter
     time_based_filter: TimeBasedFilterQosPolicy,
+    #[dds(id = 0x0021)] // PidPresentation
     presentation: PresentationQosPolicy,
+    #[dds(id = 0x0029)] // PidPartition
     partition: PartitionQosPolicy,
+    #[dds(id = 0x002e)] // PidTopicData
     topic_data: TopicDataQosPolicy,
+    #[dds(id = 0x002d)] // PidGroupData
     group_data: GroupDataQosPolicy,
+    #[dds(non_serialized)]
     unicast_locator_list: Vec<Locator>,
+    #[dds(non_serialized)]
     multicast_locator_list: Vec<Locator>,
+    #[dds(id = 0x0073)] // PidDataRepresentation
     data_representation: DataRepresentationQosPolicy,
-    #[dds(optional)]
+    #[dds(optional, id = 0x0069)]
     type_identifier: Option<TypeIdentifier>,
-    #[dds(optional)]
+    #[dds(optional, id = 0x0072)] // PID_TYPE_OBJECTV1
     type_object: Option<TypeObject>,
+    #[dds(id = 0x0074)] // PidTypeConsistencyEnforcement
     type_consistency_enforcement: TypeConsistencyEnforcementQosPolicy,
+    #[dds(non_serialized)]
     reader_reliability_extension: ReaderReliabilityExtensionQosPolicy,
 }
 

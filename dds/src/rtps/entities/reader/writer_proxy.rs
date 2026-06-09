@@ -5,6 +5,7 @@ use std::{
     cmp::max,
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 use log::debug;
@@ -36,6 +37,7 @@ pub(crate) struct WriterProxy {
     nackfrag_count: u32,
     expected_sn: SequenceNumber, // Expected next sequence number from writer
     last_heartbeat_count: Option<u32>,
+    last_heartbeat_at: Option<Instant>,
     buffered_change: BTreeSet<CacheChange>, // Changes that reader has not processed yet
     publication_builtin_topic_data: PublicationBuiltinTopicData,
     #[allow(clippy::type_complexity)]
@@ -73,6 +75,7 @@ impl WriterProxy {
             nackfrag_count: 0,
             expected_sn: SequenceNumber::UNKNOWN,
             last_heartbeat_count: None,
+            last_heartbeat_at: None,
             buffered_change: BTreeSet::new(),
             publication_builtin_topic_data,
             status_callback,
@@ -105,6 +108,14 @@ impl WriterProxy {
 
     pub(crate) fn set_last_heartbeat_count(&mut self, count: u32) {
         self.last_heartbeat_count = Some(count);
+    }
+
+    pub(crate) fn last_heartbeat_at(&self) -> Option<Instant> {
+        self.last_heartbeat_at
+    }
+
+    pub(crate) fn set_last_heartbeat_at(&mut self, at: Instant) {
+        self.last_heartbeat_at = Some(at);
     }
 
     pub(crate) fn add_new_changes_from_writer(&mut self, change_from_writer: ChangeFromWriter) {
@@ -377,7 +388,7 @@ impl WriterProxy {
         &mut self,
         seq_num: SequenceNumber,
         total_fragments: u32,
-        received_fragments: std::collections::HashSet<u32>,
+        received: impl IntoIterator<Item = u32>,
     ) {
         let change = self.changes_from_writer.entry(seq_num).or_insert_with(|| ChangeFromWriter {
             sequence_number: seq_num,
@@ -390,9 +401,9 @@ impl WriterProxy {
             }),
         });
 
-        // Combine existing fragments with new received fragments
+        // Merge this submessage's fragment numbers into the accumulated set
         if let Some(info) = &mut change.fragment_info {
-            for &fragment in &received_fragments {
+            for fragment in received {
                 info.received_fragments.insert(fragment);
             }
 
@@ -443,4 +454,60 @@ pub(crate) struct FragmentInfo {
     pub(crate) total_fragments: u32,
     pub(crate) received_fragments: std::collections::HashSet<u32>,
     pub(crate) is_complete: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_writer_proxy() -> WriterProxy {
+        let pub_data = PublicationBuiltinTopicData::default();
+        WriterProxy::new(
+            pub_data.endpoint_guid(),
+            pub_data.endpoint_guid().entity_id(),
+            Vec::new(),
+            Vec::new(),
+            0,
+            pub_data,
+            Arc::new(Mutex::new(None)),
+        )
+    }
+
+    // Single-fragment submessages arriving out of order must accumulate;
+    // missing set and completion track the union of received ranges.
+    #[test]
+    fn test_mark_frag_received_accumulates_out_of_order() {
+        let mut proxy = empty_writer_proxy();
+        let sn = SequenceNumber::new(0, 1);
+
+        proxy.mark_frag_received(sn, 4, 3..4); // fragment 3
+        proxy.mark_frag_received(sn, 4, 1..2); // fragment 1
+        assert!(proxy.still_missing_fragments(sn));
+        assert_eq!(
+            proxy.calculate_missing_fragments(sn, sn),
+            Some(FragmentNumberSet::from_vec(2, vec![2, 4])),
+        );
+
+        proxy.mark_frag_received(sn, 4, 2..3); // fragment 2
+        proxy.mark_frag_received(sn, 4, 4..5); // fragment 4
+        assert!(proxy.all_fragments_received(sn));
+        assert_eq!(proxy.calculate_missing_fragments(sn, sn), None);
+    }
+
+    // A submessage carrying several fragments passes a multi-element range.
+    #[test]
+    fn test_mark_frag_received_multi_fragment_range() {
+        let mut proxy = empty_writer_proxy();
+        let sn = SequenceNumber::new(0, 1);
+
+        proxy.mark_frag_received(sn, 4, 1..3); // fragments 1, 2
+        assert!(proxy.still_missing_fragments(sn));
+        assert_eq!(
+            proxy.calculate_missing_fragments(sn, sn),
+            Some(FragmentNumberSet::from_vec(3, vec![3, 4])),
+        );
+
+        proxy.mark_frag_received(sn, 4, 3..5); // fragments 3, 4
+        assert!(proxy.all_fragments_received(sn));
+    }
 }
