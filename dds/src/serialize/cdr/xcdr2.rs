@@ -173,19 +173,35 @@ impl Xcdr2Serializer {
         let must_bit: u32 = if must_understand { 0x8000_0000 } else { 0 };
 
         let (lc_word, nextint) = self.select_lc(len, lc_hint);
+        let lc = lc_word >> 28;
 
         let emh = must_bit | lc_word | (member_id & 0x0FFF_FFFF);
-        if let Some(ni) = nextint {
-            self.insert_nextint_slot_at(emh_pos + 4);
-            self.write_dheader_at(emh_pos, emh);
-            self.write_dheader_at(emh_pos + 4, ni);
-        } else {
-            self.write_dheader_at(emh_pos, emh);
+        match lc {
+            // LC=4: separate NEXTINT slot before payload
+            4 => {
+                let ni = nextint.expect("LC=4 always has NEXTINT");
+                self.insert_nextint_slot_at(emh_pos + 4);
+                self.write_dheader_at(emh_pos, emh);
+                self.write_dheader_at(emh_pos + 4, ni);
+            }
+            // LC=5/6/7: NEXTINT overlaps with payload's first 4 bytes
+            5 | 6 | 7 => {
+                self.write_dheader_at(emh_pos, emh);
+            }
+            // LC=0..=3: no NEXTINT
+            _ => {
+                self.write_dheader_at(emh_pos, emh);
+            }
         }
         Ok(())
     }
 
     fn select_lc(&self, len: u32, hint: LcHint) -> (u32, Option<u32>) {
+        // The value already wrote its own DHEADER as its first 4 bytes; reuse it as
+        // the NEXTINT (LC=5, byte-length form) instead of inserting a separate one.
+        if let LcHint::Dheader = hint {
+            return (5u32 << 28, None);
+        }
         match len {
             1 => (0u32 << 28, None),
             2 => (1u32 << 28, None),
@@ -233,15 +249,14 @@ impl Xcdr2Serializer {
         match self.extensibility_kind {
             ExtensibilityKind::Final => Ok(()), // No backpatching needed
             ExtensibilityKind::Appendable | ExtensibilityKind::Mutable => {
-                if size_pos > 0 {
-                    let current_pos = self.buffer.len();
-                    let object_size = (current_pos - size_pos - 4) as u32;
-
-                    // Backpatch the size
-                    let size_bytes = to_bytes_u32(object_size, self.endianness);
-
-                    self.buffer[size_pos..size_pos + 4].copy_from_slice(&size_bytes);
-                }
+                // begin_struct always reserved a 4-byte DHEADER placeholder at
+                // size_pos (which may legitimately be 0 when the struct is the very
+                // first thing in the buffer, e.g. a headerless parameter payload),
+                // so always backpatch — never gate on `size_pos > 0`.
+                let current_pos = self.buffer.len();
+                let object_size = (current_pos - size_pos - 4) as u32;
+                let size_bytes = to_bytes_u32(object_size, self.endianness);
+                self.buffer[size_pos..size_pos + 4].copy_from_slice(&size_bytes);
                 Ok(())
             }
         }
@@ -298,6 +313,11 @@ impl<'a> Xcdr2Deserializer<'a> {
 
     pub fn position(&self) -> usize {
         self.position
+    }
+
+    // Backing slice. xcdr2 input is always contiguous (no fragment reassembly).
+    pub fn get_data(&self) -> &[u8] {
+        self.data
     }
 
     /// Align position to boundary (accounting for removed header)
@@ -424,8 +444,8 @@ impl<'a> DeserializerReader for Xcdr2Deserializer<'a> {
         self.check_available(size)
     }
 
-    fn get_data(&self) -> &[u8] {
-        self.data
+    fn copy_bytes_at(&self, offset: usize, out: &mut [u8]) {
+        out.copy_from_slice(&self.data[offset..offset + out.len()]);
     }
 
     fn get_position(&self) -> usize {
@@ -445,16 +465,12 @@ impl<'a> DeserializerReader for Xcdr2Deserializer<'a> {
     }
 }
 
-const TYPE_HASH_FLAG: u16 = 0x0001;
-const TYPE_HASH_LENGTH: usize = 14;
-
 fn parse_encapsulation_header(data: &[u8]) -> Result<(Endianness, usize, bool), CdrError> {
     if data.len() < 4 {
         return Err(CdrError::InsufficientData);
     }
 
     let encap_id = u16::from_be_bytes([data[0], data[1]]);
-    let options = u16::from_be_bytes([data[2], data[3]]);
 
     let (endianness, is_xcdr2) = match encap_id {
         0x0000 | 0x0002 => (Endianness::BigEndian, false),
@@ -464,14 +480,5 @@ fn parse_encapsulation_header(data: &[u8]) -> Result<(Endianness, usize, bool), 
         _ => return Err(CdrError::InvalidEncapsulation(encap_id)),
     };
 
-    let mut header_size = 4;
-    if is_xcdr2 && (options & TYPE_HASH_FLAG) != 0 {
-        header_size += TYPE_HASH_LENGTH;
-    }
-
-    if data.len() < header_size {
-        return Err(CdrError::InsufficientData);
-    }
-
-    Ok((endianness, header_size, is_xcdr2))
+    Ok((endianness, 4, is_xcdr2))
 }

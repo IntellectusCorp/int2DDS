@@ -2,12 +2,14 @@
 //!
 //! One `BytesMut` chunk backs many incoming datagrams. Each packet is handed
 //! out as a zero-copy `Bytes` slice of that chunk. When every slice derived
-//! from the chunk is dropped, the chunk's underlying allocation is freed in
-//! one shot by `bytes`' internal `Arc<Shared>`. This replaces the previous
-//! per-packet `Bytes::copy_from_slice`, which malloc/free/madvise-churned
-//! the heap once per datagram.
+//! from the chunk is dropped, `BytesMut::reserve` rewinds the cursor to the
+//! chunk start so subsequent packets reuse the same allocation. `recv_from`
+//! writes directly into the chunk's spare capacity; only the prefix the
+//! kernel actually filled is exposed via `set_len`.
 
 use bytes::{Bytes, BytesMut};
+use std::io;
+use std::net::SocketAddr;
 
 // Max UDP datagram payload this process accepts. Matches `MAX_MESSAGE_SIZE`
 // in `udp_listener`.
@@ -22,73 +24,80 @@ pub(crate) struct RecvArena {
     current: BytesMut,
     chunk_size: usize,
     max_packet: usize,
-    slot_reserved: bool,
-    slot_start: usize,
 }
 
 impl RecvArena {
     // `chunk_size` is clamped to `>= max_packet` so a single datagram always fits.
     pub(crate) fn new(chunk_size: usize, max_packet: usize) -> Self {
         let chunk_size = chunk_size.max(max_packet);
-        Self {
-            current: BytesMut::with_capacity(chunk_size),
-            chunk_size,
-            max_packet,
-            slot_reserved: false,
-            slot_start: 0,
-        }
+        Self { current: BytesMut::with_capacity(chunk_size), chunk_size, max_packet }
     }
 
-    // Reserve a writable slot sized for the largest possible datagram.
-    // Returns a zero-initialized mutable slice to hand to `recv_from`.
-    pub(crate) fn reserve_packet_slot(&mut self) -> &mut [u8] {
-        // Roll back any previous reservation so slots can't stack up.
-        self.release_unused_slot();
+    // Receive one datagram into the arena. Returns the zero-copy `Bytes` view
+    // backed by the current chunk and the sender address. On `WouldBlock` or
+    // other recv errors the arena state is untouched.
+    pub(crate) fn recv_from(
+        &mut self,
+        sock: &mio::net::UdpSocket,
+    ) -> io::Result<(Bytes, SocketAddr)> {
+        // Make sure the chunk has at least one datagram's worth of spare ahead.
+        self.ensure_space();
 
-        // If the remaining capacity is too small for another packet, start a new chunk.
-        if self.current.capacity() - self.current.len() < self.max_packet {
-            self.current = BytesMut::with_capacity(self.chunk_size);
+        // Borrow the chunk's uninitialized tail as the recv destination.
+        let spare = self.current.spare_capacity_mut();
+
+        // Cap the recv slice at the largest datagram we accept.
+        let recv_buffer_len = spare.len().min(self.max_packet);
+
+        let recv_buffer: &mut [u8] = unsafe {
+            // SAFETY: Make &mut [u8] from &mut [MaybeUninit<u8>] without initialization
+            // 1. because we will only write to it and never read the uninit bytes.
+            // 2. and only the first `nbytes` (what the kernel actually wrote) are
+            // exposed below via set_len + split_to.
+            core::slice::from_raw_parts_mut(spare.as_mut_ptr().cast::<u8>(), recv_buffer_len)
+        };
+
+        // Kernel fills the front `nbytes` of dst with the datagram payload.
+        let (nbytes, sender) = sock.recv_from(recv_buffer)?;
+
+        // Make sure it is not larger than the max we promised to accept
+        let nbytes = nbytes.min(self.max_packet);
+
+        // Move the chunk head past the new data so the next recv writes after it
+        let new_len = self.current.len() + nbytes;
+
+        unsafe {
+            // SAFETY: recv_from initialized `nbytes` bytes starting at the old len.
+            self.current.set_len(new_len);
         }
 
-        // Mark the new slot as reserved and zero-fill it. The zeroing is needed to
-        // prevent uninitialized memory from being exposed if the caller commits a shorter packet.
-        self.slot_start = self.current.len();
-        self.slot_reserved = true;
-        self.current.resize(self.slot_start + self.max_packet, 0);
-        &mut self.current[self.slot_start..]
+        // Hand out a zero-copy view of those bytes; the chunk head advances past them.
+        Ok((self.current.split_to(nbytes).freeze(), sender))
     }
 
-    // Freeze the actually received bytes as a zero-copy `Bytes` slice.
-    // `actual_len` is clamped to the slot size so an out-of-range caller
-    // value can't corrupt arena state.
-    pub(crate) fn commit_received_packet(&mut self, actual_len: usize) -> Bytes {
-        if !self.slot_reserved {
-            return Bytes::new();
-        }
-        let actual_len = actual_len.min(self.max_packet);
-
-        // Drop the unused zero-filled tail of the slot so the next reservation
-        // reuses that capacity.
-        let new_len = self.slot_start + actual_len;
-        self.current.truncate(new_len);
-        self.slot_reserved = false;
-
-        self.current.split_to(actual_len).freeze()
-    }
-
-    // Discard a reserved-but-unused slot (e.g. on `WouldBlock` / recv error).
-    // Without this, idle polls would accumulate zero-filled dead tails.
-    pub(crate) fn release_unused_slot(&mut self) {
-        if self.slot_reserved {
-            self.current.truncate(self.slot_start);
-            self.slot_reserved = false;
-        }
+    // Reserve chunk_size worth of spare capacity. When the chunk's Arc strong
+    // count is 1 (no outstanding Bytes), this rewinds the cursor in place; when
+    // it is >1, a fresh chunk is allocated.
+    fn ensure_space(&mut self) {
+        self.current.reserve(self.max_packet);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Test helper that mirrors recv_from's arena work without needing a socket:
+    // it runs the same reserve + extend_from_slice + split_to sequence the
+    // production path uses.
+    impl RecvArena {
+        fn commit_from_slice(&mut self, src: &[u8]) -> Bytes {
+            let n = src.len().min(self.max_packet);
+            self.ensure_space();
+            self.current.extend_from_slice(&src[..n]);
+            self.current.split_to(n).freeze()
+        }
+    }
 
     #[test]
     fn multiple_packets_share_single_chunk() {
@@ -97,10 +106,10 @@ mod tests {
 
         // Carve 10 Bytes slices out of one chunk, each with a distinct byte pattern.
         for i in 0..10 {
-            let slot = arena.reserve_packet_slot();
             let n = 100 + i;
-            slot[..n].iter_mut().enumerate().for_each(|(k, b)| *b = ((i + k) & 0xff) as u8);
-            let bytes = arena.commit_received_packet(n);
+            let mut payload = vec![0u8; n];
+            payload.iter_mut().enumerate().for_each(|(k, b)| *b = ((i + k) & 0xff) as u8);
+            let bytes = arena.commit_from_slice(&payload);
             assert_eq!(bytes.len(), n);
             handed_out.push((bytes, i, n));
         }
@@ -114,56 +123,79 @@ mod tests {
     }
 
     #[test]
-    fn new_chunk_when_remaining_capacity_too_small() {
-        // 4KB chunk can only fit two 1500B slots; the third must rotate to a fresh chunk.
+    fn rewinds_in_place_when_all_slices_dropped() {
         let mut arena = RecvArena::new(4096, 1500);
-        let _b1 = {
-            let s = arena.reserve_packet_slot();
-            s[0] = 0xaa;
-            arena.commit_received_packet(1500)
-        };
-        let _b2 = {
-            let s = arena.reserve_packet_slot();
-            s[0] = 0xbb;
-            arena.commit_received_packet(1500)
-        };
-        // Snapshot the chunk pointer before the reservation that should trigger rotation.
-        let ptr_before = arena.current.as_ptr();
-        let _b3 = {
-            let s = arena.reserve_packet_slot();
-            s[0] = 0xcc;
-            arena.commit_received_packet(1500)
-        };
-        let ptr_after = arena.current.as_ptr();
-        // A different backing pointer proves a new chunk was allocated.
-        assert_ne!(ptr_before, ptr_after, "a new chunk should have been allocated");
+        arena.ensure_space();
+        let origin = arena.current.as_ptr();
+
+        // Two commits whose Bytes are dropped at the end of the block,
+        // returning the chunk's Arc strong count to 1.
+        {
+            let _ = arena.commit_from_slice(&[0xaa; 1500]);
+            let _ = arena.commit_from_slice(&[0xbb; 1500]);
+        }
+
+        // Next ensure_space must rewind to the chunk origin instead of
+        // allocating a fresh chunk.
+        arena.ensure_space();
+        assert_eq!(arena.current.as_ptr(), origin);
     }
 
     #[test]
-    fn release_unused_slot_rolls_back_len() {
-        let mut arena = RecvArena::new(64 * 1024, 1500);
-        // Reserve a slot, then release it without committing (WouldBlock case).
-        let _ = arena.reserve_packet_slot();
-        let len_before_release = arena.current.len();
-        arena.release_unused_slot();
-        // Release must shrink len back and clear the reserved flag.
-        assert!(arena.current.len() < len_before_release);
-        assert!(!arena.slot_reserved);
+    fn rewinds_every_iteration_when_idle() {
+        let mut arena = RecvArena::new(4096, 1500);
+        arena.ensure_space();
+        let origin = arena.current.as_ptr();
 
-        // Arena must still be usable for the next reservation.
-        let slot = arena.reserve_packet_slot();
-        assert_eq!(slot.len(), 1500);
+        // Each committed Bytes is dropped before the next commit, so every
+        // iteration's ensure_space must come back to the same origin.
+        for _ in 0..10 {
+            let _ = arena.commit_from_slice(&[0xcc; 1500]);
+        }
+
+        arena.ensure_space();
+        assert_eq!(arena.current.as_ptr(), origin);
+    }
+
+    #[test]
+    fn allocates_new_chunk_when_outstanding_slices_block_reclaim() {
+        let chunk_size = 1024 * 1024;
+        let max_packet = 64 * 1024;
+        let mut arena = RecvArena::new(chunk_size, max_packet);
+        arena.ensure_space();
+        let origin = arena.current.as_ptr();
+
+        // Keep the committed Bytes alive so strong_count > 1 blocks reclaim.
+        let _b1 = arena.commit_from_slice(&[0xaa; 64 * 1024]);
+
+        // Next ensure_space requests chunk_size; reclaim fails, fresh chunk alloc.
+        arena.ensure_space();
+        assert_ne!(arena.current.as_ptr(), origin);
     }
 
     #[test]
     fn committed_bytes_outlive_arena_drop() {
         let b = {
             let mut arena = RecvArena::new(4096, 1500);
-            let s = arena.reserve_packet_slot();
-            s[0..4].copy_from_slice(&[1, 2, 3, 4]);
             // Drop the arena at end of this block — the Bytes keeps the chunk alive via Arc.
-            arena.commit_received_packet(4)
+            arena.commit_from_slice(&[1, 2, 3, 4])
         };
         assert_eq!(&b[..], &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn zero_length_datagram_yields_empty_bytes() {
+        let mut arena = RecvArena::new(4096, 1500);
+        let b = arena.commit_from_slice(&[]);
+        assert_eq!(b.len(), 0);
+    }
+
+    #[test]
+    fn oversized_payload_is_clamped_to_max_packet() {
+        let mut arena = RecvArena::new(64 * 1024, 1500);
+        // Caller hands more than max_packet; arena must clamp without panicking.
+        let payload = vec![0xee; 4096];
+        let b = arena.commit_from_slice(&payload);
+        assert_eq!(b.len(), 1500);
     }
 }

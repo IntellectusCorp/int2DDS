@@ -86,7 +86,7 @@ impl RawTypeSupport {
 
     /// Create a RawTypeSupport with pre-built TypeIdentifier and TypeObject.
     ///
-    /// This enables DDS-XTypes discovery parameters (0x0069, 0x0072) to be sent
+    /// This enables DDS-XTypes discovery parameters (0x0075/0x0069, 0x0072) to be sent
     /// during endpoint matching.
     pub fn with_type_info(
         type_name: String,

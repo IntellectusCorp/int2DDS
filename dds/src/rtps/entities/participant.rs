@@ -63,7 +63,7 @@ use crate::{
         },
         transport::plugin::TransportPlugin,
     },
-    utils::timer::timer_handler::TimerHandler,
+    utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
 };
 
 #[derive(Clone)]
@@ -857,6 +857,22 @@ impl Participant {
         self.remove_all_unmatched_endpoint_from_terminated_participant(
             terminated_participant_guid.prefix(),
         )?;
+
+        // Remove SEDP periodic timers tied to this remote
+        let remote_prefix = terminated_participant_guid.prefix();
+        if let Ok(handler) = TimerHandler::get_instance(self.guid().prefix()).lock() {
+            for writer_entity_id in [
+                EntityId::SPDP_BUILTIN_PARTICIPANT_WRITER,
+                EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER,
+                EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_WRITER,
+                EntityId::SEDP_BUILTIN_TOPICS_WRITER,
+            ] {
+                handler.remove_timer(TimerId::SedpScheduledMessage {
+                    remote_prefix,
+                    writer_entity_id,
+                });
+            }
+        }
 
         info!("Successfully unmatched with remote participant: {:?}", terminated_participant_guid);
         Ok(())

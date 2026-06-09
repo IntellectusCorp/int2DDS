@@ -25,7 +25,6 @@ use crate::{
             types::{Count, ProtocolVersion, VendorId},
         },
     },
-    serialize::core::{BufferSize, PooledBuffer},
 };
 
 pub struct PlCdrSerializer {
@@ -157,8 +156,7 @@ impl PlCdrSerializer {
 
     /// Serialize parameter value
     fn serialize_parameter_value(&self, value: &ParameterValue) -> Result<Vec<u8>, String> {
-        // Use buffer pool for parameter serialization (high-frequency operation)
-        let mut buffer = PooledBuffer::new(BufferSize::Small);
+        let mut buffer: Vec<u8> = Vec::with_capacity(256);
 
         match value {
             ParameterValue::ProtocolVersion(v) => {
@@ -354,7 +352,15 @@ impl PlCdrSerializer {
                 }
             }
             ParameterValue::TypeInformation(type_info) => {
-                buffer.extend_from_slice(&type_info.serialize());
+                // 0x0075: headerless PL_CDR2 TypeInformation (no encapsulation header).
+                buffer.extend_from_slice(&type_info.serialize_for_parameter());
+                let padding = (4 - (buffer.len() % 4)) % 4;
+                if padding > 0 {
+                    buffer.extend(std::iter::repeat_n(0u8, padding));
+                }
+            }
+            ParameterValue::TypeIdentifierV1(type_id) => {
+                buffer.extend_from_slice(&type_id.serialize_for_parameter_v1());
                 let padding = (4 - (buffer.len() % 4)) % 4;
                 if padding > 0 {
                     buffer.extend(std::iter::repeat_n(0u8, padding));
@@ -371,8 +377,7 @@ impl PlCdrSerializer {
                 buffer.push(0); // padding to 8 bytes total
             }
             ParameterValue::TypeObject(type_obj) => {
-                // TypeObject: uses XCDR2 serialization (EK_MINIMAL/EK_COMPLETE marker included)
-                buffer.extend_from_slice(&type_obj.serialize());
+                buffer.extend_from_slice(&type_obj.serialize_for_parameter());
                 // CDR alignment - pad to 4-byte boundary if needed
                 let padding = (4 - (buffer.len() % 4)) % 4;
                 if padding > 0 {
@@ -408,8 +413,7 @@ impl PlCdrSerializer {
             }
         }
 
-        // Convert PooledBuffer to Vec<u8> for return
-        Ok(buffer.into_vec())
+        Ok(buffer)
     }
 
     /// Serialize duration
@@ -970,6 +974,24 @@ impl super::ParsedBuiltinTopicData {
                 value: ParameterValue::TimeBasedFilter(time_based_filter.minimum_separation.into()),
             });
         }
+        if let Some(history) = &self.history {
+            parameters.push(PlCdrParameter {
+                id: ParameterId::PidHistory,
+                value: ParameterValue::HistoryQosPolicy(*history),
+            });
+        }
+        if let Some(resource_limits) = &self.resource_limits {
+            parameters.push(PlCdrParameter {
+                id: ParameterId::PidResourceLimits,
+                value: ParameterValue::ResourceLimits(*resource_limits),
+            });
+        }
+        if let Some(transport_priority) = &self.transport_priority {
+            parameters.push(PlCdrParameter {
+                id: ParameterId::PidTransportPriority,
+                value: ParameterValue::TransportPriority(transport_priority.value as u32),
+            });
+        }
 
         // Optional fields
         if let Some(key_hash) = self.key_hash {
@@ -1015,6 +1037,13 @@ impl super::ParsedBuiltinTopicData {
             parameters.push(PlCdrParameter {
                 id: ParameterId::PidTypeInformation,
                 value: ParameterValue::TypeInformation(type_info),
+            });
+            // Legacy 0x0069 carries a single TypeIdentifier (CDR_LE encapsulated),
+            // not a TypeInformation. Fast-DDS gates 0x0075 by vendor, so this keeps
+            // type discovery working with eProsima peers.
+            parameters.push(PlCdrParameter {
+                id: ParameterId::PidTypeIdV1,
+                value: ParameterValue::TypeIdentifierV1(type_id.clone()),
             });
         }
 

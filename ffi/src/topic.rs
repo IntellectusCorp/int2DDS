@@ -223,7 +223,7 @@ pub unsafe extern "C" fn int2dds_create_topic_with_profile(
 /// Create a Topic with type information for DDS-XTypes discovery
 ///
 /// Creates a topic using a pre-built `Int2DdsTypeInfo` which provides
-/// TypeIdentifier and TypeObject for DDS discovery parameters (0x0069, 0x0072).
+/// TypeIdentifier and TypeObject for DDS discovery parameters (0x0075/0x0069, 0x0072).
 /// This enables interoperability with implementations that require type information
 ///
 /// # Safety
