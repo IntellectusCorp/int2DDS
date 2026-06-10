@@ -50,6 +50,7 @@ mod dynamic_type_support;
 mod type_compatibility;
 mod type_lookup;
 mod type_object;
+mod type_object_v1;
 mod type_registry;
 
 pub use type_compatibility::{
@@ -57,6 +58,7 @@ pub use type_compatibility::{
     minimal_key_holder, TypeCompatibilityError, TypeCompatibilityResult,
 };
 pub use type_object::*;
+pub use type_object_v1::TypeObjectV1;
 
 // Dynamic type support
 pub use dynamic_data::{DynamicData, DynamicValue, FromDynamicValue, IntoDynamicValue};
