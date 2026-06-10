@@ -228,6 +228,37 @@ namespace Int2Dds.Xtypes
     /// </summary>
     public static class DynamicEntities
     {
+        // int2dds_wait_for_type_object returns this when no matching type is
+        // discovered within the timeout (INT2DDS_RET_DYNAMIC_TIMEOUT). It is the
+        // expected outcome while polling for a not-yet-present publisher.
+        private const int DynamicTimeout = 203;
+
+        /// <summary>
+        /// Like <see cref="DynamicSupport.WaitForTypeObject"/>, but returns
+        /// <c>null</c> (instead of throwing) when the wait times out without
+        /// discovering a type — convenient for polling loops. Other failures still
+        /// throw.
+        /// </summary>
+        public static unsafe DynamicTypeObject? TryWaitForTypeObject(
+            this DomainParticipant participant, string topicName, int timeoutMs, out string? typeName)
+        {
+            typeName = null;
+            var topicBytes = Encoding.UTF8.GetBytes(topicName + '\0');
+            byte[] nameBuf = new byte[256];
+            fixed (byte* pTopic = topicBytes)
+            fixed (byte* pName = nameBuf)
+            {
+                int ret = NativeMethods.int2dds_wait_for_type_object(
+                    participant.Handle, pTopic, timeoutMs, out IntPtr typeObj,
+                    pName, (UIntPtr)nameBuf.Length, out UIntPtr outLen);
+                if (ret == DynamicTimeout)
+                    return null;
+                ReturnCodeHelper.CheckReturn(ret);
+                typeName = Encoding.UTF8.GetString(nameBuf, 0, (int)outLen);
+                return new DynamicTypeObject(typeObj);
+            }
+        }
+
         /// <summary>
         /// Creates a topic from a <see cref="TypeInfoBuilder"/> (publisher side). The
         /// builder's TypeObject is advertised during discovery so that subscribers can
