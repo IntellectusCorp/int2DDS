@@ -58,7 +58,7 @@ use crate::{
         error::{DdsError, DdsResult},
         time::Duration,
     },
-    infrastructure::condition::Condition,
+    infrastructure::{condition::Condition, guard_condition::GuardCondition},
     rtps::common::time::RtpsDuration,
 };
 
@@ -133,14 +133,19 @@ impl WaitSet {
             .lock()
             .map_err(|e| DdsError::Error(format!("Failed to lock conditions: {}", e)))?;
 
-        // Check for duplicate conditions
+        // Check for duplicate condition handles. GuardCondition debug output only reflects
+        // trigger state, so distinct guard conditions can look identical while representing
+        // different waitable entities.
         for existing_condition in conditions.iter() {
-            if Arc::ptr_eq(existing_condition, &new_condition) || {
-                std::ptr::eq(
+            if Arc::ptr_eq(existing_condition, &new_condition)
+                || std::ptr::eq(
                     existing_condition.as_ref() as *const dyn Condition as *const (),
                     new_condition.as_ref() as *const dyn Condition as *const (),
-                ) || format!("{:?}", existing_condition) == format!("{:?}", new_condition)
-            } {
+                )
+                || (!existing_condition.as_any().is::<GuardCondition>()
+                    && !new_condition.as_any().is::<GuardCondition>()
+                    && format!("{:?}", existing_condition) == format!("{:?}", new_condition))
+            {
                 debug!("[WaitSet-{}] Condition already attached, skipping", self.instance_id);
                 return Ok(());
             }
@@ -185,15 +190,17 @@ impl WaitSet {
             .lock()
             .map_err(|e| DdsError::Error(format!("Failed to lock conditions: {}", e)))?;
 
-        // Try Arc::ptr_eq first, then use StatusCondition's PartialEq if failed
+        // Remove only the same condition handle. GuardCondition debug output is not a stable
+        // identity because two false guard conditions print the same.
         let pos = conditions.iter().position(|c| {
-            Arc::ptr_eq(c, &remove_condition) || {
-                // Compare with StatusCondition PartialEq
-                std::ptr::eq(
+            Arc::ptr_eq(c, &remove_condition)
+                || std::ptr::eq(
                     c.as_ref() as *const dyn Condition as *const (),
                     remove_condition.as_ref() as *const dyn Condition as *const (),
-                ) || format!("{:?}", c) == format!("{:?}", remove_condition)
-            }
+                )
+                || (!c.as_any().is::<GuardCondition>()
+                    && !remove_condition.as_any().is::<GuardCondition>()
+                    && format!("{:?}", c) == format!("{:?}", remove_condition))
         });
 
         if let Some(pos) = pos {

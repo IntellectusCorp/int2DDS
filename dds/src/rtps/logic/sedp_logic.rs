@@ -1081,6 +1081,8 @@ impl SedpLogic {
             reader.get_update_status_callback(),
         );
 
+        reader.matched_writer_add(writer_proxy);
+
         let writer_guid = endpoint_guid;
         if writer_guid.entity_id().entity_kind().is_user_defined() {
             if let Some(wlp_logic) = self.get_upgraded_participant()?.wlp_logic() {
@@ -1091,7 +1093,6 @@ impl SedpLogic {
             }
         }
 
-        reader.matched_writer_add(writer_proxy);
         self.register_preemptive_acknack_timer(
             reader,
             publication_builtin_topic_data.endpoint_guid(),

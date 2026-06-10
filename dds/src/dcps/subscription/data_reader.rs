@@ -1879,7 +1879,12 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                     let monitor_guard =
                         self.deadline_monitor.lock().map_err(|e| DdsError::Error(e.to_string()))?;
                     if let Some(monitor) = monitor_guard.as_ref() {
-                        monitor.cancel_instance(&instance_handle);
+                        // Keep deadline tracking for synthetic no-writer transitions on non-keyed data.
+                        let synthetic_non_keyed_no_writers =
+                            instance_handle.is_nil() && cache_change.is_none();
+                        if !synthetic_non_keyed_no_writers {
+                            monitor.cancel_instance(&instance_handle);
+                        }
                     }
 
                     let reader_data_lifecycle_qos = &self.get_qos()?.reader_data_lifecycle;
