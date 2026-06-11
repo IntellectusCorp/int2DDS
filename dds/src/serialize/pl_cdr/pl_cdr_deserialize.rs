@@ -744,10 +744,13 @@ impl PlCdrParser {
                 };
                 match result {
                     Ok((type_obj, _consumed)) => ParameterValue::TypeObject(type_obj),
-                    Err(e) => {
-                        warn!("Failed to parse TypeObject: {}", e);
-                        ParameterValue::Unknown(data)
-                    }
+                    Err(e) => match crate::xtypes::TypeObjectV1::deserialize(data) {
+                        Ok((type_obj_v1, _consumed)) => ParameterValue::TypeObjectV1(type_obj_v1),
+                        Err(e_v1) => {
+                            warn!("Failed to parse TypeObject (v2: {}; v1: {})", e, e_v1);
+                            ParameterValue::Unknown(data)
+                        }
+                    },
                 }
             }
             _ => ParameterValue::Unknown(data),
