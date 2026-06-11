@@ -666,7 +666,7 @@ fn deserialize_value_cdr(
     match type_kind {
         DynamicTypeKind::Sequence { element_type, .. } => {
             let len = deserializer.deserialize_u32().map_err(cdr_error)? as usize;
-            let mut items = Vec::with_capacity(len);
+            let mut items = Vec::new();
             for _ in 0..len {
                 items.push(deserialize_value_cdr(deserializer, element_type)?);
             }
@@ -682,7 +682,7 @@ fn deserialize_value_cdr(
         }
         DynamicTypeKind::Map { key_type, value_type, .. } => {
             let len = deserializer.deserialize_u32().map_err(cdr_error)? as usize;
-            let mut entries = Vec::with_capacity(len);
+            let mut entries = Vec::new();
             for _ in 0..len {
                 let key = deserialize_value_cdr(deserializer, key_type)?;
                 let value = deserialize_value_cdr(deserializer, value_type)?;
@@ -725,7 +725,7 @@ fn deserialize_value_xcdr2(
                 let _ = deserializer.read_dheader().map_err(cdr_error)?;
             }
             let len = deserializer.deserialize_u32().map_err(cdr_error)? as usize;
-            let mut items = Vec::with_capacity(len);
+            let mut items = Vec::new();
             for _ in 0..len {
                 items.push(deserialize_value_xcdr2(deserializer, element_type)?);
             }
@@ -747,7 +747,7 @@ fn deserialize_value_xcdr2(
                 let _ = deserializer.read_dheader().map_err(cdr_error)?;
             }
             let len = deserializer.deserialize_u32().map_err(cdr_error)? as usize;
-            let mut entries = Vec::with_capacity(len);
+            let mut entries = Vec::new();
             for _ in 0..len {
                 let key = deserialize_value_xcdr2(deserializer, key_type)?;
                 let value = deserialize_value_xcdr2(deserializer, value_type)?;
