@@ -384,6 +384,13 @@ impl PlCdrSerializer {
                     buffer.extend(std::iter::repeat_n(0u8, padding));
                 }
             }
+            ParameterValue::TypeObjectV1(type_obj) => {
+                buffer.extend_from_slice(&type_obj.serialize());
+                let padding = (4 - (buffer.len() % 4)) % 4;
+                if padding > 0 {
+                    buffer.extend(std::iter::repeat_n(0u8, padding));
+                }
+            }
             ParameterValue::ContentFilterProperty(cfp) => {
                 self.write_string(&mut buffer, &cfp.content_filtered_topic_name);
                 self.write_string(&mut buffer, &cfp.related_topic_name);
