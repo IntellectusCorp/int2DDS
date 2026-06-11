@@ -332,6 +332,17 @@ impl<'a> Xcdr2Deserializer<'a> {
         }
     }
 
+    /// Validate a wire-declared count against remaining bytes before allocating.
+    #[inline]
+    pub(super) fn checked_capacity(
+        &self,
+        count: usize,
+        min_elem_size: usize,
+    ) -> Result<usize, CdrError> {
+        self.check_available(count.saturating_mul(min_elem_size.max(1)))?;
+        Ok(count)
+    }
+
     /// Read DHEADER (4-byte object size for APPENDABLE/MUTABLE types)
     pub fn read_dheader(&mut self) -> Result<u32, CdrError> {
         self.deserialize_u32()

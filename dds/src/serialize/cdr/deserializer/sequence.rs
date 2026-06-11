@@ -21,7 +21,7 @@ impl<'a> CdrDeserializer<'a> {
     pub fn deserialize_u16_sequence(&mut self) -> Result<Vec<u16>, CdrError> {
         let length = self.deserialize_u32()? as usize;
         self.align(2);
-        let mut result = Vec::with_capacity(length);
+        let mut result = Vec::with_capacity(self.checked_capacity(length, 2)?);
         for _ in 0..length {
             self.check_available(2)?;
             let bytes = self.input.read_array::<2>(self.position);
@@ -36,7 +36,7 @@ impl<'a> CdrDeserializer<'a> {
     pub fn deserialize_u32_sequence(&mut self) -> Result<Vec<u32>, CdrError> {
         let length = self.deserialize_u32()? as usize;
         self.align(4);
-        let mut result = Vec::with_capacity(length);
+        let mut result = Vec::with_capacity(self.checked_capacity(length, 4)?);
         for _ in 0..length {
             self.check_available(4)?;
             let bytes = self.input.read_array::<4>(self.position);
@@ -51,7 +51,7 @@ impl<'a> CdrDeserializer<'a> {
     pub fn deserialize_u64_sequence(&mut self) -> Result<Vec<u64>, CdrError> {
         let length = self.deserialize_u32()? as usize;
         self.align(8);
-        let mut result = Vec::with_capacity(length);
+        let mut result = Vec::with_capacity(self.checked_capacity(length, 8)?);
         for _ in 0..length {
             self.check_available(8)?;
             let bytes = self.input.read_array::<8>(self.position);
@@ -78,7 +78,7 @@ impl<'a> CdrDeserializer<'a> {
     pub fn deserialize_i16_sequence(&mut self) -> Result<Vec<i16>, CdrError> {
         let length = self.deserialize_u32()? as usize;
         self.align(2);
-        let mut result = Vec::with_capacity(length);
+        let mut result = Vec::with_capacity(self.checked_capacity(length, 2)?);
         for _ in 0..length {
             self.check_available(2)?;
             let bytes = self.input.read_array::<2>(self.position);
@@ -93,7 +93,7 @@ impl<'a> CdrDeserializer<'a> {
     pub fn deserialize_i32_sequence(&mut self) -> Result<Vec<i32>, CdrError> {
         let length = self.deserialize_u32()? as usize;
         self.align(4);
-        let mut result = Vec::with_capacity(length);
+        let mut result = Vec::with_capacity(self.checked_capacity(length, 4)?);
         for _ in 0..length {
             self.check_available(4)?;
             let bytes = self.input.read_array::<4>(self.position);
@@ -108,7 +108,7 @@ impl<'a> CdrDeserializer<'a> {
     pub fn deserialize_i64_sequence(&mut self) -> Result<Vec<i64>, CdrError> {
         let length = self.deserialize_u32()? as usize;
         self.align(8);
-        let mut result = Vec::with_capacity(length);
+        let mut result = Vec::with_capacity(self.checked_capacity(length, 8)?);
         for _ in 0..length {
             self.check_available(8)?;
             let bytes = self.input.read_array::<8>(self.position);
@@ -123,7 +123,7 @@ impl<'a> CdrDeserializer<'a> {
     pub fn deserialize_f32_sequence(&mut self) -> Result<Vec<f32>, CdrError> {
         let length = self.deserialize_u32()? as usize;
         self.align(4);
-        let mut result = Vec::with_capacity(length);
+        let mut result = Vec::with_capacity(self.checked_capacity(length, 4)?);
         for _ in 0..length {
             self.check_available(4)?;
             let bytes = self.input.read_array::<4>(self.position);
@@ -138,7 +138,7 @@ impl<'a> CdrDeserializer<'a> {
     pub fn deserialize_f64_sequence(&mut self) -> Result<Vec<f64>, CdrError> {
         let length = self.deserialize_u32()? as usize;
         self.align(8);
-        let mut result = Vec::with_capacity(length);
+        let mut result = Vec::with_capacity(self.checked_capacity(length, 8)?);
         for _ in 0..length {
             self.check_available(8)?;
             let bytes = self.input.read_array::<8>(self.position);
@@ -176,7 +176,7 @@ impl<'a> CdrDeserializer<'a> {
     /// Deserialize string sequence with length prefix
     pub fn deserialize_string_sequence(&mut self) -> Result<Vec<String>, CdrError> {
         let length = self.deserialize_u32()? as usize;
-        let mut result = Vec::with_capacity(length);
+        let mut result = Vec::with_capacity(self.checked_capacity(length, 4)?);
         for _ in 0..length {
             result.push(self.deserialize_string()?);
         }
@@ -189,7 +189,7 @@ impl<'a> CdrDeserializer<'a> {
         F: FnMut(&mut Self) -> Result<T, CdrError>,
     {
         let length = self.deserialize_u32()? as usize;
-        let mut result = Vec::with_capacity(length);
+        let mut result = Vec::new();
         for _ in 0..length {
             result.push(deserialize_fn(self)?);
         }
@@ -226,7 +226,7 @@ impl<'a> Xcdr2Deserializer<'a> {
     pub fn deserialize_u16_sequence(&mut self) -> Result<Vec<u16>, CdrError> {
         let length = self.deserialize_u32()? as usize;
         self.align(2);
-        let mut result = Vec::with_capacity(length);
+        let mut result = Vec::with_capacity(self.checked_capacity(length, 2)?);
         for _ in 0..length {
             self.check_available(2)?;
             let bytes: [u8; 2] = self.data[self.position..self.position + 2]
@@ -242,7 +242,7 @@ impl<'a> Xcdr2Deserializer<'a> {
     pub fn deserialize_u32_sequence(&mut self) -> Result<Vec<u32>, CdrError> {
         let length = self.deserialize_u32()? as usize;
         self.align(4);
-        let mut result = Vec::with_capacity(length);
+        let mut result = Vec::with_capacity(self.checked_capacity(length, 4)?);
         for _ in 0..length {
             self.check_available(4)?;
             let bytes: [u8; 4] = self.data[self.position..self.position + 4]
@@ -258,7 +258,7 @@ impl<'a> Xcdr2Deserializer<'a> {
     pub fn deserialize_u64_sequence(&mut self) -> Result<Vec<u64>, CdrError> {
         let length = self.deserialize_u32()? as usize;
         self.align(8);
-        let mut result = Vec::with_capacity(length);
+        let mut result = Vec::with_capacity(self.checked_capacity(length, 8)?);
         for _ in 0..length {
             self.check_available(8)?;
             let bytes: [u8; 8] = self.data[self.position..self.position + 8]
@@ -285,7 +285,7 @@ impl<'a> Xcdr2Deserializer<'a> {
     pub fn deserialize_i16_sequence(&mut self) -> Result<Vec<i16>, CdrError> {
         let length = self.deserialize_u32()? as usize;
         self.align(2);
-        let mut result = Vec::with_capacity(length);
+        let mut result = Vec::with_capacity(self.checked_capacity(length, 2)?);
         for _ in 0..length {
             self.check_available(2)?;
             let bytes: [u8; 2] = self.data[self.position..self.position + 2]
@@ -301,7 +301,7 @@ impl<'a> Xcdr2Deserializer<'a> {
     pub fn deserialize_i32_sequence(&mut self) -> Result<Vec<i32>, CdrError> {
         let length = self.deserialize_u32()? as usize;
         self.align(4);
-        let mut result = Vec::with_capacity(length);
+        let mut result = Vec::with_capacity(self.checked_capacity(length, 4)?);
         for _ in 0..length {
             self.check_available(4)?;
             let bytes: [u8; 4] = self.data[self.position..self.position + 4]
@@ -317,7 +317,7 @@ impl<'a> Xcdr2Deserializer<'a> {
     pub fn deserialize_i64_sequence(&mut self) -> Result<Vec<i64>, CdrError> {
         let length = self.deserialize_u32()? as usize;
         self.align(8);
-        let mut result = Vec::with_capacity(length);
+        let mut result = Vec::with_capacity(self.checked_capacity(length, 8)?);
         for _ in 0..length {
             self.check_available(8)?;
             let bytes: [u8; 8] = self.data[self.position..self.position + 8]
@@ -333,7 +333,7 @@ impl<'a> Xcdr2Deserializer<'a> {
     pub fn deserialize_f32_sequence(&mut self) -> Result<Vec<f32>, CdrError> {
         let length = self.deserialize_u32()? as usize;
         self.align(4);
-        let mut result = Vec::with_capacity(length);
+        let mut result = Vec::with_capacity(self.checked_capacity(length, 4)?);
         for _ in 0..length {
             self.check_available(4)?;
             let bytes: [u8; 4] = self.data[self.position..self.position + 4]
@@ -349,7 +349,7 @@ impl<'a> Xcdr2Deserializer<'a> {
     pub fn deserialize_f64_sequence(&mut self) -> Result<Vec<f64>, CdrError> {
         let length = self.deserialize_u32()? as usize;
         self.align(8);
-        let mut result = Vec::with_capacity(length);
+        let mut result = Vec::with_capacity(self.checked_capacity(length, 8)?);
         for _ in 0..length {
             self.check_available(8)?;
             let bytes: [u8; 8] = self.data[self.position..self.position + 8]
@@ -388,7 +388,7 @@ impl<'a> Xcdr2Deserializer<'a> {
     pub fn deserialize_string_sequence(&mut self) -> Result<Vec<String>, CdrError> {
         let _dheader = self.read_dheader()?;
         let length = self.deserialize_u32()? as usize;
-        let mut result = Vec::with_capacity(length);
+        let mut result = Vec::with_capacity(self.checked_capacity(length, 4)?);
         for _ in 0..length {
             result.push(self.deserialize_string()?);
         }
@@ -402,7 +402,7 @@ impl<'a> Xcdr2Deserializer<'a> {
     {
         let _dheader = self.read_dheader()?;
         let length = self.deserialize_u32()? as usize;
-        let mut result = Vec::with_capacity(length);
+        let mut result = Vec::new();
         for _ in 0..length {
             result.push(deserialize_fn(self)?);
         }
@@ -422,5 +422,50 @@ impl<'a> Xcdr2Deserializer<'a> {
         } else {
             Ok(None)
         }
+    }
+}
+
+#[cfg(test)]
+mod robustness_tests {
+    use super::*;
+
+    // 4-byte LE length prefix of 0xFFFFFFFF plus a near-empty body: the declared
+    // element count cannot fit, so deserialization must Err rather than OOM.
+    const HUGE_LEN: [u8; 8] = [0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00];
+
+    #[test]
+    fn cdr_sequences_reject_huge_length() {
+        assert!(CdrDeserializer::new_without_header(&HUGE_LEN, true)
+            .deserialize_u16_sequence()
+            .is_err());
+        assert!(CdrDeserializer::new_without_header(&HUGE_LEN, true)
+            .deserialize_u32_sequence()
+            .is_err());
+        assert!(CdrDeserializer::new_without_header(&HUGE_LEN, true)
+            .deserialize_u64_sequence()
+            .is_err());
+        assert!(CdrDeserializer::new_without_header(&HUGE_LEN, true)
+            .deserialize_f64_sequence()
+            .is_err());
+        assert!(CdrDeserializer::new_without_header(&HUGE_LEN, true)
+            .deserialize_string_sequence()
+            .is_err());
+    }
+
+    #[test]
+    fn xcdr2_sequences_reject_huge_length() {
+        assert!(Xcdr2Deserializer::new_without_header(&HUGE_LEN, true)
+            .deserialize_u32_sequence()
+            .is_err());
+        assert!(Xcdr2Deserializer::new_without_header(&HUGE_LEN, true)
+            .deserialize_u64_sequence()
+            .is_err());
+    }
+
+    #[test]
+    fn generic_sequence_with_huge_length_errs_without_oom() {
+        let mut d = CdrDeserializer::new_without_header(&HUGE_LEN, true);
+        let r: Result<Vec<u32>, _> = d.deserialize_sequence(|de| de.deserialize_u32());
+        assert!(r.is_err());
     }
 }

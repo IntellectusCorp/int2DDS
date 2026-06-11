@@ -1117,7 +1117,7 @@ impl CompleteMemberDetail {
             u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
 
-        let mut ann_custom = Vec::with_capacity(custom_count);
+        let mut ann_custom = Vec::new();
         for _ in 0..custom_count {
             let (ann, consumed) = AppliedAnnotation::deserialize(&data[pos..])?;
             pos += consumed;
@@ -1458,7 +1458,7 @@ impl AppliedAnnotation {
             u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
 
-        let mut param_seq = Vec::with_capacity(param_count);
+        let mut param_seq = Vec::new();
         for _ in 0..param_count {
             if data.len() < pos + 4 {
                 return Err("Insufficient data for param name_hash".to_string());
@@ -1544,7 +1544,7 @@ impl MinimalStructType {
         pos += 4;
 
         // members
-        let mut member_seq = Vec::with_capacity(member_count);
+        let mut member_seq = Vec::new();
         for _ in 0..member_count {
             let (member, consumed) = MinimalStructMember::deserialize(&data[pos..])?;
             pos += consumed;
@@ -1653,7 +1653,7 @@ impl CompleteStructType {
         pos += 4;
 
         // members
-        let mut member_seq = Vec::with_capacity(member_count);
+        let mut member_seq = Vec::new();
         for _ in 0..member_count {
             let (member, consumed) = CompleteStructMember::deserialize(&data[pos..])?;
             pos += consumed;
@@ -1778,7 +1778,7 @@ impl CompleteTypeDetail {
             u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
 
-        let mut ann_custom = Vec::with_capacity(custom_count);
+        let mut ann_custom = Vec::new();
         for _ in 0..custom_count {
             let (ann, consumed) = AppliedAnnotation::deserialize(&data[pos..])?;
             pos += consumed;
@@ -2061,7 +2061,7 @@ impl MinimalEnumeratedType {
         pos += 4;
 
         // literals
-        let mut literal_seq = Vec::with_capacity(literal_count);
+        let mut literal_seq = Vec::new();
         for _ in 0..literal_count {
             let (literal, consumed) = MinimalEnumeratedLiteral::deserialize(&data[pos..])?;
             pos += consumed;
@@ -2169,7 +2169,7 @@ impl CompleteEnumeratedType {
         pos += 4;
 
         // literals
-        let mut literal_seq = Vec::with_capacity(literal_count);
+        let mut literal_seq = Vec::new();
         for _ in 0..literal_count {
             let (literal, consumed) = CompleteEnumeratedLiteral::deserialize(&data[pos..])?;
             pos += consumed;
@@ -2430,7 +2430,7 @@ impl MinimalUnionType {
             u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
 
-        let mut member_seq = Vec::with_capacity(member_count);
+        let mut member_seq = Vec::new();
         for _ in 0..member_count {
             let (member, consumed) = MinimalUnionMember::deserialize(&data[pos..])?;
             pos += consumed;
@@ -2503,7 +2503,7 @@ impl CompleteUnionType {
             u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
 
-        let mut member_seq = Vec::with_capacity(member_count);
+        let mut member_seq = Vec::new();
         for _ in 0..member_count {
             let (member, consumed) = CompleteUnionMember::deserialize(&data[pos..])?;
             pos += consumed;
@@ -2761,7 +2761,7 @@ impl MinimalBitmaskType {
             u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
 
-        let mut flag_seq = Vec::with_capacity(flag_count);
+        let mut flag_seq = Vec::new();
         for _ in 0..flag_count {
             let (flag, consumed) = MinimalBitflag::deserialize(&data[pos..])?;
             pos += consumed;
@@ -2824,7 +2824,7 @@ impl CompleteBitmaskType {
             u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
 
-        let mut flag_seq = Vec::with_capacity(flag_count);
+        let mut flag_seq = Vec::new();
         for _ in 0..flag_count {
             let (flag, consumed) = CompleteBitflag::deserialize(&data[pos..])?;
             pos += consumed;
@@ -2987,7 +2987,7 @@ impl MinimalBitsetType {
             u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
 
-        let mut field_seq = Vec::with_capacity(field_count);
+        let mut field_seq = Vec::new();
         for _ in 0..field_count {
             let (field, consumed) = MinimalBitfield::deserialize(&data[pos..])?;
             pos += consumed;
@@ -3047,7 +3047,7 @@ impl CompleteBitsetType {
             u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
 
-        let mut field_seq = Vec::with_capacity(field_count);
+        let mut field_seq = Vec::new();
         for _ in 0..field_count {
             let (field, consumed) = CompleteBitfield::deserialize(&data[pos..])?;
             pos += consumed;
