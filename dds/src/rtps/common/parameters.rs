@@ -25,7 +25,7 @@ use crate::{
             types::{Count, GroupInfo, ProtocolVersion, VendorId},
         },
     },
-    xtypes::{TypeIdentifier, TypeInformation, TypeObject},
+    xtypes::{TypeIdentifier, TypeInformation, TypeObject, TypeObjectV1},
 };
 
 // pub type ParameterId = i16;
@@ -368,6 +368,7 @@ pub enum ParameterValue<'a> {
     TypeIdentifierV1(TypeIdentifier),
     TypeConsistencyEnforcement(TypeConsistencyEnforcementQosPolicy),
     TypeObject(TypeObject),
+    TypeObjectV1(TypeObjectV1),
     KeyHash([u8; 16]),
     StatusInfo(StatusInfo),
     MaxSerializedSize(u32),
