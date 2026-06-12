@@ -55,7 +55,8 @@ use crate::{
         },
         history_cache::HistoryCache as _,
         qos_policy::{
-            DataRepresentationId, LivelinessQosPolicyKind, Qos, ReliabilityQosPolicyKind,
+            DataRepresentationId, DurabilityQosPolicyKind, HistoryQosPolicyKind,
+            LivelinessQosPolicyKind, Qos, ReliabilityQosPolicyKind,
         },
         status::{
             LivelinessLostStatus, OfferedDeadlineMissedStatus, OfferedIncompatibleQosStatus,
@@ -72,7 +73,7 @@ use crate::{
             time::RtpsTime,
             types::{ChangeKind, SerializedData},
         },
-        entities::writer::Writer as RtpsWriter,
+        entities::writer::{StatefulWriter, Writer as RtpsWriter},
         logic::wlp_logic::WlpLogic,
     },
     topic::{
@@ -306,6 +307,26 @@ impl<Foo: 'static + Clone> EnableChild for DataWriter<Foo> {
         {
             *self.rtps_writer.lock().map_err(|e| DdsError::Error(e.to_string()))? =
                 Some(Arc::downgrade(&rtps_writer));
+        }
+
+        // A volatile, keep-all writer has no reason to keep samples acked by all readers,
+        // so register a callback that removes them unless the user opted into strict mode
+        let qos = self.get_qos()?;
+        if qos.durability.kind == DurabilityQosPolicyKind::Volatile
+            && qos.history.kind == HistoryQosPolicyKind::KeepAll
+            && !qos.history.strict
+            && qos.reliability.kind == ReliabilityQosPolicyKind::Reliable
+        {
+            if let Some(stateful_writer) = rtps_writer.as_any().downcast_ref::<StatefulWriter>() {
+                let cache = Arc::downgrade(&self.datawriter_cache);
+                stateful_writer.set_all_acked_callback(Arc::new(move |max_acked| {
+                    if let Some(cache) = cache.upgrade() {
+                        if let Ok(mut cache) = cache.lock() {
+                            let _ = cache.remove_changes_acked_up_to(max_acked);
+                        }
+                    }
+                }));
+            }
         }
 
         Ok(())
