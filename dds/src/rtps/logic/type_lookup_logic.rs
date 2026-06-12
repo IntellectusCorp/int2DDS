@@ -77,7 +77,7 @@ impl SedpLogic {
             }
         } else {
             match TypeLookupReply::deserialize(payload.as_ref()) {
-                Ok(reply) => self.handle_type_lookup_reply(reply),
+                Ok(reply) => self.handle_type_lookup_reply(remote_prefix, reply),
                 Err(e) => {
                     warn!("[TypeLookup] failed to parse reply: {}", e);
                     Ok(())
@@ -121,13 +121,25 @@ impl SedpLogic {
         )
     }
 
-    fn handle_type_lookup_reply(&self, reply: TypeLookupReply) -> RtpsResult<()> {
+    fn handle_type_lookup_reply(
+        &self,
+        replier_prefix: GuidPrefix,
+        reply: TypeLookupReply,
+    ) -> RtpsResult<()> {
         let participant = self.get_upgraded_participant()?;
         match reply.data {
             TypeLookupReturn::GetTypes(GetTypesOut { types }) => {
                 let mut still_missing: Vec<TypeIdentifier> = Vec::new();
                 if let Ok(mut registry) = participant.type_registry().write() {
                     for (type_id, type_object) in &types {
+                        if let Some(claimed) = type_id.equivalence_hash() {
+                            if *claimed != type_object.compute_hash() {
+                                warn!(
+                                    "[TypeLookup] hash mismatch for received type object; dropping"
+                                );
+                                continue;
+                            }
+                        }
                         registry.register_type_object_with_id(type_id, type_object.clone());
                     }
                     for (type_id, _) in &types {
@@ -144,8 +156,7 @@ impl SedpLogic {
                     still_missing.len()
                 );
                 if !still_missing.is_empty() {
-                    let prefix = reply.header.related_request_id.writer_guid.prefix();
-                    let _ = self.request_get_types(prefix, still_missing);
+                    let _ = self.request_get_types(replier_prefix, still_missing);
                 }
                 Ok(())
             }
@@ -156,10 +167,7 @@ impl SedpLogic {
                 let related = &reply.header.related_request_id;
                 let pending =
                     self.type_lookup_pending.lock().ok().and_then(|mut map| map.remove(related));
-                let prefix = pending
-                    .as_ref()
-                    .map(|(p, _)| *p)
-                    .unwrap_or_else(|| related.writer_guid.prefix());
+                let prefix = pending.as_ref().map(|(p, _)| *p).unwrap_or(replier_prefix);
 
                 let mut needed: Vec<TypeIdentifier> = Vec::new();
                 if let Ok(registry) = participant.type_registry().read() {
