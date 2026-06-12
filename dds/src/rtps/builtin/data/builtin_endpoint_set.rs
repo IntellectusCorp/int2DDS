@@ -28,10 +28,11 @@ bitflags! {
         const BUILTIN_ENDPOINT_PARTICIPANT_MESSAGE_DATA_WRITER           = 1 << 10;
         const BUILTIN_ENDPOINT_PARTICIPANT_MESSAGE_DATA_READER           = 1 << 11;
 
-        const RESERVED_1 = 1 << 12;
-        const RESERVED_2 = 1 << 13;
-        const RESERVED_3 = 1 << 14;
-        const RESERVED_4 = 1 << 15;
+        // DDS-XTypes 1.3 Table 22 - TypeLookup service builtin endpoint bits.
+        const BUILTIN_ENDPOINT_TYPELOOKUP_SERVICE_REQUEST_DATA_WRITER    = 1 << 12;
+        const BUILTIN_ENDPOINT_TYPELOOKUP_SERVICE_REQUEST_DATA_READER    = 1 << 13;
+        const BUILTIN_ENDPOINT_TYPELOOKUP_SERVICE_REPLY_DATA_WRITER      = 1 << 14;
+        const BUILTIN_ENDPOINT_TYPELOOKUP_SERVICE_REPLY_DATA_READER      = 1 << 15;
 
         const DISC_BUILTIN_ENDPOINT_TOPICS_ANNOUNCER                     = 1 << 28;
         const DISC_BUILTIN_ENDPOINT_TOPICS_DETECTOR                      = 1 << 29;
@@ -48,10 +49,14 @@ impl BuiltinEndpointSet {
     /// Create an initially empty EndpointSet
     pub(crate) fn new() -> Self {
         let mut bitmask = 0;
-        bitmask |= BuiltinEndpointFlag::RESERVED_1.bits();
-        bitmask |= BuiltinEndpointFlag::RESERVED_2.bits();
-        bitmask |= BuiltinEndpointFlag::RESERVED_3.bits();
-        bitmask |= BuiltinEndpointFlag::RESERVED_4.bits();
+        bitmask |=
+            BuiltinEndpointFlag::BUILTIN_ENDPOINT_TYPELOOKUP_SERVICE_REQUEST_DATA_WRITER.bits();
+        bitmask |=
+            BuiltinEndpointFlag::BUILTIN_ENDPOINT_TYPELOOKUP_SERVICE_REQUEST_DATA_READER.bits();
+        bitmask |=
+            BuiltinEndpointFlag::BUILTIN_ENDPOINT_TYPELOOKUP_SERVICE_REPLY_DATA_WRITER.bits();
+        bitmask |=
+            BuiltinEndpointFlag::BUILTIN_ENDPOINT_TYPELOOKUP_SERVICE_REPLY_DATA_READER.bits();
         Self { bitmask }
     }
     /// Create from bitmask value

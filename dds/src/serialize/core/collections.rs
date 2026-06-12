@@ -104,7 +104,7 @@ where
 {
     let length = read_length_fn()? as usize;
 
-    let mut result = Vec::with_capacity(length);
+    let mut result = Vec::new();
     for _ in 0..length {
         result.push(deserialize_fn()?);
     }

@@ -11,41 +11,77 @@ use crate::codegen::utils::{
     SerializationMethod,
 };
 
+fn name_based_minimal_id(
+    crate_path: &proc_macro2::TokenStream,
+    name_str: &str,
+) -> proc_macro2::TokenStream {
+    quote! {
+        #crate_path::xtypes::TypeIdentifier::MinimalTypeId(
+            #crate_path::xtypes::EquivalenceHash::compute(#name_str.as_bytes())
+        )
+    }
+}
+
+fn xtypes_extensibility_tokens(
+    extensibility: Option<crate::codegen::type_config::ExtensibilityKind>,
+    crate_path: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    use crate::codegen::type_config::ExtensibilityKind;
+    match extensibility.unwrap_or_default() {
+        ExtensibilityKind::Final => quote! { #crate_path::xtypes::ExtensibilityKind::Final },
+        ExtensibilityKind::Appendable => {
+            quote! { #crate_path::xtypes::ExtensibilityKind::Appendable }
+        }
+        ExtensibilityKind::Mutable => quote! { #crate_path::xtypes::ExtensibilityKind::Mutable },
+    }
+}
+
 /// Generate TypeIdentifier expression for a Rust type.
-///
-/// `as_char`: when true and the type is `u8` / `[u8; N]`, advertise it as
-/// `Char8` (resp. `Char8` array element) in XTypes metadata so that codegen
-/// from other languages — which keep IDL `char` as native char — can match.
 fn type_to_identifier(
     ty: &syn::Type,
     crate_path: &proc_macro2::TokenStream,
     as_char: bool,
 ) -> proc_macro2::TokenStream {
-    let method = get_serialization_method(ty);
+    if let syn::Type::Array(array) = ty {
+        let inner_id = type_to_identifier(&array.elem, crate_path, as_char);
+        let size = &array.len;
+        return quote! {
+            #crate_path::xtypes::TypeIdentifier::PlainArrayLarge {
+                header: #crate_path::xtypes::PlainCollectionHeader::default(),
+                array_bound_seq: vec![#size as u32],
+                element_identifier: Box::new(#inner_id),
+            }
+        };
+    }
 
-    if as_char {
-        // Override only u8 / [u8; N] cases. Other types fall through to the
-        // normal mapping below.
-        if matches!(method, SerializationMethod::U8) {
-            return quote! { #crate_path::xtypes::TypeIdentifier::Char8 };
-        }
-        if matches!(method, SerializationMethod::U8Array) {
-            if let syn::Type::Array(array) = ty {
-                let size = &array.len;
-                return quote! {
-                    #crate_path::xtypes::TypeIdentifier::PlainArrayLarge {
-                        header: #crate_path::xtypes::PlainCollectionHeader::default(),
-                        array_bound_seq: vec![#size as u32],
-                        element_identifier: Box::new(
-                            #crate_path::xtypes::TypeIdentifier::Char8
-                        ),
+    if let syn::Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.last() {
+            let wrapper = segment.ident.to_string();
+            if matches!(wrapper.as_str(), "Vec" | "Option" | "Box") {
+                if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                    if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
+                        let inner_id = type_to_identifier(inner_ty, crate_path, false);
+                        if wrapper == "Vec" {
+                            return quote! {
+                                #crate_path::xtypes::TypeIdentifier::PlainSequenceLarge {
+                                    header: #crate_path::xtypes::PlainCollectionHeader::default(),
+                                    bound: 0,
+                                    element_identifier: Box::new(#inner_id),
+                                }
+                            };
+                        }
+                        return inner_id;
                     }
-                };
+                }
             }
         }
     }
 
-    match method {
+    if as_char && matches!(get_serialization_method(ty), SerializationMethod::U8) {
+        return quote! { #crate_path::xtypes::TypeIdentifier::Char8 };
+    }
+
+    match get_serialization_method(ty) {
         SerializationMethod::Bool => quote! { #crate_path::xtypes::TypeIdentifier::Boolean },
         SerializationMethod::U8 => quote! { #crate_path::xtypes::TypeIdentifier::Byte },
         SerializationMethod::I8 => quote! { #crate_path::xtypes::TypeIdentifier::Int8 },
@@ -60,78 +96,11 @@ fn type_to_identifier(
         SerializationMethod::Char => quote! { #crate_path::xtypes::TypeIdentifier::Char8 },
         SerializationMethod::String => quote! { #crate_path::xtypes::TypeIdentifier::String8 },
         SerializationMethod::WString => quote! { #crate_path::xtypes::TypeIdentifier::String16 },
-        SerializationMethod::VecU8
-        | SerializationMethod::VecU16
-        | SerializationMethod::VecU32
-        | SerializationMethod::VecU64
-        | SerializationMethod::VecI8
-        | SerializationMethod::VecI16
-        | SerializationMethod::VecI32
-        | SerializationMethod::VecI64
-        | SerializationMethod::VecF32
-        | SerializationMethod::VecF64
-        | SerializationMethod::VecBool
-        | SerializationMethod::VecChar
-        | SerializationMethod::VecString => {
-            // Get inner type for sequences
-            if let syn::Type::Path(type_path) = ty {
-                if let Some(segment) = type_path.path.segments.last() {
-                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-                        if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
-                            let inner_id = type_to_identifier(inner_ty, crate_path, false);
-                            return quote! {
-                                #crate_path::xtypes::TypeIdentifier::PlainSequenceLarge {
-                                    header: #crate_path::xtypes::PlainCollectionHeader::default(),
-                                    bound: 0,
-                                    element_identifier: Box::new(#inner_id),
-                                }
-                            };
-                        }
-                    }
-                }
-            }
-            // Fallback
-            quote! { #crate_path::xtypes::TypeIdentifier::None }
-        }
-        SerializationMethod::U8Array
-        | SerializationMethod::U16Array
-        | SerializationMethod::U32Array
-        | SerializationMethod::U64Array
-        | SerializationMethod::I8Array
-        | SerializationMethod::I16Array
-        | SerializationMethod::I32Array
-        | SerializationMethod::I64Array
-        | SerializationMethod::F32Array
-        | SerializationMethod::F64Array
-        | SerializationMethod::BoolArray
-        | SerializationMethod::CharArray
-        | SerializationMethod::StringArray => {
-            // Arrays - get size from type
-            if let syn::Type::Array(array) = ty {
-                let inner_id = type_to_identifier(&array.elem, crate_path, false);
-                let size = &array.len;
-                return quote! {
-                    #crate_path::xtypes::TypeIdentifier::PlainArrayLarge {
-                        header: #crate_path::xtypes::PlainCollectionHeader::default(),
-                        array_bound_seq: vec![#size as u32],
-                        element_identifier: Box::new(#inner_id),
-                    }
-                };
-            }
-            // Fallback
-            quote! { #crate_path::xtypes::TypeIdentifier::None }
-        }
-        // Fallback for complex types (structs, enums, etc.)
-        SerializationMethod::Fallback => {
-            // For complex types that may or may not implement HasTypeObject,
-            // use a static approach based on type name hash
+        // Composite (struct / enum / union): name-based MinimalTypeId, matching
+        // the id under which `collect_nested_type_objects` registers the child.
+        _ => {
             let type_str = quote!(#ty).to_string();
-            quote! {
-                // Use type name to create a minimal identifier
-                #crate_path::xtypes::TypeIdentifier::MinimalTypeId(
-                    #crate_path::xtypes::EquivalenceHash::compute(#type_str.as_bytes())
-                )
-            }
+            name_based_minimal_id(crate_path, &type_str)
         }
     }
 }
@@ -168,6 +137,41 @@ fn build_type_ann_builtin(
     }
 }
 
+/// Generate the `HasTypeObject::collect_nested_type_objects` method body.
+fn generate_collect_nested(
+    crate_path: &proc_macro2::TokenStream,
+    type_name_str: &str,
+    field_types: &[&syn::Type],
+) -> proc_macro2::TokenStream {
+    let fallback_use = if field_types.is_empty() {
+        quote! {}
+    } else {
+        quote! { use #crate_path::xtypes::nested_closure::CollectFallback as _; }
+    };
+    let id_expr = name_based_minimal_id(crate_path, type_name_str);
+    quote! {
+        fn collect_nested_type_objects(
+            out: &mut Vec<(#crate_path::xtypes::TypeIdentifier, #crate_path::xtypes::TypeObject)>,
+        ) {
+            #fallback_use
+            let __id = #id_expr;
+            if let Some(__h) = __id.equivalence_hash().copied() {
+                if out.iter().any(|(__i, _)| __i.equivalence_hash() == Some(&__h)) {
+                    return;
+                }
+            }
+            out.push((
+                __id,
+                #crate_path::xtypes::TypeObject::Complete(Self::complete_type_object()),
+            ));
+            #(
+                #crate_path::xtypes::nested_closure::Probe::<#field_types>(::core::marker::PhantomData)
+                    .collect_nested(out);
+            )*
+        }
+    }
+}
+
 /// Generate HasTypeObject implementation for a struct.
 pub fn generate_has_type_object_impl(
     name: &syn::Ident,
@@ -187,11 +191,8 @@ pub fn generate_has_type_object_impl(
     let base_type_expr = if let Some(pf) = parent_field {
         let parent_type = &pf.ty;
         let parent_type_str = quote!(#parent_type).to_string();
-        quote! {
-            Some(#crate_path::xtypes::TypeIdentifier::MinimalTypeId(
-                #crate_path::xtypes::EquivalenceHash::compute(#parent_type_str.as_bytes())
-            ))
-        }
+        let parent_id = name_based_minimal_id(crate_path, &parent_type_str);
+        quote! { Some(#parent_id) }
     } else {
         quote! { None }
     };
@@ -290,17 +291,7 @@ pub fn generate_has_type_object_impl(
         .collect();
 
     // Determine extensibility kind (default: Appendable)
-    let ext_kind = match type_config.extensibility.unwrap_or_default() {
-        crate::codegen::type_config::ExtensibilityKind::Final => {
-            quote! { #crate_path::xtypes::ExtensibilityKind::Final }
-        }
-        crate::codegen::type_config::ExtensibilityKind::Appendable => {
-            quote! { #crate_path::xtypes::ExtensibilityKind::Appendable }
-        }
-        crate::codegen::type_config::ExtensibilityKind::Mutable => {
-            quote! { #crate_path::xtypes::ExtensibilityKind::Mutable }
-        }
-    };
+    let ext_kind = xtypes_extensibility_tokens(type_config.extensibility, crate_path);
     let is_nested = type_config.nested;
     let is_autoid_hash =
         matches!(type_config.autoid, Some(crate::codegen::utils::AutoIdKind::Hash));
@@ -309,6 +300,17 @@ pub fn generate_has_type_object_impl(
     let impl_generics = &gc.impl_generics;
     let ty_generics = &gc.ty_generics;
     let where_clause = &gc.where_clause;
+
+    let collect_nested_impl = if gc.has_type_params {
+        quote! {}
+    } else {
+        let nested_field_types: Vec<&syn::Type> = fields
+            .iter()
+            .filter(|f| !parse_field_attributes(f).non_serialized)
+            .map(|f| &f.ty)
+            .collect();
+        generate_collect_nested(crate_path, &type_name_str, &nested_field_types)
+    };
 
     let type_identifier_impl = if gc.has_type_params {
         // Generic types cannot use static OnceLock; compute each time
@@ -363,6 +365,8 @@ pub fn generate_has_type_object_impl(
             fn dds_type_name() -> &'static str {
                 #type_name_str
             }
+
+            #collect_nested_impl
         }
     }
 }
@@ -377,6 +381,7 @@ pub fn generate_has_type_object_alias_impl(
     let crate_path = &type_config.crate_path;
     let type_name_str = name.to_string();
     let related_type = type_to_identifier(inner_ty, crate_path, false);
+    let collect_nested_impl = generate_collect_nested(crate_path, &type_name_str, &[inner_ty]);
 
     quote! {
         impl #crate_path::xtypes::HasTypeObject for #name {
@@ -414,6 +419,8 @@ pub fn generate_has_type_object_alias_impl(
             fn dds_type_name() -> &'static str {
                 #type_name_str
             }
+
+            #collect_nested_impl
         }
     }
 }
@@ -423,9 +430,11 @@ pub fn generate_has_type_object_enum_impl(
     name: &syn::Ident,
     variants: &syn::punctuated::Punctuated<syn::Variant, syn::token::Comma>,
     type_config: &DdsTypeConfig,
+    disc_type: DiscriminantType,
 ) -> proc_macro2::TokenStream {
     let crate_path = &type_config.crate_path;
     let type_name_str = name.to_string();
+    let bit_bound = disc_type.bit_bound();
 
     let literal_flag_expr = |variant: &syn::Variant| {
         if crate::codegen::utils::variant_is_default_literal(variant) {
@@ -476,6 +485,8 @@ pub fn generate_has_type_object_enum_impl(
         })
         .collect();
 
+    let collect_nested_impl = generate_collect_nested(crate_path, &type_name_str, &[]);
+
     quote! {
         impl #crate_path::xtypes::HasTypeObject for #name {
             fn type_identifier() -> #crate_path::xtypes::TypeIdentifier {
@@ -493,7 +504,7 @@ pub fn generate_has_type_object_enum_impl(
             fn minimal_type_object() -> #crate_path::xtypes::MinimalTypeObject {
                 let mut enum_type = #crate_path::xtypes::MinimalEnumeratedType::new(
                     #crate_path::xtypes::TypeFlag::default(),
-                    32, // bit_bound for i32
+                    #bit_bound,
                 );
                 #(enum_type.add_literal(#minimal_literals);)*
                 #crate_path::xtypes::MinimalTypeObject::Enum(enum_type)
@@ -503,7 +514,7 @@ pub fn generate_has_type_object_enum_impl(
                 let mut enum_type = #crate_path::xtypes::CompleteEnumeratedType::new(
                     #crate_path::xtypes::TypeFlag::default(),
                     #type_name_str.to_string(),
-                    32, // bit_bound for i32
+                    #bit_bound,
                 );
                 #(enum_type.add_literal(#complete_literals);)*
                 #crate_path::xtypes::CompleteTypeObject::Enum(enum_type)
@@ -512,6 +523,8 @@ pub fn generate_has_type_object_enum_impl(
             fn dds_type_name() -> &'static str {
                 #type_name_str
             }
+
+            #collect_nested_impl
         }
     }
 }
@@ -525,6 +538,9 @@ pub fn generate_has_type_object_union_impl(
 ) -> proc_macro2::TokenStream {
     let crate_path = &type_config.crate_path;
     let type_name_str = name.to_string();
+
+    let union_ext_kind = xtypes_extensibility_tokens(type_config.extensibility, crate_path);
+    let union_flags = quote! { #crate_path::xtypes::TypeFlag::new(#union_ext_kind, false, false) };
 
     let disc_type_id = match disc_type {
         DiscriminantType::I32 => quote! { #crate_path::xtypes::TypeIdentifier::Int32 },
@@ -581,6 +597,11 @@ pub fn generate_has_type_object_union_impl(
         })
         .collect();
 
+    let nested_field_types: Vec<&syn::Type> =
+        variants.iter().filter(|v| variant_has_data(v)).filter_map(get_variant_type).collect();
+    let collect_nested_impl =
+        generate_collect_nested(crate_path, &type_name_str, &nested_field_types);
+
     quote! {
         impl #crate_path::xtypes::HasTypeObject for #name {
             fn type_identifier() -> #crate_path::xtypes::TypeIdentifier {
@@ -595,7 +616,7 @@ pub fn generate_has_type_object_union_impl(
 
             fn minimal_type_object() -> #crate_path::xtypes::MinimalTypeObject {
                 let mut union_type = #crate_path::xtypes::MinimalUnionType::new(
-                    #crate_path::xtypes::TypeFlag::default(),
+                    #union_flags,
                     #crate_path::xtypes::MemberFlag::default(),
                     #disc_type_id,
                 );
@@ -605,7 +626,7 @@ pub fn generate_has_type_object_union_impl(
 
             fn complete_type_object() -> #crate_path::xtypes::CompleteTypeObject {
                 let mut union_type = #crate_path::xtypes::CompleteUnionType::new(
-                    #crate_path::xtypes::TypeFlag::default(),
+                    #union_flags,
                     #crate_path::xtypes::MemberFlag::default(),
                     #disc_type_id,
                     #type_name_str.to_string(),
@@ -617,6 +638,8 @@ pub fn generate_has_type_object_union_impl(
             fn dds_type_name() -> &'static str {
                 #type_name_str
             }
+
+            #collect_nested_impl
         }
     }
 }
@@ -665,6 +688,8 @@ pub fn generate_has_type_object_bitmask_impl(
         })
         .collect();
 
+    let collect_nested_impl = generate_collect_nested(crate_path, &type_name_str, &[]);
+
     quote! {
         impl #crate_path::xtypes::HasTypeObject for #name {
             fn type_identifier() -> #crate_path::xtypes::TypeIdentifier {
@@ -699,6 +724,8 @@ pub fn generate_has_type_object_bitmask_impl(
             fn dds_type_name() -> &'static str {
                 #type_name_str
             }
+
+            #collect_nested_impl
         }
     }
 }
@@ -758,6 +785,8 @@ pub fn generate_has_type_object_bitset_impl(
         })
         .collect();
 
+    let collect_nested_impl = generate_collect_nested(crate_path, &type_name_str, &[]);
+
     quote! {
         impl #crate_path::xtypes::HasTypeObject for #name {
             fn type_identifier() -> #crate_path::xtypes::TypeIdentifier {
@@ -790,6 +819,8 @@ pub fn generate_has_type_object_bitset_impl(
             fn dds_type_name() -> &'static str {
                 #type_name_str
             }
+
+            #collect_nested_impl
         }
     }
 }

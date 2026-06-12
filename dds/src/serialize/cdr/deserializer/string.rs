@@ -67,7 +67,7 @@ impl<'a> CdrDeserializer<'a> {
         let length = self.read_u32()? as usize;
 
         self.align(2);
-        let mut utf16_chars = Vec::with_capacity(length);
+        let mut utf16_chars = Vec::with_capacity(self.checked_capacity(length, 2)?);
 
         for _ in 0..length {
             utf16_chars.push(self.read_u16()?);
@@ -169,7 +169,7 @@ impl<'a> Xcdr2Deserializer<'a> {
     pub fn deserialize_wstring16(&mut self) -> Result<String, CdrError> {
         let length = self.read_u32()? as usize;
         self.align(2);
-        let mut utf16_chars = Vec::with_capacity(length);
+        let mut utf16_chars = Vec::with_capacity(self.checked_capacity(length, 2)?);
         for _ in 0..length {
             utf16_chars.push(self.read_u16()?);
         }
