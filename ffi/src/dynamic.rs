@@ -8,14 +8,15 @@
 //!  - Discover a publisher's TypeObject at runtime
 //!  - Introspect it (extensibility, members, kinds, member_ids, flags)
 //!  - Register a topic for it via `RawTypeSupport`
-//!  - Decode received CDR sample bytes by field name (primitive + string only,
-//!    all extensibilities supported)
+//!  - Decode received CDR sample bytes into a `DynamicData` handle and read
+//!    fields by dotted/indexed path, including nested structs and
+//!    sequence/array elements (delegating to the core dynamic-type machinery)
 
 use int2dds::common::builtin::topic::publication_builtin_topic_data::PublicationBuiltinTopicData;
-use int2dds::serialize::cdr::XcdrDeserializer;
-use int2dds::serialize::DeserializerReader;
 use int2dds::xtypes::{
-    CompleteStructType, CompleteTypeObject, ExtensibilityKind, TypeIdentifier, TypeObject,
+    deserialize_dynamic_data, CompleteStructType, CompleteTypeObject, DynamicData,
+    DynamicTypeSupport, DynamicValue, ExtensibilityKind, FromDynamicValue, TypeIdentifier,
+    TypeObject,
 };
 use std::ffi::CStr;
 use std::os::raw::c_char;
@@ -23,9 +24,10 @@ use std::sync::Arc;
 
 use crate::error::*;
 use crate::type_info::{
-    INT2DDS_FIELD_BOOL, INT2DDS_FIELD_BYTE, INT2DDS_FIELD_CHAR16, INT2DDS_FIELD_CHAR8,
-    INT2DDS_FIELD_FLOAT32, INT2DDS_FIELD_FLOAT64, INT2DDS_FIELD_INT16, INT2DDS_FIELD_INT32,
-    INT2DDS_FIELD_INT64, INT2DDS_FIELD_INT8, INT2DDS_FIELD_STRING, INT2DDS_FIELD_UINT16,
+    INT2DDS_FIELD_ARRAY, INT2DDS_FIELD_BOOL, INT2DDS_FIELD_BYTE, INT2DDS_FIELD_CHAR16,
+    INT2DDS_FIELD_CHAR8, INT2DDS_FIELD_FLOAT32, INT2DDS_FIELD_FLOAT64, INT2DDS_FIELD_INT16,
+    INT2DDS_FIELD_INT32, INT2DDS_FIELD_INT64, INT2DDS_FIELD_INT8, INT2DDS_FIELD_MAP,
+    INT2DDS_FIELD_NESTED, INT2DDS_FIELD_SEQUENCE, INT2DDS_FIELD_STRING, INT2DDS_FIELD_UINT16,
     INT2DDS_FIELD_UINT32, INT2DDS_FIELD_UINT64, INT2DDS_FIELD_UINT8, INT2DDS_FIELD_WSTRING,
     INT2DDS_MEMBER_EXTERNAL, INT2DDS_MEMBER_KEY, INT2DDS_MEMBER_MUST_UNDERSTAND,
     INT2DDS_MEMBER_OPTIONAL,
@@ -62,6 +64,18 @@ fn type_identifier_to_kind(id: &TypeIdentifier) -> Option<i32> {
         TypeIdentifier::String16 => INT2DDS_FIELD_WSTRING,
         TypeIdentifier::String16Small { .. } => INT2DDS_FIELD_WSTRING,
         TypeIdentifier::String16Large { .. } => INT2DDS_FIELD_WSTRING,
+        TypeIdentifier::MinimalTypeId(..) | TypeIdentifier::CompleteTypeId(..) => {
+            INT2DDS_FIELD_NESTED
+        }
+        TypeIdentifier::PlainSequenceSmall { .. } | TypeIdentifier::PlainSequenceLarge { .. } => {
+            INT2DDS_FIELD_SEQUENCE
+        }
+        TypeIdentifier::PlainArraySmall { .. } | TypeIdentifier::PlainArrayLarge { .. } => {
+            INT2DDS_FIELD_ARRAY
+        }
+        TypeIdentifier::PlainMapSmall { .. } | TypeIdentifier::PlainMapLarge { .. } => {
+            INT2DDS_FIELD_MAP
+        }
         _ => return None,
     })
 }
@@ -570,133 +584,48 @@ pub unsafe extern "C" fn int2dds_create_topic_with_type_object(
     INT2DDS_RET_OK
 }
 
-/// Skip exactly one member of the given primitive/string kind from the reader,
-/// honoring CDR alignment. Returns `DYNAMIC_UNSUPPORTED_TYPE` for any kind
-/// outside PHASE 1 scope (sequences, arrays, nested structs, etc.).
-fn skip_member_by_kind(reader: &mut XcdrDeserializer<'_>, kind: i32) -> Result<(), Int2DdsRet> {
-    match kind {
-        k if k == INT2DDS_FIELD_BOOL
-            || k == INT2DDS_FIELD_BYTE
-            || k == INT2DDS_FIELD_CHAR8
-            || k == INT2DDS_FIELD_INT8
-            || k == INT2DDS_FIELD_UINT8 =>
-        {
-            // 1-byte primitives: no alignment needed.
-            reader.skip(1).map_err(|_| INT2DDS_RET_DYNAMIC_DECODE_ERROR)?;
-        }
-        k if k == INT2DDS_FIELD_INT16 || k == INT2DDS_FIELD_UINT16 || k == INT2DDS_FIELD_CHAR16 => {
-            reader.align(2);
-            reader.skip(2).map_err(|_| INT2DDS_RET_DYNAMIC_DECODE_ERROR)?;
-        }
-        k if k == INT2DDS_FIELD_INT32
-            || k == INT2DDS_FIELD_UINT32
-            || k == INT2DDS_FIELD_FLOAT32 =>
-        {
-            reader.align(4);
-            reader.skip(4).map_err(|_| INT2DDS_RET_DYNAMIC_DECODE_ERROR)?;
-        }
-        k if k == INT2DDS_FIELD_INT64
-            || k == INT2DDS_FIELD_UINT64
-            || k == INT2DDS_FIELD_FLOAT64 =>
-        {
-            reader.align(8);
-            reader.skip(8).map_err(|_| INT2DDS_RET_DYNAMIC_DECODE_ERROR)?;
-        }
-        k if k == INT2DDS_FIELD_STRING => {
-            let len = reader.deserialize_u32().map_err(|_| INT2DDS_RET_DYNAMIC_DECODE_ERROR)?;
-            reader.skip(len as usize).map_err(|_| INT2DDS_RET_DYNAMIC_DECODE_ERROR)?;
-        }
-        k if k == INT2DDS_FIELD_WSTRING => {
-            let len = reader.deserialize_u32().map_err(|_| INT2DDS_RET_DYNAMIC_DECODE_ERROR)?;
-            reader
-                .skip((len as usize).saturating_mul(2))
-                .map_err(|_| INT2DDS_RET_DYNAMIC_DECODE_ERROR)?;
-        }
-        _ => return Err(INT2DDS_RET_DYNAMIC_UNSUPPORTED_TYPE),
-    }
-    Ok(())
+fn decode_flat(bytes: &[u8], type_obj: &Int2DdsTypeObject) -> Result<DynamicData, Int2DdsRet> {
+    let support = DynamicTypeSupport::from_type_object(type_obj.inner.clone())
+        .map_err(|_| INT2DDS_RET_DYNAMIC_UNSUPPORTED_TYPE)?;
+    deserialize_dynamic_data(bytes, support.dynamic_type())
+        .map_err(|_| INT2DDS_RET_DYNAMIC_DECODE_ERROR)
 }
 
-/// Position a freshly initialized CDR reader at the value bytes of the named
-/// field. Returns `(positioned_reader, member's CDR kind)` on success.
-#[allow(dead_code)]
-fn position_reader_at_field<'a>(
-    bytes: &'a [u8],
-    type_obj: &Int2DdsTypeObject,
-    field_name: &str,
-) -> Result<(XcdrDeserializer<'a>, i32), Int2DdsRet> {
-    let s = type_obj.as_struct().ok_or(INT2DDS_RET_DYNAMIC_UNSUPPORTED_TYPE)?;
-
-    // Locate the target member by name.
-    let (target_idx, target_member) = s
-        .member_seq
-        .iter()
-        .enumerate()
-        .find(|(_, m)| m.detail.name == field_name)
-        .ok_or(INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND)?;
-
-    let actual_kind = type_identifier_to_kind(&target_member.common.member_type_id)
-        .ok_or(INT2DDS_RET_DYNAMIC_UNSUPPORTED_TYPE)?;
-
-    let mut reader = XcdrDeserializer::new(bytes).map_err(|_| INT2DDS_RET_DYNAMIC_DECODE_ERROR)?;
-
-    match s.struct_flags.extensibility() {
-        ExtensibilityKind::Final => {
-            // Positional skip of each preceding member.
-            for m in s.member_seq.iter().take(target_idx) {
-                let k = type_identifier_to_kind(&m.common.member_type_id)
-                    .ok_or(INT2DDS_RET_DYNAMIC_UNSUPPORTED_TYPE)?;
-                skip_member_by_kind(&mut reader, k)?;
-            }
-        }
-        ExtensibilityKind::Appendable => {
-            // Read DHEADER, then positional skip bounded by its end offset.
-            let object_size =
-                reader.read_dheader().map_err(|_| INT2DDS_RET_DYNAMIC_DECODE_ERROR)?;
-            let dh_end = reader.get_position() + object_size as usize;
-            for m in s.member_seq.iter().take(target_idx) {
-                if reader.get_position() >= dh_end {
-                    return Err(INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND);
-                }
-                let k = type_identifier_to_kind(&m.common.member_type_id)
-                    .ok_or(INT2DDS_RET_DYNAMIC_UNSUPPORTED_TYPE)?;
-                skip_member_by_kind(&mut reader, k)?;
-            }
-            if reader.get_position() >= dh_end {
-                return Err(INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND);
-            }
-        }
-        ExtensibilityKind::Mutable => {
-            // Walk EMHEADERs looking for the matching member_id.
-            let object_size =
-                reader.read_dheader().map_err(|_| INT2DDS_RET_DYNAMIC_DECODE_ERROR)?;
-            let dh_end = reader.get_position() + object_size as usize;
-            let want_id = target_member.common.member_id;
-            loop {
-                if reader.get_position() >= dh_end {
-                    return Err(INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND);
-                }
-                let (id, data_len) =
-                    reader.read_member_header().map_err(|_| INT2DDS_RET_DYNAMIC_DECODE_ERROR)?;
-                if id == want_id {
-                    return Ok((reader, actual_kind));
-                }
-                reader.skip(data_len as usize).map_err(|_| INT2DDS_RET_DYNAMIC_DECODE_ERROR)?;
-            }
-        }
+fn split_index(seg: &str) -> (&str, Option<usize>) {
+    match seg.split_once('[') {
+        Some((name, rest)) => (name, rest.strip_suffix(']').and_then(|n| n.parse().ok())),
+        None => (seg, None),
     }
-
-    Ok((reader, actual_kind))
 }
 
-use int2dds::serialize::cdr::XcdrDeserialize;
+/// Resolve a dotted/indexed path (e.g. `"pos.x"` or `"items[2].name"`) to a value.
+fn resolve_path<'a>(data: &'a DynamicData, path: &str) -> Option<&'a DynamicValue> {
+    let mut current: Option<&DynamicValue> = None;
+    for seg in path.split('.') {
+        let (name, index) = split_index(seg);
+        current = Some(match current {
+            None => data.get_value(name)?,
+            Some(DynamicValue::Struct(inner)) => inner.get_value(name)?,
+            _ => return None,
+        });
+        if let Some(i) = index {
+            current = Some(match current? {
+                DynamicValue::Sequence(items) | DynamicValue::Array(items) => items.get(i)?,
+                _ => return None,
+            });
+        }
+    }
+    current
+}
 
-macro_rules! define_dynamic_primitive_getter {
-    ($fn_name:ident, $rust_ty:ty, $expected_kind:expr $(, $also:expr)*) => {
-        /// Read a primitive field by name from a serialized CDR sample.
-        ///
-        /// Returns `INT2DDS_RET_DYNAMIC_TYPE_MISMATCH` if the field is not one of
-        /// the accepted CDR kinds for this getter.
+/// Read a typed value at `path` from already-decoded `DynamicData`.
+fn get_as<T: FromDynamicValue>(data: &DynamicData, path: &str) -> Result<T, Int2DdsRet> {
+    let value = resolve_path(data, path).ok_or(INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND)?;
+    T::from_dynamic(value).map_err(|_| INT2DDS_RET_DYNAMIC_TYPE_MISMATCH)
+}
+
+macro_rules! define_flat_sample_getter {
+    ($fn_name:ident, $rust_ty:ty) => {
         #[no_mangle]
         pub unsafe extern "C" fn $fn_name(
             bytes: *const u8,
@@ -714,57 +643,66 @@ macro_rules! define_dynamic_primitive_getter {
                 Ok(s) => s,
                 Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
             };
-            let (mut reader, kind) = match position_reader_at_field(slice, &*type_obj, name) {
-                Ok(rk) => rk,
+            let data = match decode_flat(slice, &*type_obj) {
+                Ok(d) => d,
                 Err(e) => return e,
             };
-            let accepted: &[i32] = &[$expected_kind $(, $also)*];
-            if !accepted.contains(&kind) {
-                return INT2DDS_RET_DYNAMIC_TYPE_MISMATCH;
-            }
-            match <$rust_ty as XcdrDeserialize>::deserialize_xcdr(&mut reader) {
+            match get_as::<$rust_ty>(&data, name) {
                 Ok(v) => {
                     *out = v;
                     INT2DDS_RET_OK
                 }
-                Err(_) => INT2DDS_RET_DYNAMIC_DECODE_ERROR,
+                Err(e) => e,
             }
         }
     };
 }
 
-define_dynamic_primitive_getter!(int2dds_dynamic_sample_get_bool, bool, INT2DDS_FIELD_BOOL);
-define_dynamic_primitive_getter!(int2dds_dynamic_sample_get_i8, i8, INT2DDS_FIELD_INT8);
-define_dynamic_primitive_getter!(
-    int2dds_dynamic_sample_get_u8,
-    u8,
-    INT2DDS_FIELD_UINT8,
-    INT2DDS_FIELD_BYTE
-);
-define_dynamic_primitive_getter!(
-    int2dds_dynamic_sample_get_byte,
-    u8,
-    INT2DDS_FIELD_BYTE,
-    INT2DDS_FIELD_UINT8
-);
-define_dynamic_primitive_getter!(
-    int2dds_dynamic_sample_get_char8,
-    u8,
-    INT2DDS_FIELD_CHAR8,
-    INT2DDS_FIELD_INT8,
-    INT2DDS_FIELD_UINT8,
-    INT2DDS_FIELD_BYTE
-);
-define_dynamic_primitive_getter!(int2dds_dynamic_sample_get_i16, i16, INT2DDS_FIELD_INT16);
-define_dynamic_primitive_getter!(int2dds_dynamic_sample_get_u16, u16, INT2DDS_FIELD_UINT16);
-define_dynamic_primitive_getter!(int2dds_dynamic_sample_get_i32, i32, INT2DDS_FIELD_INT32);
-define_dynamic_primitive_getter!(int2dds_dynamic_sample_get_u32, u32, INT2DDS_FIELD_UINT32);
-define_dynamic_primitive_getter!(int2dds_dynamic_sample_get_i64, i64, INT2DDS_FIELD_INT64);
-define_dynamic_primitive_getter!(int2dds_dynamic_sample_get_u64, u64, INT2DDS_FIELD_UINT64);
-define_dynamic_primitive_getter!(int2dds_dynamic_sample_get_f32, f32, INT2DDS_FIELD_FLOAT32);
-define_dynamic_primitive_getter!(int2dds_dynamic_sample_get_f64, f64, INT2DDS_FIELD_FLOAT64);
+define_flat_sample_getter!(int2dds_dynamic_sample_get_bool, bool);
+define_flat_sample_getter!(int2dds_dynamic_sample_get_i8, i8);
+define_flat_sample_getter!(int2dds_dynamic_sample_get_u8, u8);
+define_flat_sample_getter!(int2dds_dynamic_sample_get_byte, u8);
+define_flat_sample_getter!(int2dds_dynamic_sample_get_i16, i16);
+define_flat_sample_getter!(int2dds_dynamic_sample_get_u16, u16);
+define_flat_sample_getter!(int2dds_dynamic_sample_get_i32, i32);
+define_flat_sample_getter!(int2dds_dynamic_sample_get_u32, u32);
+define_flat_sample_getter!(int2dds_dynamic_sample_get_i64, i64);
+define_flat_sample_getter!(int2dds_dynamic_sample_get_u64, u64);
+define_flat_sample_getter!(int2dds_dynamic_sample_get_f32, f32);
+define_flat_sample_getter!(int2dds_dynamic_sample_get_f64, f64);
 
-/// Read a string field by name from a serialized CDR sample.
+/// Read a char8 field (returned as its byte value) from a flat sample.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_dynamic_sample_get_char8(
+    bytes: *const u8,
+    len: usize,
+    type_obj: *const Int2DdsTypeObject,
+    field_name: *const c_char,
+    out: *mut u8,
+) -> Int2DdsRet {
+    check_null!(bytes);
+    check_null!(type_obj);
+    check_null!(field_name);
+    check_null!(out);
+    let slice = std::slice::from_raw_parts(bytes, len);
+    let name = match CStr::from_ptr(field_name).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+    let data = match decode_flat(slice, &*type_obj) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+    match get_as::<char>(&data, name) {
+        Ok(c) => {
+            *out = c as u8;
+            INT2DDS_RET_OK
+        }
+        Err(e) => e,
+    }
+}
+
+/// Read a string field by name from a flat sample.
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_dynamic_sample_get_string(
     bytes: *const u8,
@@ -785,18 +723,186 @@ pub unsafe extern "C" fn int2dds_dynamic_sample_get_string(
         Ok(s) => s,
         Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
     };
-    let (mut reader, kind) = match position_reader_at_field(slice, &*type_obj, name) {
-        Ok(rk) => rk,
+    let data = match decode_flat(slice, &*type_obj) {
+        Ok(d) => d,
         Err(e) => return e,
     };
-    if kind != INT2DDS_FIELD_STRING {
-        return INT2DDS_RET_DYNAMIC_TYPE_MISMATCH;
-    }
-    let s = match String::deserialize_xcdr(&mut reader) {
+    let s: String = match get_as(&data, name) {
         Ok(v) => v,
-        Err(_) => return INT2DDS_RET_DYNAMIC_DECODE_ERROR,
+        Err(e) => return e,
     };
     copy_str_to_c(&s, out_buf, buf_cap, out_len)
+}
+
+pub struct Int2DdsDynamicData {
+    inner: DynamicData,
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_dynamic_data_from_sample(
+    participant: *const Int2DdsParticipant,
+    bytes: *const u8,
+    len: usize,
+    type_obj: *const Int2DdsTypeObject,
+    out: *mut *mut Int2DdsDynamicData,
+) -> Int2DdsRet {
+    check_null!(participant);
+    check_null!(bytes);
+    check_null!(type_obj);
+    check_null!(out);
+    let slice = std::slice::from_raw_parts(bytes, len);
+    let support = ffi_try!((*participant)
+        .inner
+        .create_dynamic_type_from_type_object((*type_obj).inner.clone()));
+    let data = match deserialize_dynamic_data(slice, support.dynamic_type()) {
+        Ok(d) => d,
+        Err(_) => return INT2DDS_RET_DYNAMIC_DECODE_ERROR,
+    };
+    *out = Box::into_raw(Box::new(Int2DdsDynamicData { inner: data }));
+    INT2DDS_RET_OK
+}
+
+/// Destroy a DynamicData handle. Safe to call with null.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_dynamic_data_destroy(d: *mut Int2DdsDynamicData) {
+    if !d.is_null() {
+        drop(Box::from_raw(d));
+    }
+}
+
+/// Handle-based getter reading a value at a dotted/indexed `field_path`.
+macro_rules! define_handle_getter {
+    ($fn_name:ident, $rust_ty:ty) => {
+        #[no_mangle]
+        pub unsafe extern "C" fn $fn_name(
+            data: *const Int2DdsDynamicData,
+            field_path: *const c_char,
+            out: *mut $rust_ty,
+        ) -> Int2DdsRet {
+            check_null!(data);
+            check_null!(field_path);
+            check_null!(out);
+            let path = match CStr::from_ptr(field_path).to_str() {
+                Ok(s) => s,
+                Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+            };
+            match get_as::<$rust_ty>(&(*data).inner, path) {
+                Ok(v) => {
+                    *out = v;
+                    INT2DDS_RET_OK
+                }
+                Err(e) => e,
+            }
+        }
+    };
+}
+
+define_handle_getter!(int2dds_dynamic_data_get_bool, bool);
+define_handle_getter!(int2dds_dynamic_data_get_i8, i8);
+define_handle_getter!(int2dds_dynamic_data_get_u8, u8);
+define_handle_getter!(int2dds_dynamic_data_get_i16, i16);
+define_handle_getter!(int2dds_dynamic_data_get_u16, u16);
+define_handle_getter!(int2dds_dynamic_data_get_i32, i32);
+define_handle_getter!(int2dds_dynamic_data_get_u32, u32);
+define_handle_getter!(int2dds_dynamic_data_get_i64, i64);
+define_handle_getter!(int2dds_dynamic_data_get_u64, u64);
+define_handle_getter!(int2dds_dynamic_data_get_f32, f32);
+define_handle_getter!(int2dds_dynamic_data_get_f64, f64);
+
+/// Read a char8 field (as its byte value) at `field_path`.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_dynamic_data_get_char8(
+    data: *const Int2DdsDynamicData,
+    field_path: *const c_char,
+    out: *mut u8,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(field_path);
+    check_null!(out);
+    let path = match CStr::from_ptr(field_path).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+    match get_as::<char>(&(*data).inner, path) {
+        Ok(c) => {
+            *out = c as u8;
+            INT2DDS_RET_OK
+        }
+        Err(e) => e,
+    }
+}
+
+/// Read a string field at `field_path` into a caller-supplied buffer.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_dynamic_data_get_string(
+    data: *const Int2DdsDynamicData,
+    field_path: *const c_char,
+    out_buf: *mut c_char,
+    buf_cap: usize,
+    out_len: *mut usize,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(field_path);
+    check_null!(out_buf);
+    check_null!(out_len);
+    let path = match CStr::from_ptr(field_path).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+    let s: String = match get_as(&(*data).inner, path) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    copy_str_to_c(&s, out_buf, buf_cap, out_len)
+}
+
+/// Get the element count of a sequence/array field at `field_path`.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_dynamic_data_get_len(
+    data: *const Int2DdsDynamicData,
+    field_path: *const c_char,
+    out: *mut usize,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(field_path);
+    check_null!(out);
+    let path = match CStr::from_ptr(field_path).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+    match resolve_path(&(*data).inner, path) {
+        Some(DynamicValue::Sequence(items)) | Some(DynamicValue::Array(items)) => {
+            *out = items.len();
+            INT2DDS_RET_OK
+        }
+        Some(_) => INT2DDS_RET_DYNAMIC_TYPE_MISMATCH,
+        None => INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND,
+    }
+}
+
+/// Extract a nested struct value at `field_path` as a new DynamicData handle.
+/// Destroy it with `int2dds_dynamic_data_destroy`.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_dynamic_data_get_member(
+    data: *const Int2DdsDynamicData,
+    field_path: *const c_char,
+    out: *mut *mut Int2DdsDynamicData,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(field_path);
+    check_null!(out);
+    let path = match CStr::from_ptr(field_path).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+    match resolve_path(&(*data).inner, path) {
+        Some(DynamicValue::Struct(inner)) => {
+            *out = Box::into_raw(Box::new(Int2DdsDynamicData { inner: (**inner).clone() }));
+            INT2DDS_RET_OK
+        }
+        Some(_) => INT2DDS_RET_DYNAMIC_TYPE_MISMATCH,
+        None => INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND,
+    }
 }
 
 #[cfg(test)]
@@ -923,19 +1029,8 @@ mod tests {
         unsafe { int2dds_type_object_destroy(h) };
     }
 
-    // ========================================================================
-    // Task 9 tests — position_reader_at_field + skip_member_by_kind
-    //
-    // Strategy: use `#[derive(DdsType)]` to produce both (a) the CDR bytes via
-    // the generated XcdrSerialize impl and (b) the CompleteTypeObject via the
-    // generated HasTypeObject impl. We then feed those bytes + type object into
-    // our helper and verify it lands on the expected value.
-    // ========================================================================
-
-    use int2dds::serialize::cdr::{
-        ExtensibilityKind as CdrExtKind, XcdrDeserialize, XcdrSerialize, XcdrSerializer,
-    };
-    use int2dds::serialize::BufferManager;
+    use int2dds::serialize::cdr::{ExtensibilityKind as CdrExtKind, XcdrSerialize, XcdrSerializer};
+    use int2dds::serialize::{BufferManager, DeserializerReader};
     use int2dds::xtypes::{CompleteTypeObject as XtCompleteTypeObject, HasTypeObject, TypeObject};
     use int2dds_derive::DdsType;
 
@@ -977,96 +1072,96 @@ mod tests {
         pub c: f64,
     }
 
+    fn flat_i32(bytes: &[u8], h: *const Int2DdsTypeObject, field: &str) -> (Int2DdsRet, i32) {
+        let c = std::ffi::CString::new(field).unwrap();
+        let mut out = 0i32;
+        let r = unsafe {
+            int2dds_dynamic_sample_get_i32(bytes.as_ptr(), bytes.len(), h, c.as_ptr(), &mut out)
+        };
+        (r, out)
+    }
+
     #[test]
-    fn position_reader_final_struct() {
+    fn dynamic_sample_final_struct() {
         let v = Phase1Final { a: 0x1122_3344, b: 3.5, c: "hello".to_string(), d: 0xBEEF };
         let bytes = serialize_with_header(&v, CdrExtKind::Final);
-        let handle = type_object_of::<Phase1Final>();
-        let to_ref = unsafe { &*handle };
+        let h = type_object_of::<Phase1Final>();
 
-        // Field "a": first member -> positioned immediately.
-        let (mut r, k) = position_reader_at_field(&bytes, to_ref, "a").unwrap();
-        assert_eq!(k, INT2DDS_FIELD_INT32);
-        assert_eq!(i32::deserialize_xcdr(&mut r).unwrap(), 0x1122_3344);
+        assert_eq!(flat_i32(&bytes, h, "a"), (INT2DDS_RET_OK, 0x1122_3344));
 
-        // Field "b": after skipping i32.
-        let (mut r, k) = position_reader_at_field(&bytes, to_ref, "b").unwrap();
-        assert_eq!(k, INT2DDS_FIELD_FLOAT64);
-        assert_eq!(f64::deserialize_xcdr(&mut r).unwrap(), 3.5);
-
-        // Field "c": after skipping i32 + f64.
-        let (mut r, k) = position_reader_at_field(&bytes, to_ref, "c").unwrap();
-        assert_eq!(k, INT2DDS_FIELD_STRING);
-        assert_eq!(String::deserialize_xcdr(&mut r).unwrap(), "hello");
-
-        // Field "d": after skipping i32 + f64 + string.
-        let (mut r, k) = position_reader_at_field(&bytes, to_ref, "d").unwrap();
-        assert_eq!(k, INT2DDS_FIELD_UINT16);
-        assert_eq!(u16::deserialize_xcdr(&mut r).unwrap(), 0xBEEF);
-
-        // Missing field.
+        let mut b = 0f64;
+        let cn = std::ffi::CString::new("b").unwrap();
         assert_eq!(
-            position_reader_at_field(&bytes, to_ref, "zzz").err().unwrap(),
-            INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND
+            unsafe {
+                int2dds_dynamic_sample_get_f64(bytes.as_ptr(), bytes.len(), h, cn.as_ptr(), &mut b)
+            },
+            INT2DDS_RET_OK
         );
+        assert_eq!(b, 3.5);
 
-        unsafe { int2dds_type_object_destroy(handle) };
+        let mut d = 0u16;
+        let cn = std::ffi::CString::new("d").unwrap();
+        assert_eq!(
+            unsafe {
+                int2dds_dynamic_sample_get_u16(bytes.as_ptr(), bytes.len(), h, cn.as_ptr(), &mut d)
+            },
+            INT2DDS_RET_OK
+        );
+        assert_eq!(d, 0xBEEF);
+
+        assert_eq!(flat_i32(&bytes, h, "zzz").0, INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND);
+
+        unsafe { int2dds_type_object_destroy(h) };
     }
 
     #[test]
-    fn position_reader_appendable_struct() {
+    fn dynamic_sample_appendable_struct() {
         let v = Phase1Appendable { a: -42, b: "world".to_string(), c: 7 };
         let bytes = serialize_with_header(&v, CdrExtKind::Appendable);
-        let handle = type_object_of::<Phase1Appendable>();
-        let to_ref = unsafe { &*handle };
+        let h = type_object_of::<Phase1Appendable>();
 
-        let (mut r, k) = position_reader_at_field(&bytes, to_ref, "a").unwrap();
-        assert_eq!(k, INT2DDS_FIELD_INT32);
-        assert_eq!(i32::deserialize_xcdr(&mut r).unwrap(), -42);
+        assert_eq!(flat_i32(&bytes, h, "a"), (INT2DDS_RET_OK, -42));
 
-        let (mut r, k) = position_reader_at_field(&bytes, to_ref, "b").unwrap();
-        assert_eq!(k, INT2DDS_FIELD_STRING);
-        assert_eq!(String::deserialize_xcdr(&mut r).unwrap(), "world");
+        let mut cc = 0u8;
+        let cn = std::ffi::CString::new("c").unwrap();
+        assert_eq!(
+            unsafe {
+                int2dds_dynamic_sample_get_u8(bytes.as_ptr(), bytes.len(), h, cn.as_ptr(), &mut cc)
+            },
+            INT2DDS_RET_OK
+        );
+        assert_eq!(cc, 7);
 
-        let (mut r, k) = position_reader_at_field(&bytes, to_ref, "c").unwrap();
-        assert_eq!(k, INT2DDS_FIELD_BYTE);
-        assert_eq!(u8::deserialize_xcdr(&mut r).unwrap(), 7);
-
-        unsafe { int2dds_type_object_destroy(handle) };
+        unsafe { int2dds_type_object_destroy(h) };
     }
 
     #[test]
-    fn position_reader_mutable_struct() {
+    fn dynamic_sample_mutable_struct() {
         let v = Phase1Mutable { a: 99, b: "dyn".to_string(), c: 1.25 };
         let bytes = serialize_with_header(&v, CdrExtKind::Mutable);
-        let handle = type_object_of::<Phase1Mutable>();
-        let to_ref = unsafe { &*handle };
+        let h = type_object_of::<Phase1Mutable>();
 
-        // Exercise all three members — mutable walk is order-independent, so
-        // fetch them in reverse order to stress the EMHEADER search.
-        let (mut r, k) = position_reader_at_field(&bytes, to_ref, "c").unwrap();
-        assert_eq!(k, INT2DDS_FIELD_FLOAT64);
-        assert_eq!(f64::deserialize_xcdr(&mut r).unwrap(), 1.25);
-
-        let (mut r, k) = position_reader_at_field(&bytes, to_ref, "b").unwrap();
-        assert_eq!(k, INT2DDS_FIELD_STRING);
-        assert_eq!(String::deserialize_xcdr(&mut r).unwrap(), "dyn");
-
-        let (mut r, k) = position_reader_at_field(&bytes, to_ref, "a").unwrap();
-        assert_eq!(k, INT2DDS_FIELD_INT32);
-        assert_eq!(i32::deserialize_xcdr(&mut r).unwrap(), 99);
-
+        let mut cval = 0f64;
+        let cn = std::ffi::CString::new("c").unwrap();
         assert_eq!(
-            position_reader_at_field(&bytes, to_ref, "missing").err().unwrap(),
-            INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND
+            unsafe {
+                int2dds_dynamic_sample_get_f64(
+                    bytes.as_ptr(),
+                    bytes.len(),
+                    h,
+                    cn.as_ptr(),
+                    &mut cval,
+                )
+            },
+            INT2DDS_RET_OK
         );
+        assert_eq!(cval, 1.25);
 
-        unsafe { int2dds_type_object_destroy(handle) };
+        assert_eq!(flat_i32(&bytes, h, "a"), (INT2DDS_RET_OK, 99));
+        assert_eq!(flat_i32(&bytes, h, "missing").0, INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND);
+
+        unsafe { int2dds_type_object_destroy(h) };
     }
-
-    // ========================================================================
-    // Task 10/11 tests — primitive + string convenience getters
-    // ========================================================================
 
     #[derive(DdsType)]
     #[dds_type(crate_path = "int2dds", extensibility = "Final")]
@@ -1205,5 +1300,110 @@ mod tests {
         assert_eq!(ret, INT2DDS_RET_DYNAMIC_DECODE_ERROR);
         assert_eq!(out_len, 5);
         unsafe { int2dds_type_object_destroy(h) };
+    }
+
+    #[test]
+    fn dynamic_data_nested_and_sequence_getters() {
+        use int2dds::topic::type_support::DdsType;
+        use int2dds::xtypes::{DynamicType, HasTypeObject};
+        use std::collections::HashMap;
+        use std::ffi::CString;
+        use std::sync::Arc;
+
+        #[derive(DdsType)]
+        #[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+        struct Inner {
+            x: i32,
+            name: String,
+        }
+        #[derive(DdsType)]
+        #[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+        struct Outer {
+            id: i32,
+            inner: Inner,
+            tags: Vec<i32>,
+        }
+
+        let inner_dt = Arc::new(
+            DynamicType::from_type_object(Inner::complete_type_object(), Inner::type_identifier())
+                .unwrap(),
+        );
+        let outer_dt = Arc::new(
+            DynamicType::from_type_object(Outer::complete_type_object(), Outer::type_identifier())
+                .unwrap(),
+        );
+
+        let mut inner_vals = HashMap::new();
+        inner_vals.insert(Arc::from("x"), DynamicValue::Int32(11));
+        inner_vals.insert(Arc::from("name"), DynamicValue::String("leaf".to_string()));
+        let inner_data = DynamicData::with_values(inner_dt, inner_vals);
+
+        let mut outer_vals = HashMap::new();
+        outer_vals.insert(Arc::from("id"), DynamicValue::Int32(7));
+        outer_vals.insert(Arc::from("inner"), DynamicValue::Struct(Box::new(inner_data)));
+        outer_vals.insert(
+            Arc::from("tags"),
+            DynamicValue::Sequence(vec![DynamicValue::Int32(100), DynamicValue::Int32(200)]),
+        );
+        let outer_data = DynamicData::with_values(outer_dt, outer_vals);
+
+        let h = Box::into_raw(Box::new(Int2DdsDynamicData { inner: outer_data }));
+
+        let mut id = 0i32;
+        let p = CString::new("id").unwrap();
+        assert_eq!(unsafe { int2dds_dynamic_data_get_i32(h, p.as_ptr(), &mut id) }, INT2DDS_RET_OK);
+        assert_eq!(id, 7);
+
+        let mut x = 0i32;
+        let p = CString::new("inner.x").unwrap();
+        assert_eq!(unsafe { int2dds_dynamic_data_get_i32(h, p.as_ptr(), &mut x) }, INT2DDS_RET_OK);
+        assert_eq!(x, 11);
+
+        let p = CString::new("inner.name").unwrap();
+        let mut buf = [0i8; 16];
+        let mut nlen = 0usize;
+        assert_eq!(
+            unsafe {
+                int2dds_dynamic_data_get_string(
+                    h,
+                    p.as_ptr(),
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    &mut nlen,
+                )
+            },
+            INT2DDS_RET_OK
+        );
+        assert_eq!(nlen, 4);
+
+        let mut len = 0usize;
+        let p = CString::new("tags").unwrap();
+        assert_eq!(
+            unsafe { int2dds_dynamic_data_get_len(h, p.as_ptr(), &mut len) },
+            INT2DDS_RET_OK
+        );
+        assert_eq!(len, 2);
+
+        let mut t1 = 0i32;
+        let p = CString::new("tags[1]").unwrap();
+        assert_eq!(unsafe { int2dds_dynamic_data_get_i32(h, p.as_ptr(), &mut t1) }, INT2DDS_RET_OK);
+        assert_eq!(t1, 200);
+
+        let p = CString::new("inner").unwrap();
+        let mut child: *mut Int2DdsDynamicData = std::ptr::null_mut();
+        assert_eq!(
+            unsafe { int2dds_dynamic_data_get_member(h, p.as_ptr(), &mut child) },
+            INT2DDS_RET_OK
+        );
+        let mut cx = 0i32;
+        let p = CString::new("x").unwrap();
+        assert_eq!(
+            unsafe { int2dds_dynamic_data_get_i32(child, p.as_ptr(), &mut cx) },
+            INT2DDS_RET_OK
+        );
+        assert_eq!(cx, 11);
+
+        unsafe { int2dds_dynamic_data_destroy(child) };
+        unsafe { int2dds_dynamic_data_destroy(h) };
     }
 }

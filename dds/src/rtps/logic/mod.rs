@@ -20,5 +20,6 @@ pub(crate) mod data;
 pub(crate) mod message_processor;
 pub(crate) mod sedp_logic;
 pub(crate) mod spdp_logic;
+pub(crate) mod type_lookup_logic;
 pub(crate) mod user_logic;
 pub(crate) mod wlp_logic;

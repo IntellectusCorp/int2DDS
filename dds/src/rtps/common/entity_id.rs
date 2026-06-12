@@ -40,6 +40,16 @@ impl EntityId {
     pub const P2P_BUILTIN_PARTICIPANT_MESSAGE_READER: Self =
         Self { entity_key: [00, 0x02, 00], entity_kind: EntityKind::BUILT_IN_READER_WITH_KEY };
 
+    // DDS-XTypes 1.3 Table 21 - TypeLookup service builtin endpoints (keyless).
+    pub const TYPE_LOOKUP_REQUEST_WRITER: Self =
+        Self { entity_key: [0x00, 0x03, 0x00], entity_kind: EntityKind::BUILT_IN_WRITER_NO_KEY };
+    pub const TYPE_LOOKUP_REQUEST_READER: Self =
+        Self { entity_key: [0x00, 0x03, 0x00], entity_kind: EntityKind::BUILT_IN_READER_NO_KEY };
+    pub const TYPE_LOOKUP_REPLY_WRITER: Self =
+        Self { entity_key: [0x00, 0x03, 0x01], entity_kind: EntityKind::BUILT_IN_WRITER_NO_KEY };
+    pub const TYPE_LOOKUP_REPLY_READER: Self =
+        Self { entity_key: [0x00, 0x03, 0x01], entity_kind: EntityKind::BUILT_IN_READER_NO_KEY };
+
     pub fn new<T>(entity_key: [u8; 3], entity_kind: T) -> Self
     where
         T: TryInto<EntityKind>,
