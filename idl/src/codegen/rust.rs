@@ -197,8 +197,8 @@ impl<'a> RustGen<'a> {
             let variant_name =
                 naming::escape_keyword(&naming::to_pascal_case(&dc.name), naming::TargetLang::Rust);
             let type_str = self.type_to_rust(&dc.resolved_type);
-            // Default case needs a discriminant value that doesn't conflict.
-            // Use -1 as a convention for default.
+            
+            self.line("#[dds(default)]");
             self.line(&format!("{}({}) = -1,", variant_name, type_str));
         }
 
@@ -208,7 +208,7 @@ impl<'a> RustGen<'a> {
 
     fn discriminant_repr(&self, ty: &ResolvedType) -> &'static str {
         match ty {
-            ResolvedType::Bool => "i32",
+            ResolvedType::Bool => "u8",
             ResolvedType::I16 => "i16",
             ResolvedType::U16 => "u16",
             ResolvedType::I32 | ResolvedType::Enum(_) => "i32",
