@@ -81,6 +81,28 @@ impl BuiltinEndpointPair {
                 }
                 Ok(None)
             }
+            EntityId::TYPE_LOOKUP_REQUEST_WRITER => {
+                if available_builtin_endpoints.contains(
+                    BuiltinEndpointFlag::BUILTIN_ENDPOINT_TYPELOOKUP_SERVICE_REQUEST_DATA_READER,
+                ) {
+                    return Ok(Some(BuiltinEndpointPair::new(
+                        participant.type_lookup_request_reader(),
+                        participant.type_lookup_request_writer(),
+                    )));
+                }
+                Ok(None)
+            }
+            EntityId::TYPE_LOOKUP_REPLY_WRITER => {
+                if available_builtin_endpoints.contains(
+                    BuiltinEndpointFlag::BUILTIN_ENDPOINT_TYPELOOKUP_SERVICE_REPLY_DATA_READER,
+                ) {
+                    return Ok(Some(BuiltinEndpointPair::new(
+                        participant.type_lookup_reply_reader(),
+                        participant.type_lookup_reply_writer(),
+                    )));
+                }
+                Ok(None)
+            }
             _ => Ok(None),
         }
     }
