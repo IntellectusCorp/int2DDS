@@ -44,6 +44,7 @@ use crate::rtps::messages::submessages::data::Data;
 use crate::rtps::messages::submessages::data_frag::{DataFrag, FragmentBuffer};
 use crate::rtps::messages::submessages::gap::Gap;
 use crate::rtps::messages::submessages::heartbeat::Heartbeat;
+use crate::rtps::messages::submessages::heartbeat_frag::HeartbeatFrag;
 use crate::rtps::messages::submessages::nack_frag::NackFrag;
 use crate::rtps::task::sending_handler::{MessageType, SendingHandler};
 use crate::rtps::task::user_traffic::user_unicast_listening_task::UserUnicastListeningTask;
@@ -1837,6 +1838,98 @@ impl UnicastMessageProcessor for UserLogic {
                                 },
                             );
                     }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn handle_heartbeatfrag_message(
+        &mut self,
+        rtps_header: &Header,
+        heartbeat_frag: &HeartbeatFrag,
+    ) -> RtpsResult<()> {
+        let remote_writer_guid = Guid::new(rtps_header.guid_prefix(), heartbeat_frag.writer_id);
+        let matched_readers =
+            self.get_matched_readers(remote_writer_guid, heartbeat_frag.reader_id)?;
+
+        if matched_readers.is_empty() {
+            debug!(
+                "[HeartbeatFrag] No matched readers found for remote writer: {:?}, skipping.",
+                remote_writer_guid
+            );
+            return Ok(());
+        }
+
+        for reader in matched_readers {
+            let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() else {
+                continue;
+            };
+
+            let writer_proxies = stateful_reader.writer_proxies();
+            let mut matched_writers = writer_proxies.lock().map_err(|e| {
+                RtpsError::new(
+                    RtpsErrorCode::LockError,
+                    format!("Failed to acquire writer_proxies lock: {}", e),
+                )
+            })?;
+
+            let Some(writer_proxy) = matched_writers
+                .iter_mut()
+                .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
+            else {
+                continue;
+            };
+
+            // Drop duplicate or stale announcements
+            if writer_proxy
+                .last_heartbeat_frag_count()
+                .is_some_and(|last| heartbeat_frag.count <= last)
+            {
+                continue;
+            }
+            writer_proxy.set_last_heartbeat_frag_count(heartbeat_frag.count);
+
+            // Seed fragment knowledge for this sequence number so the missing
+            // set is computable even when every DATA_FRAG of the sample was
+            // lost (the announcement carries the last available fragment).
+            writer_proxy.mark_frag_received(
+                heartbeat_frag.writer_sn,
+                heartbeat_frag.last_fragment_num,
+                std::iter::empty::<u32>(),
+            );
+
+            if !writer_proxy.still_missing_fragments(heartbeat_frag.writer_sn) {
+                continue;
+            }
+
+            let Some(missing_fragments) = writer_proxy
+                .calculate_missing_fragments(heartbeat_frag.writer_sn, heartbeat_frag.writer_sn)
+            else {
+                continue;
+            };
+
+            // Respond immediately with NACK_FRAG (zero response delay); the
+            // count check above suppresses duplicates per announcement.
+            writer_proxy.increase_nackfrag_count();
+            match MessageCreator::create_nackfrag_msg(
+                stateful_reader.guid(),
+                writer_proxy.remote_writer_guid(),
+                stateful_reader.guid().entity_id(),
+                writer_proxy.remote_writer_guid().entity_id(),
+                heartbeat_frag.writer_sn,
+                missing_fragments,
+                writer_proxy.nackfrag_count(),
+                None,
+            ) {
+                Ok(buffer) => {
+                    let locators: Vec<Locator> = writer_proxy.unicast_locator_list().to_vec();
+                    drop(matched_writers);
+                    self.send_rtps_message_to_locators(locators.iter(), &buffer)?;
+                }
+                Err(e) => {
+                    warn!("[UserLogic] Failed to create NACK_FRAG for HEARTBEAT_FRAG: {:?}", e);
                 }
             }
         }
