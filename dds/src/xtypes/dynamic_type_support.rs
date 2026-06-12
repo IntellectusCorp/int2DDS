@@ -13,7 +13,7 @@ use crate::{
     rtps::common::types::SerializedData,
     serialize::xcdr::ExtensibilityKind,
     topic::sql::ast::Parameter,
-    xtypes::{CompleteTypeObject, TypeIdentifier, TypeObject},
+    xtypes::{CompleteTypeObject, TypeIdentifier, TypeObject, TypeRegistry},
 };
 
 use super::dynamic_data::{DynamicData, DynamicValue};
@@ -38,10 +38,31 @@ pub struct DynamicTypeSupport {
 
 impl DynamicTypeSupport {
     /// Create DynamicTypeSupport from a TypeObject.
-    ///
-    /// This is the primary way to create DynamicTypeSupport, typically
-    /// from a TypeObject received during discovery.
     pub fn from_type_object(type_object: TypeObject) -> DdsResult<Self> {
+        Self::from_complete_with(type_object, |complete, type_identifier| {
+            DynamicType::from_type_object(complete, type_identifier.clone())
+                .map_err(|e| DdsError::Error(e.to_string()))
+        })
+    }
+
+    pub fn from_type_object_with_registry(
+        type_object: TypeObject,
+        registry: &TypeRegistry,
+    ) -> DdsResult<Self> {
+        Self::from_complete_with(type_object, |complete, type_identifier| {
+            DynamicType::from_type_object_with_registry(
+                Arc::new(complete),
+                type_identifier.clone(),
+                registry,
+            )
+            .map_err(|e| DdsError::Error(e.to_string()))
+        })
+    }
+
+    fn from_complete_with(
+        type_object: TypeObject,
+        build: impl FnOnce(CompleteTypeObject, &TypeIdentifier) -> DdsResult<DynamicType>,
+    ) -> DdsResult<Self> {
         let complete_type_object = match &type_object {
             TypeObject::Complete(complete) => complete.clone(),
             TypeObject::Minimal(_) => {
@@ -51,14 +72,11 @@ impl DynamicTypeSupport {
             }
         };
 
-        // Compute TypeIdentifier from the hash
         let hash = type_object.compute_hash();
         let type_identifier = TypeIdentifier::CompleteTypeId(hash);
         let type_name = Self::extract_type_name(&complete_type_object);
 
-        let dynamic_type =
-            DynamicType::from_type_object(complete_type_object, type_identifier.clone())
-                .map_err(|e| DdsError::Error(e.to_string()))?;
+        let dynamic_type = build(complete_type_object, &type_identifier)?;
 
         Ok(Self { dynamic_type: Arc::new(dynamic_type), type_name, type_identifier, type_object })
     }

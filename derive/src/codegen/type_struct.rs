@@ -119,7 +119,7 @@ pub fn derive_struct_impl(
     // Generate XCDR field deserialization (CDR / XCDR serialize paths go through the trait impls).
     let xcdr_field_deserialization = generate_field_deserialization_xcdr(fields, name, crate_path);
 
-    // Generate per-field DHEADER deserialization for dust-dds compatibility
+    // Generate per-field DHEADER deserialization
     let xcdr_field_deserialization_per_field_dheader =
         generate_field_deserialization_xcdr_per_field_dheader(fields, name, crate_path);
 
@@ -475,8 +475,6 @@ fn quote_deserialize_impl(
 
                     let use_delimiters = *use_delimiters;
 
-                    // Try 1: Spec-compliant path (single struct DHEADER + per-field bound checks).
-                    // This is the standards-correct deserialization and is always tried first.
                     let mut strict_deserializer = Xcdr2Deserializer::new(data)
                         .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
                     let strict_err = match <#full_type as XcdrDeserialize>::deserialize_xcdr(&mut strict_deserializer) {
@@ -484,8 +482,7 @@ fn quote_deserialize_impl(
                         Err(e) => #crate_path::dcps::core::error::DdsError::Error(e.to_string()),
                     };
 
-                    // Lenient interoperability fallbacks: only used when the spec path failed,
-                    // to interop with peers (e.g., dust-dds) whose wire layout differs slightly.
+
                     let parse_body = |mut deserializer: &mut Xcdr2Deserializer<'_>| -> #crate_path::dcps::core::error::DdsResult<#full_type> {
                         #xcdr_field_deserialization
                         Ok(result)
@@ -496,7 +493,6 @@ fn quote_deserialize_impl(
                     };
 
                     if use_delimiters {
-                        // Try 2: Per-field DHEADER format (interoperability fallback).
                         let mut compat_deserializer = Xcdr2Deserializer::new(data)
                             .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
                         match parse_body_per_field_dheader(&mut compat_deserializer) {
@@ -508,7 +504,6 @@ fn quote_deserialize_impl(
                         }
                     }
 
-                    // Try 3: No-delimiter fallback (raw field reads, no outer DHEADER).
                     let mut fallback_deserializer = Xcdr2Deserializer::new(data)
                         .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
                     match parse_body(&mut fallback_deserializer) {
@@ -661,6 +656,18 @@ fn generate_unified_type_support_impl(
                 Some(#crate_path::xtypes::TypeObject::Complete(
                     <#full_type as #crate_path::xtypes::HasTypeObject>::complete_type_object()
                 ))
+            }
+
+            fn get_type_object_closure(&self) -> Vec<(#crate_path::xtypes::TypeIdentifier, #crate_path::xtypes::TypeObject)> {
+                let mut out = Vec::new();
+                out.push((
+                    <#full_type as #crate_path::xtypes::HasTypeObject>::type_identifier(),
+                    #crate_path::xtypes::TypeObject::Complete(
+                        <#full_type as #crate_path::xtypes::HasTypeObject>::complete_type_object()
+                    ),
+                ));
+                <#full_type as #crate_path::xtypes::HasTypeObject>::collect_nested_type_objects(&mut out);
+                out
             }
         }
     }
@@ -1887,10 +1894,6 @@ fn generate_xcdr_deserialize_members_impl(
         }
     }
 }
-
-// ============================================================================
-// Tuple Struct Support
-// ============================================================================
 
 /// Generate DdsType implementation for tuple struct types (e.g., struct Foo(pub u8))
 pub fn derive_tuple_struct_impl(

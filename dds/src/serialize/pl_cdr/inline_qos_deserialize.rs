@@ -138,7 +138,7 @@ impl InlineQosParser {
         let mut reader = PlCdrReader::new(data, self.endianness);
 
         let num_bitmaps = reader.read_u32()? as usize;
-        let mut filter_result = Vec::with_capacity(num_bitmaps);
+        let mut filter_result = Vec::new();
         for _ in 0..num_bitmaps {
             let bitmap = reader.read_i32()?;
             filter_result.push(bitmap);
@@ -154,7 +154,7 @@ impl InlineQosParser {
             ));
         }
 
-        let mut filter_signatures = Vec::with_capacity(num_signatures);
+        let mut filter_signatures = Vec::new();
         for _ in 0..num_signatures {
             let bytes = reader.read_bytes(16)?;
             let mut signature = [0u8; 16];

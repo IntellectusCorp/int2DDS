@@ -95,7 +95,7 @@ pub fn derive_enum_impl(
 
     // Generate HasTypeObject implementation
     let has_type_object_impl = if is_enum {
-        generate_has_type_object_enum_impl(name, variants, type_config)
+        generate_has_type_object_enum_impl(name, variants, type_config, disc_type)
     } else {
         generate_has_type_object_union_impl(name, variants, type_config, disc_type)
     };

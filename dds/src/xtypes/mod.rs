@@ -48,6 +48,7 @@ mod dynamic_serialization;
 mod dynamic_type;
 mod dynamic_type_support;
 mod type_compatibility;
+mod type_lookup;
 mod type_object;
 mod type_object_v1;
 mod type_registry;
@@ -67,4 +68,10 @@ pub use dynamic_type::{
     MemberDescriptor, PrimitiveKind, StructDescriptor,
 };
 pub use dynamic_type_support::DynamicTypeSupport;
+pub use type_lookup::{
+    chunk_dependencies, continuation_point_for, continuation_point_index, GetTypeDependenciesIn,
+    GetTypeDependenciesOut, GetTypesIn, GetTypesOut, ReplyHeader, RequestHeader, SampleIdentity,
+    TypeLookupCall, TypeLookupReply, TypeLookupRequest, TypeLookupReturn,
+    MAX_DEPENDENCIES_PER_REPLY,
+};
 pub use type_registry::{new_shared_registry, SharedTypeRegistry, TypeRegistry};
