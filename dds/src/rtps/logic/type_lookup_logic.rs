@@ -129,17 +129,20 @@ impl SedpLogic {
         let participant = self.get_upgraded_participant()?;
         match reply.data {
             TypeLookupReturn::GetTypes(GetTypesOut { types }) => {
+                let related = &reply.header.related_request_id;
+                let pending =
+                    self.type_lookup_pending.lock().ok().and_then(|mut map| map.remove(related));
+                if pending.is_none() {
+                    warn!(
+                        "[TypeLookup] getTypes reply with no matching outstanding request; dropping"
+                    );
+                    return Ok(());
+                }
+                let prefix = pending.map(|(p, _)| p).unwrap_or(replier_prefix);
+
                 let mut still_missing: Vec<TypeIdentifier> = Vec::new();
                 if let Ok(mut registry) = participant.type_registry().write() {
                     for (type_id, type_object) in &types {
-                        if let Some(claimed) = type_id.equivalence_hash() {
-                            if *claimed != type_object.compute_hash() {
-                                warn!(
-                                    "[TypeLookup] hash mismatch for received type object; dropping"
-                                );
-                                continue;
-                            }
-                        }
                         registry.register_type_object_with_id(type_id, type_object.clone());
                     }
                     for (type_id, _) in &types {
@@ -156,7 +159,7 @@ impl SedpLogic {
                     still_missing.len()
                 );
                 if !still_missing.is_empty() {
-                    let _ = self.request_get_types(replier_prefix, still_missing);
+                    let _ = self.request_get_types(prefix, still_missing);
                 }
                 Ok(())
             }
@@ -256,15 +259,18 @@ impl SedpLogic {
         if type_ids.is_empty() {
             return Ok(());
         }
+        let pending = self.type_lookup_pending.clone();
+        let root = type_ids[0].clone();
         let call = TypeLookupCall::GetTypes(GetTypesIn { type_ids });
         self.send_type_lookup_request(
             remote_prefix,
             Box::new(move |writer_guid, seq| {
+                let request_id = SampleIdentity::new(writer_guid, seq);
+                if let Ok(mut map) = pending.lock() {
+                    map.insert(request_id.clone(), (remote_prefix, root));
+                }
                 let request = TypeLookupRequest {
-                    header: RequestHeader {
-                        request_id: SampleIdentity::new(writer_guid, seq),
-                        instance_name: String::new(),
-                    },
+                    header: RequestHeader { request_id, instance_name: String::new() },
                     data: call,
                 };
                 request.serialize()
