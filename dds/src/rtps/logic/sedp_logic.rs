@@ -5,6 +5,7 @@
 //! participants to enable reader-writer matching.
 
 use std::{
+    collections::HashMap,
     sync::{Arc, Mutex, Weak},
     thread::{self, JoinHandle},
     time::{Duration as StdDuration, Instant},
@@ -87,7 +88,7 @@ use crate::{
     },
     serialize::pl_cdr::InlineQosParameters,
     utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
-    xtypes::check_structural_compatibility,
+    xtypes::{check_structural_compatibility, SampleIdentity, TypeIdentifier, TypeObject},
 };
 
 enum MatchType {
@@ -112,6 +113,12 @@ pub(crate) struct SedpLogic {
     multicast_listening_waker: Arc<std::sync::OnceLock<Arc<mio::Waker>>>,
     unicast_listening_waker: Arc<std::sync::OnceLock<Arc<mio::Waker>>>,
     timer_handler: Arc<Mutex<TimerHandler>>,
+    /// Correlates an outstanding `getTypeDependencies` request (by its
+    /// `SampleIdentity`) with the remote prefix and root `TypeIdentifier` being
+    /// resolved, so the reply can re-issue the next continuation round and add
+    /// the root to the final `getTypes` batch.
+    pub(crate) type_lookup_pending:
+        Arc<Mutex<HashMap<SampleIdentity, (GuidPrefix, TypeIdentifier)>>>,
 }
 
 fn validate_endpoint_compatibility<L>(
@@ -227,6 +234,7 @@ impl SedpLogic {
             multicast_listening_waker: Arc::new(std::sync::OnceLock::new()),
             unicast_listening_waker: Arc::new(std::sync::OnceLock::new()),
             timer_handler,
+            type_lookup_pending: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -595,6 +603,13 @@ impl SedpLogic {
             );
         }
 
+        Self::register_discovered_type(&participant, subscription_builtin_topic_data.type_object());
+        self.maybe_request_discovered_type(
+            endpoint_guid.prefix(),
+            subscription_builtin_topic_data.type_identifier(),
+            subscription_builtin_topic_data.type_object().is_some(),
+        );
+
         participant
             .remote_subscriptions()
             .entry(topic_name)
@@ -920,6 +935,14 @@ impl SedpLogic {
 
 /// Publication Handling (Local Reader <-> Remote Writer)
 impl SedpLogic {
+    fn register_discovered_type(participant: &Participant, type_object: Option<&TypeObject>) {
+        if let Some(type_object) = type_object {
+            if let Ok(mut registry) = participant.type_registry().write() {
+                registry.register_type_object(type_object.clone());
+            }
+        }
+    }
+
     fn handle_publication_builtin_topic_data(
         &self,
         publication_builtin_topic_data: PublicationBuiltinTopicData,
@@ -968,6 +991,13 @@ impl SedpLogic {
                 topic_name
             );
         }
+
+        Self::register_discovered_type(&participant, publication_builtin_topic_data.type_object());
+        self.maybe_request_discovered_type(
+            endpoint_guid.prefix(),
+            publication_builtin_topic_data.type_identifier(),
+            publication_builtin_topic_data.type_object().is_some(),
+        );
 
         participant
             .remote_publications()
@@ -1915,7 +1945,7 @@ impl SedpLogic {
 
     /// Updates the writer proxy when data is received from a matched writer.
     /// Marks the change as received and increments the expected sequence number.
-    fn mark_as_received_in_writer_proxy(
+    pub(crate) fn mark_as_received_in_writer_proxy(
         &self,
         reader: &Arc<StatefulReader>,
         writer_guid: Guid,
@@ -1968,6 +1998,10 @@ impl UnicastMessageProcessor for SedpLogic {
         if data.writer_id == EntityId::P2P_BUILTIN_PARTICIPANT_MESSAGE_WRITER {
             debug!("[SedpLogic] P2P data, skipping in sedp_logic");
             return Ok(());
+        }
+
+        if Self::is_type_lookup_data(data) {
+            return self.handle_type_lookup_data(rtps_header, data);
         }
 
         debug!("[data] entity id - reader: {:?}, writer: {:?}", data.reader_id, data.writer_id);

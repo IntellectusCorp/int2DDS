@@ -1494,6 +1494,36 @@ impl<'a> CGen<'a> {
             return;
         }
 
+        match ty {
+            ResolvedType::Sequence { element, .. }
+                if matches!(
+                    element.as_ref(),
+                    ResolvedType::Struct(_) | ResolvedType::Enum(_) | ResolvedType::Bitmask(_)
+                ) =>
+            {
+                let elem_name = Self::rust_type_quote_str(element);
+                self.raw(&format!(
+                    "    int2dds_type_info_add_sequence_of_named_field(ti, \"{}\", \"{}\", 0, {});\n",
+                    name, elem_name, flags
+                ));
+                return;
+            }
+            ResolvedType::Array { element, size }
+                if matches!(
+                    element.as_ref(),
+                    ResolvedType::Struct(_) | ResolvedType::Enum(_) | ResolvedType::Bitmask(_)
+                ) =>
+            {
+                let elem_name = Self::rust_type_quote_str(element);
+                self.raw(&format!(
+                    "    int2dds_type_info_add_array_of_named_field(ti, \"{}\", \"{}\", {}, {});\n",
+                    name, elem_name, size, flags
+                ));
+                return;
+            }
+            _ => {}
+        }
+
         if Self::type_uses_fallback_hash(ty) {
             let hash_name = Self::rust_type_quote_str(ty);
             self.raw(&format!(

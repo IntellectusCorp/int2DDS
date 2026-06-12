@@ -123,6 +123,25 @@ class DomainParticipant:
         """Get the domain ID of this participant."""
         return self._domain_id
 
+    @property
+    def handle(self) -> ffi.CData:
+        """Native participant handle (for low-level/dynamic-type FFI calls)."""
+        if self._handle is None:
+            raise RuntimeError("participant is closed")
+        return self._handle
+
+    def wait_for_type_object(self, topic_name: str, timeout_ms: int = -1):
+        """Discover a remote type's TypeObject. Returns (TypeObject, type_name)."""
+        from int2dds.types.dynamic import wait_for_type_object
+
+        return wait_for_type_object(self, topic_name, timeout_ms)
+
+    def decode_sample(self, type_obj, data: bytes):
+        """Decode raw CDR `data` into a DynamicData using `type_obj`."""
+        from int2dds.types.dynamic import decode_sample
+
+        return decode_sample(self, type_obj, data)
+
     def create_publisher(self) -> Publisher:
         """
         Create a Publisher for this participant.
