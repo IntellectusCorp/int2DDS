@@ -899,7 +899,7 @@ pub fn get_tcp_nodelay() -> bool {
 
 /// Get the optional SO_RCVBUF override (bytes) for every TCP socket.
 /// Used by tests to induce backpressure deterministically.
-/// Default: None (OS-managed)
+/// Default: None (OS-managed). WAN: 131072 recommended (~256 KiB effective).
 pub fn get_tcp_so_rcvbuf() -> Option<usize> {
     std::env::var("INT2DDS_TCP_SO_RCVBUF").ok().and_then(|v| v.parse().ok())
 }
@@ -912,7 +912,7 @@ pub fn set_tcp_so_rcvbuf(bytes: usize) {
 
 /// Get the optional SO_SNDBUF override (bytes) for every TCP socket.
 /// Used by tests to induce backpressure deterministically.
-/// Default: None (OS-managed)
+/// Default: None (OS-managed). WAN: 131072 recommended (~256 KiB effective).
 pub fn get_tcp_so_sndbuf() -> Option<usize> {
     std::env::var("INT2DDS_TCP_SO_SNDBUF").ok().and_then(|v| v.parse().ok())
 }
