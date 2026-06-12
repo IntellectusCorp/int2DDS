@@ -151,6 +151,12 @@ fn cdr_error(error: CdrError) -> DdsError {
     DdsError::Error(error.to_string())
 }
 
+fn checked_array_len(dimensions: &[u32]) -> DdsResult<u32> {
+    dimensions.iter().try_fold(1u32, |acc, &d| acc.checked_mul(d)).ok_or_else(|| {
+        DdsError::Error(format!("array dimensions overflow element count: {:?}", dimensions))
+    })
+}
+
 fn nested_struct_deserialization_error(struct_desc: &StructDescriptor) -> DdsError {
     DdsError::Error(format!(
         "Nested struct deserialization is not supported yet for '{}': runtime nested type metadata is unavailable",
@@ -673,8 +679,8 @@ fn deserialize_value_cdr(
             Ok(DynamicValue::Sequence(items))
         }
         DynamicTypeKind::Array { element_type, dimensions } => {
-            let total_size: u32 = dimensions.iter().product();
-            let mut items = Vec::with_capacity(total_size as usize);
+            let total_size = checked_array_len(dimensions)?;
+            let mut items = Vec::new();
             for _ in 0..total_size {
                 items.push(deserialize_value_cdr(deserializer, element_type)?);
             }
@@ -735,8 +741,8 @@ fn deserialize_value_xcdr2(
             if !is_primitive_kind(element_type) {
                 let _ = deserializer.read_dheader().map_err(cdr_error)?;
             }
-            let total_size: u32 = dimensions.iter().product();
-            let mut items = Vec::with_capacity(total_size as usize);
+            let total_size = checked_array_len(dimensions)?;
+            let mut items = Vec::new();
             for _ in 0..total_size {
                 items.push(deserialize_value_xcdr2(deserializer, element_type)?);
             }
