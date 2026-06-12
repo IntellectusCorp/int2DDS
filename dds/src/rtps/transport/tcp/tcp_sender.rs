@@ -584,6 +584,15 @@ async fn open_stream(sender: &Arc<TcpSender>, addr: SocketAddr) -> io::Result<As
 
     let _ = tcp.set_nodelay(crate::common::env::get_tcp_nodelay());
 
+    // Optional socket buffer overrides from env — mirror the accept path so
+    // outbound (send) sockets are bounded too, not just accepted ones.
+    if let Some(sz) = crate::common::env::get_tcp_so_rcvbuf() {
+        let _ = socket2::SockRef::from(&tcp).set_recv_buffer_size(sz);
+    }
+    if let Some(sz) = crate::common::env::get_tcp_so_sndbuf() {
+        let _ = socket2::SockRef::from(&tcp).set_send_buffer_size(sz);
+    }
+
     // 2. Optional TLS handshake (also timeout-bounded).
     if let Some(cfg) = &sender.tls_config {
         let client_cfg = cfg
