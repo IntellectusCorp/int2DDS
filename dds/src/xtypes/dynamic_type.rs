@@ -14,6 +14,12 @@ use crate::xtypes::{
     CompleteTypeObject, CompleteUnionType, TypeIdentifier,
 };
 
+/// Maximum nested type-resolution depth. A remote peer controls the
+/// type-dependency chain via TypeLookup; a long linear (acyclic) chain would
+/// otherwise recurse until the stack overflows. Beyond this depth the nested
+/// type is left unresolved instead of recursing further.
+const MAX_BUILD_DEPTH: usize = 64;
+
 struct BuildCtx<'a> {
     registry: &'a TypeRegistry,
     memo: HashMap<EquivalenceHash, Arc<DynamicType>>,
@@ -445,6 +451,9 @@ impl DynamicType {
         }
         if ctx.stack.contains(hash) {
             // Cyclic back-edge: keep unresolved to terminate recursion.
+            return Ok(DynamicTypeKind::ExternalType { type_identifier: type_id.clone() });
+        }
+        if ctx.stack.len() >= MAX_BUILD_DEPTH {
             return Ok(DynamicTypeKind::ExternalType { type_identifier: type_id.clone() });
         }
 
