@@ -38,11 +38,12 @@ pub(crate) enum HistoryQosPolicyKind {
 impl From<HistoryQosPolicy> for qos_policy::HistoryQosPolicy {
     fn from(external: HistoryQosPolicy) -> Self {
         match external.kind {
-            HistoryQosPolicyKind::KeepLastHistoryQos => {
-                Self { kind: qos_policy::HistoryQosPolicyKind::KeepLast(external.depth) }
-            }
+            HistoryQosPolicyKind::KeepLastHistoryQos => Self {
+                kind: qos_policy::HistoryQosPolicyKind::KeepLast(external.depth),
+                strict: true,
+            },
             HistoryQosPolicyKind::KeepAllHistoryQos => {
-                Self { kind: qos_policy::HistoryQosPolicyKind::KeepAll }
+                Self { kind: qos_policy::HistoryQosPolicyKind::KeepAll, strict: true }
             }
         }
     }

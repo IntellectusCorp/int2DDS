@@ -34,7 +34,7 @@ use crate::{
     },
     publication::data_writer::DataWriter,
     rtps::{
-        common::guid::Guid,
+        common::{guid::Guid, sequence::SequenceNumber},
         entities::{
             history::{
                 cache_change::CacheChange, cache_change_pool::CacheChangePool,
@@ -442,6 +442,19 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
         }
     }
 
+    // Removes every change with a sequence number at or below the given one.
+    pub(crate) fn remove_changes_acked_up_to(
+        &mut self,
+        max_acked: SequenceNumber,
+    ) -> DdsResult<()> {
+        let acked: Vec<_> =
+            self.changes.iter().filter(|c| c.sequence_number() <= max_acked).cloned().collect();
+        for change in acked {
+            self.remove_change(change)?;
+        }
+        Ok(())
+    }
+
     // Removes and returns the oldest change from all instances.
     fn remove_oldest_change_of_all(&mut self) -> DdsResult<Arc<CacheChange>> {
         // The oldest change is always at index 0.
@@ -693,7 +706,7 @@ mod tests {
     #[test]
     fn test_history_cache_add_change_success_max_samples_per_instance_exceeded_reliable() {
         let writer_qos: DataWriterQos = DataWriterQos {
-            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
             reliability: ReliabilityQosPolicy {
                 kind: ReliabilityQosPolicyKind::Reliable,
                 max_blocking_time: Duration::from_millis(100),
@@ -768,7 +781,7 @@ mod tests {
     #[test]
     fn test_history_cache_add_change_fail_max_samples_per_instance_exceeded_reliable() {
         let writer_qos: DataWriterQos = DataWriterQos {
-            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
             reliability: ReliabilityQosPolicy {
                 kind: ReliabilityQosPolicyKind::Reliable,
                 max_blocking_time: Duration::from_millis(1000),
@@ -840,7 +853,7 @@ mod tests {
     #[test]
     fn test_history_cache_add_change_fail_max_instances_exceeded_reliable_remaining_samples() {
         let writer_qos: DataWriterQos = DataWriterQos {
-            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
             reliability: ReliabilityQosPolicy {
                 kind: ReliabilityQosPolicyKind::Reliable,
                 max_blocking_time: Duration::from_millis(1000),
@@ -897,7 +910,7 @@ mod tests {
     #[test]
     fn test_history_cache_add_change_fail_max_samples_exceeded_reliable_remaining_samples() {
         let writer_qos: DataWriterQos = DataWriterQos {
-            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
             reliability: ReliabilityQosPolicy {
                 kind: ReliabilityQosPolicyKind::Reliable,
                 max_blocking_time: Duration::from_millis(1000),
@@ -953,7 +966,7 @@ mod tests {
     #[test]
     fn test_history_cache_add_change_fail_max_samples_exceeded_reliable_unacked() {
         let writer_qos: DataWriterQos = DataWriterQos {
-            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
             reliability: ReliabilityQosPolicy {
                 kind: ReliabilityQosPolicyKind::Reliable,
                 max_blocking_time: Duration::from_millis(1000),
@@ -1023,7 +1036,7 @@ mod tests {
     #[test]
     fn test_history_cache_add_change_success_max_samples_exceeded_reliable() {
         let writer_qos: DataWriterQos = DataWriterQos {
-            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
             reliability: ReliabilityQosPolicy {
                 kind: ReliabilityQosPolicyKind::Reliable,
                 max_blocking_time: Duration::from_millis(1000),

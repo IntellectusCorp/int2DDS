@@ -558,7 +558,7 @@ impl PlCdrParser {
                     1 => HistoryQosPolicyKind::KeepAll,
                     _ => HistoryQosPolicyKind::KeepLast(depth),
                 };
-                ParameterValue::HistoryQosPolicy(HistoryQosPolicy { kind })
+                ParameterValue::HistoryQosPolicy(HistoryQosPolicy { kind, strict: true })
             }
             ParameterId::PidResourceLimits => {
                 let mut reader = PlCdrReader::new(data, self.endianness);
