@@ -1485,15 +1485,6 @@ impl<'a> CGen<'a> {
         let ty = &m.resolved_type;
         let flags = Self::member_flags_literal(m);
 
-        if m.is_external {
-            let inner = Self::rust_type_quote_str(ty);
-            self.raw(&format!(
-                "    int2dds_type_info_add_named_type_field(ti, \"{}\", \"Box < {} >\", {});\n",
-                name, inner, flags
-            ));
-            return;
-        }
-
         match ty {
             ResolvedType::Sequence { element, .. }
                 if matches!(
