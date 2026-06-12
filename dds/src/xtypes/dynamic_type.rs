@@ -7,9 +7,24 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::serialize::xcdr::ExtensibilityKind;
+use crate::xtypes::type_object::EquivalenceHash;
+use crate::xtypes::type_registry::TypeRegistry;
 use crate::xtypes::{
-    CompleteEnumeratedType, CompleteStructType, CompleteTypeObject, TypeIdentifier,
+    CompleteBitmaskType, CompleteBitsetType, CompleteEnumeratedType, CompleteStructType,
+    CompleteTypeObject, CompleteUnionType, TypeIdentifier,
 };
+
+/// Maximum nested type-resolution depth. A remote peer controls the
+/// type-dependency chain via TypeLookup; a long linear (acyclic) chain would
+/// otherwise recurse until the stack overflows. Beyond this depth the nested
+/// type is left unresolved instead of recursing further.
+const MAX_BUILD_DEPTH: usize = 64;
+
+struct BuildCtx<'a> {
+    registry: &'a TypeRegistry,
+    memo: HashMap<EquivalenceHash, Arc<DynamicType>>,
+    stack: Vec<EquivalenceHash>,
+}
 
 /// Error type for DynamicType operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,12 +119,38 @@ impl DynamicType {
         type_object: Arc<CompleteTypeObject>,
         type_identifier: TypeIdentifier,
     ) -> Result<Self, DynamicTypeError> {
+        Self::build_from_object(type_object, type_identifier, None)
+    }
+
+    pub fn from_type_object_with_registry(
+        type_object: Arc<CompleteTypeObject>,
+        type_identifier: TypeIdentifier,
+        registry: &TypeRegistry,
+    ) -> Result<Self, DynamicTypeError> {
+        let mut ctx = BuildCtx { registry, memo: HashMap::new(), stack: Vec::new() };
+        Self::build_from_object(type_object, type_identifier, Some(&mut ctx))
+    }
+
+    fn build_from_object(
+        type_object: Arc<CompleteTypeObject>,
+        type_identifier: TypeIdentifier,
+        ctx: Option<&mut BuildCtx>,
+    ) -> Result<Self, DynamicTypeError> {
         match type_object.as_ref() {
             CompleteTypeObject::Struct(struct_type) => {
-                Self::from_struct_type(struct_type, type_identifier, type_object.clone())
+                Self::from_struct_type(struct_type, type_identifier, type_object.clone(), ctx)
             }
             CompleteTypeObject::Enum(enum_type) => {
                 Self::from_enum_type(enum_type, type_identifier, type_object.clone())
+            }
+            CompleteTypeObject::Union(union_type) => {
+                Self::from_union_type(union_type, type_identifier, type_object.clone(), ctx)
+            }
+            CompleteTypeObject::Bitmask(bitmask_type) => {
+                Self::from_bitmask_type(bitmask_type, type_identifier, type_object.clone())
+            }
+            CompleteTypeObject::Bitset(bitset_type) => {
+                Self::from_bitset_type(bitset_type, type_identifier, type_object.clone())
             }
             _ => Err(DynamicTypeError::UnsupportedType(format!(
                 "TypeObject kind 0x{:02X} not yet supported for DynamicType",
@@ -122,6 +163,7 @@ impl DynamicType {
         struct_type: &CompleteStructType,
         type_identifier: TypeIdentifier,
         type_object: Arc<CompleteTypeObject>,
+        mut ctx: Option<&mut BuildCtx>,
     ) -> Result<Self, DynamicTypeError> {
         let type_name = struct_type.header.detail.type_name.clone();
         let extensibility = Self::convert_extensibility(struct_type.struct_flags.extensibility());
@@ -132,7 +174,8 @@ impl DynamicType {
         let mut member_by_id = HashMap::new();
 
         for (index, member) in struct_type.member_seq.iter().enumerate() {
-            let member_type = Self::type_from_identifier(&member.common.member_type_id)?;
+            let member_type =
+                Self::type_from_identifier(&member.common.member_type_id, ctx.as_deref_mut())?;
             let descriptor = MemberDescriptor {
                 name: Arc::from(member.detail.name.as_str()),
                 member_id: member.common.member_id,
@@ -197,6 +240,104 @@ impl DynamicType {
         })
     }
 
+    fn from_union_type(
+        union_type: &CompleteUnionType,
+        type_identifier: TypeIdentifier,
+        type_object: Arc<CompleteTypeObject>,
+        mut ctx: Option<&mut BuildCtx>,
+    ) -> Result<Self, DynamicTypeError> {
+        let type_name = union_type.header.type_name.clone();
+        let extensibility = Self::convert_extensibility(union_type.union_flags.extensibility());
+
+        let discriminator_type = Box::new(Self::type_from_identifier(
+            &union_type.discriminator.type_id,
+            ctx.as_deref_mut(),
+        )?);
+
+        let mut members = Vec::with_capacity(union_type.member_seq.len());
+        let mut member_by_id = HashMap::new();
+        for (index, member) in union_type.member_seq.iter().enumerate() {
+            let member_type =
+                Self::type_from_identifier(&member.common.member_type_id, ctx.as_deref_mut())?;
+            let descriptor = UnionMemberDescriptor {
+                name: Arc::from(member.detail.name.as_str()),
+                member_id: member.common.member_id,
+                member_type,
+                labels: member.common.label_seq.clone(),
+                is_default: member.common.member_flags.is_default(),
+                is_must_understand: member.common.member_flags.is_must_understand(),
+                index,
+            };
+            member_by_id.insert(descriptor.member_id, index);
+            members.push(descriptor);
+        }
+
+        let union_desc = UnionDescriptor { discriminator_type, members, member_by_id };
+
+        Ok(Self {
+            type_name,
+            kind: DynamicTypeKind::Union(union_desc),
+            extensibility,
+            type_identifier,
+            type_object,
+        })
+    }
+
+    fn from_bitmask_type(
+        bitmask_type: &CompleteBitmaskType,
+        type_identifier: TypeIdentifier,
+        type_object: Arc<CompleteTypeObject>,
+    ) -> Result<Self, DynamicTypeError> {
+        let type_name = bitmask_type.header.detail.type_name.clone();
+        let extensibility = Self::convert_extensibility(bitmask_type.bitmask_flags.extensibility());
+        let bit_bound = bitmask_type.header.common.bit_bound;
+
+        let flags = bitmask_type
+            .flag_seq
+            .iter()
+            .map(|flag| BitflagDescriptor {
+                name: Arc::from(flag.detail.name.as_str()),
+                position: flag.common.position,
+            })
+            .collect();
+
+        Ok(Self {
+            type_name,
+            kind: DynamicTypeKind::Bitmask(BitmaskDescriptor { bit_bound, flags }),
+            extensibility,
+            type_identifier,
+            type_object,
+        })
+    }
+
+    fn from_bitset_type(
+        bitset_type: &CompleteBitsetType,
+        type_identifier: TypeIdentifier,
+        type_object: Arc<CompleteTypeObject>,
+    ) -> Result<Self, DynamicTypeError> {
+        let type_name = bitset_type.header.type_name.clone();
+        let extensibility = Self::convert_extensibility(bitset_type.bitset_flags.extensibility());
+
+        let mut fields = Vec::with_capacity(bitset_type.field_seq.len());
+        let mut total_bits = 0u16;
+        for field in &bitset_type.field_seq {
+            total_bits = total_bits.max(field.common.position + field.common.bitcount as u16);
+            fields.push(BitfieldDescriptor {
+                name: Arc::from(field.detail.name.as_str()),
+                position: field.common.position,
+                bitcount: field.common.bitcount,
+            });
+        }
+
+        Ok(Self {
+            type_name,
+            kind: DynamicTypeKind::Bitset(BitsetDescriptor { fields, total_bits }),
+            extensibility,
+            type_identifier,
+            type_object,
+        })
+    }
+
     fn convert_extensibility(ext: crate::xtypes::ExtensibilityKind) -> ExtensibilityKind {
         match ext {
             crate::xtypes::ExtensibilityKind::Final => ExtensibilityKind::Final,
@@ -206,7 +347,10 @@ impl DynamicType {
     }
 
     /// Create a DynamicType for a primitive TypeIdentifier.
-    fn type_from_identifier(type_id: &TypeIdentifier) -> Result<DynamicTypeKind, DynamicTypeError> {
+    fn type_from_identifier(
+        type_id: &TypeIdentifier,
+        mut ctx: Option<&mut BuildCtx>,
+    ) -> Result<DynamicTypeKind, DynamicTypeError> {
         match type_id {
             TypeIdentifier::Boolean => Ok(DynamicTypeKind::Primitive(PrimitiveKind::Boolean)),
             TypeIdentifier::Byte => Ok(DynamicTypeKind::Primitive(PrimitiveKind::Byte)),
@@ -238,53 +382,93 @@ impl DynamicType {
                 Ok(DynamicTypeKind::WString { bound: Some(*bound) })
             }
             TypeIdentifier::PlainSequenceSmall { element_identifier, bound, .. } => {
-                let element_type = Self::type_from_identifier(element_identifier)?;
+                let element_type = Self::type_from_identifier(element_identifier, ctx)?;
                 Ok(DynamicTypeKind::Sequence {
                     element_type: Box::new(element_type),
                     bound: if *bound == 0 { None } else { Some(*bound as u32) },
                 })
             }
             TypeIdentifier::PlainSequenceLarge { element_identifier, bound, .. } => {
-                let element_type = Self::type_from_identifier(element_identifier)?;
+                let element_type = Self::type_from_identifier(element_identifier, ctx)?;
                 Ok(DynamicTypeKind::Sequence {
                     element_type: Box::new(element_type),
                     bound: if *bound == 0 { None } else { Some(*bound) },
                 })
             }
             TypeIdentifier::PlainArraySmall { element_identifier, array_bound_seq, .. } => {
-                let element_type = Self::type_from_identifier(element_identifier)?;
+                let element_type = Self::type_from_identifier(element_identifier, ctx)?;
                 Ok(DynamicTypeKind::Array {
                     element_type: Box::new(element_type),
                     dimensions: array_bound_seq.iter().map(|&d| d as u32).collect(),
                 })
             }
             TypeIdentifier::PlainArrayLarge { element_identifier, array_bound_seq, .. } => {
-                let element_type = Self::type_from_identifier(element_identifier)?;
+                let element_type = Self::type_from_identifier(element_identifier, ctx)?;
                 Ok(DynamicTypeKind::Array {
                     element_type: Box::new(element_type),
                     dimensions: array_bound_seq.clone(),
                 })
             }
-            TypeIdentifier::CompleteTypeId(_) => {
-                // This references another type by hash - return as external reference
-                Ok(DynamicTypeKind::ExternalType { type_identifier: type_id.clone() })
+            TypeIdentifier::PlainMapSmall { key_identifier, element_identifier, bound, .. } => {
+                let key_type = Self::type_from_identifier(key_identifier, ctx.as_deref_mut())?;
+                let value_type = Self::type_from_identifier(element_identifier, ctx)?;
+                Ok(DynamicTypeKind::Map {
+                    key_type: Box::new(key_type),
+                    value_type: Box::new(value_type),
+                    bound: if *bound == 0 { None } else { Some(*bound as u32) },
+                })
             }
-            TypeIdentifier::MinimalTypeId(_) => {
-                Ok(DynamicTypeKind::ExternalType { type_identifier: type_id.clone() })
+            TypeIdentifier::PlainMapLarge { key_identifier, element_identifier, bound, .. } => {
+                let key_type = Self::type_from_identifier(key_identifier, ctx.as_deref_mut())?;
+                let value_type = Self::type_from_identifier(element_identifier, ctx)?;
+                Ok(DynamicTypeKind::Map {
+                    key_type: Box::new(key_type),
+                    value_type: Box::new(value_type),
+                    bound: if *bound == 0 { None } else { Some(*bound) },
+                })
+            }
+            TypeIdentifier::CompleteTypeId(hash) | TypeIdentifier::MinimalTypeId(hash) => {
+                Self::resolve_nested(type_id, hash, ctx.as_deref_mut())
             }
             TypeIdentifier::None => {
                 Err(DynamicTypeError::UnsupportedType("None type identifier".to_string()))
             }
-            _ => Err(DynamicTypeError::UnsupportedType(format!(
-                "Unsupported TypeIdentifier: {:?}",
-                type_id
-            ))),
         }
     }
 
-    // ========================================================================
-    // Public API
-    // ========================================================================
+    fn resolve_nested(
+        type_id: &TypeIdentifier,
+        hash: &EquivalenceHash,
+        ctx: Option<&mut BuildCtx>,
+    ) -> Result<DynamicTypeKind, DynamicTypeError> {
+        let ctx = match ctx {
+            Some(ctx) => ctx,
+            None => return Ok(DynamicTypeKind::ExternalType { type_identifier: type_id.clone() }),
+        };
+
+        if let Some(existing) = ctx.memo.get(hash) {
+            return Ok(DynamicTypeKind::TypeRef(existing.clone()));
+        }
+        if ctx.stack.contains(hash) {
+            // Cyclic back-edge: keep unresolved to terminate recursion.
+            return Ok(DynamicTypeKind::ExternalType { type_identifier: type_id.clone() });
+        }
+        if ctx.stack.len() >= MAX_BUILD_DEPTH {
+            return Ok(DynamicTypeKind::ExternalType { type_identifier: type_id.clone() });
+        }
+
+        let object = match ctx.registry.lookup_complete(hash) {
+            Some(object) => Arc::new(object.clone()),
+            None => return Ok(DynamicTypeKind::ExternalType { type_identifier: type_id.clone() }),
+        };
+
+        ctx.stack.push(*hash);
+        let nested = Self::build_from_object(object, type_id.clone(), Some(&mut *ctx));
+        ctx.stack.pop();
+        let nested = Arc::new(nested?);
+        ctx.memo.insert(*hash, nested.clone());
+        Ok(DynamicTypeKind::TypeRef(nested))
+    }
 
     /// Get the type name.
     pub fn type_name(&self) -> &str {
@@ -342,6 +526,30 @@ impl DynamicType {
         }
     }
 
+    /// Get union descriptor (if this is a union type).
+    pub fn as_union(&self) -> Option<&UnionDescriptor> {
+        match &self.kind {
+            DynamicTypeKind::Union(desc) => Some(desc),
+            _ => None,
+        }
+    }
+
+    /// Get bitmask descriptor (if this is a bitmask type).
+    pub fn as_bitmask(&self) -> Option<&BitmaskDescriptor> {
+        match &self.kind {
+            DynamicTypeKind::Bitmask(desc) => Some(desc),
+            _ => None,
+        }
+    }
+
+    /// Get bitset descriptor (if this is a bitset type).
+    pub fn as_bitset(&self) -> Option<&BitsetDescriptor> {
+        match &self.kind {
+            DynamicTypeKind::Bitset(desc) => Some(desc),
+            _ => None,
+        }
+    }
+
     /// Get a member by name (for struct types).
     pub fn get_member(&self, name: &str) -> Option<&MemberDescriptor> {
         self.as_struct().and_then(|s| s.get_member(name))
@@ -386,12 +594,32 @@ pub enum DynamicTypeKind {
     Struct(StructDescriptor),
     /// Enum type with literal descriptors
     Enum(EnumDescriptor),
+    /// Union type with a discriminator and case members
+    Union(UnionDescriptor),
+    /// Bitmask type (serialized as a packed unsigned integer)
+    Bitmask(BitmaskDescriptor),
+    /// Bitset type (named bitfields packed into an unsigned integer)
+    Bitset(BitsetDescriptor),
     /// Sequence (dynamic array)
     Sequence { element_type: Box<DynamicTypeKind>, bound: Option<u32> },
     /// Array (fixed-size)
     Array { element_type: Box<DynamicTypeKind>, dimensions: Vec<u32> },
+    /// Map (key-value collection)
+    Map { key_type: Box<DynamicTypeKind>, value_type: Box<DynamicTypeKind>, bound: Option<u32> },
     /// Reference to an external type by TypeIdentifier (for nested structs)
     ExternalType { type_identifier: TypeIdentifier },
+    /// Resolved nested composite type holding full metadata
+    TypeRef(Arc<DynamicType>),
+}
+
+impl DynamicTypeKind {
+    /// Get the resolved nested type (if this is a `TypeRef`).
+    pub fn as_type_ref(&self) -> Option<&Arc<DynamicType>> {
+        match self {
+            DynamicTypeKind::TypeRef(t) => Some(t),
+            _ => None,
+        }
+    }
 }
 
 /// Descriptor for struct type members.
@@ -507,6 +735,115 @@ pub struct EnumLiteralDescriptor {
     pub is_default: bool,
     /// Index in the literal sequence
     pub index: usize,
+}
+
+/// Descriptor for union types.
+#[derive(Debug, Clone)]
+pub struct UnionDescriptor {
+    /// Type of the discriminator (primitive or enum)
+    discriminator_type: Box<DynamicTypeKind>,
+    /// Case members in declaration order
+    members: Vec<UnionMemberDescriptor>,
+    /// Map from member ID to index
+    member_by_id: HashMap<u32, usize>,
+}
+
+impl UnionDescriptor {
+    /// Get the discriminator type kind.
+    pub fn discriminator_type(&self) -> &DynamicTypeKind {
+        &self.discriminator_type
+    }
+
+    /// Get all case members in declaration order.
+    pub fn members(&self) -> &[UnionMemberDescriptor] {
+        &self.members
+    }
+
+    /// Get a case member by ID.
+    pub fn get_member_by_id(&self, member_id: u32) -> Option<&UnionMemberDescriptor> {
+        self.member_by_id.get(&member_id).map(|&idx| &self.members[idx])
+    }
+
+    /// Resolve the selected case member for a discriminator value: the member
+    /// whose label set contains `discriminator`, else the default member.
+    pub fn select_member(&self, discriminator: i64) -> Option<&UnionMemberDescriptor> {
+        self.members
+            .iter()
+            .find(|m| m.labels.iter().any(|&l| i64::from(l) == discriminator))
+            .or_else(|| self.members.iter().find(|m| m.is_default))
+    }
+}
+
+/// Descriptor for a single union case member.
+#[derive(Debug, Clone)]
+pub struct UnionMemberDescriptor {
+    /// Member name
+    pub name: Arc<str>,
+    /// Member ID
+    pub member_id: u32,
+    /// Member type kind
+    pub member_type: DynamicTypeKind,
+    /// Case labels selecting this member
+    pub labels: Vec<i32>,
+    /// Whether this is the default case
+    pub is_default: bool,
+    /// Whether this member must be understood
+    pub is_must_understand: bool,
+    /// Index in the member sequence (branch id is `index + 1`)
+    pub index: usize,
+}
+
+/// Descriptor for bitmask types.
+#[derive(Debug, Clone)]
+pub struct BitmaskDescriptor {
+    /// Bit bound determining the wire width (1/2/4/8 bytes)
+    pub bit_bound: u16,
+    /// Named flags (bit positions); not needed for the wire, kept for introspection
+    flags: Vec<BitflagDescriptor>,
+}
+
+impl BitmaskDescriptor {
+    /// Get all named flags.
+    pub fn flags(&self) -> &[BitflagDescriptor] {
+        &self.flags
+    }
+}
+
+/// Descriptor for a single bitmask flag.
+#[derive(Debug, Clone)]
+pub struct BitflagDescriptor {
+    /// Flag name
+    pub name: Arc<str>,
+    /// Bit position
+    pub position: u16,
+}
+
+/// Descriptor for bitset types.
+#[derive(Debug, Clone)]
+pub struct BitsetDescriptor {
+    fields: Vec<BitfieldDescriptor>,
+    total_bits: u16,
+}
+
+impl BitsetDescriptor {
+    pub fn fields(&self) -> &[BitfieldDescriptor] {
+        &self.fields
+    }
+
+    pub fn total_bits(&self) -> u16 {
+        self.total_bits
+    }
+}
+
+/// Descriptor for a single bitset field.
+#[derive(Debug, Clone)]
+pub struct BitfieldDescriptor {
+    /// Field name
+    pub name: Arc<str>,
+    /// Bit offset of this field
+    pub position: u16,
+    /// Number of bits in this field
+    pub bitcount: u8,
 }
 
 #[cfg(test)]

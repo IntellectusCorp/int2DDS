@@ -64,6 +64,7 @@ use crate::{
         transport::plugin::TransportPlugin,
     },
     utils::timer::{timer_handler::TimerHandler, timer_id::TimerId},
+    xtypes::{new_shared_registry, SharedTypeRegistry},
 };
 
 #[derive(Clone)]
@@ -95,6 +96,9 @@ pub struct Participant {
 
     remote_publications: Arc<DashMap<String, HashMap<Guid, PublicationBuiltinTopicData>>>,
     remote_subscriptions: Arc<DashMap<String, HashMap<Guid, SubscriptionBuiltinTopicData>>>,
+
+    // Dynamic-type registry populated from discovered TypeObjects.
+    type_registry: SharedTypeRegistry,
 
     liveliness_monitor: Arc<Mutex<Option<LivelinessMonitor>>>,
     working_ips: Vec<String>,
@@ -177,6 +181,7 @@ impl Participant {
             current_entity_id: Arc::new(Mutex::new([0, 0, 0])),
             remote_publications: Arc::new(DashMap::new()),
             remote_subscriptions: Arc::new(DashMap::new()),
+            type_registry: new_shared_registry(),
             working_ips,
             terminated: Arc::new(AtomicBool::new(false)),
             liveliness_monitor: Arc::new(Mutex::new(None)),
@@ -226,6 +231,44 @@ impl Participant {
         &self,
     ) -> Arc<DashMap<String, HashMap<Guid, SubscriptionBuiltinTopicData>>> {
         self.remote_subscriptions.clone()
+    }
+
+    pub(crate) fn type_registry(&self) -> SharedTypeRegistry {
+        self.type_registry.clone()
+    }
+
+    pub(crate) fn register_local_type(&self, type_object: Option<&crate::xtypes::TypeObject>) {
+        if let Some(obj) = type_object {
+            if let Ok(mut registry) = self.type_registry.write() {
+                registry.register_type_object(obj.clone());
+            }
+        }
+    }
+
+    pub(crate) fn register_local_type_objects(
+        &self,
+        objects: &[(crate::xtypes::TypeIdentifier, crate::xtypes::TypeObject)],
+    ) {
+        if objects.is_empty() {
+            return;
+        }
+        if let Ok(mut registry) = self.type_registry.write() {
+            for (id, obj) in objects {
+                registry.register_type_object_with_id(id, obj.clone());
+            }
+        }
+    }
+
+    pub(crate) fn fetch_type_via_lookup(
+        &self,
+        remote_prefix: GuidPrefix,
+        type_id: crate::xtypes::TypeIdentifier,
+    ) {
+        if let Some(sedp_logic) = self.sedp_logic.get() {
+            if let Some(sedp_logic) = sedp_logic.as_ref().as_ref() {
+                let _ = sedp_logic.request_get_types(remote_prefix, vec![type_id]);
+            }
+        }
     }
 
     pub(crate) fn working_ips(&self) -> Vec<String> {
@@ -342,6 +385,22 @@ impl Participant {
 
     pub(crate) fn sedp_builtin_topics_reader(&self) -> Arc<StatefulReader> {
         self.builtin_endpoints.sedp_builtin_topics_reader.clone()
+    }
+
+    pub(crate) fn type_lookup_request_writer(&self) -> Arc<StatefulWriter> {
+        self.builtin_endpoints.type_lookup_request_writer.clone()
+    }
+
+    pub(crate) fn type_lookup_request_reader(&self) -> Arc<StatefulReader> {
+        self.builtin_endpoints.type_lookup_request_reader.clone()
+    }
+
+    pub(crate) fn type_lookup_reply_writer(&self) -> Arc<StatefulWriter> {
+        self.builtin_endpoints.type_lookup_reply_writer.clone()
+    }
+
+    pub(crate) fn type_lookup_reply_reader(&self) -> Arc<StatefulReader> {
+        self.builtin_endpoints.type_lookup_reply_reader.clone()
     }
 
     pub(crate) fn domain_id(&self) -> DomainId {

@@ -285,7 +285,7 @@ impl PlCdrParser {
     fn parse_string_sequence(&self, data: &[u8]) -> Result<Vec<String>, String> {
         let mut reader = PlCdrReader::new(data, self.endianness);
         let count = reader.read_u32()? as usize;
-        let mut strings = Vec::with_capacity(count);
+        let mut strings = Vec::new();
 
         for _ in 0..count {
             let length = reader.read_u32()? as usize;
@@ -353,7 +353,7 @@ impl PlCdrParser {
     fn parse_property_list(&self, data: &[u8]) -> Result<Vec<Property>, String> {
         let mut reader = PlCdrReader::new(data, self.endianness);
         let count = reader.read_u32()? as usize;
-        let mut properties = Vec::with_capacity(count);
+        let mut properties = Vec::new();
 
         for _ in 0..count {
             let name_len = reader.read_u32()? as usize;

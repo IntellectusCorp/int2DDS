@@ -1117,7 +1117,7 @@ impl CompleteMemberDetail {
             u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
 
-        let mut ann_custom = Vec::with_capacity(custom_count);
+        let mut ann_custom = Vec::new();
         for _ in 0..custom_count {
             let (ann, consumed) = AppliedAnnotation::deserialize(&data[pos..])?;
             pos += consumed;
@@ -1458,7 +1458,7 @@ impl AppliedAnnotation {
             u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
 
-        let mut param_seq = Vec::with_capacity(param_count);
+        let mut param_seq = Vec::new();
         for _ in 0..param_count {
             if data.len() < pos + 4 {
                 return Err("Insufficient data for param name_hash".to_string());
@@ -1544,7 +1544,7 @@ impl MinimalStructType {
         pos += 4;
 
         // members
-        let mut member_seq = Vec::with_capacity(member_count);
+        let mut member_seq = Vec::new();
         for _ in 0..member_count {
             let (member, consumed) = MinimalStructMember::deserialize(&data[pos..])?;
             pos += consumed;
@@ -1653,7 +1653,7 @@ impl CompleteStructType {
         pos += 4;
 
         // members
-        let mut member_seq = Vec::with_capacity(member_count);
+        let mut member_seq = Vec::new();
         for _ in 0..member_count {
             let (member, consumed) = CompleteStructMember::deserialize(&data[pos..])?;
             pos += consumed;
@@ -1778,7 +1778,7 @@ impl CompleteTypeDetail {
             u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
 
-        let mut ann_custom = Vec::with_capacity(custom_count);
+        let mut ann_custom = Vec::new();
         for _ in 0..custom_count {
             let (ann, consumed) = AppliedAnnotation::deserialize(&data[pos..])?;
             pos += consumed;
@@ -2061,7 +2061,7 @@ impl MinimalEnumeratedType {
         pos += 4;
 
         // literals
-        let mut literal_seq = Vec::with_capacity(literal_count);
+        let mut literal_seq = Vec::new();
         for _ in 0..literal_count {
             let (literal, consumed) = MinimalEnumeratedLiteral::deserialize(&data[pos..])?;
             pos += consumed;
@@ -2169,7 +2169,7 @@ impl CompleteEnumeratedType {
         pos += 4;
 
         // literals
-        let mut literal_seq = Vec::with_capacity(literal_count);
+        let mut literal_seq = Vec::new();
         for _ in 0..literal_count {
             let (literal, consumed) = CompleteEnumeratedLiteral::deserialize(&data[pos..])?;
             pos += consumed;
@@ -2430,7 +2430,7 @@ impl MinimalUnionType {
             u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
 
-        let mut member_seq = Vec::with_capacity(member_count);
+        let mut member_seq = Vec::new();
         for _ in 0..member_count {
             let (member, consumed) = MinimalUnionMember::deserialize(&data[pos..])?;
             pos += consumed;
@@ -2503,7 +2503,7 @@ impl CompleteUnionType {
             u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
 
-        let mut member_seq = Vec::with_capacity(member_count);
+        let mut member_seq = Vec::new();
         for _ in 0..member_count {
             let (member, consumed) = CompleteUnionMember::deserialize(&data[pos..])?;
             pos += consumed;
@@ -2761,7 +2761,7 @@ impl MinimalBitmaskType {
             u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
 
-        let mut flag_seq = Vec::with_capacity(flag_count);
+        let mut flag_seq = Vec::new();
         for _ in 0..flag_count {
             let (flag, consumed) = MinimalBitflag::deserialize(&data[pos..])?;
             pos += consumed;
@@ -2824,7 +2824,7 @@ impl CompleteBitmaskType {
             u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
 
-        let mut flag_seq = Vec::with_capacity(flag_count);
+        let mut flag_seq = Vec::new();
         for _ in 0..flag_count {
             let (flag, consumed) = CompleteBitflag::deserialize(&data[pos..])?;
             pos += consumed;
@@ -2987,7 +2987,7 @@ impl MinimalBitsetType {
             u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
 
-        let mut field_seq = Vec::with_capacity(field_count);
+        let mut field_seq = Vec::new();
         for _ in 0..field_count {
             let (field, consumed) = MinimalBitfield::deserialize(&data[pos..])?;
             pos += consumed;
@@ -3047,7 +3047,7 @@ impl CompleteBitsetType {
             u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
 
-        let mut field_seq = Vec::with_capacity(field_count);
+        let mut field_seq = Vec::new();
         for _ in 0..field_count {
             let (field, consumed) = CompleteBitfield::deserialize(&data[pos..])?;
             pos += consumed;
@@ -3251,17 +3251,10 @@ impl TypeInformation {
         Ok((TypeInformation { minimal, complete }, pos))
     }
 
-    /// Serialize as a PID_TYPE_INFORMATION (0x0075) parameter payload. Per Fast-DDS
-    /// (QosPoliciesSerializer<TypeInformationParameter>) this is a *headerless* XCDR2
-    /// PL_CDR2 (little-endian) body: a top-level DHEADER, then members @id 0x1001
-    /// (minimal) and @id 0x1002 (complete). Unlike 0x0069/0x0072, there is NO
-    /// encapsulation header — the wire bytes begin directly with the DHEADER.
     pub fn serialize_for_parameter(&self) -> Vec<u8> {
         let mut s = Xcdr2Serializer::new(true, crate::serialize::cdr::ExtensibilityKind::Mutable);
         let build = |s: &mut Xcdr2Serializer| -> Result<(), CdrError> {
             let top = s.begin_struct()?;
-            // minimal/complete are APPENDABLE (each starts with a DHEADER); emit LC=5
-            // so that DHEADER serves as the EMHEADER NEXTINT, matching Fast-CDR.
             s.write_member_with_lc(0x1001, false, LcHint::Dheader, |ser| {
                 self.minimal.write_xcdr2(ser)
             })?;
@@ -3275,10 +3268,6 @@ impl TypeInformation {
     }
 
     /// Parse a PID_TYPE_INFORMATION (0x0075) parameter payload.
-    ///
-    /// The standard (Fast-DDS) layout is headerless little-endian PL_CDR2. A legacy
-    /// int2DDS payload that still carries a PL_CDR2 encapsulation header is tolerated
-    /// by stripping it first.
     pub fn deserialize_for_parameter(data: &[u8]) -> Result<Self, String> {
         let (body, little_endian) = strip_optional_encapsulation(data);
         let mut d = Xcdr2Deserializer::new_without_header(body, little_endian);
@@ -3571,6 +3560,27 @@ pub trait HasTypeObject {
 
     /// Get the type name as used in IDL/DDS.
     fn dds_type_name() -> &'static str;
+
+    fn collect_nested_type_objects(_out: &mut Vec<(TypeIdentifier, TypeObject)>) {}
+}
+
+pub mod nested_closure {
+    use super::{HasTypeObject, TypeIdentifier, TypeObject};
+
+    pub struct Probe<T>(pub core::marker::PhantomData<T>);
+
+    /// Fallback for field types that do NOT implement `HasTypeObject`.
+    pub trait CollectFallback {
+        fn collect_nested(&self, _out: &mut Vec<(TypeIdentifier, TypeObject)>) {}
+    }
+    impl<T> CollectFallback for Probe<T> {}
+
+    /// Preferred path for field types that implement `HasTypeObject`.
+    impl<T: HasTypeObject> Probe<T> {
+        pub fn collect_nested(&self, out: &mut Vec<(TypeIdentifier, TypeObject)>) {
+            T::collect_nested_type_objects(out);
+        }
+    }
 }
 
 // ============================================================================
@@ -3654,6 +3664,10 @@ impl<T: HasTypeObject> HasTypeObject for Vec<T> {
     fn dds_type_name() -> &'static str {
         "sequence"
     }
+
+    fn collect_nested_type_objects(out: &mut Vec<(TypeIdentifier, TypeObject)>) {
+        T::collect_nested_type_objects(out);
+    }
 }
 
 impl<T: HasTypeObject> HasTypeObject for Option<T> {
@@ -3671,6 +3685,32 @@ impl<T: HasTypeObject> HasTypeObject for Option<T> {
 
     fn dds_type_name() -> &'static str {
         T::dds_type_name()
+    }
+
+    fn collect_nested_type_objects(out: &mut Vec<(TypeIdentifier, TypeObject)>) {
+        T::collect_nested_type_objects(out);
+    }
+}
+
+impl<T: HasTypeObject> HasTypeObject for Box<T> {
+    fn type_identifier() -> TypeIdentifier {
+        T::type_identifier()
+    }
+
+    fn minimal_type_object() -> MinimalTypeObject {
+        T::minimal_type_object()
+    }
+
+    fn complete_type_object() -> CompleteTypeObject {
+        T::complete_type_object()
+    }
+
+    fn dds_type_name() -> &'static str {
+        T::dds_type_name()
+    }
+
+    fn collect_nested_type_objects(out: &mut Vec<(TypeIdentifier, TypeObject)>) {
+        T::collect_nested_type_objects(out);
     }
 }
 
@@ -3697,6 +3737,10 @@ macro_rules! impl_array_has_type_object {
 
                 fn dds_type_name() -> &'static str {
                     "array"
+                }
+
+                fn collect_nested_type_objects(out: &mut Vec<(TypeIdentifier, TypeObject)>) {
+                    T::collect_nested_type_objects(out);
                 }
             }
         )*

@@ -1045,9 +1045,6 @@ impl super::ParsedBuiltinTopicData {
                 id: ParameterId::PidTypeInformation,
                 value: ParameterValue::TypeInformation(type_info),
             });
-            // Legacy 0x0069 carries a single TypeIdentifier (CDR_LE encapsulated),
-            // not a TypeInformation. Fast-DDS gates 0x0075 by vendor, so this keeps
-            // type discovery working with eProsima peers.
             parameters.push(PlCdrParameter {
                 id: ParameterId::PidTypeIdV1,
                 value: ParameterValue::TypeIdentifierV1(type_id.clone()),
