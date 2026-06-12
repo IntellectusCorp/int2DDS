@@ -493,7 +493,8 @@ impl DomainParticipant {
         };
         reader_qos.destination_order =
             DestinationOrderQosPolicy { kind: DestinationOrderQosPolicyKind::ByReceptionTimestamp };
-        reader_qos.history = HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepLast(1) };
+        reader_qos.history =
+            HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepLast(1), strict: true };
         reader_qos.resource_limits = ResourceLimitsQosPolicy {
             max_instances: LENGTH_UNLIMITED,
             max_samples: LENGTH_UNLIMITED,
