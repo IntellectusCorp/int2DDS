@@ -285,7 +285,7 @@ impl PlCdrParser {
     fn parse_string_sequence(&self, data: &[u8]) -> Result<Vec<String>, String> {
         let mut reader = PlCdrReader::new(data, self.endianness);
         let count = reader.read_u32()? as usize;
-        let mut strings = Vec::with_capacity(count);
+        let mut strings = Vec::new();
 
         for _ in 0..count {
             let length = reader.read_u32()? as usize;
@@ -353,7 +353,7 @@ impl PlCdrParser {
     fn parse_property_list(&self, data: &[u8]) -> Result<Vec<Property>, String> {
         let mut reader = PlCdrReader::new(data, self.endianness);
         let count = reader.read_u32()? as usize;
-        let mut properties = Vec::with_capacity(count);
+        let mut properties = Vec::new();
 
         for _ in 0..count {
             let name_len = reader.read_u32()? as usize;
@@ -744,10 +744,13 @@ impl PlCdrParser {
                 };
                 match result {
                     Ok((type_obj, _consumed)) => ParameterValue::TypeObject(type_obj),
-                    Err(e) => {
-                        warn!("Failed to parse TypeObject: {}", e);
-                        ParameterValue::Unknown(data)
-                    }
+                    Err(e) => match crate::xtypes::TypeObjectV1::deserialize(data) {
+                        Ok((type_obj_v1, _consumed)) => ParameterValue::TypeObjectV1(type_obj_v1),
+                        Err(e_v1) => {
+                            warn!("Failed to parse TypeObject (v2: {}; v1: {})", e, e_v1);
+                            ParameterValue::Unknown(data)
+                        }
+                    },
                 }
             }
             _ => ParameterValue::Unknown(data),

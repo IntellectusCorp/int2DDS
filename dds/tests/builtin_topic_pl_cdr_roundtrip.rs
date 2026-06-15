@@ -25,8 +25,6 @@ use int2dds::{
     },
 };
 
-// ---------- helpers ----------
-
 /// PL_CDR_LE encapsulation prefix in big-endian-on-wire bytes.
 const PL_CDR_LE_HEADER: [u8; 4] = [0x00, 0x03, 0x00, 0x00];
 
@@ -46,9 +44,6 @@ fn locator(port: u32, addr_seed: u8) -> Locator {
     Locator::new(1, port, addr)
 }
 
-/// Count how many times the little-endian PID (2 bytes) appears at a
-/// parameter-list start position (i.e. 4-byte aligned, after the 4-byte
-/// encapsulation header, before sentinel).
 fn count_pid_occurrences(payload: &[u8], pid_le: u16) -> usize {
     assert!(payload.len() >= 4, "payload too short for encap header");
     let mut pos = 4usize;
@@ -75,8 +70,6 @@ fn assert_starts_with_pl_cdr_le(payload: &[u8]) {
     assert!(payload.len() >= 4, "payload too short");
     assert_eq!(&payload[..4], &PL_CDR_LE_HEADER, "expected PL_CDR_LE encapsulation header");
 }
-
-// ---------- Publication ----------
 
 fn sample_publication() -> PublicationBuiltinTopicData {
     let mut p = PublicationBuiltinTopicData::new(
@@ -144,8 +137,6 @@ fn publication_with_locators_emits_one_pid_per_locator() {
     assert_eq!(count_pid_occurrences(&bytes, 0x002f), 2);
 }
 
-// ---------- Subscription ----------
-
 fn sample_subscription() -> SubscriptionBuiltinTopicData {
     let qos = DataReaderQos {
         reliability: ReliabilityQosPolicy {
@@ -201,8 +192,6 @@ fn subscription_pid_topic_name_present() {
     assert_eq!(count_pid_occurrences(&bytes, 0x0030), 1);
 }
 
-// ---------- Participant ----------
-
 fn sample_participant() -> ParticipantBuiltinTopicData {
     ParticipantBuiltinTopicData::new(
         make_guid(0x55),
@@ -220,8 +209,6 @@ fn participant_pl_cdr_roundtrip() {
         .expect("PL_CDR parse should succeed");
     assert_eq!(parsed.user_data().value, original.user_data().value);
 }
-
-// ---------- Topic ----------
 
 fn sample_topic() -> TopicBuiltinTopicData {
     TopicBuiltinTopicData::new(
@@ -261,8 +248,6 @@ fn topic_pid_name_present() {
 const PID_TYPE_IDV1: u16 = 0x0069;
 const PID_TYPE_INFORMATION: u16 = 0x0075;
 
-/// PL_CDR2_LE encapsulation header. A standard 0x0075 payload must NOT begin with
-/// this — Fast-DDS serializes TypeInformation headerless (DHEADER first).
 const PL_CDR2_LE_HEADER: [u8; 4] = [0x00, 0x0b, 0x00, 0x00];
 /// CDR_LE (XCDRv1) encapsulation header expected at the start of 0x0072 / standard 0x0069.
 const CDR_LE_HEADER: [u8; 4] = [0x00, 0x01, 0x00, 0x00];
@@ -313,12 +298,9 @@ fn type_information_parameter_roundtrip() {
     // Headerless PL_CDR2: must NOT begin with an encapsulation header.
     assert_ne!(&bytes[..4], &PL_CDR2_LE_HEADER, "0x0075 must be headerless (no encap header)");
 
-    // After the top DHEADER(4) the first member EMHEADER must carry member id 0x1001.
     let emh = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
     assert_eq!(emh & 0x0FFF_FFFF, 0x1001, "first member id must be 0x1001 (minimal)");
-    // Members use LC=5 (the inner DHEADER doubles as NEXTINT), matching Fast-CDR's
-    // wire layout — no redundant length word.
-    assert_eq!(emh >> 28, 5, "TypeInformation members must use LC=5 like Fast-DDS");
+    assert_eq!(emh >> 28, 5, "TypeInformation members must use LC=5");
 
     let parsed =
         TypeInformation::deserialize_for_parameter(&bytes).expect("0x0075 payload must round-trip");

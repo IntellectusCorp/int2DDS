@@ -53,6 +53,12 @@ pub struct BuiltinEndpoints {
     // WLP (Liveliness)
     pub builtin_participant_message_writer: Arc<StatefulWriter>,
     pub builtin_participant_message_reader: Arc<StatefulReader>,
+
+    // TypeLookup
+    pub type_lookup_request_writer: Arc<StatefulWriter>,
+    pub type_lookup_request_reader: Arc<StatefulReader>,
+    pub type_lookup_reply_writer: Arc<StatefulWriter>,
+    pub type_lookup_reply_reader: Arc<StatefulReader>,
 }
 
 impl BuiltinEndpoints {
@@ -196,6 +202,58 @@ impl BuiltinEndpoints {
             participant_guid,
         );
 
+        // TypeLookup service (keyless, Reliable RPC endpoints)
+        let type_lookup_request_writer = StatefulWriter::new(
+            Guid::new(participant_guid.prefix(), EntityId::TYPE_LOOKUP_REQUEST_WRITER),
+            Vec::new(),
+            Vec::new(),
+            ReliabilityQosPolicyKind::Reliable,
+            TopicKind::NoKey,
+            EntityId::TYPE_LOOKUP_REQUEST_WRITER,
+            1024,
+            None,
+            PublicationBuiltinTopicData::default(),
+            Weak::new(),
+        );
+        let type_lookup_request_reader = StatefulReader::new(
+            Guid::new(participant_guid.prefix(), EntityId::TYPE_LOOKUP_REQUEST_READER),
+            TopicKind::NoKey,
+            ReliabilityQosPolicyKind::Reliable,
+            Vec::new(),
+            Vec::new(),
+            EntityId::TYPE_LOOKUP_REQUEST_READER,
+            false,
+            None,
+            None,
+            SubscriptionBuiltinTopicData::default(),
+            participant_guid,
+        );
+        let type_lookup_reply_writer = StatefulWriter::new(
+            Guid::new(participant_guid.prefix(), EntityId::TYPE_LOOKUP_REPLY_WRITER),
+            Vec::new(),
+            Vec::new(),
+            ReliabilityQosPolicyKind::Reliable,
+            TopicKind::NoKey,
+            EntityId::TYPE_LOOKUP_REPLY_WRITER,
+            1024,
+            None,
+            PublicationBuiltinTopicData::default(),
+            Weak::new(),
+        );
+        let type_lookup_reply_reader = StatefulReader::new(
+            Guid::new(participant_guid.prefix(), EntityId::TYPE_LOOKUP_REPLY_READER),
+            TopicKind::NoKey,
+            ReliabilityQosPolicyKind::Reliable,
+            Vec::new(),
+            Vec::new(),
+            EntityId::TYPE_LOOKUP_REPLY_READER,
+            false,
+            None,
+            None,
+            SubscriptionBuiltinTopicData::default(),
+            participant_guid,
+        );
+
         Self {
             spdp_builtin_participant_writer: Arc::new(Mutex::new(spdp_writer)),
             spdp_builtin_participant_reader: Arc::new(spdp_reader),
@@ -207,6 +265,10 @@ impl BuiltinEndpoints {
             sedp_builtin_topics_reader: Arc::new(sedp_topics_reader),
             builtin_participant_message_writer: Arc::new(builtin_participant_message_writer),
             builtin_participant_message_reader: Arc::new(builtin_participant_message_reader),
+            type_lookup_request_writer: Arc::new(type_lookup_request_writer),
+            type_lookup_request_reader: Arc::new(type_lookup_request_reader),
+            type_lookup_reply_writer: Arc::new(type_lookup_reply_writer),
+            type_lookup_reply_reader: Arc::new(type_lookup_reply_reader),
         }
     }
 
@@ -368,6 +430,26 @@ impl BuiltinEndpoints {
             );
         } else {
             debug!("Failed to lock SEDP builtin participant message reader writer proxies");
+        }
+
+        // TypeLookup service
+        for writer in [&self.type_lookup_request_writer, &self.type_lookup_reply_writer] {
+            if let Ok(mut reader_proxies) = writer.reader_proxies().lock() {
+                reader_proxies.retain(|reader_proxy| {
+                    reader_proxy.remote_reader_guid().prefix() != terminated_participant_guid_prefix
+                });
+            } else {
+                debug!("Failed to lock TypeLookup writer reader proxies");
+            }
+        }
+        for reader in [&self.type_lookup_request_reader, &self.type_lookup_reply_reader] {
+            if let Ok(mut writer_proxies) = reader.writer_proxies().lock() {
+                writer_proxies.retain(|writer_proxy| {
+                    writer_proxy.remote_writer_guid().prefix() != terminated_participant_guid_prefix
+                });
+            } else {
+                debug!("Failed to lock TypeLookup reader writer proxies");
+            }
         }
     }
 }

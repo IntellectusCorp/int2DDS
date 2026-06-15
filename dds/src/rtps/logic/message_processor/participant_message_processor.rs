@@ -211,6 +211,51 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
             );
         }
 
+        // TypeLookup service (DDS-XTypes 1.3 §7.6.3) - request/reply RPC pairs
+        if spdp_discovered_participant_data
+            .available_builtin_endpoints()
+            .contains(BuiltinEndpointFlag::BUILTIN_ENDPOINT_TYPELOOKUP_SERVICE_REQUEST_DATA_READER)
+        {
+            self.add_reader_proxy_to_builtin_writer(
+                participant.type_lookup_request_writer(),
+                spdp_discovered_participant_data.clone(),
+                EntityId::TYPE_LOOKUP_REQUEST_READER,
+            );
+        }
+
+        if spdp_discovered_participant_data
+            .available_builtin_endpoints()
+            .contains(BuiltinEndpointFlag::BUILTIN_ENDPOINT_TYPELOOKUP_SERVICE_REQUEST_DATA_WRITER)
+        {
+            self.add_writer_proxy_to_builtin_reader(
+                participant.type_lookup_request_reader(),
+                spdp_discovered_participant_data.clone(),
+                EntityId::TYPE_LOOKUP_REQUEST_WRITER,
+            );
+        }
+
+        if spdp_discovered_participant_data
+            .available_builtin_endpoints()
+            .contains(BuiltinEndpointFlag::BUILTIN_ENDPOINT_TYPELOOKUP_SERVICE_REPLY_DATA_READER)
+        {
+            self.add_reader_proxy_to_builtin_writer(
+                participant.type_lookup_reply_writer(),
+                spdp_discovered_participant_data.clone(),
+                EntityId::TYPE_LOOKUP_REPLY_READER,
+            );
+        }
+
+        if spdp_discovered_participant_data
+            .available_builtin_endpoints()
+            .contains(BuiltinEndpointFlag::BUILTIN_ENDPOINT_TYPELOOKUP_SERVICE_REPLY_DATA_WRITER)
+        {
+            self.add_writer_proxy_to_builtin_reader(
+                participant.type_lookup_reply_reader(),
+                spdp_discovered_participant_data.clone(),
+                EntityId::TYPE_LOOKUP_REPLY_WRITER,
+            );
+        }
+
         Ok(())
     }
 
