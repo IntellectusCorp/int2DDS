@@ -253,6 +253,17 @@ impl<'a> CdrDeserializer<'a> {
         }
     }
 
+    /// Validate a wire-declared count against remaining bytes before allocating.
+    #[inline]
+    pub(super) fn checked_capacity(
+        &self,
+        count: usize,
+        min_elem_size: usize,
+    ) -> Result<usize, CdrError> {
+        self.check_available(count.saturating_mul(min_elem_size.max(1)))?;
+        Ok(count)
+    }
+
     pub fn read_parameter_header(&mut self) -> Result<PlCdrMemberHeader, CdrError> {
         self.align(4);
         self.check_available(4)?;

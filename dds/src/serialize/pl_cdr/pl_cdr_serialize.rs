@@ -384,6 +384,13 @@ impl PlCdrSerializer {
                     buffer.extend(std::iter::repeat_n(0u8, padding));
                 }
             }
+            ParameterValue::TypeObjectV1(type_obj) => {
+                buffer.extend_from_slice(&type_obj.serialize());
+                let padding = (4 - (buffer.len() % 4)) % 4;
+                if padding > 0 {
+                    buffer.extend(std::iter::repeat_n(0u8, padding));
+                }
+            }
             ParameterValue::ContentFilterProperty(cfp) => {
                 self.write_string(&mut buffer, &cfp.content_filtered_topic_name);
                 self.write_string(&mut buffer, &cfp.related_topic_name);
@@ -1038,9 +1045,6 @@ impl super::ParsedBuiltinTopicData {
                 id: ParameterId::PidTypeInformation,
                 value: ParameterValue::TypeInformation(type_info),
             });
-            // Legacy 0x0069 carries a single TypeIdentifier (CDR_LE encapsulated),
-            // not a TypeInformation. Fast-DDS gates 0x0075 by vendor, so this keeps
-            // type discovery working with eProsima peers.
             parameters.push(PlCdrParameter {
                 id: ParameterId::PidTypeIdV1,
                 value: ParameterValue::TypeIdentifierV1(type_id.clone()),

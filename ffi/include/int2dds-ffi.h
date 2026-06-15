@@ -123,6 +123,14 @@
 
 #define INT2DDS_FIELD_WSTRING 15
 
+#define INT2DDS_FIELD_NESTED 16
+
+#define INT2DDS_FIELD_SEQUENCE 17
+
+#define INT2DDS_FIELD_ARRAY 18
+
+#define INT2DDS_FIELD_MAP 19
+
 #define INT2DDS_MEMBER_KEY (1 << 0)
 
 #define INT2DDS_MEMBER_OPTIONAL (1 << 1)
@@ -207,6 +215,8 @@ typedef struct Int2DdsDataWriter Int2DdsDataWriter;
  * Opaque QoS handle for DataWriter
  */
 typedef struct Int2DdsDataWriterQos Int2DdsDataWriterQos;
+
+typedef struct Int2DdsDynamicData Int2DdsDynamicData;
 
 /**
  * Opaque handle to a GuardCondition
@@ -1057,7 +1067,16 @@ Int2DdsRet int2dds_create_topic_with_type_object(const struct Int2DdsParticipant
                                                  struct Int2DdsTopic **out);
 
 /**
- * Read a string field by name from a serialized CDR sample.
+ * Read a char8 field (returned as its byte value) from a flat sample.
+ */
+Int2DdsRet int2dds_dynamic_sample_get_char8(const uint8_t *bytes,
+                                            uintptr_t len,
+                                            const struct Int2DdsTypeObject *type_obj,
+                                            const char *field_name,
+                                            uint8_t *out);
+
+/**
+ * Read a string field by name from a flat sample.
  */
 Int2DdsRet int2dds_dynamic_sample_get_string(const uint8_t *bytes,
                                              uintptr_t len,
@@ -1066,6 +1085,48 @@ Int2DdsRet int2dds_dynamic_sample_get_string(const uint8_t *bytes,
                                              char *out_buf,
                                              uintptr_t buf_cap,
                                              uintptr_t *out_len);
+
+Int2DdsRet int2dds_dynamic_data_from_sample(const struct Int2DdsParticipant *participant,
+                                            const uint8_t *bytes,
+                                            uintptr_t len,
+                                            const struct Int2DdsTypeObject *type_obj,
+                                            struct Int2DdsDynamicData **out);
+
+/**
+ * Destroy a DynamicData handle. Safe to call with null.
+ */
+void int2dds_dynamic_data_destroy(struct Int2DdsDynamicData *d);
+
+/**
+ * Read a char8 field (as its byte value) at `field_path`.
+ */
+Int2DdsRet int2dds_dynamic_data_get_char8(const struct Int2DdsDynamicData *data,
+                                          const char *field_path,
+                                          uint8_t *out);
+
+/**
+ * Read a string field at `field_path` into a caller-supplied buffer.
+ */
+Int2DdsRet int2dds_dynamic_data_get_string(const struct Int2DdsDynamicData *data,
+                                           const char *field_path,
+                                           char *out_buf,
+                                           uintptr_t buf_cap,
+                                           uintptr_t *out_len);
+
+/**
+ * Get the element count of a sequence/array field at `field_path`.
+ */
+Int2DdsRet int2dds_dynamic_data_get_len(const struct Int2DdsDynamicData *data,
+                                        const char *field_path,
+                                        uintptr_t *out);
+
+/**
+ * Extract a nested struct value at `field_path` as a new DynamicData handle.
+ * Destroy it with `int2dds_dynamic_data_destroy`.
+ */
+Int2DdsRet int2dds_dynamic_data_get_member(const struct Int2DdsDynamicData *data,
+                                           const char *field_path,
+                                           struct Int2DdsDynamicData **out);
 
 /**
  * Sets the IPv4 multicast TTL fallback via the `INT2DDS_MULTICAST_TTL`
@@ -3238,15 +3299,6 @@ Int2DdsRet int2dds_create_topic_with_field_descriptors(const struct Int2DdsParti
                                                        uintptr_t field_count,
                                                        struct Int2DdsTopic **topic_out);
 
-/**
- * Create a new type info builder.
- *
- * # Safety
- * - `type_name` must be a valid null-terminated C string
- * - `extensibility`: 0 = Final, 1 = Appendable, 2 = Mutable
- * - `out` must be a valid pointer to a null pointer
- * - The returned type info must be freed with `int2dds_type_info_destroy`
- */
 Int2DdsRet int2dds_type_info_create(const char *type_name,
                                     int32_t extensibility,
                                     struct Int2DdsTypeInfo **out);
@@ -3284,6 +3336,21 @@ Int2DdsRet int2dds_type_info_add_named_type_field(struct Int2DdsTypeInfo *type_i
                                                   const char *field_name,
                                                   const char *type_hash_name,
                                                   int32_t flags);
+
+Int2DdsRet int2dds_type_info_add_sequence_of_named_field(struct Int2DdsTypeInfo *type_info,
+                                                         const char *field_name,
+                                                         const char *element_hash_name,
+                                                         uint32_t bound,
+                                                         int32_t flags);
+
+Int2DdsRet int2dds_type_info_add_array_of_named_field(struct Int2DdsTypeInfo *type_info,
+                                                      const char *field_name,
+                                                      const char *element_hash_name,
+                                                      uint32_t array_size,
+                                                      int32_t flags);
+
+Int2DdsRet int2dds_type_info_to_type_object(const struct Int2DdsTypeInfo *type_info,
+                                            struct Int2DdsTypeObject **out);
 
 /**
  * Destroy a type info builder.
@@ -3503,7 +3570,6 @@ Int2DdsRet int2dds_dynamic_sample_get_bool  (const uint8_t *bytes, uintptr_t len
 Int2DdsRet int2dds_dynamic_sample_get_i8    (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, int8_t   *out);
 Int2DdsRet int2dds_dynamic_sample_get_u8    (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, uint8_t  *out);
 Int2DdsRet int2dds_dynamic_sample_get_byte  (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, uint8_t  *out);
-Int2DdsRet int2dds_dynamic_sample_get_char8 (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, uint8_t  *out);
 Int2DdsRet int2dds_dynamic_sample_get_i16   (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, int16_t  *out);
 Int2DdsRet int2dds_dynamic_sample_get_u16   (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, uint16_t *out);
 Int2DdsRet int2dds_dynamic_sample_get_i32   (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, int32_t  *out);
@@ -3512,5 +3578,18 @@ Int2DdsRet int2dds_dynamic_sample_get_i64   (const uint8_t *bytes, uintptr_t len
 Int2DdsRet int2dds_dynamic_sample_get_u64   (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, uint64_t *out);
 Int2DdsRet int2dds_dynamic_sample_get_f32   (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, float    *out);
 Int2DdsRet int2dds_dynamic_sample_get_f64   (const uint8_t *bytes, uintptr_t len, const struct Int2DdsTypeObject *type_obj, const char *field_name, double   *out);
+
+/* Handle-based DynamicData getters (macro-generated; manually declared). */
+Int2DdsRet int2dds_dynamic_data_get_bool (const struct Int2DdsDynamicData *data, const char *field_path, bool     *out);
+Int2DdsRet int2dds_dynamic_data_get_i8   (const struct Int2DdsDynamicData *data, const char *field_path, int8_t   *out);
+Int2DdsRet int2dds_dynamic_data_get_u8   (const struct Int2DdsDynamicData *data, const char *field_path, uint8_t  *out);
+Int2DdsRet int2dds_dynamic_data_get_i16  (const struct Int2DdsDynamicData *data, const char *field_path, int16_t  *out);
+Int2DdsRet int2dds_dynamic_data_get_u16  (const struct Int2DdsDynamicData *data, const char *field_path, uint16_t *out);
+Int2DdsRet int2dds_dynamic_data_get_i32  (const struct Int2DdsDynamicData *data, const char *field_path, int32_t  *out);
+Int2DdsRet int2dds_dynamic_data_get_u32  (const struct Int2DdsDynamicData *data, const char *field_path, uint32_t *out);
+Int2DdsRet int2dds_dynamic_data_get_i64  (const struct Int2DdsDynamicData *data, const char *field_path, int64_t  *out);
+Int2DdsRet int2dds_dynamic_data_get_u64  (const struct Int2DdsDynamicData *data, const char *field_path, uint64_t *out);
+Int2DdsRet int2dds_dynamic_data_get_f32  (const struct Int2DdsDynamicData *data, const char *field_path, float    *out);
+Int2DdsRet int2dds_dynamic_data_get_f64  (const struct Int2DdsDynamicData *data, const char *field_path, double   *out);
 
 #endif  /* INT2DDS_FFI_H */

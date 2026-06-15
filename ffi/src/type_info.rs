@@ -26,6 +26,17 @@ use int2dds::{
 
 use super::error::*;
 
+/// Decode a C string argument to `&str`, returning `INT2DDS_RET_INVALID_ARGUMENT`
+/// when it is not valid UTF-8. Caller must have already null-checked the pointer.
+macro_rules! cstr_arg {
+    ($ptr:expr) => {
+        match CStr::from_ptr($ptr).to_str() {
+            Ok(s) => s,
+            Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+        }
+    };
+}
+
 /// Field type constants for C FFI.
 pub const INT2DDS_FIELD_BOOL: i32 = 0;
 pub const INT2DDS_FIELD_BYTE: i32 = 1;
@@ -43,6 +54,10 @@ pub const INT2DDS_FIELD_FLOAT64: i32 = 12;
 pub const INT2DDS_FIELD_STRING: i32 = 13;
 pub const INT2DDS_FIELD_CHAR16: i32 = 14;
 pub const INT2DDS_FIELD_WSTRING: i32 = 15;
+pub const INT2DDS_FIELD_NESTED: i32 = 16;
+pub const INT2DDS_FIELD_SEQUENCE: i32 = 17;
+pub const INT2DDS_FIELD_ARRAY: i32 = 18;
+pub const INT2DDS_FIELD_MAP: i32 = 19;
 pub const INT2DDS_MEMBER_KEY: i32 = 1 << 0;
 pub const INT2DDS_MEMBER_OPTIONAL: i32 = 1 << 1;
 pub const INT2DDS_MEMBER_MUST_UNDERSTAND: i32 = 1 << 2;
@@ -157,17 +172,26 @@ fn field_type_to_type_identifier(field_type: i32) -> Option<TypeIdentifier> {
     }
 }
 
-// ============================================================================
-// FFI Functions
-// ============================================================================
+fn named_type_identifier(hash_name: &str) -> TypeIdentifier {
+    TypeIdentifier::MinimalTypeId(EquivalenceHash::compute(hash_name.as_bytes()))
+}
 
-/// Create a new type info builder.
-///
-/// # Safety
-/// - `type_name` must be a valid null-terminated C string
-/// - `extensibility`: 0 = Final, 1 = Appendable, 2 = Mutable
-/// - `out` must be a valid pointer to a null pointer
-/// - The returned type info must be freed with `int2dds_type_info_destroy`
+fn plain_sequence_id(element: TypeIdentifier, bound: u32) -> TypeIdentifier {
+    TypeIdentifier::PlainSequenceLarge {
+        header: PlainCollectionHeader::default(),
+        bound,
+        element_identifier: Box::new(element),
+    }
+}
+
+fn plain_array_id(element: TypeIdentifier, array_size: u32) -> TypeIdentifier {
+    TypeIdentifier::PlainArrayLarge {
+        header: PlainCollectionHeader::default(),
+        array_bound_seq: vec![array_size],
+        element_identifier: Box::new(element),
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_type_info_create(
     type_name: *const std::os::raw::c_char,
@@ -177,10 +201,7 @@ pub unsafe extern "C" fn int2dds_type_info_create(
     check_null!(type_name);
     check_null!(out);
 
-    let name_str = match CStr::from_ptr(type_name).to_str() {
-        Ok(s) => s,
-        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
-    };
+    let name_str = cstr_arg!(type_name);
 
     let ext_kind = match extensibility {
         0 => ExtensibilityKind::Final,
@@ -241,21 +262,14 @@ pub unsafe extern "C" fn int2dds_type_info_add_sequence_field(
 
     let ti = &mut *type_info;
 
-    let name_str = match CStr::from_ptr(field_name).to_str() {
-        Ok(s) => s,
-        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
-    };
+    let name_str = cstr_arg!(field_name);
 
     let element_id = match field_type_to_type_identifier(element_type) {
         Some(id) => id,
         None => return INT2DDS_RET_INVALID_ARGUMENT,
     };
 
-    let type_id = TypeIdentifier::PlainSequenceLarge {
-        header: PlainCollectionHeader::default(),
-        bound,
-        element_identifier: Box::new(element_id),
-    };
+    let type_id = plain_sequence_id(element_id, bound);
 
     ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags });
 
@@ -276,21 +290,14 @@ pub unsafe extern "C" fn int2dds_type_info_add_array_field(
 
     let ti = &mut *type_info;
 
-    let name_str = match CStr::from_ptr(field_name).to_str() {
-        Ok(s) => s,
-        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
-    };
+    let name_str = cstr_arg!(field_name);
 
     let element_id = match field_type_to_type_identifier(element_type) {
         Some(id) => id,
         None => return INT2DDS_RET_INVALID_ARGUMENT,
     };
 
-    let type_id = TypeIdentifier::PlainArrayLarge {
-        header: PlainCollectionHeader::default(),
-        array_bound_seq: vec![array_size],
-        element_identifier: Box::new(element_id),
-    };
+    let type_id = plain_array_id(element_id, array_size);
 
     ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags });
 
@@ -311,20 +318,73 @@ pub unsafe extern "C" fn int2dds_type_info_add_named_type_field(
 
     let ti = &mut *type_info;
 
-    let name_str = match CStr::from_ptr(field_name).to_str() {
-        Ok(s) => s,
-        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
-    };
+    let name_str = cstr_arg!(field_name);
+    let hash_name = cstr_arg!(type_hash_name);
 
-    let hash_name = match CStr::from_ptr(type_hash_name).to_str() {
-        Ok(s) => s,
-        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
-    };
-
-    let type_id = TypeIdentifier::MinimalTypeId(EquivalenceHash::compute(hash_name.as_bytes()));
+    let type_id = named_type_identifier(hash_name);
 
     ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags });
 
+    INT2DDS_RET_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_type_info_add_sequence_of_named_field(
+    type_info: *mut Int2DdsTypeInfo,
+    field_name: *const std::os::raw::c_char,
+    element_hash_name: *const std::os::raw::c_char,
+    bound: u32,
+    flags: i32,
+) -> Int2DdsRet {
+    check_null!(type_info);
+    check_null!(field_name);
+    check_null!(element_hash_name);
+
+    let ti = &mut *type_info;
+
+    let name_str = cstr_arg!(field_name);
+    let hash_name = cstr_arg!(element_hash_name);
+
+    let type_id = plain_sequence_id(named_type_identifier(hash_name), bound);
+
+    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags });
+
+    INT2DDS_RET_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_type_info_add_array_of_named_field(
+    type_info: *mut Int2DdsTypeInfo,
+    field_name: *const std::os::raw::c_char,
+    element_hash_name: *const std::os::raw::c_char,
+    array_size: u32,
+    flags: i32,
+) -> Int2DdsRet {
+    check_null!(type_info);
+    check_null!(field_name);
+    check_null!(element_hash_name);
+
+    let ti = &mut *type_info;
+
+    let name_str = cstr_arg!(field_name);
+    let hash_name = cstr_arg!(element_hash_name);
+
+    let type_id = plain_array_id(named_type_identifier(hash_name), array_size);
+
+    ti.fields.push(FieldInfo { name: name_str.to_string(), type_id, flags });
+
+    INT2DDS_RET_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_type_info_to_type_object(
+    type_info: *const Int2DdsTypeInfo,
+    out: *mut *mut crate::dynamic::Int2DdsTypeObject,
+) -> Int2DdsRet {
+    check_null!(type_info);
+    check_null!(out);
+    let to = (*type_info).build_type_object();
+    *out = Box::into_raw(Box::new(crate::dynamic::Int2DdsTypeObject::from_type_object(to)));
     INT2DDS_RET_OK
 }
 
@@ -443,10 +503,6 @@ mod tests {
     }
 
     /// Test that sequence fields produce the same hash as the derive macro path.
-    ///
-    /// Simulates a struct with sequence and array fields to verify that
-    /// `int2dds_type_info_add_sequence_field` and `int2dds_type_info_add_array_field`
-    /// produce correct PlainSequenceLarge/PlainArrayLarge TypeIdentifiers.
     #[test]
     fn test_sequence_type_hash_matches_derive_macro() {
         // === Path 1: FFI type_info builder ===
@@ -545,5 +601,94 @@ mod tests {
             ffi_type_id, derive_type_id,
             "TypeIdentifier hashes differ for sequence/array fields"
         );
+    }
+
+    #[test]
+    fn test_named_collection_type_hash_matches_derive_macro() {
+        use std::ffi::CString;
+
+        let name = CString::new("NamedCollType").unwrap();
+        let mut ffi_ptr: *mut Int2DdsTypeInfo = std::ptr::null_mut();
+        unsafe {
+            assert_eq!(int2dds_type_info_create(name.as_ptr(), 1, &mut ffi_ptr), INT2DDS_RET_OK);
+            let id_field = CString::new("id").unwrap();
+            assert_eq!(
+                int2dds_type_info_add_field(
+                    ffi_ptr,
+                    id_field.as_ptr(),
+                    INT2DDS_FIELD_INT32,
+                    INT2DDS_MEMBER_KEY,
+                ),
+                INT2DDS_RET_OK
+            );
+            let seq_field = CString::new("leaves").unwrap();
+            let leaf_name = CString::new("NestedLeaf").unwrap();
+            assert_eq!(
+                int2dds_type_info_add_sequence_of_named_field(
+                    ffi_ptr,
+                    seq_field.as_ptr(),
+                    leaf_name.as_ptr(),
+                    0,
+                    0,
+                ),
+                INT2DDS_RET_OK
+            );
+            let arr_field = CString::new("fixed").unwrap();
+            assert_eq!(
+                int2dds_type_info_add_array_of_named_field(
+                    ffi_ptr,
+                    arr_field.as_ptr(),
+                    leaf_name.as_ptr(),
+                    3,
+                    0,
+                ),
+                INT2DDS_RET_OK
+            );
+        }
+        let ti = unsafe { &*ffi_ptr };
+        let ffi_type_id = ti.build_type_identifier();
+
+        let leaf_element =
+            TypeIdentifier::MinimalTypeId(EquivalenceHash::compute("NestedLeaf".as_bytes()));
+        let type_flags =
+            TypeFlag::new(int2dds::xtypes::ExtensibilityKind::Appendable, false, false);
+        let mut struct_type =
+            CompleteStructType::new(type_flags, "NamedCollType".to_string(), None);
+        struct_type.add_member(CompleteStructMember::new(
+            0,
+            MemberFlag::new(TryConstructKind::Discard, false, false, false, true, false),
+            TypeIdentifier::Int32,
+            "id".to_string(),
+        ));
+        struct_type.add_member(CompleteStructMember::new(
+            1,
+            MemberFlag::new(TryConstructKind::Discard, false, false, false, false, false),
+            TypeIdentifier::PlainSequenceLarge {
+                header: PlainCollectionHeader::default(),
+                bound: 0,
+                element_identifier: Box::new(leaf_element.clone()),
+            },
+            "leaves".to_string(),
+        ));
+        struct_type.add_member(CompleteStructMember::new(
+            2,
+            MemberFlag::new(TryConstructKind::Discard, false, false, false, false, false),
+            TypeIdentifier::PlainArrayLarge {
+                header: PlainCollectionHeader::default(),
+                array_bound_seq: vec![3],
+                element_identifier: Box::new(leaf_element),
+            },
+            "fixed".to_string(),
+        ));
+
+        let derive_type_obj = TypeObject::Complete(CompleteTypeObject::Struct(struct_type));
+        let derive_type_id = TypeIdentifier::CompleteTypeId(derive_type_obj.compute_hash());
+
+        assert_eq!(
+            ffi_type_id, derive_type_id,
+            "TypeIdentifier hashes differ for named sequence/array element fields"
+        );
+
+        unsafe { int2dds_type_info_destroy(ffi_ptr) };
     }
 }
