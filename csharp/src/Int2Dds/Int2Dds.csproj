@@ -8,7 +8,7 @@
 
     <!-- Package metadata -->
     <PackageId>Int2Dds</PackageId>
-    <Version>0.1.0</Version>
+    <!-- Version is centralized in csharp/Directory.Build.props (read from ../Cargo.toml). -->
     <Authors>IntellectusCorp</Authors>
     <Description>C# binding for int2DDS - a high-performance DDS implementation</Description>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>

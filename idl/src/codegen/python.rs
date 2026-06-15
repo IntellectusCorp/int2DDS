@@ -173,7 +173,9 @@ impl<'a> PyGen<'a> {
         // _serialize_cdr_inline (bit-packing)
         self.line("def _serialize_cdr_inline(self, w: CdrWriter) -> None:");
         self.indent += 1;
-        self.line("\"\"\"Serialize fields directly into an existing writer (no encap header).\"\"\"");
+        self.line(
+            "\"\"\"Serialize fields directly into an existing writer (no encap header).\"\"\"",
+        );
         self.line("_packed = 0");
         let mut bit_offset: u32 = 0;
         for f in &b.fields {
@@ -201,7 +203,10 @@ impl<'a> PyGen<'a> {
 
         // _deserialize_cdr_inline (bit-unpacking)
         self.line("@classmethod");
-        self.line(&format!("def _deserialize_cdr_inline(cls, r: CdrReader) -> \"{}\":", class_name));
+        self.line(&format!(
+            "def _deserialize_cdr_inline(cls, r: CdrReader) -> \"{}\":",
+            class_name
+        ));
         self.indent += 1;
         self.line("\"\"\"Deserialize from an existing CdrReader (no encapsulation header).\"\"\"");
         self.line(&format!("_packed = r.{}()", read_fn));
@@ -210,10 +215,7 @@ impl<'a> PyGen<'a> {
         for f in &b.fields {
             let field_name = naming::escape_keyword(&f.name, naming::TargetLang::Python);
             let mask: u64 = (1u64 << f.bit_width) - 1;
-            self.line(&format!(
-                "obj.{} = (_packed >> {}) & 0x{:x}",
-                field_name, bit_offset, mask
-            ));
+            self.line(&format!("obj.{} = (_packed >> {}) & 0x{:x}", field_name, bit_offset, mask));
             bit_offset += f.bit_width;
         }
         self.line("return obj");
@@ -281,7 +283,13 @@ impl<'a> PyGen<'a> {
     fn label_to_python(&self, label: &ResolvedUnionLabel) -> String {
         match label {
             ResolvedUnionLabel::Int(v) => format!("{}", v),
-            ResolvedUnionLabel::Bool(v) => if *v { "True".to_string() } else { "False".to_string() },
+            ResolvedUnionLabel::Bool(v) => {
+                if *v {
+                    "True".to_string()
+                } else {
+                    "False".to_string()
+                }
+            }
             ResolvedUnionLabel::Ident(s) => s.clone(),
         }
     }
@@ -344,7 +352,9 @@ impl<'a> PyGen<'a> {
         // _serialize_cdr_inline
         self.line("def _serialize_cdr_inline(self, w: CdrWriter) -> None:");
         self.indent += 1;
-        self.line("\"\"\"Serialize fields directly into an existing writer (no encap header).\"\"\"");
+        self.line(
+            "\"\"\"Serialize fields directly into an existing writer (no encap header).\"\"\"",
+        );
         if needs_union_dh {
             self.line("if w._xcdr2:");
             self.indent += 1;
@@ -374,7 +384,10 @@ impl<'a> PyGen<'a> {
 
         // _deserialize_cdr_inline
         self.line("@classmethod");
-        self.line(&format!("def _deserialize_cdr_inline(cls, r: CdrReader) -> \"{}\":", class_name));
+        self.line(&format!(
+            "def _deserialize_cdr_inline(cls, r: CdrReader) -> \"{}\":",
+            class_name
+        ));
         self.indent += 1;
         self.line("\"\"\"Deserialize from an existing CdrReader (no encapsulation header).\"\"\"");
         self.line("obj = cls()");
@@ -439,10 +452,8 @@ impl<'a> PyGen<'a> {
                 self.line("else:");
             }
             self.indent += 1;
-            let accessor = format!(
-                "self.{}",
-                naming::escape_keyword(&def.name, naming::TargetLang::Python)
-            );
+            let accessor =
+                format!("self.{}", naming::escape_keyword(&def.name, naming::TargetLang::Python));
             self.emit_write_field(&def.resolved_type, &accessor);
             self.indent -= 1;
         }
@@ -680,7 +691,9 @@ impl<'a> PyGen<'a> {
         let members = self.collect_all_members(s);
         self.line("def _serialize_cdr_inline(self, w: CdrWriter) -> None:");
         self.indent += 1;
-        self.line("\"\"\"Serialize fields directly into an existing writer (no encap header).\"\"\"");
+        self.line(
+            "\"\"\"Serialize fields directly into an existing writer (no encap header).\"\"\"",
+        );
 
         match s.extensibility {
             ExtensibilityKind::Final => {
@@ -1160,7 +1173,8 @@ impl<'a> PyGen<'a> {
         self.line("\"\"\"Serialize key fields only (big-endian, no encapsulation).\"\"\"");
 
         let all_members = self.collect_all_members(s);
-        let key_fields: Vec<ResolvedMember> = all_members.into_iter().filter(|m| m.is_key).collect();
+        let key_fields: Vec<ResolvedMember> =
+            all_members.into_iter().filter(|m| m.is_key).collect();
 
         if key_fields.is_empty() {
             self.line("return b\"\"");
@@ -1271,7 +1285,11 @@ mod tests {
         assert!(code.contains("self.type_"), "serialize should use escaped name: {}", code);
         assert!(code.contains("self.class_"), "serialize should use escaped name: {}", code);
         // Deserialization return should use escaped names
-        assert!(code.contains("return cls(type_, class_)"), "return should use escaped names: {}", code);
+        assert!(
+            code.contains("return cls(type_, class_)"),
+            "return should use escaped names: {}",
+            code
+        );
     }
 
     #[test]
