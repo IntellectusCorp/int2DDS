@@ -3314,6 +3314,19 @@ Int2DdsRet int2dds_waitset_new(struct Int2DdsWaitSet **waitset_out);
 Int2DdsRet int2dds_waitset_wait(const struct Int2DdsWaitSet *waitset, int64_t timeout_ms);
 
 /**
+ * Wait for conditions to be triggered, with nanosecond timeout resolution.
+ *
+ * Identical to `int2dds_waitset_wait` but the timeout is given in nanoseconds so
+ * sub-millisecond waits are honored. Additive: the millisecond entry point is
+ * unchanged.
+ *
+ * # Safety
+ * - `waitset` must be a valid waitset
+ * - `timeout_ns` is the timeout in nanoseconds, or -1 for infinite
+ */
+Int2DdsRet int2dds_waitset_wait_ns(const struct Int2DdsWaitSet *waitset, int64_t timeout_ns);
+
+/**
  * Wait for conditions to be triggered and return the triggered conditions
  *
  * # Safety
