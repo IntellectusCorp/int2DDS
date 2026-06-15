@@ -1273,6 +1273,19 @@ Int2DdsRet int2dds_datawriter_get_qos(const struct Int2DdsDataWriter *writer,
                                       struct Int2DdsDataWriterQos **qos_out);
 
 /**
+ * Get the 16-byte RTPS GUID of a DataWriter.
+ *
+ * Writes the writer's endpoint GUID (the same value advertised over SEDP
+ * discovery as `endpoint_guid`) into `guid_out`. Read-only.
+ *
+ * # Safety
+ * - `writer` must be a valid datawriter
+ * - `guid_out` must be a valid pointer to a 16-byte buffer
+ */
+Int2DdsRet int2dds_datawriter_get_guid(const struct Int2DdsDataWriter *writer,
+                                       uint8_t (*guid_out)[16]);
+
+/**
  * Delete a Publisher
  *
  * # Safety
@@ -2638,6 +2651,19 @@ Int2DdsRet int2dds_datareader_set_qos(const struct Int2DdsDataReader *reader,
  */
 Int2DdsRet int2dds_datareader_get_qos(const struct Int2DdsDataReader *reader,
                                       struct Int2DdsDataReaderQos **qos_out);
+
+/**
+ * Get the 16-byte RTPS GUID of a DataReader.
+ *
+ * Writes the reader's endpoint GUID (the same value advertised over SEDP
+ * discovery as `endpoint_guid`) into `guid_out`. Read-only.
+ *
+ * # Safety
+ * - `reader` must be a valid datareader
+ * - `guid_out` must be a valid pointer to a 16-byte buffer
+ */
+Int2DdsRet int2dds_datareader_get_guid(const struct Int2DdsDataReader *reader,
+                                       uint8_t (*guid_out)[16]);
 
 /**
  * Check whether a DataReader currently has any cached samples.

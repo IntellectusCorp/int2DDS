@@ -745,6 +745,28 @@ pub unsafe extern "C" fn int2dds_datareader_get_qos(
     INT2DDS_RET_OK
 }
 
+/// Get the 16-byte RTPS GUID of a DataReader.
+///
+/// Writes the reader's endpoint GUID (the same value advertised over SEDP
+/// discovery as `endpoint_guid`) into `guid_out`. Read-only.
+///
+/// # Safety
+/// - `reader` must be a valid datareader
+/// - `guid_out` must be a valid pointer to a 16-byte buffer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_get_guid(
+    reader: *const Int2DdsDataReader,
+    guid_out: *mut [u8; 16],
+) -> Int2DdsRet {
+    check_null!(reader);
+    check_null!(guid_out);
+
+    let reader_ref = &*reader;
+    *guid_out = reader_ref.inner.guid().to_bytes();
+
+    INT2DDS_RET_OK
+}
+
 /// Check whether a DataReader currently has any cached samples.
 ///
 /// This is a level-triggered readiness check over the local reader cache.
