@@ -241,6 +241,28 @@ pub unsafe extern "C" fn int2dds_datawriter_get_qos(
     INT2DDS_RET_OK
 }
 
+/// Get the 16-byte RTPS GUID of a DataWriter.
+///
+/// Writes the writer's endpoint GUID (the same value advertised over SEDP
+/// discovery as `endpoint_guid`) into `guid_out`. Read-only.
+///
+/// # Safety
+/// - `writer` must be a valid datawriter
+/// - `guid_out` must be a valid pointer to a 16-byte buffer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_get_guid(
+    writer: *const Int2DdsDataWriter,
+    guid_out: *mut [u8; 16],
+) -> Int2DdsRet {
+    check_null!(writer);
+    check_null!(guid_out);
+
+    let writer_ref = &*writer;
+    *guid_out = writer_ref.inner.guid().to_bytes();
+
+    INT2DDS_RET_OK
+}
+
 /// Delete a Publisher
 ///
 /// # Safety

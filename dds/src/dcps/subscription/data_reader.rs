@@ -887,6 +887,13 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         <Self as DataReaderBase>::get_subscription_matched_status(self)
     }
 
+    /// Returns the 16-byte RTPS GUID of this DataReader. This is the same endpoint
+    /// GUID advertised over SEDP discovery (the `endpoint_guid` of this reader's
+    /// `SubscriptionBuiltinTopicData`). Read-only accessor; mirrors `DataWriter::guid`.
+    pub fn guid(&self) -> Guid {
+        self.guid
+    }
+
     #[inline]
     pub fn get_matched_publication_data(
         &self,
