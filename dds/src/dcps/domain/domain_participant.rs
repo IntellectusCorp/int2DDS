@@ -160,7 +160,13 @@ pub struct DomainParticipant {
         Arc<Mutex<HashMap<InstanceHandle, Vec<Weak<ContentFilteredTopic>>>>>,
     // multi_topics: Arc<Mutex<Vec<Weak<MultiTopic>>>>,
     orphaned_entities: Arc<Mutex<OrphanedEntities>>,
-    types: Arc<RwLock<HashMap<String, Arc<dyn TypeSupport>>>>,
+    // Reference-counted type registry: each create_topic registers (+1) and each
+    // delete_topic unregisters (-1); the entry is dropped only when the count reaches 0.
+    // The count prevents a concurrent topic deletion from unregistering a type that a
+    // concurrent topic/endpoint creation still needs (the previous presence-only map plus
+    // the non-atomic has_other_topics_with_type gate let a delete race ahead of a create,
+    // making find_typesupport return None and entity creation fail under node churn).
+    types: Arc<RwLock<HashMap<String, (Arc<dyn TypeSupport>, usize)>>>,
     default_subscriber_qos: Arc<Mutex<Option<SubscriberQos>>>,
     default_publisher_qos: Arc<Mutex<Option<PublisherQos>>>,
     default_topic_qos: Arc<Mutex<Option<TopicQos>>>,
@@ -1595,7 +1601,7 @@ impl DomainParticipant {
         let handle = self.create_instance_handle()?;
 
         let type_support = Foo::TypeSupport::default();
-        self.register_type(Arc::new(type_support), type_name)?;
+        self.register_type_for_topic(Arc::new(type_support), type_name)?;
         if self.find_typesupport(type_name).is_none() {
             return Err(DdsError::PreconditionNotMet);
         }
@@ -1680,7 +1686,7 @@ impl DomainParticipant {
 
         // Register type support for builtin type
         let type_support = Foo::TypeSupport::default();
-        participant.register_type(Arc::new(type_support), type_name)?;
+        participant.register_type_for_topic(Arc::new(type_support), type_name)?;
 
         let topic = Topic::new(
             true, // is_builtin
@@ -1759,7 +1765,6 @@ impl DomainParticipant {
 
         let type_name = topic.get_type_name();
         let handle = topic.get_instance_handle()?;
-        let should_unregister_type = !self.has_other_topics_with_type(type_name, &handle)?;
 
         {
             let mut topics = self
@@ -1787,10 +1792,12 @@ impl DomainParticipant {
             topics_by_handle.remove(&handle);
         }
 
-        // Unregister type only when not used by other topics
-        if should_unregister_type {
-            self.unregister_type(type_name)?;
-        }
+        // Drop this topic's reference to its type. The reference-counted registry keeps
+        // the entry alive while other topics/endpoints of the same type still exist, so a
+        // concurrent creation can never observe a missing type (the former presence-only
+        // unregister gated by has_other_topics_with_type was racy under node churn).
+        // Ignore a benign mismatch (e.g. a type registered outside create_topic).
+        let _ = self.unregister_type(type_name);
 
         topic.delete();
         Ok(())
@@ -2573,7 +2580,7 @@ impl DomainParticipant {
         let handle = self.create_instance_handle()?;
 
         let type_name = type_support.get_type_name().to_string();
-        self.register_type(type_support, &type_name)?;
+        self.register_type_for_topic(type_support, &type_name)?;
 
         let self_ref = self
             .self_ref
@@ -2754,48 +2761,64 @@ impl DomainParticipant {
         // Use write lock of RwLock
         let mut types = self.types.write().unwrap();
 
-        if let Some(existing_type) = types.get(type_name) {
+        if let Some((existing_type, _count)) = types.get(type_name) {
             // type_id() method is available (from Arc<dyn TypeSupport>)
             if existing_type.type_id() == type_support.type_id() {
+                // Already present: leave the topic reference count untouched. This path
+                // is the explicit "ensure registered" used by register_type_support /
+                // register_dynamic_type and the FFI create_topic pre-registration; the
+                // topic's own reference is added once by register_type_for_topic.
                 return Ok(());
             }
             return Err(DdsError::PreconditionNotMet);
         }
 
-        types.insert(type_name.to_string(), type_support);
+        // Present with no topic reference yet (count 0); a following create_topic adds it.
+        types.insert(type_name.to_string(), (type_support, 0));
+        Ok(())
+    }
+
+    /// Registers a type on behalf of a topic creation, atomically adding one topic
+    /// reference. Used by create_topic / create_builtin_topic / create_topic_dynamic so
+    /// the count equals the number of live topics of this type: a concurrent delete_topic
+    /// can never unregister a type that another in-flight topic still needs, and the entry
+    /// is dropped exactly when the last topic of the type is deleted (old semantics).
+    fn register_type_for_topic(
+        &self,
+        type_support: Arc<dyn TypeSupport>,
+        type_name: &str,
+    ) -> DdsResult<()> {
+        if type_name.is_empty() {
+            return Err(DdsError::BadParameter);
+        }
+
+        let mut types = self.types.write().unwrap();
+
+        if let Some((existing_type, count)) = types.get_mut(type_name) {
+            if existing_type.type_id() == type_support.type_id() {
+                *count += 1;
+                return Ok(());
+            }
+            return Err(DdsError::PreconditionNotMet);
+        }
+
+        types.insert(type_name.to_string(), (type_support, 1));
         Ok(())
     }
 
     pub(crate) fn unregister_type(&self, type_name: &str) -> DdsResult<()> {
         let mut types = self.types.write().unwrap();
 
-        if types.get(type_name).is_some() {
-            types.remove(type_name);
+        if let Some((_, count)) = types.get_mut(type_name) {
+            // Drop one reference; remove the entry only when the last user is gone.
+            // saturating_sub guards against an unmatched unregister (no underflow panic).
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                types.remove(type_name);
+            }
             return Ok(());
         }
         Err(DdsError::PreconditionNotMet)
-    }
-
-    fn has_other_topics_with_type(
-        &self,
-        type_name: &str,
-        excluding_handle: &InstanceHandle,
-    ) -> DdsResult<bool> {
-        let topics =
-            self.topics.lock().map_err(|_| DdsError::Error("Failed to lock topics".to_string()))?;
-
-        for weak_topic in topics.iter() {
-            if let Some(topic) = weak_topic.upgrade() {
-                if let Ok(topic_handle) = topic.get_instance_handle() {
-                    // Check excluding topics to be removed
-                    if topic_handle != *excluding_handle && topic.get_type_name() == type_name {
-                        return Ok(true);
-                    }
-                }
-            }
-        }
-
-        Ok(false)
     }
 
     pub(crate) fn find_internal_topic(&self, external_topic: &Topic) -> DdsResult<Arc<Topic>> {
@@ -2829,7 +2852,7 @@ impl DomainParticipant {
 
     pub(crate) fn find_typesupport(&self, type_name: &str) -> Option<Arc<dyn TypeSupport>> {
         // Use read lock of RwLock (multiple threads can read simultaneously)
-        self.types.read().unwrap().get(type_name).cloned()
+        self.types.read().unwrap().get(type_name).map(|(ts, _)| ts.clone())
     }
 
     fn create_instance_handle(&self) -> DdsResult<InstanceHandle> {
