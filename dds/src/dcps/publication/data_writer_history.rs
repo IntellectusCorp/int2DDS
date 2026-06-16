@@ -1499,6 +1499,34 @@ mod tests {
         guid
     }
 
+    fn add_best_effort_reader(stateful_writer: &StatefulWriter, octet: u8) -> Guid {
+        let guid = Guid::new(
+            [0; 12],
+            EntityId::new([0, 0, octet], EntityKind::USER_DEFINED_READER_WITH_KEY),
+        );
+        let mut reader_qos = DataReaderQos::default();
+        reader_qos.reliability.kind = ReliabilityQosPolicyKind::BestEffort;
+        let sub_data = SubscriptionBuiltinTopicData::new(
+            &reader_qos,
+            &SubscriberQos::default(),
+            &TopicQos::default(),
+        );
+        let reader_proxy = ReaderProxy::new(
+            guid,
+            EntityId::UNKNOWN,
+            Vec::new(),
+            Vec::new(),
+            SequenceNumber::new(0, 0),
+            SequenceNumber::new(0, 0),
+            false,
+            true,
+            sub_data,
+            SequenceNumber::new(0, 0),
+        );
+        stateful_writer.matched_reader_add(reader_proxy);
+        guid
+    }
+
     fn set_reader_acked(stateful_writer: &StatefulWriter, reader_guid: Guid, seq: i64) {
         let proxies = stateful_writer.reader_proxies();
         let mut guard = proxies.lock().unwrap();
@@ -1646,5 +1674,87 @@ mod tests {
 
         assert_eq!(changes_len(&writer), 3, "strict best-effort keep-all must retain samples");
         assert_eq!(rtps_changes_len(&writer), 3);
+    }
+
+    #[test]
+    fn test_unmatch_lagging_reliable_reader_advances_floor() {
+        let writer = create_datawriter(keepall_writer_qos(
+            ReliabilityQosPolicyKind::Reliable,
+            DurabilityQosPolicyKind::Volatile,
+            false,
+        ));
+        let rtps_writer = writer.get_rtps_writer().unwrap();
+        let stateful_writer = rtps_writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
+        let reader_fast = add_reliable_reader(stateful_writer, 1);
+        let reader_slow = add_reliable_reader(stateful_writer, 2);
+
+        add_changes(&writer, 3);
+        set_reader_acked(stateful_writer, reader_fast, 3);
+        set_reader_acked(stateful_writer, reader_slow, 1);
+        stateful_writer.process_acked_changes();
+        assert_eq!(changes_len(&writer), 2, "floor is the slow reader's ack (seq 1)");
+
+        // The lagging reader leaves; the floor advances to the remaining reader (seq 3).
+        stateful_writer.remove_matched_reader_and_update_status(reader_slow).unwrap();
+        assert_eq!(changes_len(&writer), 0, "unmatch advances floor over remaining readers");
+        assert_eq!(rtps_changes_len(&writer), 0);
+    }
+
+    #[test]
+    fn test_unmatch_all_reliable_readers_purges_to_highest_sent() {
+        let writer = create_datawriter(keepall_writer_qos(
+            ReliabilityQosPolicyKind::Reliable,
+            DurabilityQosPolicyKind::Volatile,
+            false,
+        ));
+        let rtps_writer = writer.get_rtps_writer().unwrap();
+        let stateful_writer = rtps_writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
+        let reader = add_reliable_reader(stateful_writer, 1);
+
+        add_changes(&writer, 3);
+        stateful_writer.process_acked_changes();
+        assert_eq!(changes_len(&writer), 3, "nothing acked yet, all retained");
+
+        // No reliable reader remains; everything transmitted becomes removable.
+        stateful_writer.remove_matched_reader_and_update_status(reader).unwrap();
+        assert_eq!(changes_len(&writer), 0, "no reliable reader left -> purge to highest-sent");
+        assert_eq!(rtps_changes_len(&writer), 0);
+    }
+
+    #[test]
+    fn test_best_effort_reader_only_reliable_writer_purges_after_send() {
+        let writer = create_datawriter(keepall_writer_qos(
+            ReliabilityQosPolicyKind::Reliable,
+            DurabilityQosPolicyKind::Volatile,
+            false,
+        ));
+        let rtps_writer = writer.get_rtps_writer().unwrap();
+        let stateful_writer = rtps_writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
+        add_best_effort_reader(stateful_writer, 1);
+
+        add_changes(&writer, 3);
+        // Best-effort reader sends no ACKNACK; the post-send trigger purges what was sent.
+        stateful_writer.process_acked_changes();
+        assert_eq!(changes_len(&writer), 0, "best-effort-only reliable writer purges after send");
+        assert_eq!(rtps_changes_len(&writer), 0);
+    }
+
+    #[test]
+    fn test_mixed_readers_best_effort_does_not_hold_floor() {
+        let writer = create_datawriter(keepall_writer_qos(
+            ReliabilityQosPolicyKind::Reliable,
+            DurabilityQosPolicyKind::Volatile,
+            false,
+        ));
+        let rtps_writer = writer.get_rtps_writer().unwrap();
+        let stateful_writer = rtps_writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
+        let reliable = add_reliable_reader(stateful_writer, 1);
+        add_best_effort_reader(stateful_writer, 2);
+
+        add_changes(&writer, 3);
+        set_reader_acked(stateful_writer, reliable, 3);
+        stateful_writer.process_acked_changes();
+        assert_eq!(changes_len(&writer), 0, "best-effort reader must not pin the floor");
+        assert_eq!(rtps_changes_len(&writer), 0);
     }
 }

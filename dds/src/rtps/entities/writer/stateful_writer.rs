@@ -77,6 +77,8 @@ pub(crate) struct StatefulWriter {
         Arc<Mutex<Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>>>,
     // Invoked with the minimum sequence number acked by all reliable readers when it advances
     all_acked_callback: Arc<Mutex<Option<Arc<dyn Fn(SequenceNumber) + Send + Sync>>>>,
+    // Mirrors all_acked_callback presence for a lock-free check on the write hot path
+    all_acked_callback_set: Arc<AtomicBool>,
     last_acked_notify_sn: Arc<Mutex<SequenceNumber>>,
     publication_builtin_topic_data: Arc<Mutex<PublicationBuiltinTopicData>>,
     heartbeat_timer_running: Arc<AtomicBool>,
@@ -118,6 +120,7 @@ impl StatefulWriter {
             heartbeat_count: Arc::new(Mutex::new(1)),
             callback: Arc::new(Mutex::new(callback)),
             all_acked_callback: Arc::new(Mutex::new(None)),
+            all_acked_callback_set: Arc::new(AtomicBool::new(false)),
             last_acked_notify_sn: Arc::new(Mutex::new(SequenceNumber::new(0, 0))),
             publication_builtin_topic_data: Arc::new(Mutex::new(publication_builtin_topic_data)),
             heartbeat_timer_running: Arc::new(AtomicBool::new(false)),
@@ -408,24 +411,22 @@ impl StatefulWriter {
         }
     }
 
-    // Returns None when no reliable reader is matched. Best-effort readers never send
-    // ACKNACK, so including them would pin the minimum at 0 forever.
-    pub(crate) fn get_min_acked_sequence_number(&self) -> Option<SequenceNumber> {
-        match self.matched_readers.lock() {
-            Ok(readers) => {
-                readers.iter().filter(|p| p.is_reliable()).map(|p| p.max_acked_sn()).min()
-            }
-            Err(e) => {
-                error!("Failed to acquire matched_readers lock: {}", e);
-                None
-            }
-        }
+    // Ok(Some) is the floor over matched reliable readers; Ok(None) means none are
+    // matched. Best-effort readers never send ACKNACK, so they are excluded to avoid
+    // pinning the minimum at 0. Err keeps the lock failure distinct from "no readers".
+    pub(crate) fn get_min_acked_sequence_number(&self) -> RtpsResult<Option<SequenceNumber>> {
+        let readers = self
+            .matched_readers
+            .lock()
+            .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
+        Ok(readers.iter().filter(|p| p.is_reliable()).map(|p| p.max_acked_sn()).min())
     }
 
     pub(crate) fn set_all_acked_callback(&self, f: Arc<dyn Fn(SequenceNumber) + Send + Sync>) {
         match self.all_acked_callback.lock() {
             Ok(mut callback) => {
                 callback.replace(f);
+                self.all_acked_callback_set.store(true, Ordering::Release);
             }
             Err(e) => {
                 error!("Failed to lock all_acked_callback: {:?}", e);
@@ -436,6 +437,10 @@ impl StatefulWriter {
     // Invokes the all-acked callback when the minimum acked sequence number advances.
     // Must not be called while holding the matched_readers lock.
     pub(crate) fn process_acked_changes(&self) {
+        if !self.all_acked_callback_set.load(Ordering::Acquire) {
+            return;
+        }
+
         let callback = match self.all_acked_callback.lock() {
             Ok(callback) => match callback.as_ref() {
                 Some(callback) => callback.clone(),
@@ -447,8 +452,22 @@ impl StatefulWriter {
             }
         };
 
-        let Some(min_acked) = self.get_min_acked_sequence_number() else {
-            return;
+        let min_acked = match self.get_min_acked_sequence_number() {
+            Ok(Some(min)) => min,
+            Ok(None) => match self.writer_cache.lock() {
+                // With no reliable reader to wait on, everything already transmitted is removable:
+                // fall back to the highest sequence number that entered the transmit queue. A lock
+                // failure stays an error so unacked samples are never purged by mistake.
+                Ok(cache) => cache.highest_sn(),
+                Err(e) => {
+                    error!("Failed to lock writer_cache: {:?}", e);
+                    return;
+                }
+            },
+            Err(e) => {
+                error!("Failed to read min acked sequence number: {:?}", e);
+                return;
+            }
         };
 
         match self.last_acked_notify_sn.lock() {
@@ -805,6 +824,10 @@ impl Writer for StatefulWriter {
         self.update_publication_matched_status(-1, InstanceHandle::from_guid(&reader_guid));
 
         debug!("Removed reader proxy with guid {:?} from matched readers", reader_guid);
+
+        // A reliable reader leaving can advance the ack floor over the remaining readers.
+        self.process_acked_changes();
+
         Ok(true)
     }
 
@@ -835,6 +858,13 @@ impl Writer for StatefulWriter {
 
         debug!("Removed all unmatched reader proxies from unmatched participant: {:?}", prefix);
         debug!("Current number of matched reader: {:?}", reader_proxies.len());
+        drop(reader_proxies);
+
+        // Removed readers can advance the ack floor; recompute once the lock is released.
+        if removed > 0 {
+            self.process_acked_changes();
+        }
+
         Ok(removed)
     }
 }
