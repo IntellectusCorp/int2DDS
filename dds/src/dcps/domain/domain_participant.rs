@@ -2664,19 +2664,55 @@ impl DomainParticipant {
         )
     }
 
+    /// Use an inline TypeObject directly when its direct dependencies are already
+    /// in the registry; otherwise trigger a TypeLookup fetch and ask the caller to
+    /// retry once the dependency closure has arrived.
+    fn use_or_fetch_inline(
+        &self,
+        obj: &crate::xtypes::TypeObject,
+        type_id: Option<&crate::xtypes::TypeIdentifier>,
+        prefix: crate::rtps::common::guid::GuidPrefix,
+    ) -> DdsResult<crate::xtypes::TypeObject> {
+        let rtps_participant = self.get_rtps_participant()?;
+        if let crate::xtypes::TypeObject::Complete(complete) = obj {
+            let missing = rtps_participant
+                .type_registry()
+                .read()
+                .map(|reg| reg.missing_direct_dependencies(complete))
+                .unwrap_or_default();
+            if !missing.is_empty() {
+                if let Some(id) = type_id {
+                    rtps_participant.fetch_type_via_lookup(prefix, id.clone());
+                    return Err(DdsError::PreconditionNotMet);
+                }
+            }
+        }
+        Ok(obj.clone())
+    }
+
     /// Resolve the TypeObject for `topic_name`
     fn discovered_type_object(&self, topic_name: &str) -> DdsResult<crate::xtypes::TypeObject> {
         let rtps_participant = self.get_rtps_participant()?;
 
-        // Inline TypeObject advertised by a remote publication/subscription.
+        // Inline TypeObject advertised by a remote publication/subscription. The
+        // inline slot carries only the top-level type, so when it references nested
+        // types absent from the registry, fall back to a TypeLookup fetch.
         if let Some(bucket) = rtps_participant.remote_publications().get(topic_name) {
-            if let Some(obj) = bucket.values().find_map(|b| b.type_object().cloned()) {
-                return Ok(obj);
+            if let Some(result) = bucket.values().find_map(|b| {
+                b.type_object().map(|obj| {
+                    self.use_or_fetch_inline(obj, b.type_identifier(), b.endpoint_guid().prefix())
+                })
+            }) {
+                return result;
             }
         }
         if let Some(bucket) = rtps_participant.remote_subscriptions().get(topic_name) {
-            if let Some(obj) = bucket.values().find_map(|b| b.type_object().cloned()) {
-                return Ok(obj);
+            if let Some(result) = bucket.values().find_map(|b| {
+                b.type_object().map(|obj| {
+                    self.use_or_fetch_inline(obj, b.type_identifier(), b.endpoint_guid().prefix())
+                })
+            }) {
+                return result;
             }
         }
 
