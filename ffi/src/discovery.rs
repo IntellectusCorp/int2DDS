@@ -18,6 +18,7 @@ use int2dds::common::{
     instance_handle::InstanceHandle,
 };
 use int2dds::core::time::Duration;
+use int2dds::infrastructure::qos_policy::{DurabilityQosPolicyKind, ReliabilityQosPolicyKind};
 use int2dds::infrastructure::status::StatusMask;
 use int2dds::infrastructure::wait_set::WaitSet;
 use int2dds::subscription::sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind};
@@ -685,6 +686,50 @@ pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_type_name(
     copy_string_to_c(&data_ref.inner.type_name(), buf, capacity, size_out)
 }
 
+/// Get the reliability kind from a PublicationBuiltinTopicData.
+/// `kind_out`: 0 = BEST_EFFORT, 1 = RELIABLE (matches INT2DDS_QOS_RELIABILITY_*).
+///
+/// # Safety
+/// - `data` must be a valid PublicationBuiltinTopicData
+/// - `kind_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_reliability_kind(
+    data: *const Int2DdsPublicationBuiltinTopicData,
+    kind_out: *mut i32,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(kind_out);
+    let data_ref = &*data;
+    *kind_out = match data_ref.inner.reliability().kind {
+        ReliabilityQosPolicyKind::BestEffort => 0,
+        ReliabilityQosPolicyKind::Reliable => 1,
+    };
+    INT2DDS_RET_OK
+}
+
+/// Get the durability kind from a PublicationBuiltinTopicData.
+/// `kind_out`: 0 = VOLATILE, 1 = TRANSIENT_LOCAL, 2 = TRANSIENT, 3 = PERSISTENT.
+///
+/// # Safety
+/// - `data` must be a valid PublicationBuiltinTopicData
+/// - `kind_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_durability_kind(
+    data: *const Int2DdsPublicationBuiltinTopicData,
+    kind_out: *mut i32,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(kind_out);
+    let data_ref = &*data;
+    *kind_out = match data_ref.inner.durability().kind {
+        DurabilityQosPolicyKind::Volatile => 0,
+        DurabilityQosPolicyKind::TransientLocal => 1,
+        DurabilityQosPolicyKind::Transient => 2,
+        DurabilityQosPolicyKind::Persistent => 3,
+    };
+    INT2DDS_RET_OK
+}
+
 /// Free a PublicationBuiltinTopicData obtained from discovery.
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_destroy(
@@ -774,6 +819,50 @@ pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_get_type_name(
 
     let data_ref = &*data;
     copy_string_to_c(&data_ref.inner.type_name(), buf, capacity, size_out)
+}
+
+/// Get the reliability kind from a SubscriptionBuiltinTopicData.
+/// `kind_out`: 0 = BEST_EFFORT, 1 = RELIABLE (matches INT2DDS_QOS_RELIABILITY_*).
+///
+/// # Safety
+/// - `data` must be a valid SubscriptionBuiltinTopicData
+/// - `kind_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_get_reliability_kind(
+    data: *const Int2DdsSubscriptionBuiltinTopicData,
+    kind_out: *mut i32,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(kind_out);
+    let data_ref = &*data;
+    *kind_out = match data_ref.inner.reliability().kind {
+        ReliabilityQosPolicyKind::BestEffort => 0,
+        ReliabilityQosPolicyKind::Reliable => 1,
+    };
+    INT2DDS_RET_OK
+}
+
+/// Get the durability kind from a SubscriptionBuiltinTopicData.
+/// `kind_out`: 0 = VOLATILE, 1 = TRANSIENT_LOCAL, 2 = TRANSIENT, 3 = PERSISTENT.
+///
+/// # Safety
+/// - `data` must be a valid SubscriptionBuiltinTopicData
+/// - `kind_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_get_durability_kind(
+    data: *const Int2DdsSubscriptionBuiltinTopicData,
+    kind_out: *mut i32,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(kind_out);
+    let data_ref = &*data;
+    *kind_out = match data_ref.inner.durability().kind {
+        DurabilityQosPolicyKind::Volatile => 0,
+        DurabilityQosPolicyKind::TransientLocal => 1,
+        DurabilityQosPolicyKind::Transient => 2,
+        DurabilityQosPolicyKind::Persistent => 3,
+    };
+    INT2DDS_RET_OK
 }
 
 /// Free a SubscriptionBuiltinTopicData obtained from discovery.

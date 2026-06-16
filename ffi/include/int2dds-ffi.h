@@ -942,6 +942,28 @@ Int2DdsRet int2dds_publication_builtin_topic_data_get_type_name(const struct Int
                                                                 uintptr_t *size_out);
 
 /**
+ * Get the reliability kind from a PublicationBuiltinTopicData.
+ * `kind_out`: 0 = BEST_EFFORT, 1 = RELIABLE (matches INT2DDS_QOS_RELIABILITY_*).
+ *
+ * # Safety
+ * - `data` must be a valid PublicationBuiltinTopicData
+ * - `kind_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_publication_builtin_topic_data_get_reliability_kind(const struct Int2DdsPublicationBuiltinTopicData *data,
+                                                                       int32_t *kind_out);
+
+/**
+ * Get the durability kind from a PublicationBuiltinTopicData.
+ * `kind_out`: 0 = VOLATILE, 1 = TRANSIENT_LOCAL, 2 = TRANSIENT, 3 = PERSISTENT.
+ *
+ * # Safety
+ * - `data` must be a valid PublicationBuiltinTopicData
+ * - `kind_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_publication_builtin_topic_data_get_durability_kind(const struct Int2DdsPublicationBuiltinTopicData *data,
+                                                                      int32_t *kind_out);
+
+/**
  * Free a PublicationBuiltinTopicData obtained from discovery.
  */
 Int2DdsRet int2dds_publication_builtin_topic_data_destroy(struct Int2DdsPublicationBuiltinTopicData *data);
@@ -986,6 +1008,28 @@ Int2DdsRet int2dds_subscription_builtin_topic_data_get_type_name(const struct In
                                                                  uint8_t *buf,
                                                                  uintptr_t capacity,
                                                                  uintptr_t *size_out);
+
+/**
+ * Get the reliability kind from a SubscriptionBuiltinTopicData.
+ * `kind_out`: 0 = BEST_EFFORT, 1 = RELIABLE (matches INT2DDS_QOS_RELIABILITY_*).
+ *
+ * # Safety
+ * - `data` must be a valid SubscriptionBuiltinTopicData
+ * - `kind_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_subscription_builtin_topic_data_get_reliability_kind(const struct Int2DdsSubscriptionBuiltinTopicData *data,
+                                                                        int32_t *kind_out);
+
+/**
+ * Get the durability kind from a SubscriptionBuiltinTopicData.
+ * `kind_out`: 0 = VOLATILE, 1 = TRANSIENT_LOCAL, 2 = TRANSIENT, 3 = PERSISTENT.
+ *
+ * # Safety
+ * - `data` must be a valid SubscriptionBuiltinTopicData
+ * - `kind_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_subscription_builtin_topic_data_get_durability_kind(const struct Int2DdsSubscriptionBuiltinTopicData *data,
+                                                                       int32_t *kind_out);
 
 /**
  * Free a SubscriptionBuiltinTopicData obtained from discovery.
@@ -1233,6 +1277,20 @@ Int2DdsRet int2dds_create_participant_with_qos(const struct Int2DdsParticipantFa
                                                int32_t domain_id,
                                                const struct Int2DdsParticipantQos *qos,
                                                struct Int2DdsParticipant **participant_out);
+
+/**
+ * Get the resolved default DomainParticipant QoS (registered default ->
+ * configured default profile -> spec default), so callers can modify it (e.g.
+ * set user_data) and pass it to `int2dds_create_participant_with_qos` without
+ * losing the configured transport/discovery defaults that the bare
+ * `int2dds_create_participant` resolution chain applies.
+ *
+ * # Safety
+ * - `qos_out` must be a valid pointer to a null pointer
+ * - The returned QoS must be freed with `int2dds_participant_qos_destroy`
+ */
+Int2DdsRet int2dds_get_default_participant_qos(const struct Int2DdsParticipantFactory *_factory,
+                                               struct Int2DdsParticipantQos **qos_out);
 
 /**
  * Delete a DomainParticipant
