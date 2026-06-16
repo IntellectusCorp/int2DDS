@@ -112,11 +112,18 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
         a_change: Arc<CacheChange>,
     ) -> DdsResult<Option<Arc<CacheChange>>> {
         if self.purge_sent_changes {
+            let seq = a_change.sequence_number().to_i64();
             // RTPS add_change delivers synchronously to all matched reader locators
             self.add_change_to_rtps_writer_cache(a_change.clone())?;
             // Delivery is done: drop it from the RTPS cache and reclaim the buffer
             self.remove_change_from_rtps_writer_cache(a_change.clone())?;
             self.pool.try_release(a_change);
+            debug!(
+                "[history-strict][best-effort] purge seq={:?} dds_len={} rtps_len={}",
+                seq,
+                self.changes.len(),
+                self.rtps_cache_len()
+            );
             return Ok(None);
         }
 
@@ -464,12 +471,22 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
         &mut self,
         max_acked: SequenceNumber,
     ) -> DdsResult<()> {
+        let before = self.changes.len();
         let acked: Vec<_> =
             self.changes.iter().filter(|c| c.sequence_number() <= max_acked).cloned().collect();
+        let removing = acked.len();
         for change in acked {
             self.remove_change(change.clone())?;
             self.pool.try_release(change);
         }
+        debug!(
+            "[history-strict] ack up to {:?} before={} removing={} after={} rtps_len={}",
+            max_acked,
+            before,
+            removing,
+            self.changes.len(),
+            self.rtps_cache_len()
+        );
         Ok(())
     }
 
@@ -631,6 +648,22 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
             }
         } else {
             Err(DdsError::Error("Failed to upgrade rtps writer weak".to_string()))
+        }
+    }
+
+    // Debug string for the RTPS transmit queue length, naming why a count is
+    // unavailable. Non-blocking so an observation never deadlocks.
+    fn rtps_cache_len(&self) -> String {
+        let Some(weak) = self.rtps_writer.as_ref() else {
+            return "no-writer".to_string();
+        };
+        let Some(writer) = weak.upgrade() else {
+            return "writer-dropped".to_string();
+        };
+        match writer.writer_cache().try_lock() {
+            Ok(guard) => guard.len().to_string(),
+            Err(std::sync::TryLockError::WouldBlock) => "busy".to_string(),
+            Err(std::sync::TryLockError::Poisoned(_)) => "poisoned".to_string(),
         }
     }
 
