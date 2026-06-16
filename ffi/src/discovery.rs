@@ -18,7 +18,9 @@ use int2dds::common::{
     instance_handle::InstanceHandle,
 };
 use int2dds::core::time::Duration;
-use int2dds::infrastructure::qos_policy::{DurabilityQosPolicyKind, ReliabilityQosPolicyKind};
+use int2dds::infrastructure::qos_policy::{
+    DurabilityQosPolicyKind, LivelinessQosPolicyKind, ReliabilityQosPolicyKind,
+};
 use int2dds::infrastructure::status::StatusMask;
 use int2dds::infrastructure::wait_set::WaitSet;
 use int2dds::subscription::sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind};
@@ -730,6 +732,120 @@ pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_durability_k
     INT2DDS_RET_OK
 }
 
+/// Get the liveliness kind from a PublicationBuiltinTopicData.
+/// `kind_out`: 0 = AUTOMATIC, 1 = MANUAL_BY_PARTICIPANT, 2 = MANUAL_BY_TOPIC.
+///
+/// # Safety
+/// - `data` must be a valid PublicationBuiltinTopicData
+/// - `kind_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_liveliness_kind(
+    data: *const Int2DdsPublicationBuiltinTopicData,
+    kind_out: *mut i32,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(kind_out);
+    let data_ref = &*data;
+    *kind_out = match data_ref.inner.liveliness().kind {
+        LivelinessQosPolicyKind::Automatic => 0,
+        LivelinessQosPolicyKind::ManualByParticipant => 1,
+        LivelinessQosPolicyKind::ManualByTopic => 2,
+    };
+    INT2DDS_RET_OK
+}
+
+/// Get the liveliness lease duration from a PublicationBuiltinTopicData.
+/// An infinite duration is reported as (0x7fffffff, 0x7fffffff).
+///
+/// # Safety
+/// - `data` must be a valid PublicationBuiltinTopicData
+/// - `sec_out` and `nanosec_out` must be valid pointers
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_liveliness_lease_duration(
+    data: *const Int2DdsPublicationBuiltinTopicData,
+    sec_out: *mut i32,
+    nanosec_out: *mut u32,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(sec_out);
+    check_null!(nanosec_out);
+    let lease = (*data).inner.liveliness().lease_duration;
+    *sec_out = lease.sec;
+    *nanosec_out = lease.nanosec;
+    INT2DDS_RET_OK
+}
+
+/// Get the deadline period from a PublicationBuiltinTopicData.
+/// An infinite duration is reported as (0x7fffffff, 0x7fffffff).
+///
+/// # Safety
+/// - `data` must be a valid PublicationBuiltinTopicData
+/// - `sec_out` and `nanosec_out` must be valid pointers
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_deadline(
+    data: *const Int2DdsPublicationBuiltinTopicData,
+    sec_out: *mut i32,
+    nanosec_out: *mut u32,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(sec_out);
+    check_null!(nanosec_out);
+    let period = (*data).inner.deadline().period;
+    *sec_out = period.sec;
+    *nanosec_out = period.nanosec;
+    INT2DDS_RET_OK
+}
+
+/// Get the lifespan duration from a PublicationBuiltinTopicData.
+/// An infinite duration is reported as (0x7fffffff, 0x7fffffff).
+///
+/// # Safety
+/// - `data` must be a valid PublicationBuiltinTopicData
+/// - `sec_out` and `nanosec_out` must be valid pointers
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_lifespan(
+    data: *const Int2DdsPublicationBuiltinTopicData,
+    sec_out: *mut i32,
+    nanosec_out: *mut u32,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(sec_out);
+    check_null!(nanosec_out);
+    let duration = (*data).inner.lifespan().duration;
+    *sec_out = duration.sec;
+    *nanosec_out = duration.nanosec;
+    INT2DDS_RET_OK
+}
+
+/// Get the user_data from a PublicationBuiltinTopicData.
+/// Copies up to `capacity` bytes into `buf`. `size_out` receives the actual size.
+///
+/// # Safety
+/// - `data` must be a valid PublicationBuiltinTopicData
+/// - `buf` must be valid for `capacity` bytes, or null to query the size only
+/// - `size_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_user_data(
+    data: *const Int2DdsPublicationBuiltinTopicData,
+    buf: *mut u8,
+    capacity: usize,
+    size_out: *mut usize,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(size_out);
+
+    let data_ref = &*data;
+    let user_data = &data_ref.inner.user_data().value;
+
+    *size_out = user_data.len();
+    if !buf.is_null() && capacity > 0 {
+        let copy_len = std::cmp::min(user_data.len(), capacity);
+        std::ptr::copy_nonoverlapping(user_data.as_ptr(), buf, copy_len);
+    }
+
+    INT2DDS_RET_OK
+}
+
 /// Free a PublicationBuiltinTopicData obtained from discovery.
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_destroy(
@@ -862,6 +978,99 @@ pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_get_durability_
         DurabilityQosPolicyKind::Transient => 2,
         DurabilityQosPolicyKind::Persistent => 3,
     };
+    INT2DDS_RET_OK
+}
+
+/// Get the liveliness kind from a SubscriptionBuiltinTopicData.
+/// `kind_out`: 0 = AUTOMATIC, 1 = MANUAL_BY_PARTICIPANT, 2 = MANUAL_BY_TOPIC.
+///
+/// # Safety
+/// - `data` must be a valid SubscriptionBuiltinTopicData
+/// - `kind_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_get_liveliness_kind(
+    data: *const Int2DdsSubscriptionBuiltinTopicData,
+    kind_out: *mut i32,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(kind_out);
+    let data_ref = &*data;
+    *kind_out = match data_ref.inner.liveliness().kind {
+        LivelinessQosPolicyKind::Automatic => 0,
+        LivelinessQosPolicyKind::ManualByParticipant => 1,
+        LivelinessQosPolicyKind::ManualByTopic => 2,
+    };
+    INT2DDS_RET_OK
+}
+
+/// Get the liveliness lease duration from a SubscriptionBuiltinTopicData.
+/// An infinite duration is reported as (0x7fffffff, 0x7fffffff).
+///
+/// # Safety
+/// - `data` must be a valid SubscriptionBuiltinTopicData
+/// - `sec_out` and `nanosec_out` must be valid pointers
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_get_liveliness_lease_duration(
+    data: *const Int2DdsSubscriptionBuiltinTopicData,
+    sec_out: *mut i32,
+    nanosec_out: *mut u32,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(sec_out);
+    check_null!(nanosec_out);
+    let lease = (*data).inner.liveliness().lease_duration;
+    *sec_out = lease.sec;
+    *nanosec_out = lease.nanosec;
+    INT2DDS_RET_OK
+}
+
+/// Get the deadline period from a SubscriptionBuiltinTopicData.
+/// An infinite duration is reported as (0x7fffffff, 0x7fffffff).
+///
+/// # Safety
+/// - `data` must be a valid SubscriptionBuiltinTopicData
+/// - `sec_out` and `nanosec_out` must be valid pointers
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_get_deadline(
+    data: *const Int2DdsSubscriptionBuiltinTopicData,
+    sec_out: *mut i32,
+    nanosec_out: *mut u32,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(sec_out);
+    check_null!(nanosec_out);
+    let period = (*data).inner.deadline().period;
+    *sec_out = period.sec;
+    *nanosec_out = period.nanosec;
+    INT2DDS_RET_OK
+}
+
+/// Get the user_data from a SubscriptionBuiltinTopicData.
+/// Copies up to `capacity` bytes into `buf`. `size_out` receives the actual size.
+///
+/// # Safety
+/// - `data` must be a valid SubscriptionBuiltinTopicData
+/// - `buf` must be valid for `capacity` bytes, or null to query the size only
+/// - `size_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_get_user_data(
+    data: *const Int2DdsSubscriptionBuiltinTopicData,
+    buf: *mut u8,
+    capacity: usize,
+    size_out: *mut usize,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(size_out);
+
+    let data_ref = &*data;
+    let user_data = &data_ref.inner.user_data().value;
+
+    *size_out = user_data.len();
+    if !buf.is_null() && capacity > 0 {
+        let copy_len = std::cmp::min(user_data.len(), capacity);
+        std::ptr::copy_nonoverlapping(user_data.as_ptr(), buf, copy_len);
+    }
+
     INT2DDS_RET_OK
 }
 
