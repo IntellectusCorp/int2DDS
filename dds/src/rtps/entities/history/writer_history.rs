@@ -147,7 +147,6 @@ impl WriterHistoryCache {
         self.changes.is_empty()
     }
 
-    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.changes.len()
     }
