@@ -38,6 +38,7 @@ regex = "1.0"
 hostname = "0.4.1"
 fern = "0.7.1"
 md5 = "0.8"
+roxmltree = "0.20"
 clap = { version = "4.5", features = ["derive"] }
 dashmap = "5.5"
 arc-swap = "1.7"
