@@ -459,6 +459,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             datawriter_cache: Arc::new(Mutex::new(DataWriterHistoryCache::<Foo>::new(
                 Weak::new(),
                 qos.reliability,
+                qos.durability,
                 qos.history,
                 qos.resource_limits,
                 type_support.is_compute_key_provided(),

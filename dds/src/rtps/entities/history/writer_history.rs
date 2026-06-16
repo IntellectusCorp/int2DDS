@@ -147,6 +147,11 @@ impl WriterHistoryCache {
         self.changes.is_empty()
     }
 
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.changes.len()
+    }
+
     /// Returns the next change with a sequence number strictly greater than `sn`.
     /// Uses BTreeMap range query for O(log N) lookup.
     pub(crate) fn next_change_after(&self, sn: SequenceNumber) -> Option<Arc<CacheChange>> {
