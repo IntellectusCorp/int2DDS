@@ -1,6 +1,6 @@
 [package]
 name = "int2dds"
-version = "0.0.1"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
