@@ -19,4 +19,19 @@
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
+
+  <!--
+    Version single source of truth: the workspace version in the repo-root
+    Cargo.toml ([workspace.package].version). We read it here so the C# binding
+    always matches int2dds without manual syncing. To bump the product version,
+    edit ONLY ../Cargo.toml.
+  -->
+  <PropertyGroup Condition="Exists('$(MSBuildThisFileDirectory)../Cargo.toml')">
+    <_Int2DdsCargoToml>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)../Cargo.toml'))</_Int2DdsCargoToml>
+    <Version>$([System.Text.RegularExpressions.Regex]::Match($(_Int2DdsCargoToml), 'version\s*=\s*"([^"]+)"').Groups.get_Item(1).Value)</Version>
+  </PropertyGroup>
+  <!-- Fallback when built outside the repo tree (e.g. from a standalone NuGet source drop). -->
+  <PropertyGroup Condition="!Exists('$(MSBuildThisFileDirectory)../Cargo.toml')">
+    <Version Condition="'$(Version)' == ''">0.0.0</Version>
+  </PropertyGroup>
 </Project>
