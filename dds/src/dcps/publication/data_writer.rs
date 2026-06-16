@@ -1239,6 +1239,14 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             cache.add_change_with_cleanup(Arc::new(change))?;
         }
 
+        // 5. Best-effort-only / no-reliable-reader writers get no ACKNACK, so the send
+        // just completed is the only chance to purge. Runs after the cache lock is
+        // released so the removal callback can re-lock it. No-op unless the all-acked
+        // callback is registered (volatile + keep_all + !strict + reliable).
+        if let Some(stateful_writer) = rtps_writer.as_any().downcast_ref::<StatefulWriter>() {
+            stateful_writer.process_acked_changes();
+        }
+
         Ok(seq_num)
     }
 
