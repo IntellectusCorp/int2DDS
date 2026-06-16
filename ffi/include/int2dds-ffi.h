@@ -964,6 +964,67 @@ Int2DdsRet int2dds_publication_builtin_topic_data_get_durability_kind(const stru
                                                                       int32_t *kind_out);
 
 /**
+ * Get the liveliness kind from a PublicationBuiltinTopicData.
+ * `kind_out`: 0 = AUTOMATIC, 1 = MANUAL_BY_PARTICIPANT, 2 = MANUAL_BY_TOPIC.
+ *
+ * # Safety
+ * - `data` must be a valid PublicationBuiltinTopicData
+ * - `kind_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_publication_builtin_topic_data_get_liveliness_kind(const struct Int2DdsPublicationBuiltinTopicData *data,
+                                                                      int32_t *kind_out);
+
+/**
+ * Get the liveliness lease duration from a PublicationBuiltinTopicData.
+ * An infinite duration is reported as (0x7fffffff, 0x7fffffff).
+ *
+ * # Safety
+ * - `data` must be a valid PublicationBuiltinTopicData
+ * - `sec_out` and `nanosec_out` must be valid pointers
+ */
+Int2DdsRet int2dds_publication_builtin_topic_data_get_liveliness_lease_duration(const struct Int2DdsPublicationBuiltinTopicData *data,
+                                                                                int32_t *sec_out,
+                                                                                uint32_t *nanosec_out);
+
+/**
+ * Get the deadline period from a PublicationBuiltinTopicData.
+ * An infinite duration is reported as (0x7fffffff, 0x7fffffff).
+ *
+ * # Safety
+ * - `data` must be a valid PublicationBuiltinTopicData
+ * - `sec_out` and `nanosec_out` must be valid pointers
+ */
+Int2DdsRet int2dds_publication_builtin_topic_data_get_deadline(const struct Int2DdsPublicationBuiltinTopicData *data,
+                                                               int32_t *sec_out,
+                                                               uint32_t *nanosec_out);
+
+/**
+ * Get the lifespan duration from a PublicationBuiltinTopicData.
+ * An infinite duration is reported as (0x7fffffff, 0x7fffffff).
+ *
+ * # Safety
+ * - `data` must be a valid PublicationBuiltinTopicData
+ * - `sec_out` and `nanosec_out` must be valid pointers
+ */
+Int2DdsRet int2dds_publication_builtin_topic_data_get_lifespan(const struct Int2DdsPublicationBuiltinTopicData *data,
+                                                               int32_t *sec_out,
+                                                               uint32_t *nanosec_out);
+
+/**
+ * Get the user_data from a PublicationBuiltinTopicData.
+ * Copies up to `capacity` bytes into `buf`. `size_out` receives the actual size.
+ *
+ * # Safety
+ * - `data` must be a valid PublicationBuiltinTopicData
+ * - `buf` must be valid for `capacity` bytes, or null to query the size only
+ * - `size_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_publication_builtin_topic_data_get_user_data(const struct Int2DdsPublicationBuiltinTopicData *data,
+                                                                uint8_t *buf,
+                                                                uintptr_t capacity,
+                                                                uintptr_t *size_out);
+
+/**
  * Free a PublicationBuiltinTopicData obtained from discovery.
  */
 Int2DdsRet int2dds_publication_builtin_topic_data_destroy(struct Int2DdsPublicationBuiltinTopicData *data);
@@ -1030,6 +1091,55 @@ Int2DdsRet int2dds_subscription_builtin_topic_data_get_reliability_kind(const st
  */
 Int2DdsRet int2dds_subscription_builtin_topic_data_get_durability_kind(const struct Int2DdsSubscriptionBuiltinTopicData *data,
                                                                        int32_t *kind_out);
+
+/**
+ * Get the liveliness kind from a SubscriptionBuiltinTopicData.
+ * `kind_out`: 0 = AUTOMATIC, 1 = MANUAL_BY_PARTICIPANT, 2 = MANUAL_BY_TOPIC.
+ *
+ * # Safety
+ * - `data` must be a valid SubscriptionBuiltinTopicData
+ * - `kind_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_subscription_builtin_topic_data_get_liveliness_kind(const struct Int2DdsSubscriptionBuiltinTopicData *data,
+                                                                       int32_t *kind_out);
+
+/**
+ * Get the liveliness lease duration from a SubscriptionBuiltinTopicData.
+ * An infinite duration is reported as (0x7fffffff, 0x7fffffff).
+ *
+ * # Safety
+ * - `data` must be a valid SubscriptionBuiltinTopicData
+ * - `sec_out` and `nanosec_out` must be valid pointers
+ */
+Int2DdsRet int2dds_subscription_builtin_topic_data_get_liveliness_lease_duration(const struct Int2DdsSubscriptionBuiltinTopicData *data,
+                                                                                 int32_t *sec_out,
+                                                                                 uint32_t *nanosec_out);
+
+/**
+ * Get the deadline period from a SubscriptionBuiltinTopicData.
+ * An infinite duration is reported as (0x7fffffff, 0x7fffffff).
+ *
+ * # Safety
+ * - `data` must be a valid SubscriptionBuiltinTopicData
+ * - `sec_out` and `nanosec_out` must be valid pointers
+ */
+Int2DdsRet int2dds_subscription_builtin_topic_data_get_deadline(const struct Int2DdsSubscriptionBuiltinTopicData *data,
+                                                                int32_t *sec_out,
+                                                                uint32_t *nanosec_out);
+
+/**
+ * Get the user_data from a SubscriptionBuiltinTopicData.
+ * Copies up to `capacity` bytes into `buf`. `size_out` receives the actual size.
+ *
+ * # Safety
+ * - `data` must be a valid SubscriptionBuiltinTopicData
+ * - `buf` must be valid for `capacity` bytes, or null to query the size only
+ * - `size_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_subscription_builtin_topic_data_get_user_data(const struct Int2DdsSubscriptionBuiltinTopicData *data,
+                                                                 uint8_t *buf,
+                                                                 uintptr_t capacity,
+                                                                 uintptr_t *size_out);
 
 /**
  * Free a SubscriptionBuiltinTopicData obtained from discovery.
