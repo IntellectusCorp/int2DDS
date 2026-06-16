@@ -58,9 +58,6 @@ pub enum LcHint {
     Auto,
     SeqMul4,
     SeqMul8,
-    /// The member value begins with its own 4-byte DHEADER (an APPENDABLE/MUTABLE
-    /// nested type). Emit LC=5 and let that DHEADER double as the EMHEADER's
-    /// NEXTINT, matching Fast-CDR (no redundant length word).
     Dheader,
 }
 
@@ -360,7 +357,7 @@ impl<T: XcdrDeserialize> XcdrDeserialize for Vec<T> {
     fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
         if T::IS_PRIMITIVE {
             let length = deserializer.deserialize_u32()? as usize;
-            let mut result = Vec::with_capacity(length);
+            let mut result = Vec::new();
             for _ in 0..length {
                 result.push(T::deserialize_xcdr(deserializer)?);
             }
@@ -370,7 +367,7 @@ impl<T: XcdrDeserialize> XcdrDeserialize for Vec<T> {
             // round-tripping, but reading it advances the cursor correctly.
             let _object_size = deserializer.read_dheader()?;
             let length = deserializer.deserialize_u32()? as usize;
-            let mut result = Vec::with_capacity(length);
+            let mut result = Vec::new();
             for _ in 0..length {
                 result.push(T::deserialize_xcdr(deserializer)?);
             }
@@ -469,7 +466,7 @@ where
         let len = deserializer.deserialize_u32()? as usize;
 
         // Read key-value pairs
-        let mut map = HashMap::with_capacity(len);
+        let mut map = HashMap::new();
         for _ in 0..len {
             let key = K::deserialize_cdr(deserializer)?;
             let value = V::deserialize_cdr(deserializer)?;
@@ -515,7 +512,7 @@ where
     fn deserialize_xcdr(deserializer: &mut XcdrDeserializer) -> XcdrResult<Self> {
         if K::IS_PRIMITIVE && V::IS_PRIMITIVE {
             let len = deserializer.deserialize_u32()? as usize;
-            let mut map = HashMap::with_capacity(len);
+            let mut map = HashMap::new();
             for _ in 0..len {
                 let key = K::deserialize_xcdr(deserializer)?;
                 let value = V::deserialize_xcdr(deserializer)?;
@@ -525,7 +522,7 @@ where
         } else {
             let _dheader = deserializer.read_dheader()?;
             let len = deserializer.deserialize_u32()? as usize;
-            let mut map = HashMap::with_capacity(len);
+            let mut map = HashMap::new();
             for _ in 0..len {
                 let key = K::deserialize_xcdr(deserializer)?;
                 let value = V::deserialize_xcdr(deserializer)?;

@@ -86,7 +86,8 @@ impl<'a> CGen<'a> {
         // Struct and union full definitions, interleaved so that structs containing
         // union members by value have the union defined first, and vice-versa.
         {
-            let union_names: Vec<&str> = self.model.unions.iter().map(|u| u.name.as_str()).collect();
+            let union_names: Vec<&str> =
+                self.model.unions.iter().map(|u| u.name.as_str()).collect();
             let mut union_emitted = vec![false; self.model.unions.len()];
 
             for s in &self.model.structs {
@@ -128,9 +129,9 @@ impl<'a> CGen<'a> {
                 while union_idx < self.model.unions.len() {
                     // Check if any struct member references this union
                     let u_name = &self.model.unions[union_idx].name;
-                    let struct_needs_union = s.members.iter().any(|m| {
-                        matches!(&m.resolved_type, ResolvedType::Struct(n) if n == u_name)
-                    });
+                    let struct_needs_union = s.members.iter().any(
+                        |m| matches!(&m.resolved_type, ResolvedType::Struct(n) if n == u_name),
+                    );
                     if struct_needs_union {
                         self.emit_union_functions(&self.model.unions[union_idx]);
                         self.raw("\n");
@@ -562,10 +563,7 @@ impl<'a> CGen<'a> {
             ResolvedType::Map { key, value, bound } => {
                 let key_decl = self.map_member_decl(key, "keys", bound);
                 let val_decl = self.map_member_decl(value, "values", bound);
-                format!(
-                    "struct {{ {}; {}; uint32_t length; }} {}",
-                    key_decl, val_decl, name
-                )
+                format!("struct {{ {}; {}; uint32_t length; }} {}", key_decl, val_decl, name)
             }
             ResolvedType::Struct(type_name)
             | ResolvedType::Enum(type_name)
@@ -747,12 +745,11 @@ impl<'a> CGen<'a> {
         // {Parent}_serialize_fields would emit a nested DHEADER and desync with Rust.
         if let Some(base) = &s.base_type {
             let simple = base.rsplit("::").next().unwrap_or(base);
-            if let Some(parent_struct) = self.model.structs.iter().find(|st| st.name == simple).cloned() {
+            if let Some(parent_struct) =
+                self.model.structs.iter().find(|st| st.name == simple).cloned()
+            {
                 let parent_var = format!("_p_{}", simple.to_lowercase());
-                self.raw(&format!(
-                    "    const {} *{} = &{}->parent;\n",
-                    simple, parent_var, prefix
-                ));
+                self.raw(&format!("    const {} *{} = &{}->parent;\n", simple, parent_var, prefix));
                 self.emit_serialize_fields(&parent_struct, &parent_var);
             }
         }
@@ -846,10 +843,7 @@ impl<'a> CGen<'a> {
             ResolvedType::Bitmask(bitmask_name) => {
                 let bit_bound = self.find_bitmask(bitmask_name).map(|b| b.bit_bound).unwrap_or(32);
                 let (write_fn, cast_type) = bitmask_cdr_write_info(bit_bound);
-                self.raw(&format!(
-                    "{}{}(&w, ({}){});\n",
-                    indent, write_fn, cast_type, accessor
-                ));
+                self.raw(&format!("{}{}(&w, ({}){});\n", indent, write_fn, cast_type, accessor));
             }
             ResolvedType::Sequence { element, .. } => {
                 let needs_dh = Self::sequence_element_needs_dheader(element);
@@ -941,7 +935,10 @@ impl<'a> CGen<'a> {
                             indent
                         ));
                     }
-                    self.raw(&format!("{}{}_serialize_fields(&w, &{});\n", indent, simple, accessor));
+                    self.raw(&format!(
+                        "{}{}_serialize_fields(&w, &{});\n",
+                        indent, simple, accessor
+                    ));
                     if needs_dh {
                         self.raw(&format!(
                             "{}if (w.xcdr2) {{ int2dds_cdr_write_dheader_finalize(&w, _mbr_dh); }}\n",
@@ -997,12 +994,11 @@ impl<'a> CGen<'a> {
         // Inline parent fields (flat) — see emit_serialize_fields.
         if let Some(base) = &s.base_type {
             let simple = base.rsplit("::").next().unwrap_or(base);
-            if let Some(parent_struct) = self.model.structs.iter().find(|st| st.name == simple).cloned() {
+            if let Some(parent_struct) =
+                self.model.structs.iter().find(|st| st.name == simple).cloned()
+            {
                 let parent_var = format!("_p_{}", simple.to_lowercase());
-                self.raw(&format!(
-                    "    {} *{} = &{}->parent;\n",
-                    simple, parent_var, prefix
-                ));
+                self.raw(&format!("    {} *{} = &{}->parent;\n", simple, parent_var, prefix));
                 self.emit_deserialize_fields(&parent_struct, &parent_var);
             }
         }
@@ -1121,10 +1117,7 @@ impl<'a> CGen<'a> {
             ResolvedType::Bitmask(bitmask_name) => {
                 let bit_bound = self.find_bitmask(bitmask_name).map(|b| b.bit_bound).unwrap_or(32);
                 let (read_fn, cast_type) = bitmask_cdr_read_info(bit_bound);
-                self.raw(&format!(
-                    "{}{}(&r, ({}*)&{});\n",
-                    indent, read_fn, cast_type, accessor
-                ));
+                self.raw(&format!("{}{}(&r, ({}*)&{});\n", indent, read_fn, cast_type, accessor));
             }
             ResolvedType::Sequence { element, bound } => {
                 let needs_dh = Self::sequence_element_needs_dheader(element);
@@ -1239,13 +1232,19 @@ impl<'a> CGen<'a> {
                 } else {
                     let needs_dh = self.struct_needs_member_dheader(type_name);
                     if needs_dh {
-                        self.raw(&format!("{}{{ uint32_t _mbr_sz = 0; size_t _mbr_sp = 0;\n", indent));
+                        self.raw(&format!(
+                            "{}{{ uint32_t _mbr_sz = 0; size_t _mbr_sp = 0;\n",
+                            indent
+                        ));
                         self.raw(&format!(
                             "{}if (r.xcdr2) {{ int2dds_cdr_read_dheader(&r, &_mbr_sz, &_mbr_sp); }}\n",
                             indent
                         ));
                     }
-                    self.raw(&format!("{}{}_deserialize_fields(&r, &{});\n", indent, simple, accessor));
+                    self.raw(&format!(
+                        "{}{}_deserialize_fields(&r, &{});\n",
+                        indent, simple, accessor
+                    ));
                     if needs_dh {
                         self.raw(&format!(
                             "{}if (r.xcdr2) {{ int2dds_cdr_read_dheader_end(&r, _mbr_sz, _mbr_sp); }}\n",
@@ -1492,6 +1491,36 @@ impl<'a> CGen<'a> {
                 name, inner, flags
             ));
             return;
+        }
+
+        match ty {
+            ResolvedType::Sequence { element, .. }
+                if matches!(
+                    element.as_ref(),
+                    ResolvedType::Struct(_) | ResolvedType::Enum(_) | ResolvedType::Bitmask(_)
+                ) =>
+            {
+                let elem_name = Self::rust_type_quote_str(element);
+                self.raw(&format!(
+                    "    int2dds_type_info_add_sequence_of_named_field(ti, \"{}\", \"{}\", 0, {});\n",
+                    name, elem_name, flags
+                ));
+                return;
+            }
+            ResolvedType::Array { element, size }
+                if matches!(
+                    element.as_ref(),
+                    ResolvedType::Struct(_) | ResolvedType::Enum(_) | ResolvedType::Bitmask(_)
+                ) =>
+            {
+                let elem_name = Self::rust_type_quote_str(element);
+                self.raw(&format!(
+                    "    int2dds_type_info_add_array_of_named_field(ti, \"{}\", \"{}\", {}, {});\n",
+                    name, elem_name, size, flags
+                ));
+                return;
+            }
+            _ => {}
         }
 
         if Self::type_uses_fallback_hash(ty) {

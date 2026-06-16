@@ -638,6 +638,13 @@ pub fn set_use_loopback_interface(enabled: bool) {
     unsafe { std::env::set_var("INT2DDS_USE_LOOPBACK_INTERFACE", enabled.to_string()) };
 }
 
+/// Retrieving TypeObject via TypeLookup service
+pub fn get_disable_inline_type_object() -> bool {
+    std::env::var("INT2DDS_DISABLE_INLINE_TYPE_OBJECT")
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false)
+}
+
 /// Set the UDP socket buffer size via environment variable
 pub fn set_udp_socket_buffer_size(size: usize) {
     log::info!("Environment variable set: INT2DDS_UDP_SOCKET_BUFFER = {}", size);
