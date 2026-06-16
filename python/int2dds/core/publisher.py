@@ -74,6 +74,12 @@ class Publisher:
         """
         return DataWriter(self, topic, qos, listener, status_mask)
 
+    def create_datawriter_dynamic(self, topic, support):
+        """Create a DataWriter for a runtime XML/dynamic-typed topic."""
+        from int2dds.types.dynamic import create_datawriter_dynamic
+
+        return create_datawriter_dynamic(self, topic, support)
+
     def delete_contained_entities(self) -> None:
         """Delete all DataWriters created by this publisher."""
         check_ret(lib.int2dds_publisher_delete_contained_entities(self._handle))
