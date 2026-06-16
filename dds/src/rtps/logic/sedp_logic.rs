@@ -126,6 +126,7 @@ fn validate_endpoint_compatibility<L>(
     requested: &SubscriptionBuiltinTopicData,
     offered: &PublicationBuiltinTopicData,
     update_incompatible_qos: impl Fn(&L, QosPolicyId),
+    update_incompatible_type: impl Fn(&L),
     update_inconsistent_topic: impl Fn(&L),
     who: &'static str, // for log
 ) -> RtpsResult<()> {
@@ -182,6 +183,7 @@ fn validate_endpoint_compatibility<L>(
             offered.type_identifier(),
             requested.type_identifier()
         );
+        update_incompatible_type(local);
         let err = RtpsError::new(
             RtpsErrorCode::QosIncompatible,
             format!("[Type compatibility failed :{}]", who),
@@ -634,6 +636,7 @@ impl SedpLogic {
                 &subscription_builtin_topic_data,
                 &writer.publication_builtin_topic_data()?,
                 |w, pid| w.update_offered_incompatible_qos_status(pid),
+                |w| w.update_offered_incompatible_type_status(),
                 |w| w.update_status(StatusKind::INCONSISTENT_TOPIC, None),
                 "writer->reader",
             ) {
@@ -699,6 +702,7 @@ impl SedpLogic {
             &subscription_builtin_topic_data,
             &writer.publication_builtin_topic_data()?,
             |w, pid| w.update_offered_incompatible_qos_status(pid),
+            |w| w.update_offered_incompatible_type_status(),
             |w| w.update_status(StatusKind::INCONSISTENT_TOPIC, None),
             "writer->reader",
         )?;
@@ -777,6 +781,7 @@ impl SedpLogic {
                 &subscription_builtin_topic_data,
                 &writer.publication_builtin_topic_data()?,
                 |w, pid| w.update_offered_incompatible_qos_status(pid),
+                |w| w.update_offered_incompatible_type_status(),
                 |w| w.update_status(StatusKind::INCONSISTENT_TOPIC, None),
                 "writer->reader",
             ) {
@@ -843,6 +848,7 @@ impl SedpLogic {
             &subscription_builtin_topic_data,
             &writer.publication_builtin_topic_data()?,
             |w, pid| w.update_offered_incompatible_qos_status(pid),
+            |w| w.update_offered_incompatible_type_status(),
             |w| w.update_status(StatusKind::INCONSISTENT_TOPIC, None),
             "writer->reader",
         ) {
@@ -1024,6 +1030,7 @@ impl SedpLogic {
                 &reader.subscription_builtin_topic_data()?,
                 &publication_builtin_topic_data,
                 |r, pid| r.update_requested_incompatible_qos_status(pid),
+                |r| r.update_requested_incompatible_type_status(),
                 |r| r.update_status(StatusKind::INCONSISTENT_TOPIC, None),
                 "reader->writer",
             ) {
@@ -1097,6 +1104,7 @@ impl SedpLogic {
             &reader.subscription_builtin_topic_data()?,
             &publication_builtin_topic_data,
             |r, pid| r.update_requested_incompatible_qos_status(pid),
+            |r| r.update_requested_incompatible_type_status(),
             |r| r.update_status(StatusKind::INCONSISTENT_TOPIC, None),
             "reader->writer",
         )?;
@@ -1149,6 +1157,7 @@ impl SedpLogic {
                 &reader.subscription_builtin_topic_data()?,
                 &publication_builtin_topic_data,
                 |r, pid| r.update_requested_incompatible_qos_status(pid),
+                |r| r.update_requested_incompatible_type_status(),
                 |r| r.update_status(StatusKind::INCONSISTENT_TOPIC, None),
                 "reader->writer",
             ) {
@@ -1224,6 +1233,7 @@ impl SedpLogic {
             &reader.subscription_builtin_topic_data()?,
             &publication_builtin_topic_data,
             |r, pid| r.update_requested_incompatible_qos_status(pid),
+            |r| r.update_requested_incompatible_type_status(),
             |r| r.update_status(StatusKind::INCONSISTENT_TOPIC, None),
             "reader->writer",
         )?;

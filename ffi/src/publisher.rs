@@ -34,7 +34,7 @@ use super::{
     qos::{Int2DdsDataWriterQos, Int2DdsPublisherQos},
     status::{
         Int2DdsLivelinessLostStatus, Int2DdsOfferedDeadlineMissedStatus,
-        Int2DdsOfferedIncompatibleQosStatus,
+        Int2DdsOfferedIncompatibleQosStatus, Int2DdsOfferedIncompatibleTypeStatus,
     },
     types::*,
 };
@@ -756,6 +756,30 @@ pub unsafe extern "C" fn int2dds_datawriter_get_offered_incompatible_qos_status(
     match writer_ref.inner.get_offered_incompatible_qos_status() {
         Ok(status) => {
             *status_out = Int2DdsOfferedIncompatibleQosStatus::from(&status);
+            INT2DDS_RET_OK
+        }
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
+/// Get offered incompatible type status for a DataWriter
+///
+/// # Safety
+/// - `writer` must be a valid datawriter
+/// - `status_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_get_offered_incompatible_type_status(
+    writer: *const Int2DdsDataWriter,
+    status_out: *mut Int2DdsOfferedIncompatibleTypeStatus,
+) -> Int2DdsRet {
+    check_null!(writer);
+    check_null!(status_out);
+
+    let writer_ref = &*writer;
+
+    match writer_ref.inner.get_offered_incompatible_type_status() {
+        Ok(status) => {
+            *status_out = Int2DdsOfferedIncompatibleTypeStatus::from(&status);
             INT2DDS_RET_OK
         }
         Err(e) => dds_error_to_code(&e),
