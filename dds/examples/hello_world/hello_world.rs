@@ -268,7 +268,7 @@ fn run_publisher(args: &Args) {
             max_blocking_time: Duration { sec: 0, nanosec: 100_000_000 },
         },
         durability: DurabilityQosPolicy { kind: qos.durability },
-        history: HistoryQosPolicy { kind: qos.history, strict: true },
+        history: HistoryQosPolicy { kind: qos.history, strict: false },
         deadline: DeadlineQosPolicy { period: qos.deadline },
         ownership: OwnershipQosPolicy { kind: qos.ownership_kind },
         ownership_strength: OwnershipStrengthQosPolicy { value: qos.ownership_strength },
