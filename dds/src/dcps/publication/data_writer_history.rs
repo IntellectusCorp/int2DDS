@@ -28,8 +28,8 @@ use crate::{
     infrastructure::{
         history_cache::HistoryCache,
         qos_policy::{
-            HistoryQosPolicy, HistoryQosPolicyKind, ReliabilityQosPolicy, ReliabilityQosPolicyKind,
-            ResourceLimitsQosPolicy,
+            DurabilityQosPolicy, DurabilityQosPolicyKind, HistoryQosPolicy, HistoryQosPolicyKind,
+            ReliabilityQosPolicy, ReliabilityQosPolicyKind, ResourceLimitsQosPolicy,
         },
     },
     publication::data_writer::DataWriter,
@@ -57,6 +57,9 @@ pub(crate) struct DataWriterHistoryCache<Foo> {
     instance_map: Arc<Mutex<HashMap<InstanceHandle, Vec<Weak<CacheChange>>>>>, // NoKey Writer shall not use this
     is_keep_all: bool,
     is_reliable: bool,
+    // Sent samples are not retained: changes go straight to the RTPS transmit queue
+    // and this cache stores nothing
+    purge_sent_changes: bool,
     max_blocking_time: Duration,
     has_key: bool,
     lifespan_timers: Arc<Mutex<HashMap<Guid, TimerId>>>, // writer_guid -> timer_id
@@ -108,6 +111,15 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
         &mut self,
         a_change: Arc<CacheChange>,
     ) -> DdsResult<Option<Arc<CacheChange>>> {
+        if self.purge_sent_changes {
+            // RTPS add_change delivers synchronously to all matched reader locators
+            self.add_change_to_rtps_writer_cache(a_change.clone())?;
+            // Delivery is done: drop it from the RTPS cache and reclaim the buffer
+            self.remove_change_from_rtps_writer_cache(a_change.clone())?;
+            self.pool.try_release(a_change);
+            return Ok(None);
+        }
+
         // Set lifespan timer if lifespan qos is configured
         let lifespan_duration = self.data_writer.upgrade().and_then(|data_writer| {
             data_writer.get_qos().ok().and_then(|qos| {
@@ -262,6 +274,7 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
     pub(crate) fn new(
         data_writer: Weak<DataWriter<Foo>>,
         reliability_qos: ReliabilityQosPolicy,
+        durability_qos: DurabilityQosPolicy,
         history_qos: HistoryQosPolicy,
         resource_limits_qos: ResourceLimitsQosPolicy,
         has_key: bool,
@@ -308,6 +321,10 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
             instance_map: Arc::new(Mutex::new(HashMap::new())),
             is_keep_all: history_qos.kind == HistoryQosPolicyKind::KeepAll,
             is_reliable: reliability_qos.kind == ReliabilityQosPolicyKind::Reliable,
+            purge_sent_changes: reliability_qos.kind == ReliabilityQosPolicyKind::BestEffort
+                && durability_qos.kind == DurabilityQosPolicyKind::Volatile
+                && history_qos.kind == HistoryQosPolicyKind::KeepAll
+                && !history_qos.strict,
             max_blocking_time: reliability_qos.max_blocking_time,
             has_key,
             lifespan_timers: Arc::new(Mutex::new(HashMap::new())),
@@ -450,7 +467,8 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
         let acked: Vec<_> =
             self.changes.iter().filter(|c| c.sequence_number() <= max_acked).cloned().collect();
         for change in acked {
-            self.remove_change(change)?;
+            self.remove_change(change.clone())?;
+            self.pool.try_release(change);
         }
         Ok(())
     }
@@ -1341,6 +1359,7 @@ mod tests {
             instance_map: Arc::new(Mutex::new(instance_map)),
             is_keep_all: false,
             is_reliable: false,
+            purge_sent_changes: false,
             max_blocking_time: Duration::from_millis(100),
             has_key: true,
             lifespan_timers: Arc::new(Mutex::new(HashMap::new())),
@@ -1383,6 +1402,7 @@ mod tests {
             instance_map: Arc::new(Mutex::new(instance_map)),
             is_keep_all: false,
             is_reliable: false,
+            purge_sent_changes: false,
             max_blocking_time: Duration::from_millis(100),
             has_key: true,
             lifespan_timers: Arc::new(Mutex::new(HashMap::new())),
@@ -1395,5 +1415,203 @@ mod tests {
         // Assert: There should be no removable changes
         assert!(result.is_ok());
         assert_eq!(result.unwrap().len(), 0);
+    }
+
+    fn keepall_writer_qos(
+        reliability: ReliabilityQosPolicyKind,
+        durability: DurabilityQosPolicyKind,
+        strict: bool,
+    ) -> DataWriterQos {
+        DataWriterQos {
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict },
+            reliability: ReliabilityQosPolicy {
+                kind: reliability,
+                max_blocking_time: Duration::from_millis(100),
+            },
+            durability: DurabilityQosPolicy { kind: durability },
+            resource_limits: ResourceLimitsQosPolicy {
+                max_samples: 100,
+                max_instances: 10,
+                max_samples_per_instance: 100,
+            },
+            ..Default::default()
+        }
+    }
+
+    fn add_reliable_reader(stateful_writer: &StatefulWriter, octet: u8) -> Guid {
+        let guid = Guid::new(
+            [0; 12],
+            EntityId::new([0, 0, octet], EntityKind::USER_DEFINED_READER_WITH_KEY),
+        );
+        let mut reader_qos = DataReaderQos::default();
+        reader_qos.reliability.kind = ReliabilityQosPolicyKind::Reliable;
+        let sub_data = SubscriptionBuiltinTopicData::new(
+            &reader_qos,
+            &SubscriberQos::default(),
+            &TopicQos::default(),
+        );
+        let reader_proxy = ReaderProxy::new(
+            guid,
+            EntityId::UNKNOWN,
+            Vec::new(),
+            Vec::new(),
+            SequenceNumber::new(0, 0),
+            SequenceNumber::new(0, 0),
+            false,
+            true,
+            sub_data,
+            SequenceNumber::new(0, 0),
+        );
+        stateful_writer.matched_reader_add(reader_proxy);
+        guid
+    }
+
+    fn set_reader_acked(stateful_writer: &StatefulWriter, reader_guid: Guid, seq: i64) {
+        let proxies = stateful_writer.reader_proxies();
+        let mut guard = proxies.lock().unwrap();
+        let proxy = guard.iter_mut().find(|p| p.remote_reader_guid() == reader_guid).unwrap();
+        proxy.acked_changes_set(SequenceNumber::from_i64(seq));
+    }
+
+    fn add_changes(writer: &DataWriter<TestData>, count: i64) {
+        let handle = InstanceHandle::new([1; 16]);
+        let cache = writer.get_datawriter_cache().unwrap();
+        let mut guard = cache.lock().unwrap();
+        for seq in 1..=count {
+            guard.add_change_with_cleanup(create_change(seq, handle)).unwrap();
+        }
+    }
+
+    fn changes_len(writer: &DataWriter<TestData>) -> usize {
+        writer.get_datawriter_cache().unwrap().lock().unwrap().changes.len()
+    }
+
+    // DDS cache and RTPS transmit queue must always hold the same change set
+    fn rtps_changes_len(writer: &DataWriter<TestData>) -> usize {
+        let rtps_writer = writer.get_rtps_writer().unwrap();
+        let cache = rtps_writer.writer_cache();
+        let guard = cache.lock().unwrap();
+        guard.len()
+    }
+
+    #[test]
+    fn test_volatile_keepall_nonstrict_removes_acked_changes() {
+        let writer = create_datawriter(keepall_writer_qos(
+            ReliabilityQosPolicyKind::Reliable,
+            DurabilityQosPolicyKind::Volatile,
+            false,
+        ));
+        let rtps_writer = writer.get_rtps_writer().unwrap();
+        let stateful_writer = rtps_writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
+        let reader_guid = add_reliable_reader(stateful_writer, 1);
+
+        add_changes(&writer, 3);
+        assert_eq!(changes_len(&writer), 3);
+        assert_eq!(rtps_changes_len(&writer), 3);
+
+        set_reader_acked(stateful_writer, reader_guid, 2);
+        stateful_writer.process_acked_changes();
+        assert_eq!(changes_len(&writer), 1, "only the unacked change (seq 3) should remain");
+        assert_eq!(rtps_changes_len(&writer), 1, "RTPS queue must drop the same acked changes");
+
+        // A second notification with no further acks must not remove anything else
+        stateful_writer.process_acked_changes();
+        assert_eq!(changes_len(&writer), 1);
+        assert_eq!(rtps_changes_len(&writer), 1);
+    }
+
+    #[test]
+    fn test_volatile_keepall_nonstrict_min_acked_across_reliable_readers() {
+        let writer = create_datawriter(keepall_writer_qos(
+            ReliabilityQosPolicyKind::Reliable,
+            DurabilityQosPolicyKind::Volatile,
+            false,
+        ));
+        let rtps_writer = writer.get_rtps_writer().unwrap();
+        let stateful_writer = rtps_writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
+        let reader_a = add_reliable_reader(stateful_writer, 1);
+        let reader_b = add_reliable_reader(stateful_writer, 2);
+
+        add_changes(&writer, 3);
+        set_reader_acked(stateful_writer, reader_a, 3);
+        set_reader_acked(stateful_writer, reader_b, 1);
+        stateful_writer.process_acked_changes();
+
+        assert_eq!(changes_len(&writer), 2, "min acked is seq 1, so seq 2 and 3 remain");
+        assert_eq!(rtps_changes_len(&writer), 2, "RTPS queue must match the DDS cache");
+    }
+
+    #[test]
+    fn test_transient_keepall_nonstrict_keeps_acked_changes() {
+        let writer = create_datawriter(keepall_writer_qos(
+            ReliabilityQosPolicyKind::Reliable,
+            DurabilityQosPolicyKind::TransientLocal,
+            false,
+        ));
+        let rtps_writer = writer.get_rtps_writer().unwrap();
+        let stateful_writer = rtps_writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
+        let reader_guid = add_reliable_reader(stateful_writer, 1);
+
+        add_changes(&writer, 3);
+        set_reader_acked(stateful_writer, reader_guid, 3);
+        stateful_writer.process_acked_changes();
+
+        assert_eq!(changes_len(&writer), 3, "transient-local must retain acked samples");
+        assert_eq!(rtps_changes_len(&writer), 3);
+    }
+
+    #[test]
+    fn test_strict_keepall_keeps_acked_changes() {
+        let writer = create_datawriter(keepall_writer_qos(
+            ReliabilityQosPolicyKind::Reliable,
+            DurabilityQosPolicyKind::Volatile,
+            true,
+        ));
+        let rtps_writer = writer.get_rtps_writer().unwrap();
+        let stateful_writer = rtps_writer.as_any().downcast_ref::<StatefulWriter>().unwrap();
+        let reader_guid = add_reliable_reader(stateful_writer, 1);
+
+        add_changes(&writer, 3);
+        set_reader_acked(stateful_writer, reader_guid, 3);
+        stateful_writer.process_acked_changes();
+
+        assert_eq!(changes_len(&writer), 3, "strict keep-all must retain acked samples");
+        assert_eq!(rtps_changes_len(&writer), 3);
+    }
+
+    #[test]
+    fn test_best_effort_volatile_nonstrict_keepall_purges_on_write() {
+        let writer = create_datawriter(keepall_writer_qos(
+            ReliabilityQosPolicyKind::BestEffort,
+            DurabilityQosPolicyKind::Volatile,
+            false,
+        ));
+
+        add_changes(&writer, 3);
+
+        assert_eq!(
+            changes_len(&writer),
+            0,
+            "best-effort volatile keep-all must not retain samples"
+        );
+        assert_eq!(
+            rtps_changes_len(&writer),
+            0,
+            "RTPS queue must be drained after synchronous send"
+        );
+    }
+
+    #[test]
+    fn test_best_effort_volatile_strict_keepall_keeps_samples() {
+        let writer = create_datawriter(keepall_writer_qos(
+            ReliabilityQosPolicyKind::BestEffort,
+            DurabilityQosPolicyKind::Volatile,
+            true,
+        ));
+
+        add_changes(&writer, 3);
+
+        assert_eq!(changes_len(&writer), 3, "strict best-effort keep-all must retain samples");
+        assert_eq!(rtps_changes_len(&writer), 3);
     }
 }
