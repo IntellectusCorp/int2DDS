@@ -105,6 +105,10 @@ name = "dynamic_type_subscriber"
 path = "examples/xtypes/dynamic_type_subscriber.rs"
 
 [[example]]
+name = "xml_type_publisher"
+path = "examples/xtypes/xml_type_publisher.rs"
+
+[[example]]
 name = "route_gateway"
 path = "examples/route_gateway/route_gateway.rs"
 required-features = []
