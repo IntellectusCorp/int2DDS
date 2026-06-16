@@ -53,8 +53,8 @@ use super::{
     qos::{Int2DdsDataReaderQos, Int2DdsSubscriberQos},
     status::{
         Int2DdsLivelinessChangedStatus, Int2DdsRequestedDeadlineMissedStatus,
-        Int2DdsRequestedIncompatibleQosStatus, Int2DdsSampleLostStatus,
-        Int2DdsSampleRejectedStatus,
+        Int2DdsRequestedIncompatibleQosStatus, Int2DdsRequestedIncompatibleTypeStatus,
+        Int2DdsSampleLostStatus, Int2DdsSampleRejectedStatus,
     },
     types::*,
 };
@@ -963,6 +963,30 @@ pub unsafe extern "C" fn int2dds_datareader_get_requested_incompatible_qos_statu
     match reader_ref.inner.get_requested_incompatible_qos_status() {
         Ok(status) => {
             *status_out = Int2DdsRequestedIncompatibleQosStatus::from(&status);
+            INT2DDS_RET_OK
+        }
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
+/// Get requested incompatible type status for a DataReader
+///
+/// # Safety
+/// - `reader` must be a valid datareader
+/// - `status_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_get_requested_incompatible_type_status(
+    reader: *const Int2DdsDataReader,
+    status_out: *mut Int2DdsRequestedIncompatibleTypeStatus,
+) -> Int2DdsRet {
+    check_null!(reader);
+    check_null!(status_out);
+
+    let reader_ref = &*reader;
+
+    match reader_ref.inner.get_requested_incompatible_type_status() {
+        Ok(status) => {
+            *status_out = Int2DdsRequestedIncompatibleTypeStatus::from(&status);
             INT2DDS_RET_OK
         }
         Err(e) => dds_error_to_code(&e),

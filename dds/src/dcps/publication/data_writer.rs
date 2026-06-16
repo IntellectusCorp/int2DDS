@@ -59,7 +59,8 @@ use crate::{
         },
         status::{
             LivelinessLostStatus, OfferedDeadlineMissedStatus, OfferedIncompatibleQosStatus,
-            PublicationMatchedStatus, StatusInfo, StatusKind, StatusMask,
+            OfferedIncompatibleTypeStatus, PublicationMatchedStatus, StatusInfo, StatusKind,
+            StatusMask,
         },
         status_condition::StatusCondition,
     },
@@ -105,6 +106,7 @@ pub trait DataWriterBase: DomainEntity + Send + Any {
     fn get_liveliness_lost_status(&self) -> DdsResult<LivelinessLostStatus>;
     fn get_offered_deadline_missed_status(&self) -> DdsResult<OfferedDeadlineMissedStatus>;
     fn get_offered_incompatible_qos_status(&self) -> DdsResult<OfferedIncompatibleQosStatus>;
+    fn get_offered_incompatible_type_status(&self) -> DdsResult<OfferedIncompatibleTypeStatus>;
     fn get_publication_matched_status(&self) -> DdsResult<PublicationMatchedStatus>;
     fn get_topic(&self) -> DdsResult<Topic>;
     fn get_publisher(&self) -> DdsResult<Publisher>;
@@ -156,6 +158,7 @@ pub struct DataWriter<Foo> {
     liveliness_lost_status: Arc<Mutex<LivelinessLostStatus>>,
     offered_deadline_missed_status: Arc<Mutex<OfferedDeadlineMissedStatus>>,
     offered_incompatible_qos_status: Arc<Mutex<OfferedIncompatibleQosStatus>>,
+    offered_incompatible_type_status: Arc<Mutex<OfferedIncompatibleTypeStatus>>,
     publication_matched_status: Arc<Mutex<PublicationMatchedStatus>>,
     deadline_monitor: Arc<Mutex<Option<DeadlineMonitor>>>,
     _phantom: PhantomData<fn() -> Foo>,
@@ -192,6 +195,10 @@ impl<Foo> Debug for DataWriter<Foo> {
                 "offered_incompatible_qos_status",
                 &self.offered_incompatible_qos_status.lock().unwrap(),
             )
+            .field(
+                "offered_incompatible_type_status",
+                &self.offered_incompatible_type_status.lock().unwrap(),
+            )
             .field("publication_matched_status", &self.publication_matched_status.lock().unwrap())
             .field("_phantom", &self._phantom)
             .finish()
@@ -220,6 +227,7 @@ impl<Foo: 'static + Clone> Clone for DataWriter<Foo> {
             liveliness_lost_status: self.liveliness_lost_status.clone(),
             offered_deadline_missed_status: self.offered_deadline_missed_status.clone(),
             offered_incompatible_qos_status: self.offered_incompatible_qos_status.clone(),
+            offered_incompatible_type_status: self.offered_incompatible_type_status.clone(),
             publication_matched_status: self.publication_matched_status.clone(),
             deadline_monitor: self.deadline_monitor.clone(),
             _phantom: self._phantom,
@@ -386,6 +394,13 @@ impl<Foo: 'static + Clone> UpdateStatus for DataWriter<Foo> {
                 .map_err(|_| DdsError::BadParameter)?;
                 self.handle_offered_incompatible_qos_status(info)
             }
+            StatusKind::OFFERED_INCOMPATIBLE_TYPE => {
+                let info = Arc::downcast::<OfferedIncompatibleTypeStatus>(
+                    info.ok_or(DdsError::BadParameter)?,
+                )
+                .map_err(|_| DdsError::BadParameter)?;
+                self.handle_offered_incompatible_type_status(info)
+            }
             StatusKind::LIVELINESS_LOST => {
                 if info.is_some() {
                     return Err(DdsError::BadParameter);
@@ -445,6 +460,9 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             )),
             offered_incompatible_qos_status: Arc::new(Mutex::new(
                 OfferedIncompatibleQosStatus::default(),
+            )),
+            offered_incompatible_type_status: Arc::new(Mutex::new(
+                OfferedIncompatibleTypeStatus::default(),
             )),
             publication_matched_status: Arc::new(Mutex::new(PublicationMatchedStatus::default())),
             deadline_monitor: Arc::new(Mutex::new(None)),
@@ -1194,6 +1212,11 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
     }
 
     #[inline]
+    pub fn get_offered_incompatible_type_status(&self) -> DdsResult<OfferedIncompatibleTypeStatus> {
+        <Self as DataWriterBase>::get_offered_incompatible_type_status(self)
+    }
+
+    #[inline]
     pub fn get_publication_matched_status(&self) -> DdsResult<PublicationMatchedStatus> {
         <Self as DataWriterBase>::get_publication_matched_status(self)
     }
@@ -1399,6 +1422,17 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         status_guard.total_count_change = 0;
         Ok(result)
     }
+    fn take_offered_incompatible_type_status(&self) -> DdsResult<OfferedIncompatibleTypeStatus> {
+        let mut status_guard = self
+            .offered_incompatible_type_status
+            .lock()
+            .map_err(|e| DdsError::Error(e.to_string()))?;
+        let result = status_guard.clone();
+
+        // Reset count_change
+        status_guard.total_count_change = 0;
+        Ok(result)
+    }
     fn take_publication_matched_status(&self) -> DdsResult<PublicationMatchedStatus> {
         let mut status_guard =
             self.publication_matched_status.lock().map_err(|e| DdsError::Error(e.to_string()))?;
@@ -1515,6 +1549,26 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
 
         // StatusCondition
         self.set_communication_status_propagation(&StatusKind::OFFERED_INCOMPATIBLE_QOS, true)?;
+
+        Ok(())
+    }
+
+    fn handle_offered_incompatible_type_status(
+        &self,
+        info: Arc<OfferedIncompatibleTypeStatus>,
+    ) -> DdsResult<()> {
+        {
+            let mut status_guard = self
+                .offered_incompatible_type_status
+                .lock()
+                .map_err(|e| DdsError::Error(e.to_string()))?;
+
+            status_guard.total_count += 1;
+            status_guard.total_count_change += 1;
+        }
+
+        // StatusCondition
+        self.set_communication_status_propagation(&StatusKind::OFFERED_INCOMPATIBLE_TYPE, true)?;
 
         Ok(())
     }
@@ -2083,6 +2137,27 @@ impl<Foo: 'static + Clone> DataWriterBase for DataWriter<Foo> {
         status_guard.total_count_change = 0;
 
         self.set_communication_status_propagation(&StatusKind::OFFERED_INCOMPATIBLE_QOS, false)?;
+
+        Ok(result)
+    }
+
+    fn get_offered_incompatible_type_status(&self) -> DdsResult<OfferedIncompatibleTypeStatus> {
+        /*
+            This operation provides access to the OFFERED_INCOMPATIBLE_TYPE communication status.
+            Refer to Section 2.2.4.1 Communication Status for a description of communication status.
+        */
+        self.is_deleted()?;
+
+        let mut status_guard = self
+            .offered_incompatible_type_status
+            .lock()
+            .map_err(|e| DdsError::Error(e.to_string()))?;
+        let result = status_guard.clone();
+
+        // 1. Reset total_count_change
+        status_guard.total_count_change = 0;
+
+        self.set_communication_status_propagation(&StatusKind::OFFERED_INCOMPATIBLE_TYPE, false)?;
 
         Ok(result)
     }

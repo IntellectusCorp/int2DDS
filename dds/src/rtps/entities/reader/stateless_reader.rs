@@ -15,8 +15,8 @@ use crate::{
         history_cache::HistoryCache as dcps_history_cache,
         qos_policy::{QosPolicyId, ReliabilityQosPolicyKind},
         status::{
-            QosPolicyCount, RequestedIncompatibleQosStatus, StatusInfo, StatusKind,
-            SubscriptionMatchedStatus,
+            QosPolicyCount, RequestedIncompatibleQosStatus, RequestedIncompatibleTypeStatus,
+            StatusInfo, StatusKind, SubscriptionMatchedStatus,
         },
     },
     rtps::{
@@ -67,6 +67,7 @@ pub(crate) struct StatelessReader {
     subscription_builtin_topic_data: Arc<Mutex<SubscriptionBuiltinTopicData>>,
     subscription_matched_status: Arc<Mutex<SubscriptionMatchedStatus>>,
     requested_incompatible_qos_status: Arc<Mutex<RequestedIncompatibleQosStatus>>,
+    requested_incompatible_type_status: Arc<Mutex<RequestedIncompatibleTypeStatus>>,
 }
 
 impl StatelessReader {
@@ -103,6 +104,9 @@ impl StatelessReader {
             subscription_matched_status: Arc::new(Mutex::new(SubscriptionMatchedStatus::default())),
             requested_incompatible_qos_status: Arc::new(Mutex::new(
                 RequestedIncompatibleQosStatus::default(),
+            )),
+            requested_incompatible_type_status: Arc::new(Mutex::new(
+                RequestedIncompatibleTypeStatus::default(),
             )),
         }
     }
@@ -221,6 +225,25 @@ impl StatelessReader {
             }
             Err(e) => {
                 log::error!("Failed to lock requested_incompatible_qos_status: {:?}", e);
+            }
+        }
+    }
+
+    pub(crate) fn update_requested_incompatible_type_status(&self) {
+        match self.requested_incompatible_type_status.lock() {
+            Ok(mut requested_incompatible_type_status) => {
+                requested_incompatible_type_status.total_count += 1;
+                requested_incompatible_type_status.total_count_change += 1;
+
+                self.update_status(
+                    StatusKind::REQUESTED_INCOMPATIBLE_TYPE,
+                    Some(Arc::new(requested_incompatible_type_status.clone())),
+                );
+
+                requested_incompatible_type_status.total_count_change = 0;
+            }
+            Err(e) => {
+                log::error!("Failed to lock requested_incompatible_type_status: {:?}", e);
             }
         }
     }

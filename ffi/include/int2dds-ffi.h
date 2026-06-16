@@ -48,6 +48,10 @@
 
 #define INT2DDS_STATUS_REQUESTED_DEADLINE_MISSED (1 << 2)
 
+#define INT2DDS_STATUS_OFFERED_INCOMPATIBLE_TYPE (1 << 3)
+
+#define INT2DDS_STATUS_REQUESTED_INCOMPATIBLE_TYPE (1 << 4)
+
 #define INT2DDS_STATUS_OFFERED_INCOMPATIBLE_QOS (1 << 5)
 
 #define INT2DDS_STATUS_REQUESTED_INCOMPATIBLE_QOS (1 << 6)
@@ -443,6 +447,20 @@ typedef struct Int2DdsDataWriterListener {
   Int2DdsUserContext user_context;
 } Int2DdsDataWriterListener;
 
+/**
+ * C-compatible offered incompatible type status
+ */
+typedef struct Int2DdsOfferedIncompatibleTypeStatus {
+  /**
+   * Total cumulative count of incompatible type
+   */
+  int32_t total_count;
+  /**
+   * Change in total_count since last access
+   */
+  int32_t total_count_change;
+} Int2DdsOfferedIncompatibleTypeStatus;
+
 typedef void (*Int2DdsOnDataAvailableCallback)(struct Int2DdsDataReader *reader,
                                                Int2DdsUserContext user_context);
 
@@ -611,6 +629,20 @@ typedef struct Int2DdsDataReaderListener {
   Int2DdsOnSampleLostCallback on_sample_lost;
   Int2DdsUserContext user_context;
 } Int2DdsDataReaderListener;
+
+/**
+ * C-compatible requested incompatible type status
+ */
+typedef struct Int2DdsRequestedIncompatibleTypeStatus {
+  /**
+   * Total cumulative count of incompatible type
+   */
+  int32_t total_count;
+  /**
+   * Change in total_count since last access
+   */
+  int32_t total_count_change;
+} Int2DdsRequestedIncompatibleTypeStatus;
 
 /**
  * FFI-safe SampleInfo returned to C callers
@@ -1502,6 +1534,16 @@ Int2DdsRet int2dds_datawriter_get_offered_deadline_missed_status(const struct In
  */
 Int2DdsRet int2dds_datawriter_get_offered_incompatible_qos_status(const struct Int2DdsDataWriter *writer,
                                                                   struct Int2DdsOfferedIncompatibleQosStatus *status_out);
+
+/**
+ * Get offered incompatible type status for a DataWriter
+ *
+ * # Safety
+ * - `writer` must be a valid datawriter
+ * - `status_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_datawriter_get_offered_incompatible_type_status(const struct Int2DdsDataWriter *writer,
+                                                                   struct Int2DdsOfferedIncompatibleTypeStatus *status_out);
 
 /**
  * Delete all entities contained by a publisher
@@ -2809,6 +2851,16 @@ Int2DdsRet int2dds_datareader_get_requested_deadline_missed_status(const struct 
  */
 Int2DdsRet int2dds_datareader_get_requested_incompatible_qos_status(const struct Int2DdsDataReader *reader,
                                                                     struct Int2DdsRequestedIncompatibleQosStatus *status_out);
+
+/**
+ * Get requested incompatible type status for a DataReader
+ *
+ * # Safety
+ * - `reader` must be a valid datareader
+ * - `status_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_datareader_get_requested_incompatible_type_status(const struct Int2DdsDataReader *reader,
+                                                                     struct Int2DdsRequestedIncompatibleTypeStatus *status_out);
 
 /**
  * Delete all entities contained by a subscriber

@@ -71,8 +71,8 @@ use crate::{
         qos_policy::{DestinationOrderQosPolicyKind, HistoryQosPolicyKind, Qos},
         status::{
             LivelinessChangedStatus, RequestedDeadlineMissedStatus, RequestedIncompatibleQosStatus,
-            SampleLostStatus, SampleRejectedStatus, StatusInfo, StatusKind, StatusMask,
-            SubscriptionMatchedStatus,
+            RequestedIncompatibleTypeStatus, SampleLostStatus, SampleRejectedStatus, StatusInfo,
+            StatusKind, StatusMask, SubscriptionMatchedStatus,
         },
         status_condition::StatusCondition,
     },
@@ -209,6 +209,7 @@ pub trait DataReaderBase: DomainEntity + Send + Any {
     fn get_sample_lost_status(&self) -> DdsResult<SampleLostStatus>;
     fn get_requested_deadline_missed_status(&self) -> DdsResult<RequestedDeadlineMissedStatus>;
     fn get_requested_incompatible_qos_status(&self) -> DdsResult<RequestedIncompatibleQosStatus>;
+    fn get_requested_incompatible_type_status(&self) -> DdsResult<RequestedIncompatibleTypeStatus>;
     fn get_subscription_matched_status(&self) -> DdsResult<SubscriptionMatchedStatus>;
     fn get_matched_publication_data(
         &self,
@@ -287,6 +288,7 @@ pub struct DataReader<Foo> {
     sample_rejected_status: Arc<Mutex<SampleRejectedStatus>>,
     requested_deadline_missed_status: Arc<Mutex<RequestedDeadlineMissedStatus>>,
     requested_incompatible_qos_status: Arc<Mutex<RequestedIncompatibleQosStatus>>,
+    requested_incompatible_type_status: Arc<Mutex<RequestedIncompatibleTypeStatus>>,
     subscription_matched_status: Arc<Mutex<SubscriptionMatchedStatus>>,
     sample_lost_status: Arc<Mutex<SampleLostStatus>>,
     deadline_monitor: Arc<Mutex<Option<DeadlineMonitor>>>,
@@ -326,6 +328,10 @@ impl<Foo> Debug for DataReader<Foo> {
                 "requested_incompatible_qos_status",
                 &self.requested_incompatible_qos_status.lock().unwrap(),
             )
+            .field(
+                "requested_incompatible_type_status",
+                &self.requested_incompatible_type_status.lock().unwrap(),
+            )
             .field("subscription_matched_status", &self.subscription_matched_status.lock().unwrap())
             .field("sample_lost_status", &self.sample_lost_status.lock().unwrap())
             .field("_phantom", &self._phantom)
@@ -359,6 +365,7 @@ impl<Foo: 'static + Clone + Debug> Clone for DataReader<Foo> {
             sample_lost_status: self.sample_lost_status.clone(),
             requested_deadline_missed_status: self.requested_deadline_missed_status.clone(),
             requested_incompatible_qos_status: self.requested_incompatible_qos_status.clone(),
+            requested_incompatible_type_status: self.requested_incompatible_type_status.clone(),
             subscription_matched_status: self.subscription_matched_status.clone(),
             deadline_monitor: self.deadline_monitor.clone(),
             change_callback: self.change_callback.clone(),
@@ -600,6 +607,13 @@ impl<Foo: 'static + Clone + Debug> UpdateStatus for DataReader<Foo> {
                 )
                 .map_err(|_| DdsError::BadParameter)?;
                 self.handle_requested_incompatible_qos_status(info)
+            }
+            StatusKind::REQUESTED_INCOMPATIBLE_TYPE => {
+                let info = Arc::downcast::<RequestedIncompatibleTypeStatus>(
+                    info.ok_or(DdsError::BadParameter)?,
+                )
+                .map_err(|_| DdsError::BadParameter)?;
+                self.handle_requested_incompatible_type_status(info)
             }
             StatusKind::SAMPLE_LOST => {
                 if info.is_some() {
@@ -887,6 +901,13 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     }
 
     #[inline]
+    pub fn get_requested_incompatible_type_status(
+        &self,
+    ) -> DdsResult<RequestedIncompatibleTypeStatus> {
+        <Self as DataReaderBase>::get_requested_incompatible_type_status(self)
+    }
+
+    #[inline]
     pub fn get_subscription_matched_status(&self) -> DdsResult<SubscriptionMatchedStatus> {
         <Self as DataReaderBase>::get_subscription_matched_status(self)
     }
@@ -1170,6 +1191,19 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         status_guard.total_count_change = 0;
         Ok(result)
     }
+    fn take_requested_incompatible_type_status(
+        &self,
+    ) -> DdsResult<RequestedIncompatibleTypeStatus> {
+        let mut status_guard = self
+            .requested_incompatible_type_status
+            .lock()
+            .map_err(|e| DdsError::Error(e.to_string()))?;
+        let result = status_guard.clone();
+
+        // Reset total_count_change
+        status_guard.total_count_change = 0;
+        Ok(result)
+    }
     fn take_subscription_matched_status(&self) -> DdsResult<SubscriptionMatchedStatus> {
         let mut status_guard =
             self.subscription_matched_status.lock().map_err(|e| DdsError::Error(e.to_string()))?;
@@ -1274,6 +1308,25 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
         // StatusCondition
         self.set_communication_status_propagation(&StatusKind::REQUESTED_INCOMPATIBLE_QOS, true)?;
+
+        Ok(())
+    }
+    fn handle_requested_incompatible_type_status(
+        &self,
+        info: Arc<RequestedIncompatibleTypeStatus>,
+    ) -> DdsResult<()> {
+        {
+            let mut status_guard = self
+                .requested_incompatible_type_status
+                .lock()
+                .map_err(|e| DdsError::Error(e.to_string()))?;
+
+            status_guard.total_count += 1;
+            status_guard.total_count_change += 1;
+        }
+
+        // StatusCondition
+        self.set_communication_status_propagation(&StatusKind::REQUESTED_INCOMPATIBLE_TYPE, true)?;
 
         Ok(())
     }
@@ -2013,6 +2066,9 @@ impl<Foo: DdsType> DataReader<Foo> {
             )),
             requested_incompatible_qos_status: Arc::new(Mutex::new(
                 RequestedIncompatibleQosStatus::default(),
+            )),
+            requested_incompatible_type_status: Arc::new(Mutex::new(
+                RequestedIncompatibleTypeStatus::default(),
             )),
             subscription_matched_status: Arc::new(Mutex::new(SubscriptionMatchedStatus::default())),
             deadline_monitor: Arc::new(Mutex::new(None)),
@@ -3380,6 +3436,18 @@ impl<Foo: 'static + Clone + Debug> DataReaderBase for DataReader<Foo> {
 
         self.set_communication_status_propagation(&StatusKind::REQUESTED_INCOMPATIBLE_QOS, false)?;
         self.take_requested_incompatible_qos_status()
+    }
+
+    fn get_requested_incompatible_type_status(&self) -> DdsResult<RequestedIncompatibleTypeStatus> {
+        // out: DdsError_t, status: RequestedIncompatibleTypeStatus
+        /*
+            This operation provides access to the REQUESTED_INCOMPATIBLE_TYPE communication status.
+            Communication status is described in Section 2.2.4.1, Communication Status.
+        */
+        self.is_deleted()?;
+
+        self.set_communication_status_propagation(&StatusKind::REQUESTED_INCOMPATIBLE_TYPE, false)?;
+        self.take_requested_incompatible_type_status()
     }
 
     fn get_subscription_matched_status(&self) -> DdsResult<SubscriptionMatchedStatus> {
