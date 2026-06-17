@@ -1,49 +1,55 @@
-//! Resolved transport-layer configuration derived from `PropertyQosPolicy`.
+//! Per-mode transport configuration derived from `PropertyQosPolicy`.
 //!
-//! `TransportConfig` is intentionally a small POD struct so socket/sender layers
-//! can carry a single `Copy` value instead of importing the full DCPS QoS module
-//! (preserves the `rtps::transport` → `dcps` one-way dependency).
+//! Each transport mode (`UdpConfig`, `TcpConfig`, `HybridConfig`) resolves its
+//! own parameters from a participant's `PropertyQosPolicy` via the
+//! [`TransportConfig`] trait, so participants in one process are tuned
+//! independently.
 //!
 //! Transport-tunable property keys (e.g. [`PROP_MULTICAST_TTL`]) live in the
 //! `dcps::infrastructure::qos_policy` module so they form the public API surface
 //! alongside the property setter helpers; this file just consumes them.
 
-use crate::dcps::infrastructure::qos_policy::{PropertyQosPolicy, PROP_MULTICAST_TTL};
+use std::net::SocketAddr;
+use std::time::Duration;
+
+use crate::dcps::infrastructure::qos_policy::{
+    PropertyQosPolicy, PROP_INITIAL_PEERS, PROP_MULTICAST_TTL, PROP_TCP_ASYNC_WORKERS,
+    PROP_TCP_BIND_PORT, PROP_TCP_BIND_TIMEOUT_MS, PROP_TCP_CONNECT_TIMEOUT_MS,
+    PROP_TCP_INCOMING_IDLE_TIMEOUT_MS, PROP_TCP_KEEPALIVE_INTERVAL_MS,
+    PROP_TCP_KEEPALIVE_MAX_MISSES, PROP_TCP_KEEPALIVE_TIMEOUT_MS, PROP_TCP_NODELAY,
+    PROP_TCP_PUBLIC_ADDRESS, PROP_TCP_SO_RCVBUF, PROP_TCP_SO_SNDBUF, PROP_TRANSPORT,
+};
+use crate::rtps::transport::TransportType;
 
 /// IPv4 multicast TTL fallback. Matches RFC 1112 / `IP_MULTICAST_TTL` defaults
 /// on Linux and Windows (`1` — link-local only).
 pub(crate) const DEFAULT_MULTICAST_TTL: u8 = 1;
 
+pub(crate) trait TransportConfig {
+    /// Resolve this mode's config from a participant's `PropertyQosPolicy`,
+    /// applying property → env → default precedence per field.
+    fn from_property(property: &PropertyQosPolicy) -> Self
+    where
+        Self: Sized;
+}
+
+/// UDP transport parameters.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct TransportConfig {
+pub(crate) struct UdpConfig {
     pub multicast_ttl: u8,
 }
 
-impl Default for TransportConfig {
-    fn default() -> Self {
-        Self { multicast_ttl: DEFAULT_MULTICAST_TTL }
-    }
-}
-
-impl TransportConfig {
-    /// Resolve transport-layer parameters from a `PropertyQosPolicy`.
-    ///
-    /// Takes `&PropertyQosPolicy` (not `&DomainParticipantQos`) so the transport
-    /// layer never imports `dcps::domain` — the only DCPS dependency stays the
-    /// single property container type.
-    ///
-    /// Unknown keys are ignored. Parse failures (e.g. `"abc"`, `"256"`, `"-1"`)
-    /// log a warning and fall back to the default — a per-key typo must never
-    /// abort `DomainParticipant` creation.
-    pub(crate) fn from_property(property: &PropertyQosPolicy) -> Self {
+impl TransportConfig for UdpConfig {
+    fn from_property(property: &PropertyQosPolicy) -> Self {
+        // Multicast TTL: property → env → default. A per-key typo logs a warning
+        // and falls back rather than aborting `DomainParticipant` creation.
         let multicast_ttl = property
             .find_property(PROP_MULTICAST_TTL)
             .and_then(|v| match v.parse::<u8>() {
                 Ok(ttl) => Some(ttl),
                 Err(e) => {
                     log::warn!(
-                        "[TransportConfig] invalid {} property value '{}': {}. \
-                         Falling back to env/default.",
+                        "invalid {} property value '{}': {}. Falling back to env/default.",
                         PROP_MULTICAST_TTL,
                         v,
                         e
@@ -53,9 +59,86 @@ impl TransportConfig {
             })
             .or_else(crate::common::env::get_multicast_ttl_override)
             .unwrap_or(DEFAULT_MULTICAST_TTL);
-
         Self { multicast_ttl }
     }
+}
+
+/// TCP transport parameters — all resolved per participant.
+#[derive(Debug, Clone)]
+pub(crate) struct TcpConfig {
+    /// Selected transport. Lets the TCP plugin distinguish pure TCP (initial
+    /// peers required from the Hybrid-embedded case.
+    pub transport_type: TransportType,
+    pub bind_port: Option<u16>,
+    /// Public endpoint advertised in SPDP for WAN/NAT traversal.
+    pub public_address: Option<SocketAddr>,
+    /// SPDP dial gate. Property first, then the `INT2DDS_INITIAL_PEERS` env var.
+    pub initial_peers: Vec<SocketAddr>,
+    pub nodelay: bool,
+    pub connect_timeout: Duration,
+    pub bind_timeout: Duration,
+    pub keepalive_interval: Duration,
+    pub keepalive_timeout: Duration,
+    pub keepalive_max_misses: u32,
+    pub incoming_idle_timeout: Duration,
+    pub so_rcvbuf: Option<usize>,
+    pub so_sndbuf: Option<usize>,
+    pub async_workers: Option<usize>,
+}
+
+impl TransportConfig for TcpConfig {
+    fn from_property(property: &PropertyQosPolicy) -> Self {
+        let ms = |key, default| {
+            Duration::from_millis(prop_parse::<u64>(property, key).unwrap_or(default))
+        };
+        Self {
+            transport_type: property
+                .find_property(PROP_TRANSPORT)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(crate::rtps::transport::get_transport_type),
+            bind_port: prop_parse::<u16>(property, PROP_TCP_BIND_PORT),
+            public_address: prop_parse::<SocketAddr>(property, PROP_TCP_PUBLIC_ADDRESS),
+            initial_peers: property
+                .find_property(PROP_INITIAL_PEERS)
+                .map(crate::common::env::parse_initial_peers)
+                .unwrap_or_else(crate::common::env::get_initial_peers),
+            nodelay: prop_parse::<bool>(property, PROP_TCP_NODELAY).unwrap_or(true),
+            connect_timeout: ms(PROP_TCP_CONNECT_TIMEOUT_MS, 5_000),
+            bind_timeout: ms(PROP_TCP_BIND_TIMEOUT_MS, 5_000),
+            keepalive_interval: ms(PROP_TCP_KEEPALIVE_INTERVAL_MS, 10_000),
+            keepalive_timeout: ms(PROP_TCP_KEEPALIVE_TIMEOUT_MS, 5_000),
+            keepalive_max_misses: prop_parse::<u32>(property, PROP_TCP_KEEPALIVE_MAX_MISSES)
+                .unwrap_or(3),
+            incoming_idle_timeout: ms(PROP_TCP_INCOMING_IDLE_TIMEOUT_MS, 60_000),
+            so_rcvbuf: prop_parse::<usize>(property, PROP_TCP_SO_RCVBUF),
+            so_sndbuf: prop_parse::<usize>(property, PROP_TCP_SO_SNDBUF),
+            async_workers: prop_parse::<usize>(property, PROP_TCP_ASYNC_WORKERS),
+        }
+    }
+}
+
+impl Default for TcpConfig {
+    fn default() -> Self {
+        Self::from_property(&PropertyQosPolicy::default())
+    }
+}
+
+/// Hybrid composes both sides: UDP multicast discovery + TCP/UDP unicast.
+#[derive(Debug, Clone)]
+pub(crate) struct HybridConfig {
+    pub udp: UdpConfig,
+    pub tcp: TcpConfig,
+}
+
+impl TransportConfig for HybridConfig {
+    fn from_property(property: &PropertyQosPolicy) -> Self {
+        Self { udp: UdpConfig::from_property(property), tcp: TcpConfig::from_property(property) }
+    }
+}
+
+/// Parse a single text property into `T`, ignoring absent/invalid values.
+fn prop_parse<T: std::str::FromStr>(property: &PropertyQosPolicy, key: &str) -> Option<T> {
+    property.find_property(key).and_then(|v| v.trim().parse::<T>().ok())
 }
 
 #[cfg(test)]
@@ -69,9 +152,8 @@ mod tests {
     #[test]
     fn default_when_property_missing() {
         clear_env();
-        assert_eq!(TransportConfig::default().multicast_ttl, DEFAULT_MULTICAST_TTL);
         assert_eq!(
-            TransportConfig::from_property(&PropertyQosPolicy::default()).multicast_ttl,
+            UdpConfig::from_property(&PropertyQosPolicy::default()).multicast_ttl,
             DEFAULT_MULTICAST_TTL
         );
     }
@@ -83,7 +165,7 @@ mod tests {
             let mut p = PropertyQosPolicy::default();
             p.add_property(PROP_MULTICAST_TTL, raw, false);
             assert_eq!(
-                TransportConfig::from_property(&p).multicast_ttl,
+                UdpConfig::from_property(&p).multicast_ttl,
                 raw.parse::<u8>().unwrap(),
                 "parse {raw}"
             );
@@ -97,10 +179,49 @@ mod tests {
             let mut p = PropertyQosPolicy::default();
             p.add_property(PROP_MULTICAST_TTL, bad, false);
             assert_eq!(
-                TransportConfig::from_property(&p).multicast_ttl,
+                UdpConfig::from_property(&p).multicast_ttl,
                 DEFAULT_MULTICAST_TTL,
                 "{bad} should fall back"
             );
         }
+    }
+
+    // TcpConfig reads only properties for its TCP-specific fields (no env), so
+    // these defaults are independent of any INT2DDS_TCP_* env var.
+    #[test]
+    fn tcp_config_defaults_when_property_missing() {
+        let cfg = TcpConfig::from_property(&PropertyQosPolicy::default());
+        assert_eq!(cfg.bind_port, None);
+        assert_eq!(cfg.public_address, None);
+        assert!(cfg.nodelay);
+        assert_eq!(cfg.connect_timeout, Duration::from_millis(5_000));
+        assert_eq!(cfg.bind_timeout, Duration::from_millis(5_000));
+        assert_eq!(cfg.keepalive_interval, Duration::from_millis(10_000));
+        assert_eq!(cfg.keepalive_timeout, Duration::from_millis(5_000));
+        assert_eq!(cfg.keepalive_max_misses, 3);
+        assert_eq!(cfg.incoming_idle_timeout, Duration::from_millis(60_000));
+        assert_eq!(cfg.so_rcvbuf, None);
+        assert_eq!(cfg.so_sndbuf, None);
+        assert_eq!(cfg.async_workers, None);
+    }
+
+    #[test]
+    fn tcp_config_reads_properties_and_ignores_invalid() {
+        let mut p = PropertyQosPolicy::default();
+        p.add_property(PROP_TCP_BIND_PORT, "17400", false);
+        p.add_property(PROP_TCP_NODELAY, "false", false);
+        p.add_property(PROP_TCP_BIND_TIMEOUT_MS, "2222", false);
+        p.add_property(PROP_TCP_KEEPALIVE_MAX_MISSES, "7", false);
+        p.add_property(PROP_TCP_PUBLIC_ADDRESS, "203.0.113.5:7400", false);
+        // Invalid value must be ignored (falls back to default), not panic.
+        p.add_property(PROP_TCP_SO_RCVBUF, "not-a-number", false);
+
+        let cfg = TcpConfig::from_property(&p);
+        assert_eq!(cfg.bind_port, Some(17400));
+        assert!(!cfg.nodelay);
+        assert_eq!(cfg.bind_timeout, Duration::from_millis(2222));
+        assert_eq!(cfg.keepalive_max_misses, 7);
+        assert_eq!(cfg.public_address, Some("203.0.113.5:7400".parse().unwrap()));
+        assert_eq!(cfg.so_rcvbuf, None);
     }
 }

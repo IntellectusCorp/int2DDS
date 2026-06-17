@@ -3,7 +3,7 @@
 
 use crate::rtps::{
     common::locator::MULTICAST_IP,
-    transport::{port_manager::PortManager, TransportConfig},
+    transport::{port_manager::PortManager, UdpConfig},
 };
 use log::debug;
 use socket2::{Domain, Protocol, SockAddr, Socket as Socket2, Type};
@@ -39,13 +39,13 @@ impl UdpSender {
     pub(crate) fn new(
         bind_ip: String,
         multicast_if_ip: String,
-        transport_config: TransportConfig,
+        udp_config: UdpConfig,
     ) -> std::io::Result<Self> {
         let socket = Socket2::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
 
         let mc_addr: Ipv4Addr = multicast_if_ip.parse().unwrap();
         socket.set_multicast_if_v4(&mc_addr)?;
-        socket.set_multicast_ttl_v4(transport_config.multicast_ttl as u32)?;
+        socket.set_multicast_ttl_v4(udp_config.multicast_ttl as u32)?;
 
         let bind_addr: Ipv4Addr = bind_ip.parse().unwrap();
         let sock_addr = SockAddr::from(SocketAddr::new(IpAddr::V4(bind_addr), 0));

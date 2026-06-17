@@ -9,7 +9,8 @@ use crate::rtps::common::locator::Locator;
 use crate::rtps::transport::shm::shm_listener::ShmListener;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 
-use super::TransportType;
+use super::{HybridConfig, TcpConfig, TransportConfig, TransportType, UdpConfig};
+use crate::dcps::infrastructure::qos_policy::PropertyQosPolicy;
 
 /// Intent-based send target, named after the RTPS protocol concept being
 /// delivered rather than the transport mechanism used. Each `TransportPlugin`
@@ -173,7 +174,7 @@ impl TransportPluginFactory {
         working_ips: Vec<String>,
         guid_prefix: GuidPrefix,
         tls_config: Option<std::sync::Arc<crate::rtps::transport::tcp::tls::TlsConfig>>,
-        transport_config: crate::rtps::transport::TransportConfig,
+        property: &PropertyQosPolicy,
     ) -> io::Result<Box<dyn TransportPlugin>> {
         match transport_type {
             TransportType::UDP => {
@@ -184,7 +185,7 @@ impl TransportPluginFactory {
                     bind_ip,
                     multicast_if_ip,
                     working_ips,
-                    transport_config,
+                    UdpConfig::from_property(property),
                 )?;
                 Ok(Box::new(plugin))
             }
@@ -197,6 +198,7 @@ impl TransportPluginFactory {
                     working_ips,
                     guid_prefix,
                     tls_config,
+                    TcpConfig::from_property(property),
                 )?;
                 Ok(Box::new(plugin))
             }
@@ -209,7 +211,7 @@ impl TransportPluginFactory {
                     multicast_if_ip,
                     working_ips,
                     guid_prefix,
-                    transport_config,
+                    HybridConfig::from_property(property),
                 )?;
                 Ok(Box::new(plugin))
             }
@@ -221,7 +223,7 @@ impl TransportPluginFactory {
                     bind_ip,
                     multicast_if_ip,
                     working_ips,
-                    transport_config,
+                    UdpConfig::from_property(property),
                 )?;
                 Ok(Box::new(plugin))
             }

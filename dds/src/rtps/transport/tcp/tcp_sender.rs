@@ -35,19 +35,12 @@ use crate::rtps::transport::tcp::mux_state::MuxState;
 use crate::rtps::transport::tcp::protocol::ControlMsg;
 use crate::rtps::transport::tcp::stream::{wrap_plain, AsyncConnStream};
 use crate::rtps::transport::tcp::tls::{connect_tls_async, TlsConfig};
+use crate::rtps::transport::TcpConfig;
 
 /// Logical port 0 = control connection — carries PEER_HELLO,
 /// PORT_RESERVE, KEEPALIVE; never RTPS data.
 pub(crate) const CONTROL_LOGICAL_PORT: u16 = 0;
 
-const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
-const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
-/// Per-keepalive ACK deadline — must be < `DEFAULT_KEEPALIVE_INTERVAL`,
-/// since the next tick is when we evaluate whether the previous round-trip
-/// met the deadline.
-const DEFAULT_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(5);
-const DEFAULT_MAX_MISSED_KEEPALIVES: u32 = 3;
 const ORPHAN_PRUNE_INTERVAL: Duration = Duration::from_millis(500);
 
 // ── Cache entry types ───────────────────────────────────────────────────────
@@ -164,6 +157,7 @@ impl TcpSender {
         local_guid_prefix: GuidPrefix,
         tls_config: Option<Arc<TlsConfig>>,
         shared: Arc<MuxState>,
+        tcp_config: &TcpConfig,
     ) -> Arc<Self> {
         let cancel = CancellationToken::new();
         // Capture the current runtime handle so sync `send_to_*` callers can
@@ -176,11 +170,11 @@ impl TcpSender {
             working_ip,
             listener_port,
             local_guid_prefix,
-            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
-            handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
-            keepalive_interval: DEFAULT_KEEPALIVE_INTERVAL,
-            keepalive_timeout: DEFAULT_KEEPALIVE_TIMEOUT,
-            max_missed_keepalives: DEFAULT_MAX_MISSED_KEEPALIVES,
+            connect_timeout: tcp_config.connect_timeout,
+            handshake_timeout: tcp_config.bind_timeout,
+            keepalive_interval: tcp_config.keepalive_interval,
+            keepalive_timeout: tcp_config.keepalive_timeout,
+            max_missed_keepalives: tcp_config.keepalive_max_misses,
             tls_config,
             shared,
             connections: Arc::new(DashMap::new()),
@@ -582,14 +576,13 @@ async fn open_stream(sender: &Arc<TcpSender>, addr: SocketAddr) -> io::Result<As
             io::Error::new(io::ErrorKind::TimedOut, format!("tcp connect timeout to {:?}", addr))
         })??;
 
-    let _ = tcp.set_nodelay(crate::common::env::get_tcp_nodelay());
+    let _ = tcp.set_nodelay(sender.shared.tuning.nodelay);
 
-    // Optional socket buffer overrides from env — mirror the accept path so
-    // outbound (send) sockets are bounded too, not just accepted ones.
-    if let Some(sz) = crate::common::env::get_tcp_so_rcvbuf() {
+    // Mirror the accept path so outbound (send) sockets are bounded too.
+    if let Some(sz) = sender.shared.tuning.so_rcvbuf {
         let _ = socket2::SockRef::from(&tcp).set_recv_buffer_size(sz);
     }
-    if let Some(sz) = crate::common::env::get_tcp_so_sndbuf() {
+    if let Some(sz) = sender.shared.tuning.so_sndbuf {
         let _ = socket2::SockRef::from(&tcp).set_send_buffer_size(sz);
     }
 
@@ -808,6 +801,7 @@ fn addr_to_guid(addr: SocketAddr) -> GuidPrefix {
 mod tests {
     use super::*;
     use crate::rtps::transport::plugin::IncomingMessage;
+    use crate::rtps::transport::tcp::mux_state::TcpSocketTuning;
     use crate::rtps::transport::tcp::tcp_mux_listener::TcpMuxListener;
     use crossbeam_channel::bounded;
     use std::time::Instant;
@@ -846,7 +840,14 @@ mod tests {
         listener_port: u16,
     ) -> (Arc<TcpSender>, crossbeam_channel::Receiver<IncomingMessage>) {
         let (d_tx, d_rx, u_tx, _u_rx) = make_channels();
-        let shared = Arc::new(MuxState::new(0, participant_id, guid_prefix, d_tx, u_tx));
+        let shared = Arc::new(MuxState::new(
+            0,
+            participant_id,
+            guid_prefix,
+            TcpSocketTuning::default(),
+            d_tx,
+            u_tx,
+        ));
         let sender = TcpSender::new(
             0,
             participant_id,
@@ -855,6 +856,7 @@ mod tests {
             guid_prefix,
             None,
             shared,
+            &TcpConfig::default(),
         );
         (sender, d_rx)
     }
@@ -932,6 +934,7 @@ mod tests {
             b_user_tx,
             None,
             Duration::from_secs(60),
+            TcpSocketTuning::default(),
         )
         .expect("listener bind_and_spawn");
         let b_port = listener.port();
@@ -971,6 +974,7 @@ mod tests {
             b_user_tx,
             None,
             Duration::from_secs(60),
+            TcpSocketTuning::default(),
         )
         .expect("listener bind_and_spawn");
         let b_port = listener.port();
@@ -1021,6 +1025,7 @@ mod tests {
             b_user_tx,
             None,
             Duration::from_secs(60),
+            TcpSocketTuning::default(),
         )
         .expect("listener bind_and_spawn");
         let b_port = listener.port();

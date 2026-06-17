@@ -41,7 +41,7 @@ pub(crate) mod tokens;
 pub(crate) mod transport_config;
 pub(crate) mod udp;
 
-pub(crate) use transport_config::TransportConfig;
+pub(crate) use transport_config::{HybridConfig, TcpConfig, TransportConfig, UdpConfig};
 
 use std::env;
 use std::sync::OnceLock;

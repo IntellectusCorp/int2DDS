@@ -827,6 +827,42 @@ pub struct BinaryProperty {
 /// reader lives in `rtps::transport::transport_config`.
 pub const PROP_MULTICAST_TTL: &str = "int2dds.transport.UDPv4.multicast_ttl";
 
+/// Transport selection (`udp` | `tcp` | `hybrid` | `shm`). Falls back to the
+/// `INT2DDS_TRANSPORT` env var when absent.
+pub const PROP_TRANSPORT: &str = "int2dds.transport";
+
+/// SPDP initial peers, comma-separated `ip:port` list. Falls back to the
+/// `INT2DDS_INITIAL_PEERS` env var when absent.
+pub const PROP_INITIAL_PEERS: &str = "int2dds.initial_peers";
+
+/// ---------TCP QoS ----------
+/// TCP listen (server bind) port. When absent, defaults to the domain port
+/// formula `PB + DG * domain_id`.
+pub const PROP_TCP_BIND_PORT: &str = "int2dds.transport.TCPv4.bind_port";
+/// Public `ip:port` advertised in SPDP for WAN/NAT traversal.
+pub const PROP_TCP_PUBLIC_ADDRESS: &str = "int2dds.transport.TCPv4.public_address";
+/// Disable Nagle (`TCP_NODELAY`). Default `true`.
+pub const PROP_TCP_NODELAY: &str = "int2dds.transport.TCPv4.nodelay";
+/// Outbound connect timeout, milliseconds. Default `5000`.
+pub const PROP_TCP_CONNECT_TIMEOUT_MS: &str = "int2dds.transport.TCPv4.connect_timeout_ms";
+/// BIND handshake response timeout, milliseconds. Default `5000`.
+pub const PROP_TCP_BIND_TIMEOUT_MS: &str = "int2dds.transport.TCPv4.bind_timeout_ms";
+/// Control keepalive send interval, milliseconds. Default `10000`.
+pub const PROP_TCP_KEEPALIVE_INTERVAL_MS: &str = "int2dds.transport.TCPv4.keepalive_interval_ms";
+/// Keepalive response timeout, milliseconds. Default `5000`.
+pub const PROP_TCP_KEEPALIVE_TIMEOUT_MS: &str = "int2dds.transport.TCPv4.keepalive_timeout_ms";
+/// Keepalive max consecutive misses before disconnect. Default `3`.
+pub const PROP_TCP_KEEPALIVE_MAX_MISSES: &str = "int2dds.transport.TCPv4.keepalive_max_misses";
+/// Idle timeout for incoming connections, milliseconds. Default `60000`.
+pub const PROP_TCP_INCOMING_IDLE_TIMEOUT_MS: &str =
+    "int2dds.transport.TCPv4.incoming_idle_timeout_ms";
+/// Forced `SO_RCVBUF` in bytes. Default OS-managed (absent).
+pub const PROP_TCP_SO_RCVBUF: &str = "int2dds.transport.TCPv4.so_rcvbuf";
+/// Forced `SO_SNDBUF` in bytes. Default OS-managed (absent).
+pub const PROP_TCP_SO_SNDBUF: &str = "int2dds.transport.TCPv4.so_sndbuf";
+/// Tokio worker thread count for the TCP runtime.
+pub const PROP_TCP_ASYNC_WORKERS: &str = "int2dds.transport.TCPv4.async_workers";
+
 /// Generic name/value extension channel for QoS-driven configuration.
 ///
 /// Standard mapping: OMG DDS-Security v1.2 spec 7.3.21 `PropertyQosPolicy`
@@ -928,6 +964,13 @@ impl PropertyQosPolicy {
     /// Equivalent to `add_property(PROP_MULTICAST_TTL, ttl.to_string(), false)`.
     pub fn set_multicast_ttl(&mut self, ttl: u8) {
         self.add_property(PROP_MULTICAST_TTL, ttl.to_string(), false);
+    }
+
+    /// Convenience setter for the TCP listen (server bind) port. Pin a distinct
+    /// value per participant when running several in one process.
+    /// Equivalent to `add_property(PROP_TCP_BIND_PORT, port.to_string(), false)`.
+    pub fn set_tcp_bind_port(&mut self, port: u16) {
+        self.add_property(PROP_TCP_BIND_PORT, port.to_string(), false);
     }
 
     /// Converts the `propagate==true` text properties into the RTPS wire-format
