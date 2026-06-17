@@ -852,15 +852,6 @@ impl<'a> CGen<'a> {
                 ));
             }
             ResolvedType::Sequence { element, .. } => {
-                let needs_dh = Self::sequence_element_needs_dheader(element);
-                if needs_dh {
-                    // XCDR2: non-primitive sequences need DHEADER
-                    self.raw(&format!("{}{{ size_t _seq_dh = 0;\n", indent));
-                    self.raw(&format!(
-                        "{}if (w.xcdr2) {{ int2dds_cdr_write_dheader_begin(&w, &_seq_dh); }}\n",
-                        indent
-                    ));
-                }
                 self.raw(&format!(
                     "{}int2dds_cdr_write_seq_header(&w, {}.length);\n",
                     indent, accessor
@@ -872,13 +863,6 @@ impl<'a> CGen<'a> {
                 let elem_accessor = format!("{}.data[_i]", accessor);
                 self.emit_write_field_indented(element, &elem_accessor, &format!("{}    ", indent));
                 self.raw(&format!("{}}}\n", indent));
-                if needs_dh {
-                    self.raw(&format!(
-                        "{}if (w.xcdr2) {{ int2dds_cdr_write_dheader_finalize(&w, _seq_dh); }}\n",
-                        indent
-                    ));
-                    self.raw(&format!("{}}}\n", indent));
-                }
             }
             ResolvedType::Array { element, size } => {
                 self.raw(&format!("{}for (uint32_t _i = 0; _i < {}; _i++) {{\n", indent, size));
@@ -1127,15 +1111,6 @@ impl<'a> CGen<'a> {
                 ));
             }
             ResolvedType::Sequence { element, bound } => {
-                let needs_dh = Self::sequence_element_needs_dheader(element);
-                if needs_dh {
-                    // XCDR2: non-primitive sequences need DHEADER
-                    self.raw(&format!("{}{{ uint32_t _seq_sz = 0; size_t _seq_sp = 0;\n", indent));
-                    self.raw(&format!(
-                        "{}if (r.xcdr2) {{ int2dds_cdr_read_dheader(&r, &_seq_sz, &_seq_sp); }}\n",
-                        indent
-                    ));
-                }
                 self.raw(&format!(
                     "{}int2dds_cdr_read_seq_header(&r, &{}.length);\n",
                     indent, accessor
@@ -1175,13 +1150,6 @@ impl<'a> CGen<'a> {
                         &elem_accessor,
                         &format!("{}    ", indent),
                     );
-                    self.raw(&format!("{}}}\n", indent));
-                }
-                if needs_dh {
-                    self.raw(&format!(
-                        "{}if (r.xcdr2) {{ int2dds_cdr_read_dheader_end(&r, _seq_sz, _seq_sp); }}\n",
-                        indent
-                    ));
                     self.raw(&format!("{}}}\n", indent));
                 }
             }

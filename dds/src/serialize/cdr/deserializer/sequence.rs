@@ -384,9 +384,7 @@ impl<'a> Xcdr2Deserializer<'a> {
         Ok(result)
     }
 
-    /// XCDR2: Read DHEADER for non-primitive sequences (string is non-primitive per DDS-XTypes v1.3)
     pub fn deserialize_string_sequence(&mut self) -> Result<Vec<String>, CdrError> {
-        let _dheader = self.read_dheader()?;
         let length = self.deserialize_u32()? as usize;
         let mut result = Vec::with_capacity(self.checked_capacity(length, 4)?);
         for _ in 0..length {
@@ -395,14 +393,12 @@ impl<'a> Xcdr2Deserializer<'a> {
         Ok(result)
     }
 
-    /// XCDR2: Read DHEADER for non-primitive sequences
     pub fn deserialize_sequence<T, F>(&mut self, mut deserialize_fn: F) -> Result<Vec<T>, CdrError>
     where
         F: FnMut(&mut Self) -> Result<T, CdrError>,
     {
-        let _dheader = self.read_dheader()?;
         let length = self.deserialize_u32()? as usize;
-        let mut result = Vec::new();
+        let mut result = Vec::with_capacity(self.checked_capacity(length, 1)?);
         for _ in 0..length {
             result.push(deserialize_fn(self)?);
         }
