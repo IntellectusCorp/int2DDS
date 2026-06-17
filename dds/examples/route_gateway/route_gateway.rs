@@ -10,8 +10,12 @@
 //!
 //! # Usage
 //!
+//! Config resolution: `DDS_QOS_PROFILE` env, else the bundled
+//! `gateway.example.json` next to this example.
+//!
 //! ```bash
-//! cargo run --example route_gateway -- --config gateway.json
+//! DDS_QOS_PROFILE=gateway.json cargo run --example route_gateway
+//! cargo run --example route_gateway   # uses the bundled gateway.example.json
 //! ```
 //!
 //! # Example configuration
@@ -48,13 +52,14 @@ use int2dds::{
     route_gateway::{AutoRelay, QosResolver, RouteGatewayConfig, TopicFilter},
 };
 
+/// Bundled gateway config, used when `DDS_QOS_PROFILE` is not set.
+/// `CARGO_MANIFEST_DIR` is the crate dir (`.../int2DDS/dds`).
+const DEFAULT_CONFIG_FILE: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/examples/route_gateway/gateway.example.json");
+
 #[derive(Parser, Debug)]
 #[command(author, version, about = "int2DDS Route Gateway", long_about = None)]
 struct Args {
-    /// Path to the JSON configuration file.
-    #[arg(short, long)]
-    config: String,
-
     /// Verbose logging.
     #[arg(short, long, default_value = "false")]
     verbose: bool,
@@ -66,10 +71,15 @@ fn main() {
     set_log_type(LogType::Console);
     set_console_log_level(if args.verbose { LogLevel::Debug } else { LogLevel::Info });
 
-    let cfg = RouteGatewayConfig::from_file(&args.config)
-        .unwrap_or_else(|e| panic!("Failed to load config '{}': {:?}", args.config, e));
+    // Config path: DDS_QOS_PROFILE env, else the bundled gateway.example.json
+    // next to this example.
+    let config_path =
+        std::env::var("DDS_QOS_PROFILE").unwrap_or_else(|_| DEFAULT_CONFIG_FILE.to_string());
 
-    println!("[Route Gateway] starting");
+    let cfg = RouteGatewayConfig::from_file(&config_path)
+        .unwrap_or_else(|e| panic!("Failed to load config '{}': {:?}", config_path, e));
+
+    println!("[Route Gateway] starting (config: {config_path})");
     println!("  local:  domain={}, transport={}", cfg.local.domain_id, cfg.local.transport);
     println!(
         "  remote: domain={}, transport={}, tls={}, initial_peers={:?}",
