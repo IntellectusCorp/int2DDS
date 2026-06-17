@@ -859,8 +859,8 @@ impl<'a> CsGen<'a> {
                 }
             }
             ResolvedType::Map { key, value, .. } => {
-                let non_prim = Self::is_non_primitive_element(key)
-                    || Self::is_non_primitive_element(value);
+                let non_prim =
+                    Self::is_non_primitive_element(key) || Self::is_non_primitive_element(value);
                 if non_prim {
                     self.line("{");
                     self.indent += 1;
@@ -1130,10 +1130,7 @@ impl<'a> CsGen<'a> {
                 let size_var = format!("_{name}SeqSize");
                 let start_var = format!("_{name}SeqStart");
                 if non_prim {
-                    self.line(&format!(
-                        "var ({}, {}) = r.ReadDheader();",
-                        size_var, start_var
-                    ));
+                    self.line(&format!("var ({}, {}) = r.ReadDheader();", size_var, start_var));
                 }
                 self.line(&format!("var {} = r.ReadSeqHeader();", count_var));
                 self.line(&format!(
@@ -1157,10 +1154,7 @@ impl<'a> CsGen<'a> {
                 let size_var = format!("_{name}ArrSize");
                 let start_var = format!("_{name}ArrStart");
                 if non_prim {
-                    self.line(&format!(
-                        "var ({}, {}) = r.ReadDheader();",
-                        size_var, start_var
-                    ));
+                    self.line(&format!("var ({}, {}) = r.ReadDheader();", size_var, start_var));
                 }
                 self.line(&format!("{}.{} = new {}[{}];", obj, name, cs_elem, size));
                 self.line(&format!("for (var _i = 0; _i < {}; _i++)", size));
@@ -1178,15 +1172,12 @@ impl<'a> CsGen<'a> {
                 let count_var = format!("_{name}Count");
                 let cs_key = self.type_to_csharp(key);
                 let cs_val = self.type_to_csharp(value);
-                let non_prim = Self::is_non_primitive_element(key)
-                    || Self::is_non_primitive_element(value);
+                let non_prim =
+                    Self::is_non_primitive_element(key) || Self::is_non_primitive_element(value);
                 let size_var = format!("_{name}MapSize");
                 let start_var = format!("_{name}MapStart");
                 if non_prim {
-                    self.line(&format!(
-                        "var ({}, {}) = r.ReadDheader();",
-                        size_var, start_var
-                    ));
+                    self.line(&format!("var ({}, {}) = r.ReadDheader();", size_var, start_var));
                 }
                 self.line(&format!("var {} = r.ReadSeqHeader();", count_var));
                 self.line(&format!(
@@ -1277,10 +1268,7 @@ impl<'a> CsGen<'a> {
                 let size_var = format!("{var_name}SeqSize");
                 let start_var = format!("{var_name}SeqStart");
                 if non_prim {
-                    self.line(&format!(
-                        "var ({}, {}) = r.ReadDheader();",
-                        size_var, start_var
-                    ));
+                    self.line(&format!("var ({}, {}) = r.ReadDheader();", size_var, start_var));
                 }
                 self.line(&format!("var {} = r.ReadSeqHeader();", count_var));
                 self.line(&format!(
@@ -1304,10 +1292,7 @@ impl<'a> CsGen<'a> {
                 let size_var = format!("{var_name}ArrSize");
                 let start_var = format!("{var_name}ArrStart");
                 if non_prim {
-                    self.line(&format!(
-                        "var ({}, {}) = r.ReadDheader();",
-                        size_var, start_var
-                    ));
+                    self.line(&format!("var ({}, {}) = r.ReadDheader();", size_var, start_var));
                 }
                 self.line(&format!("var {} = new {}[{}];", var_name, cs_elem, size));
                 self.line(&format!("for (var _j = 0; _j < {}; _j++)", size));
@@ -1325,15 +1310,12 @@ impl<'a> CsGen<'a> {
                 let count_var = format!("{var_name}Count");
                 let cs_key = self.type_to_csharp(key);
                 let cs_val = self.type_to_csharp(value);
-                let non_prim = Self::is_non_primitive_element(key)
-                    || Self::is_non_primitive_element(value);
+                let non_prim =
+                    Self::is_non_primitive_element(key) || Self::is_non_primitive_element(value);
                 let size_var = format!("{var_name}MapSize");
                 let start_var = format!("{var_name}MapStart");
                 if non_prim {
-                    self.line(&format!(
-                        "var ({}, {}) = r.ReadDheader();",
-                        size_var, start_var
-                    ));
+                    self.line(&format!("var ({}, {}) = r.ReadDheader();", size_var, start_var));
                 }
                 self.line(&format!("var {} = r.ReadSeqHeader();", count_var));
                 self.line(&format!(
