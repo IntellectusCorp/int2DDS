@@ -572,14 +572,18 @@ impl Participant {
             }
         }
 
+        // Remove from the store first, before unmatching intra-participant readers below.
+        // While the readers are being unmatched, a just-sent in-flight sample from this writer
+        // then observes the writer as already gone (find_writer_from_entity_id == None), which
+        // lets the delivery path deliver the already-accepted sample instead of dropping it.
+        // No duplicate can result: the writer is gone, so no reliable retransmit can occur.
+        self.rtps_writer_store.remove(&topic_name, entity_id);
+
         // Unmatch with intra participant readers
         self.cleanup_resources_for_remote_writer(
             Guid::new(self.guid().prefix(), entity_id),
             &topic_name,
         )?;
-
-        // Remove from store
-        self.rtps_writer_store.remove(&topic_name, entity_id);
 
         Ok(())
     }
