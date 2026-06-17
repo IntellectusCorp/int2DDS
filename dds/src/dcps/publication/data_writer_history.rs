@@ -111,6 +111,8 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
         &mut self,
         a_change: Arc<CacheChange>,
     ) -> DdsResult<Option<Arc<CacheChange>>> {
+        // If purge_sent_changes, deliver to the RTPS cache,
+        // then drop from history and return the buffer to the pool.
         if self.purge_sent_changes {
             let seq = a_change.sequence_number().to_i64();
             // RTPS add_change delivers synchronously to all matched reader locators
@@ -363,6 +365,11 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
         self.pool.len()
     }
 
+    // current number of stored changes
+    pub(crate) fn changes_len(&self) -> usize {
+        self.changes.len()
+    }
+
     // Must be called immediately after DataWriterHistoryCache creation.
     pub(crate) fn set_datawriter(&mut self, data_writer: Weak<DataWriter<Foo>>) {
         self.data_writer = data_writer;
@@ -480,8 +487,8 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
             self.pool.try_release(change);
         }
         debug!(
-            "[history-strict] ack up to {:?} before={} removing={} after={} rtps_len={}",
-            max_acked,
+            "[history-strict] ack up to {} before={} removing={} after={} rtps_len={}",
+            max_acked.to_i64(),
             before,
             removing,
             self.changes.len(),

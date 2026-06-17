@@ -1244,7 +1244,17 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         // released so the removal callback can re-lock it. No-op unless the all-acked
         // callback is registered (volatile + keep_all + !strict + reliable).
         if let Some(stateful_writer) = rtps_writer.as_any().downcast_ref::<StatefulWriter>() {
+            debug!("[history-strict] trigger=send-complete seq={}", seq_num.to_i64());
             stateful_writer.process_acked_changes();
+            let dcps_len = match self.datawriter_cache.try_lock() {
+                Ok(cache) => cache.changes_len().to_string(),
+                Err(_) => "busy".to_string(),
+            };
+            debug!(
+                "[history-strict] after send-complete rtps_len={} dcps_len={}",
+                stateful_writer.rtps_cache_len(),
+                dcps_len
+            );
         }
 
         Ok(seq_num)
