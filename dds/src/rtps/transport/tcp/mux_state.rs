@@ -112,12 +112,30 @@ pub(crate) struct ConnectionEntry {
 
 // ── MuxState ─────────────────────────────────────────────────────────────────
 
+/// Socket-level tuning applied to both accepted (inbound) and dialed (outbound)
+/// TCP streams. Resolved per participant from `TcpConfig`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TcpSocketTuning {
+    pub(crate) nodelay: bool,
+    pub(crate) so_rcvbuf: Option<usize>,
+    pub(crate) so_sndbuf: Option<usize>,
+}
+
+impl Default for TcpSocketTuning {
+    fn default() -> Self {
+        Self { nodelay: true, so_rcvbuf: None, so_sndbuf: None }
+    }
+}
+
 /// Thread-safe shared state for the mux listener.
 pub(crate) struct MuxState {
     pub(crate) domain_id: u32,
     pub(crate) participant_id: u32,
     #[allow(dead_code)]
     local_guid_prefix: GuidPrefix,
+
+    /// Socket tuning shared with the accept loop and the outbound sender.
+    pub(crate) tuning: TcpSocketTuning,
 
     pub(crate) connections: DashMap<ConnectionId, ConnectionEntry>,
     peer_connections: Mutex<HashMap<GuidPrefix, PeerConnectionGroup>>,
@@ -139,6 +157,7 @@ impl MuxState {
         domain_id: u32,
         participant_id: u32,
         local_guid_prefix: GuidPrefix,
+        tuning: TcpSocketTuning,
         discovery_tx: Sender<IncomingMessage>,
         user_data_tx: Sender<IncomingMessage>,
     ) -> Self {
@@ -146,6 +165,7 @@ impl MuxState {
             domain_id,
             participant_id,
             local_guid_prefix,
+            tuning,
             connections: DashMap::new(),
             peer_connections: Mutex::new(HashMap::new()),
             cookie_to_port: DashMap::new(),

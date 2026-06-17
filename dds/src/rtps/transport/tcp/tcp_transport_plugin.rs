@@ -11,7 +11,6 @@
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use crossbeam_channel::bounded;
 use log::{debug, info};
@@ -21,9 +20,11 @@ use crate::rtps::common::locator::Locator;
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::plugin::{IncomingMessage, MessageSource, SendTarget, TransportPlugin};
 use crate::rtps::transport::port_manager::PortManager;
+use crate::rtps::transport::tcp::mux_state::TcpSocketTuning;
 use crate::rtps::transport::tcp::tcp_mux_listener::TcpMuxListener;
 use crate::rtps::transport::tcp::tcp_sender::TcpSender;
 use crate::rtps::transport::tcp::tls::TlsConfig;
+use crate::rtps::transport::{TcpConfig, TransportType};
 
 /// Crossbeam capacity for discovery + dead-peer channels.
 const CHANNEL_BUFFER_SIZE: usize = 512;
@@ -31,9 +32,6 @@ const CHANNEL_BUFFER_SIZE: usize = 512;
 /// Crossbeam capacity for the inbound user_data channel. Sized to absorb
 /// short consumer stalls under bursty fragmented workloads.
 const USER_CHANNEL_CAPACITY: usize = 1024;
-
-/// Default inbound idle timeout.
-const DEFAULT_INCOMING_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 // ── TcpTransportPlugin ──────────────────────────────────────────────────
 
@@ -50,6 +48,9 @@ pub(crate) struct TcpTransportPlugin {
     /// locators are ignored. Empty falls back to dialing every advertised
     /// locator. Expects one reachable address per peer.
     initial_peers: Vec<SocketAddr>,
+
+    /// Public endpoint advertised in SPDP for WAN/NAT traversal (per participant).
+    public_address: Option<SocketAddr>,
 
     /// runtime isolating tcp tasks. Dropped last (after listener
     /// and sender) so tasks can drain on shutdown.
@@ -75,8 +76,17 @@ impl TcpTransportPlugin {
         working_ip: String,
         working_ips: Vec<String>,
         guid_prefix: GuidPrefix,
+        tcp_config: TcpConfig,
     ) -> io::Result<Self> {
-        Self::new_with_tls(domain_id, participant_id, working_ip, working_ips, guid_prefix, None)
+        Self::new_with_tls(
+            domain_id,
+            participant_id,
+            working_ip,
+            working_ips,
+            guid_prefix,
+            None,
+            tcp_config,
+        )
     }
 
     /// Build the plugin. Internally creates a multi-thread runtime, then
@@ -89,15 +99,27 @@ impl TcpTransportPlugin {
         working_ips: Vec<String>,
         guid_prefix: GuidPrefix,
         tls_config: Option<Arc<TlsConfig>>,
+        tcp_config: TcpConfig,
     ) -> io::Result<Self> {
-        let physical_port = crate::common::env::get_tcp_port()
-            .unwrap_or_else(|| PortManager::get_tcp_physical_port(domain_id));
+        let physical_port =
+            tcp_config.bind_port.unwrap_or_else(|| PortManager::get_tcp_physical_port(domain_id));
 
-        // Read from env for the dial gate. The pure-TCP "initial peers
-        // required" check lives in `DcpsBridge::new`, which resolves them from
-        // the QoS property as well (this env read does not see property-only
-        // peers — unifying that source is part of the future fallback work).
-        let initial_peers = crate::common::env::get_initial_peers();
+        // Dial gate, resolved per participant (int2dds.initial_peers property →
+        // INT2DDS_INITIAL_PEERS env).
+        let initial_peers = tcp_config.initial_peers.clone();
+
+        // Pure TCP has no multicast, so discovery cannot bootstrap without
+        // initial peers — fail fast with a clear message. Hybrid embeds this
+        // plugin but bootstraps over UDP multicast, so its `transport_type`
+        // (not `TCP`) exempts it from this requirement.
+        if tcp_config.transport_type == TransportType::TCP && initial_peers.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "TCP transport requires initial peers: TCP has no multicast for discovery. \
+                 Set the int2dds.initial_peers QoS property (or INT2DDS_INITIAL_PEERS) to the \
+                 peer's ip:port.",
+            ));
+        }
 
         // Crossbeam bridges async → sync. Listener writes to *_tx; the DDS
         // layer reads from *_rx via `take_*_source()`.
@@ -105,9 +127,8 @@ impl TcpTransportPlugin {
         let (user_data_tx, user_data_rx) = bounded::<IncomingMessage>(USER_CHANNEL_CAPACITY);
         let (dead_peer_tx, dead_peer_rx) = bounded::<SocketAddr>(CHANNEL_BUFFER_SIZE);
 
-        // Runtime — worker count overridable via env for ops tuning. Default
-        // keeps a small footprint suitable for most participant workloads.
-        let worker_threads = worker_thread_count();
+        // Runtime worker count (per participant). Default keeps a small footprint.
+        let worker_threads = tcp_config.async_workers.unwrap_or_else(default_worker_count);
         let runtime = Arc::new(
             tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(worker_threads)
@@ -122,7 +143,12 @@ impl TcpTransportPlugin {
                 })?,
         );
 
-        let idle_timeout = DEFAULT_INCOMING_IDLE_TIMEOUT;
+        let idle_timeout = tcp_config.incoming_idle_timeout;
+        let tuning = TcpSocketTuning {
+            nodelay: tcp_config.nodelay,
+            so_rcvbuf: tcp_config.so_rcvbuf,
+            so_sndbuf: tcp_config.so_sndbuf,
+        };
 
         // Build listener + sender inside a runtime context — both
         // constructors call `tokio::spawn`, which needs `Handle::current()`.
@@ -136,6 +162,7 @@ impl TcpTransportPlugin {
                 user_data_tx,
                 tls_config.clone(),
                 idle_timeout,
+                tuning,
             )
             .map_err(|e| {
                 log::error!(
@@ -170,6 +197,7 @@ impl TcpTransportPlugin {
                 guid_prefix,
                 tls_config,
                 shared,
+                &tcp_config,
             );
 
             sender.set_dead_peer_tx(dead_peer_tx);
@@ -190,6 +218,7 @@ impl TcpTransportPlugin {
             working_ips,
             listener_port,
             initial_peers,
+            public_address: tcp_config.public_address,
             runtime,
             sender,
             mux_listener: Mutex::new(Some(mux_listener)),
@@ -204,7 +233,7 @@ impl TcpTransportPlugin {
     /// the per-NIC list when set.
     fn advertised_tcp_locators(&self) -> Vec<Locator> {
         // 1. Explicit WAN/NAT public endpoint takes precedence.
-        if let Some(public_addr) = crate::common::env::get_tcp_public_addr() {
+        if let Some(public_addr) = self.public_address {
             if let std::net::IpAddr::V4(v4) = public_addr.ip() {
                 log::info!(
                     "[TcpTransportPlugin] WAN mode: advertising public address \
@@ -371,17 +400,9 @@ impl Drop for TcpTransportPlugin {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-/// Decide how many worker threads to spawn on the runtime.
-/// Default: `min(4, available_parallelism)`.
-/// Override via `INT2DDS_TCP_ASYNC_WORKERS`.
-fn worker_thread_count() -> usize {
-    if let Ok(s) = std::env::var("INT2DDS_TCP_ASYNC_WORKERS") {
-        if let Ok(n) = s.parse::<usize>() {
-            if n > 0 {
-                return n;
-            }
-        }
-    }
+/// Default tokio worker thread count when `TcpConfig.async_workers` is unset:
+/// `min(4, available_parallelism)`.
+fn default_worker_count() -> usize {
     let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
     cpus.min(4).max(1)
 }
@@ -401,12 +422,17 @@ mod tests {
     }
 
     fn make_plugin(domain: u32) -> TcpTransportPlugin {
+        // These tests exercise the listener/runtime mechanics, not discovery, so
+        // satisfy the pure-TCP initial-peers requirement with a dummy peer.
+        let mut cfg = TcpConfig::default();
+        cfg.initial_peers = vec!["127.0.0.1:7400".parse().unwrap()];
         TcpTransportPlugin::new(
             domain,
             0,
             "127.0.0.1".to_string(),
             vec!["127.0.0.1".to_string()],
             [0u8; 12],
+            cfg,
         )
         .expect("plugin creation")
     }

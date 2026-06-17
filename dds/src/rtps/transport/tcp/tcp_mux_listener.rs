@@ -23,7 +23,10 @@ use crate::rtps::transport::tcp::stream::wrap_plain;
 use crate::rtps::transport::tcp::tls::{accept_tls_async, TlsConfig};
 use crate::rtps::{
     common::guid::GuidPrefix,
-    transport::{plugin::IncomingMessage, tcp::mux_state::MuxState},
+    transport::{
+        plugin::IncomingMessage,
+        tcp::mux_state::{MuxState, TcpSocketTuning},
+    },
 };
 
 /// How often the prune ticker scans for idle connections. Independent of the
@@ -62,6 +65,7 @@ impl TcpMuxListener {
         user_data_tx: crossbeam_channel::Sender<IncomingMessage>,
         tls_config: Option<Arc<TlsConfig>>,
         idle_timeout: Duration,
+        tuning: TcpSocketTuning,
     ) -> io::Result<Self> {
         let std_listener = bind_listener(port)?;
         let actual_port = std_listener.local_addr()?.port();
@@ -70,6 +74,7 @@ impl TcpMuxListener {
             domain_id,
             participant_id,
             local_guid_prefix,
+            tuning,
             discovery_tx,
             user_data_tx,
         ));
@@ -130,6 +135,13 @@ impl Drop for TcpMuxListener {
 fn bind_listener(port: u16) -> io::Result<std::net::TcpListener> {
     let addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
     let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)?;
+    // SO_REUSEADDR semantics differ by OS. On Unix it only relaxes rebinding a
+    // port left in TIME_WAIT — two live listeners on the same port still
+    // conflict — so we keep it for clean restarts. On Windows it would instead
+    // let a second listener share/hijack the same port, silently defeating the
+    // per-participant bind-collision detection; leaving it off there preserves
+    // the EADDRINUSE failure we rely on.
+    #[cfg(unix)]
     socket.set_reuse_address(true)?;
     socket.set_nonblocking(true)?;
     socket.bind(&addr.into())?;
@@ -165,11 +177,11 @@ async fn accept_loop_task(
                     Ok((tcp, addr)) => {
                         debug!("Accepted from {:?}", addr);
 
-                        // Optional socket buffer overrides from env.
-                        if let Some(sz) = crate::common::env::get_tcp_so_rcvbuf() {
+                        // Optional socket buffer overrides (per-participant config).
+                        if let Some(sz) = shared.tuning.so_rcvbuf {
                             let _ = socket2::SockRef::from(&tcp).set_recv_buffer_size(sz);
                         }
-                        if let Some(sz) = crate::common::env::get_tcp_so_sndbuf() {
+                        if let Some(sz) = shared.tuning.so_sndbuf {
                             let _ = socket2::SockRef::from(&tcp).set_send_buffer_size(sz);
                         }
 
@@ -227,7 +239,7 @@ async fn handshake_and_register_task(
         None => wrap_plain(tcp),
     };
 
-    let _ = stream.set_nodelay(crate::common::env::get_tcp_nodelay());
+    let _ = stream.set_nodelay(shared.tuning.nodelay);
 
     // Channel created here, NOT inside spawn_conn_actor — so we can register
     // the entry (with tx) before the reader task starts polling.
@@ -305,6 +317,7 @@ mod tests {
             u_tx,
             None,
             Duration::from_secs(60),
+            TcpSocketTuning::default(),
         )
         .expect("bind_and_spawn")
     }
@@ -410,6 +423,7 @@ mod tests {
             u_tx,
             None,
             Duration::from_millis(50), // idle timeout
+            TcpSocketTuning::default(),
         )
         .expect("bind_and_spawn");
         let port = listener.port();
@@ -479,6 +493,7 @@ mod tests {
             u_tx,
             None,
             Duration::from_millis(50),
+            TcpSocketTuning::default(),
         )
         .expect("bind_and_spawn");
         let port = listener.port();
