@@ -1148,10 +1148,19 @@ impl UserLogic {
         // Update WriterProxy state - mark as Received if data was received
         if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
             if let Ok(mut matched_writers) = stateful_reader.writer_proxies().lock() {
-                let writer_proxy = matched_writers
+                let writer_proxy = match matched_writers
                     .iter_mut()
                     .find(|proxy| proxy.remote_writer_guid() == remote_guid)
-                    .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
+                {
+                    Some(proxy) => proxy,
+                    None => {
+                        // The writer proxy was concurrently removed (the writer was destroyed
+                        // while this already-accepted sample was still being delivered
+                        // intra-participant). Deliver it directly instead of dropping it.
+                        drop(matched_writers);
+                        return self.add_change_to_reader_cache_and_notify(reader, vec![change]);
+                    }
+                };
 
                 // Mark the corresponding sequence number as Received
                 writer_proxy.mark_change_received(sequence_number, fragment_info);
@@ -1416,6 +1425,15 @@ impl UserLogic {
                 })?;
             if reader.matched_writer_is_matched(remote_writer_guid) {
                 matched_readers.push(reader.clone());
+            } else if remote_writer_guid.prefix() == participant.guid().prefix()
+                && participant.find_writer_from_entity_id(remote_writer_guid.entity_id()).is_none()
+            {
+                // Intra-participant directed sample whose local writer was already destroyed
+                // while this just-sent sample was still in flight. With the writer gone there
+                // is no reliable retransmit (so no duplicate is possible); deliver the
+                // already-accepted sample instead of dropping it. The matched path and
+                // cross-participant samples are unchanged.
+                matched_readers.push(reader.clone());
             }
         } else {
             matched_readers
@@ -1455,10 +1473,16 @@ impl UserLogic {
             let matched_writers = writer_proxies
                 .lock()
                 .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
-            let writer_proxy = matched_writers
+            // If the writer proxy was concurrently removed (the writer was destroyed while
+            // this already-accepted sample is still being delivered intra-participant), keep
+            // the change's default attributes instead of dropping the sample.
+            let writer_proxy = match matched_writers
                 .iter()
                 .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
-                .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
+            {
+                Some(proxy) => proxy,
+                None => return Ok(()),
+            };
 
             // Get attributes from WriterProxy
             ownership_strength = writer_proxy.get_ownership_strength();
