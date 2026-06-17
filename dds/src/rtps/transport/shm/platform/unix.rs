@@ -49,7 +49,9 @@ impl UnixSharedMemory {
 
         if fd >= 0 {
             // We created it, set the size
-            let ret = unsafe { ftruncate(fd, size as i64) };
+            // `off_t` is i64 on 64-bit targets but i32 on 32-bit (e.g. armhf),
+            // so cast to off_t rather than a fixed i64 to stay portable.
+            let ret = unsafe { ftruncate(fd, size as libc::off_t) };
             if ret < 0 {
                 unsafe { close(fd) };
                 return Err(io::Error::last_os_error());
