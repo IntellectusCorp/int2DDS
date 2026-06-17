@@ -434,6 +434,14 @@ impl StatefulWriter {
         }
     }
 
+    // Non-blocking RTPS transmit queue length for debug logging.
+    pub(crate) fn rtps_cache_len(&self) -> String {
+        match self.writer_cache.try_lock() {
+            Ok(cache) => cache.len().to_string(),
+            Err(_) => "busy".to_string(),
+        }
+    }
+
     // Invokes the all-acked callback when the minimum acked sequence number advances.
     // Must not be called while holding the matched_readers lock.
     pub(crate) fn process_acked_changes(&self) {
@@ -826,7 +834,9 @@ impl Writer for StatefulWriter {
         debug!("Removed reader proxy with guid {:?} from matched readers", reader_guid);
 
         // A reliable reader leaving can advance the ack floor over the remaining readers.
+        debug!("[history-strict] trigger=unmatch-single");
         self.process_acked_changes();
+        debug!("[history-strict] after unmatch-single rtps_len={}", self.rtps_cache_len());
 
         Ok(true)
     }
@@ -862,7 +872,9 @@ impl Writer for StatefulWriter {
 
         // Removed readers can advance the ack floor; recompute once the lock is released.
         if removed > 0 {
+            debug!("[history-strict] trigger=unmatch-bulk");
             self.process_acked_changes();
+            debug!("[history-strict] after unmatch-bulk rtps_len={}", self.rtps_cache_len());
         }
 
         Ok(removed)

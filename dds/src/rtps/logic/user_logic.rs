@@ -1960,7 +1960,9 @@ impl UnicastMessageProcessor for UserLogic {
         drop(reader_proxies);
 
         // May remove all-acked changes from a volatile keep-all writer's history
+        debug!("[history-strict] trigger=acknack");
         stateful_writer.process_acked_changes();
+        debug!("[history-strict] after acknack rtps_len={}", stateful_writer.rtps_cache_len());
 
         stateful_writer.stop_heartbeat_if_acked_by_all()?;
 
