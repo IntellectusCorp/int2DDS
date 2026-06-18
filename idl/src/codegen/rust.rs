@@ -197,13 +197,35 @@ impl<'a> RustGen<'a> {
             let variant_name =
                 naming::escape_keyword(&naming::to_pascal_case(&dc.name), naming::TargetLang::Rust);
             let type_str = self.type_to_rust(&dc.resolved_type);
-            
+            let disc_val = self.default_discriminant(u, repr);
+
             self.line("#[dds(default)]");
-            self.line(&format!("{}({}) = -1,", variant_name, type_str));
+            self.line(&format!("{}({}) = {},", variant_name, type_str, disc_val));
         }
 
         self.indent -= 1;
         self.line("}");
+    }
+
+    fn default_discriminant(&self, u: &ResolvedUnion, repr: &str) -> String {
+        if matches!(repr, "i16" | "i32" | "i64") {
+            return "-1".to_string();
+        }
+        let used: std::collections::HashSet<i64> = u
+            .cases
+            .iter()
+            .flat_map(|c| &c.labels)
+            .filter_map(|l| match l {
+                ResolvedUnionLabel::Int(v) => Some(*v),
+                ResolvedUnionLabel::Bool(b) => Some(*b as i64),
+                ResolvedUnionLabel::Ident(_) => None,
+            })
+            .collect();
+        let mut candidate = 0i64;
+        while used.contains(&candidate) {
+            candidate += 1;
+        }
+        candidate.to_string()
     }
 
     fn discriminant_repr(&self, ty: &ResolvedType) -> &'static str {
@@ -684,6 +706,46 @@ mod tests {
         assert!(code.contains("pub enum MyUnion {"));
         assert!(code.contains("IntVal(i32) = 0,"));
         assert!(code.contains("StrVal(String) = 1,"));
+    }
+
+    #[test]
+    fn test_union_bool_default_codegen() {
+        let defs = parse_idl(
+            r#"
+            union BoolUnion switch(boolean) {
+                case TRUE: long true_val;
+                default: string other;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "BoolUnion.idl", &RustOptions::default());
+
+        assert!(code.contains("#[repr(u8)]"), "{}", code);
+        assert!(code.contains("#[dds(default)]"), "{}", code);
+        assert!(!code.contains("= -1,"), "u8 repr default must not be -1: {}", code);
+        assert!(code.contains("Other(String) = 0,"), "default takes unused label 0: {}", code);
+    }
+
+    #[test]
+    fn test_union_unsigned_default_codegen() {
+        let defs = parse_idl(
+            r#"
+            union UU switch(unsigned long) {
+                case 0: long a;
+                case 1: long b;
+                default: string d;
+            };
+            "#,
+        )
+        .unwrap();
+        let model = resolve(defs).unwrap();
+        let code = generate(&model, "UU.idl", &RustOptions::default());
+
+        assert!(code.contains("#[repr(u32)]"), "{}", code);
+        assert!(!code.contains("= -1,"), "u32 repr default must not be -1: {}", code);
+        assert!(code.contains("D(String) = 2,"), "default takes smallest unused label 2: {}", code);
     }
 
     #[test]
