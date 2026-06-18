@@ -16,7 +16,7 @@ use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::tcp::tcp_transport_plugin::TcpTransportPlugin;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 use crate::rtps::transport::udp::udp_sender::UdpSender;
-use crate::rtps::transport::TransportConfig;
+use crate::rtps::transport::HybridConfig;
 
 /// Channel buffer size for merged sources.
 const CHANNEL_BUFFER_SIZE: usize = 256;
@@ -55,9 +55,9 @@ impl HybridTransportPlugin {
         multicast_if_ip: String,
         working_ips: Vec<String>,
         guid_prefix: GuidPrefix,
-        transport_config: TransportConfig,
+        hybrid_config: HybridConfig,
     ) -> io::Result<Self> {
-        let udp_sender = UdpSender::new(bind_ip.clone(), multicast_if_ip, transport_config)?;
+        let udp_sender = UdpSender::new(bind_ip.clone(), multicast_if_ip, hybrid_config.udp)?;
 
         // Multicast first (domain-wide port, no per-participant collision).
         let discovery_mc_port = PortManager::get_discovery_traffic_multicast_port(domain_id);
@@ -67,9 +67,9 @@ impl HybridTransportPlugin {
         // like UdpTransportPlugin and ShmTransportPlugin. Without this, two
         // Hybrid processes on the same host both bind (domain, pid=0)'s UDP
         // unicast ports, the second `.ok()` swallows the conflict, and
-        // discovery silently fails. (TCP physical port is shared across
-        // participants via the mux listener — its collision is resolved
-        // separately by INT2DDS_TCP_PORT, not by participant_id.)
+        // discovery silently fails. (The TCP listen port is independent of
+        // participant_id; for several participants on one host, pin a distinct
+        // int2dds.transport.TCPv4.bind_port per participant.)
         let (discovery_uc, user_uc) = loop {
             let disc_port =
                 PortManager::get_discovery_traffic_unicast_port(domain_id, participant_id);
@@ -91,15 +91,16 @@ impl HybridTransportPlugin {
         };
 
         // Create TCP plugin (handles its own mux listener thread).
-        // Pass the final participant_id so TCP's identity matches UDP's.
-        // The TCP physical port itself is independent of participant_id —
-        // override via INT2DDS_TCP_PORT for multi-process on the same host.
+        // Pass the final participant_id so TCP's identity matches UDP's. The TCP
+        // listen port comes from the per-participant TcpConfig (bind_port
+        // property, else the domain formula).
         let tcp_plugin = TcpTransportPlugin::new(
             domain_id,
             participant_id,
             bind_ip,
             working_ips.clone(),
             guid_prefix,
+            hybrid_config.tcp,
         )?;
 
         // Create merged discovery unicast channel: UDP listener + TCP discovery rx
