@@ -92,6 +92,13 @@ target_link_libraries(xml_dynamic_subscriber ${INT2DDS_FFI_LIB})
 add_executable(xml_parse_check xtypes/xml_parse_check.c)
 target_link_libraries(xml_parse_check ${INT2DDS_FFI_LIB})
 
+# QoS Profile Examples: load QoS from an XML <qos_library> and apply it
+add_executable(qos_profile_publisher qos_profile/publisher.c)
+target_link_libraries(qos_profile_publisher ${INT2DDS_FFI_LIB})
+
+add_executable(qos_profile_subscriber qos_profile/subscriber.c)
+target_link_libraries(qos_profile_subscriber ${INT2DDS_FFI_LIB})
+
 # Copy DLL to output directory on Windows
 if(WIN32 AND EXISTS ${INT2DDS_FFI_DLL})
     foreach(target
@@ -101,7 +108,8 @@ if(WIN32 AND EXISTS ${INT2DDS_FFI_DLL})
         listener_publisher listener_subscriber
         multi_pub_sub multi_participant_1 multi_participant_2
         dynamic_type_publisher dynamic_type_subscriber
-        xml_dynamic_publisher xml_dynamic_subscriber xml_parse_check)
+        xml_dynamic_publisher xml_dynamic_subscriber xml_parse_check
+        qos_profile_publisher qos_profile_subscriber)
         add_custom_command(TARGET ${target} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${INT2DDS_FFI_DLL}
@@ -135,4 +143,6 @@ message(STATUS "  ./dynamic_type_subscriber")
 message(STATUS "  ./xml_dynamic_publisher [--domain N] [--xml PATH] [--type NAME]")
 message(STATUS "  ./xml_dynamic_subscriber [--domain N] [--xml PATH] [--type NAME]")
 message(STATUS "  ./xml_parse_check [xml_dir]")
+message(STATUS "  ./qos_profile_publisher [--domain N] [--qos-profile PATH]")
+message(STATUS "  ./qos_profile_subscriber [--domain N] [--qos-profile PATH]")
 message(STATUS "")
