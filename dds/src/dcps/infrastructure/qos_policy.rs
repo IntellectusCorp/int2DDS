@@ -267,6 +267,8 @@ impl HistoryQosPolicyKind {
 /// - Uses `ResourceLimitsQosPolicy.max_samples_per_instance` as the actual limit.
 /// - **Reliable mode**: Blocks waiting for ACKs up to `max_blocking_time`, returns `OutOfResources` on timeout.
 /// - **Best-Effort mode**: Removes oldest sample when limit exceeded.
+/// - **`strict: false`**: A volatile writer removes samples acknowledged by all matched readers
+///   from its history. Default is `true` (keep all samples).
 ///
 /// # DataReader Behavior
 ///
@@ -311,6 +313,7 @@ impl HistoryQosPolicyKind {
 /// let writer_qos_keep_last = DataWriterQos {
 ///     history: HistoryQosPolicy {
 ///         kind: HistoryQosPolicyKind::KeepLast(10),
+///         strict: true,
 ///     },
 ///     ..Default::default()
 /// };
@@ -319,6 +322,7 @@ impl HistoryQosPolicyKind {
 /// let _writer_qos_keep_all = DataWriterQos {
 ///     history: HistoryQosPolicy {
 ///         kind: HistoryQosPolicyKind::KeepAll,
+///         strict: true,
 ///     },
 ///     resource_limits: ResourceLimitsQosPolicy {
 ///         max_samples: 1000,
@@ -333,14 +337,23 @@ impl HistoryQosPolicyKind {
 ///     .unwrap();
 /// ```
 #[derive(DdsType, Copy, Eq)]
-#[dds_type(crate_path = "crate")]
+#[dds_type(crate_path = "crate", no_default)]
 pub struct HistoryQosPolicy {
     /// The history storage strategy.
     pub kind: HistoryQosPolicyKind,
+    /// Only affects a Volatile writer with `KeepAll`. When `false`, samples
+    /// acknowledged by all matched readers are removed from history; `true` keeps them.
+    pub strict: bool,
+}
+
+impl Default for HistoryQosPolicy {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
 }
 
 impl ConstDefault for HistoryQosPolicy {
-    const DEFAULT: Self = Self { kind: HistoryQosPolicyKind::DEFAULT };
+    const DEFAULT: Self = Self { kind: HistoryQosPolicyKind::DEFAULT, strict: true };
 }
 
 impl QosPolicy for HistoryQosPolicy {
@@ -1555,6 +1568,7 @@ impl DurabilityQosPolicyKind {
 ///     },
 ///     history: HistoryQosPolicy {
 ///         kind: HistoryQosPolicyKind::KeepAll,
+///         strict: true,
 ///     },
 ///     ..Default::default()
 /// };
@@ -1651,6 +1665,7 @@ impl QosPolicy for DurabilityQosPolicy {
 /// let writer_qos = DataWriterQos {
 ///     history: HistoryQosPolicy {
 ///         kind: HistoryQosPolicyKind::KeepAll,
+///         strict: true,
 ///     },
 ///     resource_limits: ResourceLimitsQosPolicy {
 ///         max_samples: 100,

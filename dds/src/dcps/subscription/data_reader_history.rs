@@ -831,7 +831,10 @@ mod tests {
         #[test]
         fn test_history_cache_creation() {
             let reader_qos = DataReaderQos {
-                history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepLast(10) },
+                history: HistoryQosPolicy {
+                    kind: HistoryQosPolicyKind::KeepLast(10),
+                    strict: true,
+                },
                 resource_limits: ResourceLimitsQosPolicy {
                     max_samples: 50,
                     max_instances: 5,
@@ -851,7 +854,7 @@ mod tests {
         #[test]
         fn test_history_cache_keep_last() {
             let reader_qos = DataReaderQos {
-                history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepLast(5) },
+                history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepLast(5), strict: true },
                 resource_limits: ResourceLimitsQosPolicy {
                     max_samples: 20,
                     max_instances: 4,
@@ -871,7 +874,7 @@ mod tests {
         #[test]
         fn test_history_cache_keep_last_with_unlimited_resource_limits() {
             let reader_qos = DataReaderQos {
-                history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepLast(5) },
+                history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepLast(5), strict: true },
                 ..Default::default()
             };
             let data_reader = create_with_key_datareader(reader_qos);
@@ -886,7 +889,7 @@ mod tests {
         #[test]
         fn test_history_cache_keep_all() {
             let reader_qos = DataReaderQos {
-                history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+                history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
                 resource_limits: ResourceLimitsQosPolicy {
                     max_samples: 20,
                     max_instances: 4,
@@ -910,7 +913,7 @@ mod tests {
         #[test]
         fn test_history_cache_no_key_instance_limits() {
             let reader_qos = DataReaderQos {
-                history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+                history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
                 resource_limits: ResourceLimitsQosPolicy {
                     max_samples: 20,
                     max_instances: 4,
@@ -931,7 +934,7 @@ mod tests {
         fn test_history_cache_add_change_success_no_key_max_samples_exceeded() {
             // can_auto_remove = true
             let reader_qos = DataReaderQos {
-                history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepLast(3) },
+                history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepLast(3), strict: true },
                 reliability: ReliabilityQosPolicy {
                     kind: ReliabilityQosPolicyKind::Reliable,
                     max_blocking_time: Duration::from_millis(100),
@@ -975,7 +978,7 @@ mod tests {
         fn test_history_cache_add_change_fail_no_key_max_samples_exceeded() {
             // KeepAll + Reliable = can_auto_remove = false
             let reader_qos = DataReaderQos {
-                history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+                history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
                 reliability: ReliabilityQosPolicy {
                     kind: ReliabilityQosPolicyKind::Reliable,
                     max_blocking_time: Duration::from_millis(100),
@@ -1013,7 +1016,7 @@ mod tests {
         fn test_history_cache_add_change_success_with_key_max_samples_per_instance_exceeded() {
             // KeepLast + Reliable = can_auto_remove = true
             let reader_qos = DataReaderQos {
-                history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepLast(2) },
+                history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepLast(2), strict: true },
                 reliability: ReliabilityQosPolicy {
                     kind: ReliabilityQosPolicyKind::Reliable,
                     max_blocking_time: Duration::from_millis(100),
@@ -1058,7 +1061,7 @@ mod tests {
         fn test_history_cache_add_change_fail_with_key_max_samples_per_instance_exceeded() {
             // KeepAll + Reliable = can_auto_remove = false
             let reader_qos = DataReaderQos {
-                history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+                history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
                 reliability: ReliabilityQosPolicy {
                     kind: ReliabilityQosPolicyKind::Reliable,
                     max_blocking_time: Duration::from_millis(100),
@@ -1094,7 +1097,7 @@ mod tests {
         #[test]
         fn test_history_cache_add_change_success_with_key_max_instances_exceeded() {
             let reader_qos = DataReaderQos {
-                history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepLast(3) },
+                history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepLast(3), strict: true },
                 reliability: ReliabilityQosPolicy {
                     kind: ReliabilityQosPolicyKind::Reliable,
                     max_blocking_time: Duration::from_millis(100),
@@ -1196,7 +1199,7 @@ mod tests {
         #[test]
         fn test_history_cache_add_change_success_with_key_max_samples_exceeded() {
             let reader_qos = DataReaderQos {
-                history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepLast(3) },
+                history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepLast(3), strict: true },
                 reliability: ReliabilityQosPolicy {
                     kind: ReliabilityQosPolicyKind::Reliable,
                     max_blocking_time: Duration::from_millis(100),
@@ -1243,7 +1246,7 @@ mod tests {
         #[test]
         fn test_history_cache_add_change_fail_with_key_max_samples_exceeded() {
             let reader_qos = DataReaderQos {
-                history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+                history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
                 reliability: ReliabilityQosPolicy {
                     kind: ReliabilityQosPolicyKind::Reliable,
                     max_blocking_time: Duration::from_millis(100),
