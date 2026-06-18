@@ -1,47 +1,50 @@
 {
-  "local": {
-    "domain_id": 0,
-    "transport": "udp"
-  },
-  "remote": {
-    "domain_id": 1,
-    "transport": "tcp",
-    "initial_peers": [
-      "192.168.1.100:7650"
-    ]
-  },
-  "auto_relay": {
-    "filter": "*",
-    "qos_profiles": {
-      "name": "DemoQos",
-      "qos_profiles": [
-        {
-          "name": "BestEffort",
-          "datareader_qos": {
-            "reliability": {
-              "kind": "BEST_EFFORT_RELIABILITY_QOS"
-            },
-            "history": {
-              "kind": "KEEP_LAST_HISTORY_QOS",
-              "depth": 1
-            }
-          },
-          "datawriter_qos": {
-            "reliability": {
-              "kind": "BEST_EFFORT_RELIABILITY_QOS"
-            },
-            "history": {
-              "kind": "KEEP_LAST_HISTORY_QOS",
-              "depth": 1
-            }
-          }
-        }
+  "route_gateway": {
+    "local": {
+      "domain_id": 0,
+      "transport": "udp"
+    },
+    "remote": {
+      "domain_id": 1,
+      "transport": "tcp",
+      "bind_port": 7650,
+      "initial_peers": [
+        "192.168.1.100:7650"
       ]
     },
-    "default_local_reader_qos": "DemoQos::BestEffort",
-    "default_local_writer_qos": "DemoQos::BestEffort",
-    "default_remote_reader_qos": "DemoQos::BestEffort",
-    "default_remote_writer_qos": "DemoQos::BestEffort"
-  },
-  "poll_period_ms": 50
+    "auto_relay": {
+      "filter": "*",
+      "qos_profiles": {
+        "name": "DemoQos",
+        "qos_profiles": [
+          {
+            "name": "BestEffort",
+            "datareader_qos": {
+              "reliability": {
+                "kind": "BEST_EFFORT_RELIABILITY_QOS"
+              },
+              "history": {
+                "kind": "KEEP_LAST_HISTORY_QOS",
+                "depth": 1
+              }
+            },
+            "datawriter_qos": {
+              "reliability": {
+                "kind": "BEST_EFFORT_RELIABILITY_QOS"
+              },
+              "history": {
+                "kind": "KEEP_LAST_HISTORY_QOS",
+                "depth": 1
+              }
+            }
+          }
+        ]
+      },
+      "default_local_reader_qos": "DemoQos::BestEffort",
+      "default_local_writer_qos": "DemoQos::BestEffort",
+      "default_remote_reader_qos": "DemoQos::BestEffort",
+      "default_remote_writer_qos": "DemoQos::BestEffort"
+    },
+    "poll_period_ms": 50
+  }
 }
