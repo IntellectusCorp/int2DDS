@@ -29,6 +29,7 @@ use crate::{
             endpoint::Endpoint,
             entity::Entity,
             history::{cache_change::CacheChange, reader_history::ReaderHistoryCache},
+            reader::time_based_filter::TimeBasedFilter,
         },
     },
 };
@@ -43,6 +44,11 @@ pub(crate) trait Reader: Entity + Endpoint + Debug + Any {
     fn matched_writer_is_matched(&self, writer_guid: Guid) -> bool;
     fn matched_writers_guids(&self) -> Vec<Guid>;
     fn on_change(&self, change: Arc<CacheChange>);
+
+    // Reader-side TIME_BASED_FILTER state, present only when minimum_separation > 0.
+    fn time_based_filter(&self) -> Option<Arc<TimeBasedFilter>> {
+        None
+    }
 
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
