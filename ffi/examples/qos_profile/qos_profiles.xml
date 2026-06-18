@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<dds>
+    <qos_library name="HelloWorldLibrary">
+        <qos_profile name="ReliableProfile" is_default_profile="true">
+            <publisher_qos>
+                <partition><name><element>HelloWorldPartition</element></name></partition>
+            </publisher_qos>
+            <subscriber_qos>
+                <partition><name><element>HelloWorldPartition</element></name></partition>
+            </subscriber_qos>
+            <topic_qos>
+                <reliability><kind>RELIABLE_RELIABILITY_QOS</kind></reliability>
+                <durability><kind>TRANSIENT_LOCAL_DURABILITY_QOS</kind></durability>
+            </topic_qos>
+            <datawriter_qos>
+                <reliability><kind>RELIABLE_RELIABILITY_QOS</kind></reliability>
+                <durability><kind>TRANSIENT_LOCAL_DURABILITY_QOS</kind></durability>
+                <history><kind>KEEP_LAST_HISTORY_QOS</kind><depth>10</depth></history>
+            </datawriter_qos>
+            <datareader_qos>
+                <reliability><kind>RELIABLE_RELIABILITY_QOS</kind></reliability>
+                <durability><kind>TRANSIENT_LOCAL_DURABILITY_QOS</kind></durability>
+                <history><kind>KEEP_LAST_HISTORY_QOS</kind><depth>10</depth></history>
+            </datareader_qos>
+        </qos_profile>
+        <qos_profile name="BestEffortProfile">
+            <datawriter_qos>
+                <reliability><kind>BEST_EFFORT_RELIABILITY_QOS</kind></reliability>
+                <history><kind>KEEP_LAST_HISTORY_QOS</kind><depth>1</depth></history>
+            </datawriter_qos>
+            <datareader_qos>
+                <reliability><kind>BEST_EFFORT_RELIABILITY_QOS</kind></reliability>
+                <history><kind>KEEP_LAST_HISTORY_QOS</kind><depth>1</depth></history>
+            </datareader_qos>
+        </qos_profile>
+    </qos_library>
+</dds>

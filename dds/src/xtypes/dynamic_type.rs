@@ -173,9 +173,29 @@ impl DynamicType {
         let mut member_by_name = HashMap::new();
         let mut member_by_id = HashMap::new();
 
-        for (index, member) in struct_type.member_seq.iter().enumerate() {
+        // Inherited base members come first (XTypes: parent fields precede child).
+        // Skip when a member already references the base type — derive embeds the
+        // parent as a named member, so flattening there would duplicate fields.
+        if let Some(base_id) = &struct_type.header.base_type {
+            let already_embedded =
+                struct_type.member_seq.iter().any(|m| &m.common.member_type_id == base_id);
+            if !already_embedded {
+                let base_kind = Self::type_from_identifier(base_id, ctx.as_deref_mut())?;
+                if let Some(base_members) = Self::struct_members_of(&base_kind) {
+                    for bm in base_members {
+                        let index = members.len();
+                        member_by_name.insert(bm.name.clone(), index);
+                        member_by_id.insert(bm.member_id, index);
+                        members.push(MemberDescriptor { index, ..bm.clone() });
+                    }
+                }
+            }
+        }
+
+        for member in struct_type.member_seq.iter() {
             let member_type =
                 Self::type_from_identifier(&member.common.member_type_id, ctx.as_deref_mut())?;
+            let index = members.len();
             let descriptor = MemberDescriptor {
                 name: Arc::from(member.detail.name.as_str()),
                 member_id: member.common.member_id,
@@ -468,6 +488,20 @@ impl DynamicType {
         let nested = Arc::new(nested?);
         ctx.memo.insert(*hash, nested.clone());
         Ok(DynamicTypeKind::TypeRef(nested))
+    }
+
+    /// Resolve a base type's struct members (following a `TypeRef`), for
+    /// flattening inherited members. Returns None when the base could not be
+    /// resolved to a struct.
+    fn struct_members_of(kind: &DynamicTypeKind) -> Option<&[MemberDescriptor]> {
+        let resolved = match kind {
+            DynamicTypeKind::TypeRef(arc) => arc.kind(),
+            other => other,
+        };
+        match resolved {
+            DynamicTypeKind::Struct(desc) => Some(desc.members()),
+            _ => None,
+        }
     }
 
     /// Get the type name.

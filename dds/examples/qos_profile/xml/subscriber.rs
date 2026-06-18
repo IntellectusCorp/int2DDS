@@ -1,16 +1,16 @@
-//! QoS Profile Subscriber Example
+//! QoS Profile Subscriber Example (XML)
 //!
-//! Companion to `qos_profile_publisher`. Uses `_QOS_DEFAULT` sentinels
-//! with the profile loaded via `DDS_QOS_PROFILE`.
+//! Companion to `qos_profile_xml_publisher`. The profile is defined in XML
+//! (`xml/qos_profiles.xml`) and loaded via `DDS_QOS_PROFILE`.
 //!
 //! ```bash
-//! DDS_QOS_PROFILE=dds/examples/qos_profile/qos_profiles.json \
-//!     cargo run --example qos_profile_subscriber
+//! DDS_QOS_PROFILE=dds/examples/qos_profile/xml/qos_profiles.xml \
+//!     cargo run --example qos_profile_xml_subscriber
 //! ```
 
 use std::sync::Arc;
 
-#[path = "../common/shutdown.rs"]
+#[path = "../../common/shutdown.rs"]
 mod shutdown;
 use shutdown::{cleanup_participant, Shutdown};
 
@@ -81,7 +81,7 @@ fn main() {
 
     if std::env::var("DDS_QOS_PROFILE").is_err() {
         eprintln!("[Subscriber] WARNING: DDS_QOS_PROFILE is not set.");
-        eprintln!("             Set DDS_QOS_PROFILE=dds/examples/qos_profile/qos_profiles.json");
+        eprintln!("             Set DDS_QOS_PROFILE=dds/examples/qos_profile/xml/qos_profiles.xml");
     }
 
     println!("[Subscriber] domain_id = {}", domain_id);
