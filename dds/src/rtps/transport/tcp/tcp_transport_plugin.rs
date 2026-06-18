@@ -520,6 +520,25 @@ mod tests {
         plugin.close();
     }
 
+    /// `access_port()` returns the port a peer is actually reached at: the `port`
+    /// field for UDP, but the physical (address-packed) port for a TCP dual-port
+    /// locator whose `port` field holds the logical/mux port. A dead-peer dial
+    /// address carries the physical port, so the TCP branch must not return the
+    /// logical port (the dead-peer cleanup match relies on this).
+    #[test]
+    fn access_port_returns_physical_for_tcp_and_port_field_for_udp() {
+        let ip = std::net::Ipv4Addr::new(127, 0, 0, 1);
+        let logical: u16 = 7410;
+        let physical: u16 = 7401;
+
+        let tcp = Locator::from_tcp_v4_dual(ip, logical, physical);
+        assert_eq!(tcp.access_port(), physical as u32, "TCP must match the physical dial port");
+        assert_ne!(tcp.access_port(), logical as u32, "TCP must not match the logical port");
+
+        let udp = Locator::from_ip(ip, logical as u32);
+        assert_eq!(udp.access_port(), logical as u32, "UDP port field is already physical");
+    }
+
     /// A sender at participant_id 0 reaches a listener at participant_id 1 by
     /// reserving the logical port the listener advertised in its own locator —
     /// the cross-pid case that used to fail (Hybrid single-host), because the
