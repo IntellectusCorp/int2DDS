@@ -363,7 +363,8 @@ impl DomainParticipant {
         listener: Option<Arc<dyn DomainParticipantListener>>,
         mask: StatusMask,
     ) -> DdsResult<Self> {
-        let dcps_bridge = DcpsBridge::new(domain_id as u32, &qos.property);
+        let dcps_bridge = DcpsBridge::new(domain_id as u32, &qos.property)
+            .map_err(|e| DdsError::Error(e.message))?;
         let guid = dcps_bridge.get_participant().map_err(|e| DdsError::Error(e.message))?.guid();
 
         let mut participant = Self {
@@ -493,7 +494,8 @@ impl DomainParticipant {
         };
         reader_qos.destination_order =
             DestinationOrderQosPolicy { kind: DestinationOrderQosPolicyKind::ByReceptionTimestamp };
-        reader_qos.history = HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepLast(1) };
+        reader_qos.history =
+            HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepLast(1), strict: true };
         reader_qos.resource_limits = ResourceLimitsQosPolicy {
             max_instances: LENGTH_UNLIMITED,
             max_samples: LENGTH_UNLIMITED,

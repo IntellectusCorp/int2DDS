@@ -36,7 +36,7 @@ use crate::{
 /// policy stays on its type default.
 pub fn default_relay_reader_qos() -> DataReaderQos {
     DataReaderQos {
-        history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+        history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
         ..Default::default()
     }
 }
@@ -44,7 +44,7 @@ pub fn default_relay_reader_qos() -> DataReaderQos {
 /// Built-in fallback DataWriterQos. See [`default_relay_reader_qos`].
 pub fn default_relay_writer_qos() -> DataWriterQos {
     DataWriterQos {
-        history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+        history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
         ..Default::default()
     }
 }
