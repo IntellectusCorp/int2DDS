@@ -579,6 +579,26 @@ pub fn variant_is_default_literal(variant: &syn::Variant) -> bool {
     false
 }
 
+/// Returns true if the variant is marked `#[dds(default)]` — the union `default:`
+/// case selected by any discriminant that matches no other label.
+pub fn variant_is_union_default(variant: &syn::Variant) -> bool {
+    for attr in &variant.attrs {
+        if attr.path().is_ident("dds") {
+            let mut found = false;
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("default") && !meta.input.peek(syn::Token![=]) {
+                    found = true;
+                }
+                Ok(())
+            });
+            if found {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Get bitmask position from variant attributes (#[dds(position = N)]).
 /// Falls back to variant index if not specified.
 pub fn get_bitmask_position(variant: &syn::Variant, index: usize) -> u8 {

@@ -7,8 +7,58 @@ use syn::Variant;
 use crate::codegen::type_config::ExtensibilityKind;
 use crate::codegen::utils::{
     get_discriminant_value, get_serialization_method, get_variant_type, variant_has_data,
-    DiscriminantType, SerializationMethod,
+    variant_is_union_default, DiscriminantType, SerializationMethod,
 };
+
+fn generate_unknown_discriminant_arm(
+    name: &syn::Ident,
+    variants: &Punctuated<Variant, Comma>,
+    crate_path: &TokenStream,
+    xcdr: bool,
+    consume_member_header: bool,
+) -> TokenStream {
+    let err_path = quote! {
+        #crate_path::serialize::core::SerializationError::InvalidUnionDiscriminant(discriminant as i32)
+    };
+
+    let Some(variant) = variants.iter().find(|v| variant_is_union_default(v)) else {
+        return quote! { _ => Err(#err_path), };
+    };
+
+    let variant_name = &variant.ident;
+    if !variant_has_data(variant) {
+        return quote! { _ => Ok(#name::#variant_name), };
+    }
+
+    let value_deserialization = if let Some(field_type) = get_variant_type(variant) {
+        generate_value_deserialization(field_type, crate_path, xcdr)
+    } else if xcdr {
+        quote! {
+            let value = #crate_path::serialize::cdr::XcdrDeserialize::deserialize_xcdr(deserializer)?;
+        }
+    } else {
+        quote! {
+            let value = #crate_path::serialize::cdr::CdrDeserialize::deserialize_cdr(deserializer)?;
+        }
+    };
+
+    if consume_member_header {
+        quote! {
+            _ => {
+                let (_mid, _mlen) = deserializer.read_member_header()?;
+                #value_deserialization
+                Ok(#name::#variant_name(value))
+            }
+        }
+    } else {
+        quote! {
+            _ => {
+                #value_deserialization
+                Ok(#name::#variant_name(value))
+            }
+        }
+    }
+}
 
 pub fn wrap_with_emheader(
     member_id_expr: TokenStream,
@@ -126,13 +176,15 @@ pub fn generate_union_cdr_deserialize_impl(
         })
         .collect();
 
+    let unknown_arm = generate_unknown_discriminant_arm(name, variants, crate_path, false, false);
+
     quote! {
         impl #crate_path::serialize::cdr::CdrDeserialize for #name {
             fn deserialize_cdr(deserializer: &mut #crate_path::serialize::cdr::CdrDeserializer) -> #crate_path::serialize::cdr::CdrResult<Self> {
                 let discriminant = deserializer.#deserialize_disc_method()? as i64;
                 match discriminant {
                     #(#match_arms)*
-                    _ => Err(#crate_path::serialize::core::SerializationError::InvalidUnionDiscriminant(discriminant as i32)),
+                    #unknown_arm
                 }
             }
         }
@@ -309,12 +361,15 @@ pub fn generate_union_xcdr_deserialize_impl(
         })
         .collect();
 
+    let unknown_arm =
+        generate_unknown_discriminant_arm(name, variants, crate_path, true, is_mutable);
+
     let body = match extensibility {
         ExtensibilityKind::Final => quote! {
             let discriminant = deserializer.#deserialize_disc_method()? as i64;
             match discriminant {
                 #(#match_arms)*
-                _ => Err(#crate_path::serialize::core::SerializationError::InvalidUnionDiscriminant(discriminant as i32)),
+                #unknown_arm
             }
         },
         ExtensibilityKind::Appendable => quote! {
@@ -322,7 +377,7 @@ pub fn generate_union_xcdr_deserialize_impl(
             let discriminant = deserializer.#deserialize_disc_method()? as i64;
             let result = match discriminant {
                 #(#match_arms)*
-                _ => Err(#crate_path::serialize::core::SerializationError::InvalidUnionDiscriminant(discriminant as i32)),
+                #unknown_arm
             };
             deserializer.end_struct(object_size, start_position)?;
             result
@@ -340,7 +395,7 @@ pub fn generate_union_xcdr_deserialize_impl(
             // Then the branch member header + payload (consumed inside arm).
             let result = match discriminant {
                 #(#match_arms)*
-                _ => Err(#crate_path::serialize::core::SerializationError::InvalidUnionDiscriminant(discriminant as i32)),
+                #unknown_arm
             };
 
             deserializer.end_struct(object_size, start_position)?;
