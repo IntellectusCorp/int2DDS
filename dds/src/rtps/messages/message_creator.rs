@@ -50,7 +50,7 @@ impl MessageCreator {
             )
         };
 
-        info!("Creating basic SPDP message for participant: {:?}", participant_guid);
+        info!("Creating basic SPDP message for participant: {}", participant_guid);
 
         let spdp_message = SpdpMessage::new(participant, None)?;
         let rtps_message = spdp_message.rtps_message();
@@ -150,7 +150,7 @@ impl MessageCreator {
         content_filter_info: Option<ContentFilterInfo>,
         send_buffer: &mut Vec<u8>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        debug!("Creating RTPS message from cache change: {:?}", cache_change);
+        debug!("Creating RTPS message from cache change: {}", cache_change);
 
         let mut rtps_message = RtpsMessage::new(Header::new(cache_change.writer_guid().prefix()));
 

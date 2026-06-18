@@ -107,6 +107,31 @@ pub(crate) struct CacheChange {
     writer_ownership_strength: Option<i32>, // Set only when it's writer cache && Ownership QoS is EXCLUSIVE, CacheChange should be split to reader & writer cache in the future
     lifespan_duration: Option<Duration>,
 }
+impl std::fmt::Display for CacheChange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "CacheChange {{ kind: {:?}, writer_guid: {}, sequence_number: {}, \
+             data_payload_len: {}, instance_handle: {}, source_timestamp: {:?}, \
+             reception_timestamp: {:?}, fragmented: {}, fragment_set: {:?}, \
+             total_fragments: {}, fragment_size: {}, writer_ownership_strength: {:?}, \
+             lifespan_duration: {:?} }}",
+            self.kind,
+            self.writer_guid,
+            self.sequence_number,
+            self.data_payload.as_slice().len(),
+            self.instance_handle,
+            self.source_timestamp,
+            self.reception_timestamp,
+            self.fragmented,
+            self.fragment_set,
+            self.total_fragments,
+            self.fragment_size,
+            self.writer_ownership_strength,
+            self.lifespan_duration
+        )
+    }
+}
 
 impl PartialOrd for CacheChange {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {

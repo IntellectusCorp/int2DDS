@@ -60,7 +60,7 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
         if spdp_discovered_participant_data.participant_guid().entity_id() != EntityId::PARTICIPANT
         {
             debug!(
-                "Received SPDP message with non-participant entity ID: {:?}. Ignoring.",
+                "Received SPDP message with non-participant entity ID: {}. Ignoring.",
                 spdp_discovered_participant_data.participant_guid()
             );
             return Ok(());
@@ -70,9 +70,14 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
 
         let participant_guid = spdp_discovered_participant_data.participant_guid();
         log::debug!(
-            "Start handling DiscoveredParticipantData {:?} / {:?}",
+            "Start handling DiscoveredParticipantData {} / [{}]",
             participant_guid,
-            spdp_discovered_participant_data.metatraffic_unicast_locator_list()
+            spdp_discovered_participant_data
+                .metatraffic_unicast_locator_list()
+                .iter()
+                .map(|l| l.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
         );
 
         // Start monitoring liveliness for the discovered participant
@@ -97,9 +102,14 @@ pub(crate) trait ParticipantMessageProcessor: ParticipantAccessor {
                 remote_participant_datas.iter().any(|remote_participant_data| {
                     if remote_participant_data.participant_guid() == participant_guid {
                         log::debug!(
-                            "DiscoveredParticipantData already exist {:?} / {:?}",
+                            "DiscoveredParticipantData already exist {} / [{}]",
                             participant_guid,
-                            spdp_discovered_participant_data.metatraffic_unicast_locator_list()
+                            spdp_discovered_participant_data
+                                .metatraffic_unicast_locator_list()
+                                .iter()
+                                .map(|l| l.to_string())
+                                .collect::<Vec<_>>()
+                                .join(", ")
                         );
                         true
                     } else {

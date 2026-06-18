@@ -212,7 +212,7 @@ impl UserLogic {
 
                 if a_change.is_fragmented() {
                     debug!(
-                        "[UserLogic] [RequestedChanges] Fragmented change: {:?}",
+                        "[UserLogic] [RequestedChanges] Fragmented change: {}",
                         a_change.sequence_number()
                     );
 
@@ -316,7 +316,7 @@ impl UserLogic {
                 gap_list.push(*requested_change_sn);
 
                 debug!(
-                    "[UserLogic] [AckNack] CacheChange not found for sequence number: {:?}",
+                    "[UserLogic] [AckNack] CacheChange not found for sequence number: {}",
                     requested_change_sn
                 );
             }
@@ -430,7 +430,7 @@ impl UserLogic {
                                 }
                                 Err(e) if e.code == RtpsErrorCode::PeerDisconnected => {
                                     warn!(
-                                        "[DataFrag] Peer disconnected for reader {:?}",
+                                        "[DataFrag] Peer disconnected for reader {}",
                                         reader_proxy.remote_reader_guid()
                                     );
                                     disconnected_peer =
@@ -505,7 +505,7 @@ impl UserLogic {
                             }
                             Err(e) if e.code == RtpsErrorCode::PeerDisconnected => {
                                 warn!(
-                                    "[Data] Peer disconnected for reader {:?}",
+                                    "[Data] Peer disconnected for reader {}",
                                     reader_proxy.remote_reader_guid()
                                 );
                                 disconnected_peer =
@@ -517,7 +517,7 @@ impl UserLogic {
                     }
                 } else {
                     warn!(
-                        "[Data] Failed to find change in history cache for seq_num: {:?}",
+                        "[Data] Failed to find change in history cache for seq_num: {}",
                         a_change_seq_num
                     );
                 }
@@ -1158,14 +1158,14 @@ impl UserLogic {
                 // Deliver change if sequence number is in order
                 if change.sequence_number() == writer_proxy.expected_sn() {
                     debug!(
-                        "Delivering in-order change: {:?}, expected_sn: {:?}",
+                        "Delivering in-order change: {}, expected_sn: {}",
                         change.sequence_number(),
                         writer_proxy.expected_sn()
                     );
 
                     writer_proxy.increment_expected_sn();
 
-                    debug!("After delivering, new expected_sn: {:?}", writer_proxy.expected_sn());
+                    debug!("After delivering, new expected_sn: {}", writer_proxy.expected_sn());
 
                     let flushed_changes = writer_proxy.flush_buffered_changes();
 
@@ -1184,7 +1184,7 @@ impl UserLogic {
                 // Buffer out-of-order changes
                 else if change.sequence_number() > writer_proxy.expected_sn() {
                     debug!(
-                        "Buffering out-of-order change: {:?}, expected_sn: {:?}",
+                        "Buffering out-of-order change: {}, expected_sn: {}",
                         change.sequence_number(),
                         writer_proxy.expected_sn()
                     );
@@ -1313,7 +1313,7 @@ impl UserLogic {
             for (key, _) in complete_buffers.iter().take(remaining_to_remove) {
                 if let Some((_, removed_buffer)) = self.fragment_buffers.remove(key) {
                     debug!(
-                        "Cleaned up complete fragment buffer: writer_guid={:?}, seq_num={:?}, age={:.2}s",
+                        "Cleaned up complete fragment buffer: writer_guid={}, seq_num={}, age={:.2}s",
                         key.0,
                         key.1,
                         removed_buffer.created_at.elapsed().as_secs_f64()
@@ -1366,7 +1366,7 @@ impl UserLogic {
                     continue;
                 }
                 Err(e) => {
-                    warn!("[UserLogic] Failed to send to locator {:?}: {:?}", locator, e);
+                    warn!("[UserLogic] Failed to send to locator {}: {:?}", locator, e);
                     match e.kind() {
                         std::io::ErrorKind::BrokenPipe
                         | std::io::ErrorKind::ConnectionReset
@@ -1374,7 +1374,7 @@ impl UserLogic {
                             return Err(RtpsError::new(
                                 RtpsErrorCode::PeerDisconnected,
                                 format!(
-                                    "[UserLogic] Peer disconnected at locator {:?}: {}",
+                                    "[UserLogic] Peer disconnected at locator {}: {}",
                                     locator, e
                                 ),
                             ));
@@ -1537,7 +1537,7 @@ impl UnicastMessageProcessor for UserLogic {
 
         if matched_readers.is_empty() {
             debug!(
-                "[DATA] No matched readers found for remote writer: {:?}, skipping data handling.",
+                "[DATA] No matched readers found for remote writer: {}, skipping data handling.",
                 remote_writer_guid
             );
             return Ok(());
@@ -1619,7 +1619,7 @@ impl UnicastMessageProcessor for UserLogic {
 
         if matched_readers.is_empty() {
             debug!(
-                "[Heartbeat] No matched readers found for remote writer: {:?}, skipping data handling.",
+                "[Heartbeat] No matched readers found for remote writer: {}, skipping data handling.",
                 remote_writer_guid
             );
             return Ok(());
@@ -1900,7 +1900,7 @@ impl UnicastMessageProcessor for UserLogic {
         ));
 
         debug!(
-            "[UserLogic] [AckNack] ACK received up to seq_num={:?}",
+            "[UserLogic] [AckNack] ACK received up to seq_num={}",
             SequenceNumber::from_i64(acknack.reader_sn_state.bitmap_base().to_i64() - 1)
         );
 
@@ -1909,7 +1909,10 @@ impl UnicastMessageProcessor for UserLogic {
 
         // NACK
         if !missing_seq_numbers.is_empty() {
-            debug!("Sending AckNack - missing changes: {:?}", missing_seq_numbers);
+            debug!(
+                "Sending AckNack - missing changes: [{}]",
+                missing_seq_numbers.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(", ")
+            );
 
             reader_proxy.requested_changes_set(missing_seq_numbers);
 
@@ -2018,7 +2021,7 @@ impl UnicastMessageProcessor for UserLogic {
 
         if matched_readers.is_empty() {
             debug!(
-                "[DATA] No matched readers found for remote writer: {:?}, skipping data handling.",
+                "[DATA] No matched readers found for remote writer: {}, skipping data handling.",
                 remote_writer_guid
             );
             return Ok(());
@@ -2222,7 +2225,7 @@ impl UnicastMessageProcessor for UserLogic {
         reader_proxy.set_last_nackfrag_at(now);
 
         let change = history_cache_guard.get_change(writer_sn).ok_or_else(|| {
-            warn!("NACK_FRAG requested missing change SN={:?}", writer_sn);
+            warn!("NACK_FRAG requested missing change SN={}", writer_sn);
             RtpsError::new(RtpsErrorCode::InvalidSubmessageBody, "Change not found")
         })?;
 
@@ -2263,7 +2266,7 @@ impl UnicastMessageProcessor for UserLogic {
                 ) {
                     if e.code == RtpsErrorCode::PeerDisconnected {
                         warn!(
-                            "[NackFrag] Peer disconnected during retransmit for reader {:?}",
+                            "[NackFrag] Peer disconnected during retransmit for reader {}",
                             reader_proxy.remote_reader_guid()
                         );
                         break;
@@ -2288,7 +2291,7 @@ impl UnicastMessageProcessor for UserLogic {
 
         if matched_readers.is_empty() {
             debug!(
-                "[Gap] No matched readers found for remote writer: {:?}, skipping data handling.",
+                "[Gap] No matched readers found for remote writer: {}, skipping data handling.",
                 remote_writer_guid
             );
             return Ok(());
