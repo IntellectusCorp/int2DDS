@@ -32,7 +32,7 @@ fn reliable_writer_qos() -> DataWriterQos {
             kind: ReliabilityQosPolicyKind::Reliable,
             max_blocking_time: Duration { sec: 1, nanosec: 0 },
         },
-        history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+        history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
         ..Default::default()
     }
 }
@@ -43,7 +43,7 @@ fn reliable_reader_qos() -> DataReaderQos {
             kind: ReliabilityQosPolicyKind::Reliable,
             max_blocking_time: Duration { sec: 1, nanosec: 0 },
         },
-        history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+        history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
         ..Default::default()
     }
 }
