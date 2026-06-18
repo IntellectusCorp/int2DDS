@@ -410,13 +410,6 @@ impl<'a> CGen<'a> {
 
     // ---- Struct ----
 
-    fn emit_struct_section(&mut self, s: &ResolvedStruct) {
-        self.emit_struct_header(s);
-        self.emit_struct_typedef(s);
-        self.raw("\n");
-        self.emit_struct_functions(s);
-    }
-
     fn emit_struct_header(&mut self, s: &ResolvedStruct) {
         let ext_str = match s.extensibility {
             ExtensibilityKind::Final => "FINAL",

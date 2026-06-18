@@ -222,6 +222,7 @@ fn main() {
                                 "[RECV] id={} temp={:.1}°C hum={:.1}% loc={}",
                                 sensor_id, temperature, humidity, location
                             );
+                            let _ = std::io::Write::flush(&mut std::io::stdout());
                         }
                     }
                 }
