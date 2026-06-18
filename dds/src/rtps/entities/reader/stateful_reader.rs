@@ -45,7 +45,7 @@ use crate::{
     },
 };
 
-use super::{writer_proxy::WriterProxy, Reader};
+use super::{time_based_filter::TimeBasedFilter, writer_proxy::WriterProxy, Reader};
 
 pub(crate) struct StatefulReader {
     guid: Guid,
@@ -66,6 +66,8 @@ pub(crate) struct StatefulReader {
     subscription_builtin_topic_data: Arc<Mutex<SubscriptionBuiltinTopicData>>,
     subscription_matched_status: Arc<Mutex<SubscriptionMatchedStatus>>,
     requested_incompatible_qos_status: Arc<Mutex<RequestedIncompatibleQosStatus>>,
+    // Present only when minimum_separation > 0 at creation.
+    time_based_filter: Option<Arc<TimeBasedFilter>>,
 }
 
 impl StatefulReader {
@@ -87,6 +89,13 @@ impl StatefulReader {
         let reader_reliability_extension =
             *subscription_builtin_topic_data.reader_reliability_extension();
 
+        let time_based_filter =
+            if subscription_builtin_topic_data.time_based_filter().minimum_separation.is_zero() {
+                None
+            } else {
+                Some(Arc::new(TimeBasedFilter::new()))
+            };
+
         Self {
             guid,
             topic_kind,
@@ -105,6 +114,7 @@ impl StatefulReader {
             requested_incompatible_qos_status: Arc::new(Mutex::new(
                 RequestedIncompatibleQosStatus::default(),
             )),
+            time_based_filter,
         }
     }
 
@@ -310,6 +320,10 @@ impl Reader for StatefulReader {
     fn reader_cache(&self) -> Arc<Mutex<ReaderHistoryCache>> {
         // self.reader_cache.clone()
         Arc::clone(&self.reader_cache)
+    }
+
+    fn time_based_filter(&self) -> Option<Arc<TimeBasedFilter>> {
+        self.time_based_filter.clone()
     }
 
     fn available_changes(&self) -> Vec<Arc<CacheChange>> {
