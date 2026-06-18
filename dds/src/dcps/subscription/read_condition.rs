@@ -259,7 +259,7 @@ mod tests {
             .create_subscriber(SubscriberQos::default(), None, StatusMask::default())
             .unwrap();
         let reader_qos = DataReaderQos {
-            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
             reliability: ReliabilityQosPolicy {
                 kind: ReliabilityQosPolicyKind::Reliable,
                 max_blocking_time: Duration::from_seconds(1),
@@ -274,7 +274,7 @@ mod tests {
             .create_publisher(PublisherQos::default(), None, StatusMask::default())
             .unwrap();
         let writer_qos = DataWriterQos {
-            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll },
+            history: HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true },
             reliability: ReliabilityQosPolicy {
                 kind: ReliabilityQosPolicyKind::Reliable,
                 max_blocking_time: Duration::from_seconds(1),
