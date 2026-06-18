@@ -1457,6 +1457,23 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         Ok(())
     }
 
+    // Remove the SampleInfo bookkeeping for an instance.
+    pub(crate) fn remove_instance_info(&self, instance_handle: InstanceHandle) {
+        if let Ok(mut instance_infos) = self.instance_infos.lock() {
+            instance_infos.remove(&instance_handle);
+        }
+    }
+
+    // Fully reclaim an instance after its NOT_ALIVE_NO_WRITERS autopurge delay: drop its
+    // samples and all per-instance state, so future samples are treated as a new instance.
+    pub(crate) fn reclaim_instance(&self, instance_handle: InstanceHandle) -> DdsResult<()> {
+        self.remove_change_of_instance(instance_handle)?;
+        if let Ok(cache) = self.get_datareader_cache()?.lock() {
+            cache.remove_all_instance_resources(instance_handle);
+        }
+        Ok(())
+    }
+
     /// This should be only called when removing a change from data reader side to rtps reader side to avoid deadlock.
     /// RTPS reader history keeps acquiring datareader cache lock on socket listening thread,
     /// So never try to acquire rtps reader cache lock while holding datareader cache lock.
@@ -1746,6 +1763,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                             std_duration,
                             TimerId::AutopurgeDisposed { reader_guid: self.guid },
                             instance_handle,
+                            false,
                         )?;
                     }
                 } else {
@@ -1786,6 +1804,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
                             std_duration,
                             TimerId::AutopurgeNowriter { reader_guid: self.guid },
                             instance_handle,
+                            true,
                         )?;
                     }
                 } else {
@@ -1808,6 +1827,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         std_duration: std::time::Duration,
         timer_id: TimerId,
         instance_handle: InstanceHandle,
+        full_reclaim: bool,
     ) -> DdsResult<()> {
         // Get weak reference to self (DataReader)
         let self_ref = self.self_ref.lock().map_err(|e| DdsError::Error(e.to_string()))?;
@@ -1821,8 +1841,14 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
 
         timer_handler_guard.add_timer(timer_id, std_duration, false, move || {
             if let Some(strong) = weak_self.as_ref().and_then(|w| w.upgrade()) {
-                if let Err(e) = strong.remove_change_of_instance(instance_handle) {
-                    log::error!("Failed to remove change: {:?}", e);
+                // NO_WRITERS reclaims all instance state; DISPOSED purges only the samples.
+                let res = if full_reclaim {
+                    strong.reclaim_instance(instance_handle)
+                } else {
+                    strong.remove_change_of_instance(instance_handle)
+                };
+                if let Err(e) = res {
+                    log::error!("Failed to autopurge instance: {:?}", e);
                 }
             }
         });
