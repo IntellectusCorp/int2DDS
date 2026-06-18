@@ -97,11 +97,19 @@ path = "examples/hello_world_tcp/hello_world_tcp.rs"
 
 [[example]]
 name = "qos_profile_publisher"
-path = "examples/qos_profile/publisher.rs"
+path = "examples/qos_profile/json/publisher.rs"
 
 [[example]]
 name = "qos_profile_subscriber"
-path = "examples/qos_profile/subscriber.rs"
+path = "examples/qos_profile/json/subscriber.rs"
+
+[[example]]
+name = "qos_profile_xml_publisher"
+path = "examples/qos_profile/xml/publisher.rs"
+
+[[example]]
+name = "qos_profile_xml_subscriber"
+path = "examples/qos_profile/xml/subscriber.rs"
 
 [[example]]
 name = "dynamic_type_publisher"
