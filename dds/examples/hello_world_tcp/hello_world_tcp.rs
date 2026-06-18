@@ -16,7 +16,7 @@ use shutdown::{cleanup_participant, Shutdown};
 use clap::Parser;
 use int2dds::{
     common::{
-        env::{set_console_log_level, set_log_type, set_use_loopback_interface},
+        env::{set_console_log_level, set_log_type},
         instance_handle::InstanceHandle,
         log::{LogLevel, LogType},
     },
@@ -449,9 +449,6 @@ fn run_subscriber(args: &Args) {
 fn main() {
     set_log_type(LogType::Console);
     set_console_log_level(LogLevel::Info);
-    // Single-host demo: advertise 127.0.0.1 so SPDP locators match the loopback
-    // `initial_peers`.
-    set_use_loopback_interface(true);
 
     let args = Args::parse();
 

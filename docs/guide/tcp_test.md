@@ -41,7 +41,11 @@ member `int2dds`.
 
 `hello_world_tcp` runs the Hello World publisher/subscriber over TCP. By default
 the transport is loaded from a QoS profile; the publisher binds `7400` and the
-subscriber `7401` on a single host over loopback.
+subscriber `7401`, and the bundled profile addresses are loopback (`127.0.0.1`).
+
+The example does not force any interface. To use the bundled profile **as-is on a
+single host**, enable the loopback interface (`INT2DDS_USE_LOOPBACK_INTERFACE=true`)
+so both sides advertise `127.0.0.1` — matching the `initial_peers` they dial.
 
 Open two terminals:
 
@@ -52,6 +56,11 @@ cargo run -p int2dds --example hello_world_tcp -- -S
 # Terminal 2 — publisher (binds 7400)
 cargo run -p int2dds --example hello_world_tcp -- -P
 ```
+
+To run over a real interface instead, customize the profile addresses
+(`initial_peers`, and `public_address` if used) with that interface's IP — then
+the loopback flag is not needed. You can optionally pin the NIC by name with
+`INT2DDS_NETWORK_INTERFACE=eth0`.
 
 ### Choosing the QoS source
 
@@ -135,9 +144,6 @@ Minimal QoS profile JSON (a single publisher-side profile):
 }
 ```
 
-> Single-host runs also need a working NIC or loopback. The `hello_world_tcp`
-> example forces loopback (`set_use_loopback_interface(true)`) so both sides
-> advertise `127.0.0.1`, matching the `initial_peers` they dial.
 
 ## Related Files
 
