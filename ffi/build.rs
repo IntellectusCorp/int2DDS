@@ -60,5 +60,26 @@ Int2DdsRet int2dds_dynamic_data_get_f64  (const struct Int2DdsDynamicData *data,
         std::fs::write(&output_file, new_contents).expect("write header");
     }
 
+    // Embed an ELF SONAME on the Linux cdylib. rustc does NOT set DT_SONAME for
+    // cdylibs, so consumers would otherwise record an unversioned dependency on
+    // "libint2dds_ffi.so". We inject the soname via the linker.
+    //
+    // Version source: Cargo sets CARGO_PKG_VERSION_{MAJOR,MINOR} in the build
+    // environment from this crate's `version` field in Cargo.toml. We track
+    // major.minor (not the full version) because pre-1.0 the ABI can break on
+    // minor bumps, so the soname must change whenever minor changes.
+    //
+    // Gated to Linux/ELF: the MSVC (COFF) linker rejects -Wl,-soname, and the
+    // concept does not exist on Windows/macOS.
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os == "linux" {
+        let major = env::var("CARGO_PKG_VERSION_MAJOR").unwrap();
+        let minor = env::var("CARGO_PKG_VERSION_MINOR").unwrap();
+        // cdylib output name = package name with '-' -> '_': libint2dds_ffi.so
+        let lib_name = package_name.replace('-', "_");
+        println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,lib{}.so.{}.{}", lib_name, major, minor);
+    }
+
     println!("cargo:rerun-if-changed=src");
+    println!("cargo:rerun-if-changed=Cargo.toml");
 }
