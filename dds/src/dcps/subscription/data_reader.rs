@@ -960,10 +960,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         if writer_samples.len() >= max_samples {
             if let Some(&oldest_seq_num) = writer_samples.iter().next() {
                 writer_samples.remove(&oldest_seq_num);
-                log::debug!(
-                    "Removed oldest read sample with sequence number: {:?}",
-                    oldest_seq_num
-                );
+                log::debug!("Removed oldest read sample with sequence number: {}", oldest_seq_num);
             }
         }
 
@@ -2500,8 +2497,14 @@ impl<Foo: DdsType> DataReader<Foo> {
         exact: bool,
         take: bool,
     ) -> DdsResult<Vec<DataSample<Foo>>> {
-        log::debug!("read_or_take called: max_samples={}, handle={:?}, single_instance={}, exact={}, take={}",
-                   max_samples, handle, single_instance, exact, take);
+        log::debug!(
+            "read_or_take called: max_samples={}, handle={}, single_instance={}, exact={}, take={}",
+            max_samples,
+            handle,
+            single_instance,
+            exact,
+            take
+        );
         log::debug!(
             "direct_states: sample={:?}, view={:?}, instance={:?}",
             direct_sample_states.is_some(),
@@ -5956,7 +5959,7 @@ pub(crate) mod tests {
 
             fn on_data_on_readers(&self, subscriber: &Subscriber) {
                 log::info!(
-                    "Get DataOnReaders Status - Guid {:?}",
+                    "Get DataOnReaders Status - Guid {}",
                     subscriber.get_instance_handle().unwrap().to_guid()
                 );
             }

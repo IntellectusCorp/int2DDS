@@ -52,10 +52,15 @@ pub struct NodeConfig {
     /// are not validated against the WAN scenario.
     pub transport: String,
     /// Optional list of initial peers (used by TCP transport to reach the remote gateway).
-    /// Format per entry: `"<ip>:<port>"`. Port follows the RTPS rule
-    /// `7400 + 250 * domain_id` unless `INT2DDS_TCP_PORT` is set.
+    /// Format per entry: `"<ip>:<port>"`. The peer's TCP listen port is its
+    /// `bind_port` (else the domain formula `7400 + 250 * domain_id`).
     #[serde(default)]
     pub initial_peers: Vec<String>,
+    /// Optional TCP listen (bind) port for this participant. When omitted, the
+    /// domain formula `7400 + 250 * domain_id` is used. Pin a distinct value per
+    /// participant when several share a host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind_port: Option<u16>,
     /// Optional TLS configuration. When present, TCP connections are wrapped
     /// in TLS. When absent, plain TCP is used.
     #[serde(default)]
@@ -68,6 +73,9 @@ impl NodeConfig {
         property.add_property("int2dds.transport", &self.transport, false);
         if !self.initial_peers.is_empty() {
             property.add_property("int2dds.initial_peers", self.initial_peers.join(","), false);
+        }
+        if let Some(port) = self.bind_port {
+            property.set_tcp_bind_port(port);
         }
         if let Some(tls) = &self.tls {
             property.add_property("int2dds.tls.ca_file", &tls.ca_file, false);
@@ -226,8 +234,17 @@ impl RouteGatewayConfig {
         Self::from_json(&raw)
     }
 
+    /// Parse a Route Gateway config file. The settings are wrapped in a
+    /// top-level `route_gateway` object so the file is self-describing and its
+    /// transport keys stay separable from a plain participant's QoS.
     pub fn from_json(raw: &str) -> DdsResult<Self> {
-        serde_json::from_str(raw).map_err(|e| DdsError::Error(format!("invalid config JSON: {e}")))
+        #[derive(Deserialize)]
+        struct Wrapper {
+            route_gateway: RouteGatewayConfig,
+        }
+        serde_json::from_str::<Wrapper>(raw)
+            .map(|w| w.route_gateway)
+            .map_err(|e| DdsError::Error(format!("invalid config JSON: {e}")))
     }
 }
 
@@ -237,10 +254,10 @@ mod tests {
 
     #[test]
     fn parses_minimal_config() {
-        let json = r#"{
+        let json = r#"{ "route_gateway": {
             "local":  { "domain_id": 0, "transport": "udp" },
             "remote": { "domain_id": 1, "transport": "tcp", "initial_peers": ["1.2.3.4:7400"] }
-        }"#;
+        }}"#;
         let cfg = RouteGatewayConfig::from_json(json).unwrap();
         assert_eq!(cfg.local.domain_id, 0);
         assert_eq!(cfg.local.transport, "udp");
@@ -252,12 +269,12 @@ mod tests {
 
     #[test]
     fn parses_full_config() {
-        let json = r#"{
+        let json = r#"{ "route_gateway": {
             "local":  { "domain_id": 0, "transport": "udp", "initial_peers": [] },
             "remote": { "domain_id": 1, "transport": "tcp", "initial_peers": ["10.0.0.1:7400"] },
             "auto_relay": { "filter": "sensor/*" },
             "poll_period_ms": 100
-        }"#;
+        }}"#;
         let cfg = RouteGatewayConfig::from_json(json).unwrap();
         assert_eq!(cfg.auto_relay.filter, "sensor/*");
         assert_eq!(cfg.poll_period_ms, 100);
@@ -269,6 +286,7 @@ mod tests {
             domain_id: 1,
             transport: "tcp".to_string(),
             initial_peers: vec!["1.2.3.4:7400".to_string()],
+            bind_port: None,
             tls: None,
         };
         let qos = node.to_participant_qos();
@@ -279,7 +297,7 @@ mod tests {
 
     #[test]
     fn parses_tls_config() {
-        let json = r#"{
+        let json = r#"{ "route_gateway": {
             "local":  { "domain_id": 0, "transport": "udp" },
             "remote": {
                 "domain_id": 1,
@@ -293,7 +311,7 @@ mod tests {
                     "verify_peer": true
                 }
             }
-        }"#;
+        }}"#;
         let cfg = RouteGatewayConfig::from_json(json).unwrap();
         let tls = cfg.remote.tls.expect("tls present");
         assert_eq!(tls.ca_file, "/etc/ssl/ca.pem");
@@ -307,6 +325,7 @@ mod tests {
             domain_id: 1,
             transport: "tcp".to_string(),
             initial_peers: vec![],
+            bind_port: None,
             tls: Some(TlsNodeConfig {
                 ca_file: "/etc/ssl/ca.pem".to_string(),
                 cert_file: "/etc/ssl/cert.pem".to_string(),
@@ -325,7 +344,7 @@ mod tests {
 
     #[test]
     fn parses_qos_override_fields() {
-        let json = r#"{
+        let json = r#"{ "route_gateway": {
             "local":  { "domain_id": 0, "transport": "udp" },
             "remote": { "domain_id": 1, "transport": "tcp", "initial_peers": ["1.2.3.4:7400"] },
             "auto_relay": {
@@ -352,7 +371,7 @@ mod tests {
                     "remote_writer_qos": "GwLib::Reliable"
                 }
             ]
-        }"#;
+        }}"#;
         let cfg = RouteGatewayConfig::from_json(json).unwrap();
         assert_eq!(cfg.auto_relay.default_local_reader_qos.as_deref(), Some("GwLib::Reliable"));
         assert_eq!(cfg.topic_relays.len(), 1);
@@ -362,7 +381,7 @@ mod tests {
 
     #[test]
     fn qos_provider_resolves_inline_profile() {
-        let json = r#"{
+        let json = r#"{ "route_gateway": {
             "local":  { "domain_id": 0, "transport": "udp" },
             "remote": { "domain_id": 1, "transport": "tcp" },
             "auto_relay": {
@@ -374,7 +393,7 @@ mod tests {
                     }]
                 }
             }
-        }"#;
+        }}"#;
         let cfg = RouteGatewayConfig::from_json(json).unwrap();
         let provider = cfg.auto_relay.build_qos_provider().unwrap();
         let qos = provider.get_datareader_qos("GwLib::KeepAll").expect("profile resolves");
@@ -386,10 +405,10 @@ mod tests {
 
     #[test]
     fn defaults_empty_when_not_specified() {
-        let json = r#"{
+        let json = r#"{ "route_gateway": {
             "local":  { "domain_id": 0, "transport": "udp" },
             "remote": { "domain_id": 1, "transport": "tcp" }
-        }"#;
+        }}"#;
         let cfg = RouteGatewayConfig::from_json(json).unwrap();
         assert!(cfg.auto_relay.default_local_reader_qos.is_none());
         assert!(cfg.auto_relay.qos_profiles.is_none());
@@ -398,16 +417,39 @@ mod tests {
 
     #[test]
     fn tls_server_name_defaults_to_localhost() {
-        let json = r#"{
+        let json = r#"{ "route_gateway": {
             "local":  { "domain_id": 0, "transport": "udp" },
             "remote": {
                 "domain_id": 1, "transport": "tcp",
                 "tls": { "ca_file": "/a", "cert_file": "/b", "key_file": "/c" }
             }
-        }"#;
+        }}"#;
         let cfg = RouteGatewayConfig::from_json(json).unwrap();
         let tls = cfg.remote.tls.unwrap();
         assert_eq!(tls.server_name, "localhost");
         assert!(!tls.verify_peer);
+    }
+
+    #[test]
+    fn bind_port_maps_to_tcp_property() {
+        let node = NodeConfig {
+            domain_id: 1,
+            transport: "tcp".to_string(),
+            initial_peers: vec!["1.2.3.4:7400".to_string()],
+            bind_port: Some(17400),
+            tls: None,
+        };
+        let qos = node.to_participant_qos();
+        assert_eq!(qos.property.find_property("int2dds.transport.TCPv4.bind_port"), Some("17400"));
+    }
+
+    #[test]
+    fn unwrapped_config_is_rejected() {
+        // Settings must sit under the top-level `route_gateway` key.
+        let json = r#"{
+            "local":  { "domain_id": 0, "transport": "udp" },
+            "remote": { "domain_id": 1, "transport": "tcp" }
+        }"#;
+        assert!(RouteGatewayConfig::from_json(json).is_err());
     }
 }
