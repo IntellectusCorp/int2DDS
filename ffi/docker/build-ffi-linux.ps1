@@ -70,10 +70,14 @@ function Invoke-Native {
 }
 
 # target triple-ish platform -> (docker platform, dist subdir)
+# Musl targets build from the Alpine Dockerfile.musl (native musl); gnu targets
+# from the Ubuntu Dockerfile. Each is compiled in its own-arch container.
 $Targets = @(
-    @{ Platform = "linux/amd64";  Dist = "linux-x86_64" },
-    @{ Platform = "linux/arm64";  Dist = "linux-aarch64" },
-    @{ Platform = "linux/arm/v7"; Dist = "linux-armhf" }
+    @{ Platform = "linux/amd64";  Dist = "linux-x86_64";       Musl = $false },
+    @{ Platform = "linux/arm64";  Dist = "linux-aarch64";      Musl = $false },
+    @{ Platform = "linux/arm/v7"; Dist = "linux-armhf";        Musl = $false },
+    @{ Platform = "linux/amd64";  Dist = "linux-x86_64-musl";  Musl = $true  },
+    @{ Platform = "linux/arm64";  Dist = "linux-aarch64-musl"; Musl = $true  }
 )
 if ($Only) { $Targets = $Targets | Where-Object { $Only -contains $_.Platform } }
 if (-not $Targets) { throw "No targets selected (check -Only values)." }
@@ -118,17 +122,20 @@ foreach ($t in $Targets) {
 
     Write-Host "`n===== [$i/$($Targets.Count)] $plat -> ffi/dist/$dist =====" -ForegroundColor Cyan
 
+    # Pick the Dockerfile: Alpine (musl) vs Ubuntu (gnu).
+    $df = if ($t.Musl) { Join-Path $PSScriptRoot "Dockerfile.musl" } else { $Dockerfile }
+
     # Build the per-platform toolchain image (layers cached after first run).
-    Write-Host "[build image] $tag" -ForegroundColor DarkCyan
+    Write-Host "[build image] $tag  (from $(Split-Path $df -Leaf))" -ForegroundColor DarkCyan
     Invoke-Native -What "docker build ($plat)" -Cmd {
         docker build --platform $plat `
             --build-arg "RUST_VERSION=$RustVersion" `
-            -t $tag -f $Dockerfile $PSScriptRoot
+            -t $tag -f $df $PSScriptRoot
     }
 
     # Clean compile inside the container (ephemeral target dir).
     Write-Host "[compile] $plat (this may take a while under emulation)" -ForegroundColor DarkCyan
-    Invoke-Native -What "container build ($plat)" -Cmd {
+    Invoke-Native -What "container build ($plat / $dist)" -Cmd {
         docker run --rm --platform $plat `
             -v "${RepoRoot}:/src" `
             -e "DIST=$dist" `
@@ -187,30 +194,33 @@ manifest="$stage/int2dds-ffi.manifest.yaml"
   echo "artifacts:"
 } > "$manifest"
 
-# "<dist-subdir>|<debian-arch>|<rust-triple>"
+# "<dist-subdir>|<debian-arch>|<rust-triple>|<libc>"
 for entry in \
-  "linux-x86_64|amd64|x86_64-unknown-linux-gnu" \
-  "linux-aarch64|arm64|aarch64-unknown-linux-gnu" \
-  "linux-armhf|armhf|armv7-unknown-linux-gnueabihf"; do
-  d=${entry%%|*}; rest=${entry#*|}; deb=${rest%%|*}; triple=${rest#*|}
+  "linux-x86_64|amd64|x86_64-unknown-linux-gnu|gnu" \
+  "linux-aarch64|arm64|aarch64-unknown-linux-gnu|gnu" \
+  "linux-armhf|armhf|armv7-unknown-linux-gnueabihf|gnu" \
+  "linux-x86_64-musl|amd64|x86_64-unknown-linux-musl|musl" \
+  "linux-aarch64-musl|arm64|aarch64-unknown-linux-musl|musl"; do
+  d=${entry%%|*}; rest=${entry#*|}; deb=${rest%%|*}; rest2=${rest#*|}; triple=${rest2%%|*}; libc=${rest2#*|}
   real="/src/ffi/dist/${d}/libint2dds_ffi.so.${ver}"
-  if [ ! -e "$real" ]; then
-    echo "  -- skip ${d}: ${real} not found (not built this run)"
-    continue
-  fi
+  if [ ! -e "$real" ]; then echo "  -- skip ${d}: not built this run"; continue; fi
   mkdir -p "${stage}/${d}"
   cp "$real" "${stage}/${d}/libint2dds_ffi.so"
   sha=$(sha256sum "${stage}/${d}/libint2dds_ffi.so" | cut -d' ' -f1)
-  glibc=$(readelf -V "${stage}/${d}/libint2dds_ffi.so" 2>/dev/null \
-            | grep -oE 'GLIBC_[0-9.]+' | sed 's/GLIBC_//' | sort -V | tail -1)
-  [ -n "$glibc" ] || glibc="unknown"
   {
-    echo "  - arch: ${deb}"
+    echo "  - os: linux"
+    echo "    arch: ${deb}"
     echo "    triple: ${triple}"
     echo "    file: ${d}/libint2dds_ffi.so"
     echo "    sha256: ${sha}"
-    echo "    min_glibc: \"${glibc}\""
   } >> "$manifest"
+  if [ "$libc" = musl ]; then
+    echo "    libc: musl" >> "$manifest"
+  else
+    glibc=$(readelf -V "${stage}/${d}/libint2dds_ffi.so" 2>/dev/null | grep -oE 'GLIBC_[0-9.]+' | sed 's/GLIBC_//' | sort -V | tail -1)
+    [ -n "$glibc" ] || glibc="unknown"
+    echo "    min_glibc: \"${glibc}\"" >> "$manifest"
+  fi
 done
 
 out="/src/ffi/dist/int2dds-ffi-${ver}-linux.tar.gz"
@@ -220,12 +230,24 @@ echo "== archive contents =="; tar -tzf "$out"
 echo "== archive =="; ls -l "$out"
 '@
 
-    Invoke-Native -What "package" -Cmd {
-        docker run --rm `
-            -v "${RepoRoot}:/src" `
-            -e "GIT_COMMIT=$commit" `
-            -e "BUILD_DATE=$date" `
-            $pkgImage bash -c $packageScript
+    # Write the script to a bind-mounted temp file and run `bash <file>`, rather
+    # than `bash -c <arg>` or a stdin pipe: PowerShell 5.1 prepends a UTF-8 BOM
+    # and rewrites line endings to CRLF when sending strings to a native command,
+    # which breaks bash. Writing the file ourselves as UTF-8 (no BOM) with LF
+    # endings sidesteps all of that.
+    $pkgScriptPath = Join-Path $RepoRoot ".pkg-linux.sh"
+    $lf = ($packageScript -replace "`r`n", "`n") -replace "`r", "`n"
+    [System.IO.File]::WriteAllText($pkgScriptPath, $lf, (New-Object System.Text.UTF8Encoding($false)))
+    try {
+        Invoke-Native -What "package" -Cmd {
+            docker run --rm `
+                -v "${RepoRoot}:/src" `
+                -e "GIT_COMMIT=$commit" `
+                -e "BUILD_DATE=$date" `
+                $pkgImage bash /src/.pkg-linux.sh
+        }
+    } finally {
+        Remove-Item $pkgScriptPath -Force -ErrorAction SilentlyContinue
     }
 
     Write-Host "Archive : ffi/dist/int2dds-ffi-<version>-linux.tar.gz" -ForegroundColor Green
