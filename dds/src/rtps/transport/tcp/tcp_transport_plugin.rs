@@ -231,7 +231,10 @@ impl TcpTransportPlugin {
     /// Build the TCP locators this plugin advertises in SPDP. Mirrors the
     /// sync plugin's `advertised_tcp_locators`: WAN public address overrides
     /// the per-NIC list when set.
-    fn advertised_tcp_locators(&self) -> Vec<Locator> {
+    /// Build advertised TCP locators carrying `logical_port` in the RTPS port
+    /// field and the physical listener port in the address bytes, so a peer
+    /// reserves the right logical port regardless of its own participant id.
+    fn advertised_tcp_locators(&self, logical_port: u16) -> Vec<Locator> {
         // 1. Explicit WAN/NAT public endpoint takes precedence.
         if let Some(public_addr) = self.public_address {
             if let std::net::IpAddr::V4(v4) = public_addr.ip() {
@@ -241,7 +244,7 @@ impl TcpTransportPlugin {
                     public_addr,
                     self.listener_port
                 );
-                return vec![Locator::from_tcp_v4(v4, public_addr.port() as u32)];
+                return vec![Locator::from_tcp_v4_dual(v4, logical_port, public_addr.port())];
             }
             log::warn!(
                 "[TcpTransportPlugin] Public address is not IPv4, \
@@ -251,14 +254,14 @@ impl TcpTransportPlugin {
 
         // 2. Generic IP override (carried over from develop's `init_locators`).
         if let Some(ext_ip) = crate::common::env::get_external_address() {
-            return vec![Locator::from_tcp_v4(ext_ip, self.listener_port as u32)];
+            return vec![Locator::from_tcp_v4_dual(ext_ip, logical_port, self.listener_port)];
         }
 
         // 3. All local NICs.
         self.working_ips
             .iter()
             .filter_map(|ip_str| ip_str.parse::<Ipv4Addr>().ok())
-            .map(|ip| Locator::from_tcp_v4(ip, self.listener_port as u32))
+            .map(|ip| Locator::from_tcp_v4_dual(ip, logical_port, self.listener_port))
             .collect()
     }
 
@@ -282,39 +285,22 @@ impl TransportPlugin for TcpTransportPlugin {
                 }
                 Ok(())
             }
-            SendTarget::SEDPDiscovery(locator) => {
+            // SEDP and user data both dial the peer's physical port and reserve
+            // the logical port the peer advertised in its own locator — so
+            // delivery no longer assumes the two sides share a participant id.
+            SendTarget::SEDPDiscovery(locator) | SendTarget::UserData(locator) => {
                 if !locator.is_tcp() {
                     return Err(io::Error::new(io::ErrorKind::Unsupported, locator.kind_name()));
                 }
                 let addr = SocketAddr::new(
                     std::net::IpAddr::V4(locator.to_ip_v4_addr()),
-                    locator.port() as u16,
+                    locator.tcp_physical_port(),
                 );
                 if !self.should_dial(&addr) {
-                    log::debug!(
-                        "[TcpTransportPlugin] SEDP: skip non-initial-peer locator {}",
-                        addr
-                    );
+                    log::debug!("[TcpTransportPlugin] skip non-initial-peer locator {}", addr);
                     return Ok(());
                 }
-                self.sender.send_to_discovery(&addr, data)
-            }
-            SendTarget::UserData(locator) => {
-                if !locator.is_tcp() {
-                    return Err(io::Error::new(io::ErrorKind::Unsupported, locator.kind_name()));
-                }
-                let addr = SocketAddr::new(
-                    std::net::IpAddr::V4(locator.to_ip_v4_addr()),
-                    locator.port() as u16,
-                );
-                if !self.should_dial(&addr) {
-                    log::debug!(
-                        "[TcpTransportPlugin] UserData: skip non-initial-peer locator {}",
-                        addr
-                    );
-                    return Ok(());
-                }
-                self.sender.send_to_user_data(&addr, data)
+                self.sender.send_to(addr, locator.tcp_logical_port(), data)
             }
         }
     }
@@ -324,13 +310,18 @@ impl TransportPlugin for TcpTransportPlugin {
     }
 
     fn advertised_metatraffic_unicast_locators(&self) -> Vec<Locator> {
-        self.advertised_tcp_locators()
+        // Metatraffic (discovery/SEDP) carries the discovery logical port.
+        let logical_port =
+            PortManager::get_discovery_traffic_unicast_port(self.domain_id, self.participant_id);
+        self.advertised_tcp_locators(logical_port)
     }
 
     fn advertised_default_unicast_locators(&self) -> Vec<Locator> {
-        // TCP multiplexes discovery and user-data over the same listener;
-        // metatraffic and default locators resolve to identical endpoints.
-        self.advertised_tcp_locators()
+        // User data shares the same physical listener but a distinct logical
+        // port, so the peer reserves the right mux port per traffic type.
+        let logical_port =
+            PortManager::get_user_traffic_unicast_port(self.domain_id, self.participant_id);
+        self.advertised_tcp_locators(logical_port)
     }
 
     fn take_discovery_multicast_source(&self) -> Option<MessageSource> {
@@ -492,26 +483,103 @@ mod tests {
     fn send_to_unreachable_does_not_panic() {
         let plugin = make_plugin(next_test_domain());
 
-        let locator = Locator::from_tcp_v4(std::net::Ipv4Addr::new(127, 0, 0, 1), 1);
+        // Physical port (7400) is the make_plugin initial peer, so should_dial
+        // passes and the connect path is exercised (then refused → dead peer).
+        let locator = Locator::from_tcp_v4_dual(std::net::Ipv4Addr::new(127, 0, 0, 1), 100, 7400);
         let target = SendTarget::UserData(&locator);
         let _ = plugin.send(b"\x52\x54\x50\x53", &target);
 
         plugin.close();
     }
 
-    /// Advertised locators include the bound listener port for each working IP.
+    /// Advertised locators carry the logical RTPS port in the `port` field and
+    /// the physical listener port in the address bytes.
     #[test]
-    fn advertised_locators_carry_listener_port() {
-        let plugin = make_plugin(next_test_domain());
+    fn advertised_locators_carry_logical_and_physical_ports() {
+        let domain = next_test_domain();
+        let plugin = make_plugin(domain);
         let port = plugin.tcp_listener_port().expect("listener port");
 
-        let locators = plugin.advertised_metatraffic_unicast_locators();
-        assert!(!locators.is_empty(), "expected at least one advertised locator");
-        for loc in &locators {
+        let meta = plugin.advertised_metatraffic_unicast_locators();
+        assert!(!meta.is_empty(), "expected at least one advertised locator");
+        let expected_disc = PortManager::get_discovery_traffic_unicast_port(domain, 0);
+        for loc in &meta {
             assert!(loc.is_tcp());
-            assert_eq!(loc.port() as u16, port);
+            assert_eq!(loc.tcp_physical_port(), port, "physical port in address bytes");
+            assert_eq!(loc.tcp_logical_port(), expected_disc, "metatraffic logical port");
+        }
+
+        // Default (user-data) locators advertise a distinct logical port.
+        let def = plugin.advertised_default_unicast_locators();
+        let expected_user = PortManager::get_user_traffic_unicast_port(domain, 0);
+        for loc in &def {
+            assert_eq!(loc.tcp_physical_port(), port);
+            assert_eq!(loc.tcp_logical_port(), expected_user, "user-data logical port");
         }
 
         plugin.close();
+    }
+
+    /// A sender at participant_id 0 reaches a listener at participant_id 1 by
+    /// reserving the logical port the listener advertised in its own locator —
+    /// the cross-pid case that used to fail (Hybrid single-host), because the
+    /// sender recomputed the destination port from its own participant id.
+    #[test]
+    fn send_reaches_listener_with_mismatched_participant_id() {
+        let domain = next_test_domain();
+        let recv_port: u16 = 17601;
+        let send_port: u16 = 17602;
+
+        // Receiver at participant_id 1 (its logical ports differ from pid 0).
+        let mut recv_cfg = TcpConfig::default();
+        recv_cfg.bind_port = Some(recv_port);
+        recv_cfg.initial_peers = vec![format!("127.0.0.1:{recv_port}").parse().unwrap()];
+        let receiver = TcpTransportPlugin::new(
+            domain,
+            1,
+            "127.0.0.1".to_string(),
+            vec!["127.0.0.1".to_string()],
+            [0x11u8; 12],
+            recv_cfg,
+        )
+        .expect("receiver");
+
+        // Sender at participant_id 0, allowed to dial the receiver.
+        let mut send_cfg = TcpConfig::default();
+        send_cfg.bind_port = Some(send_port);
+        send_cfg.initial_peers = vec![format!("127.0.0.1:{recv_port}").parse().unwrap()];
+        let sender = TcpTransportPlugin::new(
+            domain,
+            0,
+            "127.0.0.1".to_string(),
+            vec!["127.0.0.1".to_string()],
+            [0x00u8; 12],
+            send_cfg,
+        )
+        .expect("sender");
+
+        let rx = match receiver.take_user_data_unicast_source().expect("user source") {
+            MessageSource::Channel { rx } => rx,
+            _ => panic!("expected channel source"),
+        };
+
+        // Receiver's advertised user-data locator carries pid-1's logical port
+        // plus the physical bind port — distinct values, proving the carry.
+        let loc =
+            receiver.advertised_default_unicast_locators().into_iter().next().expect("locator");
+        assert_eq!(loc.tcp_physical_port(), recv_port);
+        assert_eq!(loc.tcp_logical_port(), PortManager::get_user_traffic_unicast_port(domain, 1));
+        assert_ne!(loc.tcp_logical_port(), loc.tcp_physical_port());
+
+        let rtps: &[u8] = b"RTPS\x02\x04\x00\x00\x01\x02\x03\x04\x05\x06\x07\x08";
+        sender.send(rtps, &SendTarget::UserData(&loc)).expect("send");
+
+        let msg = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("receiver got frame despite pid mismatch");
+        assert_eq!(&msg.data[..rtps.len()], rtps);
+
+        sender.close();
+        receiver.close();
     }
 }

@@ -292,23 +292,17 @@ impl TcpSender {
 // kernel accepts the bytes. Connections, TLS, keepalive, and the protocol
 // handshake remain on the async task pair created by `spawn_conn_actor`.
 impl TcpSender {
+    /// SPDP bootstrap fan-out to an initial peer we have not discovered yet.
+    /// The peer's participant id (hence its logical port) is unknown, so we
+    /// reserve the well-known index-0 metatraffic port — the conventional
+    /// bootstrap port. Once SPDP completes, SEDP and user data reserve the
+    /// peer's actual advertised logical port via `send_to`.
     pub(crate) fn send_to_discovery(
         self: &Arc<Self>,
         addr: &SocketAddr,
         data: &[u8],
     ) -> io::Result<()> {
-        let logical_port =
-            PortManager::get_discovery_traffic_unicast_port(self.domain_id, self.participant_id);
-        self.send_to(*addr, logical_port, data)
-    }
-
-    pub(crate) fn send_to_user_data(
-        self: &Arc<Self>,
-        addr: &SocketAddr,
-        data: &[u8],
-    ) -> io::Result<()> {
-        let logical_port =
-            PortManager::get_user_traffic_unicast_port(self.domain_id, self.participant_id);
+        let logical_port = PortManager::get_discovery_traffic_unicast_port(self.domain_id, 0);
         self.send_to(*addr, logical_port, data)
     }
 
@@ -316,8 +310,9 @@ impl TcpSender {
     /// otherwise block until the connection (control + data handshake) is
     /// established — then perform the wire `writev` inline. All user-data
     /// writes funnel through this single path, so a peer's fragments always
-    /// reach the wire in the order the caller emits them.
-    fn send_to(
+    /// reach the wire in the order the caller emits them. `logical_port` is the
+    /// destination's advertised RTPS port, reserved on the mux connection.
+    pub(crate) fn send_to(
         self: &Arc<Self>,
         addr: SocketAddr,
         logical_port: u16,
