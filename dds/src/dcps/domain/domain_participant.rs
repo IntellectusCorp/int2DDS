@@ -4087,7 +4087,7 @@ mod domain_participant_tests {
             .unwrap();
 
         let instance_handle = participant.get_instance_handle().unwrap();
-        println!("instance_handle: {:?}", instance_handle);
+        println!("instance_handle: {}", instance_handle);
         assert_eq!(instance_handle.is_nil(), false);
     }
 

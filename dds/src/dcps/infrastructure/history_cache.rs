@@ -220,7 +220,7 @@ pub(crate) trait HistoryCache {
                 debug!("[HistoryCache] Failed to remove expired change: {:?}", e);
             } else {
                 debug!(
-                    "[HistoryCache] Removed expired change seq_num: {:?}, writer_guid: {:?}",
+                    "[HistoryCache] Removed expired change seq_num: {}, writer_guid: {}",
                     expired_change.sequence_number().to_i64(),
                     writer_guid
                 );

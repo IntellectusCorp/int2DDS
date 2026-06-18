@@ -262,7 +262,7 @@ impl TimerTask {
         self.timers.retain(|id, _| !id.belongs_to_entity(entity_id));
         let removed = before - self.timers.len();
         if removed > 0 {
-            debug!("Removed {} timer(s) for entity {:?}", removed, entity_id);
+            debug!("Removed {} timer(s) for entity {}", removed, entity_id);
         }
     }
 

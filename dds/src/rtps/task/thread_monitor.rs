@@ -17,7 +17,7 @@ use std::time::{Duration, SystemTime};
 
 use log::{debug, error};
 
-use crate::rtps::common::guid::GuidPrefix;
+use crate::rtps::common::guid::{Guid, GuidPrefix};
 use crate::rtps::entities::entity::Entity;
 use crate::rtps::entities::participant::Participant;
 use crate::utils::timer::{timer_handler::TimerHandler, timer_id::TimerId};
@@ -729,7 +729,11 @@ impl ThreadMonitor {
             if let Ok(mut map) = registry.lock() {
                 for (guid, tid_map) in map.iter_mut() {
                     if tid_map.remove(&tid).is_some() {
-                        debug!("Removed thread TID {} from registry (Guid: {:?})", tid, guid);
+                        debug!(
+                            "Removed thread TID {} from registry (Guid: {})",
+                            tid,
+                            Guid::guid_prefix_to_string(guid)
+                        );
                         break;
                     }
                 }
@@ -749,8 +753,10 @@ impl ThreadMonitor {
         if let Ok(mut map) = registry.lock() {
             map.entry(guid_prefix).or_insert_with(HashMap::new).insert(tid, name.to_string());
             debug!(
-                "Registered thread TID {} with name '{}' for GuidPrefix {:?}",
-                tid, name, guid_prefix
+                "Registered thread TID {} with name '{}' for GuidPrefix {}",
+                tid,
+                name,
+                Guid::guid_prefix_to_string(&guid_prefix)
             );
         }
     }
@@ -761,9 +767,9 @@ impl ThreadMonitor {
             if let Ok(mut map) = registry.lock() {
                 if let Some(tid_map) = map.remove(guid_prefix) {
                     debug!(
-                        "Removed {} threads associated with GuidPrefix {:?}",
+                        "Removed {} threads associated with GuidPrefix {}",
                         tid_map.len(),
-                        guid_prefix
+                        Guid::guid_prefix_to_string(guid_prefix)
                     );
                 }
             }
