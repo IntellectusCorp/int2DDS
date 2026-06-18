@@ -31,7 +31,7 @@ Key differences from UDP:
 
 | Location | Kind | Covers |
 | --- | --- | --- |
-| `dds/examples/hello_world/hello_world_tcp.rs` | example | end-to-end pub/sub over TCP |
+| `dds/examples/hello_world_tcp/hello_world_tcp.rs` | example | end-to-end pub/sub over TCP |
 | `dds/examples/route_gateway/route_gateway.rs` | example | Topic-relaying in WAN (LAN UDP ⇄ WAN TCP) |
 
 All commands below are run from the repository root; the crate is the workspace
@@ -56,7 +56,7 @@ cargo run -p int2dds --example hello_world_tcp -- -P
 ### Choosing the QoS source
 
 - **Bundled profile (default).** With no env set, the example loads its bundled
-  `dds/examples/hello_world/hello_world_tcp_qos.json`. The path is baked in at
+  `dds/examples/hello_world_tcp/hello_world_tcp_qos.json`. The path is baked in at
   compile time (`CARGO_MANIFEST_DIR`), so it works from any working directory.
 
 - **Custom profile via `DDS_QOS_PROFILE`.** Point it at your own profile file;
@@ -75,7 +75,7 @@ cargo run -p int2dds --example hello_world_tcp -- -P
   > that working directory — e.g. from the repo root:
   >
   > ```bash
-  > DDS_QOS_PROFILE=dds/examples/hello_world/hello_world_tcp_qos.json \
+  > DDS_QOS_PROFILE=dds/examples/hello_world_tcp/hello_world_tcp_qos.json \
   >     cargo run -p int2dds --example hello_world_tcp -- -P
   > ```
   >
@@ -141,8 +141,8 @@ Minimal QoS profile JSON (a single publisher-side profile):
 
 ## Related Files
 
-- [dds/examples/hello_world/hello_world_tcp.rs](../../dds/examples/hello_world/hello_world_tcp.rs) - TCP pub/sub example
-- [dds/examples/hello_world/hello_world_tcp_qos.json](../../dds/examples/hello_world/hello_world_tcp_qos.json) - bundled TCP QoS profile
+- [dds/examples/hello_world_tcp/hello_world_tcp.rs](../../dds/examples/hello_world_tcp/hello_world_tcp.rs) - TCP pub/sub example
+- [dds/examples/hello_world_tcp/hello_world_tcp_qos.json](../../dds/examples/hello_world_tcp/hello_world_tcp_qos.json) - bundled TCP QoS profile
 - [dds/examples/route_gateway/route_gateway.rs](../../dds/examples/route_gateway/route_gateway.rs) - WAN gateway example
 - [dds/src/rtps/transport/transport_config.rs](../../dds/src/rtps/transport/transport_config.rs) - `TcpConfig` resolution from QoS
 - [dds/src/rtps/transport/tcp/](../../dds/src/rtps/transport/tcp/) - TCP transport implementation and unit tests

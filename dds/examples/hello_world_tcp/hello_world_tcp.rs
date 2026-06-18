@@ -52,7 +52,7 @@ const PROFILE_SUB: &str = "HelloWorldTcp::TcpSub";
 /// `CARGO_MANIFEST_DIR` is the crate dir (`.../int2DDS/dds`), so the path is
 /// relative to it (note the leading `/`).
 const DEFAULT_QOS_FILE: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/examples/hello_world/hello_world_tcp_qos.json");
+    concat!(env!("CARGO_MANIFEST_DIR"), "/examples/hello_world_tcp/hello_world_tcp_qos.json");
 
 #[derive(Parser, Debug)]
 #[command(about = "Hello World DDS Example (TCP via QoS profile)", disable_help_flag = true)]
