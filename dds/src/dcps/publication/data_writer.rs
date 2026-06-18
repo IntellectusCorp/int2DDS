@@ -1641,7 +1641,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                 monitor.track_instance(&handle);
             }
 
-            log::debug!("Registering Instance - handle: {:?}", handle);
+            log::debug!("Registering Instance - handle: {}", handle);
         }
         Ok(handle)
     }
@@ -2601,7 +2601,7 @@ mod tests {
 
         // Start tracking instance with register_instance
         let handle = writer.register_instance(&data).unwrap();
-        println!("Instance registered with handle: {:?}", handle);
+        println!("Instance registered with handle: {}", handle);
 
         // Wait for deadline - miss should occur
         thread::sleep(std::time::Duration::from_millis(200));

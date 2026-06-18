@@ -318,6 +318,24 @@ impl StatusInfo {
         self.0.to_be_bytes()
     }
 }
+impl std::fmt::Display for StatusInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0 == 0 {
+            return write!(f, "NONE");
+        }
+        let mut parts: Vec<&str> = Vec::new();
+        if self.disposed() {
+            parts.push("DISPOSED");
+        }
+        if self.unregistered() {
+            parts.push("UNREGISTERED");
+        }
+        if self.filtered() {
+            parts.push("FILTERED");
+        }
+        write!(f, "{}", parts.join("|"))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Readable, Writable)]
 pub struct Property {

@@ -535,7 +535,7 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
         if self.get_first_acked_change_from_vec(&vec![change.clone()])?.is_none() {
             // TODO: trigger unacked_sample_removed status
             debug!(
-                "Unacked sample removed for sequence number {:?}",
+                "Unacked sample removed for sequence number {}",
                 change.sequence_number().to_i64()
             );
         }
