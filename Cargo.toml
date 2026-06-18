@@ -1,10 +1,13 @@
 [workspace]
-members = ["dds", "derive", "ffi", "rpc"]
-default-members = ["dds", "derive", "ffi", "rpc"]
-exclude = ["idl"]
+members = ["dds", "derive", "ffi", "rpc", "idl"]
+default-members = ["dds", "derive", "ffi", "rpc", "idl"]
 resolver = "2"
 
 [workspace.package]
+# Single source of truth for the product version. Every workspace crate inherits
+# this via `version.workspace = true`; the C# binding reads it from this file in
+# csharp/Directory.Build.props, and ffi/build.rs derives the .so SONAME from it.
+version = "0.0.1"
 authors = ["Intellectus Corp"]
 license = "Apache-2.0"
 repository = "https://github.com/IntellectusCorp/int2DDS"
