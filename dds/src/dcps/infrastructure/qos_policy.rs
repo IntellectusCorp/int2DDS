@@ -341,7 +341,8 @@ impl HistoryQosPolicyKind {
 pub struct HistoryQosPolicy {
     /// The history storage strategy.
     pub kind: HistoryQosPolicyKind,
-    /// Only applicable for writer history when `kind` is `KeepAll`.
+    /// Only affects a Volatile writer with `KeepAll`. When `false`, samples
+    /// acknowledged by all matched readers are removed from history; `true` keeps them.
     pub strict: bool,
 }
 
