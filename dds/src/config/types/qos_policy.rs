@@ -13,7 +13,7 @@ use crate::{
 use log::error;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct HistoryQosPolicy {
     #[serde(default)]
     pub(crate) kind: HistoryQosPolicyKind,
@@ -21,10 +21,27 @@ pub(crate) struct HistoryQosPolicy {
     #[serde(serialize_with = "serialize_i32_or_unlimited")]
     #[serde(default = "default_depth")]
     pub(crate) depth: i32,
+    // Only meaningful for a Volatile KeepAll writer; mirrors qos_policy default of true
+    #[serde(default = "default_strict")]
+    pub(crate) strict: bool,
+}
+
+impl Default for HistoryQosPolicy {
+    fn default() -> Self {
+        Self {
+            kind: HistoryQosPolicyKind::default(),
+            depth: default_depth(),
+            strict: default_strict(),
+        }
+    }
 }
 
 fn default_depth() -> i32 {
     1
+}
+
+fn default_strict() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -40,10 +57,10 @@ impl From<HistoryQosPolicy> for qos_policy::HistoryQosPolicy {
         match external.kind {
             HistoryQosPolicyKind::KeepLastHistoryQos => Self {
                 kind: qos_policy::HistoryQosPolicyKind::KeepLast(external.depth),
-                strict: true,
+                strict: external.strict,
             },
             HistoryQosPolicyKind::KeepAllHistoryQos => {
-                Self { kind: qos_policy::HistoryQosPolicyKind::KeepAll, strict: true }
+                Self { kind: qos_policy::HistoryQosPolicyKind::KeepAll, strict: external.strict }
             }
         }
     }
@@ -52,12 +69,16 @@ impl From<HistoryQosPolicy> for qos_policy::HistoryQosPolicy {
 impl From<qos_policy::HistoryQosPolicy> for HistoryQosPolicy {
     fn from(internal: qos_policy::HistoryQosPolicy) -> Self {
         match internal.kind {
-            qos_policy::HistoryQosPolicyKind::KeepLast(depth) => {
-                Self { kind: HistoryQosPolicyKind::KeepLastHistoryQos, depth }
-            }
-            qos_policy::HistoryQosPolicyKind::KeepAll => {
-                Self { kind: HistoryQosPolicyKind::KeepAllHistoryQos, depth: 1 }
-            }
+            qos_policy::HistoryQosPolicyKind::KeepLast(depth) => Self {
+                kind: HistoryQosPolicyKind::KeepLastHistoryQos,
+                depth,
+                strict: internal.strict,
+            },
+            qos_policy::HistoryQosPolicyKind::KeepAll => Self {
+                kind: HistoryQosPolicyKind::KeepAllHistoryQos,
+                depth: 1,
+                strict: internal.strict,
+            },
         }
     }
 }
