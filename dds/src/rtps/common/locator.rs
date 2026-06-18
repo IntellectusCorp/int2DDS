@@ -202,6 +202,19 @@ impl Locator {
         u16::from_be_bytes([self.address[0], self.address[1]])
     }
 
+    /// Port a peer is actually reached at over the wire.
+    ///
+    /// For UDP the `port` field already holds the physical port. But for a TCP v4
+    /// dual-port locator the `port` field carries the logical port. So the
+    /// physical listener port packed in the address bytes is returned instead.
+    pub fn access_port(&self) -> u32 {
+        if self.kind == LOCATOR_KIND_TCP_V4 {
+            self.tcp_physical_port() as u32
+        } else {
+            self.port
+        }
+    }
+
     /// Create a TCP locator from IPv6 address and port
     ///
     /// # Arguments
