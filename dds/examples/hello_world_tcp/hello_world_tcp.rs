@@ -1,3 +1,8 @@
+//! Hello World over TCP. The participant's transport (TCP + per-participant
+//! `bind_port` + `initial_peers`) comes from a QoS profile by default, or from
+//! `build_participant_qos` in code with `--inline-qos`.
+//! Single host: publisher binds 7400, subscriber 7401.
+
 use std::sync::{
     mpsc::{sync_channel, SyncSender},
     Arc,
@@ -39,10 +44,18 @@ use int2dds::{
 };
 use log::info;
 
-const MULTICAST_TTL: u8 = 64;
+const PUB_TCP_PORT: u16 = 7400;
+const SUB_TCP_PORT: u16 = 7401;
+const PROFILE_PUB: &str = "HelloWorldTcp::TcpPub";
+const PROFILE_SUB: &str = "HelloWorldTcp::TcpSub";
+/// Bundled QoS profile file, used when `DDS_QOS_PROFILE` is not set.
+/// `CARGO_MANIFEST_DIR` is the crate dir (`.../int2DDS/dds`), so the path is
+/// relative to it (note the leading `/`).
+const DEFAULT_QOS_FILE: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/examples/hello_world_tcp/hello_world_tcp_qos.json");
 
 #[derive(Parser, Debug)]
-#[command(about = "Hello World DDS Example (multicast TTL = 64)", disable_help_flag = true)]
+#[command(about = "Hello World DDS Example (TCP via QoS profile)", disable_help_flag = true)]
 struct Args {
     /// Print help
     #[arg(long, action = clap::ArgAction::Help)]
@@ -55,6 +68,10 @@ struct Args {
     /// Run as subscriber
     #[arg(short = 'S', long, conflicts_with = "publisher")]
     subscriber: bool,
+
+    /// Build the participant QoS in code instead of loading the QoS profile(loopback)
+    #[arg(short = 'c', long = "inline-qos")]
+    inline_qos: bool,
 
     /// Topic name
     #[arg(short = 'T', long, default_value = "hello_world_topic")]
@@ -163,13 +180,18 @@ fn build_qos(args: &Args, is_publisher: bool) -> QosConfig {
     }
 }
 
-fn build_participant_qos() -> DomainParticipantQos {
+/// Code-level equivalent of the JSON profile, used with `--inline-qos`.
+fn build_participant_qos(is_publisher: bool) -> DomainParticipantQos {
+    let (bind_port, peer_port) =
+        if is_publisher { (PUB_TCP_PORT, SUB_TCP_PORT) } else { (SUB_TCP_PORT, PUB_TCP_PORT) };
+
     let mut property = PropertyQosPolicy::default();
-    property.set_multicast_ttl(MULTICAST_TTL);
+    property.add_property("int2dds.transport", "tcp", false);
+    property.set_tcp_bind_port(bind_port);
+    property.add_property("int2dds.initial_peers", format!("127.0.0.1:{peer_port}"), false);
     DomainParticipantQos { property, ..Default::default() }
 }
 
-// Publisher Listener
 struct PubListener;
 
 impl DataWriterListener for PubListener {
@@ -195,7 +217,6 @@ impl DataWriterListener for PubListener {
     }
 }
 
-// Subscriber Listener
 struct SubListener {
     sender: SyncSender<bool>,
 }
@@ -242,19 +263,47 @@ impl DataReaderListener for SubListener {
     }
 }
 
+/// Create the participant either from the QoS profile (default) or from
+/// `build_participant_qos` (`--inline-qos`).
+fn make_participant(
+    args: &Args,
+    is_publisher: bool,
+) -> int2dds::domain::domain_participant::DomainParticipant {
+    let factory = DomainParticipantFactory::get_instance();
+    let profile = if is_publisher { PROFILE_PUB } else { PROFILE_SUB };
+
+    let participant = if args.inline_qos {
+        factory
+            .create_participant(
+                args.domain,
+                build_participant_qos(is_publisher),
+                None,
+                StatusMask::default(),
+            )
+            .unwrap()
+    } else {
+        // The factory auto-loads profiles from `DDS_QOS_PROFILE`; if it is not
+        // set, fall back to the bundled profile file.
+        if std::env::var("DDS_QOS_PROFILE").is_err() {
+            factory.load_profiles(&[DEFAULT_QOS_FILE]).expect("failed to load TCP QoS profile");
+        }
+        factory
+            .create_participant_with_profile(args.domain, profile, None, StatusMask::default())
+            .unwrap()
+    };
+    participant
+}
+
 fn run_publisher(args: &Args) {
     let qos = build_qos(args, true);
     let shutdown = Shutdown::install();
 
-    let factory = DomainParticipantFactory::get_instance();
-    let participant = factory
-        .create_participant(args.domain, build_participant_qos(), None, StatusMask::default())
-        .unwrap();
+    let participant = make_participant(args, true);
 
     let topic = participant
         .create_topic::<HelloWorldType>(
             &args.topic,
-            "HelloWorld",
+            "HelloWorldType",
             TopicQos::default(),
             None,
             StatusMask::default(),
@@ -278,40 +327,21 @@ fn run_publisher(args: &Args) {
         ..Default::default()
     };
 
-    let listener = PubListener;
     let writer = publisher
         .create_datawriter::<HelloWorldType>(
             &topic,
             writer_qos,
-            Some(Arc::new(listener)),
+            Some(Arc::new(PubListener)),
             StatusMask::default(),
         )
         .unwrap();
 
     println!(
-        "********* [publisher INFO] domain_id: {:?}, hostname: {:?}, reliability: {:?}, topic: {}, multicast_ttl: {}",
+        "********* [publisher INFO] domain_id: {}, hostname: {:?}, reliability: {:?}, topic: {}",
         args.domain,
         hostname::get().unwrap(),
         qos.reliability,
         args.topic,
-        MULTICAST_TTL,
-    );
-    let deadline_str = if qos.deadline == Duration::infinite() {
-        "INFINITE".to_string()
-    } else {
-        format!("{:?}", qos.deadline)
-    };
-    println!(
-        "********* [publisher qos info] interval: {}ms, reliability: {:?}, durability: {:?}, \
-         history: {:?}, deadline: {}, ownership: {:?}(strength: {}), partition: {:?}",
-        args.interval,
-        qos.reliability,
-        qos.durability,
-        qos.history,
-        deadline_str,
-        qos.ownership_kind,
-        qos.ownership_strength,
-        qos.partition.name,
     );
 
     while !shutdown.is_stopped() {
@@ -338,7 +368,7 @@ fn run_publisher(args: &Args) {
             "[{:?}]HelloWorld_{}_d{}",
             hostname::get().unwrap(),
             reliability_str,
-            args.domain,
+            args.domain
         );
         if let Some(target) = args.size {
             if message.len() < target {
@@ -364,15 +394,12 @@ fn run_subscriber(args: &Args) {
     let qos = build_qos(args, false);
     let shutdown = Shutdown::install();
 
-    let factory = DomainParticipantFactory::get_instance();
-    let participant = factory
-        .create_participant(args.domain, build_participant_qos(), None, StatusMask::default())
-        .unwrap();
+    let participant = make_participant(args, false);
 
     let topic = participant
         .create_topic::<HelloWorldType>(
             &args.topic,
-            "HelloWorld",
+            "HelloWorldType",
             TopicQos::default(),
             None,
             StatusMask::default(),
@@ -396,38 +423,21 @@ fn run_subscriber(args: &Args) {
     };
 
     let (sender, _receiver) = sync_channel(0);
-    let read_listener = SubListener { sender };
     let _reader = subscriber
         .create_datareader::<HelloWorldType>(
             &topic,
             reader_qos.clone(),
-            Some(Arc::new(read_listener)),
+            Some(Arc::new(SubListener { sender })),
             StatusMask::default(),
         )
         .unwrap();
 
     println!(
-        "********* [subscriber INFO] domain_id: {:?}, hostname: {:?}, reliability: {:?}, topic: {}, multicast_ttl: {}",
+        "********* [subscriber INFO] domain_id: {}, hostname: {:?}, reliability: {:?}, topic: {}",
         args.domain,
         hostname::get().unwrap(),
         qos.reliability,
         args.topic,
-        MULTICAST_TTL,
-    );
-    let deadline_str = if qos.deadline == Duration::infinite() {
-        "INFINITE".to_string()
-    } else {
-        format!("{:?}", qos.deadline)
-    };
-    println!(
-        "********* [subscriber qos info] reliability: {:?}, durability: {:?}, \
-         history: {:?}, ownership_kind: {:?}, deadline: {}, partition: {:?}",
-        qos.reliability,
-        qos.durability,
-        qos.history,
-        qos.ownership_kind,
-        deadline_str,
-        qos.partition.name,
     );
 
     shutdown.wait();
