@@ -14,7 +14,7 @@ use crate::rtps::transport::shm::shm_listener::ShmListener;
 use crate::rtps::transport::shm::shm_sender::ShmSender;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 use crate::rtps::transport::udp::udp_sender::UdpSender;
-use crate::rtps::transport::TransportConfig;
+use crate::rtps::transport::UdpConfig;
 
 /// SHM transport plugin — UDP for discovery, SHM for user data.
 ///
@@ -51,9 +51,9 @@ impl ShmTransportPlugin {
         bind_ip: String,
         multicast_if_ip: String,
         working_ips: Vec<String>,
-        transport_config: TransportConfig,
+        udp_config: UdpConfig,
     ) -> io::Result<Self> {
-        let udp_sender = UdpSender::new(bind_ip, multicast_if_ip, transport_config)?;
+        let udp_sender = UdpSender::new(bind_ip, multicast_if_ip, udp_config)?;
         let shm_sender = ShmSender::new(domain_id)?;
 
         // Create UDP multicast listeners (shared ports, no per-pid collision).

@@ -10,7 +10,7 @@ use crate::rtps::transport::plugin::{MessageSource, SendTarget, TransportPlugin}
 use crate::rtps::transport::port_manager::PortManager;
 use crate::rtps::transport::udp::udp_listener::UdpListener;
 use crate::rtps::transport::udp::udp_sender::UdpSender;
-use crate::rtps::transport::TransportConfig;
+use crate::rtps::transport::UdpConfig;
 
 /// UDP implementation of the TransportPlugin trait.
 ///
@@ -42,9 +42,9 @@ impl UdpTransportPlugin {
         bind_ip: String,
         multicast_if_ip: String,
         working_ips: Vec<String>,
-        transport_config: TransportConfig,
+        udp_config: UdpConfig,
     ) -> io::Result<Self> {
-        let sender = UdpSender::new(bind_ip, multicast_if_ip, transport_config)?;
+        let sender = UdpSender::new(bind_ip, multicast_if_ip, udp_config)?;
 
         // Create multicast listeners (shared ports, no conflict)
         let discovery_mc_port = PortManager::get_discovery_traffic_multicast_port(domain_id);
