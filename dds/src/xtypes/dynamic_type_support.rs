@@ -34,6 +34,10 @@ pub struct DynamicTypeSupport {
     type_identifier: TypeIdentifier,
     /// Original TypeObject
     type_object: TypeObject,
+    /// Transitive closure of nested TypeObjects, so a dynamic DataWriter can
+    /// advertise dependencies for cross-participant TypeLookup. Empty when built
+    /// without a registry.
+    dependencies: Vec<(TypeIdentifier, TypeObject)>,
 }
 
 impl DynamicTypeSupport {
@@ -49,14 +53,18 @@ impl DynamicTypeSupport {
         type_object: TypeObject,
         registry: &TypeRegistry,
     ) -> DdsResult<Self> {
-        Self::from_complete_with(type_object, |complete, type_identifier| {
+        let mut support = Self::from_complete_with(type_object, |complete, type_identifier| {
             DynamicType::from_type_object_with_registry(
                 Arc::new(complete),
                 type_identifier.clone(),
                 registry,
             )
             .map_err(|e| DdsError::Error(e.to_string()))
-        })
+        })?;
+        if let TypeObject::Complete(complete) = &support.type_object {
+            support.dependencies = registry.dependency_closure_of(complete);
+        }
+        Ok(support)
     }
 
     fn from_complete_with(
@@ -78,7 +86,13 @@ impl DynamicTypeSupport {
 
         let dynamic_type = build(complete_type_object, &type_identifier)?;
 
-        Ok(Self { dynamic_type: Arc::new(dynamic_type), type_name, type_identifier, type_object })
+        Ok(Self {
+            dynamic_type: Arc::new(dynamic_type),
+            type_name,
+            type_identifier,
+            type_object,
+            dependencies: Vec::new(),
+        })
     }
 
     /// Create DynamicTypeSupport from a CompleteTypeObject directly.
@@ -145,6 +159,7 @@ impl Default for DynamicTypeSupport {
                 type_object: TypeObject::Complete(CompleteTypeObject::Struct(
                     crate::xtypes::CompleteStructType::default(),
                 )),
+                dependencies: Vec::new(),
             }
         })
     }
@@ -291,6 +306,13 @@ impl TypeSupport for DynamicTypeSupport {
 
     fn get_type_object(&self) -> Option<TypeObject> {
         Some(self.type_object.clone())
+    }
+
+    fn get_type_object_closure(&self) -> Vec<(TypeIdentifier, TypeObject)> {
+        let mut out = Vec::with_capacity(1 + self.dependencies.len());
+        out.push((self.type_identifier.clone(), self.type_object.clone()));
+        out.extend(self.dependencies.iter().cloned());
+        out
     }
 }
 

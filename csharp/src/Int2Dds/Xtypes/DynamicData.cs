@@ -17,6 +17,8 @@ namespace Int2Dds.Xtypes
             _handle = handle;
         }
 
+        internal IntPtr Handle => _handle;
+
         public unsafe bool GetBool(string path)
         {
             var pb = Encoding.UTF8.GetBytes(path + '\0');
@@ -178,6 +180,142 @@ namespace Int2Dds.Xtypes
             {
                 ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_dynamic_data_get_member(_handle, p, out IntPtr child));
                 return new DynamicData(child);
+            }
+        }
+
+        // --- Writable setters (build a sample to publish) ---
+
+        public unsafe DynamicData SetBool(string field, bool value)
+        {
+            var f = NativeString.ToCStr(field);
+            fixed (byte* p = f)
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_dynamic_data_set_bool(_handle, p, (byte)(value ? 1 : 0)));
+            return this;
+        }
+
+        public unsafe DynamicData SetI8(string field, sbyte value)
+        {
+            var f = NativeString.ToCStr(field);
+            fixed (byte* p = f)
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_dynamic_data_set_i8(_handle, p, value));
+            return this;
+        }
+
+        public unsafe DynamicData SetU8(string field, byte value)
+        {
+            var f = NativeString.ToCStr(field);
+            fixed (byte* p = f)
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_dynamic_data_set_u8(_handle, p, value));
+            return this;
+        }
+
+        public unsafe DynamicData SetI16(string field, short value)
+        {
+            var f = NativeString.ToCStr(field);
+            fixed (byte* p = f)
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_dynamic_data_set_i16(_handle, p, value));
+            return this;
+        }
+
+        public unsafe DynamicData SetU16(string field, ushort value)
+        {
+            var f = NativeString.ToCStr(field);
+            fixed (byte* p = f)
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_dynamic_data_set_u16(_handle, p, value));
+            return this;
+        }
+
+        public unsafe DynamicData SetI32(string field, int value)
+        {
+            var f = NativeString.ToCStr(field);
+            fixed (byte* p = f)
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_dynamic_data_set_i32(_handle, p, value));
+            return this;
+        }
+
+        public unsafe DynamicData SetU32(string field, uint value)
+        {
+            var f = NativeString.ToCStr(field);
+            fixed (byte* p = f)
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_dynamic_data_set_u32(_handle, p, value));
+            return this;
+        }
+
+        public unsafe DynamicData SetI64(string field, long value)
+        {
+            var f = NativeString.ToCStr(field);
+            fixed (byte* p = f)
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_dynamic_data_set_i64(_handle, p, value));
+            return this;
+        }
+
+        public unsafe DynamicData SetU64(string field, ulong value)
+        {
+            var f = NativeString.ToCStr(field);
+            fixed (byte* p = f)
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_dynamic_data_set_u64(_handle, p, value));
+            return this;
+        }
+
+        public unsafe DynamicData SetF32(string field, float value)
+        {
+            var f = NativeString.ToCStr(field);
+            fixed (byte* p = f)
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_dynamic_data_set_f32(_handle, p, value));
+            return this;
+        }
+
+        public unsafe DynamicData SetF64(string field, double value)
+        {
+            var f = NativeString.ToCStr(field);
+            fixed (byte* p = f)
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_dynamic_data_set_f64(_handle, p, value));
+            return this;
+        }
+
+        public unsafe DynamicData SetChar8(string field, byte value)
+        {
+            var f = NativeString.ToCStr(field);
+            fixed (byte* p = f)
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_dynamic_data_set_char8(_handle, p, value));
+            return this;
+        }
+
+        public unsafe DynamicData SetString(string field, string value)
+        {
+            var f = NativeString.ToCStr(field);
+            var v = NativeString.ToCStr(value);
+            fixed (byte* pf = f)
+            fixed (byte* pv = v)
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_dynamic_data_set_string(_handle, pf, pv));
+            return this;
+        }
+
+        /// <summary>
+        /// Set <paramref name="field"/> from a (possibly nested) <see cref="DynamicValue"/> tree.
+        /// The value is consumed on success and must not be reused.
+        /// </summary>
+        public unsafe DynamicData SetValue(string field, DynamicValue value)
+        {
+            if (value == null) throw new ArgumentNullException(nameof(value));
+            var f = NativeString.ToCStr(field);
+            int ret;
+            fixed (byte* p = f)
+                ret = NativeMethods.int2dds_dynamic_data_set_value(_handle, p, value.Handle);
+            if (ret != ReturnCode.NullPointer && ret != ReturnCode.InvalidArgument)
+                value.Consume();
+            ReturnCodeHelper.CheckReturn(ret);
+            return this;
+        }
+
+        /// <summary>Clone the value at a dotted/indexed path into a new <see cref="DynamicValue"/> tree.</summary>
+        public unsafe DynamicValue GetValue(string path)
+        {
+            var pb = NativeString.ToCStr(path);
+            fixed (byte* p = pb)
+            {
+                ReturnCodeHelper.CheckReturn(NativeMethods.int2dds_dynamic_data_get_value(_handle, p, out IntPtr v));
+                return new DynamicValue(v);
             }
         }
 
