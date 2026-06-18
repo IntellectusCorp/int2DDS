@@ -363,7 +363,8 @@ impl DomainParticipant {
         listener: Option<Arc<dyn DomainParticipantListener>>,
         mask: StatusMask,
     ) -> DdsResult<Self> {
-        let dcps_bridge = DcpsBridge::new(domain_id as u32, &qos.property);
+        let dcps_bridge = DcpsBridge::new(domain_id as u32, &qos.property)
+            .map_err(|e| DdsError::Error(e.message))?;
         let guid = dcps_bridge.get_participant().map_err(|e| DdsError::Error(e.message))?.guid();
 
         let mut participant = Self {
@@ -4050,7 +4051,7 @@ mod domain_participant_tests {
             .unwrap();
 
         let instance_handle = participant.get_instance_handle().unwrap();
-        println!("instance_handle: {:?}", instance_handle);
+        println!("instance_handle: {}", instance_handle);
         assert_eq!(instance_handle.is_nil(), false);
     }
 

@@ -171,7 +171,7 @@ impl WlpLogic {
         liveliness: LivelinessQosPolicy,
     ) -> RtpsResult<()> {
         log::debug!(
-            "[WLP] register_asserting_writer: writer_guid={:?}, liveliness_kind={:?}, lease_duration={:?}",
+            "[WLP] register_asserting_writer: writer_guid={}, liveliness_kind={:?}, lease_duration={:?}",
             writer_guid,
             liveliness.kind,
             liveliness.lease_duration
@@ -208,14 +208,14 @@ impl WlpLogic {
                 match writer.reader_proxies().lock() {
                     Ok(proxies) => {
                         log::debug!(
-                            "[WLP] register_asserting_writer: writer_guid={:?}, reader_proxies count={}",
+                            "[WLP] register_asserting_writer: writer_guid={}, reader_proxies count={}",
                             writer_guid,
                             proxies.len()
                         );
                         if proxies.is_empty() {
                             // No readers yet, skip liveliness setup
                             log::warn!(
-                                    "[WLP] register_asserting_writer: SKIPPING liveliness registration for writer_guid={:?} - no readers matched yet!",
+                                    "[WLP] register_asserting_writer: SKIPPING liveliness registration for writer_guid={} - no readers matched yet!",
                                     writer_guid
                                 );
                             return Ok(());
@@ -254,7 +254,7 @@ impl WlpLogic {
                 match liveliness_monitor.as_ref() {
                     Some(liveliness_monitor) => {
                         log::info!(
-                                "[WLP] register_asserting_writer: Registering writer_guid={:?} to LivelinessMonitor, lease_duration={:?}",
+                                "[WLP] register_asserting_writer: Registering writer_guid={} to LivelinessMonitor, lease_duration={:?}",
                                 writer_guid, liveliness.lease_duration
                             );
                         liveliness_monitor.track_writer(&writer_guid, liveliness.lease_duration);
@@ -262,7 +262,7 @@ impl WlpLogic {
                     }
                     None => Err(RtpsError::new(
                         RtpsErrorCode::NotInitialized,
-                        format!("Liveliness Monitor for Participant: {:?}", participant.guid(),),
+                        format!("Liveliness Monitor for Participant: {}", participant.guid(),),
                     )),
                 }
             }
@@ -289,7 +289,7 @@ impl WlpLogic {
                 None => Err(RtpsError::new(
                     RtpsErrorCode::NotInitialized,
                     format!(
-                        "Liveliness Monitor for Participant: {:?}",
+                        "Liveliness Monitor for Participant: {}",
                         self.get_upgraded_participant()?.guid()
                     ),
                 )),
@@ -348,12 +348,12 @@ impl WlpLogic {
                     }
                     None => {
                         log::error!(
-                            "Liveliness Monitor not initialized for Participant: {:?}",
+                            "Liveliness Monitor not initialized for Participant: {}",
                             participant.guid()
                         );
                         Err(RtpsError::new(
                             RtpsErrorCode::NotInitialized,
-                            format!("Liveliness Monitor for Participant: {:?}", participant.guid(),),
+                            format!("Liveliness Monitor for Participant: {}", participant.guid(),),
                         ))
                     }
                 }
@@ -405,7 +405,7 @@ impl WlpLogic {
                 }
                 None => Err(RtpsError::new(
                     RtpsErrorCode::NotInitialized,
-                    format!("Liveliness Monitor for Participant: {:?}", participant.guid(),),
+                    format!("Liveliness Monitor for Participant: {}", participant.guid(),),
                 )),
             },
             Err(e) => Err(RtpsError::new(RtpsErrorCode::LockError, e.to_string())),
@@ -648,7 +648,7 @@ impl WlpLogic {
                 let last_sn = cache_guard.get_seq_num_max().unwrap_or(wlp_last_change_sn);
                 let info = Some((writer.heartbeat_count(), first_sn, last_sn, false, false));
                 debug!(
-                    "[WLP] heartbeat_info: count={}, first={:?}, last={:?}",
+                    "[WLP] heartbeat_info: count={}, first={}, last={}",
                     writer.heartbeat_count(),
                     first_sn,
                     last_sn
@@ -721,7 +721,7 @@ impl WlpLogic {
                             let _ =
                                 self.transport.send(buffer, &SendTarget::SEDPDiscovery(&locator));
                             debug!(
-                                "[{}] WLP Logic: {} message sent to {:?}",
+                                "[{}] WLP Logic: {} message sent to {}",
                                 message_type, message_type, locator
                             );
                             is_sent = true;
@@ -737,7 +737,7 @@ impl WlpLogic {
 
         if !is_sent {
             warn!(
-                "[{}] WLP Logic: Failed to find remote participant for GUID: {:?}",
+                "[{}] WLP Logic: Failed to find remote participant for GUID: {}",
                 message_type, remote_guid
             );
         }
@@ -884,7 +884,7 @@ impl WlpLogic {
 
             if !self.find_or_create_writer_proxy(local_reader, remote_guid, heartbeat.writer_id) {
                 error!(
-                    "[heartbeat] Failed to create WriterProxy for builtin GUID: {:?}",
+                    "[heartbeat] Failed to create WriterProxy for builtin GUID: {}",
                     remote_guid
                 );
                 return Ok(());
@@ -897,13 +897,13 @@ impl WlpLogic {
                 final_flag,
             )?;
 
-            debug!("[WLP] Processing builtin heartbeat from writer: {:?}", remote_guid);
+            debug!("[WLP] Processing builtin heartbeat from writer: {}", remote_guid);
         } else {
             match participant.find_readers_matched_with_remote_writer(remote_guid) {
                 Ok(readers) => {
                     if readers.is_empty() {
                         warn!(
-                            "[heartbeat] No matching reader found for user-defined writer: {:?}",
+                            "[heartbeat] No matching reader found for user-defined writer: {}",
                             remote_guid
                         );
                         return Ok(());
@@ -926,7 +926,7 @@ impl WlpLogic {
                             }
                             None => {
                                 debug!(
-                              "[heartbeat] No StatefulReader found for writer {:?}. HEARTBEAT requires stateful communication.",
+                              "[heartbeat] No StatefulReader found for writer {}. HEARTBEAT requires stateful communication.",
                               remote_guid
                           );
                                 return Ok(());
@@ -965,8 +965,13 @@ impl WlpLogic {
 
                 if !missing_changes.is_empty() || requires_response {
                     debug!(
-                        "Sending AckNack - missing changes: {:?}, requires response: {}",
-                        missing_changes, requires_response
+                        "Sending AckNack - missing changes: [{}], requires response: {}",
+                        missing_changes
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        requires_response
                     );
 
                     writer_proxy.increase_acknack_count();
@@ -981,7 +986,7 @@ impl WlpLogic {
                     )?;
                 }
             } else {
-                warn!("[heartbeat] Failed to find writer proxy for GUID: {:?}", remote_guid);
+                warn!("[heartbeat] Failed to find writer proxy for GUID: {}", remote_guid);
             }
         } else {
             error!("[heartbeat] Failed to acquire matched_writers lock");
@@ -1002,10 +1007,7 @@ impl WlpLogic {
             Ok(writer_proxies) => {
                 for writer_proxy in writer_proxies.iter() {
                     if writer_proxy.remote_writer_guid().prefix() == writer_guid.prefix() {
-                        debug!(
-                            "SEDP Logic: Found existing WriterProxy for GUID: {:?}",
-                            writer_guid
-                        );
+                        debug!("SEDP Logic: Found existing WriterProxy for GUID: {}", writer_guid);
                         return true;
                     }
                 }
@@ -1173,11 +1175,11 @@ impl WlpLogic {
     ) {
         if let Some(mut writer_info) = asserting_writers.get_mut(&guid) {
             writer_info.set_not_alive();
-            debug!("[WLP] Writer {:?} set to NOT_ALIVE (participant kept for recovery)", guid);
+            debug!("[WLP] Writer {} set to NOT_ALIVE (participant kept for recovery)", guid);
 
             if let Some(writer) = participant.find_writer_from_entity_id(guid.entity_id()) {
                 log::info!(
-                    "[WLP] mark_asserting_writer_lost: Found LOCAL writer for guid={:?}",
+                    "[WLP] mark_asserting_writer_lost: Found LOCAL writer for guid={}",
                     guid
                 );
                 writer.update_status(StatusKind::LIVELINESS_LOST, None);
@@ -1191,12 +1193,12 @@ impl WlpLogic {
         guid: Guid,
         remote_participants: Arc<DashMap<GuidPrefix, HashMap<Guid, WriterInfo>>>,
     ) {
-        log::debug!("[WLP] mark_monitored_writer_lost: guid={:?}", guid);
+        log::debug!("[WLP] mark_monitored_writer_lost: guid={}", guid);
 
         if let Ok(readers) = participant.find_readers_matched_with_remote_writer(guid) {
             for reader in readers {
                 log::debug!(
-                    "[WLP] mark_monitored_writer_lost: Notifying reader {:?} of LOST for writer {:?}",
+                    "[WLP] mark_monitored_writer_lost: Notifying reader {} of LOST for writer {}",
                     reader.guid(),
                     guid
                 );
@@ -1225,7 +1227,7 @@ impl WlpLogic {
     }
 
     pub(crate) fn renew_asserting_writer(&self, writer_guid: &Guid) -> RtpsResult<()> {
-        log::debug!("[WLP] renew_asserting_writer called for guid={:?}", writer_guid);
+        log::debug!("[WLP] renew_asserting_writer called for guid={}", writer_guid);
 
         if let Some(mut info) = self.asserting_writers.get_mut(writer_guid) {
             info.set_alive();
@@ -1403,7 +1405,7 @@ fn notify_reader_liveliness_changed(
 ) {
     let (alive_change, not_alive_change) = transition.deltas();
     log::debug!(
-        "[WLP] notify_reader_liveliness_changed: transition={:?}, writer={:?}, reader={:?}",
+        "[WLP] notify_reader_liveliness_changed: transition={:?}, writer={}, reader={}",
         transition.deltas(),
         guid,
         reader.guid()
@@ -1533,8 +1535,9 @@ impl UnicastMessageProcessor for WlpLogic {
         let missing_sequence_numbers = acknack.reader_sn_state.extract_numbers();
 
         debug!(
-            "Missing sequence numbers {:?} from remote: {:?}",
-            missing_sequence_numbers, remote_guid
+            "Missing sequence numbers [{}] from remote: {}",
+            missing_sequence_numbers.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(", "),
+            remote_guid
         );
 
         if missing_sequence_numbers.is_empty() {
@@ -1572,7 +1575,7 @@ impl UnicastMessageProcessor for WlpLogic {
         ));
 
         debug!(
-            "Retransmitting {} missing changes from remote: {:?}",
+            "Retransmitting {} missing changes from remote: {}",
             missing_changes.len(),
             remote_guid
         );
@@ -1628,10 +1631,7 @@ impl UnicastMessageProcessor for WlpLogic {
                     if let Err(e) =
                         self.transport.send(&send_buffer, &SendTarget::SEDPDiscovery(&locator))
                     {
-                        warn!(
-                            "[WLP] Failed to send DATA message to locator {:?}: {:?}",
-                            locator, e
-                        );
+                        warn!("[WLP] Failed to send DATA message to locator {}: {:?}", locator, e);
                     }
                 }
                 if let Ok(mut pool) = participant.wire_buffer_pool().lock() {

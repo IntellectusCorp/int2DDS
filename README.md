@@ -2,7 +2,7 @@
 
 <div align="center">
 
-A **Rust implementation** of the [Data Distribution Service (DDS)](https://www.omg.org/spec/DDS/) middleware standard,  
+A **Rust implementation** of the [Data Distribution Service (DDS)](https://www.omg.org/spec/DDS/) middleware standard,
 following the Real-Time Publish-Subscribe (RTPS)
 
 </div>
@@ -338,13 +338,7 @@ int2DDS supports various environment variables for configuration:
 - `INT2DDS_UDP_SOCKET_BUFFER`: UDP socket buffer size (bytes), increase up to 8388608(8MB) for large payloads
 - `INT2DDS_USE_LOOPBACK_INTERFACE`: Enable loopback interface for endpoint communication
 - `INT2DDS_MULTICAST_TTL`: IPv4 multicast TTL fallback (0-255), used when `PropertyQosPolicy` has no `int2dds.transport.UDPv4.multicast_ttl` entry (default: 1)
-
-### TCP Environment Variables
-
-- `INT2DDS_TCP_CONNECT_TIMEOUT`: TCP connection timeout in milliseconds (default: 5000)
-- `INT2DDS_TCP_WRITE_TIMEOUT`: TCP write timeout in milliseconds (default: 10000)
-- `INT2DDS_TCP_NODELAY`: Enable TCP Nodelay, disables Nagle algorithm (default: true)
-- `INT2DDS_INITIAL_PEERS`: Initial peer list for TCP/Hybrid mode (format: "ip:port,ip:port,...")
+- `INT2DDS_INITIAL_PEERS`: Initial peer list for unicast (format: "ip:port,ip:port,...")
 
 ### int2DDS-feature dependent Environment Variables
 
