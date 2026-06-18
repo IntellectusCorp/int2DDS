@@ -1,7 +1,8 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
-use std::io::{self, Read, Write};
+use std::io::{self, IoSlice};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 
@@ -14,133 +15,15 @@ const FRAME_MAGIC: [u8; 4] = [0x49, 0x4E, 0x54, 0x32];
 /// Magic field size
 const MAGIC_SIZE: usize = 4;
 
-/// Stateful framed message reader for non-blocking TCP streams
-///
-/// Maintains an internal buffer to handle partial reads from non-blocking streams.
-/// Call `read_message()` repeatedly until a complete message is available.
-#[derive(Debug)]
-pub(crate) struct FramedReader {
-    /// Buffer for accumulating partial data
-    buffer: Vec<u8>,
-    /// Expected message length (None if length prefix not yet read)
-    expected_len: Option<usize>,
-}
-
-impl FramedReader {
-    /// Create a new FramedReader
-    pub(crate) fn new() -> Self {
-        Self { buffer: Vec::new(), expected_len: None }
-    }
-
-    /// Try to read a complete framed message from the stream
-    ///
-    /// Returns:
-    /// - `Ok(Some(message))` - Complete message read
-    /// - `Ok(None)` - Read new bytes but message incomplete, call again immediately
-    /// - `Err(WouldBlock)` - No data available, wait for poll event
-    /// - `Err(other)` - Read error or invalid message
-    pub(crate) fn read_message<R: Read>(&mut self, stream: &mut R) -> io::Result<Option<Vec<u8>>> {
-        // Try to read more data into buffer
-        let mut temp_buf = [0u8; 8192];
-        let read_new_bytes = match stream.read(&mut temp_buf) {
-            Ok(0) => {
-                // Connection closed
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Connection closed"));
-            }
-            Ok(n) => {
-                self.buffer.extend_from_slice(&temp_buf[..n]);
-                true // Successfully read new bytes
-            }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                // No data available right now
-                // Will check if we have a complete message in existing buffer
-                false // Did not read new bytes
-            }
-            Err(e) => return Err(e),
-        };
-
-        // Try to parse length prefix if we don't have it yet
-        if self.expected_len.is_none() {
-            if self.buffer.len() >= 4 {
-                let len_bytes: [u8; 4] = self.buffer[0..4].try_into().unwrap();
-                let len = u32::from_be_bytes(len_bytes) as usize;
-
-                // Validate length
-                if len == 0 {
-                    return Err(transport_io_error(
-                        TransportErrorCode::TcpFrameInvalidLength,
-                        "Invalid message length: 0",
-                    ));
-                }
-                if len > MAX_MESSAGE_SIZE {
-                    return Err(transport_io_error(
-                        TransportErrorCode::TcpFrameTooLarge,
-                        format!(
-                            "Message too large: {} bytes (max: {} bytes)",
-                            len, MAX_MESSAGE_SIZE
-                        ),
-                    ));
-                }
-
-                self.expected_len = Some(len);
-            } else {
-                // Not enough data for length prefix yet
-                // CRITICAL: If we didn't read new bytes (WouldBlock), propagate that error
-                // Otherwise return Ok(None) to indicate we should try reading more
-                if !read_new_bytes {
-                    return Err(io::Error::new(io::ErrorKind::WouldBlock, "No data available"));
-                }
-                return Ok(None);
-            }
-        }
-
-        // Check if we have a complete message
-        let expected_len = self.expected_len.unwrap();
-        let total_len = 4 + expected_len;
-
-        if self.buffer.len() >= total_len {
-            // Validate magic (first 4 bytes of payload)
-            if expected_len < MAGIC_SIZE || self.buffer[4..8] != FRAME_MAGIC {
-                self.buffer.drain(0..total_len);
-                self.expected_len = None;
-                return Err(transport_io_error(
-                    TransportErrorCode::TcpFrameInvalidMagic,
-                    "Invalid frame magic (expected INT2)",
-                ));
-            }
-
-            // Extract payload after magic
-            let message = self.buffer[4 + MAGIC_SIZE..total_len].to_vec();
-
-            self.buffer.drain(0..total_len);
-            self.expected_len = None;
-
-            return Ok(Some(message));
-        }
-
-        // Need more data
-        // CRITICAL: If we didn't read new bytes (WouldBlock), propagate that error
-        // Otherwise return Ok(None) to indicate we should try reading more
-        if !read_new_bytes {
-            return Err(io::Error::new(io::ErrorKind::WouldBlock, "No data available"));
-        }
-        Ok(None)
-    }
-
-    /// Clear the internal buffer (use when connection is reset)
-    pub(crate) fn clear(&mut self) {
-        self.buffer.clear();
-        self.expected_len = None;
-    }
-}
-
 /// Write a framed message to a TCP stream.
 ///
 /// Format: [4B length (BE)] [4B magic "INT2"] [NB payload]
 /// length = magic(4) + payload size
 ///
-/// Single write_all to prevent TCP segmentation of header vs body.
-pub(crate) fn write_framed_message<W: Write>(stream: &mut W, data: &[u8]) -> io::Result<()> {
+pub(crate) async fn write_framed_message<W>(stream: &mut W, data: &[u8]) -> io::Result<()>
+where
+    W: AsyncWrite + Unpin + ?Sized,
+{
     if data.len() > MAX_MESSAGE_SIZE {
         return Err(transport_io_error(
             TransportErrorCode::TcpFrameTooLarge,
@@ -149,24 +32,38 @@ pub(crate) fn write_framed_message<W: Write>(stream: &mut W, data: &[u8]) -> io:
     }
 
     let total_payload = MAGIC_SIZE + data.len();
-    let mut buf = Vec::with_capacity(4 + total_payload);
-    buf.extend_from_slice(&(total_payload as u32).to_be_bytes());
-    buf.extend_from_slice(&FRAME_MAGIC);
-    buf.extend_from_slice(data);
-    stream.write_all(&buf)?;
-    stream.flush()?;
+    let len_bytes = (total_payload as u32).to_be_bytes();
 
+    let mut bufs = [IoSlice::new(&len_bytes), IoSlice::new(&FRAME_MAGIC), IoSlice::new(data)];
+    let mut slices: &mut [IoSlice<'_>] = &mut bufs;
+    while !slices.is_empty() {
+        match stream.write_vectored(slices).await? {
+            0 => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "write_vectored returned 0 mid-frame",
+                ));
+            }
+            n => IoSlice::advance_slices(&mut slices, n),
+        }
+    }
     Ok(())
 }
 
-/// Read a framed message from a TCP stream (blocking).
+/// Read a framed message from a TCP stream (completely).
 ///
 /// Format: [4B length (BE)] [4B magic "INT2"] [NB payload]
 /// Returns the payload after validating and stripping magic.
-pub(crate) fn read_framed_message<R: Read>(stream: &mut R) -> io::Result<Vec<u8>> {
-    let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf)?;
-    let len = u32::from_be_bytes(len_buf) as usize;
+pub(crate) async fn read_framed_message<R>(stream: &mut R) -> io::Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin + ?Sized,
+{
+    // Read length + magic together into a stack buffer, then read the payload
+    // directly into its own exact-sized Vec. This avoids the extra alloc + memcpy
+    // that `data[MAGIC_SIZE..].to_vec()` used to incur on every frame.
+    let mut header = [0u8; 4 + MAGIC_SIZE];
+    stream.read_exact(&mut header).await?;
+    let len = u32::from_be_bytes(header[..4].try_into().unwrap()) as usize;
 
     if len < MAGIC_SIZE {
         return Err(transport_io_error(
@@ -182,32 +79,35 @@ pub(crate) fn read_framed_message<R: Read>(stream: &mut R) -> io::Result<Vec<u8>
         ));
     }
 
-    let mut data = vec![0u8; len];
-    stream.read_exact(&mut data)?;
-
-    // Validate magic
-    if data[0..4] != FRAME_MAGIC {
+    if header[4..] != FRAME_MAGIC {
         return Err(transport_io_error(
             TransportErrorCode::TcpFrameInvalidMagic,
             format!(
                 "Invalid frame magic: {:02x} {:02x} {:02x} {:02x} (expected INT2)",
-                data[0], data[1], data[2], data[3]
+                header[4], header[5], header[6], header[7]
             ),
         ));
     }
 
-    // Return payload after magic
-    Ok(data[MAGIC_SIZE..].to_vec())
+    let payload_len = len - MAGIC_SIZE;
+    let mut payload = Vec::with_capacity(payload_len);
+    while payload.len() < payload_len {
+        let n = stream.read_buf(&mut payload).await?;
+        if n == 0 {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "premature EOF mid-payload"));
+        }
+    }
+    Ok(payload)
 }
 
-/// Classification of a TCP frame payload
+/// Classified kind of a TCP frame payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TcpFrameKind {
-    /// Rtps data message (payload starts with RTPS magic: 0x52545053)
+    /// Payload starts with RTPS magic (0x52545053).
     RtpsData,
-    /// TCP control message (payload[0] in 0x01..=0x7F)
+    /// Control message (payload[0] in 0x01..=0x7F).
     Control,
-    /// Unknown or invalid format
+    /// Unrecognized payload.
     Unknown,
 }
 
@@ -239,12 +139,12 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
-    #[test]
-    fn test_write_and_read_framed_message() {
+    #[tokio::test]
+    async fn test_write_and_read_framed_message() {
         let test_data = b"Hello, TCP Framing!";
         let mut buffer = Vec::new();
 
-        write_framed_message(&mut buffer, test_data).unwrap();
+        write_framed_message(&mut buffer, test_data).await.unwrap();
 
         // Verify: [4B length][4B magic "INT2"][payload]
         let total_payload = MAGIC_SIZE + test_data.len();
@@ -255,28 +155,28 @@ mod tests {
 
         // Read back — returns payload without magic
         let mut cursor = Cursor::new(buffer);
-        let read_data = read_framed_message(&mut cursor).unwrap();
+        let read_data = read_framed_message(&mut cursor).await.unwrap();
         assert_eq!(read_data, test_data);
     }
 
-    #[test]
-    fn test_multiple_messages() {
+    #[tokio::test]
+    async fn test_multiple_messages() {
         let messages = vec![b"First".to_vec(), b"Second message".to_vec(), b"Third".to_vec()];
         let mut buffer = Vec::new();
 
         for msg in &messages {
-            write_framed_message(&mut buffer, msg).unwrap();
+            write_framed_message(&mut buffer, msg).await.unwrap();
         }
 
         let mut cursor = Cursor::new(buffer);
         for expected in &messages {
-            let read_data = read_framed_message(&mut cursor).unwrap();
+            let read_data = read_framed_message(&mut cursor).await.unwrap();
             assert_eq!(&read_data, expected);
         }
     }
 
-    #[test]
-    fn test_invalid_magic_rejected() {
+    #[tokio::test]
+    async fn test_invalid_magic_rejected() {
         // Manually write frame with wrong magic
         let mut buffer = Vec::new();
         let payload = b"test";
@@ -286,30 +186,30 @@ mod tests {
         buffer.extend_from_slice(payload);
 
         let mut cursor = Cursor::new(buffer);
-        let result = read_framed_message(&mut cursor);
+        let result = read_framed_message(&mut cursor).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Invalid frame magic"));
     }
 
-    #[test]
-    fn test_message_too_large_write() {
+    #[tokio::test]
+    async fn test_message_too_large_write() {
         let large_data = vec![0u8; MAX_MESSAGE_SIZE + 1];
         let mut buffer = Vec::new();
 
-        let result = write_framed_message(&mut buffer, &large_data);
+        let result = write_framed_message(&mut buffer, &large_data).await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
     }
 
-    #[test]
-    fn test_large_valid_message() {
+    #[tokio::test]
+    async fn test_large_valid_message() {
         let test_data = vec![0xAB; 1024 * 1024]; // 1 MB
         let mut buffer = Vec::new();
 
-        write_framed_message(&mut buffer, &test_data).unwrap();
+        write_framed_message(&mut buffer, &test_data).await.unwrap();
 
         let mut cursor = Cursor::new(buffer);
-        let read_data = read_framed_message(&mut cursor).unwrap();
+        let read_data = read_framed_message(&mut cursor).await.unwrap();
 
         assert_eq!(read_data.len(), test_data.len());
         assert_eq!(read_data, test_data);

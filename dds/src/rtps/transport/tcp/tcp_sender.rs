@@ -1,895 +1,1065 @@
-#![allow(dead_code)]
-#![allow(unused_variables)]
+//! Outbound side of the TCP mux transport.
+//!
+//! `TcpSender` owns the outbound connection cache and conn_actor lifecycles,
+//! exposing sync `send_to_*` methods for the DDS layer. On cache miss a
+//! connect runs TCP + (optional) TLS + the 3-way handshake
+//! (PEER_HELLO → PORT_RESERVE → PORT_BIND), then hands the stream to a
+//! conn_actor pair.
+//!
+//! PORT_RESERVE replies travel through the single-slot oneshot mailbox in
+//! `MuxState::ConnectionEntry::pending_ack`: the sender registers the
+//! `oneshot::Sender`, writes the request, then awaits the reply that the
+//! reader task routes back via `MuxState::dispatch`.
 
-use std::env;
-use std::io::{self, ErrorKind};
-use std::net::{IpAddr, SocketAddr, TcpStream};
-use std::sync::Arc;
-use std::time::Duration;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::time::{Duration, Instant};
+use std::{io, mem};
 
+use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
-use log::{debug, warn};
-use socket2::{Domain, Protocol, SockAddr, Socket as Socket2, Type};
+use log::{debug, info, warn};
+use tokio::net::TcpStream;
+use tokio::sync::{mpsc, oneshot, Mutex as TokioMutex, Notify};
+use tokio::task::JoinHandle;
+use tokio::time::MissedTickBehavior;
+use tokio_util::sync::CancellationToken;
 
 use crate::rtps::common::guid::GuidPrefix;
-use crate::rtps::transport::error::{transport_io_error, TransportError, TransportErrorCode};
+use crate::rtps::transport::error::{transport_io_error, TransportErrorCode};
 use crate::rtps::transport::port_manager::PortManager;
+use crate::rtps::transport::tcp::conn_actor::{inbox_capacity, spawn_conn_actor, SharedWriteHalf};
 use crate::rtps::transport::tcp::framing::{read_framed_message, write_framed_message};
-use crate::rtps::transport::tcp::protocol::{
-    encode_locator, ControlMsg, MSG_KEEPALIVE_ACK, MSG_PEER_HELLO_ACK, MSG_PORT_BIND_ACK,
-};
-use crate::rtps::transport::tcp::stream_wrapper::{connect_tls, wrap_stream, TcpStreamWrapper};
-use crate::rtps::transport::tcp::tls::TlsConfig;
+use crate::rtps::transport::tcp::mux_state::MuxState;
+use crate::rtps::transport::tcp::protocol::ControlMsg;
+use crate::rtps::transport::tcp::stream::{wrap_plain, AsyncConnStream};
+use crate::rtps::transport::tcp::tls::{connect_tls_async, TlsConfig};
+use crate::rtps::transport::TcpConfig;
 
-/// Connection key: (physical address, logical_port)
-type ConnectionKey = (SocketAddr, u16);
+/// Logical port 0 = control connection — carries PEER_HELLO,
+/// PORT_RESERVE, KEEPALIVE; never RTPS data.
+pub(crate) const CONTROL_LOGICAL_PORT: u16 = 0;
 
-/// Logical port 0 = control connection
-const CONTROL_LOGICAL_PORT: u16 = 0;
+const ORPHAN_PRUNE_INTERVAL: Duration = Duration::from_millis(500);
 
-/// Cached peer info from PEER_HELLO handshake
-#[derive(Debug, Clone)]
-struct PeerInfo {
-    /// Physical address of the control connection
-    control_addr: SocketAddr,
+// ── Cache entry types ───────────────────────────────────────────────────────
+
+/// An entry in the sender's outbound cache. `control` is `Some` only for
+/// control connections (logical_port == CONTROL_LOGICAL_PORT) — it carries
+/// the bookkeeping needed to serialise PORT_RESERVE requests and read their
+/// responses through the control connection's pending_ack slot.
+struct OutboundEntry {
+    /// Control inbox feeding the connection's `writer_task`. Used by the
+    /// reader task and lifecycle tasks (keepalive, PORT_RESERVE) to enqueue
+    /// protocol frames; not used by the user-data send path.
+    writer_tx: mpsc::Sender<Vec<u8>>,
+    /// User-data writes acquire this directly via
+    /// `runtime.block_on(write_half.lock().await)` and perform the wire
+    /// `writev` inline on the calling thread.
+    write_half: SharedWriteHalf,
+    control: Option<ControlExtras>,
 }
 
-/// TCP sender with 3-step handshake: PEER_HELLO → PORT_RESERVE → PORT_BIND
-///
-/// Connections are stored as `Box<dyn TcpStreamWrapper>` so that both
-/// plain TCP and TLS connections can be held uniformly. A per-connection
-/// TLS config on the sender decides which variant is used during
-/// `tcp_connect()`.
 #[derive(Clone)]
+struct ControlExtras {
+    /// Same `Arc` that lives in `MuxState::ConnectionEntry::pending_ack`.
+    /// dispatch installs the response; the awaiting connect_task takes it.
+    pending_ack: Arc<StdMutex<Option<oneshot::Sender<ControlMsg>>>>,
+    /// Lets only one PORT_RESERVE round-trip run at a time, so concurrent
+    /// requests don't clobber each other's `pending_ack` slot.
+    request_lock: Arc<TokioMutex<()>>,
+}
+
+/// Borrowed handle to the cache entry of a control connection. Holds clones
+/// of the channels needed to issue + await a PORT_RESERVE request.
+struct ControlConnHandle {
+    writer_tx: mpsc::Sender<Vec<u8>>,
+    extras: ControlExtras,
+}
+
+// ── In-flight connect guard ─────────────────────────────────────────────────
+
+/// Guard that prevents duplicate concurrent connects to the same peer.
+/// While it lives, the peer is marked "connecting" in `in_flight` so other
+/// tasks wait instead of opening a second connection. On drop (success,
+/// error, panic, or cancel) it clears the mark and wakes the waiters.
+struct InFlightGuard {
+    map: Arc<DashMap<(SocketAddr, u16), Arc<Notify>>>,
+    key: (SocketAddr, u16),
+    notify: Arc<Notify>,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.map.remove(&self.key);
+        self.notify.notify_waiters();
+    }
+}
+
+/// Result of trying to claim the connect slot for a peer.
+enum InFlightAcquisition {
+    /// We claimed the slot — the caller must perform the connect.
+    Acquired(InFlightGuard),
+    /// Another task was already connecting (we waited for it) — the caller
+    /// should just re-check the cache.
+    AlreadyDone,
+}
+
+// ── TcpSender ────────────────────────────────────────────────────────────────
+
+/// Outbound side of the TCP mux transport. See module-level docs.
 pub(crate) struct TcpSender {
-    working_ip: String,
-    connections: Arc<DashMap<ConnectionKey, Box<dyn TcpStreamWrapper>>>,
-    peer_info: Arc<DashMap<SocketAddr, PeerInfo>>,
-    /// Missed keepalive count per peer (physical addr)
-    keepalive_missed: Arc<DashMap<SocketAddr, u32>>,
-    connect_timeout: Duration,
-    local_guid_prefix: GuidPrefix,
     domain_id: u32,
     participant_id: u32,
+    working_ip: String,
     listener_port: u16,
-    /// TLS configuration for outbound connections. When `Some`, every
-    /// newly-opened TCP socket is wrapped with TLS via `connect_tls`.
-    tls_config: Option<Arc<TlsConfig>>,
-    /// Channel to notify the RTPS layer (PeerMonitor) when a peer has
-    /// been disconnected by any send-path failure, not just keepalive.
-    dead_peer_tx: std::sync::OnceLock<crossbeam_channel::Sender<SocketAddr>>,
-}
+    #[allow(dead_code)]
+    local_guid_prefix: GuidPrefix,
 
-// `Debug` by hand — `Box<dyn TcpStreamWrapper>` doesn't derive Debug.
-impl std::fmt::Debug for TcpSender {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TcpSender")
-            .field("working_ip", &self.working_ip)
-            .field("connection_count", &self.connections.len())
-            .field("peer_count", &self.peer_info.len())
-            .field("domain_id", &self.domain_id)
-            .field("participant_id", &self.participant_id)
-            .field("listener_port", &self.listener_port)
-            .field("tls", &self.tls_config.is_some())
-            .finish()
-    }
+    connect_timeout: Duration,
+    handshake_timeout: Duration,
+    keepalive_interval: Duration,
+    keepalive_timeout: Duration,
+    max_missed_keepalives: u32,
+
+    tls_config: Option<Arc<TlsConfig>>,
+    shared: Arc<MuxState>,
+
+    /// Outbound connection cache, keyed by (addr, logical_port).
+    connections: Arc<DashMap<(SocketAddr, u16), OutboundEntry>>,
+
+    /// Marks peers currently being connected, so duplicate concurrent
+    /// connects to the same peer are prevented. See `InFlightGuard`.
+    in_flight: Arc<DashMap<(SocketAddr, u16), Arc<Notify>>>,
+
+    /// Dead-peer notifier, installed once by the plugin during init.
+    dead_peer_tx: OnceLock<crossbeam_channel::Sender<SocketAddr>>,
+
+    /// Handle to the runtime, saved when the sender is built.
+    /// The sync `send_to_*` methods run outside the runtime, so they cannot
+    /// use `tokio::spawn` (it would panic). They use this handle instead to
+    /// run async work (`block_on`) and start connect tasks.
+    runtime_handle: tokio::runtime::Handle,
+
+    cancel: CancellationToken,
+    task_handles: StdMutex<Vec<JoinHandle<()>>>,
 }
 
 impl TcpSender {
-    const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 5000;
-    const DEFAULT_WRITE_TIMEOUT_MS: u64 = 10000;
-    const DEFAULT_NODELAY: bool = true;
-
+    /// Build a sender and spawn its long-running tasks (keepalive, orphan
+    /// prune). Must be called inside a tokio runtime context.
     pub(crate) fn new(
-        working_ip: String,
-        local_guid_prefix: GuidPrefix,
         domain_id: u32,
         participant_id: u32,
-        listener_port: u16,
-        keepalive_missed: Arc<DashMap<SocketAddr, u32>>,
-    ) -> io::Result<Self> {
-        Self::new_with_tls(
-            working_ip,
-            local_guid_prefix,
-            domain_id,
-            participant_id,
-            listener_port,
-            keepalive_missed,
-            None,
-        )
-    }
-
-    /// Like `new`, but with an optional TLS config for outbound connections.
-    pub(crate) fn new_with_tls(
         working_ip: String,
-        local_guid_prefix: GuidPrefix,
-        domain_id: u32,
-        participant_id: u32,
         listener_port: u16,
-        keepalive_missed: Arc<DashMap<SocketAddr, u32>>,
+        local_guid_prefix: GuidPrefix,
         tls_config: Option<Arc<TlsConfig>>,
-    ) -> io::Result<Self> {
-        let connect_timeout_ms = env::var("INT2DDS_TCP_CONNECT_TIMEOUT")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(Self::DEFAULT_CONNECT_TIMEOUT_MS);
+        shared: Arc<MuxState>,
+        tcp_config: &TcpConfig,
+    ) -> Arc<Self> {
+        let cancel = CancellationToken::new();
+        // Capture the current runtime handle so sync `send_to_*` callers can
+        // spawn connect tasks even though they are not in runtime context.
+        let runtime_handle = tokio::runtime::Handle::current();
 
-        debug!(
-            "TcpSender: Created (domain={}, pid={}, port={}, tls={})",
+        let sender = Arc::new(Self {
             domain_id,
             participant_id,
-            listener_port,
-            tls_config.is_some()
-        );
-
-        Ok(Self {
             working_ip,
-            connections: Arc::new(DashMap::new()),
-            peer_info: Arc::new(DashMap::new()),
-            keepalive_missed,
-            connect_timeout: Duration::from_millis(connect_timeout_ms),
-            local_guid_prefix,
-            domain_id,
-            participant_id,
             listener_port,
+            local_guid_prefix,
+            connect_timeout: tcp_config.connect_timeout,
+            handshake_timeout: tcp_config.bind_timeout,
+            keepalive_interval: tcp_config.keepalive_interval,
+            keepalive_timeout: tcp_config.keepalive_timeout,
+            max_missed_keepalives: tcp_config.keepalive_max_misses,
             tls_config,
-            dead_peer_tx: std::sync::OnceLock::new(),
-        })
+            shared,
+            connections: Arc::new(DashMap::new()),
+            in_flight: Arc::new(DashMap::new()),
+            dead_peer_tx: OnceLock::new(),
+            runtime_handle: runtime_handle.clone(),
+            cancel: cancel.clone(),
+            task_handles: StdMutex::new(Vec::new()),
+        });
+
+        // Spawn lifecycle tasks now that we have an Arc. Use the handle
+        // explicitly so this is robust even if `new()` is somehow called
+        // from a context where `tokio::spawn` would not be valid.
+        let mut handles = sender.task_handles.lock().expect("task_handles lock");
+        handles.push(
+            runtime_handle.spawn(keepalive_interval_task(Arc::clone(&sender), cancel.clone())),
+        );
+        handles.push(
+            runtime_handle.spawn(orphan_prune_interval_task(Arc::clone(&sender), cancel.clone())),
+        );
+        drop(handles);
+
+        sender
     }
 
-    pub(crate) fn listener_port(&self) -> u16 {
-        self.listener_port
-    }
-
-    /// Attach the dead-peer notification channel. Called once by the
-    /// plugin after it constructs both the sender and the channel.
-    /// Safe to call from any thread; subsequent calls are no-ops.
+    /// Plug in the dead-peer notifier. Idempotent; subsequent calls are no-ops.
     pub(crate) fn set_dead_peer_tx(&self, tx: crossbeam_channel::Sender<SocketAddr>) {
         let _ = self.dead_peer_tx.set(tx);
     }
 
-    fn get_write_timeout() -> Duration {
-        Duration::from_millis(crate::common::env::get_tcp_write_timeout_ms())
-    }
-
-    fn get_nodelay() -> bool {
-        crate::common::env::get_tcp_nodelay()
-    }
-
-    pub(crate) fn port(&self) -> u16 {
-        self.listener_port
-    }
-
-    // ========================================================================
-    // 3-Step Handshake
-    // ========================================================================
-
-    /// Step 1: PEER_HELLO — establish control connection, exchange locators.
-    fn ensure_control(&self, physical_addr: &SocketAddr) -> io::Result<()> {
-        let key = (*physical_addr, CONTROL_LOGICAL_PORT);
-        if self.connections.contains_key(&key) {
-            return Ok(());
-        }
-        self.ensure_control_inner(physical_addr, key).map_err(|e| {
-            Self::wrap_raw_io_error(e, TransportErrorCode::TcpHandshakeHelloFailed, physical_addr)
-        })
-    }
-
-    fn ensure_control_inner(
-        &self,
-        physical_addr: &SocketAddr,
-        key: ConnectionKey,
-    ) -> io::Result<()> {
-        let mut stream = self.tcp_connect(physical_addr)?;
-
-        let local_ip: std::net::Ipv4Addr =
-            self.working_ip.parse().unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
-        let locator = encode_locator(local_ip, self.listener_port);
-
-        // Send PEER_HELLO
-        let hello = ControlMsg::PeerHello { locator };
-        write_framed_message(&mut stream, &hello.to_bytes())?;
-
-        // Read PEER_HELLO_ACK
-        let resp = self.read_control_response(&mut stream)?;
-        if resp.to_bytes()[0] != MSG_PEER_HELLO_ACK {
-            return Err(transport_io_error(
-                TransportErrorCode::TcpHandshakeHelloFailed,
-                format!("Expected PEER_HELLO_ACK, got {}", resp.type_name()),
-            ));
-        }
-
-        debug!("TcpSender: PEER_HELLO complete to {:?}", physical_addr);
-
-        self.connections.insert(key, stream);
-        self.peer_info.insert(*physical_addr, PeerInfo { control_addr: *physical_addr });
-
-        Ok(())
-    }
-
-    /// Steps 2+3: PORT_RESERVE on control connection, then PORT_BIND on new connection.
-    fn ensure_data(&self, physical_addr: &SocketAddr, logical_port: u16) -> io::Result<()> {
-        // Ensure control connection is healthy first. If it was stale,
-        // disconnect_peer (called by the retry in send_to_logical_port)
-        // already removed all connections for this address, so the
-        // contains_key check below sees a clean slate.
-        self.ensure_control(physical_addr)?;
-
-        let key = (*physical_addr, logical_port);
-        if self.connections.contains_key(&key) {
-            return Ok(());
-        }
-
-        self.ensure_data_inner(physical_addr, logical_port, key)
-    }
-
-    fn ensure_data_inner(
-        &self,
-        physical_addr: &SocketAddr,
+    /// Resolve the connection's shared write half, establishing it on cache
+    /// miss. Blocks the caller (via `send_to`'s `block_on`) until the
+    /// connection is ready. `do_connect_data` internally ensures the shared
+    /// control connection (PEER_HELLO + PORT_RESERVE) before PORT_BIND.
+    async fn ensure_connection(
+        self: &Arc<Self>,
+        addr: SocketAddr,
         logical_port: u16,
-        key: ConnectionKey,
-    ) -> io::Result<()> {
-        // Step 2: PORT_RESERVE on the control connection
-        let control_key = (*physical_addr, CONTROL_LOGICAL_PORT);
-        let cookie = {
-            let mut control_stream = self
-                .connections
-                .get(&control_key)
-                .ok_or_else(|| {
-                    transport_io_error(
-                        TransportErrorCode::TcpHandshakeReserveFailed,
-                        "Control connection lost before PORT_RESERVE",
-                    )
-                })?
-                .value()
-                .try_clone_box()
-                .map_err(|e| {
-                    Self::wrap_raw_io_error(
-                        e,
-                        TransportErrorCode::TcpHandshakeReserveFailed,
-                        physical_addr,
-                    )
-                })?;
+    ) -> io::Result<SharedWriteHalf> {
+        let key = (addr, logical_port);
 
-            let reserve = ControlMsg::PortReserve { logical_port };
-            write_framed_message(&mut control_stream, &reserve.to_bytes()).map_err(|e| {
-                Self::wrap_raw_io_error(
-                    e,
-                    TransportErrorCode::TcpHandshakeReserveFailed,
-                    physical_addr,
-                )
-            })?;
+        if let Some(entry) = self.connections.get(&key) {
+            return Ok(Arc::clone(&entry.write_half));
+        }
 
-            let resp = self.read_control_response(&mut control_stream).map_err(|e| {
-                Self::wrap_raw_io_error(
-                    e,
-                    TransportErrorCode::TcpHandshakeReserveFailed,
-                    physical_addr,
-                )
-            })?;
-            match resp {
-                ControlMsg::PortReserveAck { cookie } => cookie,
-                ControlMsg::Error { operation, code, message } => {
-                    return Err(transport_io_error(
-                        TransportErrorCode::TcpHandshakeReserveFailed,
-                        format!(
-                            "PORT_RESERVE rejected (op=0x{:02x}, code={}): {}",
-                            operation, code, message
-                        ),
-                    ));
-                }
-                other => {
-                    return Err(transport_io_error(
-                        TransportErrorCode::TcpHandshakeReserveFailed,
-                        format!("Expected PORT_RESERVE_ACK, got {}", other.type_name()),
-                    ));
-                }
-            }
+        let result = if logical_port == CONTROL_LOGICAL_PORT {
+            do_connect_control(self, addr).await.map(|_| ())
+        } else {
+            do_connect_data(self, addr, logical_port).await.map(|_| ())
         };
-
-        debug!(
-            "TcpSender: PORT_RESERVE complete (port={}, cookie=0x{:02x})",
-            logical_port, cookie[0]
-        );
-
-        // Step 3: PORT_BIND on a NEW TCP connection
-        let mut data_stream = self.tcp_connect(physical_addr)?;
-
-        let bind = ControlMsg::PortBind { cookie };
-        write_framed_message(&mut data_stream, &bind.to_bytes()).map_err(|e| {
-            Self::wrap_raw_io_error(e, TransportErrorCode::TcpHandshakeBindFailed, physical_addr)
-        })?;
-
-        let resp = self.read_control_response(&mut data_stream).map_err(|e| {
-            Self::wrap_raw_io_error(e, TransportErrorCode::TcpHandshakeBindFailed, physical_addr)
-        })?;
-        if resp.to_bytes()[0] != MSG_PORT_BIND_ACK {
-            return Err(transport_io_error(
-                TransportErrorCode::TcpHandshakeBindFailed,
-                format!("Expected PORT_BIND_ACK, got {}", resp.type_name()),
-            ));
-        }
-
-        debug!("TcpSender: PORT_BIND complete (port={}, cookie=0x{:02x})", logical_port, cookie[0]);
-
-        self.connections.insert(key, data_stream);
-        Ok(())
-    }
-
-    // ========================================================================
-    // Sending
-    // ========================================================================
-
-    /// Send RTPS data to a logical port. Performs handshake if needed.
-    ///
-    /// If the write fails with BrokenPipe / ConnectionReset (peer went
-    /// away), the dead connection is purged and **one automatic retry** is
-    /// attempted. The retry re-runs the full ensure_control → ensure_data
-    /// → write sequence, which opens a fresh TCP connection to the same
-    /// address. This lets a restarted remote peer (new GUID, same
-    /// address) be discovered on the very next SPDP send cycle instead of
-    /// having to wait for the keepalive timeout to expire.
-    pub(crate) fn send_to_logical_port(
-        &self,
-        addr: &SocketAddr,
-        logical_port: u16,
-        data: &[u8],
-    ) -> io::Result<usize> {
-        match self.send_to_logical_port_once(addr, logical_port, data) {
-            Ok(n) => Ok(n),
-            Err(e)
-                if e.kind() == ErrorKind::BrokenPipe
-                    || e.kind() == ErrorKind::ConnectionReset
-                    || e.kind() == ErrorKind::ConnectionAborted =>
-            {
-                debug!(
-                    "TcpSender: send to {:?}:{} failed ({}), reconnecting and retrying",
-                    addr, logical_port, e
-                );
-                self.disconnect_peer(addr);
-                // One retry — if this also fails, propagate the error.
-                self.send_to_logical_port_once(addr, logical_port, data)
-            }
-            Err(e) => Err(e),
-        }
-    }
-
-    fn send_to_logical_port_once(
-        &self,
-        addr: &SocketAddr,
-        logical_port: u16,
-        data: &[u8],
-    ) -> io::Result<usize> {
-        self.ensure_data(addr, logical_port)?;
-
-        let key = (*addr, logical_port);
-        let mut stream = self
-            .connections
-            .get(&key)
-            .ok_or_else(|| {
-                transport_io_error(
-                    TransportErrorCode::TcpConnectionRefused,
-                    format!("Connection not found for {:?}", key),
-                )
-            })?
-            .value()
-            .try_clone_box()?;
-
-        match write_framed_message(&mut stream, data) {
-            Ok(()) => {
-                debug!("TcpSender: Sent {} bytes to {:?}", data.len(), key);
-                Ok(data.len())
-            }
-            Err(e) => {
-                if e.kind() == ErrorKind::BrokenPipe
-                    || e.kind() == ErrorKind::ConnectionReset
-                    || e.kind() == ErrorKind::ConnectionAborted
-                {
-                    debug!("TcpSender: Peer {:?} disconnected, cleaning up", addr);
-                    self.disconnect_peer(addr);
-                } else {
-                    self.connections.remove(&key);
-                }
-                Err(e)
-            }
-        }
-    }
-
-    /// Send to discovery channel.
-    pub(crate) fn send_to_discovery(&self, addr: &SocketAddr, data: &[u8]) -> io::Result<usize> {
-        let port =
-            PortManager::get_discovery_traffic_unicast_port(self.domain_id, self.participant_id);
-        self.send_to_logical_port(addr, port, data)
-    }
-
-    /// Send to user data channel.
-    pub(crate) fn send_to_user_data(&self, addr: &SocketAddr, data: &[u8]) -> io::Result<usize> {
-        let port = PortManager::get_user_traffic_unicast_port(self.domain_id, self.participant_id);
-        self.send_to_logical_port(addr, port, data)
-    }
-
-    pub(crate) fn get_peer_discovery_port(&self, addr: &SocketAddr) -> io::Result<u16> {
-        Ok(PortManager::get_discovery_traffic_unicast_port(self.domain_id, self.participant_id))
-    }
-
-    pub(crate) fn get_peer_user_port(&self, addr: &SocketAddr) -> io::Result<u16> {
-        Ok(PortManager::get_user_traffic_unicast_port(self.domain_id, self.participant_id))
-    }
-
-    pub(crate) fn disconnect_peer(&self, addr: &SocketAddr) {
-        let had_entry = self.connections.iter().any(|e| e.key().0 == *addr)
-            || self.peer_info.contains_key(addr);
-
-        self.connections.retain(|key, _| key.0 != *addr);
-        self.peer_info.remove(addr);
-        self.keepalive_missed.remove(addr);
-
-        debug!("TcpSender: Disconnected peer {:?}", addr);
-
-        // Signal the RTPS layer so PeerMonitor can unmatch RTPS proxies.
-        // We only emit if there was actually something to clean up, to
-        // avoid spurious events on idempotent disconnect_peer calls.
-        if had_entry {
+        if let Err(e) = result {
+            warn!(
+                "TcpSender: outbound connect to {:?} (port={}) failed: {:?}",
+                addr, logical_port, e
+            );
             if let Some(tx) = self.dead_peer_tx.get() {
-                let _ = tx.try_send(*addr);
+                let _ = tx.try_send(addr);
             }
+            return Err(e);
         }
-    }
 
-    /// Execute one keepalive cycle: send on each outgoing control connection and
-    /// evict peers whose keepalive budget is exhausted or whose send failed.
-    /// ACK waiting is offloaded to a spawned thread so the mux loop is never blocked.
-    /// Dead peers are disconnected in-place (which also fires `dead_peer_tx`).
-    pub(crate) fn execute_keepalives(&self) {
-        let max_missed: u32 = crate::common::env::get_tcp_keepalive_max_misses();
-
-        let ack_timeout = Duration::from_millis(crate::common::env::get_tcp_keepalive_timeout_ms());
-
-        let control_peers: Vec<SocketAddr> = self
-            .connections
-            .iter()
-            .filter(|e| e.key().1 == CONTROL_LOGICAL_PORT)
-            .map(|e| e.key().0)
-            .collect();
-
-        for peer_addr in control_peers {
-            let missed = self.keepalive_missed.get(&peer_addr).map(|v| *v).unwrap_or(0);
-
-            if missed >= max_missed {
-                warn!("TcpSender: Peer {:?} missed {} keepalives", peer_addr, missed);
-                self.disconnect_peer(&peer_addr);
-                continue;
-            }
-
-            let key = (peer_addr, CONTROL_LOGICAL_PORT);
-            let mut stream = match self.connections.get(&key).and_then(|s| s.try_clone_box().ok()) {
-                Some(s) => s,
-                None => continue,
-            };
-
-            if let Err(e) = write_framed_message(&mut stream, &ControlMsg::Keepalive.to_bytes()) {
-                warn!("TcpSender: Keepalive send failed to {:?}: {:?}", peer_addr, e);
-                self.disconnect_peer(&peer_addr);
-                continue;
-            }
-
-            // Spawn a thread to wait for ACK — prevents blocking the mux loop.
-            // This avoids deadlock in self-connection where the mux thread must
-            // both send the ACK (via on_readable) and receive it (via read here).
-            let keepalive_missed = self.keepalive_missed.clone();
-            std::thread::Builder::new()
-                .name(format!("keepalive_ack_{}", peer_addr))
-                .spawn(move || {
-                    stream.set_read_timeout(Some(ack_timeout)).ok();
-                    match read_framed_message(&mut stream) {
-                        Ok(payload) if payload.first() == Some(&MSG_KEEPALIVE_ACK) => {
-                            keepalive_missed.insert(peer_addr, 0);
-                            debug!("TcpSender: KeepaliveAck from {:?}", peer_addr);
-                        }
-                        Ok(_) | Err(_) => {
-                            let prev = keepalive_missed.get(&peer_addr).map(|v| *v).unwrap_or(0);
-                            let new_missed = prev + 1;
-                            warn!(
-                                "TcpSender: No KeepaliveAck from {:?} (missed={}/{})",
-                                peer_addr, new_missed, max_missed
-                            );
-                            keepalive_missed.insert(peer_addr, new_missed);
-                        }
-                    }
-                })
-                .ok();
-        }
-    }
-
-    /// Prune outgoing data connections whose control connection is missing.
-    ///
-    /// This mirrors the listener-side orphan pruning in `TcpMuxListener`.
-    /// A data connection becomes orphaned when its control connection was
-    /// removed (e.g. write failure) but the data entry was not cleaned up
-    /// at the same time. Returns the number of pruned connections.
-    pub(crate) fn prune_orphan_connections(&self) -> usize {
-        // Collect peer addrs that have at least one data connection
-        let peers_with_data: Vec<SocketAddr> = self
-            .connections
-            .iter()
-            .filter(|e| e.key().1 != CONTROL_LOGICAL_PORT)
-            .map(|e| e.key().0)
-            .collect();
-
-        let mut pruned = 0;
-        for peer_addr in peers_with_data {
-            let has_control = self.connections.contains_key(&(peer_addr, CONTROL_LOGICAL_PORT));
-
-            if !has_control {
-                let before = self.connections.len();
-                self.connections.retain(|key, _| key.0 != peer_addr);
-                let removed = before - self.connections.len();
-                self.peer_info.remove(&peer_addr);
-                self.keepalive_missed.remove(&peer_addr);
-                if removed > 0 {
-                    warn!(
-                        "TcpSender [{}]: Pruned {} orphan outgoing connection(s) for {:?}",
-                        TransportErrorCode::TcpOrphanPruned,
-                        removed,
-                        peer_addr
-                    );
-                    pruned += removed;
-                }
-            }
-        }
-        pruned
-    }
-
-    /// Test only: remove the control connection entry without touching data connections.
-    /// This creates an orphan state where data connections exist without their control.
-    #[cfg(test)]
-    pub(crate) fn drop_control_only(&self, addr: &SocketAddr) {
-        self.connections.remove(&(*addr, CONTROL_LOGICAL_PORT));
-        debug!("TcpSender: [test] dropped control-only for {:?}", addr);
-    }
-
-    /// Test only: remove a specific data connection entry without touching control.
-    /// The next send attempt to this logical port will trigger re-reserve + re-bind.
-    #[cfg(test)]
-    pub(crate) fn drop_data_connection(&self, addr: &SocketAddr, logical_port: u16) {
-        assert_ne!(logical_port, CONTROL_LOGICAL_PORT, "use drop_control_only for control");
-        self.connections.remove(&(*addr, logical_port));
-        debug!("TcpSender: [test] dropped data connection {:?} port={}", addr, logical_port);
-    }
-
-    pub(crate) fn connection_count(&self) -> usize {
-        self.connections.len()
-    }
-
-    pub(crate) fn peer_count(&self) -> usize {
-        self.peer_info.len()
-    }
-
-    pub(crate) fn close_all(self) {
-        self.connections.clear();
-        self.peer_info.clear();
-        debug!("TcpSender: All connections closed");
-    }
-
-    // ========================================================================
-    // Internal helpers
-    // ========================================================================
-
-    /// Wrap a raw OS `io::Error` with a `TransportError` if it isn't one already.
-    fn wrap_raw_io_error(e: io::Error, code: TransportErrorCode, addr: &SocketAddr) -> io::Error {
-        if e.get_ref().and_then(|s| s.downcast_ref::<TransportError>()).is_some() {
-            return e;
-        }
-        transport_io_error(code, format!("{} (peer {:?})", e, addr))
-    }
-
-    fn tcp_connect(&self, addr: &SocketAddr) -> io::Result<Box<dyn TcpStreamWrapper>> {
-        self.tcp_connect_inner(addr).map_err(|e| {
-            // Already a TransportError — pass through as-is.
-            if e.get_ref().and_then(|s| s.downcast_ref::<TransportError>()).is_some() {
-                return e;
-            }
-            // Wrap raw OS errors with a TransportErrorCode based on ErrorKind.
-            let code = match e.kind() {
-                ErrorKind::TimedOut => TransportErrorCode::TcpConnectionTimeout,
-                ErrorKind::ConnectionRefused => TransportErrorCode::TcpConnectionRefused,
-                ErrorKind::AddrNotAvailable | ErrorKind::AddrInUse => {
-                    TransportErrorCode::TcpBindFailed
-                }
-                _ => TransportErrorCode::TcpConnectionRefused,
-            };
-            transport_io_error(code, format!("{} (to {:?})", e, addr))
+        self.connections.get(&key).map(|entry| Arc::clone(&entry.write_half)).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Other, "connect succeeded but cache entry missing")
         })
     }
 
-    fn tcp_connect_inner(&self, addr: &SocketAddr) -> io::Result<Box<dyn TcpStreamWrapper>> {
-        let socket2 = Socket2::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+    /// Tear down every cached connection to `addr` (control + data) and
+    /// notify the dead-peer channel. Used on keepalive failure / explicit
+    /// peer eviction.
+    pub(crate) fn disconnect_peer(&self, addr: SocketAddr) {
+        // 1. Cancel + drop all sender-cached entries for this addr.
+        self.connections.retain(|(peer_addr, _), _entry| *peer_addr != addr);
 
-        // Apply optional buffer-size overrides BEFORE connect so they take
-        // effect on the initial handshake's window negotiation.
-        if let Some(sz) = crate::common::env::get_tcp_so_rcvbuf() {
-            let _ = socket2.set_recv_buffer_size(sz);
-        }
-        if let Some(sz) = crate::common::env::get_tcp_so_sndbuf() {
-            let _ = socket2.set_send_buffer_size(sz);
-        }
+        // 2. Tear down the peer group on the shared mux state — this also
+        //    cancels the corresponding conn_actors via their tokens.
+        let synthetic_guid = addr_to_guid(addr);
+        self.shared.remove_peer(synthetic_guid);
 
-        let local_ip: IpAddr = self.working_ip.parse().map_err(|e| {
-            io::Error::new(ErrorKind::InvalidInput, format!("Invalid working_ip: {}", e))
-        })?;
-        socket2.bind(&SockAddr::from(SocketAddr::new(local_ip, 0)))?;
-        socket2.set_nonblocking(true)?;
-
-        match socket2.connect(&SockAddr::from(*addr)) {
-            Ok(_) => {}
-            Err(e)
-                if e.raw_os_error() == Some(10035)   // Windows WSAEWOULDBLOCK
-                    || e.raw_os_error() == Some(115) // Linux EINPROGRESS
-                    || e.raw_os_error() == Some(36)  // macOS/BSD EINPROGRESS
-                    || e.kind() == ErrorKind::WouldBlock =>
-            {
-                let start = std::time::Instant::now();
-                loop {
-                    if start.elapsed() >= self.connect_timeout {
-                        return Err(transport_io_error(
-                            TransportErrorCode::TcpConnectionTimeout,
-                            format!("Connection timeout to {:?}", addr),
-                        ));
-                    }
-                    match socket2.take_error() {
-                        Ok(Some(err)) => {
-                            return Err(transport_io_error(
-                                TransportErrorCode::TcpConnectionRefused,
-                                format!("Connection failed to {:?}: {:?}", addr, err),
-                            ));
-                        }
-                        Ok(None) if socket2.peer_addr().is_ok() => break,
-                        Ok(None) => {}
-                        Err(e) => return Err(e),
-                    }
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            }
-            Err(e) => return Err(e),
+        // 3. Notify upper layer.
+        if let Some(tx) = self.dead_peer_tx.get() {
+            let _ = tx.try_send(addr);
         }
 
-        socket2.set_nonblocking(false)?;
-        let stream: TcpStream = socket2.into();
-        let _ = stream.set_nodelay(Self::get_nodelay());
-        let _ = stream.set_write_timeout(Some(Self::get_write_timeout()));
+        info!("TcpSender: Disconnected peer {:?}", addr);
+    }
 
-        // If TLS is configured, wrap the connected TCP socket with a TLS
-        // session. The handshake runs synchronously on this thread.
-        match &self.tls_config {
-            Some(cfg) => {
-                let client_cfg = cfg.build_client_config()?;
-                connect_tls(stream, client_cfg, &cfg.server_name)
-            }
-            None => Ok(wrap_stream(stream)),
+    /// Graceful shutdown — cancels lifecycle tasks then awaits them. Does
+    /// not consume `self` so the plugin can hold an `Arc<TcpSender>`.
+    pub(crate) async fn shutdown(&self) {
+        self.cancel.cancel();
+        let handles = mem::take(&mut *self.task_handles.lock().expect("task_handles lock"));
+        for h in handles {
+            let _ = h.await;
         }
     }
 
-    fn read_control_response(
-        &self,
-        stream: &mut Box<dyn TcpStreamWrapper>,
-    ) -> io::Result<ControlMsg> {
-        let payload = read_framed_message(stream)?;
-        ControlMsg::from_bytes(&payload)
+    /// Heuristic: is this address our own listener? Avoids loopback
+    /// self-connections during SPDP fan-out.
+    fn is_self_connection(&self, addr: &SocketAddr) -> bool {
+        if addr.port() != self.listener_port {
+            return false;
+        }
+        match addr.ip() {
+            IpAddr::V4(v4) => v4.is_loopback() || self.working_ip == v4.to_string(),
+            IpAddr::V6(_) => false,
+        }
     }
 }
+
+// ── Send path ────────────────────────────────────────────────────────────────
+//
+// Sends a single RTPS frame inline on the user thread. The connection's
+// `SharedWriteHalf` is locked for the duration of one `write_vectored`
+// syscall; the calling thread waits via `runtime.block_on` until the
+// kernel accepts the bytes. Connections, TLS, keepalive, and the protocol
+// handshake remain on the async task pair created by `spawn_conn_actor`.
+impl TcpSender {
+    /// SPDP bootstrap fan-out to an initial peer we have not discovered yet.
+    /// The peer's participant id (hence its logical port) is unknown, so we
+    /// reserve the well-known index-0 metatraffic port — the conventional
+    /// bootstrap port. Once SPDP completes, SEDP and user data reserve the
+    /// peer's actual advertised logical port via `send_to`.
+    pub(crate) fn send_to_discovery(
+        self: &Arc<Self>,
+        addr: &SocketAddr,
+        data: &[u8],
+    ) -> io::Result<()> {
+        let logical_port = PortManager::get_discovery_traffic_unicast_port(self.domain_id, 0);
+        self.send_to(*addr, logical_port, data)
+    }
+
+    /// Resolve the connection's write half — fast path on cache hit,
+    /// otherwise block until the connection (control + data handshake) is
+    /// established — then perform the wire `writev` inline. All user-data
+    /// writes funnel through this single path, so a peer's fragments always
+    /// reach the wire in the order the caller emits them. `logical_port` is the
+    /// destination's advertised RTPS port, reserved on the mux connection.
+    pub(crate) fn send_to(
+        self: &Arc<Self>,
+        addr: SocketAddr,
+        logical_port: u16,
+        data: &[u8],
+    ) -> io::Result<()> {
+        let key = (addr, logical_port);
+
+        let write_half = match self.connections.get(&key) {
+            Some(entry) => Arc::clone(&entry.write_half),
+            None => self.runtime_handle.block_on(self.ensure_connection(addr, logical_port))?,
+        };
+
+        let payload = data.to_vec();
+        self.runtime_handle.block_on(async move {
+            let mut wh = write_half.lock().await;
+            write_framed_message(&mut *wh, &payload).await
+        })
+    }
+}
+
+impl Drop for TcpSender {
+    fn drop(&mut self) {
+        // Best-effort — Drop can't await the lifecycle handles, but
+        // cancelling the token tells them to exit at their next yield.
+        self.cancel.cancel();
+    }
+}
+
+/// Atomic acquire — returns `Acquired` if we got the slot, or `AlreadyDone`
+/// after waiting for the existing in-flight task to finish.
+async fn acquire_in_flight(sender: &Arc<TcpSender>, key: (SocketAddr, u16)) -> InFlightAcquisition {
+    enum Slot {
+        Existing(Arc<Notify>),
+        New(Arc<Notify>),
+    }
+
+    // Atomic check-and-insert. Entry guard is dropped before any await.
+    let slot = match sender.in_flight.entry(key) {
+        Entry::Occupied(e) => Slot::Existing(e.get().clone()),
+        Entry::Vacant(v) => {
+            let n = Arc::new(Notify::new());
+            v.insert(n.clone());
+            Slot::New(n)
+        }
+    };
+
+    match slot {
+        Slot::Existing(notify) => {
+            notify.notified().await;
+            InFlightAcquisition::AlreadyDone
+        }
+        Slot::New(notify) => InFlightAcquisition::Acquired(InFlightGuard {
+            map: Arc::clone(&sender.in_flight),
+            key,
+            notify,
+        }),
+    }
+}
+
+// ── do_connect_control ──────────────────────────────────────────────────────
+
+async fn do_connect_control(
+    sender: &Arc<TcpSender>,
+    addr: SocketAddr,
+) -> io::Result<mpsc::Sender<Vec<u8>>> {
+    if sender.is_self_connection(&addr) {
+        return Err(io::Error::new(io::ErrorKind::AddrInUse, "self connect"));
+    }
+
+    // 1. TCP (+ TLS).
+    let mut stream = open_stream(sender, addr).await?;
+
+    // 2. PEER_HELLO + PEER_HELLO_ACK (inline, before conn_actor takes the stream).
+    peer_hello_handshake(&mut stream, sender.handshake_timeout).await?;
+
+    // 3. Channel + cancel + pending_ack mailbox.
+    let (tx, rx) = mpsc::channel::<Vec<u8>>(inbox_capacity());
+    let conn_cancel = sender.cancel.child_token();
+    let pending_ack = Arc::new(StdMutex::new(None));
+    let request_lock = Arc::new(TokioMutex::new(()));
+
+    // 4. Register in mux_state BEFORE spawning conn_actor — otherwise the
+    //    reader task could receive a frame and find no entry.
+    let conn_id = sender.shared.register_outbound_control_connection(
+        addr,
+        tx.clone(),
+        conn_cancel.clone(),
+        Arc::clone(&pending_ack),
+    );
+
+    // 5. Spawn the actor pair.
+    let write_half =
+        spawn_conn_actor(stream, conn_id, Arc::clone(&sender.shared), conn_cancel, tx.clone(), rx);
+
+    // 6. Seed liveness state: send first KEEPALIVE so that the
+    //    interval task's first tick has not fail. (timeout)
+    let _ = tx.try_send(ControlMsg::Keepalive.to_bytes());
+    if let Some(e) = sender.shared.connections.get(&conn_id) {
+        *e.last_keepalive_sent_at.lock().expect("...") = Some(Instant::now());
+    }
+
+    // 7. Cache for future sends + future PORT_RESERVE round-trips.
+    sender.connections.insert(
+        (addr, CONTROL_LOGICAL_PORT),
+        OutboundEntry {
+            writer_tx: tx.clone(),
+            write_half,
+            control: Some(ControlExtras { pending_ack, request_lock }),
+        },
+    );
+
+    debug!("TcpSender: control connection established to {:?} (conn={})", addr, conn_id);
+    Ok(tx)
+}
+
+// ── do_connect_data ─────────────────────────────────────────────────────────
+
+async fn do_connect_data(
+    sender: &Arc<TcpSender>,
+    addr: SocketAddr,
+    logical_port: u16,
+) -> io::Result<mpsc::Sender<Vec<u8>>> {
+    if sender.is_self_connection(&addr) {
+        return Err(io::Error::new(io::ErrorKind::AddrInUse, "self connect"));
+    }
+
+    // 1. Ensure we have a control connection.
+    let control = ensure_control_connection(sender, addr).await?;
+
+    // 2. PORT_RESERVE round-trip → cookie.
+    let cookie = port_reserve_round_trip(&control, logical_port, sender.handshake_timeout).await?;
+
+    // 3. Open a fresh TCP for the data connection (+ TLS).
+    let mut stream = open_stream(sender, addr).await?;
+
+    // 4. PORT_BIND + PORT_BIND_ACK (inline, before conn_actor).
+    port_bind_handshake(&mut stream, cookie, sender.handshake_timeout).await?;
+
+    // 5. Channel + cancel — no pending_ack needed for data connections.
+    let (tx, rx) = mpsc::channel::<Vec<u8>>(inbox_capacity());
+    let conn_cancel = sender.cancel.child_token();
+
+    // 6. Register, then spawn (race-free order).
+    let conn_id = sender.shared.register_outbound_data_connection(
+        addr,
+        logical_port,
+        tx.clone(),
+        conn_cancel.clone(),
+    );
+    let write_half =
+        spawn_conn_actor(stream, conn_id, Arc::clone(&sender.shared), conn_cancel, tx.clone(), rx);
+
+    // 7. Cache.
+    sender.connections.insert(
+        (addr, logical_port),
+        OutboundEntry { writer_tx: tx.clone(), write_half, control: None },
+    );
+
+    debug!(
+        "TcpSender: data connection established to {:?} (port={}, conn={})",
+        addr, logical_port, conn_id
+    );
+    Ok(tx)
+}
+
+// ── ensure_control_connection ───────────────────────────────────────────────
+
+/// Look up the control connection in cache, creating it via the in-flight
+/// gate if missing. Returns a handle the caller uses to issue PORT_RESERVE
+/// round-trips.
+async fn ensure_control_connection(
+    sender: &Arc<TcpSender>,
+    addr: SocketAddr,
+) -> io::Result<ControlConnHandle> {
+    let key = (addr, CONTROL_LOGICAL_PORT);
+
+    if let Some(handle) = lookup_control_handle(sender, key) {
+        return Ok(handle);
+    }
+
+    match acquire_in_flight(sender, key).await {
+        InFlightAcquisition::Acquired(_guard) => {
+            let _ = do_connect_control(sender, addr).await?;
+            // _guard drops at end of scope → notify_waiters fires.
+        }
+        InFlightAcquisition::AlreadyDone => {
+            // Concurrent task finished; cache may or may not have the entry.
+        }
+    }
+
+    lookup_control_handle(sender, key).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::Other, "control connect failed (cache miss after wait)")
+    })
+}
+
+fn lookup_control_handle(sender: &TcpSender, key: (SocketAddr, u16)) -> Option<ControlConnHandle> {
+    sender.connections.get(&key).and_then(|entry| {
+        entry.control.as_ref().map(|extras| ControlConnHandle {
+            writer_tx: entry.writer_tx.clone(),
+            extras: extras.clone(),
+        })
+    })
+}
+
+// ── PORT_RESERVE round-trip via single-slot oneshot ─────────────────────────
+
+async fn port_reserve_round_trip(
+    control: &ControlConnHandle,
+    logical_port: u16,
+    timeout: Duration,
+) -> io::Result<[u8; 16]> {
+    // Serialise concurrent PORT_RESERVE on the same control connection.
+    // Otherwise the second request would clobber the first's pending_ack slot.
+    let _permit = control.extras.request_lock.lock().await;
+
+    let (tx, rx) = oneshot::channel();
+    *control.extras.pending_ack.lock().expect("pending_ack lock") = Some(tx);
+
+    let _ = control.writer_tx.try_send(ControlMsg::PortReserve { logical_port }.to_bytes());
+
+    let response = match tokio::time::timeout(timeout, rx).await {
+        Ok(Ok(msg)) => msg,
+        Ok(Err(_)) => {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "PORT_RESERVE response channel closed",
+            ));
+        }
+        Err(_) => {
+            // Timeout — clean up our slot in case dispatch never ran.
+            *control.extras.pending_ack.lock().expect("pending_ack lock") = None;
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "PORT_RESERVE response timeout"));
+        }
+    };
+
+    match response {
+        ControlMsg::PortReserveAck { cookie } => Ok(cookie),
+        ControlMsg::Error { operation: _, code, message } => Err(transport_io_error(
+            TransportErrorCode::TcpHandshakeReserveFailed,
+            format!("PORT_RESERVE rejected: code={} message={}", code, message),
+        )),
+        other => Err(transport_io_error(
+            TransportErrorCode::TcpHandshakeReserveFailed,
+            format!("unexpected response to PORT_RESERVE: {}", other.type_name()),
+        )),
+    }
+}
+
+// ── Stream open + inline handshakes ─────────────────────────────────────────
+
+async fn open_stream(sender: &Arc<TcpSender>, addr: SocketAddr) -> io::Result<AsyncConnStream> {
+    // 1. TCP connect (timeout-bounded).
+    let tcp = tokio::time::timeout(sender.connect_timeout, TcpStream::connect(addr))
+        .await
+        .map_err(|_| {
+            io::Error::new(io::ErrorKind::TimedOut, format!("tcp connect timeout to {:?}", addr))
+        })??;
+
+    let _ = tcp.set_nodelay(sender.shared.tuning.nodelay);
+
+    // Mirror the accept path so outbound (send) sockets are bounded too.
+    if let Some(sz) = sender.shared.tuning.so_rcvbuf {
+        let _ = socket2::SockRef::from(&tcp).set_recv_buffer_size(sz);
+    }
+    if let Some(sz) = sender.shared.tuning.so_sndbuf {
+        let _ = socket2::SockRef::from(&tcp).set_send_buffer_size(sz);
+    }
+
+    // 2. Optional TLS handshake (also timeout-bounded).
+    if let Some(cfg) = &sender.tls_config {
+        let client_cfg = cfg
+            .build_client_config()
+            .map_err(|e| transport_io_error(TransportErrorCode::TlsConfigError, e.to_string()))?;
+        // TODO: thread the SNI name properly. For now use the configured
+        // server_name or fall back to "localhost".
+        let sni = cfg.server_name().to_string();
+
+        let stream = tokio::time::timeout(
+            sender.handshake_timeout,
+            connect_tls_async(tcp, client_cfg, &sni),
+        )
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "tls handshake timeout"))??;
+
+        Ok(stream)
+    } else {
+        Ok(wrap_plain(tcp))
+    }
+}
+
+async fn peer_hello_handshake(stream: &mut AsyncConnStream, timeout: Duration) -> io::Result<()> {
+    // Locator field is opaque to the peer in this protocol; the sync version
+    // sends a zero locator. TODO: thread the real local locator through once
+    // the plugin wiring is in place.
+    let hello = ControlMsg::PeerHello { locator: [0u8; 16] };
+    write_framed_message(stream, &hello.to_bytes()).await?;
+
+    let response_bytes = tokio::time::timeout(timeout, read_framed_message(stream))
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "PEER_HELLO_ACK timeout"))??;
+
+    let response = ControlMsg::from_bytes(&response_bytes).map_err(|e| {
+        transport_io_error(
+            TransportErrorCode::TcpHandshakeHelloFailed,
+            format!("malformed PEER_HELLO_ACK: {:?}", e),
+        )
+    })?;
+
+    match response {
+        ControlMsg::PeerHelloAck => Ok(()),
+        ControlMsg::Error { code, message, .. } => Err(transport_io_error(
+            TransportErrorCode::TcpHandshakeHelloFailed,
+            format!("PEER_HELLO rejected: code={} message={}", code, message),
+        )),
+        other => Err(transport_io_error(
+            TransportErrorCode::TcpHandshakeHelloFailed,
+            format!("unexpected response to PEER_HELLO: {}", other.type_name()),
+        )),
+    }
+}
+
+async fn port_bind_handshake(
+    stream: &mut AsyncConnStream,
+    cookie: [u8; 16],
+    timeout: Duration,
+) -> io::Result<()> {
+    let bind = ControlMsg::PortBind { cookie };
+    write_framed_message(stream, &bind.to_bytes()).await?;
+
+    let response_bytes = tokio::time::timeout(timeout, read_framed_message(stream))
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "PORT_BIND_ACK timeout"))??;
+
+    let response = ControlMsg::from_bytes(&response_bytes).map_err(|e| {
+        transport_io_error(
+            TransportErrorCode::TcpHandshakeBindFailed,
+            format!("malformed PORT_BIND_ACK: {:?}", e),
+        )
+    })?;
+
+    match response {
+        ControlMsg::PortBindAck => Ok(()),
+        ControlMsg::Error { code, message, .. } => Err(transport_io_error(
+            TransportErrorCode::TcpHandshakeBindFailed,
+            format!("PORT_BIND rejected: code={} message={}", code, message),
+        )),
+        other => Err(transport_io_error(
+            TransportErrorCode::TcpHandshakeBindFailed,
+            format!("unexpected response to PORT_BIND: {}", other.type_name()),
+        )),
+    }
+}
+
+// ── Lifecycle tasks ──────────────────────────────────────────────────────────
+
+/// Per-tick keepalive cycle on every outbound control connection.
+///
+/// Each tick judges the previous round-trip from `last_keepalive_sent_at`
+/// (set here) and `last_keepalive_ack_at` (set by `mux_state` on
+/// KEEPALIVE_ACK):
+/// - timely (`ack_at >= sent_at` and gap ≤ `keepalive_timeout`) → reset
+///   `missed_keepalives`.
+/// - otherwise → increment it; past `max_missed_keepalives` the peer is
+///   declared dead and torn down via `disconnect_peer`.
+///
+/// Then a fresh KEEPALIVE is pushed and `last_keepalive_sent_at` set to `now`.
+async fn keepalive_interval_task(sender: Arc<TcpSender>, cancel: CancellationToken) {
+    let mut ticker = tokio::time::interval(sender.keepalive_interval);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                let now = Instant::now();
+                let mut dead: Vec<SocketAddr> = Vec::new();
+
+                for entry in sender.shared.connections.iter() {
+                    // Filter to OUTBOUND CONTROL connections only. (skipping DATA conncections)
+                    if entry.pending_ack.is_none() {
+                        continue;
+                    }
+
+                    let key = (entry.remote_addr, CONTROL_LOGICAL_PORT);
+                    if !sender.connections.contains_key(&key) {
+                        continue; // sender cache may have evicted concurrently
+                    }
+
+                    // Read previous cycle's send/ack timestamps from the
+                    // shared ConnectionEntry — mux_state::dispatch updates
+                    // `last_keepalive_ack_at` on KEEPALIVE_ACK.
+                    let sent_at = *entry
+                        .last_keepalive_sent_at
+                        .lock()
+                        .expect("last_keepalive_sent_at lock");
+                    let ack_at = *entry
+                        .last_keepalive_ack_at
+                        .lock()
+                        .expect("last_keepalive_ack_at lock");
+
+                    // Was the previous round-trip timely?
+                    //  - sent_at == None: first-ever tick → no judgment yet
+                    //  - ack_at < sent_at: latest ACK is from an older cycle
+                    //  - gap > timeout: ACK arrived late
+                    let timely = match (sent_at, ack_at) {
+                        (Some(s), Some(a)) => {
+                            a >= s && a.duration_since(s) <= sender.keepalive_timeout
+                        }
+                        _ => false,
+                    };
+
+                    if timely {
+                        entry.missed_keepalives.store(0, Ordering::Relaxed);
+                    } else {
+                        // Previous keepalive went unacked or late.
+                        let new_count = entry
+                            .missed_keepalives
+                            .fetch_add(1, Ordering::Relaxed)
+                            + 1;
+                        if new_count > sender.max_missed_keepalives {
+                            dead.push(entry.remote_addr);
+                            continue; // skip sending the next KEEPALIVE
+                        }
+                    }
+                    // First-ever tick (sent_at None): just send below.
+
+                    // Record send time, then push the KEEPALIVE frame.
+                    *entry
+                        .last_keepalive_sent_at
+                        .lock()
+                        .expect("last_keepalive_sent_at lock") = Some(now);
+                    let _ = entry
+                        .writer_tx
+                        .try_send(ControlMsg::Keepalive.to_bytes());
+                }
+
+                for addr in dead {
+                    warn!(
+                        "TcpSender: peer {:?} missed > {} keepalives — disconnecting",
+                        addr, sender.max_missed_keepalives
+                    );
+                    sender.disconnect_peer(addr);
+                }
+            }
+            _ = cancel.cancelled() => break,
+        }
+    }
+}
+
+/// Drop cache entries whose writer channel is closed (conn_actor exited),
+/// so stale entries don't pile up on dead links.
+async fn orphan_prune_interval_task(sender: Arc<TcpSender>, cancel: CancellationToken) {
+    let mut ticker = tokio::time::interval(ORPHAN_PRUNE_INTERVAL);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                sender.connections.retain(|_key, entry| !entry.writer_tx.is_closed());
+            }
+            _ = cancel.cancelled() => break,
+        }
+    }
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Mirror of `mux_state::addr_to_guid` — same synthetic-guid derivation so
+/// `disconnect_peer` can target the right peer group.
+fn addr_to_guid(addr: SocketAddr) -> GuidPrefix {
+    let mut g = [0u8; 12];
+    if let SocketAddr::V4(v4) = addr {
+        g[0..4].copy_from_slice(&v4.ip().octets());
+        g[4..6].copy_from_slice(&v4.port().to_be_bytes());
+    }
+    g
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rtps::transport::plugin::IncomingMessage;
+    use crate::rtps::transport::tcp::mux_state::TcpSocketTuning;
     use crate::rtps::transport::tcp::tcp_mux_listener::TcpMuxListener;
     use crossbeam_channel::bounded;
+    use std::time::Instant;
 
-    /// Allocate a non-overlapping domain so concurrent tests don't collide.
-    fn next_test_domain() -> u32 {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static NEXT: AtomicU32 = AtomicU32::new(800);
-        NEXT.fetch_add(1, Ordering::SeqCst)
+    /// Helper: build the crossbeam channels needed by `MuxState::new` /
+    /// `TcpMuxListener::bind_and_spawn`, returning the receivers so tests
+    /// can observe routed RTPS frames.
+    fn make_channels() -> (
+        crossbeam_channel::Sender<IncomingMessage>,
+        crossbeam_channel::Receiver<IncomingMessage>,
+        crossbeam_channel::Sender<IncomingMessage>,
+        crossbeam_channel::Receiver<IncomingMessage>,
+    ) {
+        let (d_tx, d_rx) = bounded(64);
+        let (u_tx, u_rx) = bounded(64);
+        (d_tx, d_rx, u_tx, u_rx)
     }
 
-    fn create_test_sender() -> TcpSender {
-        let keepalive_missed = Arc::new(DashMap::new());
-        TcpSender::new("127.0.0.1".to_string(), [0x01; 12], 0, 0, 7400, keepalive_missed).unwrap()
+    /// Poll a crossbeam receiver from async code without blocking a worker.
+    /// Returns `Some(msg)` if received before `deadline`, else `None`.
+    async fn wait_for_recv<T>(rx: &crossbeam_channel::Receiver<T>, deadline: Instant) -> Option<T> {
+        while Instant::now() < deadline {
+            if let Ok(msg) = rx.try_recv() {
+                return Some(msg);
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        None
     }
 
-    /// Create a MuxListener on an ephemeral port + a TcpSender targeting it.
-    /// Returns (listener, sender, listener_addr, discovery_port, user_port).
-    fn create_listener_and_sender(
-        domain_id: u32,
-    ) -> (TcpMuxListener, TcpSender, SocketAddr, u16, u16) {
-        let (disc_tx, _disc_rx) = bounded(64);
-        let (user_tx, _user_rx) = bounded(64);
-        let listener = TcpMuxListener::new(
-            0, // port 0 → OS-assigned ephemeral port
-            domain_id, 0, [0x02; 12], disc_tx, user_tx,
-        )
-        .expect("listener creation");
-        let port = listener.port();
-        let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
-
-        let disc_port =
-            crate::rtps::transport::port_manager::PortManager::get_discovery_traffic_unicast_port(
-                domain_id, 0,
-            );
-        let user_port =
-            crate::rtps::transport::port_manager::PortManager::get_user_traffic_unicast_port(
-                domain_id, 0,
-            );
-
-        let keepalive_missed = Arc::new(DashMap::new());
-        let sender = TcpSender::new(
-            "127.0.0.1".to_string(),
-            [0x01; 12],
-            domain_id,
+    /// Build a bare sender with its own MuxState. The sender does NOT bind
+    /// a listener — callers that need a target listener spawn one separately.
+    fn make_sender(
+        participant_id: u32,
+        guid_prefix: GuidPrefix,
+        listener_port: u16,
+    ) -> (Arc<TcpSender>, crossbeam_channel::Receiver<IncomingMessage>) {
+        let (d_tx, d_rx, u_tx, _u_rx) = make_channels();
+        let shared = Arc::new(MuxState::new(
             0,
-            port,
-            keepalive_missed,
+            participant_id,
+            guid_prefix,
+            TcpSocketTuning::default(),
+            d_tx,
+            u_tx,
+        ));
+        let sender = TcpSender::new(
+            0,
+            participant_id,
+            "127.0.0.1".to_string(),
+            listener_port,
+            guid_prefix,
+            None,
+            shared,
+            &TcpConfig::default(),
+        );
+        (sender, d_rx)
+    }
+
+    /// `send_to_*` blocks via `runtime_handle.block_on`, which panics if
+    /// invoked from inside a tokio runtime worker. Production callers are the
+    /// sync DDS write path (outside any runtime); tests run under
+    /// `#[tokio::test]`, so they must drive the send from a blocking thread.
+    async fn blocking_send_discovery(
+        sender: &Arc<TcpSender>,
+        target: SocketAddr,
+        data: &[u8],
+    ) -> io::Result<()> {
+        let sender = Arc::clone(sender);
+        let data = data.to_vec();
+        tokio::task::spawn_blocking(move || sender.send_to_discovery(&target, &data))
+            .await
+            .expect("spawn_blocking join")
+    }
+
+    // ── construction smoke ───────────────────────────────────────────────────
+
+    /// `TcpSender::new` inside a tokio context succeeds and the lifecycle
+    /// tasks (keepalive, orphan prune) shut down cleanly.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn new_in_runtime_succeeds_and_shuts_down() {
+        let (sender, _disc_rx) = make_sender(0, [0xAA; 12], 12345);
+        // No connections yet.
+        assert_eq!(sender.connections.len(), 0);
+        // Shutdown must complete within a small timeout — guard against deadlock.
+        tokio::time::timeout(Duration::from_secs(2), sender.shutdown())
+            .await
+            .expect("shutdown did not complete within 2s");
+    }
+
+    // ── private heuristics ───────────────────────────────────────────────────
+
+    /// `is_self_connection` flags loopback + matching listener port.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn self_connection_detection() {
+        let listener_port: u16 = 7000;
+        let (sender, _) = make_sender(0, [0xAA; 12], listener_port);
+
+        let self_addr: SocketAddr = format!("127.0.0.1:{}", listener_port).parse().unwrap();
+        assert!(sender.is_self_connection(&self_addr));
+
+        let wrong_port: SocketAddr = format!("127.0.0.1:{}", listener_port + 1).parse().unwrap();
+        assert!(!sender.is_self_connection(&wrong_port));
+
+        let wrong_ip: SocketAddr = format!("192.0.2.1:{}", listener_port).parse().unwrap();
+        assert!(!sender.is_self_connection(&wrong_ip));
+
+        sender.shutdown().await;
+    }
+
+    // ── end-to-end: sender ──▶ separate listener (same process) ──────────────
+
+    /// Full 3-way handshake (PEER_HELLO + PORT_RESERVE + PORT_BIND) plus an
+    /// RTPS frame round-trip. Sender on side A reaches the listener on side B,
+    /// and the RTPS frame is routed to side B's discovery crossbeam channel.
+    ///
+    /// Both sides use `participant_id = 0` so the logical port computation
+    /// agrees on both ends — the listener's `MuxState` only accepts
+    /// PORT_RESERVE for its own discovery/user ports.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn end_to_end_send_to_discovery_roundtrip() {
+        // Side B (listener) — ephemeral port.
+        let (b_disc_tx, b_disc_rx, b_user_tx, _b_user_rx) = make_channels();
+        let listener = TcpMuxListener::bind_and_spawn(
+            0,
+            0,
+            0,
+            [0u8; 12],
+            b_disc_tx,
+            b_user_tx,
+            None,
+            Duration::from_secs(60),
+            TcpSocketTuning::default(),
         )
-        .expect("sender creation");
+        .expect("listener bind_and_spawn");
+        let b_port = listener.port();
 
-        (listener, sender, addr, disc_port, user_port)
+        // Side A (sender) — different GUID, dummy local listener port.
+        let (sender, _a_disc_rx) = make_sender(0, [0xAA; 12], 12345);
+
+        // Send.
+        let target: SocketAddr = format!("127.0.0.1:{}", b_port).parse().unwrap();
+        let rtps_data: &[u8] = b"RTPS\x02\x04\x00\x00\x01\x02\x03\x04\x05\x06\x07\x08";
+        blocking_send_discovery(&sender, target, rtps_data).await.expect("send");
+
+        // Listener should eventually receive the RTPS frame on its discovery channel.
+        // 5s allows for the full chain: connect → PEER_HELLO + ACK → PORT_RESERVE
+        // round-trip → PORT_BIND + ACK → conn_actor spawn → first frame.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let received = wait_for_recv(&b_disc_rx, deadline).await;
+        let msg = received.expect("listener did not receive RTPS data within 5s");
+
+        assert_eq!(&msg.data[..rtps_data.len()], rtps_data);
+
+        sender.shutdown().await;
+        listener.shutdown().await;
     }
 
-    /// Pump the listener's accept + on_readable in a background thread until
-    /// the stop flag is set. Returns a JoinHandle.
-    fn spawn_listener_pump(
-        mut listener: TcpMuxListener,
-        stop: Arc<std::sync::atomic::AtomicBool>,
-    ) -> std::thread::JoinHandle<()> {
-        use crate::rtps::transport::tcp::stream_wrapper::wrap_stream;
+    /// A second send to the same peer reuses the cached data connection
+    /// instead of triggering a new connect_task.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cached_send_reuses_existing_data_connection() {
+        let (b_disc_tx, b_disc_rx, b_user_tx, _b_user_rx) = make_channels();
+        let listener = TcpMuxListener::bind_and_spawn(
+            0,
+            0,
+            0,
+            [0u8; 12],
+            b_disc_tx,
+            b_user_tx,
+            None,
+            Duration::from_secs(60),
+            TcpSocketTuning::default(),
+        )
+        .expect("listener bind_and_spawn");
+        let b_port = listener.port();
 
-        std::thread::Builder::new()
-            .name("test_listener_pump".to_string())
-            .spawn(move || {
-                // TcpMuxListener configures the listener as non-blocking, so
-                // accept() returns WouldBlock when there is nothing pending;
-                // we sleep briefly so the stop flag is checked periodically
-                // without busy-spinning. SO_RCVTIMEO is not used here because
-                // it does not propagate to accept() on macOS/BSD/Windows.
-                let raw_listener = match listener.take_listener() {
-                    Some(l) => l,
-                    None => return,
-                };
+        let (sender, _) = make_sender(0, [0xAA; 12], 12345);
 
-                let terminated = stop.clone();
-                let idle_timeout = Duration::from_secs(30);
+        let target: SocketAddr = format!("127.0.0.1:{}", b_port).parse().unwrap();
+        blocking_send_discovery(&sender, target, b"RTPS\x00\x00\x00\x00")
+            .await
+            .expect("first send");
 
-                while !stop.load(std::sync::atomic::Ordering::SeqCst) {
-                    match raw_listener.accept() {
-                        Ok((tcp, addr)) => {
-                            let stream = wrap_stream(tcp);
-                            listener.accept_connection(
-                                stream,
-                                addr,
-                                terminated.clone(),
-                                idle_timeout,
-                            );
-                        }
-                        Err(ref e)
-                            if e.kind() == std::io::ErrorKind::WouldBlock
-                                || e.kind() == std::io::ErrorKind::TimedOut =>
-                        {
-                            std::thread::sleep(Duration::from_millis(100));
-                        }
-                        Err(_) => break,
-                    }
-                }
+        // Wait until the first frame lands on the listener (proves the cache is populated).
+        let deadline = Instant::now() + Duration::from_secs(5);
+        wait_for_recv(&b_disc_rx, deadline).await.expect("first send did not deliver within 5s");
 
-                listener.close();
-            })
-            .unwrap()
-    }
+        // Cache should now contain at least control + data entries.
+        let after_first = sender.connections.len();
+        assert!(after_first >= 2, "expected control + data entries in cache, got {}", after_first);
 
-    #[test]
-    fn test_tcp_sender_creation() {
-        let sender = create_test_sender();
-        assert_eq!(sender.port(), 7400);
-        assert_eq!(sender.connection_count(), 0);
-        assert_eq!(sender.peer_count(), 0);
-    }
+        // Second send reuses the cached connection.
+        blocking_send_discovery(&sender, target, b"RTPS\x11\x11\x11\x11")
+            .await
+            .expect("second send");
 
-    #[test]
-    fn test_disconnect_nonexistent_peer() {
-        let sender = create_test_sender();
-        let addr: SocketAddr = "192.168.1.10:7400".parse().unwrap();
-        sender.disconnect_peer(&addr);
-        assert_eq!(sender.connection_count(), 0);
-    }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        wait_for_recv(&b_disc_rx, deadline).await.expect("second send did not deliver within 5s");
 
-    #[test]
-    fn control_drop_orphan_prune() {
-        let domain = next_test_domain();
-        let (listener, sender, addr, disc_port, _user_port) = create_listener_and_sender(domain);
-
-        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let handle = spawn_listener_pump(listener, stop.clone());
-
-        // Allow listener thread to start
-        std::thread::sleep(Duration::from_millis(100));
-
-        // Establish control + discovery data connection
-        sender.ensure_data(&addr, disc_port).expect("ensure_data");
-        assert_eq!(sender.connection_count(), 2, "control + data");
-
-        // Drop control only → data becomes orphan
-        sender.drop_control_only(&addr);
-        assert_eq!(sender.connection_count(), 1, "orphan data remains");
-
-        // Prune orphans
-        let pruned = sender.prune_orphan_connections();
-        assert!(pruned > 0, "should have pruned orphan data");
-        assert_eq!(sender.connection_count(), 0, "all cleaned up");
-
-        stop.store(true, std::sync::atomic::Ordering::SeqCst);
-        handle.join().unwrap();
-    }
-
-    #[test]
-    fn discovery_data_drop_recovery() {
-        let domain = next_test_domain();
-        let (listener, sender, addr, disc_port, _user_port) = create_listener_and_sender(domain);
-
-        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let handle = spawn_listener_pump(listener, stop.clone());
-
-        std::thread::sleep(Duration::from_millis(100));
-
-        // Establish control + discovery data
-        sender.ensure_data(&addr, disc_port).expect("ensure_data");
-        assert_eq!(sender.connection_count(), 2);
-
-        // Drop discovery data only → control survives
-        sender.drop_data_connection(&addr, disc_port);
-        assert_eq!(sender.connection_count(), 1, "only control remains");
-
-        // Next send triggers re-reserve + re-bind via ensure_data
-        let dummy_rtps = b"RTPS test payload for 12_8";
-        let result = sender.send_to_discovery(&addr, dummy_rtps);
-        assert!(
-            result.is_ok(),
-            "send_to_discovery should succeed after re-reserve: {:?}",
-            result.err()
+        assert_eq!(
+            sender.connections.len(),
+            after_first,
+            "second send should reuse cache, not spawn new connect",
         );
-        assert_eq!(sender.connection_count(), 2, "control + new data restored");
 
-        stop.store(true, std::sync::atomic::Ordering::SeqCst);
-        handle.join().unwrap();
+        sender.shutdown().await;
+        listener.shutdown().await;
     }
 
-    #[test]
-    fn user_data_drop_recovery() {
-        let domain = next_test_domain();
-        let (listener, sender, addr, disc_port, user_port) = create_listener_and_sender(domain);
+    /// `disconnect_peer` evicts every cached connection for the given address.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn disconnect_peer_evicts_cached_entries() {
+        let (b_disc_tx, b_disc_rx, b_user_tx, _b_user_rx) = make_channels();
+        let listener = TcpMuxListener::bind_and_spawn(
+            0,
+            0,
+            0,
+            [0u8; 12],
+            b_disc_tx,
+            b_user_tx,
+            None,
+            Duration::from_secs(60),
+            TcpSocketTuning::default(),
+        )
+        .expect("listener bind_and_spawn");
+        let b_port = listener.port();
 
-        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let handle = spawn_listener_pump(listener, stop.clone());
+        let (sender, _) = make_sender(0, [0xAA; 12], 12345);
+        let target: SocketAddr = format!("127.0.0.1:{}", b_port).parse().unwrap();
+        blocking_send_discovery(&sender, target, b"RTPS\x00\x00\x00\x00").await.expect("send");
 
-        std::thread::sleep(Duration::from_millis(100));
+        // Wait for cache to populate.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        wait_for_recv(&b_disc_rx, deadline).await.expect("send did not deliver within 5s");
+        assert!(sender.connections.len() > 0);
 
-        // Establish control + discovery + user data
-        sender.ensure_data(&addr, disc_port).expect("ensure disc");
-        sender.ensure_data(&addr, user_port).expect("ensure user");
-        assert_eq!(sender.connection_count(), 3, "control + disc + user");
-
-        // Drop user data only → control + discovery survive
-        sender.drop_data_connection(&addr, user_port);
-        assert_eq!(sender.connection_count(), 2, "control + disc remain");
-
-        // Next send triggers re-reserve + re-bind for user port
-        let dummy_rtps = b"RTPS test payload for 12_9";
-        let result = sender.send_to_user_data(&addr, dummy_rtps);
-        assert!(
-            result.is_ok(),
-            "send_to_user_data should succeed after re-reserve: {:?}",
-            result.err()
+        sender.disconnect_peer(target);
+        assert_eq!(
+            sender.connections.len(),
+            0,
+            "disconnect_peer should evict all cached entries to that peer",
         );
-        assert_eq!(sender.connection_count(), 3, "all three connections restored");
 
-        stop.store(true, std::sync::atomic::Ordering::SeqCst);
-        handle.join().unwrap();
+        sender.shutdown().await;
+        listener.shutdown().await;
+    }
+
+    /// A send to our own listener port is refused without spawning a connect
+    /// (self-loop heuristic). The send itself returns Ok (fire-and-forget)
+    /// but no connection is added to the cache.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn send_to_self_does_not_populate_cache() {
+        let listener_port = 7777;
+        let (sender, _) = make_sender(0, [0xAA; 12], listener_port);
+
+        let self_addr: SocketAddr = format!("127.0.0.1:{}", listener_port).parse().unwrap();
+        // `ensure_connection` rejects the self-connect (AddrInUse) before any
+        // cache insert, so the send returns Err and nothing is cached.
+        let _ = blocking_send_discovery(&sender, self_addr, b"RTPS\x00\x00\x00\x00").await;
+
+        assert_eq!(sender.connections.len(), 0, "self-connection must not be cached",);
+
+        sender.shutdown().await;
     }
 }

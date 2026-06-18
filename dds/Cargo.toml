@@ -44,8 +44,11 @@ dashmap = "5.5"
 arc-swap = "1.7"
 libloading = "0.8"
 
+num_cpus = "1.0"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.21"
+tokio-rustls = "0.26"
+tokio-util = { version = "0.7.18", features = ["rt"] }
 futures-util = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -87,6 +90,10 @@ path = "examples/hello_world/hello_world.rs"
 [[example]]
 name = "hello_world_with_ttl"
 path = "examples/hello_world/hello_world_with_ttl.rs"
+
+[[example]]
+name = "hello_world_tcp"
+path = "examples/hello_world_tcp/hello_world_tcp.rs"
 
 [[example]]
 name = "qos_profile_publisher"
