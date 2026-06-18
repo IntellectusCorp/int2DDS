@@ -90,6 +90,12 @@ class Subscriber:
         """
         return DataReader(self, topic, qos, listener, status_mask)
 
+    def create_datareader_dynamic(self, topic, support):
+        """Create a DataReader for a runtime XML/dynamic-typed topic."""
+        from int2dds.types.dynamic import create_datareader_dynamic
+
+        return create_datareader_dynamic(self, topic, support)
+
     def delete_contained_entities(self) -> None:
         """Delete all DataReaders created by this subscriber."""
         check_ret(lib.int2dds_subscriber_delete_contained_entities(self._handle))

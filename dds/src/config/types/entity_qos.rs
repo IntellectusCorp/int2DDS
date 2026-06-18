@@ -728,7 +728,7 @@ pub(crate) struct DomainParticipantQos {
 }
 
 /// Merge two `PropertyQosPolicy` mirrors by `name`: parent's keys are kept and
-/// child's keys override on collision. This matches RTI XML inheritance semantics
+/// child's keys override on collision. This matches XML inheritance semantics
 /// and is required because the simple `.or()` fallback would drop all parent
 /// properties as soon as the child sets a single one.
 fn merge_property_policies(

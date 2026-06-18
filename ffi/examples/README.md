@@ -20,6 +20,10 @@ examples/
 ├── listener/               # Listener callback examples
 │   ├── listener_publisher.c
 │   └── listener_subscriber.c
+├── qos_profile/            # Load QoS from an XML <qos_library>
+│   ├── publisher.c
+│   ├── subscriber.c
+│   └── qos_profiles.xml
 └── multiple_participant/   # Multi-participant examples
     ├── multi_pub_sub.c
     ├── multi_participant_1.c
@@ -140,6 +144,29 @@ INT2DDS_MULTICAST_TTL=32 ./hello_world_with_ttl_publisher
 
 See [docs/guide/env.md](../../docs/guide/env.md#int2dds_multicast_ttl) for the
 full TTL configuration reference.
+
+**QoS Profile (XML)**
+
+`qos_profile_publisher` and `qos_profile_subscriber` load QoS settings from an
+XML profile (RTI/OMG `<qos_library>` syntax, `qos_profile/qos_profiles.xml`).
+The factory auto-loads the profiles named by the `DDS_QOS_PROFILE` environment
+variable; entities created with default QoS pick up the profile marked
+`is_default_profile="true"`. Each example sets `DDS_QOS_PROFILE` to the bundled
+file when it is not already set (override with `--qos-profile PATH`).
+
+```bash
+# Windows (run from build/Debug)
+cd build/Debug
+./qos_profile_subscriber --qos-profile ../../qos_profile/qos_profiles.xml
+./qos_profile_publisher  --qos-profile ../../qos_profile/qos_profiles.xml
+
+# Or set the env var explicitly (any platform)
+DDS_QOS_PROFILE=../qos_profile/qos_profiles.xml ./qos_profile_subscriber
+DDS_QOS_PROFILE=../qos_profile/qos_profiles.xml ./qos_profile_publisher
+```
+
+The Python (`python/examples/qos_profile_*.py`) and C#
+(`csharp/examples/QosProfile*`) bindings ship equivalent examples.
 
 ### Multiple Participant Example
 
