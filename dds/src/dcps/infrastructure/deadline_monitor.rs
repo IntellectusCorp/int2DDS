@@ -84,7 +84,7 @@ impl DeadlineMonitor {
     }
 
     pub(crate) fn reschedule_instance(&self, handle: &InstanceHandle) {
-        trace!("[DeadlineMonitor] Rescheduling instance: {:?}", handle);
+        trace!("[DeadlineMonitor] Rescheduling instance: {}", handle);
         if let Ok(mut trackers) = self.trackers.lock() {
             if let Some(last_update) = trackers.get_mut(handle) {
                 let now = Time::now();
@@ -95,24 +95,21 @@ impl DeadlineMonitor {
                     handle, old_time, now
                 );
             } else {
-                warn!("[DeadlineMonitor] Attempted to reschedule untracked instance: {:?}", handle);
+                warn!("[DeadlineMonitor] Attempted to reschedule untracked instance: {}", handle);
             }
         } else {
-            warn!(
-                "[DeadlineMonitor] Failed to acquire lock for rescheduling instance: {:?}",
-                handle
-            );
+            warn!("[DeadlineMonitor] Failed to acquire lock for rescheduling instance: {}", handle);
         }
     }
 
     pub(crate) fn track_instance(&self, handle: &InstanceHandle) {
-        debug!("[DeadlineMonitor] Starting to track instance: {:?}", handle);
+        debug!("[DeadlineMonitor] Starting to track instance: {}", handle);
         if let Ok(mut trackers) = self.trackers.lock() {
             let now = Time::now();
             let was_new = trackers.insert(*handle, now).is_none();
             if was_new {
                 debug!(
-                    "[DeadlineMonitor] New instance {:?} added to tracking at {:?}. Total tracked: {}",
+                    "[DeadlineMonitor] New instance {} added to tracking at {:?}. Total tracked: {}",
                     handle, now, trackers.len()
                 );
             } else {
@@ -122,12 +119,12 @@ impl DeadlineMonitor {
                 );
             }
         } else {
-            warn!("[DeadlineMonitor] Failed to acquire lock for tracking instance: {:?}", handle);
+            warn!("[DeadlineMonitor] Failed to acquire lock for tracking instance: {}", handle);
         }
     }
 
     pub(crate) fn cancel_instance(&self, handle: &InstanceHandle) {
-        debug!("[DeadlineMonitor] Canceling tracking for instance: {:?}", handle);
+        debug!("[DeadlineMonitor] Canceling tracking for instance: {}", handle);
         if let Ok(mut trackers) = self.trackers.lock() {
             if trackers.remove(handle).is_some() {
                 debug!(
@@ -136,10 +133,10 @@ impl DeadlineMonitor {
                     trackers.len()
                 );
             } else {
-                warn!("[DeadlineMonitor] Attempted to cancel untracked instance: {:?}", handle);
+                warn!("[DeadlineMonitor] Attempted to cancel untracked instance: {}", handle);
             }
         } else {
-            warn!("[DeadlineMonitor] Failed to acquire lock for canceling instance: {:?}", handle);
+            warn!("[DeadlineMonitor] Failed to acquire lock for canceling instance: {}", handle);
         }
     }
 
@@ -260,7 +257,7 @@ impl DeadlineMonitor {
                             };
 
                             debug!(
-                                "[DeadlineMonitor Thread] Invoking callback for {} status, instance: {:?}",
+                                "[DeadlineMonitor Thread] Invoking callback for {} status, instance: {}",
                                 if is_writer { "OFFERED_DEADLINE_MISSED" } else { "REQUESTED_DEADLINE_MISSED" },
                                 handle
                             );

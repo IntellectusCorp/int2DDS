@@ -446,7 +446,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
                     cache_change.instance_handle(),
                 )? {
                     debug!(
-                        "Rejecting change, writer {:?} is not owner of instance: {:?}",
+                        "Rejecting change, writer {} is not owner of instance: {}",
                         cache_change.writer_guid(),
                         cache_change.instance_handle()
                     );
@@ -486,13 +486,13 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
         update_state: bool, // should update instance state to NOT_ALIVE_NO_WRITERS if no candidates left
         synthesize_notification: bool, // should data reader create an invalid-data sample
     ) -> DdsResult<()> {
-        debug!("Removing writer {:?} from owner candidates", remote_writer_guid);
+        debug!("Removing writer {} from owner candidates", remote_writer_guid);
         for mut entry in self.owner_candidates.iter_mut() {
             let writers = entry.value_mut();
             writers.retain(|owner_info| owner_info.owner_guid != remote_writer_guid);
 
             if writers.is_empty() {
-                debug!("No writers left for instance {:?}", *entry.key());
+                debug!("No writers left for instance {}", *entry.key());
                 if update_state {
                     let data_reader = self
                         .data_reader
@@ -561,7 +561,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
         let mut entry = self.owner_candidates.entry(instance_handle).or_default();
         if !entry.iter().any(|info| info.owner_guid == owner_guid) {
             debug!(
-                "Adding new owner candidate {:?} with strength {} for instance {:?}",
+                "Adding new owner candidate {} with strength {} for instance {}",
                 owner_guid, ownership_strength, instance_handle
             );
             entry.insert(OwnershipInfo { ownership_strength, owner_guid });

@@ -59,6 +59,11 @@ impl EntityKind {
         (self.0 & 0x0F) == 0x02 || (self.0 & 0x0F) == 0x07
     }
 }
+impl std::fmt::Display for EntityKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:02x}", self.0)
+    }
+}
 impl TryFrom<u8> for EntityKind {
     type Error = &'static str;
 

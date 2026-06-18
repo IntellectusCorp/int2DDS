@@ -123,9 +123,9 @@ impl SPDPbuiltinParticipantWriter {
         match self.reader_locators.lock() {
             Ok(mut reader_locators) => {
                 debug!(
-                    "SPDP Builtin Participant Writer had {} reader locators before remove {:?}",
+                    "SPDP Builtin Participant Writer had {} reader locators before remove {}",
                     reader_locators.len(),
-                    guid_prefix
+                    Guid::guid_prefix_to_string(&guid_prefix)
                 );
                 reader_locators.retain(|x| x.guid_prefix() != guid_prefix);
                 debug!(
