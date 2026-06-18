@@ -97,11 +97,16 @@ impl Guid {
     }
 
     pub fn guid_prefix_to_string(prefix: &GuidPrefix) -> String {
-        prefix.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(":")
+        prefix.iter().map(|b| format!("{:02x}", b)).collect()
     }
 
     pub fn to_hex_string(&self) -> String {
         self.to_bytes().iter().map(|b| format!("{:02x}", b)).collect()
+    }
+}
+impl std::fmt::Display for Guid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_hex_string())
     }
 }
 
@@ -123,6 +128,14 @@ impl GroupDigest {
     pub fn from_entity_ids() -> Self {
         todo!()
         // DDSI-RTPS v2.5 9.3.2.5 GroupDigest_t (p.150)
+    }
+}
+impl std::fmt::Display for GroupDigest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for b in &self.0 {
+            write!(f, "{:02x}", b)?;
+        }
+        Ok(())
     }
 }
 

@@ -43,6 +43,11 @@ impl SequenceNumber {
         result
     }
 }
+impl std::fmt::Display for SequenceNumber {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_i64())
+    }
+}
 
 impl AddAssign<u32> for SequenceNumber {
     fn add_assign(&mut self, rhs: u32) {
@@ -302,6 +307,13 @@ impl<T: SetNumberType> NumberSet<T> {
         }
 
         numbers
+    }
+}
+impl<T: SetNumberType + std::fmt::Display> std::fmt::Display for NumberSet<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let list =
+            self.extract_numbers().iter().map(|n| n.to_string()).collect::<Vec<_>>().join(",");
+        write!(f, "base={},[{}]", self.bitmap_base, list)
     }
 }
 

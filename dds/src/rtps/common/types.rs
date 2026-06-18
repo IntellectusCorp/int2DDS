@@ -58,6 +58,11 @@ impl ProtocolVersion {
 
     pub const PROTOCOLVERSION_2_5: Self = Self { major: 2, minor: 5 };
 }
+impl std::fmt::Display for ProtocolVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}", self.major, self.minor)
+    }
+}
 
 pub type MessageLength = u32;
 pub const MESSAGE_LENGTH_INVALID: MessageLength = 0;
@@ -111,6 +116,11 @@ impl ChangeCount {
     pub fn to_i64(&self) -> i64 {
         // high.wrapping_shl(32) == high << 32
         (self.high as i64).wrapping_shl(32) | (self.low as i64)
+    }
+}
+impl std::fmt::Display for ChangeCount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_i64())
     }
 }
 

@@ -489,11 +489,11 @@ impl SedpLogic {
         let participant = self.get_upgraded_participant()?;
 
         if participant.guid().prefix() != endpoint_guid.prefix() {
-            debug!("Not local endpoint, skipping matching for GUID: {:?}", endpoint_guid);
+            debug!("Not local endpoint, skipping matching for GUID: {}", endpoint_guid);
             return Ok(());
         }
 
-        debug!("Local endpoint detected, proceeding to match for GUID: {:?}", endpoint_guid);
+        debug!("Local endpoint detected, proceeding to match for GUID: {}", endpoint_guid);
         if let BuiltinTopicData::Publication(publication_builtin_topic_data) = builtin_topic_data {
             let local_reader = participant
                 .find_reader_from_entity_id(endpoint_guid.entity_id())
@@ -639,7 +639,7 @@ impl SedpLogic {
             ) {
                 // Incompatible - remove matching
                 debug!(
-                    "QoS changed for remote reader {:?}, now incompatible - removing matching",
+                    "QoS changed for remote reader {}, now incompatible - removing matching",
                     endpoint_guid
                 );
                 writer
@@ -672,7 +672,7 @@ impl SedpLogic {
                 .changeable_qos_equals(&subscription_builtin_topic_data)
             {
                 debug!(
-                    "Syncing subscription_builtin_topic_data for compatible remote reader {:?}",
+                    "Syncing subscription_builtin_topic_data for compatible remote reader {}",
                     endpoint_guid
                 );
                 writer
@@ -782,7 +782,7 @@ impl SedpLogic {
             ) {
                 // Incompatible - remove matching
                 debug!(
-                    "QoS changed for remote reader {:?}, now incompatible - removing matching",
+                    "QoS changed for remote reader {}, now incompatible - removing matching",
                     endpoint_guid
                 );
                 writer
@@ -816,7 +816,7 @@ impl SedpLogic {
                 .changeable_qos_equals(&subscription_builtin_topic_data)
             {
                 debug!(
-                    "Syncing subscription_builtin_topic_data for compatible remote reader {:?}",
+                    "Syncing subscription_builtin_topic_data for compatible remote reader {}",
                     endpoint_guid
                 );
                 writer
@@ -1029,7 +1029,7 @@ impl SedpLogic {
             ) {
                 // Incompatible - remove matching
                 debug!(
-                    "QoS changed for remote writer {:?}, now incompatible - removing matching",
+                    "QoS changed for remote writer {}, now incompatible - removing matching",
                     endpoint_guid
                 );
 
@@ -1069,7 +1069,7 @@ impl SedpLogic {
             {
                 // Still compatible - just update builtin_topic_data
                 debug!(
-                    "Syncing publication_builtin_topic_data for compatible remote writer {:?}",
+                    "Syncing publication_builtin_topic_data for compatible remote writer {}",
                     endpoint_guid
                 );
                 reader
@@ -1153,7 +1153,7 @@ impl SedpLogic {
             ) {
                 // Incompatible - remove matching
                 debug!(
-                    "QoS changed for remote writer {:?}, now incompatible - removing matching",
+                    "QoS changed for remote writer {}, now incompatible - removing matching",
                     endpoint_guid
                 );
 
@@ -1195,7 +1195,7 @@ impl SedpLogic {
                 .changeable_qos_equals(&publication_builtin_topic_data)
             {
                 debug!(
-                    "Syncing publication_builtin_topic_data for compatible remote writer {:?}",
+                    "Syncing publication_builtin_topic_data for compatible remote writer {}",
                     endpoint_guid
                 );
 
@@ -1675,7 +1675,7 @@ impl SedpLogic {
                 );
             }
         } else {
-            error!("Invalid sender for SEDP termination: {:?}", builtin_writer_guid.entity_id());
+            error!("Invalid sender for SEDP termination: {}", builtin_writer_guid.entity_id());
         }
 
         for remote_guid in remote_guid_list {
@@ -1749,9 +1749,9 @@ impl SedpLogic {
             participant.find_remote_participant_proxy_data(remote_guid.prefix())
         else {
             debug!(
-                "[{}] SEDP Logic: Remote participant data not found for GUID prefix: {:?}",
+                "[{}] SEDP Logic: Remote participant data not found for GUID prefix: {}",
                 message_type,
-                remote_guid.prefix()
+                Guid::guid_prefix_to_string(&remote_guid.prefix())
             );
             return Ok(false);
         };
@@ -1966,7 +1966,7 @@ impl SedpLogic {
                 RtpsError::new(
                     RtpsErrorCode::BuiltinEndpointNotFound,
                     format!(
-                        "[data] SPDP Message may have not been received, cause builtin reader not matched with remote guid: {:?}",
+                        "[data] SPDP Message may have not been received, cause builtin reader not matched with remote guid: {}",
                         writer_guid
                     ),
                 )
@@ -2004,7 +2004,7 @@ impl UnicastMessageProcessor for SedpLogic {
             return self.handle_type_lookup_data(rtps_header, data);
         }
 
-        debug!("[data] entity id - reader: {:?}, writer: {:?}", data.reader_id, data.writer_id);
+        debug!("[data] entity id - reader: {}, writer: {}", data.reader_id, data.writer_id);
 
         let is_big_endian = submessage_header
             .endianness_flag()
@@ -2154,7 +2154,7 @@ impl UnicastMessageProcessor for SedpLogic {
         }
 
         debug!(
-            "[heartbeat] entity id - reader: {:?}, writer: {:?}",
+            "[heartbeat] entity id - reader: {}, writer: {}",
             heartbeat.reader_id, heartbeat.writer_id
         );
 
@@ -2181,7 +2181,7 @@ impl UnicastMessageProcessor for SedpLogic {
         let final_flag = submessage_header.final_flag().unwrap_or(false);
 
         if !local_reader.matched_writer_is_matched(remote_writer_guid) {
-            debug!("[heartbeat] SPDP Message may have not been received, cause builtin reader not matched with remote guid: {:?}", remote_writer_guid);
+            debug!("[heartbeat] SPDP Message may have not been received, cause builtin reader not matched with remote guid: {}", remote_writer_guid);
             return Ok(());
         }
 
@@ -2219,8 +2219,9 @@ impl UnicastMessageProcessor for SedpLogic {
         // Send AckNack if there are missing changes or if response is required
         if !missing_changes.is_empty() || requires_response {
             debug!(
-                "Sending AckNack - missing changes: {:?}, requires response: {}",
-                missing_changes, requires_response
+                "Sending AckNack - missing changes: [{}], requires response: {}",
+                missing_changes.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(", "),
+                requires_response
             );
 
             writer_proxy.increase_acknack_count();
@@ -2249,7 +2250,7 @@ impl UnicastMessageProcessor for SedpLogic {
         }
 
         debug!(
-            "[acknack] entity id - reader: {:?}, writer: {:?}",
+            "[acknack] entity id - reader: {}, writer: {}",
             acknack.reader_id, acknack.writer_id
         );
 
@@ -2315,8 +2316,9 @@ impl UnicastMessageProcessor for SedpLogic {
         let missing_sequence_numbers = acknack.reader_sn_state.extract_numbers();
 
         debug!(
-            "Missing sequence numbers {:?} from remote: {:?}",
-            missing_sequence_numbers, remote_reader_guid
+            "Missing sequence numbers [{}] from remote: {}",
+            missing_sequence_numbers.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(", "),
+            remote_reader_guid
         );
 
         if missing_sequence_numbers.is_empty() {
@@ -2339,7 +2341,7 @@ impl UnicastMessageProcessor for SedpLogic {
 
         if !gap_sns.is_empty() {
             debug!(
-                "[SEDP] GAP for {} missing SN(s) not in cache, remote: {:?}",
+                "[SEDP] GAP for {} missing SN(s) not in cache, remote: {}",
                 gap_sns.len(),
                 remote_reader_guid
             );
@@ -2353,7 +2355,7 @@ impl UnicastMessageProcessor for SedpLogic {
 
         if !missing_changes.is_empty() {
             debug!(
-                "Retransmitting {} missing changes from remote: {:?}",
+                "Retransmitting {} missing changes from remote: {}",
                 missing_changes.len(),
                 remote_reader_guid
             );
