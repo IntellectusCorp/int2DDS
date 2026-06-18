@@ -933,7 +933,7 @@ mod tests {
     }
 
     fn change_callback(change: Arc<CacheChange>) {
-        log::info!("change: {:?}", change);
+        log::info!("change: {}", change);
     }
     fn status_callback(status: StatusKind, info: Option<Arc<dyn StatusInfo>>) {
         log::info!("status: {:?}", status);
@@ -1001,7 +1001,7 @@ mod tests {
                     let changes = reader.available_changes();
                     if changes.len() > 0 {
                         for change in changes {
-                            log::info!("change: {:?}", change);
+                            log::info!("change: {}", change);
                         }
                     } else {
                         continue;

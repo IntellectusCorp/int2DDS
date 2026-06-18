@@ -155,7 +155,7 @@ impl fmt::Display for TimerId {
                 write!(f, "spdp_multicast_{}", domain_id)
             }
             TimerId::WlpP2p { guid_prefix } => {
-                write!(f, "wlp_p2p_{:02x?}", guid_prefix)
+                write!(f, "wlp_p2p_{}", Guid::guid_prefix_to_string(guid_prefix))
             }
             TimerId::LifespanWriter { writer_guid } => {
                 write!(f, "lifespan_writer_{:x}", Self::guid_u128(writer_guid))
@@ -172,8 +172,8 @@ impl fmt::Display for TimerId {
             TimerId::SedpScheduledMessage { remote_prefix, writer_entity_id } => {
                 write!(
                     f,
-                    "sedp_scheduled_{:02x?}_{}",
-                    remote_prefix,
+                    "sedp_scheduled_{}_{}",
+                    Guid::guid_prefix_to_string(remote_prefix),
                     Self::id_hex(writer_entity_id)
                 )
             }
