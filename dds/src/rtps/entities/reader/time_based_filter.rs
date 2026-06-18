@@ -101,14 +101,23 @@ impl TimeBasedFilter {
         Some(change)
     }
 
-    // Drop any held sample for this instance. Called when a non-ALIVE change bypasses the
-    // filter: the held sample was filtered data the reader did not commit to delivering, so it
-    // is discarded rather than leaked out after the dispose by a later timer firing.
+    // Drop the held sample on dispose/unregister; the instance still exists, so keep its state.
     pub(crate) fn discard_pending(&self, instance_handle: InstanceHandle) {
         let mut instances = self.lock();
         if let Some(state) = instances.get_mut(&instance_handle) {
             state.pending = None;
         }
+    }
+
+    // Forget an instance's filter state when the instance is removed from the reader.
+    pub(crate) fn remove_instance(&self, instance_handle: InstanceHandle) {
+        let mut instances = self.lock();
+        instances.remove(&instance_handle);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tracks_instance(&self, instance_handle: InstanceHandle) -> bool {
+        self.lock().contains_key(&instance_handle)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<InstanceHandle, InstanceFilterState>> {

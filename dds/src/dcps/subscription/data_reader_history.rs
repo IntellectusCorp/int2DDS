@@ -572,8 +572,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
     // Removes unused instances from the instance map.
     fn remove_unused_instance(&mut self) -> DdsResult<bool> {
         let mut key_to_remove: Option<InstanceHandle> = None;
-        let mut instance_map =
-            self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        let instance_map = self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
         for (instance_handle, changes) in instance_map.iter() {
             if changes.is_empty() && self.check_if_no_writers(*instance_handle)? {
@@ -582,12 +581,30 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
             }
         }
 
+        drop(instance_map);
+
         if let Some(key) = key_to_remove {
-            instance_map.remove(&key);
+            self.remove_all_instance_resources(key);
             Ok(true)
         } else {
             Ok(false)
         }
+    }
+
+    // Drop all resources associated with the specified instance, including its CacheChanges and filter state.
+    pub(crate) fn remove_all_instance_resources(&self, instance_handle: InstanceHandle) {
+        if let Ok(mut instance_map) = self.instance_map.lock() {
+            instance_map.remove(&instance_handle);
+        }
+
+        let Some(data_reader) = self.data_reader.upgrade() else { return };
+        if let Ok(rtps_reader) = data_reader.get_rtps_reader() {
+            if let Some(filter) = rtps_reader.time_based_filter() {
+                filter.remove_instance(instance_handle);
+            }
+        }
+
+        data_reader.remove_instance_info(instance_handle);
     }
 
     // Checks if there is no writer writing to this instance.
@@ -823,6 +840,51 @@ mod tests {
             .unwrap();
 
         reader
+    }
+
+    // Reclaiming an instance drops all three per-instance resources: the cache index entry,
+    // the SampleInfo bookkeeping, and the TIME_BASED_FILTER state.
+    #[test]
+    fn remove_all_instance_resources_clears_index_sample_info_and_filter() {
+        let mut qos = DataReaderQos::default();
+        qos.time_based_filter.minimum_separation = Duration::from_millis(500);
+        let reader = create_with_key_datareader(qos);
+        let handle = InstanceHandle::new([7; 16]);
+
+        // Populate all three: cache index, SampleInfo state, and filter state.
+        let cache_arc = reader.get_datareader_cache().unwrap();
+        cache_arc
+            .lock()
+            .unwrap()
+            .add_change_with_cleanup(create_change_with_key(1, handle))
+            .unwrap();
+        reader
+            .update_instance_state(handle, InstanceStateKind::ALIVE_INSTANCE_STATE, None)
+            .unwrap();
+        let rtps_reader = reader.get_rtps_reader().unwrap();
+        let filter =
+            rtps_reader.time_based_filter().expect("filter present for min_separation > 0");
+        filter.on_alive_sample(
+            (*create_change_with_key(2, handle)).clone(),
+            500_000_000,
+            RtpsTime::now(),
+        );
+
+        assert!(cache_arc.lock().unwrap().get_instance_map().lock().unwrap().contains_key(&handle));
+        assert!(reader.get_instance_infos().unwrap().contains_key(&handle));
+        assert!(filter.tracks_instance(handle));
+
+        cache_arc.lock().unwrap().remove_all_instance_resources(handle);
+
+        assert!(!cache_arc
+            .lock()
+            .unwrap()
+            .get_instance_map()
+            .lock()
+            .unwrap()
+            .contains_key(&handle));
+        assert!(!reader.get_instance_infos().unwrap().contains_key(&handle));
+        assert!(!filter.tracks_instance(handle));
     }
 
     mod history_qos {
