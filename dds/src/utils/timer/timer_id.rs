@@ -1,5 +1,6 @@
 use std::fmt;
 
+use crate::common::instance_handle::InstanceHandle;
 use crate::rtps::common::entity_id::EntityId;
 use crate::rtps::common::guid::{Guid, GuidPrefix};
 use crate::rtps::common::sequence::SequenceNumber;
@@ -89,6 +90,12 @@ pub(crate) enum TimerId {
 
     // Thread monitoring periodic timer
     ThreadMonitoring,
+
+    // Reader: one-shot delivery of a held sample for TIME_BASED_FILTER
+    TimeBasedFilter {
+        reader_entity_id: EntityId,
+        instance_handle: InstanceHandle,
+    },
 }
 
 impl fmt::Display for TimerId {
@@ -179,6 +186,9 @@ impl fmt::Display for TimerId {
             }
             TimerId::ThreadMonitoring => {
                 write!(f, "thread_monitoring_timer")
+            }
+            TimerId::TimeBasedFilter { reader_entity_id, instance_handle } => {
+                write!(f, "tbf_{}_{}", Self::id_hex(reader_entity_id), instance_handle)
             }
         }
     }
