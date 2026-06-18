@@ -88,6 +88,12 @@ impl BuiltinEndpointSet {
         Self { bitmask: 0 }
     }
 }
+impl std::fmt::Display for BuiltinEndpointSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Reuse the bitflags-derived Debug to expand the bitmask into flag names.
+        write!(f, "{:?}", BuiltinEndpointFlag::from_bits_truncate(self.bitmask))
+    }
+}
 
 impl Default for BuiltinEndpointSet {
     fn default() -> Self {
