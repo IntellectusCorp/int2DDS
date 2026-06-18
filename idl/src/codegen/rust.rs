@@ -244,9 +244,7 @@ impl<'a> RustGen<'a> {
         }
         match s.extensibility {
             ExtensibilityKind::Appendable => {} // default, no annotation needed
-            ExtensibilityKind::Final => {
-                type_attrs.push("extensibility = \"Final\"".to_string())
-            }
+            ExtensibilityKind::Final => type_attrs.push("extensibility = \"Final\"".to_string()),
             ExtensibilityKind::Mutable => {
                 type_attrs.push("extensibility = \"Mutable\"".to_string())
             }
@@ -446,7 +444,7 @@ mod tests {
         let code = generate(&model, "HelloWorld.idl", &RustOptions::default());
 
         assert!(code.contains("#[derive(DdsType)]"));
-        assert!(!code.contains("extensibility"));  // Appendable is default, no annotation needed
+        assert!(!code.contains("extensibility")); // Appendable is default, no annotation needed
         assert!(code.contains("pub struct HelloWorld {"));
         assert!(code.contains("pub index: u32,"));
         assert!(code.contains("pub message: String,"));
