@@ -256,3 +256,34 @@ impl Xcdr2Serializer {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[allow(unused_imports)]
+mod cdr_sequence_tests {
+    use crate::{
+        dcps::topic::type_support::{DdsType, FieldAccessor},
+        serialize::{
+            cdr::{
+                CdrDeserialize, CdrDeserializer, CdrSerialize, CdrSerializer, ExtensibilityKind,
+                XcdrDeserialize, XcdrDeserializer, XcdrSerialize, XcdrSerializer,
+            },
+            BufferManager, DeserializerReader, WChar, WString,
+        },
+    };
+    use std::collections::HashMap;
+    #[test]
+    fn test_cdr_vec_i32() {
+        let value: Vec<i32> = vec![1, 2, 3, 4, 5];
+
+        let mut serializer = CdrSerializer::new(true);
+        serializer.write_encapsulation_header().unwrap();
+        value.serialize_cdr(&mut serializer).unwrap();
+
+        let bytes = serializer.into_bytes();
+        let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+        let result = Vec::<i32>::deserialize_cdr(&mut deserializer).unwrap();
+        assert_eq!(result, value);
+    }
+
+    // Array Tests - CDR
+}

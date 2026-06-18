@@ -432,3 +432,155 @@ mod tests {
         assert_ne!(key, InstanceHandle::NIL);
     }
 }
+
+#[cfg(test)]
+#[allow(unused_imports)]
+mod nested_enum_width_tests {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use crate::dcps::topic::type_support::{DdsType, SerializationFormat};
+    use crate::serialize::cdr::{
+        CdrSerialize, CdrSerializer, ExtensibilityKind, PrimitiveSerialize, Xcdr2Serializer,
+        XcdrDeserialize, XcdrDeserializer, XcdrSerialize,
+    };
+    use crate::serialize::{BufferManager, DeserializerReader};
+    use crate::xtypes::{
+        serialize_dynamic_data, CollectionElementFlag, CompleteStructMember, CompleteStructType,
+        CompleteTypeObject, DynamicData, DynamicType, DynamicTypeKind, DynamicTypeSupport,
+        DynamicValue, EquivalenceHash, HasTypeObject, MemberFlag, PlainCollectionHeader,
+        TryConstructKind, TypeFlag, TypeIdentifier, TypeObject, TypeRegistry,
+    };
+    fn hash_of(id: &TypeIdentifier) -> EquivalenceHash {
+        match id {
+            TypeIdentifier::CompleteTypeId(h) | TypeIdentifier::MinimalTypeId(h) => *h,
+            other => panic!("expected a hash-based type identifier, got {:?}", other),
+        }
+    }
+
+    fn concrete_cdr<T: CdrSerialize>(value: &T) -> Vec<u8> {
+        let mut serializer = CdrSerializer::with_capacity(true, 256);
+        serializer.write_encapsulation_header().unwrap();
+        value.serialize_cdr(&mut serializer).unwrap();
+        serializer.into_bytes()
+    }
+
+    fn dynamic_bytes(data: &DynamicData, format: &SerializationFormat) -> Vec<u8> {
+        serialize_dynamic_data(data, format).unwrap().to_vec()
+    }
+
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "int2dds")]
+    #[repr(u8)]
+    enum Small8 {
+        A,
+        B,
+        C,
+    }
+
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "int2dds")]
+    #[repr(i16)]
+    enum Small16 {
+        X,
+        Y,
+        Z,
+    }
+
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "int2dds", extensibility = "Final")]
+    struct EnumHolder {
+        v8: Small8,
+        v16: Small16,
+        list: Vec<Small8>,
+    }
+
+    fn build_dynamic_enum_holder(dt: &Arc<DynamicType>) -> DynamicData {
+        let e = |value: i32| DynamicValue::Enum { name: String::new(), value };
+        let mut data = DynamicData::new(dt.clone());
+        data.set_value("v8", e(2)).unwrap();
+        data.set_value("v16", e(2)).unwrap();
+        data.set_value("list", DynamicValue::Sequence(vec![e(0), e(1)])).unwrap();
+        data
+    }
+
+    fn concrete_enum_holder() -> EnumHolder {
+        EnumHolder { v8: Small8::C, v16: Small16::Z, list: vec![Small8::A, Small8::B] }
+    }
+
+    fn enum_holder_type_object() -> TypeObject {
+        let small8_hash = hash_of(&Small8::type_identifier());
+        let small16_hash = hash_of(&Small16::type_identifier());
+        let flag = || MemberFlag::new(TryConstructKind::Discard, false, false, false, false, false);
+
+        let mut outer = CompleteStructType::new(
+            TypeFlag::new(crate::xtypes::ExtensibilityKind::Final, false, false),
+            "EnumHolderSupport".into(),
+            None,
+        );
+        outer.add_member(CompleteStructMember::new(
+            0,
+            flag(),
+            TypeIdentifier::CompleteTypeId(small8_hash),
+            "v8".to_string(),
+        ));
+        outer.add_member(CompleteStructMember::new(
+            1,
+            flag(),
+            TypeIdentifier::CompleteTypeId(small16_hash),
+            "v16".to_string(),
+        ));
+        outer.add_member(CompleteStructMember::new(
+            2,
+            flag(),
+            TypeIdentifier::PlainSequenceLarge {
+                header: PlainCollectionHeader::default(),
+                bound: 0,
+                element_identifier: Box::new(TypeIdentifier::CompleteTypeId(small8_hash)),
+            },
+            "list".to_string(),
+        ));
+        TypeObject::Complete(CompleteTypeObject::Struct(outer))
+    }
+
+    fn enum_holder_registry() -> TypeRegistry {
+        let mut registry = TypeRegistry::new();
+        registry.register_complete(
+            hash_of(&Small8::type_identifier()),
+            "Small8".into(),
+            Small8::complete_type_object(),
+        );
+        registry.register_complete(
+            hash_of(&Small16::type_identifier()),
+            "Small16".into(),
+            Small16::complete_type_object(),
+        );
+        registry
+    }
+
+    #[test]
+    fn support_with_registry_resolves_nested_enum_width() {
+        let support = DynamicTypeSupport::from_type_object_with_registry(
+            enum_holder_type_object(),
+            &enum_holder_registry(),
+        )
+        .unwrap();
+        let dynamic = build_dynamic_enum_holder(support.dynamic_type());
+        assert_eq!(
+            dynamic_bytes(&dynamic, &SerializationFormat::Cdr),
+            concrete_cdr(&concrete_enum_holder())
+        );
+    }
+
+    #[test]
+    fn support_without_registry_does_not_resolve_nested_enum_width() {
+        let support = DynamicTypeSupport::from_type_object(enum_holder_type_object()).unwrap();
+        let dynamic = build_dynamic_enum_holder(support.dynamic_type());
+        let codegen = concrete_cdr(&concrete_enum_holder());
+
+        match serialize_dynamic_data(&dynamic, &SerializationFormat::Cdr) {
+            Ok(bytes) => assert_ne!(bytes.to_vec(), codegen),
+            Err(_) => {}
+        }
+    }
+}

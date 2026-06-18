@@ -388,3 +388,124 @@ impl Default for SubscriptionBuiltinTopicData {
         Self::new(&DataReaderQos::default(), &SubscriberQos::default(), &TopicQos::default())
     }
 }
+
+#[cfg(test)]
+#[allow(unused_imports)]
+mod tests {
+    use crate::{
+        common::builtin::topic::{
+            participant_builtin_topic_data::ParticipantBuiltinTopicData,
+            publication_builtin_topic_data::PublicationBuiltinTopicData,
+            subscription_builtin_topic_data::SubscriptionBuiltinTopicData,
+            topic_builtin_topic_data::TopicBuiltinTopicData,
+        },
+        core::time::Duration,
+        infrastructure::qos_policy::{
+            ReliabilityQosPolicy, ReliabilityQosPolicyKind, UserDataQosPolicy,
+        },
+        publication::qos::{DataWriterQos, PublisherQos},
+        rtps::common::{guid::Guid, locator::Locator},
+        subscription::qos::{DataReaderQos, SubscriberQos},
+        topic::{qos::TopicQos, type_support::DdsType},
+        xtypes::{
+            EquivalenceHash, MinimalTypeObject, TypeIdentifier, TypeIdentifierWithDependencies,
+            TypeIdentifierWithSize, TypeInformation, TypeObject,
+        },
+    };
+    const PL_CDR_LE_HEADER: [u8; 4] = [0x00, 0x03, 0x00, 0x00];
+    fn make_guid(seed: u8) -> Guid {
+        let mut bytes = [0u8; 16];
+        for (i, b) in bytes.iter_mut().enumerate() {
+            *b = seed.wrapping_add(i as u8);
+        }
+        Guid::from_bytes(bytes)
+    }
+    fn locator(port: u32, addr_seed: u8) -> Locator {
+        let mut addr = [0u8; 16];
+        for (i, b) in addr.iter_mut().enumerate() {
+            *b = addr_seed.wrapping_add(i as u8);
+        }
+        Locator::new(1, port, addr)
+    }
+    fn count_pid_occurrences(payload: &[u8], pid_le: u16) -> usize {
+        assert!(payload.len() >= 4, "payload too short for encap header");
+        let mut pos = 4usize;
+        let mut count = 0usize;
+        while pos + 4 <= payload.len() {
+            let pid = u16::from_le_bytes([payload[pos], payload[pos + 1]]);
+            let len = u16::from_le_bytes([payload[pos + 2], payload[pos + 3]]) as usize;
+            // PID_SENTINEL = 0x0001 ends the list.
+            if pid == 0x0001 {
+                break;
+            }
+            if pid == pid_le {
+                count += 1;
+            }
+            pos += 4 + len;
+            // 4-byte alignment for next parameter (already aligned because len is u16
+            // and PlCdrSerializer pads each parameter to 4-byte boundary, but be safe).
+            pos = pos.div_ceil(4) * 4;
+        }
+        count
+    }
+    fn assert_starts_with_pl_cdr_le(payload: &[u8]) {
+        assert!(payload.len() >= 4, "payload too short");
+        assert_eq!(&payload[..4], &PL_CDR_LE_HEADER, "expected PL_CDR_LE encapsulation header");
+    }
+    fn sample_subscription() -> SubscriptionBuiltinTopicData {
+        let qos = DataReaderQos {
+            reliability: ReliabilityQosPolicy {
+                kind: ReliabilityQosPolicyKind::Reliable,
+                max_blocking_time: Duration { sec: 0, nanosec: 0 },
+            },
+            ..Default::default()
+        };
+        let mut s = SubscriptionBuiltinTopicData::new(
+            &qos,
+            &SubscriberQos::default(),
+            &TopicQos::default(),
+        );
+        s.set_endpoint_guid(make_guid(0x33));
+        s.set_topic_name("test/sub_topic".into());
+        s.set_type_name("SubType".into());
+        s.add_multicast_locator(locator(7402, 0x30));
+        s
+    }
+    #[test]
+    fn subscription_pl_cdr_roundtrip() {
+        let original = sample_subscription();
+        let bytes = original.to_serialized_data().to_vec();
+        assert_starts_with_pl_cdr_le(&bytes);
+
+        let parsed = SubscriptionBuiltinTopicData::from_serialized_data(&bytes)
+            .expect("PL_CDR parse should succeed");
+        assert_eq!(parsed.endpoint_guid(), original.endpoint_guid());
+        assert_eq!(parsed.topic_name(), original.topic_name());
+        assert_eq!(parsed.type_name(), original.type_name());
+        assert_eq!(parsed.reliability().kind, original.reliability().kind);
+        assert_eq!(parsed.multicast_locator_list(), original.multicast_locator_list());
+    }
+
+    #[test]
+    fn subscription_dds_serialize_emits_pl_cdr() {
+        let original = sample_subscription();
+        let dds_bytes = DdsType::serialize(&original).expect("serialize").to_vec();
+        assert_starts_with_pl_cdr_le(&dds_bytes);
+
+        let helper_bytes = original.to_serialized_data().to_vec();
+        assert_eq!(
+            dds_bytes, helper_bytes,
+            "DdsType::serialize must produce the same bytes as to_serialized_data"
+        );
+    }
+
+    #[test]
+    fn subscription_pid_topic_name_present() {
+        let s = sample_subscription();
+        let bytes = s.to_serialized_data().to_vec();
+        assert_eq!(count_pid_occurrences(&bytes, 0x0005), 1);
+        assert_eq!(count_pid_occurrences(&bytes, 0x005a), 1);
+        // PidMulticastLocator = 0x0030
+        assert_eq!(count_pid_occurrences(&bytes, 0x0030), 1);
+    }
+}
