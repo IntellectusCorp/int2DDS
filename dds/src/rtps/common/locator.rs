@@ -254,6 +254,11 @@ impl Locator {
         self.kind != LOCATOR_KIND_INVALID && self.kind != LOCATOR_KIND_RESERVED
     }
 }
+impl std::fmt::Display for Locator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}:{}", self.kind_name(), self.to_ip_v4_addr_string(), self.port)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Readable, Writable)]
 pub struct LocatorUDPv4 {

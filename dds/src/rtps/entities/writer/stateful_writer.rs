@@ -566,7 +566,7 @@ impl StatefulWriter {
 
 impl Debug for StatefulWriter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "StatefulWriter: {:?}", self.guid)
+        write!(f, "StatefulWriter: {}", self.guid)
     }
 }
 
@@ -820,7 +820,7 @@ impl Writer for StatefulWriter {
         // Find the index of the reader to remove
         let Some(idx) = proxies.iter().position(|proxy| proxy.remote_reader_guid() == reader_guid)
         else {
-            debug!("Reader proxy with guid {:?} not found in matched readers", reader_guid);
+            debug!("Reader proxy with guid {} not found in matched readers", reader_guid);
             return Ok(false);
         };
 
@@ -831,7 +831,7 @@ impl Writer for StatefulWriter {
         // Update publication matched status
         self.update_publication_matched_status(-1, InstanceHandle::from_guid(&reader_guid));
 
-        debug!("Removed reader proxy with guid {:?} from matched readers", reader_guid);
+        debug!("Removed reader proxy with guid {} from matched readers", reader_guid);
 
         // A reliable reader leaving can advance the ack floor over the remaining readers.
         debug!("[history-strict] trigger=unmatch-single");
@@ -866,7 +866,10 @@ impl Writer for StatefulWriter {
         reader_proxies.retain(|reader_proxy| reader_proxy.remote_reader_guid().prefix() != prefix);
         let removed = len_before - reader_proxies.len();
 
-        debug!("Removed all unmatched reader proxies from unmatched participant: {:?}", prefix);
+        debug!(
+            "Removed all unmatched reader proxies from unmatched participant: {}",
+            Guid::guid_prefix_to_string(&prefix)
+        );
         debug!("Current number of matched reader: {:?}", reader_proxies.len());
         drop(reader_proxies);
 

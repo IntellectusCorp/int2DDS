@@ -13,6 +13,17 @@ pub struct InstanceHandle {
     value: KeyHash,
     is_defined: bool,
 }
+impl std::fmt::Display for InstanceHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if !self.is_defined {
+            return write!(f, "<undefined>");
+        }
+        for b in &self.value {
+            write!(f, "{:02x}", b)?;
+        }
+        Ok(())
+    }
+}
 
 impl InstanceHandle {
     pub const NIL: Self = Self { value: [0; 16], is_defined: false };

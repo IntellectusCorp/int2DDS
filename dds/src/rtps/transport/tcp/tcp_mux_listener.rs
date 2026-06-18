@@ -13,7 +13,7 @@ use crossbeam_channel::Sender;
 use dashmap::DashMap;
 use log::{debug, info, warn};
 
-use crate::rtps::common::guid::GuidPrefix;
+use crate::rtps::common::guid::{Guid, GuidPrefix};
 use crate::rtps::transport::error::TransportErrorCode;
 use crate::rtps::transport::plugin::IncomingMessage;
 use crate::rtps::transport::port_manager::PortManager;
@@ -181,7 +181,7 @@ impl MuxListenerShared {
             for conn_id in group.all_conns() {
                 self.remove_connection_inner(conn_id);
             }
-            debug!("TcpMuxListener: Removed peer {:?}", guid);
+            debug!("TcpMuxListener: Removed peer {}", Guid::guid_prefix_to_string(&guid));
         }
     }
 

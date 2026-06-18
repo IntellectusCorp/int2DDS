@@ -247,7 +247,7 @@ impl TopicRelay {
                     Ok(()) => {
                         count += 1;
                         log::debug!(
-                            "[relay:{} {}] fwd #{} pub_handle={:?}",
+                            "[relay:{} {}] fwd #{} pub_handle={}",
                             topic_name,
                             direction,
                             count,
