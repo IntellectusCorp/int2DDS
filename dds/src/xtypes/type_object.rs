@@ -4204,3 +4204,146 @@ mod tests {
         assert!(!complex_id.is_collection());
     }
 }
+
+#[cfg(test)]
+#[allow(unused_imports)]
+mod derive_typeobject_tests {
+    use crate::dcps::topic::type_support::DdsType;
+    use crate::serialize::cdr::{CdrSerialize, CdrSerializer};
+    use crate::serialize::BufferManager;
+    use crate::xtypes::*;
+    fn encode_cdr<T: CdrSerialize>(value: &T) -> Vec<u8> {
+        let mut serializer = CdrSerializer::new(true);
+        serializer.write_encapsulation_header().unwrap();
+        value.serialize_cdr(&mut serializer).unwrap();
+        serializer.into_bytes()
+    }
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "int2dds")]
+    #[repr(i32)]
+    enum EnumWithValue {
+        First,
+        #[dds(value = 100)]
+        HundredLit,
+        Third,
+    }
+
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "int2dds", ignore_literal_names)]
+    #[repr(i32)]
+    enum EnumWithDefaultLiteral {
+        Alpha,
+        #[dds(default_literal)]
+        Beta,
+        Gamma,
+    }
+
+    #[test]
+    fn test_enum_value_attribute_roundtrip() {
+        use crate::xtypes::HasTypeObject;
+        let obj = EnumWithValue::complete_type_object();
+        let literals = match obj {
+            crate::xtypes::CompleteTypeObject::Enum(e) => e.literal_seq,
+            _ => panic!("expected enum complete type"),
+        };
+        assert_eq!(literals[0].common.value, 0);
+        assert_eq!(literals[1].common.value, 100);
+        assert_eq!(literals[2].common.value, 101);
+    }
+
+    #[test]
+    fn test_enum_default_literal_flag() {
+        use crate::xtypes::HasTypeObject;
+        let obj = EnumWithDefaultLiteral::complete_type_object();
+        let literals = match obj {
+            crate::xtypes::CompleteTypeObject::Enum(e) => e.literal_seq,
+            _ => panic!("expected enum complete type"),
+        };
+        assert!(!literals[0].common.flags.is_default());
+        assert!(literals[1].common.flags.is_default());
+        assert!(!literals[2].common.flags.is_default());
+    }
+
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "int2dds", alias, extensibility = "Final")]
+    struct MyIntSequence(pub Vec<i32>);
+
+    #[test]
+    fn test_alias_emits_tk_alias_type_object() {
+        use crate::xtypes::{CompleteTypeObject, HasTypeObject};
+        let obj = MyIntSequence::complete_type_object();
+        match obj {
+            CompleteTypeObject::Alias(_) => {}
+            _ => panic!("expected Alias TypeObject"),
+        }
+    }
+
+    #[test]
+    fn test_alias_wire_matches_base_type() {
+        let alias_value = MyIntSequence(vec![1, 2, 3]);
+        let base_value: Vec<i32> = vec![1, 2, 3];
+        let alias_bytes = encode_cdr(&alias_value);
+        let mut serializer = CdrSerializer::new(true);
+        serializer.write_encapsulation_header().unwrap();
+        base_value.serialize_cdr(&mut serializer).unwrap();
+        let base_bytes = serializer.into_bytes();
+        assert_eq!(alias_bytes, base_bytes);
+    }
+
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "int2dds", nested, extensibility = "Final")]
+    struct NestedOnly {
+        pub v: i32,
+    }
+
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "int2dds", extensibility = "Final")]
+    struct NotNested {
+        pub v: i32,
+    }
+
+    #[test]
+    fn test_nested_flag_in_type_object() {
+        use crate::xtypes::{CompleteTypeObject, HasTypeObject};
+        let nested = match NestedOnly::complete_type_object() {
+            CompleteTypeObject::Struct(s) => s.struct_flags.is_nested(),
+            _ => panic!("expected struct"),
+        };
+        let not_nested = match NotNested::complete_type_object() {
+            CompleteTypeObject::Struct(s) => s.struct_flags.is_nested(),
+            _ => panic!("expected struct"),
+        };
+        assert!(nested);
+        assert!(!not_nested);
+    }
+
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "int2dds", extensibility = "Final", nested)]
+    #[dds_type(data_representation(XCDR2))]
+    struct AnnBuiltinType {
+        #[dds(hashid = "custom_hash_name")]
+        pub v: i32,
+    }
+
+    #[test]
+    fn test_type_ann_builtin_nested_and_data_representation() {
+        use crate::xtypes::{CompleteTypeObject, HasTypeObject};
+        let ann = match AnnBuiltinType::complete_type_object() {
+            CompleteTypeObject::Struct(s) => s.header.detail.ann_builtin.expect("ann_builtin"),
+            _ => panic!("expected struct"),
+        };
+        assert_eq!(ann.nested, Some(true));
+        assert_eq!(ann.data_representation, Some(1u16 << 2));
+    }
+
+    #[test]
+    fn test_member_ann_builtin_hashid() {
+        use crate::xtypes::{CompleteTypeObject, HasTypeObject};
+        let member = match AnnBuiltinType::complete_type_object() {
+            CompleteTypeObject::Struct(s) => s.member_seq[0].clone(),
+            _ => panic!("expected struct"),
+        };
+        let ann = member.detail.ann_builtin.expect("member ann_builtin");
+        assert_eq!(ann.hash_id.as_deref(), Some("custom_hash_name"));
+    }
+}

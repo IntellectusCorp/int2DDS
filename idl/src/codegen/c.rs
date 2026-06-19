@@ -410,13 +410,6 @@ impl<'a> CGen<'a> {
 
     // ---- Struct ----
 
-    fn emit_struct_section(&mut self, s: &ResolvedStruct) {
-        self.emit_struct_header(s);
-        self.emit_struct_typedef(s);
-        self.raw("\n");
-        self.emit_struct_functions(s);
-    }
-
     fn emit_struct_header(&mut self, s: &ResolvedStruct) {
         let ext_str = match s.extensibility {
             ExtensibilityKind::Final => "FINAL",
@@ -846,15 +839,6 @@ impl<'a> CGen<'a> {
                 self.raw(&format!("{}{}(&w, ({}){});\n", indent, write_fn, cast_type, accessor));
             }
             ResolvedType::Sequence { element, .. } => {
-                let needs_dh = Self::sequence_element_needs_dheader(element);
-                if needs_dh {
-                    // XCDR2: non-primitive sequences need DHEADER
-                    self.raw(&format!("{}{{ size_t _seq_dh = 0;\n", indent));
-                    self.raw(&format!(
-                        "{}if (w.xcdr2) {{ int2dds_cdr_write_dheader_begin(&w, &_seq_dh); }}\n",
-                        indent
-                    ));
-                }
                 self.raw(&format!(
                     "{}int2dds_cdr_write_seq_header(&w, {}.length);\n",
                     indent, accessor
@@ -866,13 +850,6 @@ impl<'a> CGen<'a> {
                 let elem_accessor = format!("{}.data[_i]", accessor);
                 self.emit_write_field_indented(element, &elem_accessor, &format!("{}    ", indent));
                 self.raw(&format!("{}}}\n", indent));
-                if needs_dh {
-                    self.raw(&format!(
-                        "{}if (w.xcdr2) {{ int2dds_cdr_write_dheader_finalize(&w, _seq_dh); }}\n",
-                        indent
-                    ));
-                    self.raw(&format!("{}}}\n", indent));
-                }
             }
             ResolvedType::Array { element, size } => {
                 self.raw(&format!("{}for (uint32_t _i = 0; _i < {}; _i++) {{\n", indent, size));
@@ -1120,15 +1097,6 @@ impl<'a> CGen<'a> {
                 self.raw(&format!("{}{}(&r, ({}*)&{});\n", indent, read_fn, cast_type, accessor));
             }
             ResolvedType::Sequence { element, bound } => {
-                let needs_dh = Self::sequence_element_needs_dheader(element);
-                if needs_dh {
-                    // XCDR2: non-primitive sequences need DHEADER
-                    self.raw(&format!("{}{{ uint32_t _seq_sz = 0; size_t _seq_sp = 0;\n", indent));
-                    self.raw(&format!(
-                        "{}if (r.xcdr2) {{ int2dds_cdr_read_dheader(&r, &_seq_sz, &_seq_sp); }}\n",
-                        indent
-                    ));
-                }
                 self.raw(&format!(
                     "{}int2dds_cdr_read_seq_header(&r, &{}.length);\n",
                     indent, accessor
@@ -1168,13 +1136,6 @@ impl<'a> CGen<'a> {
                         &elem_accessor,
                         &format!("{}    ", indent),
                     );
-                    self.raw(&format!("{}}}\n", indent));
-                }
-                if needs_dh {
-                    self.raw(&format!(
-                        "{}if (r.xcdr2) {{ int2dds_cdr_read_dheader_end(&r, _seq_sz, _seq_sp); }}\n",
-                        indent
-                    ));
                     self.raw(&format!("{}}}\n", indent));
                 }
             }
