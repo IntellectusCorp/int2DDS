@@ -16,7 +16,7 @@ use int2dds::{
         log::{LogLevel, LogType},
     },
     core::time::Duration,
-    domain::{domain_participant_factory::DomainParticipantFactory, qos::DomainParticipantQos},
+    domain::{domain_participant_factory::DomainParticipantFactory, qos::PARTICIPANT_QOS_DEFAULT},
     infrastructure::{
         qos_policy::{
             DeadlineQosPolicy, DurabilityQosPolicy, DurabilityQosPolicyKind, HistoryQosPolicy,
@@ -28,16 +28,19 @@ use int2dds::{
     },
     publication::{
         data_writer_listener::DataWriterListener,
-        qos::{DataWriterQos, PublisherQos},
+        qos::{DataWriterQos, PublisherQos, DATAWRITER_QOS_DEFAULT, PUBLISHER_QOS_DEFAULT},
     },
     subscription::{
         data_reader_listener::DataReaderListener,
-        qos::{DataReaderQos, SubscriberQos},
+        qos::{DataReaderQos, SubscriberQos, DATAREADER_QOS_DEFAULT, SUBSCRIBER_QOS_DEFAULT},
         sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind},
     },
-    topic::{qos::TopicQos, type_support::DdsType},
+    topic::{
+        qos::{TopicQos, TOPIC_QOS_DEFAULT},
+        type_support::DdsType,
+    },
 };
-use log::info;
+use log::{info, warn};
 
 #[derive(Parser, Debug)]
 #[command(about = "Hello World DDS Example", disable_help_flag = true)]
@@ -116,6 +119,35 @@ fn ms_to_duration(ms: u64) -> Duration {
     Duration { sec: (ms / 1000) as i32, nanosec: ((ms % 1000) * 1_000_000) as u32 }
 }
 
+fn deadline_str(period: Duration) -> String {
+    if period == Duration::infinite() {
+        "INFINITE".to_string()
+    } else {
+        format!("{:?}", period)
+    }
+}
+
+/// True when QoS should come from an env-loaded profile (default-sentinel mode).
+fn profile_mode() -> bool {
+    std::env::var("DDS_QOS_PROFILE").is_ok()
+}
+
+/// Logs the QoS source after factory init (the log facade is active by then).
+/// In profile mode, warns when `DDS_QOS_PROFILE` is set but no profile resolved
+/// (bad path / parse error / no default profile selected) — entities then fall
+/// back to spec-default QoS.
+fn log_qos_source(factory: &DomainParticipantFactory) {
+    if !profile_mode() {
+        info!("Profile was not set; running without a QoS profile (CLI args / UDP)");
+    } else if factory.default_profile_path().is_none() {
+        warn!(
+            "DDS_QOS_PROFILE is set but no profile resolved (bad path / parse error / \
+             no default profile selected); using spec-default QoS"
+        );
+    }
+}
+
+/// Builds entity QoS from the CLI flags. Used only when `profile_mode()` is false.
 fn build_qos(args: &Args, is_publisher: bool) -> QosConfig {
     let reliability = if args.reliable {
         ReliabilityQosPolicyKind::Reliable
@@ -160,6 +192,21 @@ fn build_qos(args: &Args, is_publisher: bool) -> QosConfig {
         partition,
     }
 }
+
+// Transport (and any participant QoS) can also be injected directly in code,
+// instead of loading a profile via DDS_QOS_PROFILE. The block below is the
+// code-level equivalent of profiles/tcp/profile.json — pass its result to
+// create_participant to bind TCP without a profile file.
+/// ```no_run
+/// fn build_participant_qos(is_publisher: bool) -> DomainParticipantQos {
+///    let (bind_port, peer_port) = if is_publisher { (7400, 7401) } else { (7401, 7400) };
+///    let mut property = PropertyQosPolicy::default();
+///    property.add_property("int2dds.transport", "tcp", false);
+///    property.set_tcp_bind_port(bind_port);
+///    property.add_property("int2dds.initial_peers", format!("127.0.0.1:{peer_port}"), false);
+///    DomainParticipantQos { property, ..Default::default() }
+/// }
+/// ```
 
 // Publisher Listener
 struct PubListener;
@@ -235,79 +282,94 @@ impl DataReaderListener for SubListener {
 }
 
 fn run_publisher(args: &Args) {
-    let qos = build_qos(args, true);
     let shutdown = Shutdown::install();
-
     let factory = DomainParticipantFactory::get_instance();
+    log_qos_source(factory);
     let participant = factory
-        .create_participant(
-            args.domain,
-            DomainParticipantQos::default(),
+        .create_participant(args.domain, PARTICIPANT_QOS_DEFAULT, None, StatusMask::default())
+        .unwrap();
+
+    let topic = if profile_mode() {
+        participant.create_topic::<HelloWorldType>(
+            &args.topic,
+            "HelloWorldType",
+            TOPIC_QOS_DEFAULT,
             None,
             StatusMask::default(),
         )
-        .unwrap();
-
-    let topic = participant
-        .create_topic::<HelloWorldType>(
+    } else {
+        participant.create_topic::<HelloWorldType>(
             &args.topic,
             "HelloWorldType",
             TopicQos::default(),
             None,
             StatusMask::default(),
         )
-        .unwrap();
+    }
+    .unwrap();
 
-    let publisher_qos = PublisherQos { partition: qos.partition.clone(), ..Default::default() };
-    let publisher =
-        participant.create_publisher(publisher_qos, None, StatusMask::default()).unwrap();
-
-    let writer_qos = DataWriterQos {
-        reliability: ReliabilityQosPolicy {
-            kind: qos.reliability,
-            max_blocking_time: Duration { sec: 0, nanosec: 100_000_000 },
-        },
-        durability: DurabilityQosPolicy { kind: qos.durability },
-        history: HistoryQosPolicy { kind: qos.history, strict: true },
-        deadline: DeadlineQosPolicy { period: qos.deadline },
-        ownership: OwnershipQosPolicy { kind: qos.ownership_kind },
-        ownership_strength: OwnershipStrengthQosPolicy { value: qos.ownership_strength },
-        ..Default::default()
+    let (_publisher, writer) = if profile_mode() {
+        let publisher = participant
+            .create_publisher(PUBLISHER_QOS_DEFAULT, None, StatusMask::default())
+            .unwrap();
+        let writer = publisher
+            .create_datawriter::<HelloWorldType>(
+                &topic,
+                DATAWRITER_QOS_DEFAULT,
+                Some(Arc::new(PubListener)),
+                StatusMask::default(),
+            )
+            .unwrap();
+        (publisher, writer)
+    } else {
+        let qos = build_qos(args, true);
+        let publisher = participant
+            .create_publisher(
+                PublisherQos { partition: qos.partition.clone(), ..Default::default() },
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let writer_qos = DataWriterQos {
+            reliability: ReliabilityQosPolicy {
+                kind: qos.reliability,
+                max_blocking_time: Duration { sec: 0, nanosec: 100_000_000 },
+            },
+            durability: DurabilityQosPolicy { kind: qos.durability },
+            history: HistoryQosPolicy { kind: qos.history, strict: true },
+            deadline: DeadlineQosPolicy { period: qos.deadline },
+            ownership: OwnershipQosPolicy { kind: qos.ownership_kind },
+            ownership_strength: OwnershipStrengthQosPolicy { value: qos.ownership_strength },
+            ..Default::default()
+        };
+        let writer = publisher
+            .create_datawriter::<HelloWorldType>(
+                &topic,
+                writer_qos,
+                Some(Arc::new(PubListener)),
+                StatusMask::default(),
+            )
+            .unwrap();
+        (publisher, writer)
     };
 
-    let listener = PubListener;
-    let writer = publisher
-        .create_datawriter::<HelloWorldType>(
-            &topic,
-            writer_qos,
-            Some(Arc::new(listener)),
-            StatusMask::default(),
-        )
-        .unwrap();
-
+    // Report the effective QoS (works in both modes).
+    let wqos = writer.get_qos().unwrap();
     println!(
-        "********* [publisher INFO] domain_id: {:?}, hostname: {:?}, reliability: {:?}, topic: {}",
+        "********* [publisher INFO] domain_id: {}, hostname: {:?}, topic: {}",
         args.domain,
         hostname::get().unwrap(),
-        qos.reliability,
-        args.topic,
+        args.topic
     );
-    let deadline_str = if qos.deadline == Duration::infinite() {
-        "INFINITE".to_string()
-    } else {
-        format!("{:?}", qos.deadline)
-    };
     println!(
-        "********* [publisher qos info] interval: {}ms, reliability: {:?}, durability: {:?}, \
-         history: {:?}, deadline: {}, ownership: {:?}(strength: {}), partition: {:?}",
-        args.interval,
-        qos.reliability,
-        qos.durability,
-        qos.history,
-        deadline_str,
-        qos.ownership_kind,
-        qos.ownership_strength,
-        qos.partition.name,
+        "********* [publisher qos] reliability: {:?}, durability: {:?}, history: {:?}, \
+         deadline: {}, ownership: {:?}(strength: {})",
+        wqos.reliability.kind,
+        wqos.durability.kind,
+        wqos.history.kind,
+        deadline_str(wqos.deadline.period),
+        wqos.ownership.kind,
+        wqos.ownership_strength.value,
     );
 
     while !shutdown.is_stopped() {
@@ -322,7 +384,7 @@ fn run_publisher(args: &Args) {
         }
     }
 
-    let reliability_str = match qos.reliability {
+    let reliability_str = match wqos.reliability.kind {
         ReliabilityQosPolicyKind::BestEffort => "best_effort",
         ReliabilityQosPolicyKind::Reliable => "reliable",
     };
@@ -334,7 +396,7 @@ fn run_publisher(args: &Args) {
             "[{:?}]HelloWorld_{}_d{}",
             hostname::get().unwrap(),
             reliability_str,
-            args.domain,
+            args.domain
         );
         if let Some(target) = args.size {
             if message.len() < target {
@@ -347,7 +409,6 @@ fn run_publisher(args: &Args) {
         writer.write(&data, InstanceHandle::NIL).unwrap();
         info!("Published {:?}", data);
         if shutdown.wait_timeout(period) {
-            println!("break");
             break;
         }
         i += 1;
@@ -358,82 +419,98 @@ fn run_publisher(args: &Args) {
 }
 
 fn run_subscriber(args: &Args) {
-    let qos = build_qos(args, false);
     let shutdown = Shutdown::install();
-
     let factory = DomainParticipantFactory::get_instance();
+    log_qos_source(factory);
+
     let participant = factory
-        .create_participant(
-            args.domain,
-            DomainParticipantQos::default(),
+        .create_participant(args.domain, PARTICIPANT_QOS_DEFAULT, None, StatusMask::default())
+        .unwrap();
+
+    let topic = if profile_mode() {
+        participant.create_topic::<HelloWorldType>(
+            &args.topic,
+            "HelloWorldType",
+            TOPIC_QOS_DEFAULT,
             None,
             StatusMask::default(),
         )
-        .unwrap();
-
-    let topic = participant
-        .create_topic::<HelloWorldType>(
+    } else {
+        participant.create_topic::<HelloWorldType>(
             &args.topic,
             "HelloWorldType",
             TopicQos::default(),
             None,
             StatusMask::default(),
         )
-        .unwrap();
-
-    let subscriber_qos = SubscriberQos { partition: qos.partition.clone(), ..Default::default() };
-    let subscriber =
-        participant.create_subscriber(subscriber_qos, None, StatusMask::default()).unwrap();
-
-    let reader_qos = DataReaderQos {
-        reliability: ReliabilityQosPolicy {
-            kind: qos.reliability,
-            max_blocking_time: Duration { sec: 0, nanosec: 100_000_000 },
-        },
-        durability: DurabilityQosPolicy { kind: qos.durability },
-        history: HistoryQosPolicy { kind: qos.history, strict: true },
-        deadline: DeadlineQosPolicy { period: qos.deadline },
-        ownership: OwnershipQosPolicy { kind: qos.ownership_kind },
-        ..Default::default()
-    };
+    }
+    .unwrap();
 
     let (sender, _receiver) = sync_channel(0);
-    let read_listener = SubListener { sender };
-    let _reader = subscriber
-        .create_datareader::<HelloWorldType>(
-            &topic,
-            reader_qos.clone(),
-            Some(Arc::new(read_listener)),
-            StatusMask::default(),
-        )
-        .unwrap();
+    let (_subscriber, reader) = if profile_mode() {
+        let subscriber = participant
+            .create_subscriber(SUBSCRIBER_QOS_DEFAULT, None, StatusMask::default())
+            .unwrap();
+        let reader = subscriber
+            .create_datareader::<HelloWorldType>(
+                &topic,
+                DATAREADER_QOS_DEFAULT,
+                Some(Arc::new(SubListener { sender })),
+                StatusMask::default(),
+            )
+            .unwrap();
+        (subscriber, reader)
+    } else {
+        let qos = build_qos(args, false);
+        let subscriber = participant
+            .create_subscriber(
+                SubscriberQos { partition: qos.partition.clone(), ..Default::default() },
+                None,
+                StatusMask::default(),
+            )
+            .unwrap();
+        let reader_qos = DataReaderQos {
+            reliability: ReliabilityQosPolicy {
+                kind: qos.reliability,
+                max_blocking_time: Duration { sec: 0, nanosec: 100_000_000 },
+            },
+            durability: DurabilityQosPolicy { kind: qos.durability },
+            history: HistoryQosPolicy { kind: qos.history, strict: true },
+            deadline: DeadlineQosPolicy { period: qos.deadline },
+            ownership: OwnershipQosPolicy { kind: qos.ownership_kind },
+            ..Default::default()
+        };
+        let reader = subscriber
+            .create_datareader::<HelloWorldType>(
+                &topic,
+                reader_qos,
+                Some(Arc::new(SubListener { sender })),
+                StatusMask::default(),
+            )
+            .unwrap();
+        (subscriber, reader)
+    };
 
+    let rqos = reader.get_qos().unwrap();
     println!(
-        "********* [subscriber INFO] domain_id: {:?}, hostname: {:?}, reliability: {:?}, topic: {}",
+        "********* [subscriber INFO] domain_id: {}, hostname: {:?}, topic: {}",
         args.domain,
         hostname::get().unwrap(),
-        qos.reliability,
-        args.topic,
+        args.topic
     );
-    let deadline_str = if qos.deadline == Duration::infinite() {
-        "INFINITE".to_string()
-    } else {
-        format!("{:?}", qos.deadline)
-    };
     println!(
-        "********* [subscriber qos info] reliability: {:?}, durability: {:?}, \
-         history: {:?}, ownership_kind: {:?}, deadline: {}, partition: {:?}",
-        qos.reliability,
-        qos.durability,
-        qos.history,
-        qos.ownership_kind,
-        deadline_str,
-        qos.partition.name,
+        "********* [subscriber qos] reliability: {:?}, durability: {:?}, history: {:?}, \
+         deadline: {}, ownership: {:?}",
+        rqos.reliability.kind,
+        rqos.durability.kind,
+        rqos.history.kind,
+        deadline_str(rqos.deadline.period),
+        rqos.ownership.kind,
     );
 
     shutdown.wait();
 
-    drop(_reader);
+    drop(reader);
     cleanup_participant(participant);
 }
 
