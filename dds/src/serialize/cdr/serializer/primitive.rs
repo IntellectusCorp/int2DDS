@@ -105,3 +105,147 @@ pub trait PrimitiveSerialize: CdrSerializerCommon {
 // Implement PrimitiveSerialize for both serializer types
 impl PrimitiveSerialize for CdrSerializer {}
 impl PrimitiveSerialize for Xcdr2Serializer {}
+
+#[cfg(test)]
+#[allow(unused_imports)]
+mod cdr_primitive_tests {
+    use crate::{
+        dcps::topic::type_support::{DdsType, FieldAccessor},
+        serialize::{
+            cdr::{
+                CdrDeserialize, CdrDeserializer, CdrSerialize, CdrSerializer, ExtensibilityKind,
+                XcdrDeserialize, XcdrDeserializer, XcdrSerialize, XcdrSerializer,
+            },
+            BufferManager, DeserializerReader, WChar, WString,
+        },
+    };
+    use std::collections::HashMap;
+    #[test]
+    fn test_cdr_bool() {
+        let mut serializer = CdrSerializer::new(true);
+        serializer.write_encapsulation_header().unwrap();
+        true.serialize_cdr(&mut serializer).unwrap();
+
+        let bytes = serializer.into_bytes();
+        let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+        let result = bool::deserialize_cdr(&mut deserializer).unwrap();
+        assert_eq!(result, true);
+
+        let mut serializer = CdrSerializer::new(true);
+        serializer.write_encapsulation_header().unwrap();
+        false.serialize_cdr(&mut serializer).unwrap();
+
+        let bytes = serializer.into_bytes();
+        let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+        let result = bool::deserialize_cdr(&mut deserializer).unwrap();
+        assert_eq!(result, false);
+    }
+
+    #[test]
+    fn test_cdr_i32() {
+        let values: [i32; 4] = [-2147483648, -1, 0, 2147483647];
+        for value in values {
+            let mut serializer = CdrSerializer::new(true);
+            serializer.write_encapsulation_header().unwrap();
+            value.serialize_cdr(&mut serializer).unwrap();
+
+            let bytes = serializer.into_bytes();
+            let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+            let result = i32::deserialize_cdr(&mut deserializer).unwrap();
+            assert_eq!(result, value);
+        }
+    }
+
+    #[test]
+    fn test_cdr_f64() {
+        let values: [f64; 5] = [0.0, -1.0, 1.0, f64::MIN, f64::MAX];
+        for value in values {
+            let mut serializer = CdrSerializer::new(true);
+            serializer.write_encapsulation_header().unwrap();
+            value.serialize_cdr(&mut serializer).unwrap();
+
+            let bytes = serializer.into_bytes();
+            let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+            let result = f64::deserialize_cdr(&mut deserializer).unwrap();
+            assert_eq!(result, value);
+        }
+    }
+
+    // String Tests - CDR
+
+    #[test]
+    fn test_cdr_wchar() {
+        let values: [char; 3] = ['A', 'Z', '0'];
+        for c in values {
+            let value = WChar::from(c);
+
+            let mut serializer = CdrSerializer::new(true);
+            serializer.write_encapsulation_header().unwrap();
+            value.serialize_cdr(&mut serializer).unwrap();
+
+            let bytes = serializer.into_bytes();
+            let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+            let result = WChar::deserialize_cdr(&mut deserializer).unwrap();
+            assert_eq!(result.as_char(), c);
+        }
+    }
+
+    #[test]
+    fn test_cdr_little_endian() {
+        let value: u32 = 0x12345678;
+
+        let mut serializer = CdrSerializer::new(true); // little endian
+        serializer.write_encapsulation_header().unwrap();
+        value.serialize_cdr(&mut serializer).unwrap();
+
+        let bytes = serializer.into_bytes();
+        assert_eq!(bytes[0], 0x00);
+        assert_eq!(bytes[1], 0x01);
+
+        let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+        let result = u32::deserialize_cdr(&mut deserializer).unwrap();
+        assert_eq!(result, value);
+    }
+
+    #[test]
+    fn test_cdr_big_endian() {
+        let value: u32 = 0x12345678;
+
+        let mut serializer = CdrSerializer::new(false); // big endian
+        serializer.write_encapsulation_header().unwrap();
+        value.serialize_cdr(&mut serializer).unwrap();
+
+        let bytes = serializer.into_bytes();
+        assert_eq!(bytes[0], 0x00);
+        assert_eq!(bytes[1], 0x00);
+
+        let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+        let result = u32::deserialize_cdr(&mut deserializer).unwrap();
+        assert_eq!(result, value);
+    }
+
+    // XCDR2 Tests
+
+    #[test]
+    fn test_xcdr2_primitives() {
+        // bool
+        let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Final);
+        serializer.write_encapsulation_header().unwrap();
+        true.serialize_xcdr(&mut serializer).unwrap();
+
+        let bytes = serializer.into_bytes();
+        let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
+        let result = bool::deserialize_xcdr(&mut deserializer).unwrap();
+        assert_eq!(result, true);
+
+        // i32
+        let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Final);
+        serializer.write_encapsulation_header().unwrap();
+        42i32.serialize_xcdr(&mut serializer).unwrap();
+
+        let bytes = serializer.into_bytes();
+        let mut deserializer = XcdrDeserializer::new(&bytes).unwrap();
+        let result = i32::deserialize_xcdr(&mut deserializer).unwrap();
+        assert_eq!(result, 42);
+    }
+}

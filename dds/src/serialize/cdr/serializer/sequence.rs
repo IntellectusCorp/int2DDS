@@ -177,25 +177,7 @@ pub trait SequenceSerialize: CdrSerializerCommon + PrimitiveSerialize + StringSe
 
 // Implement SequenceSerialize for both serializer types
 impl SequenceSerialize for CdrSerializer {}
-impl SequenceSerialize for Xcdr2Serializer {
-    /// XCDR2: String is non-primitive, so sequence<string> needs DHEADER per DDS-XTypes v1.3
-    fn serialize_string_sequence(&mut self, data: &[String]) -> Result<(), CdrError> {
-        // Write DHEADER placeholder
-        let dheader_pos = self.reserve_dheader();
-        let content_start = self.position();
-
-        let length = checked_length(data.len())?;
-        self.serialize_u32(length)?;
-        for value in data {
-            self.serialize_string(value)?;
-        }
-
-        // Backpatch DHEADER with content byte size
-        let content_size = (self.position() - content_start) as u32;
-        self.write_dheader_at(dheader_pos, content_size);
-        Ok(())
-    }
-}
+impl SequenceSerialize for Xcdr2Serializer {}
 
 // Generic serialize_sequence and serialize_optional methods need to stay as inherent impl
 // because they use generic parameters with Self type bounds
@@ -238,7 +220,7 @@ impl CdrSerializer {
 }
 
 impl Xcdr2Serializer {
-    /// Serialize sequence of non-primitive values with DHEADER + length prefix (XCDR2)
+    /// Serialize sequence of non-primitive values with length prefix (XCDR2).
     pub fn serialize_sequence<T, F>(
         &mut self,
         values: &[T],
@@ -247,19 +229,11 @@ impl Xcdr2Serializer {
     where
         F: FnMut(&mut Self, &T) -> Result<(), CdrError>,
     {
-        // XCDR2: Write DHEADER for non-primitive sequences
-        let dheader_pos = self.reserve_dheader();
-        let content_start = self.position();
-
         let length = checked_length(values.len())?;
         self.serialize_u32(length)?;
         for value in values {
             serialize_fn(self, value)?;
         }
-
-        // Backpatch DHEADER with content byte size
-        let content_size = (self.position() - content_start) as u32;
-        self.write_dheader_at(dheader_pos, content_size);
         Ok(())
     }
 
@@ -281,4 +255,35 @@ impl Xcdr2Serializer {
         }
         Ok(())
     }
+}
+
+#[cfg(test)]
+#[allow(unused_imports)]
+mod cdr_sequence_tests {
+    use crate::{
+        dcps::topic::type_support::{DdsType, FieldAccessor},
+        serialize::{
+            cdr::{
+                CdrDeserialize, CdrDeserializer, CdrSerialize, CdrSerializer, ExtensibilityKind,
+                XcdrDeserialize, XcdrDeserializer, XcdrSerialize, XcdrSerializer,
+            },
+            BufferManager, DeserializerReader, WChar, WString,
+        },
+    };
+    use std::collections::HashMap;
+    #[test]
+    fn test_cdr_vec_i32() {
+        let value: Vec<i32> = vec![1, 2, 3, 4, 5];
+
+        let mut serializer = CdrSerializer::new(true);
+        serializer.write_encapsulation_header().unwrap();
+        value.serialize_cdr(&mut serializer).unwrap();
+
+        let bytes = serializer.into_bytes();
+        let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
+        let result = Vec::<i32>::deserialize_cdr(&mut deserializer).unwrap();
+        assert_eq!(result, value);
+    }
+
+    // Array Tests - CDR
 }
