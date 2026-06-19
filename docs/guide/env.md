@@ -18,9 +18,6 @@ This document describes the environment variables available in int2dds. All envi
 | `INT2DDS_FRAGMENT_SIZE`              | `--int2dds-fragment-size`              | Writer fragment size in bytes (1-65000)    | 65000                   |
 | `INT2DDS_MULTICAST_TTL`              | `--int2dds-multicast-ttl`              | IPv4 multicast TTL fallback (0-255)        | 1                       |
 | `INT2DDS_EXTENDED_DISCOVERY`         | `--int2dds-extended-discovery`         | Enable extended discovery                  | false                   |
-| `INT2DDS_TCP_CONNECT_TIMEOUT`        | `--int2dds-tcp-connect-timeout`        | TCP connection timeout (ms)                | 5000                    |
-| `INT2DDS_TCP_WRITE_TIMEOUT`          | `--int2dds-tcp-write-timeout`          | TCP write timeout (ms)                     | 10000                   |
-| `INT2DDS_TCP_NODELAY`                | `--int2dds-tcp-nodelay`                | Enable TCP Nodelay                         | true                    |
 | `INT2DDS_INITIAL_PEERS`              | `--int2dds-initial-peers`              | Initial peer list                          | none                    |
 | `INT2DDS_THREAD_MONITORING`          | `--int2dds-thread-monitoring`          | Enable thread monitoring                   | false                   |
 | `INT2DDS_THREAD_MONITORING_LOG_PATH` | `--int2dds-thread-monitoring-log-path` | Thread monitoring log path                 | ./thread_monitoring.log |
@@ -393,82 +390,6 @@ cargo run --example hello_world -- --int2dds-extended-discovery
 - `"false"`, `"0"`, not set: Disabled (default)
 - Case-insensitive
 
----
-
-## TCP Settings
-
-### INT2DDS_TCP_CONNECT_TIMEOUT
-
-Sets the TCP connection timeout in milliseconds.
-
-- Default: 5000ms (5 seconds)
-
-#### Configuration
-
-```powershell
-# Windows PowerShell
-$env:INT2DDS_TCP_CONNECT_TIMEOUT = "10000"  # 10 seconds
-
-# CLI argument
-cargo run --example hello_world -- --int2dds-tcp-connect-timeout 10000
-```
-
-```bash
-# Linux/macOS
-export INT2DDS_TCP_CONNECT_TIMEOUT=10000
-
-# CLI argument
-cargo run --example hello_world -- --int2dds-tcp-connect-timeout 10000
-```
-
-### INT2DDS_TCP_WRITE_TIMEOUT
-
-Sets the TCP write timeout in milliseconds.
-
-- Default: 10000ms (10 seconds)
-
-#### Configuration
-
-```powershell
-# Windows PowerShell
-$env:INT2DDS_TCP_WRITE_TIMEOUT = "5000"  # 5 seconds
-
-# CLI argument
-cargo run --example hello_world -- --int2dds-tcp-write-timeout 5000
-```
-
-```bash
-# Linux/macOS
-export INT2DDS_TCP_WRITE_TIMEOUT=5000
-
-# CLI argument
-cargo run --example hello_world -- --int2dds-tcp-write-timeout 5000
-```
-
-### INT2DDS_TCP_NODELAY
-
-Sets TCP Nodelay (disables Nagle algorithm).
-
-- Default: true (Nagle algorithm disabled, low latency)
-
-#### Configuration
-
-```powershell
-# Windows PowerShell - Environment variable
-$env:INT2DDS_TCP_NODELAY = "true"
-
-# CLI argument (flag type)
-cargo run --example hello_world -- --int2dds-tcp-nodelay
-```
-
-```bash
-# Linux/macOS - Environment variable
-export INT2DDS_TCP_NODELAY=true
-
-# CLI argument (flag type)
-cargo run --example hello_world -- --int2dds-tcp-nodelay
-```
-
 ### INT2DDS_INITIAL_PEERS
 
 Sets the initial peer list for SPDP unicast discovery. When set, SPDP messages are sent via unicast to these peers in addition to the default multicast. Works with all transport modes. Format is comma-separated socket addresses.
@@ -724,4 +645,3 @@ cargo run --example hello_world -- --int2dds-function-timing-log-path /var/log/f
 - [dds/src/rtps/transport/mod.rs](../../dds/src/rtps/transport/mod.rs) - Transport type definition
 - [dds/src/rtps/transport/transport_config.rs](../../dds/src/rtps/transport/transport_config.rs) - Multicast TTL resolution
 - [dds/src/rtps/transport/udp/udp_sender.rs](../../dds/src/rtps/transport/udp/udp_sender.rs) - UDP transport settings
-- [dds/src/rtps/transport/tcp/tcp_sender.rs](../../dds/src/rtps/transport/tcp/tcp_sender.rs) - TCP sender and connection management
