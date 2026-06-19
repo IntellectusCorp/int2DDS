@@ -304,7 +304,13 @@ class CdrReader:
 
     def read_seq_header(self) -> int:
         """Read a sequence header (element count)."""
-        return self.read_u32()
+        count = self.read_u32()
+        
+        if count > self.remaining:
+            raise CdrUnderflowError(
+                f"Sequence length {count} exceeds {self.remaining} remaining bytes"
+            )
+        return count
 
     def read_bytes(self, length: int) -> bytes:
         """Read raw bytes."""

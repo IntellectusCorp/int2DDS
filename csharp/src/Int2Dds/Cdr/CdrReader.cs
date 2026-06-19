@@ -289,7 +289,12 @@ namespace Int2Dds.Cdr
         /// <summary>Read a sequence header (uint32 element count).</summary>
         public uint ReadSeqHeader()
         {
-            return ReadU32();
+            uint count = ReadU32();
+            
+            if (count > (uint)Remaining)
+                throw new CdrUnderflowException(
+                    $"Sequence length {count} exceeds {Remaining} remaining bytes.");
+            return count;
         }
 
         /// <summary>Read raw bytes (no alignment).</summary>
