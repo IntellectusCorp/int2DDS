@@ -1,18 +1,18 @@
-//! QoS Profile Publisher Example
+//! QoS Profile Publisher Example (XML)
 //!
-//! Demonstrates QoS profile auto-loading via `DDS_QOS_PROFILE`.
-//! Entities are created with `_QOS_DEFAULT` sentinels — the loaded profile
-//! (`ReliableProfile`) is applied automatically.
+//! Same as the JSON variant, but the profile is defined in XML
+//! (`xml/qos_profiles.xml`, RTI/OMG `<qos_library>` syntax). `DDS_QOS_PROFILE`
+//! auto-loading picks the format by file extension.
 //!
 //! ```bash
-//! DDS_QOS_PROFILE=dds/examples/qos_profile/qos_profiles.json \
-//!     cargo run --example qos_profile_publisher
+//! DDS_QOS_PROFILE=dds/examples/qos_profile/xml/qos_profiles.xml \
+//!     cargo run --example qos_profile_xml_publisher
 //! ```
 
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
-#[path = "../common/shutdown.rs"]
+#[path = "../../common/shutdown.rs"]
 mod shutdown;
 use shutdown::{cleanup_participant, Shutdown};
 
@@ -61,7 +61,7 @@ fn main() {
 
     if std::env::var("DDS_QOS_PROFILE").is_err() {
         eprintln!("[Publisher] WARNING: DDS_QOS_PROFILE is not set.");
-        eprintln!("           Set DDS_QOS_PROFILE=dds/examples/qos_profile/qos_profiles.json");
+        eprintln!("           Set DDS_QOS_PROFILE=dds/examples/qos_profile/xml/qos_profiles.xml");
     }
 
     println!("[Publisher] domain_id = {}", domain_id);

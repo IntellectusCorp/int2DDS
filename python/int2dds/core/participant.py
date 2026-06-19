@@ -142,6 +142,12 @@ class DomainParticipant:
 
         return decode_sample(self, type_obj, data)
 
+    def create_topic_dynamic(self, topic_name: str, support):
+        """Create a Topic backed by a runtime :class:`DynamicTypeSupport`."""
+        from int2dds.types.dynamic import create_topic_dynamic
+
+        return create_topic_dynamic(self, topic_name, support)
+
     def create_publisher(self) -> Publisher:
         """
         Create a Publisher for this participant.
