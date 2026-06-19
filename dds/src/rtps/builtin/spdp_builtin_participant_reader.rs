@@ -83,7 +83,7 @@ impl SPDPBuiltinParticipantReader {
     }
 
     fn add_change(&mut self, a_change: CacheChange) {
-        let _ = self.reader_cache.lock().unwrap().add_change(a_change);
+        let _ = self.reader_cache.lock().unwrap().add_change(a_change, false);
     }
 }
 
