@@ -14,3 +14,8 @@ path = "src/lib.rs"
 
 [dependencies]
 md5 = "0.8.0"
+
+[dev-dependencies]
+int2dds = { path = "../dds" }
+speedy = "0.8.0"
+log = "0.4.11"

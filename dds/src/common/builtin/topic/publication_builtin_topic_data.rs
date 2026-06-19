@@ -401,3 +401,244 @@ impl Default for PublicationBuiltinTopicData {
         Self::new(&DataWriterQos::default(), &PublisherQos::default(), &TopicQos::default())
     }
 }
+
+#[cfg(test)]
+#[allow(unused_imports)]
+mod tests {
+    use crate::{
+        common::builtin::topic::{
+            participant_builtin_topic_data::ParticipantBuiltinTopicData,
+            publication_builtin_topic_data::PublicationBuiltinTopicData,
+            subscription_builtin_topic_data::SubscriptionBuiltinTopicData,
+            topic_builtin_topic_data::TopicBuiltinTopicData,
+        },
+        core::time::Duration,
+        infrastructure::qos_policy::{
+            ReliabilityQosPolicy, ReliabilityQosPolicyKind, UserDataQosPolicy,
+        },
+        publication::qos::{DataWriterQos, PublisherQos},
+        rtps::common::{guid::Guid, locator::Locator},
+        subscription::qos::{DataReaderQos, SubscriberQos},
+        topic::{qos::TopicQos, type_support::DdsType},
+        xtypes::{
+            EquivalenceHash, MinimalTypeObject, TypeIdentifier, TypeIdentifierWithDependencies,
+            TypeIdentifierWithSize, TypeInformation, TypeObject,
+        },
+    };
+    const PL_CDR_LE_HEADER: [u8; 4] = [0x00, 0x03, 0x00, 0x00];
+    fn make_guid(seed: u8) -> Guid {
+        let mut bytes = [0u8; 16];
+        for (i, b) in bytes.iter_mut().enumerate() {
+            *b = seed.wrapping_add(i as u8);
+        }
+        Guid::from_bytes(bytes)
+    }
+    fn locator(port: u32, addr_seed: u8) -> Locator {
+        let mut addr = [0u8; 16];
+        for (i, b) in addr.iter_mut().enumerate() {
+            *b = addr_seed.wrapping_add(i as u8);
+        }
+        Locator::new(1, port, addr)
+    }
+    fn count_pid_occurrences(payload: &[u8], pid_le: u16) -> usize {
+        assert!(payload.len() >= 4, "payload too short for encap header");
+        let mut pos = 4usize;
+        let mut count = 0usize;
+        while pos + 4 <= payload.len() {
+            let pid = u16::from_le_bytes([payload[pos], payload[pos + 1]]);
+            let len = u16::from_le_bytes([payload[pos + 2], payload[pos + 3]]) as usize;
+            // PID_SENTINEL = 0x0001 ends the list.
+            if pid == 0x0001 {
+                break;
+            }
+            if pid == pid_le {
+                count += 1;
+            }
+            pos += 4 + len;
+            // 4-byte alignment for next parameter (already aligned because len is u16
+            // and PlCdrSerializer pads each parameter to 4-byte boundary, but be safe).
+            pos = pos.div_ceil(4) * 4;
+        }
+        count
+    }
+    fn assert_starts_with_pl_cdr_le(payload: &[u8]) {
+        assert!(payload.len() >= 4, "payload too short");
+        assert_eq!(&payload[..4], &PL_CDR_LE_HEADER, "expected PL_CDR_LE encapsulation header");
+    }
+    fn sample_publication() -> PublicationBuiltinTopicData {
+        let mut p = PublicationBuiltinTopicData::new(
+            &DataWriterQos::default(),
+            &PublisherQos::default(),
+            &TopicQos::default(),
+        );
+        p.set_endpoint_guid(make_guid(0x11));
+        p.set_topic_name("test/pub_topic".into());
+        p.set_type_name("PubType".into());
+        p.add_unicast_locator(locator(7400, 0x20));
+        p.add_unicast_locator(locator(7401, 0x21));
+        p
+    }
+    #[test]
+    fn publication_pl_cdr_roundtrip() {
+        let original = sample_publication();
+        let bytes = original.to_serialized_data().to_vec();
+        assert_starts_with_pl_cdr_le(&bytes);
+
+        let parsed = PublicationBuiltinTopicData::from_serialized_data(&bytes)
+            .expect("PL_CDR parse should succeed");
+        assert_eq!(parsed.endpoint_guid(), original.endpoint_guid());
+        assert_eq!(parsed.topic_name(), original.topic_name());
+        assert_eq!(parsed.type_name(), original.type_name());
+        assert_eq!(parsed.unicast_locator_list(), original.unicast_locator_list());
+    }
+
+    #[test]
+    fn publication_dds_serialize_emits_pl_cdr() {
+        let original = sample_publication();
+        let dds_bytes = DdsType::serialize(&original).expect("serialize").to_vec();
+        assert_starts_with_pl_cdr_le(&dds_bytes);
+
+        // Bytes from DdsType::serialize must round-trip via the PL_CDR helper.
+        let parsed = PublicationBuiltinTopicData::from_serialized_data(&dds_bytes)
+            .expect("DdsType bytes are valid PL_CDR");
+        assert_eq!(parsed.topic_name(), original.topic_name());
+        assert_eq!(parsed.type_name(), original.type_name());
+
+        // And they must be byte-identical to the PL_CDR helper output.
+        let helper_bytes = original.to_serialized_data().to_vec();
+        assert_eq!(
+            dds_bytes, helper_bytes,
+            "DdsType::serialize must produce the same bytes as to_serialized_data"
+        );
+    }
+
+    #[test]
+    fn publication_pid_topic_name_present() {
+        let p = sample_publication();
+        let bytes = p.to_serialized_data().to_vec();
+        // PidTopicName = 0x0005 must appear exactly once.
+        assert_eq!(count_pid_occurrences(&bytes, 0x0005), 1);
+        // PidEndpointGuid = 0x005a must appear exactly once.
+        assert_eq!(count_pid_occurrences(&bytes, 0x005a), 1);
+    }
+
+    #[test]
+    fn publication_with_locators_emits_one_pid_per_locator() {
+        let p = sample_publication();
+        let bytes = p.to_serialized_data().to_vec();
+        // PidUnicastLocator = 0x002f, one per locator added (2).
+        assert_eq!(count_pid_occurrences(&bytes, 0x002f), 2);
+    }
+    const PID_TYPE_IDV1: u16 = 0x0069;
+    const PID_TYPE_INFORMATION: u16 = 0x0075;
+
+    const PL_CDR2_LE_HEADER: [u8; 4] = [0x00, 0x0b, 0x00, 0x00];
+    /// CDR_LE (XCDRv1) encapsulation header expected at the start of 0x0072 / standard 0x0069.
+    const CDR_LE_HEADER: [u8; 4] = [0x00, 0x01, 0x00, 0x00];
+    fn sample_type_information() -> TypeInformation {
+        let main_hash = EquivalenceHash::new([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+        let dep_hash = EquivalenceHash::new([21; 14]);
+
+        let mut minimal = TypeIdentifierWithDependencies::new(TypeIdentifierWithSize::new(
+            TypeIdentifier::MinimalTypeId(main_hash),
+            42,
+        ));
+        // Exercise the non-primitive sequence (DHEADER + count + element) framing.
+        minimal
+            .dependent_typeids
+            .push(TypeIdentifierWithSize::new(TypeIdentifier::MinimalTypeId(dep_hash), 7));
+
+        let complete = TypeIdentifierWithDependencies::new(TypeIdentifierWithSize::new(
+            TypeIdentifier::CompleteTypeId(main_hash),
+            42,
+        ));
+        TypeInformation::new(minimal, complete)
+    }
+
+    fn find_pid_value<'a>(payload: &'a [u8], pid_le: u16) -> Option<&'a [u8]> {
+        let mut pos = 4usize;
+        while pos + 4 <= payload.len() {
+            let pid = u16::from_le_bytes([payload[pos], payload[pos + 1]]);
+            let len = u16::from_le_bytes([payload[pos + 2], payload[pos + 3]]) as usize;
+            if pid == 0x0001 {
+                break;
+            }
+            if pid == pid_le {
+                return payload.get(pos + 4..pos + 4 + len);
+            }
+            pos += 4 + len;
+            pos = pos.div_ceil(4) * 4;
+        }
+        None
+    }
+    #[test]
+    fn type_information_parameter_roundtrip() {
+        let ti = sample_type_information();
+        let bytes = ti.serialize_for_parameter();
+
+        // Headerless PL_CDR2: must NOT begin with an encapsulation header.
+        assert_ne!(&bytes[..4], &PL_CDR2_LE_HEADER, "0x0075 must be headerless (no encap header)");
+
+        let emh = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+        assert_eq!(emh & 0x0FFF_FFFF, 0x1001, "first member id must be 0x1001 (minimal)");
+        assert_eq!(emh >> 28, 5, "TypeInformation members must use LC=5");
+
+        let parsed = TypeInformation::deserialize_for_parameter(&bytes)
+            .expect("0x0075 payload must round-trip");
+        assert_eq!(parsed, ti, "TypeInformation must survive serialize/deserialize");
+    }
+
+    #[test]
+    fn type_object_parameter_has_cdr_header() {
+        let obj = TypeObject::Minimal(MinimalTypeObject::default());
+        let bytes = obj.serialize_for_parameter();
+        assert_eq!(&bytes[..4], &CDR_LE_HEADER, "0x0072 must start with CDR_LE header");
+        // Helper must be purely additive over the legacy body (guards hash entanglement).
+        assert_eq!(&bytes[4..], obj.serialize().as_slice());
+    }
+
+    #[test]
+    fn type_identifier_v1_parameter_has_cdr_header() {
+        let hash = EquivalenceHash::new([9; 14]);
+        let tid = TypeIdentifier::MinimalTypeId(hash);
+        let bytes = tid.serialize_for_parameter_v1();
+        assert_eq!(&bytes[..4], &CDR_LE_HEADER, "standard 0x0069 must start with CDR_LE header");
+        assert_eq!(&bytes[4..], tid.serialize().as_slice());
+    }
+    fn publication_with_type_info() -> PublicationBuiltinTopicData {
+        let mut p = sample_publication();
+        p.set_type_identifier(Some(TypeIdentifier::MinimalTypeId(EquivalenceHash::new([7; 14]))));
+        p
+    }
+    #[test]
+    fn publication_emits_both_0x0075_and_legacy_0x0069() {
+        let p = publication_with_type_info();
+        let bytes = p.to_serialized_data().to_vec();
+
+        // Standard 0x0075 exactly once, legacy 0x0069 exactly once (backward compat).
+        assert_eq!(count_pid_occurrences(&bytes, PID_TYPE_INFORMATION), 1);
+        assert_eq!(count_pid_occurrences(&bytes, PID_TYPE_IDV1), 1);
+
+        // The 0x0075 value is headerless PL_CDR2: top DHEADER first, then EMHEADER 0x1001.
+        let v75 = find_pid_value(&bytes, PID_TYPE_INFORMATION).expect("0x0075 present");
+        assert_ne!(&v75[..4], &PL_CDR2_LE_HEADER, "0x0075 must be headerless");
+        let emh = u32::from_le_bytes([v75[4], v75[5], v75[6], v75[7]]);
+        assert_eq!(emh & 0x0FFF_FFFF, 0x1001, "0x0075 first member id must be 0x1001");
+
+        // The legacy 0x0069 value is a single CDR_LE-encapsulated TypeIdentifier.
+        let v69 = find_pid_value(&bytes, PID_TYPE_IDV1).expect("0x0069 present");
+        assert_eq!(&v69[..4], &CDR_LE_HEADER, "legacy 0x0069 must carry a CDR_LE TypeIdentifier");
+        let expected_tid = TypeIdentifier::MinimalTypeId(EquivalenceHash::new([7; 14]));
+        let tid_bytes = expected_tid.serialize();
+        assert_eq!(&v69[4..4 + tid_bytes.len()], tid_bytes.as_slice());
+    }
+
+    #[test]
+    fn publication_type_identifier_roundtrips_via_0x0075() {
+        let original = publication_with_type_info();
+        let bytes = original.to_serialized_data().to_vec();
+        let parsed = PublicationBuiltinTopicData::from_serialized_data(&bytes)
+            .expect("PL_CDR parse should succeed");
+        assert_eq!(parsed.type_identifier(), original.type_identifier());
+    }
+}

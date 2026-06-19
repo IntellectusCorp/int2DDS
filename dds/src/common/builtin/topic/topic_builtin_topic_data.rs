@@ -190,3 +190,94 @@ impl TopicBuiltinTopicData {
         parsed.to_serialized_data()
     }
 }
+
+#[cfg(test)]
+#[allow(unused_imports)]
+mod tests {
+    use crate::{
+        common::builtin::topic::{
+            participant_builtin_topic_data::ParticipantBuiltinTopicData,
+            publication_builtin_topic_data::PublicationBuiltinTopicData,
+            subscription_builtin_topic_data::SubscriptionBuiltinTopicData,
+            topic_builtin_topic_data::TopicBuiltinTopicData,
+        },
+        core::time::Duration,
+        infrastructure::qos_policy::{
+            ReliabilityQosPolicy, ReliabilityQosPolicyKind, UserDataQosPolicy,
+        },
+        publication::qos::{DataWriterQos, PublisherQos},
+        rtps::common::{guid::Guid, locator::Locator},
+        subscription::qos::{DataReaderQos, SubscriberQos},
+        topic::{qos::TopicQos, type_support::DdsType},
+        xtypes::{
+            EquivalenceHash, MinimalTypeObject, TypeIdentifier, TypeIdentifierWithDependencies,
+            TypeIdentifierWithSize, TypeInformation, TypeObject,
+        },
+    };
+    const PL_CDR_LE_HEADER: [u8; 4] = [0x00, 0x03, 0x00, 0x00];
+    fn make_guid(seed: u8) -> Guid {
+        let mut bytes = [0u8; 16];
+        for (i, b) in bytes.iter_mut().enumerate() {
+            *b = seed.wrapping_add(i as u8);
+        }
+        Guid::from_bytes(bytes)
+    }
+    fn count_pid_occurrences(payload: &[u8], pid_le: u16) -> usize {
+        assert!(payload.len() >= 4, "payload too short for encap header");
+        let mut pos = 4usize;
+        let mut count = 0usize;
+        while pos + 4 <= payload.len() {
+            let pid = u16::from_le_bytes([payload[pos], payload[pos + 1]]);
+            let len = u16::from_le_bytes([payload[pos + 2], payload[pos + 3]]) as usize;
+            // PID_SENTINEL = 0x0001 ends the list.
+            if pid == 0x0001 {
+                break;
+            }
+            if pid == pid_le {
+                count += 1;
+            }
+            pos += 4 + len;
+            // 4-byte alignment for next parameter (already aligned because len is u16
+            // and PlCdrSerializer pads each parameter to 4-byte boundary, but be safe).
+            pos = pos.div_ceil(4) * 4;
+        }
+        count
+    }
+    fn assert_starts_with_pl_cdr_le(payload: &[u8]) {
+        assert!(payload.len() >= 4, "payload too short");
+        assert_eq!(&payload[..4], &PL_CDR_LE_HEADER, "expected PL_CDR_LE encapsulation header");
+    }
+    fn sample_topic() -> TopicBuiltinTopicData {
+        TopicBuiltinTopicData::new(
+            make_guid(0x77),
+            "test/topic".into(),
+            "TopicType".into(),
+            TopicQos::default(),
+        )
+    }
+    #[test]
+    fn topic_pl_cdr_roundtrip() {
+        let original = sample_topic();
+        let bytes = original.to_serialized_data().to_vec();
+        assert_starts_with_pl_cdr_le(&bytes);
+
+        let parsed = TopicBuiltinTopicData::from_serialized_data(&bytes)
+            .expect("PL_CDR parse should succeed");
+        assert_eq!(parsed.name(), original.name());
+        assert_eq!(parsed.type_name(), original.type_name());
+        assert_eq!(parsed.reliability().kind, original.reliability().kind);
+        assert_eq!(parsed.durability().kind, original.durability().kind);
+    }
+
+    #[test]
+    fn topic_pid_name_present() {
+        let t = sample_topic();
+        let bytes = t.to_serialized_data().to_vec();
+        // PidTopicName = 0x0005, PidTypeName = 0x0007
+        assert_eq!(count_pid_occurrences(&bytes, 0x0005), 1);
+        assert_eq!(count_pid_occurrences(&bytes, 0x0007), 1);
+        // PidHistory = 0x0040, PidResourceLimits = 0x0041 — Topic-specific.
+        assert_eq!(count_pid_occurrences(&bytes, 0x0040), 1);
+        assert_eq!(count_pid_occurrences(&bytes, 0x0041), 1);
+    }
+}
