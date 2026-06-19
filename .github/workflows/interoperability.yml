@@ -299,16 +299,18 @@ jobs:
 
           rows = [filter_row(row) for row in rows]
 
-          # Get header info from row 0 and row 2
-          pub_header = rows[0][1] if len(rows[0]) > 1 else "Publisher: int2DDS"
-          sub_header = rows[0][8] if len(rows[0]) > 8 else "Subscriber: int2DDS"
-
           # Row 2 has DDS names (actual column headers)
           dds_headers = rows[2] if len(rows) > 2 else []
 
-          # Count columns for each section
-          pub_cols = 7  # Number of DDS implementations
-          sub_cols = 7
+          # Derive section sizes from the data so the table tracks the matrix size.
+          # Excludes the leading 'Test' column; pub/sub sections are equal.
+          total_cols = max(len(dds_headers) - 1, 0)
+          pub_cols = total_cols // 2
+          sub_cols = total_cols - pub_cols
+
+          # Get header info from row 0
+          pub_header = rows[0][1] if len(rows[0]) > 1 else "Publisher: int2DDS"
+          sub_header = rows[0][1 + pub_cols] if len(rows[0]) > 1 + pub_cols else "Subscriber: int2DDS"
 
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
               f.write("## 📊 Interoperability Test Report (int2DDS)\n\n")
