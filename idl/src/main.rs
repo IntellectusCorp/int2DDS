@@ -11,6 +11,7 @@ struct Args {
     c_output: Option<String>,
     python_output: Option<String>,
     csharp_output: Option<String>,
+    xml_output: Option<String>,
     output_dir: Option<String>,
     crate_path: String,
     python_module: String,
@@ -28,6 +29,7 @@ fn parse_args() -> Args {
     let mut c_output = None;
     let mut python_output = None;
     let mut csharp_output = None;
+    let mut xml_output = None;
     let mut output_dir = None;
     let mut crate_path = "int2dds".to_string();
     let mut python_module = "int2dds".to_string();
@@ -54,6 +56,10 @@ fn parse_args() -> Args {
             "-s" | "--csharp" => {
                 i += 1;
                 csharp_output = Some(args.get(i).cloned().unwrap_or_default());
+            }
+            "-x" | "--xml" => {
+                i += 1;
+                xml_output = Some(args.get(i).cloned().unwrap_or_default());
             }
             "-o" | "--output-dir" => {
                 i += 1;
@@ -116,6 +122,7 @@ fn parse_args() -> Args {
         c_output,
         python_output,
         csharp_output,
+        xml_output,
         output_dir,
         crate_path,
         python_module,
@@ -137,6 +144,7 @@ OPTIONS:
     -c, --c-header <PATH>     Generate C header output to PATH
     -p, --python <PATH>       Generate Python output to PATH
     -s, --csharp <PATH>       Generate C# output to PATH
+    -x, --xml <PATH>          Generate XML type representation to PATH
     -o, --output-dir <DIR>    Output directory (auto-names files)
     --crate-path <PATH>       Rust crate path (default: int2dds)
     --python-module <PATH>    Python module path (default: int2dds)
@@ -200,17 +208,28 @@ fn main() {
             .as_ref()
             .map(|dir| format!("{}/{}.cs", dir, naming::to_pascal_case(&base_name)))
     });
+    let xml_path = args
+        .xml_output
+        .or_else(|| args.output_dir.as_ref().map(|dir| format!("{}/{}.xml", dir, base_name)));
 
     // If neither -r, -c, -p, nor -o specified, default to generating Rust and C
-    let (rust_path, c_path, python_path, rpc_path, csharp_path) = if rust_path.is_none()
+    let (rust_path, c_path, python_path, rpc_path, csharp_path, xml_path) = if rust_path.is_none()
         && c_path.is_none()
         && python_path.is_none()
         && rpc_path.is_none()
         && csharp_path.is_none()
+        && xml_path.is_none()
     {
-        (Some(format!("{}.rs", base_name)), Some(format!("{}.h", base_name)), None, None, None)
+        (
+            Some(format!("{}.rs", base_name)),
+            Some(format!("{}.h", base_name)),
+            None,
+            None,
+            None,
+            None,
+        )
     } else {
-        (rust_path, c_path, python_path, rpc_path, csharp_path)
+        (rust_path, c_path, python_path, rpc_path, csharp_path, xml_path)
     };
 
     // Generate Rust
@@ -274,6 +293,26 @@ fn main() {
         let csharp_opts =
             codegen::csharp::CSharpOptions { namespace: args.csharp_namespace.clone() };
         let code = codegen::csharp::generate(&model, idl_filename, &csharp_opts);
+        if let Err(e) = write_file(path, &code) {
+            eprintln!("error: cannot write '{}': {}", path, e);
+            process::exit(1);
+        }
+        eprintln!("generated: {}", path);
+    }
+
+    // Generate XML type representation
+    if let Some(path) = &xml_path {
+        let code = match codegen::xml::generate(
+            &model,
+            idl_filename,
+            &codegen::xml::XmlOptions::default(),
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("{}: {}", args.input_file, e);
+                process::exit(1);
+            }
+        };
         if let Err(e) = write_file(path, &code) {
             eprintln!("error: cannot write '{}': {}", path, e);
             process::exit(1);

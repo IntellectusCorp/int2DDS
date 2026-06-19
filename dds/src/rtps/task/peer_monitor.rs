@@ -85,7 +85,7 @@ impl PeerMonitor {
                 .chain(proxy.default_unicast_locator_list().iter());
 
             for locator in locators {
-                if locator.to_ip_v4_addr() == ip && locator.port() == port {
+                if locator.to_ip_v4_addr() == ip && locator.access_port() == port {
                     return Some(proxy.guid_prefix());
                 }
             }

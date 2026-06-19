@@ -302,7 +302,7 @@ impl Endpoint for StatefulReader {
 
 impl Debug for StatefulReader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "StatefulReader: {:?}", self.guid)
+        write!(f, "StatefulReader: {}", self.guid)
     }
 }
 
@@ -363,7 +363,7 @@ impl Reader for StatefulReader {
 
     fn on_change(&self, change: Arc<CacheChange>) {
         debug!(
-            "on_change: seq_num={:?}, writer_guid={:?}, kind={:?}, fragmented={}, total_fragments={}",
+            "on_change: seq_num={}, writer_guid={}, kind={:?}, fragmented={}, total_fragments={}",
             change.sequence_number(),
             change.writer_guid(),
             change.kind(),
@@ -458,7 +458,7 @@ impl Reader for StatefulReader {
         // Find the index of the writer proxy with the given writer_guid
         let Some(idx) = proxies.iter().position(|proxy| proxy.remote_writer_guid() == writer_guid)
         else {
-            debug!("Writer proxy with guid {:?} not found in matched writers", writer_guid);
+            debug!("Writer proxy with guid {} not found in matched writers", writer_guid);
             return Ok(false);
         };
 
@@ -469,7 +469,7 @@ impl Reader for StatefulReader {
         // Update subscription matched status
         self.update_subscription_matched_status(-1, InstanceHandle::from_guid(&writer_guid));
 
-        debug!("Removed writer proxy with guid {:?} from matched writers", writer_guid);
+        debug!("Removed writer proxy with guid {} from matched writers", writer_guid);
         Ok(true)
     }
 
@@ -498,7 +498,10 @@ impl Reader for StatefulReader {
         writer_proxies.retain(|writer_proxy| writer_proxy.remote_writer_guid().prefix() != prefix);
         let removed = len_before - writer_proxies.len();
 
-        debug!("Removed all unmatched remote writers from participant: {:?}", prefix);
+        debug!(
+            "Removed all unmatched remote writers from participant: {}",
+            Guid::guid_prefix_to_string(&prefix)
+        );
         debug!("Current number of matched writer: {:?}", writer_proxies.len());
         Ok(removed)
     }

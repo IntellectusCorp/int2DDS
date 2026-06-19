@@ -1,6 +1,6 @@
 use crate::common::instance_handle::InstanceHandle;
 use crate::rtps::common::entity_kind::EntityKind;
-use crate::rtps::common::guid::GuidPrefix;
+use crate::rtps::common::guid::{Guid, GuidPrefix};
 use crate::rtps::common::types::DomainId;
 use crate::rtps::entities::entity::Entity;
 use crate::rtps::entities::participant::Participant;
@@ -150,8 +150,8 @@ impl DiscoveryMulticastListeningTask {
         let rtps_message = rtps_message.unwrap();
         if rtps_message.header.guid_prefix() == self.guid_prefix {
             debug!(
-                "[multicast] Filtering out self-sent message - guid_prefix: {:?}",
-                self.guid_prefix
+                "[multicast] Filtering out self-sent message - guid_prefix: {}",
+                Guid::guid_prefix_to_string(&self.guid_prefix)
             );
             return;
         }
@@ -165,7 +165,7 @@ impl DiscoveryMulticastListeningTask {
                     != EntityKind::BUILT_IN_PARTICIPANT
                 {
                     debug!(
-                        "Received RTPS message with non-participant entity ID: {:?}. Ignoring.",
+                        "Received RTPS message with non-participant entity ID: {}. Ignoring.",
                         participant_proxy_data.participant_guid()
                     );
                     return;
