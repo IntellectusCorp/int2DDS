@@ -788,7 +788,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             seq_num = change.sequence_number();
             let mut datawriter_cache =
                 self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-            datawriter_cache.add_change_with_cleanup(Arc::new(change))?;
+            datawriter_cache.add_change_with_cleanup(Arc::new(change), false)?;
         }
 
         self.update_liveliness()?;
@@ -1236,7 +1236,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         {
             let mut cache =
                 self.datawriter_cache.lock().map_err(|e| DdsError::Error(e.to_string()))?;
-            cache.add_change_with_cleanup(Arc::new(change))?;
+            cache.add_change_with_cleanup(Arc::new(change), false)?;
         }
 
         // 5. Best-effort-only / no-reliable-reader writers get no ACKNACK, so the send

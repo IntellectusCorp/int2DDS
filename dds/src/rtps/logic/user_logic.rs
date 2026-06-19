@@ -18,7 +18,6 @@ use crate::rtps::common::locator::Locator;
 use crate::rtps::common::parameters::ParameterList;
 use crate::rtps::common::rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult};
 use crate::rtps::common::sequence::SequenceNumber;
-use crate::rtps::common::time::RtpsTime;
 use crate::rtps::common::types::ChangeKind;
 use crate::rtps::common::types::DomainId;
 use crate::rtps::entities::endpoint::Endpoint;
@@ -27,8 +26,7 @@ use crate::rtps::entities::history::cache_change::CacheChange;
 use crate::rtps::entities::history::history_cache::HistoryCache;
 use crate::rtps::entities::history::writer_history::WriterHistoryCache;
 use crate::rtps::entities::reader::{
-    FilterOutcome, FragmentInfo, Reader, StatefulReader, StatelessReader, TimeBasedFilter,
-    WriterProxy,
+    FragmentInfo, Reader, StatefulReader, StatelessReader, WriterProxy,
 };
 use crate::rtps::entities::writer::reader_locator::ReaderLocator;
 use crate::rtps::entities::writer::reader_proxy::ReaderProxy;
@@ -1220,88 +1218,24 @@ impl UserLogic {
         changes: Vec<CacheChange>,
     ) -> RtpsResult<()> {
         for change in changes.into_iter() {
-            match reader.time_based_filter() {
-                Some(filter) => self.filter_change_by_time(reader, &filter, change)?,
-                None => Self::deliver_change(reader, change),
-            }
+            Self::deliver_change(reader, change);
         }
 
         Ok(())
     }
 
-    // Add a single change to the reader cache and notify the application.
+    // Add a single change to the reader cache and notify the application. TIME_BASED_FILTER is
+    // applied inside the reader history cache: a held sample returns None and is delivered later
+    // by the cache's own timer, so it is not notified here.
     fn deliver_change(reader: &dyn Reader, change: CacheChange) {
         let reader_cache = reader.reader_cache();
-        let mut res: Option<RtpsResult<Arc<CacheChange>>> = None;
+        let mut res: Option<RtpsResult<Option<Arc<CacheChange>>>> = None;
         if let Ok(mut cache_guard) = reader_cache.lock() {
-            res = Some(cache_guard.add_change(change));
+            res = Some(cache_guard.add_change(change, true));
         }
-        if let Some(Ok(change)) = res {
+        if let Some(Ok(Some(change))) = res {
             reader.on_change(change);
         }
-    }
-
-    // Apply TIME_BASED_FILTER: instance state changes pass through, while ALIVE samples are
-    // rate-limited to one per minimum_separation per instance.
-    fn filter_change_by_time(
-        &self,
-        reader: &dyn Reader,
-        filter: &Arc<TimeBasedFilter>,
-        change: CacheChange,
-    ) -> RtpsResult<()> {
-        let min_separation =
-            reader.get_subscription_builtin_topic_data()?.time_based_filter().minimum_separation;
-        if min_separation.is_zero() {
-            Self::deliver_change(reader, change);
-            return Ok(());
-        }
-
-        let instance_handle = change.instance_handle();
-
-        // Dispose/unregister bypass the filter and deliver immediately. Any held ALIVE sample
-        // was filtered data not yet committed to delivery, so it is discarded.
-        if change.kind() != ChangeKind::Alive {
-            filter.discard_pending(instance_handle);
-            Self::deliver_change(reader, change);
-            return Ok(());
-        }
-
-        let min_separation_nanos = min_separation.as_nanos().max(0) as u64;
-        match filter.on_alive_sample(change, min_separation_nanos, RtpsTime::now()) {
-            FilterOutcome::Deliver(change) => Self::deliver_change(reader, change),
-            FilterOutcome::Held { deliver_after: Some(delay) } => {
-                self.schedule_delayed_delivery(reader, Arc::clone(filter), instance_handle, delay)?;
-            }
-            FilterOutcome::Held { deliver_after: None } => {}
-        }
-        Ok(())
-    }
-
-    // Schedule a one-shot timer that delivers the held sample once the window elapses.
-    fn schedule_delayed_delivery(
-        &self,
-        reader: &dyn Reader,
-        filter: Arc<TimeBasedFilter>,
-        instance_handle: InstanceHandle,
-        delay: Duration,
-    ) -> RtpsResult<()> {
-        let participant = self.get_upgraded_participant()?;
-        let participant_guid = participant.guid();
-        let reader_entity_id = reader.guid().entity_id();
-        let timer_id = TimerId::TimeBasedFilter { reader_entity_id, instance_handle };
-
-        if let Ok(timer_handler) = TimerHandler::get_instance(participant_guid.prefix()).lock() {
-            timer_handler.add_timer(timer_id, delay, false, move || {
-                let Some(reader) = participant.find_reader_from_entity_id(reader_entity_id) else {
-                    return;
-                };
-                if let Some(change) = filter.take_pending_on_timer(instance_handle, RtpsTime::now())
-                {
-                    UserLogic::deliver_change(reader.as_ref(), change);
-                }
-            });
-        }
-        Ok(())
     }
 }
 

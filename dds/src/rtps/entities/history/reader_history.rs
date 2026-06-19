@@ -143,7 +143,12 @@ impl ReaderHistoryCache {
     /// Add CacheChange to ReaderHistoryCache.
     /// Mutates the change via DataReaderHistoryCache (instance handle, reception timestamp),
     /// then wraps in Arc once and shares between RTPS and DCPS histories. Zero deep copies.
-    pub(crate) fn add_change(&mut self, mut a_change: CacheChange) -> RtpsResult<Arc<CacheChange>> {
+    /// With apply_filter, a held sample returns None (not stored; delivered later by a timer).
+    pub(crate) fn add_change(
+        &mut self,
+        mut a_change: CacheChange,
+        apply_filter: bool,
+    ) -> RtpsResult<Option<Arc<CacheChange>>> {
         if let Some(datareader_cache_weak) = &self.datareader_cache {
             if let Some(datareader_cache_arc) = datareader_cache_weak.upgrade() {
                 let mut datareader_cache = datareader_cache_arc.lock().map_err(|_| {
@@ -162,9 +167,14 @@ impl ReaderHistoryCache {
                 let shared = Arc::new(a_change);
 
                 // Insert into DataReaderHistoryCache (Arc::clone only)
-                let removed = datareader_cache
-                    .add_change_with_cleanup(Arc::clone(&shared))
+                let (removed, filtered) = datareader_cache
+                    .add_change_with_cleanup(Arc::clone(&shared), apply_filter)
                     .map_err(|e| RtpsError::new(RtpsErrorCode::DdsError, e.to_string()))?;
+
+                // Held by TIME_BASED_FILTER: not stored in either history, no notification.
+                if filtered {
+                    return Ok(None);
+                }
 
                 // Insert into RTPS ReaderHistoryCache (Arc::clone only)
                 self.changes.push(Arc::clone(&shared));
@@ -173,7 +183,7 @@ impl ReaderHistoryCache {
                     self.remove_change(removed_change)?;
                 }
 
-                return Ok(shared);
+                return Ok(Some(shared));
             }
         }
 
@@ -188,7 +198,7 @@ impl ReaderHistoryCache {
 
             let shared = Arc::new(a_change);
             self.changes.push(Arc::clone(&shared));
-            Ok(shared)
+            Ok(Some(shared))
         } else {
             // Non-builtin endpoint must have DataReader cache
             Err(RtpsError::new(

@@ -44,7 +44,7 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 
-use super::{time_based_filter::TimeBasedFilter, Reader, RemoteWriterInfo};
+use super::{Reader, RemoteWriterInfo};
 
 #[allow(dead_code)]
 pub(crate) struct StatelessReader {
@@ -67,8 +67,6 @@ pub(crate) struct StatelessReader {
     subscription_builtin_topic_data: Arc<Mutex<SubscriptionBuiltinTopicData>>,
     subscription_matched_status: Arc<Mutex<SubscriptionMatchedStatus>>,
     requested_incompatible_qos_status: Arc<Mutex<RequestedIncompatibleQosStatus>>,
-    // Present only when minimum_separation > 0 at creation.
-    time_based_filter: Option<Arc<TimeBasedFilter>>,
 }
 
 impl StatelessReader {
@@ -87,13 +85,6 @@ impl StatelessReader {
         subscription_builtin_topic_data: SubscriptionBuiltinTopicData,
         participant_guid: Guid,
     ) -> Self {
-        let time_based_filter =
-            if subscription_builtin_topic_data.time_based_filter().minimum_separation.is_zero() {
-                None
-            } else {
-                Some(Arc::new(TimeBasedFilter::new()))
-            };
-
         Self {
             guid,
             topic_kind,
@@ -113,7 +104,6 @@ impl StatelessReader {
             requested_incompatible_qos_status: Arc::new(Mutex::new(
                 RequestedIncompatibleQosStatus::default(),
             )),
-            time_based_filter,
         }
     }
 
@@ -328,10 +318,6 @@ impl Endpoint for StatelessReader {
 impl Reader for StatelessReader {
     fn reader_cache(&self) -> Arc<Mutex<ReaderHistoryCache>> {
         Arc::clone(&self.reader_cache)
-    }
-
-    fn time_based_filter(&self) -> Option<Arc<TimeBasedFilter>> {
-        self.time_based_filter.clone()
     }
 
     fn available_changes(&self) -> Vec<Arc<CacheChange>> {
