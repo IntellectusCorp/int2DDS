@@ -140,7 +140,7 @@ jobs:
           - name: opendds
             pattern: opendds-*_shape_main_linux
           - name: coredx
-            pattern: toc_coredx_dds-*-shape_main_linux
+            pattern: toc_coredx_dds-*_shape_main_linux
           - name: hdds
             pattern: hdds-*_shape_main_linux
           - name: zzdds
