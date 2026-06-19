@@ -410,13 +410,6 @@ impl<'a> CGen<'a> {
 
     // ---- Struct ----
 
-    fn emit_struct_section(&mut self, s: &ResolvedStruct) {
-        self.emit_struct_header(s);
-        self.emit_struct_typedef(s);
-        self.raw("\n");
-        self.emit_struct_functions(s);
-    }
-
     fn emit_struct_header(&mut self, s: &ResolvedStruct) {
         let ext_str = match s.extensibility {
             ExtensibilityKind::Final => "FINAL",
@@ -1483,15 +1476,6 @@ impl<'a> CGen<'a> {
         let name = &m.name;
         let ty = &m.resolved_type;
         let flags = Self::member_flags_literal(m);
-
-        if m.is_external {
-            let inner = Self::rust_type_quote_str(ty);
-            self.raw(&format!(
-                "    int2dds_type_info_add_named_type_field(ti, \"{}\", \"Box < {} >\", {});\n",
-                name, inner, flags
-            ));
-            return;
-        }
 
         match ty {
             ResolvedType::Sequence { element, .. }

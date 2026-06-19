@@ -149,6 +149,10 @@ impl TlsConfig {
         };
         Ok(Arc::new(cfg))
     }
+
+    pub fn server_name(&self) -> &str {
+        self.server_name.as_str()
+    }
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────

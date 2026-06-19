@@ -161,6 +161,55 @@ reader_qos = DataReaderQos(
 reader = sub.create_datareader(topic, qos=reader_qos)
 ```
 
+## XML-defined runtime types
+
+Load a type from an XML file at runtime — the same `XmlTypeRegistry` workflow as
+the Rust and C APIs — and publish/subscribe it with **no compile-time IDL**. The
+other DDS vendor XML dialects both parse through the registry.
+
+```python
+from int2dds import DomainParticipant
+from int2dds.types import XmlTypeRegistry
+
+reg = XmlTypeRegistry.from_file("dds/examples/xtypes/sensor_data.xml")
+support = reg.get_type_support("SensorData")
+
+with DomainParticipant(domain_id=0) as dp:
+    topic = dp.create_topic_dynamic("SensorTopic", support)
+    writer = dp.create_publisher().create_datawriter_dynamic(topic, support)
+    reader = dp.create_subscriber().create_datareader_dynamic(topic, support)
+
+    data = support.create_data()
+    data.set_i32("sensor_id", 42)
+    data.set_f64("temperature", 23.5)
+    writer.write(data)
+
+    sample = reader.take()              # DynamicData or None
+    if sample is not None:
+        print(sample.get_i32("sensor_id"), sample.get_f64("temperature"))
+```
+
+`DynamicData` exposes flat `set_*`/`get_*` accessors (by dotted/indexed path,
+e.g. `"pos.x"`, `"items[2]"`). For nested structs, sequences, arrays, maps,
+unions, enums, bitmask/bitset and wide strings, build a `DynamicValue` tree and
+attach it with `set_value`; read it back with `get_value`:
+
+```python
+from int2dds.types import DynamicValue
+
+seq = DynamicValue.sequence()
+seq.push(DynamicValue.i32(100)).push(DynamicValue.i32(200))
+data.set_value("samples", seq)
+data.set_value("mode", DynamicValue.enum("ON", 1))
+
+got = sample.get_value("samples")
+print(got.len(), got.element(0).as_i32())
+print(sample.get_value("mode").as_enum())   # -> ("ON", 1)
+```
+
+See `examples/xml_dynamic_publisher.py` and `examples/xml_dynamic_subscriber.py`
+for a runnable pub/sub pair.
+
 ## Environment Configuration
 
 The `int2dds.env` module wraps the underlying `INT2DDS_*` environment variables

@@ -287,9 +287,9 @@ impl BuiltinEndpoints {
             self.sedp_builtin_publications_writer.reader_proxies().lock()
         {
             debug!(
-                "SEDP builtin publications writer had {} reader proxies before remove {:?}",
+                "SEDP builtin publications writer had {} reader proxies before remove {}",
                 reader_proxies.len(),
-                terminated_participant_guid_prefix
+                Guid::guid_prefix_to_string(&terminated_participant_guid_prefix)
             );
             reader_proxies.retain(|reader_proxy| {
                 reader_proxy.remote_reader_guid().prefix() != terminated_participant_guid_prefix
@@ -306,9 +306,9 @@ impl BuiltinEndpoints {
             self.sedp_builtin_publications_reader.writer_proxies().lock()
         {
             debug!(
-                "SEDP builtin publications reader had {} writer proxies before remove {:?}",
+                "SEDP builtin publications reader had {} writer proxies before remove {}",
                 writer_proxies.len(),
-                terminated_participant_guid_prefix
+                Guid::guid_prefix_to_string(&terminated_participant_guid_prefix)
             );
             writer_proxies.retain(|writer_proxy| {
                 writer_proxy.remote_writer_guid().prefix() != terminated_participant_guid_prefix
@@ -325,9 +325,9 @@ impl BuiltinEndpoints {
             self.sedp_builtin_subscriptions_writer.reader_proxies().lock()
         {
             debug!(
-                "SEDP builtin subscriptions writer had {} reader proxies before remove {:?}",
+                "SEDP builtin subscriptions writer had {} reader proxies before remove {}",
                 reader_proxies.len(),
-                terminated_participant_guid_prefix
+                Guid::guid_prefix_to_string(&terminated_participant_guid_prefix)
             );
             reader_proxies.retain(|reader_proxy| {
                 reader_proxy.remote_reader_guid().prefix() != terminated_participant_guid_prefix
@@ -344,9 +344,9 @@ impl BuiltinEndpoints {
             self.sedp_builtin_subscriptions_reader.writer_proxies().lock()
         {
             debug!(
-                "SEDP builtin subscriptions reader had {} writer proxies before remove {:?}",
+                "SEDP builtin subscriptions reader had {} writer proxies before remove {}",
                 writer_proxies.len(),
-                terminated_participant_guid_prefix
+                Guid::guid_prefix_to_string(&terminated_participant_guid_prefix)
             );
             writer_proxies.retain(|writer_proxy| {
                 writer_proxy.remote_writer_guid().prefix() != terminated_participant_guid_prefix
@@ -362,9 +362,9 @@ impl BuiltinEndpoints {
         //SEDP Topics
         if let Ok(mut reader_proxies) = self.sedp_builtin_topics_writer.reader_proxies().lock() {
             debug!(
-                "SEDP builtin topics writer had {} reader proxies before remove {:?}",
+                "SEDP builtin topics writer had {} reader proxies before remove {}",
                 reader_proxies.len(),
-                terminated_participant_guid_prefix
+                Guid::guid_prefix_to_string(&terminated_participant_guid_prefix)
             );
             reader_proxies.retain(|reader_proxy| {
                 reader_proxy.remote_reader_guid().prefix() != terminated_participant_guid_prefix
@@ -376,9 +376,9 @@ impl BuiltinEndpoints {
 
         if let Ok(mut writer_proxies) = self.sedp_builtin_topics_reader.writer_proxies().lock() {
             debug!(
-                "SEDP builtin topics reader had {} writer proxies before remove {:?}",
+                "SEDP builtin topics reader had {} writer proxies before remove {}",
                 writer_proxies.len(),
-                terminated_participant_guid_prefix
+                Guid::guid_prefix_to_string(&terminated_participant_guid_prefix)
             );
             writer_proxies.retain(|writer_proxy| {
                 writer_proxy.remote_writer_guid().prefix() != terminated_participant_guid_prefix
@@ -389,8 +389,8 @@ impl BuiltinEndpoints {
         }
 
         debug!(
-            "Removed all unmatched built-in endpoints from terminated participant: {:?}",
-            terminated_participant_guid_prefix
+            "Removed all unmatched built-in endpoints from terminated participant: {}",
+            Guid::guid_prefix_to_string(&terminated_participant_guid_prefix)
         );
 
         // WLP
@@ -398,9 +398,9 @@ impl BuiltinEndpoints {
             self.builtin_participant_message_writer.reader_proxies().lock()
         {
             debug!(
-                "SEDP builtin participant message writer had {} reader locators before remove {:?}",
+                "SEDP builtin participant message writer had {} reader locators before remove {}",
                 reader_proxies.len(),
-                terminated_participant_guid_prefix
+                Guid::guid_prefix_to_string(&terminated_participant_guid_prefix)
             );
             reader_proxies.retain(|reader_proxy| {
                 reader_proxy.remote_reader_guid().prefix() != terminated_participant_guid_prefix
@@ -417,9 +417,9 @@ impl BuiltinEndpoints {
             self.builtin_participant_message_reader.writer_proxies().lock()
         {
             debug!(
-                "SEDP builtin participant message reader had {} writer proxies before remove {:?}",
+                "SEDP builtin participant message reader had {} writer proxies before remove {}",
                 writer_proxies.len(),
-                terminated_participant_guid_prefix
+                Guid::guid_prefix_to_string(&terminated_participant_guid_prefix)
             );
             writer_proxies.retain(|writer_proxy| {
                 writer_proxy.remote_writer_guid().prefix() != terminated_participant_guid_prefix
