@@ -660,6 +660,30 @@ impl From<qos_policy::WriterReliabilityExtensionQosPolicy> for WriterReliability
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
+pub(crate) struct DataFragQosPolicy {
+    pub(crate) max_size: i32,
+}
+
+impl Default for DataFragQosPolicy {
+    fn default() -> Self {
+        Self { max_size: 65000 }
+    }
+}
+
+impl From<DataFragQosPolicy> for qos_policy::DataFragQosPolicy {
+    fn from(external: DataFragQosPolicy) -> Self {
+        Self { max_size: external.max_size }
+    }
+}
+
+impl From<qos_policy::DataFragQosPolicy> for DataFragQosPolicy {
+    fn from(internal: qos_policy::DataFragQosPolicy) -> Self {
+        Self { max_size: internal.max_size }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub(crate) struct ReaderReliabilityExtensionQosPolicy {
     pub(crate) heartbeat_response_delay: Duration,
     pub(crate) heartbeat_suppression_duration: Duration,

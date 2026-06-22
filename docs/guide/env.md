@@ -15,7 +15,6 @@ This document describes the environment variables available in int2dds. All envi
 | `INT2DDS_NETWORK_IP`                 | `--int2dds-network-ip`                 | Network IP address                         | auto                    |
 | `INT2DDS_USE_LOOPBACK_INTERFACE`     | `--int2dds-use-loopback-interface`     | Enable loopback interface                  | false                   |
 | `INT2DDS_UDP_SOCKET_BUFFER`          | `--int2dds-udp-socket-buffer`          | UDP socket buffer size (bytes)             | OS default              |
-| `INT2DDS_FRAGMENT_SIZE`              | `--int2dds-fragment-size`              | Writer fragment size in bytes (1-65000)    | 65000                   |
 | `INT2DDS_MULTICAST_TTL`              | `--int2dds-multicast-ttl`              | IPv4 multicast TTL fallback (0-255)        | 1                       |
 | `INT2DDS_EXTENDED_DISCOVERY`         | `--int2dds-extended-discovery`         | Enable extended discovery                  | false                   |
 | `INT2DDS_TCP_CONNECT_TIMEOUT`        | `--int2dds-tcp-connect-timeout`        | TCP connection timeout (ms)                | 5000                    |
@@ -279,29 +278,6 @@ export INT2DDS_UDP_SOCKET_BUFFER=1048576
 cargo run --example hello_world -- --int2dds-udp-socket-buffer 1048576
 ```
 
-### INT2DDS_FRAGMENT_SIZE
-
-Sets the writer fragment size in bytes. Samples larger than this are split into
-fragments of this size. Default: 65000. Valid range `1`-`65000`; out-of-range
-values are clamped, invalid values fall back to the default.
-
-#### Configuration
-
-```powershell
-# Windows PowerShell
-$env:INT2DDS_FRAGMENT_SIZE = "1344"  # fits within a 1500-byte MTU after headers
-
-# CLI argument
-cargo run --example hello_world -- --int2dds-fragment-size 1344
-```
-
-```bash
-# Linux/macOS
-export INT2DDS_FRAGMENT_SIZE=1344
-
-# CLI argument
-cargo run --example hello_world -- --int2dds-fragment-size 1344
-```
 
 ### INT2DDS_MULTICAST_TTL
 

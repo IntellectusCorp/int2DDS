@@ -198,14 +198,6 @@ fn apply_cli_args_to_env() {
                     .value_hint(ValueHint::Other),
             )
             .arg(
-                Arg::new("int2dds_fragment_size")
-                    .long("int2dds-fragment-size")
-                    .value_name("BYTES")
-                    .help("Writer fragment size in bytes (1-65000)")
-                    .num_args(1)
-                    .value_hint(ValueHint::Other),
-            )
-            .arg(
                 Arg::new("int2dds_initial_peers")
                     .long("int2dds-initial-peers")
                     .value_name("PEERS")
@@ -322,10 +314,6 @@ fn apply_cli_args_to_env() {
     if let Some(v) = matches.get_one::<String>("int2dds_shm_buffer_size") {
         log::info!("Environment variable set: INT2DDS_SHM_BUFFER_SIZE = {}", v);
         unsafe { std::env::set_var("INT2DDS_SHM_BUFFER_SIZE", v) };
-    }
-    if let Some(v) = matches.get_one::<String>("int2dds_fragment_size") {
-        log::info!("Environment variable set: INT2DDS_FRAGMENT_SIZE = {}", v);
-        unsafe { std::env::set_var("INT2DDS_FRAGMENT_SIZE", v) };
     }
     if let Some(v) = matches.get_one::<String>("int2dds_initial_peers") {
         log::info!("Environment variable set: INT2DDS_INITIAL_PEERS = {}", v);
@@ -642,27 +630,6 @@ pub fn set_initial_peers(peers: &[std::net::SocketAddr]) {
 
     log::info!("Environment variable set: INT2DDS_INITIAL_PEERS = {}", peers_str);
     unsafe { std::env::set_var("INT2DDS_INITIAL_PEERS", peers_str) };
-}
-
-/// Get the fragment size (data_max_size_serialized) for user-defined writers.
-/// Default 65000; capped at 65000 (u16 wire limit + 64KB datagram - headers).
-pub fn get_fragment_size() -> i32 {
-    const DEFAULT: i32 = 65000;
-    const MAX: i32 = 65000;
-    match std::env::var("INT2DDS_FRAGMENT_SIZE").ok().and_then(|v| v.parse::<i32>().ok()) {
-        Some(v) if v > MAX => {
-            log::warn!("INT2DDS_FRAGMENT_SIZE={} exceeds max {}, clamping to {}", v, MAX, MAX);
-            MAX
-        }
-        Some(v) if v > 0 => v,
-        _ => DEFAULT,
-    }
-}
-
-/// Set the writer fragment size via environment variable
-pub fn set_fragment_size(size: i32) {
-    log::info!("Environment variable set: INT2DDS_FRAGMENT_SIZE = {}", size);
-    unsafe { std::env::set_var("INT2DDS_FRAGMENT_SIZE", size.to_string()) };
 }
 
 /// Read the IPv4 multicast TTL override from `INT2DDS_MULTICAST_TTL`.
