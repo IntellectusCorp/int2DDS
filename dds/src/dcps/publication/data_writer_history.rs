@@ -110,7 +110,8 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
     fn add_change_with_cleanup(
         &mut self,
         a_change: Arc<CacheChange>,
-    ) -> DdsResult<Option<Arc<CacheChange>>> {
+        _apply_filter: bool, // writer side never applies TIME_BASED_FILTER
+    ) -> DdsResult<(Option<Arc<CacheChange>>, bool)> {
         // If purge_sent_changes, deliver to the RTPS cache,
         // then drop from history and return the buffer to the pool.
         if self.purge_sent_changes {
@@ -126,7 +127,7 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
                 self.changes.len(),
                 self.rtps_cache_len()
             );
-            return Ok(None);
+            return Ok((None, false));
         }
 
         // Set lifespan timer if lifespan qos is configured
@@ -180,7 +181,7 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
 
         // Writer-side callers never use the removed value
         // unlike DataReaderHistoryCache, which needs it to sync the RTPS history
-        Ok(None)
+        Ok((None, false))
     }
 
     // Removes the given CacheChange from the history vector and map.
@@ -805,10 +806,10 @@ mod tests {
 
         // Adding 2 changes should succeed
         assert!(cache_guard
-            .add_change_with_cleanup(create_change(1, InstanceHandle::new([1; 16])))
+            .add_change_with_cleanup(create_change(1, InstanceHandle::new([1; 16])), false)
             .is_ok());
         assert!(cache_guard
-            .add_change_with_cleanup(create_change(2, InstanceHandle::new([1; 16])))
+            .add_change_with_cleanup(create_change(2, InstanceHandle::new([1; 16])), false)
             .is_ok());
 
         let datawriter_clone = data_writer.clone();
@@ -826,8 +827,8 @@ mod tests {
             reader_proxy.acked_changes_set(SequenceNumber::from_i64(1));
         });
 
-        let result =
-            cache_guard.add_change_with_cleanup(create_change(3, InstanceHandle::new([1; 16])));
+        let result = cache_guard
+            .add_change_with_cleanup(create_change(3, InstanceHandle::new([1; 16])), false);
 
         handle.join().unwrap();
 
@@ -894,15 +895,15 @@ mod tests {
 
         // Adding 2 changes should succeed
         assert!(cache_guard
-            .add_change_with_cleanup(create_change(1, InstanceHandle::new([1; 16])))
+            .add_change_with_cleanup(create_change(1, InstanceHandle::new([1; 16])), false)
             .is_ok());
         assert!(cache_guard
-            .add_change_with_cleanup(create_change(2, InstanceHandle::new([1; 16])))
+            .add_change_with_cleanup(create_change(2, InstanceHandle::new([1; 16])), false)
             .is_ok());
 
         // Returns error after blocking time since no ACK processing
-        let result =
-            cache_guard.add_change_with_cleanup(create_change(3, InstanceHandle::new([1; 16])));
+        let result = cache_guard
+            .add_change_with_cleanup(create_change(3, InstanceHandle::new([1; 16])), false);
 
         assert!(result.is_err());
         assert!(matches!(result, Err(DdsError::OutOfResources)));
@@ -955,11 +956,16 @@ mod tests {
         let instance_handle_3 = InstanceHandle::new([3; 16]);
 
         // Adding 2 changes should succeed
-        assert!(cache_guard.add_change_with_cleanup(create_change(1, instance_handle_1)).is_ok());
-        assert!(cache_guard.add_change_with_cleanup(create_change(2, instance_handle_2)).is_ok());
+        assert!(cache_guard
+            .add_change_with_cleanup(create_change(1, instance_handle_1), false)
+            .is_ok());
+        assert!(cache_guard
+            .add_change_with_cleanup(create_change(2, instance_handle_2), false)
+            .is_ok());
 
         // Returns error immediately without blocking since max_instances(2) is exceeded
-        let result = cache_guard.add_change_with_cleanup(create_change(3, instance_handle_3));
+        let result =
+            cache_guard.add_change_with_cleanup(create_change(3, instance_handle_3), false);
 
         assert!(result.is_err());
         assert!(matches!(result, Err(DdsError::OutOfResources)));
@@ -1011,11 +1017,16 @@ mod tests {
         let instance_handle_2 = InstanceHandle::new([2; 16]);
         let instance_handle_3 = InstanceHandle::new([3; 16]);
 
-        assert!(cache_guard.add_change_with_cleanup(create_change(1, instance_handle_1)).is_ok());
-        assert!(cache_guard.add_change_with_cleanup(create_change(2, instance_handle_2)).is_ok());
+        assert!(cache_guard
+            .add_change_with_cleanup(create_change(1, instance_handle_1), false)
+            .is_ok());
+        assert!(cache_guard
+            .add_change_with_cleanup(create_change(2, instance_handle_2), false)
+            .is_ok());
 
         // Returns error immediately without blocking since all instances except instance_handle_3 have only 1 sample remaining
-        let result = cache_guard.add_change_with_cleanup(create_change(3, instance_handle_3));
+        let result =
+            cache_guard.add_change_with_cleanup(create_change(3, instance_handle_3), false);
 
         assert!(result.is_err());
         assert!(matches!(result, Err(DdsError::OutOfResources)));
@@ -1081,11 +1092,16 @@ mod tests {
         let instance_handle_2 = InstanceHandle::new([2; 16]);
 
         // Add 2 changes to instance_handle_1, reaching max_samples
-        assert!(cache_guard.add_change_with_cleanup(create_change(1, instance_handle_1)).is_ok());
-        assert!(cache_guard.add_change_with_cleanup(create_change(2, instance_handle_1)).is_ok());
+        assert!(cache_guard
+            .add_change_with_cleanup(create_change(1, instance_handle_1), false)
+            .is_ok());
+        assert!(cache_guard
+            .add_change_with_cleanup(create_change(2, instance_handle_1), false)
+            .is_ok());
 
         // To add to instance_handle_2, one sample from instance_handle_1 should be ACKED, but returns error after blocking time since no ACK processing
-        let result = cache_guard.add_change_with_cleanup(create_change(3, instance_handle_2));
+        let result =
+            cache_guard.add_change_with_cleanup(create_change(3, instance_handle_2), false);
 
         assert!(result.is_err());
         assert!(matches!(result, Err(DdsError::OutOfResources)));
@@ -1137,8 +1153,12 @@ mod tests {
         let instance_handle_2 = InstanceHandle::new([2; 16]);
 
         // Add 2 changes to instance_handle_1, reaching max_samples
-        assert!(cache_guard.add_change_with_cleanup(create_change(1, instance_handle_1)).is_ok());
-        assert!(cache_guard.add_change_with_cleanup(create_change(2, instance_handle_1)).is_ok());
+        assert!(cache_guard
+            .add_change_with_cleanup(create_change(1, instance_handle_1), false)
+            .is_ok());
+        assert!(cache_guard
+            .add_change_with_cleanup(create_change(2, instance_handle_1), false)
+            .is_ok());
 
         // To add to instance_handle_2, one sample from instance_handle_1 should be ACKED
         let datawriter_clone = data_writer.clone();
@@ -1157,7 +1177,8 @@ mod tests {
         });
 
         // Should succeed after deleting since change1 was acked
-        let result = cache_guard.add_change_with_cleanup(create_change(3, instance_handle_2));
+        let result =
+            cache_guard.add_change_with_cleanup(create_change(3, instance_handle_2), false);
         handle.join().unwrap();
 
         assert!(result.is_ok());
@@ -1546,7 +1567,7 @@ mod tests {
         let cache = writer.get_datawriter_cache().unwrap();
         let mut guard = cache.lock().unwrap();
         for seq in 1..=count {
-            guard.add_change_with_cleanup(create_change(seq, handle)).unwrap();
+            guard.add_change_with_cleanup(create_change(seq, handle), false).unwrap();
         }
     }
 
