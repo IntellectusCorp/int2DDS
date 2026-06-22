@@ -5,10 +5,9 @@ use std::time::Duration as StdDuration;
 mod shutdown;
 use shutdown::{cleanup_participant, Shutdown};
 
-use clap::Parser;
 use int2dds::{
     common::{
-        env::{set_console_log_level, set_log_type},
+        env::{init_from_env, set_console_log_level, set_log_type},
         instance_handle::InstanceHandle,
         log::{LogLevel, LogType},
     },
@@ -24,21 +23,18 @@ use log::info;
 
 const TOPIC_NAME: &str = "hello_world_topic";
 const PUBLISH_INTERVAL: StdDuration = StdDuration::from_millis(1000);
+const DEFAULT_DOMAIN: i32 = 0;
 
-/// The domain id is the only CLI option; everything else is fixed.
-#[derive(Parser, Debug)]
-#[command(
-    about = "Hello World DDS Publisher (QoS via profile or spec default)",
-    disable_help_flag = true
-)]
-struct Args {
-    /// Print help
-    #[arg(long, action = clap::ArgAction::Help)]
-    help: Option<bool>,
-
-    /// Domain ID
-    #[arg(short = 'd', long, default_value_t = 0)]
-    domain: i32,
+fn parse_domain_id() -> i32 {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "-d" || arg == "--domain" {
+            if let Some(Ok(id)) = args.next().map(|v| v.parse::<i32>()) {
+                return id;
+            }
+        }
+    }
+    DEFAULT_DOMAIN
 }
 
 #[derive(DdsType)]
@@ -76,8 +72,9 @@ impl DataWriterListener for PubListener {
 fn main() {
     set_log_type(LogType::Console);
     set_console_log_level(LogLevel::Info);
+    init_from_env();
 
-    let domain_id = Args::parse().domain;
+    let domain_id = parse_domain_id();
     let shutdown = Shutdown::install();
     let factory = DomainParticipantFactory::get_instance();
 
