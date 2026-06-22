@@ -1,0 +1,23 @@
+{
+    "name": "HelloWorld",
+    "qos_profiles": [
+        {
+            "name": "Sub",
+            "is_default_profile": true,
+            "domain_participant_qos": {
+                "property": {
+                    "value": [
+                        { "name": "int2dds.transport", "value": "tcp", "propagate": false },
+                        { "name": "int2dds.transport.TCPv4.bind_port", "value": "7401", "propagate": false },
+                        { "name": "int2dds.initial_peers", "value": "127.0.0.1:7400", "propagate": false }
+                    ]
+                }
+            },
+            "datareader_qos": {
+                "reliability": { "kind": "RELIABLE_RELIABILITY_QOS" },
+                "durability": { "kind": "TRANSIENT_LOCAL_DURABILITY_QOS" },
+                "history": { "kind": "KEEP_LAST_HISTORY_QOS", "depth": 10 }
+            }
+        }
+    ]
+}

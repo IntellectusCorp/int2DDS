@@ -1129,10 +1129,7 @@ impl<'a> CsGen<'a> {
                 let size_var = format!("_{name}ArrSize");
                 let start_var = format!("_{name}ArrStart");
                 if non_prim {
-                    self.line(&format!(
-                        "var ({}, {}) = r.ReadDheader();",
-                        size_var, start_var
-                    ));
+                    self.line(&format!("var ({}, {}) = r.ReadDheader();", size_var, start_var));
                 }
                 self.line(&format!("{}.{} = new {}[{}];", obj, name, cs_elem, size));
                 self.line(&format!("for (var _i = 0; _i < {}; _i++)", size));
@@ -1243,10 +1240,7 @@ impl<'a> CsGen<'a> {
                 let size_var = format!("{var_name}SeqSize");
                 let start_var = format!("{var_name}SeqStart");
                 if non_prim {
-                    self.line(&format!(
-                        "var ({}, {}) = r.ReadDheader();",
-                        size_var, start_var
-                    ));
+                    self.line(&format!("var ({}, {}) = r.ReadDheader();", size_var, start_var));
                 }
                 self.line(&format!("var {} = r.ReadSeqHeader();", count_var));
                 self.line(&format!(
@@ -1267,10 +1261,7 @@ impl<'a> CsGen<'a> {
                 let size_var = format!("{var_name}ArrSize");
                 let start_var = format!("{var_name}ArrStart");
                 if non_prim {
-                    self.line(&format!(
-                        "var ({}, {}) = r.ReadDheader();",
-                        size_var, start_var
-                    ));
+                    self.line(&format!("var ({}, {}) = r.ReadDheader();", size_var, start_var));
                 }
                 self.line(&format!("var {} = new {}[{}];", var_name, cs_elem, size));
                 self.line(&format!("for (var _j = 0; _j < {}; _j++)", size));
