@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<dds>
+    <qos_library name="HelloWorld">
+        <qos_profile name="Default" is_default_profile="true">
+            <domain_participant_qos>
+                <property>
+                    <value>
+                        <name>int2dds.transport</name>
+                        <value>udp</value>
+                        <propagate>false</propagate>
+                    </value>
+                    <value>
+                        <name>int2dds.transport.UDPv4.multicast_ttl</name>
+                        <value>64</value>
+                        <propagate>false</propagate>
+                    </value>
+                </property>
+            </domain_participant_qos>
+            <datawriter_qos>
+                <reliability><kind>RELIABLE_RELIABILITY_QOS</kind></reliability>
+                <durability><kind>TRANSIENT_LOCAL_DURABILITY_QOS</kind></durability>
+                <history><kind>KEEP_LAST_HISTORY_QOS</kind><depth>10</depth></history>
+            </datawriter_qos>
+            <datareader_qos>
+                <reliability><kind>RELIABLE_RELIABILITY_QOS</kind></reliability>
+                <durability><kind>TRANSIENT_LOCAL_DURABILITY_QOS</kind></durability>
+                <history><kind>KEEP_LAST_HISTORY_QOS</kind><depth>10</depth></history>
+            </datareader_qos>
+        </qos_profile>
+    </qos_library>
+</dds>

@@ -1,15 +1,28 @@
 {
-  "args": ["test", "--", "--nocapture"],
-  "sourceLanguages": ["rust"],
+  "args": [
+    "test",
+    "--",
+    "--nocapture"
+  ],
+  "sourceLanguages": [
+    "rust"
+  ],
   "configurations": [
     {
       "name": "Debug Pub D-0",
       "type": "lldb",
       "request": "launch",
-      "args": ["--role", "pub", "--domain", "0"],
+      "args": [
+        "--domain",
+        "0"
+      ],
       "cwd": "${workspaceFolder}",
       "cargo": {
-        "args": ["run", "--example", "hello_world_param"]
+        "args": [
+          "run",
+          "--example",
+          "hello_world_pub"
+        ]
       },
       "env": {
         "RUST_LOG": "debug"
