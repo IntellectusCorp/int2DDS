@@ -202,13 +202,19 @@ impl UserLogic {
                 // In case of fragment, fragment state is checked via last seq number, so
                 // use current seq number in previous heartbeat to get ack from reader for retransmitted message
                 // In case of data retransmission, decide whether to send heartbeat
-                let heartbeat_info = Some((
-                    stateful_writer.heartbeat_count(),
-                    *requested_change_sn,
-                    *requested_change_sn,
-                    false, // final_flag
-                    false, // liveliness_flag = false for retransmission
-                ));
+                let heartbeat_info = if reader_proxy.is_reliable()
+                    && !stateful_writer.disable_piggyback_heartbeat()
+                {
+                    Some((
+                        stateful_writer.heartbeat_count(),
+                        *requested_change_sn,
+                        *requested_change_sn,
+                        false, // final_flag
+                        false, // liveliness_flag = false for retransmission
+                    ))
+                } else {
+                    None
+                };
 
                 if a_change.is_fragmented() {
                     debug!(
@@ -1217,20 +1223,25 @@ impl UserLogic {
         reader: &dyn Reader,
         changes: Vec<CacheChange>,
     ) -> RtpsResult<()> {
-        let reader_cache = reader.reader_cache();
-
         for change in changes.into_iter() {
-            let mut res: Option<RtpsResult<Arc<CacheChange>>> = None;
-            if let Ok(mut cache_guard) = reader_cache.lock() {
-                res = Some(cache_guard.add_change(change));
-            }
-
-            if let Some(Ok(change)) = res {
-                reader.on_change(change);
-            }
+            Self::deliver_change(reader, change);
         }
 
         Ok(())
+    }
+
+    // Add a single change to the reader cache and notify the application. TIME_BASED_FILTER is
+    // applied inside the reader history cache: a held sample returns None and is delivered later
+    // by the cache's own timer, so it is not notified here.
+    fn deliver_change(reader: &dyn Reader, change: CacheChange) {
+        let reader_cache = reader.reader_cache();
+        let mut res: Option<RtpsResult<Option<Arc<CacheChange>>>> = None;
+        if let Ok(mut cache_guard) = reader_cache.lock() {
+            res = Some(cache_guard.add_change(change, true));
+        }
+        if let Some(Ok(Some(change))) = res {
+            reader.on_change(change);
+        }
     }
 }
 
@@ -2242,7 +2253,12 @@ impl UnicastMessageProcessor for UserLogic {
                 "Writer cache should not be empty while sending DATA_FRAG",
             )
         })?;
-        let heartbeat_info = Some((heartbeat_count, writer_sn, last_sn, false, false));
+        let heartbeat_info =
+            if reader_proxy.is_reliable() && !stateful_writer.disable_piggyback_heartbeat() {
+                Some((heartbeat_count, writer_sn, last_sn, false, false))
+            } else {
+                None
+            };
 
         let timestamp = Utc::now();
         let participant = self.get_upgraded_participant()?;

@@ -1,0 +1,61 @@
+# int2dds-ffi musl builder — Alpine-native shared library (libint2dds_ffi.so).
+#
+# Alpine IS musl, so a native cargo build links against musl libc. We set
+# crt-static OFF so rustc emits a cdylib (.so) rather than a static lib, and the
+# Alpine `libgcc` package provides libgcc_s.so.1 so the dynamic link succeeds —
+# the thing the ubuntu + musl-tools path could not do.
+#
+# Built per-arch by running with --platform: amd64 native, arm64 via QEMU.
+# Produces a .so that loads on Alpine/musl systems with NO glibc dependency.
+
+FROM alpine:3.20
+
+ARG RUST_VERSION=1.89.0
+ENV CARGO_HOME=/usr/local/cargo \
+    RUSTUP_HOME=/usr/local/rustup \
+    PATH=/usr/local/cargo/bin:$PATH \
+    CARGO_TARGET_DIR=/tmp/cargo-target \
+    DIST=unknown \
+    RUSTFLAGS=-Ctarget-feature=-crt-static
+
+# build-base -> gcc/musl-dev/make for the cdylib link + -sys crates
+# cmake/perl/nasm -> aws-lc-sys / ring build from source
+# clang/clang-dev/llvm-dev -> aws-lc-sys bindgen
+# libgcc -> provides libgcc_s.so.1 for the dynamic cdylib link
+# binutils/file -> readelf for the post-build checks
+RUN apk add --no-cache \
+        build-base cmake perl nasm \
+        clang clang-dev llvm-dev \
+        pkgconf linux-headers libgcc \
+        curl bash binutils file rustup
+
+# rustup-init on Alpine installs the musl host toolchain (x86_64/aarch64-musl).
+RUN rustup-init -y --no-modify-path --profile minimal --default-toolchain ${RUST_VERSION} \
+    && rustc --version && rustc -vV | grep host
+
+WORKDIR /src
+
+# Native musl build: no --target needed (the host IS *-linux-musl). RUSTFLAGS
+# (crt-static off) makes a cdylib .so come out, dynamically linked to musl.
+CMD ["bash", "-lc", "\
+    set -eu; \
+    export PATH=/usr/local/cargo/bin:$PATH; \
+    echo \"== alpine musl: $(uname -m)  ->  dist/$DIST ==\"; \
+    rustc -vV | grep host || true; \
+    cargo build --release -p int2dds-ffi; \
+    ver=$(grep -m1 '^version' /src/Cargo.toml | cut -d'\"' -f2); \
+    mm=${ver%.*}; \
+    real=libint2dds_ffi.so.$ver; son=libint2dds_ffi.so.$mm; \
+    out=/src/ffi/dist/$DIST; mkdir -p \"$out\"; \
+    cp -v \"$CARGO_TARGET_DIR/release/libint2dds_ffi.so\" \"$out/$real\"; \
+    ln -sfn \"$real\" \"$out/$son\"; \
+    ln -sfn \"$real\" \"$out/libint2dds_ffi.so\"; \
+    cp -v /src/ffi/include/int2dds-ffi.h /src/ffi/dist/ 2>/dev/null || true; \
+    echo '== artifact =='; \
+    readelf -h \"$out/$real\" | grep -E 'Class|Machine|Type' || true; \
+    echo '== embedded SONAME (should be '$son') =='; \
+    readelf -d \"$out/$real\" | grep SONAME || true; \
+    echo '== NEEDED (expect musl libc, NOT libc.so.6) =='; \
+    readelf -d \"$out/$real\" | grep NEEDED || true; \
+    echo '== dist layout =='; ls -l \"$out\" || true \
+    "]
