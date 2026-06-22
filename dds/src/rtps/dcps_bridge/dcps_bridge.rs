@@ -328,7 +328,7 @@ impl DcpsBridge {
         let change = self.participant.sedp_builtin_publications_writer().new_change(
             ChangeKind::Alive,
             payload.to_vec(),
-            InstanceHandle::NIL,
+            InstanceHandle::from_guid(&publication_builtin_topic_data.endpoint_guid()),
             Some(RtpsTime::now()),
         );
         let cache_change = Arc::new(change);
@@ -489,7 +489,7 @@ impl DcpsBridge {
         let change = self.participant.sedp_builtin_subscriptions_writer().new_change(
             ChangeKind::Alive,
             payload.to_vec(),
-            InstanceHandle::NIL,
+            InstanceHandle::from_guid(&subscription_builtin_topic_data.endpoint_guid()),
             Some(RtpsTime::now()),
         );
         let cache_change = Arc::new(change);
@@ -705,7 +705,7 @@ impl DcpsBridge {
         let change = self.participant.sedp_builtin_subscriptions_writer().new_change(
             ChangeKind::Alive,
             payload.to_vec(),
-            InstanceHandle::NIL,
+            InstanceHandle::from_guid(&subscription_builtin_topic_data.endpoint_guid()),
             Some(RtpsTime::now()),
         );
         let cache_change = Arc::new(change);
@@ -751,7 +751,7 @@ impl DcpsBridge {
         let datawriter_guid = publication_builtin_topic_data.endpoint_guid();
 
         // remove prev endpoint discovery data
-        let cache = self.participant.sedp_builtin_subscriptions_writer().writer_cache();
+        let cache = self.participant.sedp_builtin_publications_writer().writer_cache();
         let mut cache = cache.lock().map_err(|e| {
             RtpsError::new(RtpsErrorCode::LockError, format!("Failed to lock history cache: {}", e))
         })?;
@@ -777,7 +777,7 @@ impl DcpsBridge {
         let change = self.participant.sedp_builtin_publications_writer().new_change(
             ChangeKind::Alive,
             payload.to_vec(),
-            InstanceHandle::NIL,
+            InstanceHandle::from_guid(&publication_builtin_topic_data.endpoint_guid()),
             Some(RtpsTime::now()),
         );
         let cache_change = Arc::new(change);

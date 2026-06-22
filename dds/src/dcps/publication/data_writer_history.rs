@@ -12,8 +12,12 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, Weak,
+    },
     thread,
+    time::Instant,
 };
 
 use ::log::debug;
@@ -45,6 +49,57 @@ use crate::{
     },
     utils::timer::timer_id::TimerId,
 };
+
+static WRITER_HISTORY_PROFILE_COUNT: AtomicU64 = AtomicU64::new(0);
+static WRITER_HISTORY_PROFILE_LIFESPAN_US: AtomicU64 = AtomicU64::new(0);
+static WRITER_HISTORY_PROFILE_ENSURE_US: AtomicU64 = AtomicU64::new(0);
+static WRITER_HISTORY_PROFILE_RELEASE_US: AtomicU64 = AtomicU64::new(0);
+static WRITER_HISTORY_PROFILE_PUSH_US: AtomicU64 = AtomicU64::new(0);
+static WRITER_HISTORY_PROFILE_INSTANCE_US: AtomicU64 = AtomicU64::new(0);
+static WRITER_HISTORY_PROFILE_RTPS_US: AtomicU64 = AtomicU64::new(0);
+static WRITER_HISTORY_PROFILE_TOTAL_US: AtomicU64 = AtomicU64::new(0);
+
+fn writer_history_profile_enabled() -> bool {
+    std::env::var_os("RMW_INT2DDS_PROFILE").is_some()
+}
+
+fn elapsed_us(start: Instant, end: Instant) -> u64 {
+    end.duration_since(start).as_micros() as u64
+}
+
+fn record_writer_history_profile(
+    lifespan_us: u64,
+    ensure_us: u64,
+    release_us: u64,
+    push_us: u64,
+    instance_us: u64,
+    rtps_us: u64,
+    total_us: u64,
+) {
+    let n = WRITER_HISTORY_PROFILE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    WRITER_HISTORY_PROFILE_LIFESPAN_US.fetch_add(lifespan_us, Ordering::Relaxed);
+    WRITER_HISTORY_PROFILE_ENSURE_US.fetch_add(ensure_us, Ordering::Relaxed);
+    WRITER_HISTORY_PROFILE_RELEASE_US.fetch_add(release_us, Ordering::Relaxed);
+    WRITER_HISTORY_PROFILE_PUSH_US.fetch_add(push_us, Ordering::Relaxed);
+    WRITER_HISTORY_PROFILE_INSTANCE_US.fetch_add(instance_us, Ordering::Relaxed);
+    WRITER_HISTORY_PROFILE_RTPS_US.fetch_add(rtps_us, Ordering::Relaxed);
+    WRITER_HISTORY_PROFILE_TOTAL_US.fetch_add(total_us, Ordering::Relaxed);
+
+    if n % 300 == 0 {
+        let divisor = n as f64;
+        eprintln!(
+            "INT2DDS_WRITER_HISTORY_PROFILE count={} total_avg_us={:.3} lifespan_avg_us={:.3} ensure_avg_us={:.3} release_avg_us={:.3} push_avg_us={:.3} instance_avg_us={:.3} rtps_avg_us={:.3}",
+            n,
+            WRITER_HISTORY_PROFILE_TOTAL_US.load(Ordering::Relaxed) as f64 / divisor,
+            WRITER_HISTORY_PROFILE_LIFESPAN_US.load(Ordering::Relaxed) as f64 / divisor,
+            WRITER_HISTORY_PROFILE_ENSURE_US.load(Ordering::Relaxed) as f64 / divisor,
+            WRITER_HISTORY_PROFILE_RELEASE_US.load(Ordering::Relaxed) as f64 / divisor,
+            WRITER_HISTORY_PROFILE_PUSH_US.load(Ordering::Relaxed) as f64 / divisor,
+            WRITER_HISTORY_PROFILE_INSTANCE_US.load(Ordering::Relaxed) as f64 / divisor,
+            WRITER_HISTORY_PROFILE_RTPS_US.load(Ordering::Relaxed) as f64 / divisor,
+        );
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct DataWriterHistoryCache<Foo> {
@@ -130,6 +185,9 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
             return Ok((None, false));
         }
 
+        let profile = writer_history_profile_enabled();
+        let total_t0 = Instant::now();
+        let lifespan_t0 = Instant::now();
         // Set lifespan timer if lifespan qos is configured
         let lifespan_duration = self.data_writer.upgrade().and_then(|data_writer| {
             data_writer.get_qos().ok().and_then(|qos| {
@@ -160,24 +218,51 @@ impl<Foo: 'static + Clone> HistoryCache for DataWriterHistoryCache<Foo> {
             }
         }
         // end lifespan
+        let lifespan_us = if profile { elapsed_us(lifespan_t0, Instant::now()) } else { 0 };
 
+        let ensure_t0 = Instant::now();
         let removed = self.ensure_capacity(a_change.instance_handle())?;
+        let ensure_us = if profile { elapsed_us(ensure_t0, Instant::now()) } else { 0 };
 
         // Release evicted change back to pool for buffer reuse.
         // Consume the Arc by value so Arc::try_unwrap succeeds (refcount == 1).
+        let release_t0 = Instant::now();
         if let Some(evicted) = removed {
             self.pool.try_release(evicted);
         }
+        let release_us = if profile { elapsed_us(release_t0, Instant::now()) } else { 0 };
 
+        let push_t0 = Instant::now();
         if lifespan_duration.is_some() {
             self.insert_change_sorted(a_change.clone());
         } else {
             self.changes.push(a_change.clone());
         }
-        self.add_change_to_instance_map(a_change.clone())?;
+        let push_us = if profile { elapsed_us(push_t0, Instant::now()) } else { 0 };
+
+        let instance_t0 = Instant::now();
+        if self.has_key {
+            self.add_change_to_instance_map(a_change.clone())?;
+        }
+        let instance_us = if profile { elapsed_us(instance_t0, Instant::now()) } else { 0 };
+
+        let rtps_t0 = Instant::now();
         self.add_change_to_rtps_writer_cache(a_change)?;
+        let rtps_us = if profile { elapsed_us(rtps_t0, Instant::now()) } else { 0 };
 
         debug!("add_change_with_cleanup completed");
+
+        if profile {
+            record_writer_history_profile(
+                lifespan_us,
+                ensure_us,
+                release_us,
+                push_us,
+                instance_us,
+                rtps_us,
+                elapsed_us(total_t0, Instant::now()),
+            );
+        }
 
         // Writer-side callers never use the removed value
         // unlike DataReaderHistoryCache, which needs it to sync the RTPS history
@@ -609,6 +694,9 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
 
     // Adds CacheChange to the instance map.
     fn add_change_to_instance_map(&self, a_change: Arc<CacheChange>) -> DdsResult<()> {
+        if !self.has_key {
+            return Ok(());
+        }
         let mut instance_map =
             self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
         instance_map
@@ -620,6 +708,9 @@ impl<Foo: 'static + Clone> DataWriterHistoryCache<Foo> {
 
     // Removes CacheChange from the instance map.
     fn remove_change_from_instance_map(&self, a_change: &Arc<CacheChange>) -> DdsResult<()> {
+        if !self.has_key {
+            return Ok(());
+        }
         let mut instance_map =
             self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
         if let Some(changes) = instance_map.get_mut(&a_change.instance_handle()) {

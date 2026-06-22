@@ -45,13 +45,14 @@ pub struct ContentFilteredTopic {
     guid: Guid,
     pub(crate) self_ref: Option<Arc<ContentFilteredTopic>>,
     deleted: Arc<AtomicBool>,
+    enabled: Arc<AtomicBool>,
     related_topic: Option<Weak<Topic>>,
     topic_name: String,
     type_name: String,
     participant: Option<Weak<DomainParticipant>>,
-    filter_expression: String,
+    filter_expression: Arc<Mutex<String>>,
     expression_parameters: Arc<Mutex<Vec<String>>>,
-    pub(crate) parsed_expression: Expression,
+    parsed_expression: Arc<Mutex<Expression>>,
 }
 impl PartialEq for ContentFilteredTopic {
     fn eq(&self, other: &Self) -> bool {
@@ -102,13 +103,14 @@ impl ContentFilteredTopic {
             guid: handle.to_guid(),
             self_ref: None,
             deleted: Arc::new(AtomicBool::new(false)),
+            enabled: Arc::new(AtomicBool::new(true)),
             related_topic: Some(Arc::downgrade(related_topic)),
             topic_name: topic_name.to_owned(),
             type_name: related_topic.get_type_name().to_string(),
             participant: Some(Arc::downgrade(participant)),
-            filter_expression,
+            filter_expression: Arc::new(Mutex::new(filter_expression)),
             expression_parameters: Arc::new(Mutex::new(expression_parameters)),
-            parsed_expression: expression,
+            parsed_expression: Arc::new(Mutex::new(expression)),
         };
         let cft_arc = Arc::new(cft.clone());
         cft.self_ref = Some(cft_arc); // Without Arc, the new() function completes and memory is freed. The StatusCondition's entity field returns None.
@@ -116,7 +118,10 @@ impl ContentFilteredTopic {
     }
     pub fn get_filter_expression(&self) -> DdsResult<String> {
         self.is_deleted()?;
-        Ok(self.filter_expression.clone())
+        match self.filter_expression.lock() {
+            Ok(filter_expression) => Ok(filter_expression.clone()),
+            Err(e) => Err(DdsError::Error(e.to_string())),
+        }
     }
 
     pub fn get_related_topic(&self) -> DdsResult<Topic> {
@@ -142,13 +147,71 @@ impl ContentFilteredTopic {
 
     pub fn set_expression_parameters(&self, expression_parameters: Vec<String>) -> DdsResult<()> {
         self.is_deleted()?;
-        self.parsed_expression.validate_expression_parameters(&expression_parameters)?;
+        match self.parsed_expression.lock() {
+            Ok(parsed_expression) => {
+                parsed_expression.validate_expression_parameters(&expression_parameters)?
+            }
+            Err(e) => return Err(DdsError::Error(e.to_string())),
+        }
 
         match self.expression_parameters.lock() {
             Ok(mut prev_params) => {
                 *prev_params = expression_parameters;
                 Ok(())
             }
+            Err(e) => Err(DdsError::Error(e.to_string())),
+        }
+    }
+
+    pub fn set_filter_expression(
+        &self,
+        filter_expression: &str,
+        expression_parameters: Vec<String>,
+    ) -> DdsResult<()> {
+        self.is_deleted()?;
+        let expression = parse_expression(filter_expression, false)?;
+        expression.validate_expression_parameters(&expression_parameters)?;
+
+        match self.parsed_expression.lock() {
+            Ok(mut parsed_expression) => {
+                *parsed_expression = expression;
+            }
+            Err(e) => return Err(DdsError::Error(e.to_string())),
+        }
+
+        match self.filter_expression.lock() {
+            Ok(mut stored_expression) => {
+                *stored_expression = filter_expression.to_owned();
+            }
+            Err(e) => return Err(DdsError::Error(e.to_string())),
+        }
+
+        match self.expression_parameters.lock() {
+            Ok(mut stored_parameters) => {
+                *stored_parameters = expression_parameters;
+            }
+            Err(e) => return Err(DdsError::Error(e.to_string())),
+        }
+
+        self.enabled.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub fn set_enabled(&self, enabled: bool) -> DdsResult<()> {
+        self.is_deleted()?;
+        self.enabled.store(enabled, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub fn is_filter_enabled(&self) -> DdsResult<bool> {
+        self.is_deleted()?;
+        Ok(self.enabled.load(Ordering::SeqCst))
+    }
+
+    pub(crate) fn get_parsed_expression(&self) -> DdsResult<Expression> {
+        self.is_deleted()?;
+        match self.parsed_expression.lock() {
+            Ok(parsed_expression) => Ok(parsed_expression.clone()),
             Err(e) => Err(DdsError::Error(e.to_string())),
         }
     }
