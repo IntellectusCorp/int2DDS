@@ -1,6 +1,6 @@
 # Environment Variables
 
-This document describes the environment variables available in int2dds.
+This document describes the environment variables available in int2dds. All environment variables can also be set via CLI arguments.
 
 ## Environment Variables Summary
 
@@ -15,6 +15,7 @@ This document describes the environment variables available in int2dds.
 | `INT2DDS_NETWORK_IP`                 | `--int2dds-network-ip`                 | Network IP address                         | auto                    |
 | `INT2DDS_USE_LOOPBACK_INTERFACE`     | `--int2dds-use-loopback-interface`     | Enable loopback interface                  | false                   |
 | `INT2DDS_UDP_SOCKET_BUFFER`          | `--int2dds-udp-socket-buffer`          | UDP socket buffer size (bytes)             | OS default              |
+| `INT2DDS_SHM_BUFFER_SIZE`            | `--int2dds-shm-buffer-size`            | Shared-memory ring buffer size (bytes)     | 1048576 (1MB)           |
 | `INT2DDS_FRAGMENT_SIZE`              | `--int2dds-fragment-size`              | Writer fragment size in bytes (1-65000)    | 65000                   |
 | `INT2DDS_MULTICAST_TTL`              | `--int2dds-multicast-ttl`              | IPv4 multicast TTL fallback (0-255)        | 1                       |
 | `INT2DDS_EXTENDED_DISCOVERY`         | `--int2dds-extended-discovery`         | Enable extended discovery                  | false                   |
@@ -48,14 +49,16 @@ Sets the transport protocol type.
 # Windows PowerShell - Environment variable
 $env:INT2DDS_TRANSPORT = "tcp"
 
-cargo run --example hello_world_pub
+# CLI argument
+cargo run --example hello_world_pub -- --int2dds-transport tcp
 ```
 
 ```bash
 # Linux/macOS - Environment variable
 export INT2DDS_TRANSPORT=tcp
 
-cargo run --example hello_world_pub
+# CLI argument
+cargo run --example hello_world_pub -- --int2dds-transport tcp
 ```
 
 ### INT2DDS_DISCOVERY_MODE
@@ -74,14 +77,16 @@ Sets the DDS Participant Discovery mode.
 # Windows PowerShell
 $env:INT2DDS_DISCOVERY_MODE = "hybrid"
 
-cargo run --example hello_world_pub
+# CLI argument
+cargo run --example hello_world_pub -- --int2dds-discovery-mode hybrid
 ```
 
 ```bash
 # Linux/macOS
 export INT2DDS_DISCOVERY_MODE=hybrid
 
-cargo run --example hello_world_pub
+# CLI argument
+cargo run --example hello_world_pub -- --int2dds-discovery-mode hybrid
 ```
 
 ---
@@ -105,14 +110,16 @@ Sets the log output type.
 # Windows PowerShell
 $env:INT2DDS_LOG_TYPE = "console"
 
-cargo run --example hello_world_pub
+# CLI argument
+cargo run --example hello_world_pub -- --int2dds-log-type console
 ```
 
 ```bash
 # Linux/macOS
 export INT2DDS_LOG_TYPE=console
 
-cargo run --example hello_world_pub
+# CLI argument
+cargo run --example hello_world_pub -- --int2dds-log-type console
 ```
 
 ### INT2DDS_CONSOLE_LOG_LEVEL
@@ -133,14 +140,16 @@ Sets the console log level.
 # Windows PowerShell
 $env:INT2DDS_CONSOLE_LOG_LEVEL = "debug"
 
-cargo run --example hello_world_pub
+# CLI argument
+cargo run --example hello_world_pub -- --int2dds-console-log-level debug
 ```
 
 ```bash
 # Linux/macOS
 export INT2DDS_CONSOLE_LOG_LEVEL=debug
 
-cargo run --example hello_world_pub
+# CLI argument
+cargo run --example hello_world_pub -- --int2dds-console-log-level debug
 ```
 
 ### INT2DDS_FILE_LOG_LEVEL
@@ -153,14 +162,16 @@ Sets the file log level. Values are the same as `INT2DDS_CONSOLE_LOG_LEVEL`.
 # Windows PowerShell
 $env:INT2DDS_FILE_LOG_LEVEL = "trace"
 
-cargo run --example hello_world_pub
+# CLI argument
+cargo run --example hello_world_pub -- --int2dds-file-log-level trace
 ```
 
 ```bash
 # Linux/macOS
 export INT2DDS_FILE_LOG_LEVEL=trace
 
-cargo run --example hello_world_pub
+# CLI argument
+cargo run --example hello_world_pub -- --int2dds-file-log-level trace
 ```
 
 ---
@@ -178,14 +189,16 @@ If not specified, all available interfaces will be used.
 # Windows PowerShell
 $env:INT2DDS_NETWORK_INTERFACE = "Ethernet"
 
-cargo run --example hello_world_pub
+# CLI argument
+cargo run --example hello_world_pub -- --int2dds-network-interface Ethernet
 ```
 
 ```bash
 # Linux/macOS
 export INT2DDS_NETWORK_INTERFACE=eth0
 
-cargo run --example hello_world_pub
+# CLI argument
+cargo run --example hello_world_pub -- --int2dds-network-interface eth0
 ```
 
 ### INT2DDS_NETWORK_IP
@@ -199,14 +212,16 @@ If not specified, all available addresses will be used.
 # Windows PowerShell
 $env:INT2DDS_NETWORK_IP = "192.168.1.100"
 
-cargo run --example hello_world_pub
+# CLI argument
+cargo run --example hello_world_pub -- --int2dds-network-ip 192.168.1.100
 ```
 
 ```bash
 # Linux/macOS
 export INT2DDS_NETWORK_IP=192.168.1.100
 
-cargo run --example hello_world_pub
+# CLI argument
+cargo run --example hello_world_pub -- --int2dds-network-ip 192.168.1.100
 ```
 
 ### INT2DDS_USE_LOOPBACK_INTERFACE
@@ -228,14 +243,16 @@ However, new participants will not be discovered since loopback multicast discov
 # Windows PowerShell - Environment variable
 $env:INT2DDS_USE_LOOPBACK_INTERFACE = "true"
 
-cargo run --example hello_world_pub
+# CLI argument (flag type)
+cargo run --example hello_world_pub -- --int2dds-use-loopback-interface
 ```
 
 ```bash
 # Linux/macOS - Environment variable
 export INT2DDS_USE_LOOPBACK_INTERFACE=true
 
-cargo run --example hello_world_pub
+# CLI argument (flag type)
+cargo run --example hello_world_pub -- --int2dds-use-loopback-interface
 ```
 
 ### INT2DDS_UDP_SOCKET_BUFFER
@@ -248,14 +265,39 @@ Sets the UDP socket buffer size in bytes. Default uses OS default value.
 # Windows PowerShell
 $env:INT2DDS_UDP_SOCKET_BUFFER = "1048576"  # 1MB
 
-cargo run --example hello_world_pub
+# CLI argument
+cargo run --example hello_world_pub -- --int2dds-udp-socket-buffer 1048576
 ```
 
 ```bash
 # Linux/macOS
 export INT2DDS_UDP_SOCKET_BUFFER=1048576
 
-cargo run --example hello_world_pub
+# CLI argument
+cargo run --example hello_world_pub -- --int2dds-udp-socket-buffer 1048576
+```
+
+### INT2DDS_SHM_BUFFER_SIZE
+
+Sets the shared-memory transport's ring buffer size in bytes. Only applies when
+the SHM transport is in use. Default: 1048576 (1MB).
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_SHM_BUFFER_SIZE = "2097152"  # 2MB
+
+# CLI argument
+cargo run --example hello_world_pub -- --int2dds-shm-buffer-size 2097152
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_SHM_BUFFER_SIZE=2097152
+
+# CLI argument
+cargo run --example hello_world_pub -- --int2dds-shm-buffer-size 2097152
 ```
 
 ### INT2DDS_FRAGMENT_SIZE
@@ -270,14 +312,16 @@ values are clamped, invalid values fall back to the default.
 # Windows PowerShell
 $env:INT2DDS_FRAGMENT_SIZE = "1344"  # fits within a 1500-byte MTU after headers
 
-cargo run --example hello_world_pub
+# CLI argument
+cargo run --example hello_world_pub -- --int2dds-fragment-size 1344
 ```
 
 ```bash
 # Linux/macOS
 export INT2DDS_FRAGMENT_SIZE=1344
 
-cargo run --example hello_world_pub
+# CLI argument
+cargo run --example hello_world_pub -- --int2dds-fragment-size 1344
 ```
 
 ### INT2DDS_MULTICAST_TTL
@@ -304,14 +348,16 @@ Explicit code or JSON-profile QoS settings always win over this fallback.
 # Windows PowerShell
 $env:INT2DDS_MULTICAST_TTL = "32"
 
-cargo run --example hello_world_pub
+# CLI argument
+cargo run --example hello_world_pub -- --int2dds-multicast-ttl 32
 ```
 
 ```bash
 # Linux/macOS
 export INT2DDS_MULTICAST_TTL=32
 
-cargo run --example hello_world_pub
+# CLI argument
+cargo run --example hello_world_pub -- --int2dds-multicast-ttl 32
 ```
 
 #### Language bindings
@@ -339,14 +385,16 @@ Controls the ability to send DDS discovery messages via extended discovery.
 # Windows PowerShell - Environment variable
 $env:INT2DDS_EXTENDED_DISCOVERY = "true"
 
-cargo run --example hello_world_pub
+# CLI argument (flag type)
+cargo run --example hello_world_pub -- --int2dds-extended-discovery
 ```
 
 ```bash
 # Linux/macOS - Environment variable
 export INT2DDS_EXTENDED_DISCOVERY=true
 
-cargo run --example hello_world_pub
+# CLI argument (flag type)
+cargo run --example hello_world_pub -- --int2dds-extended-discovery
 ```
 
 #### Behavior
@@ -382,14 +430,16 @@ Sets the initial peer list for SPDP unicast discovery. When set, SPDP messages a
 # Windows PowerShell
 $env:INT2DDS_INITIAL_PEERS = "192.168.1.100:17410,192.168.1.100:17412"
 
-cargo run --example hello_world_pub
+# CLI argument
+cargo run --example hello_world_pub -- --int2dds-initial-peers "192.168.1.100:17410,192.168.1.100:17412"
 ```
 
 ```bash
 # Linux/macOS
 export INT2DDS_INITIAL_PEERS="192.168.1.100:17410,192.168.1.100:17412"
 
-cargo run --example hello_world_pub
+# CLI argument
+cargo run --example hello_world_pub -- --int2dds-initial-peers "192.168.1.100:17410,192.168.1.100:17412"
 ```
 
 ---
@@ -526,14 +576,16 @@ Enables thread monitoring.
 # Windows PowerShell - Environment variable
 $env:INT2DDS_THREAD_MONITORING = "true"
 
-cargo run --example hello_world_pub
+# CLI argument (flag type)
+cargo run --example hello_world_pub -- --int2dds-thread-monitoring
 ```
 
 ```bash
 # Linux/macOS - Environment variable
 export INT2DDS_THREAD_MONITORING=true
 
-cargo run --example hello_world_pub
+# CLI argument (flag type)
+cargo run --example hello_world_pub -- --int2dds-thread-monitoring
 ```
 
 ### INT2DDS_THREAD_MONITORING_LOG_PATH
@@ -548,14 +600,16 @@ Sets the thread monitoring log file path.
 # Windows PowerShell
 $env:INT2DDS_THREAD_MONITORING_LOG_PATH = "C:\logs\thread.log"
 
-cargo run --example hello_world_pub
+# CLI argument
+cargo run --example hello_world_pub -- --int2dds-thread-monitoring-log-path "C:\logs\thread.log"
 ```
 
 ```bash
 # Linux/macOS
 export INT2DDS_THREAD_MONITORING_LOG_PATH=/var/log/thread_monitoring.log
 
-cargo run --example hello_world_pub
+# CLI argument
+cargo run --example hello_world_pub -- --int2dds-thread-monitoring-log-path /var/log/thread_monitoring.log
 ```
 
 ### INT2DDS_FUNCTION_TIMING
@@ -570,14 +624,16 @@ Enables function execution time measurement.
 # Windows PowerShell - Environment variable
 $env:INT2DDS_FUNCTION_TIMING = "true"
 
-cargo run --example hello_world_pub
+# CLI argument (flag type)
+cargo run --example hello_world_pub -- --int2dds-function-timing
 ```
 
 ```bash
 # Linux/macOS - Environment variable
 export INT2DDS_FUNCTION_TIMING=true
 
-cargo run --example hello_world_pub
+# CLI argument (flag type)
+cargo run --example hello_world_pub -- --int2dds-function-timing
 ```
 
 ### INT2DDS_FUNCTION_TIMING_LOG_PATH
@@ -592,14 +648,16 @@ Sets the function timing log file path.
 # Windows PowerShell
 $env:INT2DDS_FUNCTION_TIMING_LOG_PATH = "C:\logs\timing.log"
 
-cargo run --example hello_world_pub
+# CLI argument
+cargo run --example hello_world_pub -- --int2dds-function-timing-log-path "C:\logs\timing.log"
 ```
 
 ```bash
 # Linux/macOS
 export INT2DDS_FUNCTION_TIMING_LOG_PATH=/var/log/function_timing.log
 
-cargo run --example hello_world_pub
+# CLI argument
+cargo run --example hello_world_pub -- --int2dds-function-timing-log-path /var/log/function_timing.log
 ```
 
 ---
