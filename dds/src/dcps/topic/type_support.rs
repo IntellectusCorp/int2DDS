@@ -235,3 +235,84 @@ pub mod nested_access {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(unused_imports)]
+mod keyhash_tests {
+    use super::*;
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "int2dds", extensibility = "Final")]
+    struct SingleU32Key {
+        #[dds(key)]
+        pub id: u32,
+        pub data: f64,
+    }
+
+    #[test]
+    fn test_keyhash_u32_big_endian() {
+        use crate::dcps::topic::type_support::TypeSupport;
+
+        let value = SingleU32Key { id: 42, data: 1.0 };
+        let type_support = SingleU32Key::get_type_support();
+        let key_bytes = type_support.serialize_key(&value).unwrap();
+
+        assert_eq!(&*key_bytes, &[0x00, 0x00, 0x00, 0x2A]);
+
+        let instance_handle = type_support.compute_key(&value);
+        let handle_bytes = instance_handle.value();
+        let mut expected = [0u8; 16];
+        expected[..4].copy_from_slice(&[0x00, 0x00, 0x00, 0x2A]);
+        assert_eq!(handle_bytes, &expected);
+    }
+
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "int2dds", extensibility = "Final")]
+    struct MultiKeyStruct {
+        #[dds(key)]
+        pub a: u16,
+        #[dds(key)]
+        pub b: u32,
+        pub c: f64,
+    }
+
+    #[test]
+    fn test_keyhash_multi_key_big_endian_order() {
+        use crate::dcps::topic::type_support::TypeSupport;
+
+        let value = MultiKeyStruct { a: 1, b: 2, c: 99.0 };
+        let type_support = MultiKeyStruct::get_type_support();
+        let key_bytes = type_support.serialize_key(&value).unwrap();
+
+        assert_eq!(&*key_bytes, &[0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,]);
+    }
+
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "int2dds", extensibility = "Final")]
+    struct LargeKeyStruct {
+        #[dds(key)]
+        pub a: u64,
+        #[dds(key)]
+        pub b: u64,
+        #[dds(key)]
+        pub c: u64,
+    }
+
+    #[test]
+    fn test_keyhash_large_key_uses_md5() {
+        use crate::dcps::topic::type_support::TypeSupport;
+
+        let value = LargeKeyStruct { a: 1, b: 2, c: 3 };
+        let type_support = LargeKeyStruct::get_type_support();
+        let key_bytes = type_support.serialize_key(&value).unwrap();
+
+        assert_eq!(key_bytes.len(), 24);
+
+        let instance_handle = type_support.compute_key(&value);
+        let expected_md5 = md5::compute(&*key_bytes);
+        assert_eq!(instance_handle.value(), &expected_md5.0);
+    }
+
+    // ============================================================================
+    // LC 6/7 EMHEADER Optimization Tests
+    // ============================================================================
+}
