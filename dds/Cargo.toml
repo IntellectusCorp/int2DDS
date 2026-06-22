@@ -84,8 +84,12 @@ winapi = { version = "0.3", features = [
 windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_Memory"] }
 
 [[example]]
-name = "hello_world"
-path = "examples/hello_world/hello_world.rs"
+name = "hello_world_pub"
+path = "examples/hello_world/hello_world_pub.rs"
+
+[[example]]
+name = "hello_world_sub"
+path = "examples/hello_world/hello_world_sub.rs"
 
 [[example]]
 name = "dynamic_type_publisher"
