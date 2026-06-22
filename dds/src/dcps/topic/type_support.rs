@@ -147,6 +147,14 @@ pub trait TypeSupport: Send + Sync + 'static {
     // Key handling
     fn serialize_key(&self, data: &dyn Any) -> DdsResult<SerializedData>;
     fn deserialize_key(&self, serialized_key: &[u8]) -> DdsResult<Box<dyn Any + Send + Sync>>;
+
+    // Decode a wire serializedKey (K-flag SerializedPayload, with encapsulation header)
+    // into the key value. Default strips the 4-byte header and decodes big-endian;
+    // generated impls override to read endianness from the header.
+    fn deserialize_key_payload(&self, payload: &[u8]) -> DdsResult<Box<dyn Any + Send + Sync>> {
+        let body = if payload.len() >= 4 { &payload[4..] } else { payload };
+        self.deserialize_key(body)
+    }
     fn compute_key(&self, data: &dyn Any) -> InstanceHandle;
     fn is_compute_key_provided(&self) -> bool;
     fn get_extensibility_kind(&self) -> crate::serialize::xcdr::ExtensibilityKind;

@@ -145,6 +145,24 @@ fn generate_key_impls_from_fields(
             Ok(Box::new(key_holder))
         }
 
+        fn deserialize_key_payload(&self, payload: &[u8]) -> #crate_path::dcps::core::error::DdsResult<Box<dyn std::any::Any + Send + Sync>> {
+            use #crate_path::serialize::cdr::{CdrDeserialize, CdrDeserializer};
+
+            // Wire serializedKey: CDR with a 4-byte encapsulation header; read endianness from it.
+            let mut deserializer = CdrDeserializer::new(payload)
+                .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+            let mut key_holder = <#full_type as Default>::default();
+
+            #(
+                key_holder.#key_fields = <#key_types as #crate_path::serialize::cdr::CdrDeserialize>::deserialize_cdr(&mut deserializer)
+                    .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(
+                        format!("Failed to deserialize field {}: {}", stringify!(#key_fields), e)
+                    ))?;
+            )*
+
+            Ok(Box::new(key_holder))
+        }
+
     };
 
     let compute_logic = if is_single_unbounded_string {

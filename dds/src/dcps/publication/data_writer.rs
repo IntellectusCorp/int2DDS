@@ -1647,6 +1647,19 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
     }
 
     /// Common logic for dispose after key resolution and handle validation.
+    // Wrap a headerless key (serialize_key output, big-endian) as a wire serializedKey
+    // SerializedPayload by prepending the CDR_BE encapsulation header. Empty stays empty
+    // so no K-flag is set for keyless changes.
+    fn key_to_wire_payload(serialized_key: &[u8]) -> Vec<u8> {
+        if serialized_key.is_empty() {
+            return Vec::new();
+        }
+        let mut payload = Vec::with_capacity(serialized_key.len() + 4);
+        payload.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // CDR_BE, no options
+        payload.extend_from_slice(serialized_key);
+        payload
+    }
+
     fn dispose_inner(
         &self,
         serialized_key: SerializedData,
@@ -1677,9 +1690,12 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             }
         }
 
+        // Carry the key on the wire as a serializedKey payload (K-flag): peers without a
+        // reversible KeyHash (e.g. >16-byte string keys) need it to identify the instance.
+        let wire_key = Self::key_to_wire_payload(&serialized_key);
         self.add_change_serialized(
             ChangeKind::NotAliveDisposed,
-            &[],
+            &wire_key,
             resolved_handle,
             Some(timestamp.into()),
         )?;
@@ -1726,7 +1742,13 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                 ChangeKind::NotAliveUnregistered
             };
 
-        self.add_change_serialized(change_kind, &[], resolved_handle, Some(timestamp.into()))?;
+        let wire_key = Self::key_to_wire_payload(&serialized_key);
+        self.add_change_serialized(
+            change_kind,
+            &wire_key,
+            resolved_handle,
+            Some(timestamp.into()),
+        )?;
 
         self.update_liveliness()?;
 
