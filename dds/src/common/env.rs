@@ -53,7 +53,7 @@ pub fn init_from_env() {
 
     // - TCP transport is configured per-participant via the
     //   int2dds.transport.TCPv4.* QoS properties (see dcps::infrastructure::qos_policy),
-    //   not env vars. INT2DDS_INITIAL_PEERS / INT2DDS_EXTERNAL_ADDRESS remain shared fallbacks.
+    //   not env vars. INT2DDS_INITIAL_PEERS remain shared fallbacks.
     apply_cli_args_to_env();
 
     setting_log();
