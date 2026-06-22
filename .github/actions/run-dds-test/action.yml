@@ -22,6 +22,8 @@ runs:
   using: 'composite'
   steps:
     - name: Run Interoperability test for ${{ inputs.dds-name }} (${{ inputs.role }})
+      env:
+        INT2DDS_DISABLE_INLINE_TYPE_INFO: 'true'
       run: |
         source .venv/bin/activate
         cd executables
