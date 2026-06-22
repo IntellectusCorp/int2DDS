@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<dds>
+    <qos_library name="HelloWorld">
+        <qos_profile name="Sub" is_default_profile="true">
+            <domain_participant_qos>
+                <property>
+                    <value>
+                        <name>int2dds.transport</name>
+                        <value>tcp</value>
+                        <propagate>false</propagate>
+                    </value>
+                    <value>
+                        <name>int2dds.transport.TCPv4.bind_port</name>
+                        <value>7401</value>
+                        <propagate>false</propagate>
+                    </value>
+                    <value>
+                        <name>int2dds.initial_peers</name>
+                        <value>127.0.0.1:7400</value>
+                        <propagate>false</propagate>
+                    </value>
+                </property>
+            </domain_participant_qos>
+            <datareader_qos>
+                <reliability><kind>RELIABLE_RELIABILITY_QOS</kind></reliability>
+                <durability><kind>TRANSIENT_LOCAL_DURABILITY_QOS</kind></durability>
+                <history><kind>KEEP_LAST_HISTORY_QOS</kind><depth>10</depth></history>
+            </datareader_qos>
+        </qos_profile>
+    </qos_library>
+</dds>
