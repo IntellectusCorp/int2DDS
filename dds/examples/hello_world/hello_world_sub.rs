@@ -19,7 +19,7 @@ use int2dds::{
     },
     topic::{qos::TOPIC_QOS_DEFAULT, type_support::DdsType},
 };
-use log::{info, warn};
+use log::info;
 
 const TOPIC_NAME: &str = "hello_world_topic";
 
@@ -89,20 +89,6 @@ impl DataReaderListener for SubListener {
     }
 }
 
-/// Logs whether the effective QoS came from a profile or spec defaults.
-fn log_qos_source(factory: &DomainParticipantFactory) {
-    if std::env::var("DDS_QOS_PROFILE").is_err() {
-        info!("No DDS_QOS_PROFILE set; using spec-default QoS");
-    } else if let Some(profile) = factory.default_profile_path() {
-        info!("Using QoS profile: {}", profile);
-    } else {
-        warn!(
-            "DDS_QOS_PROFILE is set but no profile resolved (bad path / parse error / \
-             no default profile selected); using spec-default QoS"
-        );
-    }
-}
-
 fn main() {
     set_log_type(LogType::Console);
     set_console_log_level(LogLevel::Info);
@@ -110,7 +96,6 @@ fn main() {
     let domain_id = Args::parse().domain;
     let shutdown = Shutdown::install();
     let factory = DomainParticipantFactory::get_instance();
-    log_qos_source(factory);
 
     let participant = factory
         .create_participant(domain_id, PARTICIPANT_QOS_DEFAULT, None, StatusMask::default())
@@ -144,7 +129,7 @@ fn main() {
     );
     println!(
         "[subscriber qos] reliability: {:?}, durability: {:?}, history: {:?}",
-        rqos.reliability.kind, rqos.durability.kind, rqos.history.kind,
+        rqos.reliability.kind, rqos.durability.kind, rqos.history.kind
     );
 
     shutdown.wait();
