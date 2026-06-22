@@ -306,8 +306,8 @@ export INT2DDS_JAVA_LIB=/abs/path/to/target/release/int2dds_java.dll
 
 ```bash
 # Rust
-cargo run --release --example hello_world_param -- --role pub --domain 0 --reliability reliable
-cargo run --release --example hello_world_param -- --role sub --domain 0 --reliability reliable
+cargo run --release --example hello_world_pub -- --domain 0
+cargo run --release --example hello_world_sub -- --domain 0
 
 # C# (requires int2dds_ffi.dll copied next to the exe; see step 3)
 dotnet run -c Release --project csharp/examples/HelloWorldPublisher -f net8.0
