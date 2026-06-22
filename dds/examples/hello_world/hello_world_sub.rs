@@ -4,9 +4,10 @@ use std::sync::Arc;
 mod shutdown;
 use shutdown::{cleanup_participant, Shutdown};
 
+use clap::Parser;
 use int2dds::{
     common::{
-        env::{init_from_env, set_console_log_level, set_log_type},
+        env::{set_console_log_level, set_log_type},
         log::{LogLevel, LogType},
     },
     domain::{domain_participant_factory::DomainParticipantFactory, qos::PARTICIPANT_QOS_DEFAULT},
@@ -21,18 +22,21 @@ use int2dds::{
 use log::info;
 
 const TOPIC_NAME: &str = "hello_world_topic";
-const DEFAULT_DOMAIN: i32 = 0;
 
-fn parse_domain_id() -> i32 {
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        if arg == "-d" || arg == "--domain" {
-            if let Some(Ok(id)) = args.next().map(|v| v.parse::<i32>()) {
-                return id;
-            }
-        }
-    }
-    DEFAULT_DOMAIN
+/// The domain id is the only CLI option; everything else is fixed.
+#[derive(Parser, Debug)]
+#[command(
+    about = "Hello World DDS Subscriber (QoS via profile or spec default)",
+    disable_help_flag = true
+)]
+struct Args {
+    /// Print help
+    #[arg(long, action = clap::ArgAction::Help)]
+    help: Option<bool>,
+
+    /// Domain ID
+    #[arg(short = 'd', long, default_value_t = 0)]
+    domain: i32,
 }
 
 #[derive(DdsType)]
@@ -88,9 +92,8 @@ impl DataReaderListener for SubListener {
 fn main() {
     set_log_type(LogType::Console);
     set_console_log_level(LogLevel::Info);
-    init_from_env();
 
-    let domain_id = parse_domain_id();
+    let domain_id = Args::parse().domain;
     let shutdown = Shutdown::install();
     let factory = DomainParticipantFactory::get_instance();
 
