@@ -28,6 +28,8 @@ bitflags! {
         const INCONSISTENT_TOPIC = 0x0001 << 0;
         const OFFERED_DEADLINE_MISSED = 0x0001 << 1;
         const REQUESTED_DEADLINE_MISSED = 0x0001 << 2;
+        const OFFERED_INCOMPATIBLE_TYPE = 0x0001 << 3;
+        const REQUESTED_INCOMPATIBLE_TYPE = 0x0001 << 4;
         const OFFERED_INCOMPATIBLE_QOS = 0x0001 << 5;
         const REQUESTED_INCOMPATIBLE_QOS = 0x0001 << 6;
         const SAMPLE_LOST = 0x0001 << 7;
@@ -276,6 +278,44 @@ impl RequestedIncompatibleQosStatus {
     }
     pub fn policies(&self) -> QosPolicyCountSeq {
         self.policies.clone()
+    }
+}
+
+#[derive(Default, Clone, Debug)]
+pub struct OfferedIncompatibleTypeStatus {
+    pub(crate) total_count: i32,
+    pub(crate) total_count_change: i32,
+}
+impl StatusInfo for OfferedIncompatibleTypeStatus {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+impl OfferedIncompatibleTypeStatus {
+    pub fn total_count(&self) -> i32 {
+        self.total_count
+    }
+    pub fn total_count_change(&self) -> i32 {
+        self.total_count_change
+    }
+}
+
+#[derive(Default, Clone, Debug)]
+pub struct RequestedIncompatibleTypeStatus {
+    pub(crate) total_count: i32,
+    pub(crate) total_count_change: i32,
+}
+impl StatusInfo for RequestedIncompatibleTypeStatus {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+impl RequestedIncompatibleTypeStatus {
+    pub fn total_count(&self) -> i32 {
+        self.total_count
+    }
+    pub fn total_count_change(&self) -> i32 {
+        self.total_count_change
     }
 }
 
