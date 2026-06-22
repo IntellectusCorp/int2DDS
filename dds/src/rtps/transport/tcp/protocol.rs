@@ -74,33 +74,39 @@ pub(crate) fn decode_locator(loc: &[u8; 16]) -> (Ipv4Addr, u16) {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ControlMsg {
     /// Client announces its listener address.
-    PeerHello { locator: [u8; 16] },
+    PeerHello {
+        locator: [u8; 16],
+    },
 
-    /// Server acknowledges peer hello.
     PeerHelloAck,
 
     /// Client requests reservation of a logical port.
-    PortReserve { logical_port: u16 },
+    PortReserve {
+        logical_port: u16,
+    },
 
-    /// Server confirms reservation with a cookie.
-    PortReserveAck { cookie: [u8; 16] },
+    /// Server confirms reservation, returning a cookie.
+    PortReserveAck {
+        cookie: [u8; 16],
+    },
 
-    /// Client binds a data connection using a previously issued cookie.
-    PortBind { cookie: [u8; 16] },
+    /// Client binds a data connection with a previously issued cookie.
+    PortBind {
+        cookie: [u8; 16],
+    },
 
-    /// Server confirms the data connection is bound.
     PortBindAck,
 
-    /// Connection keepalive ping.
     Keepalive,
 
-    /// Keepalive acknowledgment.
     KeepaliveAck,
 
-    /// Error response with operation context, code, and message.
-    /// `operation` identifies which handshake step failed (uses MSG_* constants),
-    /// or one of the synthetic OP_* markers below for non-handshake errors.
-    Error { operation: u8, code: u16, message: String },
+    /// Error response. `operation` reuses MSG_* (handshake step) or an OP_* marker.
+    Error {
+        operation: u8,
+        code: u16,
+        message: String,
+    },
 }
 
 // ─── ERROR payload fields ───────────────────────────────────────────────────
@@ -113,8 +119,7 @@ pub(crate) enum ControlMsg {
 // markers (>= 0xF0, outside the MSG_* range) for non-handshake failures.
 
 // Synthetic operation markers (must not collide with MSG_* constants)
-/// Server is tearing down an incoming connection that has been silent past
-/// the configured idle threshold.
+/// Incoming connection torn down for exceeding the idle threshold.
 pub(crate) const OP_IDLE_TIMEOUT: u8 = 0xF0;
 
 // Error codes

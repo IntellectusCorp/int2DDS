@@ -290,7 +290,7 @@ impl WriterProxy {
             .range(..first_available_seq_num)
             .filter_map(|(seq_num, change_from_writer)| {
                 if change_from_writer.status == ChangeFromWriterStatusKind::Missing {
-                    debug!("Sample Lost!: {:?}", change_from_writer.sequence_number);
+                    debug!("Sample Lost!: {}", change_from_writer.sequence_number);
                     self.on_sample_lost();
                 }
                 Some(*seq_num)

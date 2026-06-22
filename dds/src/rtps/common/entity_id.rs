@@ -173,3 +173,12 @@ impl EntityId {
         EntityId { entity_key: key, entity_kind: EntityKind(bytes[3]) }
     }
 }
+impl std::fmt::Display for EntityId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:02x}{:02x}{:02x}{}",
+            self.entity_key[0], self.entity_key[1], self.entity_key[2], self.entity_kind
+        )
+    }
+}

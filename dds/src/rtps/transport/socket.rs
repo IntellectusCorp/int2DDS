@@ -206,8 +206,9 @@ impl Socket {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dcps::infrastructure::qos_policy::PropertyQosPolicy;
     use crate::rtps::transport::plugin::TransportPluginFactory;
-    use crate::rtps::transport::{TransportConfig, TransportType};
+    use crate::rtps::transport::TransportType;
 
     #[test]
     fn test_create_socket() {
@@ -221,7 +222,7 @@ mod tests {
             socket.working_ips(),
             [0u8; 12],
             None,
-            TransportConfig::default(),
+            &PropertyQosPolicy::default(),
         )
         .unwrap();
         let transport: Arc<dyn TransportPlugin> = Arc::from(transport);

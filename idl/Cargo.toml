@@ -1,7 +1,7 @@
 [package]
 name = "int2dds-idl"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "IDL code generator for int2DDS - generates Rust and C type definitions from OMG IDL"
 
 [[bin]]
@@ -14,3 +14,8 @@ path = "src/lib.rs"
 
 [dependencies]
 md5 = "0.8.0"
+
+[dev-dependencies]
+int2dds = { path = "../dds" }
+speedy = "0.8.0"
+log = "0.4.11"

@@ -122,7 +122,7 @@ pub unsafe extern "C" fn int2dds_publication_data_destroy(p: *mut Int2DdsPublica
 /// Helper: copy a Rust &str into a caller-supplied C buffer.
 /// Writes required length (without the NUL) into *out_len and returns
 /// DYNAMIC_DECODE_ERROR if the supplied buffer is too small.
-unsafe fn copy_str_to_c(
+pub(crate) unsafe fn copy_str_to_c(
     s: &str,
     buf: *mut c_char,
     buf_len: usize,
@@ -503,14 +503,18 @@ pub unsafe extern "C" fn int2dds_type_object_find_member(
     INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND
 }
 
+use int2dds::common::instance_handle::InstanceHandle;
 use int2dds::infrastructure::status::StatusMask;
+use int2dds::publication::{data_writer::DataWriter, qos::DataWriterQos};
 use int2dds::serialize::cdr::ExtensibilityKind as CdrExtensibilityKind;
+use int2dds::subscription::sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind};
+use int2dds::subscription::{data_reader::DataReader, qos::DataReaderQos};
 use int2dds::topic::{qos::TopicQos, TypeSupport};
 
 use crate::data::Int2DdsData;
-use crate::qos::Int2DdsTopicQos;
+use crate::qos::{Int2DdsDataReaderQos, Int2DdsDataWriterQos, Int2DdsTopicQos};
 use crate::raw_type_support::RawTypeSupport;
-use crate::types::Int2DdsTopic;
+use crate::types::{Int2DdsPublisher, Int2DdsSampleInfo, Int2DdsTopic};
 
 /// Register a topic backed by a discovered TypeObject. The TypeObject is cloned
 /// internally; the caller still owns and must destroy `type_obj`.
@@ -599,7 +603,7 @@ fn split_index(seg: &str) -> (&str, Option<usize>) {
 }
 
 /// Resolve a dotted/indexed path (e.g. `"pos.x"` or `"items[2].name"`) to a value.
-fn resolve_path<'a>(data: &'a DynamicData, path: &str) -> Option<&'a DynamicValue> {
+pub(crate) fn resolve_path<'a>(data: &'a DynamicData, path: &str) -> Option<&'a DynamicValue> {
     let mut current: Option<&DynamicValue> = None;
     for seg in path.split('.') {
         let (name, index) = split_index(seg);
@@ -735,7 +739,7 @@ pub unsafe extern "C" fn int2dds_dynamic_sample_get_string(
 }
 
 pub struct Int2DdsDynamicData {
-    inner: DynamicData,
+    pub(crate) inner: DynamicData,
 }
 
 #[no_mangle]
@@ -903,6 +907,323 @@ pub unsafe extern "C" fn int2dds_dynamic_data_get_member(
         Some(_) => INT2DDS_RET_DYNAMIC_TYPE_MISMATCH,
         None => INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND,
     }
+}
+
+// ============================================================================
+// Dynamic pub/sub: build, write, and take DynamicData via DynamicTypeSupport.
+// Mirrors the core create_topic_dynamic / create_datawriter_dynamic /
+// create_datareader_dynamic path so XML- or discovery-sourced types can be
+// published and subscribed without compile-time IDL.
+// ============================================================================
+
+/// Opaque handle wrapping an `Arc<DynamicTypeSupport>` (full dependency closure
+/// resolved). Obtain one from an XML registry or a discovered TypeObject.
+pub struct Int2DdsDynamicTypeSupport {
+    pub(crate) inner: Arc<DynamicTypeSupport>,
+}
+unsafe impl Send for Int2DdsDynamicTypeSupport {}
+unsafe impl Sync for Int2DdsDynamicTypeSupport {}
+
+/// Opaque handle to a dynamic DataWriter (`DataWriter<DynamicData>`).
+pub struct Int2DdsDynamicDataWriter {
+    inner: DataWriter<DynamicData>,
+}
+unsafe impl Send for Int2DdsDynamicDataWriter {}
+unsafe impl Sync for Int2DdsDynamicDataWriter {}
+
+/// Opaque handle to a dynamic DataReader (`DataReader<DynamicData>`).
+pub struct Int2DdsDynamicDataReader {
+    inner: DataReader<DynamicData>,
+}
+unsafe impl Send for Int2DdsDynamicDataReader {}
+unsafe impl Sync for Int2DdsDynamicDataReader {}
+
+/// Destroy a dynamic type support handle. Safe to call with null.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_dynamic_type_support_destroy(s: *mut Int2DdsDynamicTypeSupport) {
+    if !s.is_null() {
+        drop(Box::from_raw(s));
+    }
+}
+
+/// Register a topic backed by a dynamic type support. The support's full type
+/// closure is advertised during discovery.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_create_topic_dynamic(
+    participant: *const Int2DdsParticipant,
+    topic_name: *const c_char,
+    type_support: *const Int2DdsDynamicTypeSupport,
+    qos: *const Int2DdsTopicQos,
+    out: *mut *mut Int2DdsTopic,
+) -> Int2DdsRet {
+    check_null!(participant);
+    check_null!(topic_name);
+    check_null!(type_support);
+    check_null!(out);
+
+    let p = &*participant;
+    let topic_name_str = match CStr::from_ptr(topic_name).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+    let support = (*type_support).inner.clone();
+    let type_name = support.get_type_name().to_string();
+    let topic_qos = if qos.is_null() { TopicQos::default() } else { (*qos).inner.clone() };
+
+    let topic = ffi_try!(p.inner.create_topic_dynamic(
+        topic_name_str,
+        support,
+        topic_qos,
+        None,
+        StatusMask::default(),
+    ));
+    *out = Box::into_raw(Box::new(Int2DdsTopic { inner: Arc::new(topic), type_name }));
+    INT2DDS_RET_OK
+}
+
+/// Create a dynamic DataWriter. Pass null `qos` to use the default.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_create_datawriter_dynamic(
+    publisher: *const Int2DdsPublisher,
+    topic: *const Int2DdsTopic,
+    type_support: *const Int2DdsDynamicTypeSupport,
+    qos: *const Int2DdsDataWriterQos,
+    out: *mut *mut Int2DdsDynamicDataWriter,
+) -> Int2DdsRet {
+    check_null!(publisher);
+    check_null!(topic);
+    check_null!(type_support);
+    check_null!(out);
+
+    let support = (*type_support).inner.clone();
+    let writer_qos = if qos.is_null() { DataWriterQos::default() } else { (*qos).inner.clone() };
+    let writer = ffi_try!((*publisher).inner.create_datawriter_dynamic(
+        (*topic).inner.as_ref(),
+        support,
+        writer_qos,
+        None,
+        StatusMask::default(),
+    ));
+    *out = Box::into_raw(Box::new(Int2DdsDynamicDataWriter { inner: writer }));
+    INT2DDS_RET_OK
+}
+
+/// Create a dynamic DataReader. Pass null `qos` to use the default.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_create_datareader_dynamic(
+    subscriber: *const Int2DdsSubscriber,
+    topic: *const Int2DdsTopic,
+    type_support: *const Int2DdsDynamicTypeSupport,
+    qos: *const Int2DdsDataReaderQos,
+    out: *mut *mut Int2DdsDynamicDataReader,
+) -> Int2DdsRet {
+    check_null!(subscriber);
+    check_null!(topic);
+    check_null!(type_support);
+    check_null!(out);
+
+    let support = (*type_support).inner.clone();
+    let reader_qos = if qos.is_null() { DataReaderQos::default() } else { (*qos).inner.clone() };
+    let reader = ffi_try!((*subscriber).inner.create_datareader_dynamic(
+        (*topic).inner.as_ref(),
+        support,
+        reader_qos,
+        None,
+        StatusMask::default(),
+    ));
+    *out = Box::into_raw(Box::new(Int2DdsDynamicDataReader { inner: reader }));
+    INT2DDS_RET_OK
+}
+
+/// Destroy a dynamic DataWriter handle. Safe to call with null.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_dynamic_writer_destroy(w: *mut Int2DdsDynamicDataWriter) {
+    if !w.is_null() {
+        drop(Box::from_raw(w));
+    }
+}
+
+/// Destroy a dynamic DataReader handle. Safe to call with null.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_dynamic_reader_destroy(r: *mut Int2DdsDynamicDataReader) {
+    if !r.is_null() {
+        drop(Box::from_raw(r));
+    }
+}
+
+/// Current number of DataReaders matched to this dynamic writer.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_dynamic_writer_publication_matched_count(
+    writer: *const Int2DdsDynamicDataWriter,
+    out: *mut i32,
+) -> Int2DdsRet {
+    check_null!(writer);
+    check_null!(out);
+    let status = ffi_try!((*writer).inner.get_publication_matched_status());
+    *out = status.current_count();
+    INT2DDS_RET_OK
+}
+
+/// Current number of DataWriters matched to this dynamic reader.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_dynamic_reader_subscription_matched_count(
+    reader: *const Int2DdsDynamicDataReader,
+    out: *mut i32,
+) -> Int2DdsRet {
+    check_null!(reader);
+    check_null!(out);
+    let status = ffi_try!((*reader).inner.get_subscription_matched_status());
+    *out = status.current_count();
+    INT2DDS_RET_OK
+}
+
+/// Create an empty, writable DynamicData for the given type support.
+/// Populate it with the `int2dds_dynamic_data_set_*` setters, then publish via
+/// `int2dds_dynamic_writer_write`. Destroy with `int2dds_dynamic_data_destroy`.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_dynamic_data_create(
+    type_support: *const Int2DdsDynamicTypeSupport,
+    out: *mut *mut Int2DdsDynamicData,
+) -> Int2DdsRet {
+    check_null!(type_support);
+    check_null!(out);
+    let data = (*type_support).inner.create_data();
+    *out = Box::into_raw(Box::new(Int2DdsDynamicData { inner: data }));
+    INT2DDS_RET_OK
+}
+
+/// Setter writing a primitive value to a top-level field by name.
+macro_rules! define_handle_setter {
+    ($fn_name:ident, $rust_ty:ty) => {
+        #[no_mangle]
+        pub unsafe extern "C" fn $fn_name(
+            data: *mut Int2DdsDynamicData,
+            field: *const c_char,
+            value: $rust_ty,
+        ) -> Int2DdsRet {
+            check_null!(data);
+            check_null!(field);
+            let name = match CStr::from_ptr(field).to_str() {
+                Ok(s) => s,
+                Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+            };
+            match (*data).inner.set(name, value) {
+                Ok(()) => INT2DDS_RET_OK,
+                Err(_) => INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND,
+            }
+        }
+    };
+}
+
+define_handle_setter!(int2dds_dynamic_data_set_bool, bool);
+define_handle_setter!(int2dds_dynamic_data_set_i8, i8);
+define_handle_setter!(int2dds_dynamic_data_set_u8, u8);
+define_handle_setter!(int2dds_dynamic_data_set_i16, i16);
+define_handle_setter!(int2dds_dynamic_data_set_u16, u16);
+define_handle_setter!(int2dds_dynamic_data_set_i32, i32);
+define_handle_setter!(int2dds_dynamic_data_set_u32, u32);
+define_handle_setter!(int2dds_dynamic_data_set_i64, i64);
+define_handle_setter!(int2dds_dynamic_data_set_u64, u64);
+define_handle_setter!(int2dds_dynamic_data_set_f32, f32);
+define_handle_setter!(int2dds_dynamic_data_set_f64, f64);
+
+/// Set a char8 field (given as its byte value) on a top-level field.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_dynamic_data_set_char8(
+    data: *mut Int2DdsDynamicData,
+    field: *const c_char,
+    value: u8,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(field);
+    let name = match CStr::from_ptr(field).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+    match (*data).inner.set(name, char::from(value)) {
+        Ok(()) => INT2DDS_RET_OK,
+        Err(_) => INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND,
+    }
+}
+
+/// Set a string field on a top-level field. `value` must be null-terminated UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_dynamic_data_set_string(
+    data: *mut Int2DdsDynamicData,
+    field: *const c_char,
+    value: *const c_char,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(field);
+    check_null!(value);
+    let name = match CStr::from_ptr(field).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+    let v = match CStr::from_ptr(value).to_str() {
+        Ok(s) => s.to_string(),
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+    match (*data).inner.set(name, v) {
+        Ok(()) => INT2DDS_RET_OK,
+        Err(_) => INT2DDS_RET_DYNAMIC_FIELD_NOT_FOUND,
+    }
+}
+
+/// Publish a populated DynamicData sample.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_dynamic_writer_write(
+    writer: *const Int2DdsDynamicDataWriter,
+    data: *const Int2DdsDynamicData,
+) -> Int2DdsRet {
+    check_null!(writer);
+    check_null!(data);
+    match (*writer).inner.write(&(*data).inner, InstanceHandle::NIL) {
+        Ok(()) => INT2DDS_RET_OK,
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
+/// Take the next available DynamicData sample. On success `out_data` receives a
+/// new DynamicData handle (destroy with `int2dds_dynamic_data_destroy`) and, if
+/// non-null, `out_info` receives the sample info. Returns INT2DDS_RET_NO_DATA
+/// when no valid sample is available.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_dynamic_reader_take(
+    reader: *const Int2DdsDynamicDataReader,
+    out_data: *mut *mut Int2DdsDynamicData,
+    out_info: *mut Int2DdsSampleInfo,
+) -> Int2DdsRet {
+    check_null!(reader);
+    check_null!(out_data);
+
+    let samples = match (*reader).inner.take(
+        1,
+        &[SampleStateKind::NOT_READ_SAMPLE_STATE],
+        &[ViewStateKind::ANY_VIEW_STATE],
+        &[InstanceStateKind::ANY_INSTANCE_STATE],
+    ) {
+        Ok(s) => s,
+        Err(int2dds::dcps::core::error::DdsError::NoData) => return INT2DDS_RET_NO_DATA,
+        Err(e) => return dds_error_to_code(&e),
+    };
+
+    let sample = match samples.into_iter().next() {
+        Some(s) => s,
+        None => return INT2DDS_RET_NO_DATA,
+    };
+
+    let info = sample.sample_info();
+    if !out_info.is_null() {
+        *out_info = Int2DdsSampleInfo::from(&info);
+    }
+    if !info.valid_data {
+        return INT2DDS_RET_NO_DATA;
+    }
+
+    let dynamic_data = ffi_try!(sample.data());
+    *out_data = Box::into_raw(Box::new(Int2DdsDynamicData { inner: dynamic_data }));
+    INT2DDS_RET_OK
 }
 
 #[cfg(test)]

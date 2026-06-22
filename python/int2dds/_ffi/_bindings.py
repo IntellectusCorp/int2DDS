@@ -961,6 +961,126 @@ ffi.cdef("""
     Int2DdsRet int2dds_dynamic_data_get_member(const Int2DdsDynamicData *data, const char *field_path, Int2DdsDynamicData **out);
 """)
 
+# XML-defined runtime types + dynamic pub/sub + the DynamicValue tree.
+ffi.cdef("""
+    typedef struct Int2DdsDynamicTypeSupport Int2DdsDynamicTypeSupport;
+    typedef struct Int2DdsDynamicDataWriter Int2DdsDynamicDataWriter;
+    typedef struct Int2DdsDynamicDataReader Int2DdsDynamicDataReader;
+    typedef struct Int2DdsDynamicValue Int2DdsDynamicValue;
+    typedef struct Int2DdsXmlTypeRegistry Int2DdsXmlTypeRegistry;
+
+    typedef struct Int2DdsSampleInfo {
+        int32_t source_timestamp_sec;
+        uint32_t source_timestamp_nanosec;
+        uint32_t sample_state;
+        uint32_t view_state;
+        uint32_t instance_state;
+        uint8_t instance_handle[16];
+        uint8_t publication_handle[16];
+        int32_t disposed_generation_count;
+        int32_t no_writers_generation_count;
+        int32_t sample_rank;
+        int32_t generation_rank;
+        int32_t absolute_generation_rank;
+        bool valid_data;
+    } Int2DdsSampleInfo;
+
+    /* XML type registry */
+    Int2DdsRet int2dds_xml_type_registry_create(Int2DdsXmlTypeRegistry **out);
+    Int2DdsRet int2dds_xml_type_registry_from_file(const char *path, Int2DdsXmlTypeRegistry **out);
+    Int2DdsRet int2dds_xml_type_registry_load_file(Int2DdsXmlTypeRegistry *registry, const char *path);
+    Int2DdsRet int2dds_xml_type_registry_load_str(Int2DdsXmlTypeRegistry *registry, const char *xml);
+    Int2DdsRet int2dds_xml_type_registry_get_type_support(const Int2DdsXmlTypeRegistry *registry, const char *name, Int2DdsDynamicTypeSupport **out);
+    Int2DdsRet int2dds_xml_type_registry_get_type_object(const Int2DdsXmlTypeRegistry *registry, const char *name, Int2DdsTypeObject **out);
+    Int2DdsRet int2dds_xml_type_registry_type_count(const Int2DdsXmlTypeRegistry *registry, uintptr_t *out);
+    Int2DdsRet int2dds_xml_type_registry_type_name(const Int2DdsXmlTypeRegistry *registry, uintptr_t index, char *buf, uintptr_t buf_len, uintptr_t *out_len);
+    void int2dds_xml_type_registry_destroy(Int2DdsXmlTypeRegistry *registry);
+
+    /* Dynamic type support + endpoints */
+    void int2dds_dynamic_type_support_destroy(Int2DdsDynamicTypeSupport *s);
+    Int2DdsRet int2dds_create_topic_dynamic(const Int2DdsParticipant *participant, const char *topic_name, const Int2DdsDynamicTypeSupport *type_support, const Int2DdsTopicQos *qos, Int2DdsTopic **out);
+    Int2DdsRet int2dds_create_datawriter_dynamic(const Int2DdsPublisher *publisher, const Int2DdsTopic *topic, const Int2DdsDynamicTypeSupport *type_support, const Int2DdsDataWriterQos *qos, Int2DdsDynamicDataWriter **out);
+    Int2DdsRet int2dds_create_datareader_dynamic(const Int2DdsSubscriber *subscriber, const Int2DdsTopic *topic, const Int2DdsDynamicTypeSupport *type_support, const Int2DdsDataReaderQos *qos, Int2DdsDynamicDataReader **out);
+    void int2dds_dynamic_writer_destroy(Int2DdsDynamicDataWriter *w);
+    void int2dds_dynamic_reader_destroy(Int2DdsDynamicDataReader *r);
+    Int2DdsRet int2dds_dynamic_writer_publication_matched_count(const Int2DdsDynamicDataWriter *writer, int32_t *out);
+    Int2DdsRet int2dds_dynamic_reader_subscription_matched_count(const Int2DdsDynamicDataReader *reader, int32_t *out);
+    Int2DdsRet int2dds_dynamic_writer_write(const Int2DdsDynamicDataWriter *writer, const Int2DdsDynamicData *data);
+    Int2DdsRet int2dds_dynamic_reader_take(const Int2DdsDynamicDataReader *reader, Int2DdsDynamicData **out_data, Int2DdsSampleInfo *out_info);
+
+    /* Writable DynamicData */
+    Int2DdsRet int2dds_dynamic_data_create(const Int2DdsDynamicTypeSupport *type_support, Int2DdsDynamicData **out);
+    Int2DdsRet int2dds_dynamic_data_set_bool(Int2DdsDynamicData *data, const char *field, bool value);
+    Int2DdsRet int2dds_dynamic_data_set_i8(Int2DdsDynamicData *data, const char *field, int8_t value);
+    Int2DdsRet int2dds_dynamic_data_set_u8(Int2DdsDynamicData *data, const char *field, uint8_t value);
+    Int2DdsRet int2dds_dynamic_data_set_i16(Int2DdsDynamicData *data, const char *field, int16_t value);
+    Int2DdsRet int2dds_dynamic_data_set_u16(Int2DdsDynamicData *data, const char *field, uint16_t value);
+    Int2DdsRet int2dds_dynamic_data_set_i32(Int2DdsDynamicData *data, const char *field, int32_t value);
+    Int2DdsRet int2dds_dynamic_data_set_u32(Int2DdsDynamicData *data, const char *field, uint32_t value);
+    Int2DdsRet int2dds_dynamic_data_set_i64(Int2DdsDynamicData *data, const char *field, int64_t value);
+    Int2DdsRet int2dds_dynamic_data_set_u64(Int2DdsDynamicData *data, const char *field, uint64_t value);
+    Int2DdsRet int2dds_dynamic_data_set_f32(Int2DdsDynamicData *data, const char *field, float value);
+    Int2DdsRet int2dds_dynamic_data_set_f64(Int2DdsDynamicData *data, const char *field, double value);
+    Int2DdsRet int2dds_dynamic_data_set_char8(Int2DdsDynamicData *data, const char *field, uint8_t value);
+    Int2DdsRet int2dds_dynamic_data_set_string(Int2DdsDynamicData *data, const char *field, const char *value);
+    Int2DdsRet int2dds_dynamic_data_set_value(Int2DdsDynamicData *data, const char *field, Int2DdsDynamicValue *value);
+    Int2DdsRet int2dds_dynamic_data_get_value(const Int2DdsDynamicData *data, const char *path, Int2DdsDynamicValue **out);
+
+    /* DynamicValue tree: constructors */
+    Int2DdsRet int2dds_dynamic_value_bool(bool value, Int2DdsDynamicValue **out);
+    Int2DdsRet int2dds_dynamic_value_i8(int8_t value, Int2DdsDynamicValue **out);
+    Int2DdsRet int2dds_dynamic_value_i16(int16_t value, Int2DdsDynamicValue **out);
+    Int2DdsRet int2dds_dynamic_value_i32(int32_t value, Int2DdsDynamicValue **out);
+    Int2DdsRet int2dds_dynamic_value_i64(int64_t value, Int2DdsDynamicValue **out);
+    Int2DdsRet int2dds_dynamic_value_u8(uint8_t value, Int2DdsDynamicValue **out);
+    Int2DdsRet int2dds_dynamic_value_u16(uint16_t value, Int2DdsDynamicValue **out);
+    Int2DdsRet int2dds_dynamic_value_u32(uint32_t value, Int2DdsDynamicValue **out);
+    Int2DdsRet int2dds_dynamic_value_u64(uint64_t value, Int2DdsDynamicValue **out);
+    Int2DdsRet int2dds_dynamic_value_f32(float value, Int2DdsDynamicValue **out);
+    Int2DdsRet int2dds_dynamic_value_f64(double value, Int2DdsDynamicValue **out);
+    Int2DdsRet int2dds_dynamic_value_byte(uint8_t value, Int2DdsDynamicValue **out);
+    Int2DdsRet int2dds_dynamic_value_bitmask(uint64_t value, Int2DdsDynamicValue **out);
+    Int2DdsRet int2dds_dynamic_value_bitset(uint64_t value, Int2DdsDynamicValue **out);
+    Int2DdsRet int2dds_dynamic_value_char8(uint8_t value, Int2DdsDynamicValue **out);
+    Int2DdsRet int2dds_dynamic_value_string(const char *value, Int2DdsDynamicValue **out);
+    Int2DdsRet int2dds_dynamic_value_wstring(const char *value, Int2DdsDynamicValue **out);
+    Int2DdsRet int2dds_dynamic_value_enum(const char *name, int32_t value, Int2DdsDynamicValue **out);
+    Int2DdsRet int2dds_dynamic_value_struct(const Int2DdsDynamicData *data, Int2DdsDynamicValue **out);
+    Int2DdsRet int2dds_dynamic_value_sequence(Int2DdsDynamicValue **out);
+    Int2DdsRet int2dds_dynamic_value_array(Int2DdsDynamicValue **out);
+    Int2DdsRet int2dds_dynamic_value_map(Int2DdsDynamicValue **out);
+    Int2DdsRet int2dds_dynamic_value_union(Int2DdsDynamicValue *discriminator, Int2DdsDynamicValue *value, Int2DdsDynamicValue **out);
+    Int2DdsRet int2dds_dynamic_value_push(Int2DdsDynamicValue *collection, Int2DdsDynamicValue *element);
+    Int2DdsRet int2dds_dynamic_value_map_insert(Int2DdsDynamicValue *map, Int2DdsDynamicValue *key, Int2DdsDynamicValue *value);
+    void int2dds_dynamic_value_destroy(Int2DdsDynamicValue *value);
+
+    /* DynamicValue tree: inspection */
+    Int2DdsRet int2dds_dynamic_value_kind(const Int2DdsDynamicValue *value, int32_t *out);
+    Int2DdsRet int2dds_dynamic_value_as_bool(const Int2DdsDynamicValue *value, bool *out);
+    Int2DdsRet int2dds_dynamic_value_as_i8(const Int2DdsDynamicValue *value, int8_t *out);
+    Int2DdsRet int2dds_dynamic_value_as_i16(const Int2DdsDynamicValue *value, int16_t *out);
+    Int2DdsRet int2dds_dynamic_value_as_i32(const Int2DdsDynamicValue *value, int32_t *out);
+    Int2DdsRet int2dds_dynamic_value_as_i64(const Int2DdsDynamicValue *value, int64_t *out);
+    Int2DdsRet int2dds_dynamic_value_as_u8(const Int2DdsDynamicValue *value, uint8_t *out);
+    Int2DdsRet int2dds_dynamic_value_as_u16(const Int2DdsDynamicValue *value, uint16_t *out);
+    Int2DdsRet int2dds_dynamic_value_as_u32(const Int2DdsDynamicValue *value, uint32_t *out);
+    Int2DdsRet int2dds_dynamic_value_as_u64(const Int2DdsDynamicValue *value, uint64_t *out);
+    Int2DdsRet int2dds_dynamic_value_as_f32(const Int2DdsDynamicValue *value, float *out);
+    Int2DdsRet int2dds_dynamic_value_as_f64(const Int2DdsDynamicValue *value, double *out);
+    Int2DdsRet int2dds_dynamic_value_as_char8(const Int2DdsDynamicValue *value, uint8_t *out);
+    Int2DdsRet int2dds_dynamic_value_as_string(const Int2DdsDynamicValue *value, char *buf, uintptr_t buf_len, uintptr_t *out_len);
+    Int2DdsRet int2dds_dynamic_value_as_enum(const Int2DdsDynamicValue *value, char *buf, uintptr_t buf_len, uintptr_t *out_len, int32_t *out_value);
+    Int2DdsRet int2dds_dynamic_value_as_bitmask(const Int2DdsDynamicValue *value, uint64_t *out);
+    Int2DdsRet int2dds_dynamic_value_as_bitset(const Int2DdsDynamicValue *value, uint64_t *out);
+    Int2DdsRet int2dds_dynamic_value_len(const Int2DdsDynamicValue *value, uintptr_t *out);
+    Int2DdsRet int2dds_dynamic_value_element(const Int2DdsDynamicValue *value, uintptr_t index, Int2DdsDynamicValue **out);
+    Int2DdsRet int2dds_dynamic_value_map_key(const Int2DdsDynamicValue *value, uintptr_t index, Int2DdsDynamicValue **out);
+    Int2DdsRet int2dds_dynamic_value_map_value(const Int2DdsDynamicValue *value, uintptr_t index, Int2DdsDynamicValue **out);
+    Int2DdsRet int2dds_dynamic_value_as_struct(const Int2DdsDynamicValue *value, Int2DdsDynamicData **out);
+    Int2DdsRet int2dds_dynamic_value_union_discriminator(const Int2DdsDynamicValue *value, Int2DdsDynamicValue **out);
+    Int2DdsRet int2dds_dynamic_value_union_value(const Int2DdsDynamicValue *value, Int2DdsDynamicValue **out);
+""")
+
 
 def _find_library() -> str:
     """Find the int2dds_ffi library path."""

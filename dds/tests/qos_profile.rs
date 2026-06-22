@@ -363,3 +363,34 @@ fn test_blocking_time_only() {
     assert_eq!(datareader.reliability.kind, ReliabilityQosPolicyKind::BestEffort);
     assert_eq!(datareader.reliability.max_blocking_time, Duration::from_seconds(1));
 }
+
+fn create_test_profile_xml() -> NamedTempFile {
+    let mut file = tempfile::Builder::new().suffix(".xml").tempfile().unwrap();
+    let xml = r#"<dds><qos_library name="XmlLibrary">
+        <qos_profile name="ReliableProfile">
+            <publisher_qos>
+                <partition><name><element>partition1</element></name></partition>
+            </publisher_qos>
+            <datawriter_qos>
+                <reliability><kind>RELIABLE_RELIABILITY_QOS</kind></reliability>
+                <history><kind>KEEP_LAST_HISTORY_QOS</kind><depth>10</depth></history>
+            </datawriter_qos>
+        </qos_profile>
+    </qos_library></dds>"#;
+    file.write_all(xml.as_bytes()).unwrap();
+    file
+}
+
+#[test]
+fn test_factory_load_xml_profiles() {
+    let file = create_test_profile_xml();
+    let factory = DomainParticipantFactory::get_instance();
+    factory.load_profiles(&[file.path()]).unwrap();
+
+    let qos = factory.get_datawriter_qos_from_profile("XmlLibrary::ReliableProfile").unwrap();
+    assert_eq!(qos.reliability.kind, ReliabilityQosPolicyKind::Reliable);
+    assert!(matches!(qos.history.kind, HistoryQosPolicyKind::KeepLast(10)));
+
+    let pub_qos = factory.get_publisher_qos_from_profile("XmlLibrary::ReliableProfile").unwrap();
+    assert_eq!(pub_qos.partition.name, vec!["partition1".to_string()]);
+}

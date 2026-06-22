@@ -107,7 +107,7 @@ pub struct Participant {
 }
 impl Debug for Participant {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Participant: {:?}", self.guid)
+        write!(f, "Participant: {}", self.guid)
     }
 }
 
@@ -321,10 +321,7 @@ impl Participant {
                     .retain(|data| data.participant_guid() != participant_guid);
                 let removed = initial_len != remote_participant_proxy_datas.len();
                 if removed {
-                    debug!(
-                        "Removed remote participant proxy data for GUID: {:?}",
-                        participant_guid
-                    );
+                    debug!("Removed remote participant proxy data for GUID: {}", participant_guid);
                 }
                 removed
             }
@@ -544,7 +541,7 @@ impl Participant {
                     Arc::new(a_cache_change),
                 )?;
 
-                log::info!("Remote writer with GUID {:?} terminated", writer_guid);
+                log::info!("Remote writer with GUID {} terminated", writer_guid);
 
                 // Remove builtin topic data from builtin endpoint
                 match self.builtin_endpoints.sedp_builtin_publications_writer.writer_cache().lock()
@@ -937,7 +934,7 @@ impl Participant {
             }
         }
 
-        info!("Successfully unmatched with remote participant: {:?}", terminated_participant_guid);
+        info!("Successfully unmatched with remote participant: {}", terminated_participant_guid);
         Ok(())
     }
 

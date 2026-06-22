@@ -55,7 +55,8 @@ use crate::{
         },
         history_cache::HistoryCache as _,
         qos_policy::{
-            DataRepresentationId, LivelinessQosPolicyKind, Qos, ReliabilityQosPolicyKind,
+            DataRepresentationId, DurabilityQosPolicyKind, HistoryQosPolicyKind,
+            LivelinessQosPolicyKind, Qos, ReliabilityQosPolicyKind,
         },
         status::{
             LivelinessLostStatus, OfferedDeadlineMissedStatus, OfferedIncompatibleQosStatus,
@@ -73,7 +74,10 @@ use crate::{
             time::RtpsTime,
             types::{ChangeKind, SerializedData},
         },
-        entities::{history::cache_change::CacheChange, writer::Writer as RtpsWriter},
+        entities::{
+            history::cache_change::CacheChange,
+            writer::{StatefulWriter, Writer as RtpsWriter},
+        },
         logic::wlp_logic::WlpLogic,
     },
     topic::{
@@ -334,6 +338,26 @@ impl<Foo: 'static + Clone> EnableChild for DataWriter<Foo> {
                 Some(Arc::downgrade(&rtps_writer));
         }
 
+        // A volatile, keep-all writer has no reason to keep samples acked by all readers,
+        // so register a callback that removes them unless the user opted into strict mode
+        let qos = self.get_qos()?;
+        if qos.durability.kind == DurabilityQosPolicyKind::Volatile
+            && qos.history.kind == HistoryQosPolicyKind::KeepAll
+            && !qos.history.strict
+            && qos.reliability.kind == ReliabilityQosPolicyKind::Reliable
+        {
+            if let Some(stateful_writer) = rtps_writer.as_any().downcast_ref::<StatefulWriter>() {
+                let cache = Arc::downgrade(&self.datawriter_cache);
+                stateful_writer.set_all_acked_callback(Arc::new(move |max_acked| {
+                    if let Some(cache) = cache.upgrade() {
+                        if let Ok(mut cache) = cache.lock() {
+                            let _ = cache.remove_changes_acked_up_to(max_acked);
+                        }
+                    }
+                }));
+            }
+        }
+
         Ok(())
     }
     fn update_rtps_entity(&self, qos: &Self::Qos) -> DdsResult<()> {
@@ -470,6 +494,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             datawriter_cache: Arc::new(Mutex::new(DataWriterHistoryCache::<Foo>::new(
                 Weak::new(),
                 qos.reliability,
+                qos.durability,
                 qos.history,
                 qos.resource_limits,
                 type_support.is_compute_key_provided(),
@@ -1320,6 +1345,24 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
             cache.add_change_with_cleanup(Arc::new(change))?;
         }
 
+        // 5. Best-effort-only / no-reliable-reader writers get no ACKNACK, so the send
+        // just completed is the only chance to purge. Runs after the cache lock is
+        // released so the removal callback can re-lock it. No-op unless the all-acked
+        // callback is registered (volatile + keep_all + !strict + reliable).
+        if let Some(stateful_writer) = rtps_writer.as_any().downcast_ref::<StatefulWriter>() {
+            debug!("[history-strict] trigger=send-complete seq={}", seq_num.to_i64());
+            stateful_writer.process_acked_changes();
+            let dcps_len = match self.datawriter_cache.try_lock() {
+                Ok(cache) => cache.changes_len().to_string(),
+                Err(_) => "busy".to_string(),
+            };
+            debug!(
+                "[history-strict] after send-complete rtps_len={} dcps_len={}",
+                stateful_writer.rtps_cache_len(),
+                dcps_len
+            );
+        }
+
         Ok(seq_num)
     }
 
@@ -1735,7 +1778,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                 monitor.track_instance(&handle);
             }
 
-            log::debug!("Registering Instance - handle: {:?}", handle);
+            log::debug!("Registering Instance - handle: {}", handle);
         }
         Ok(handle)
     }
@@ -2716,7 +2759,7 @@ mod tests {
 
         // Start tracking instance with register_instance
         let handle = writer.register_instance(&data).unwrap();
-        println!("Instance registered with handle: {:?}", handle);
+        println!("Instance registered with handle: {}", handle);
 
         // Wait for deadline - miss should occur
         thread::sleep(std::time::Duration::from_millis(200));

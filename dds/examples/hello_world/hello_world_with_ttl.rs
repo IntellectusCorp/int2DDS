@@ -271,7 +271,7 @@ fn run_publisher(args: &Args) {
             max_blocking_time: Duration { sec: 0, nanosec: 100_000_000 },
         },
         durability: DurabilityQosPolicy { kind: qos.durability },
-        history: HistoryQosPolicy { kind: qos.history },
+        history: HistoryQosPolicy { kind: qos.history, strict: true },
         deadline: DeadlineQosPolicy { period: qos.deadline },
         ownership: OwnershipQosPolicy { kind: qos.ownership_kind },
         ownership_strength: OwnershipStrengthQosPolicy { value: qos.ownership_strength },
@@ -389,7 +389,7 @@ fn run_subscriber(args: &Args) {
             max_blocking_time: Duration { sec: 0, nanosec: 100_000_000 },
         },
         durability: DurabilityQosPolicy { kind: qos.durability },
-        history: HistoryQosPolicy { kind: qos.history },
+        history: HistoryQosPolicy { kind: qos.history, strict: true },
         deadline: DeadlineQosPolicy { period: qos.deadline },
         ownership: OwnershipQosPolicy { kind: qos.ownership_kind },
         ..Default::default()

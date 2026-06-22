@@ -444,7 +444,7 @@ fn rpc_datawriter_qos() -> DataWriterQos {
     let mut qos = DataWriterQos::default();
     qos.reliability =
         ReliabilityQosPolicy { kind: ReliabilityQosPolicyKind::Reliable, ..qos.reliability };
-    qos.history = HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll };
+    qos.history = HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true };
     qos.durability = DurabilityQosPolicy { kind: DurabilityQosPolicyKind::Volatile };
     qos
 }
@@ -453,7 +453,7 @@ fn rpc_datareader_qos() -> DataReaderQos {
     let mut qos = DataReaderQos::default();
     qos.reliability =
         ReliabilityQosPolicy { kind: ReliabilityQosPolicyKind::Reliable, ..qos.reliability };
-    qos.history = HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll };
+    qos.history = HistoryQosPolicy { kind: HistoryQosPolicyKind::KeepAll, strict: true };
     qos.durability = DurabilityQosPolicy { kind: DurabilityQosPolicyKind::Volatile };
     qos
 }

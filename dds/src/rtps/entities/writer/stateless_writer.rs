@@ -270,7 +270,7 @@ impl StatelessWriter {
 
 impl Debug for StatelessWriter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "StatelessWriter: {:?}", self.guid)
+        write!(f, "StatelessWriter: {}", self.guid)
     }
 }
 
@@ -496,14 +496,14 @@ impl Writer for StatelessWriter {
         });
 
         if locators.len() == len_before {
-            debug!("Reader locator with guid {:?} not found in matched readers", reader_guid);
+            debug!("Reader locator with guid {} not found in matched readers", reader_guid);
             return Ok(false);
         }
 
         drop(locators);
         self.update_publication_matched_status(-1, InstanceHandle::from_guid(&reader_guid));
 
-        debug!("Removed reader locator with guid {:?} from matched readers", reader_guid);
+        debug!("Removed reader locator with guid {} from matched readers", reader_guid);
         Ok(true)
     }
 
@@ -540,7 +540,10 @@ impl Writer for StatelessWriter {
         reader_locator.retain(|locator| locator.guid_prefix() != prefix);
         let removed = len_before - reader_locator.len();
 
-        debug!("Removed all unmatched reader locators from participant: {:?}", prefix);
+        debug!(
+            "Removed all unmatched reader locators from participant: {}",
+            Guid::guid_prefix_to_string(&prefix)
+        );
         debug!("Current number of matched reader: {:?}", reader_locator.len());
         Ok(removed)
     }
