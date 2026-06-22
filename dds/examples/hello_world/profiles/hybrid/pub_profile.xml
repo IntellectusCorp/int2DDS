@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<dds>
+    <qos_library name="HelloWorld">
+        <qos_profile name="Pub" is_default_profile="true">
+            <domain_participant_qos>
+                <property>
+                    <value>
+                        <name>int2dds.transport</name>
+                        <value>hybrid</value>
+                        <propagate>false</propagate>
+                    </value>
+                    <value>
+                        <name>int2dds.transport.TCPv4.bind_port</name>
+                        <value>7400</value>
+                        <propagate>false</propagate>
+                    </value>
+                </property>
+            </domain_participant_qos>
+            <datawriter_qos>
+                <reliability><kind>RELIABLE_RELIABILITY_QOS</kind></reliability>
+                <durability><kind>TRANSIENT_LOCAL_DURABILITY_QOS</kind></durability>
+                <history><kind>KEEP_LAST_HISTORY_QOS</kind><depth>10</depth></history>
+            </datawriter_qos>
+        </qos_profile>
+    </qos_library>
+</dds>
