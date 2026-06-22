@@ -549,6 +549,105 @@ pub unsafe extern "C" fn int2dds_delete_contentfilteredtopic(
     }
 }
 
+/// Update the expression parameters of an existing ContentFilteredTopic
+///
+/// This updates only the parameter values for the current filter expression.
+///
+/// # Safety
+/// - `cft` must be a valid ContentFilteredTopic created by `int2dds_create_contentfilteredtopic`
+/// - `expression_parameters` must be a valid array of null-terminated C strings, or null if count is 0
+/// - `expression_parameters_count` is the number of parameters
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_contentfilteredtopic_set_expression_parameters(
+    cft: *mut Int2DdsContentFilteredTopic,
+    expression_parameters: *const *const std::os::raw::c_char,
+    expression_parameters_count: usize,
+) -> Int2DdsRet {
+    if cft.is_null() {
+        return INT2DDS_RET_NULL_POINTER;
+    }
+
+    let cft_ref = &mut *cft;
+
+    let mut params = Vec::new();
+    if expression_parameters_count > 0 {
+        if expression_parameters.is_null() {
+            return INT2DDS_RET_INVALID_ARGUMENT;
+        }
+        for i in 0..expression_parameters_count {
+            let param_ptr = *expression_parameters.add(i);
+            if param_ptr.is_null() {
+                return INT2DDS_RET_INVALID_ARGUMENT;
+            }
+            match CStr::from_ptr(param_ptr).to_str() {
+                Ok(s) => params.push(s.to_string()),
+                Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+            }
+        }
+    }
+
+    match cft_ref.inner.set_expression_parameters(params) {
+        Ok(()) => INT2DDS_RET_OK,
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_contentfilteredtopic_set_filter_expression(
+    cft: *mut Int2DdsContentFilteredTopic,
+    filter_expression: *const std::os::raw::c_char,
+    expression_parameters: *const *const std::os::raw::c_char,
+    expression_parameters_count: usize,
+) -> Int2DdsRet {
+    if cft.is_null() || filter_expression.is_null() {
+        return INT2DDS_RET_NULL_POINTER;
+    }
+
+    let cft_ref = &mut *cft;
+    let filter_expression = match CStr::from_ptr(filter_expression).to_str() {
+        Ok(s) => s,
+        Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+    };
+
+    let mut params = Vec::new();
+    if expression_parameters_count > 0 {
+        if expression_parameters.is_null() {
+            return INT2DDS_RET_INVALID_ARGUMENT;
+        }
+        for i in 0..expression_parameters_count {
+            let param_ptr = *expression_parameters.add(i);
+            if param_ptr.is_null() {
+                return INT2DDS_RET_INVALID_ARGUMENT;
+            }
+            match CStr::from_ptr(param_ptr).to_str() {
+                Ok(s) => params.push(s.to_string()),
+                Err(_) => return INT2DDS_RET_INVALID_ARGUMENT,
+            }
+        }
+    }
+
+    match cft_ref.inner.set_filter_expression(filter_expression, params) {
+        Ok(()) => INT2DDS_RET_OK,
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_contentfilteredtopic_set_enabled(
+    cft: *mut Int2DdsContentFilteredTopic,
+    enabled: bool,
+) -> Int2DdsRet {
+    if cft.is_null() {
+        return INT2DDS_RET_NULL_POINTER;
+    }
+
+    let cft_ref = &mut *cft;
+    match cft_ref.inner.set_enabled(enabled) {
+        Ok(()) => INT2DDS_RET_OK,
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
 /// Create a Topic with key field metadata for compute_key() support.
 ///
 /// Same as int2dds_create_topic_keyed but additionally accepts key field

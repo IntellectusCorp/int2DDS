@@ -61,6 +61,16 @@ use super::{
     subscriber_listener::SubscriberListener,
 };
 
+fn effective_topic_name(topic_description: &dyn TopicDescription) -> DdsResult<String> {
+    if let Some(cft) = topic_description
+        .as_any()
+        .downcast_ref::<crate::topic::content_filtered_topic::ContentFilteredTopic>()
+    {
+        return Ok(cft.get_related_topic()?.get_name().to_string());
+    }
+    Ok(topic_description.get_name().to_string())
+}
+
 #[derive(Clone)]
 pub struct Subscriber {
     // Indicates whether this entity is a built-in entity.
@@ -355,7 +365,7 @@ impl Subscriber {
                 Err(e) => return Err(DdsError::Error(e.to_string())),
             };
 
-            let topic_name = topic_description.get_name().to_string();
+            let topic_name = effective_topic_name(topic_description)?;
             let topic_handle = topic_description.topic_instance_handle()?;
 
             readers_by_topic_name
@@ -550,8 +560,9 @@ impl Subscriber {
             return Err(DdsError::PreconditionNotMet);
         }
         let handle = datareader.get_instance_handle()?;
-        let topic_name = datareader.get_topicdescription()?.get_name().to_string();
-        let topic_handle = datareader.get_topicdescription()?.topic_instance_handle()?;
+        let topic_description = datareader.get_topicdescription()?;
+        let topic_name = effective_topic_name(topic_description.as_ref())?;
+        let topic_handle = topic_description.topic_instance_handle()?;
 
         {
             let participant = self.get_participant()?;
