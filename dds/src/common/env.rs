@@ -502,6 +502,14 @@ pub fn get_disable_inline_type_object() -> bool {
         .unwrap_or(false)
 }
 
+// Drop all XTypes info (TypeInformation, TypeIdV1, TypeObject) from SEDP so peers
+// match by type name only, skipping TypeObject/TypeLookup entirely.
+pub fn get_disable_inline_type_info() -> bool {
+    std::env::var("INT2DDS_DISABLE_INLINE_TYPE_INFO")
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false)
+}
+
 /// Set the UDP socket buffer size via environment variable
 pub fn set_udp_socket_buffer_size(size: usize) {
     log::info!("Environment variable set: INT2DDS_UDP_SOCKET_BUFFER = {}", size);

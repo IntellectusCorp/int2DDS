@@ -1227,20 +1227,25 @@ impl UserLogic {
         reader: &dyn Reader,
         changes: Vec<CacheChange>,
     ) -> RtpsResult<()> {
-        let reader_cache = reader.reader_cache();
-
         for change in changes.into_iter() {
-            let mut res: Option<RtpsResult<Arc<CacheChange>>> = None;
-            if let Ok(mut cache_guard) = reader_cache.lock() {
-                res = Some(cache_guard.add_change(change));
-            }
-
-            if let Some(Ok(change)) = res {
-                reader.on_change(change);
-            }
+            Self::deliver_change(reader, change);
         }
 
         Ok(())
+    }
+
+    // Add a single change to the reader cache and notify the application. TIME_BASED_FILTER is
+    // applied inside the reader history cache: a held sample returns None and is delivered later
+    // by the cache's own timer, so it is not notified here.
+    fn deliver_change(reader: &dyn Reader, change: CacheChange) {
+        let reader_cache = reader.reader_cache();
+        let mut res: Option<RtpsResult<Option<Arc<CacheChange>>>> = None;
+        if let Ok(mut cache_guard) = reader_cache.lock() {
+            res = Some(cache_guard.add_change(change, true));
+        }
+        if let Some(Ok(Some(change))) = res {
+            reader.on_change(change);
+        }
     }
 }
 

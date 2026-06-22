@@ -42,10 +42,13 @@ pub(crate) trait HistoryCache {
     fn get_timer_handler(&self, guid_prefix: GuidPrefix) -> DdsResult<Arc<Mutex<TimerHandler>>> {
         Ok(TimerHandler::get_instance(guid_prefix))
     }
+    // Add a change under History/ResourceLimits. Returns (evicted, filtered); filtered is true
+    // when apply_filter held the sample via TIME_BASED_FILTER (nothing stored).
     fn add_change_with_cleanup(
         &mut self,
         a_change: Arc<CacheChange>,
-    ) -> DdsResult<Option<Arc<CacheChange>>>; // Returns removed CacheChange while ensuring capacity
+        apply_filter: bool,
+    ) -> DdsResult<(Option<Arc<CacheChange>>, bool)>;
 
     /// Mutate a CacheChange before making it immutable (set instance handle, reception timestamp, etc.)
     /// Default: no-op. Only DataReaderHistoryCache overrides this.

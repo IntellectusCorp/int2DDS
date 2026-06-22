@@ -2062,7 +2062,7 @@ impl UnicastMessageProcessor for SedpLogic {
                         message_receiver.get_source_timestamp(),
                     );
                     cache_change.set_owned_payload(payload.as_ref().to_vec());
-                    let _ = cache_guard.add_change(cache_change);
+                    let _ = cache_guard.add_change(cache_change, false);
                 }
             };
 

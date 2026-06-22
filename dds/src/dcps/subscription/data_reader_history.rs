@@ -39,7 +39,11 @@ use crate::{
         common::{guid::Guid, sequence::SequenceNumber, time::RtpsTime, types::ChangeKind},
         entities::history::cache_change::CacheChange,
     },
-    subscription::{data_reader::DataReader, sample_info::InstanceStateKind},
+    subscription::{
+        data_reader::DataReader,
+        sample_info::InstanceStateKind,
+        time_based_filter::{FilterOutcome, TimeBasedFilter},
+    },
     utils::timer::timer_id::TimerId,
 };
 
@@ -81,6 +85,9 @@ pub(crate) struct DataReaderHistoryCache<Foo> {
     #[allow(clippy::type_complexity)]
     status_callback:
         Arc<Mutex<Option<Arc<dyn Fn(StatusKind, Option<Arc<dyn StatusInfo>>) + Send + Sync>>>>,
+    // Reader-side TIME_BASED_FILTER state. Always present; min_separation is read live per
+    // sample so a runtime QoS change takes effect immediately.
+    time_based_filter: TimeBasedFilter,
 }
 
 impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> {
@@ -165,20 +172,53 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
         )
     }
 
-    // Adds the given CacheChange to the history vector and map,
-    // and returns any CacheChange that was removed during space allocation before adding.
+    // Add a change under History/ResourceLimits. With apply_filter, an ALIVE owner sample inside
+    // the separation window is held (returns (None, true)) and delivered later by a timer.
     fn add_change_with_cleanup(
         &mut self,
         immutable_change: Arc<CacheChange>,
-    ) -> DdsResult<Option<Arc<CacheChange>>> {
+        apply_filter: bool,
+    ) -> DdsResult<(Option<Arc<CacheChange>>, bool)> {
         let writer_guid = immutable_change.writer_guid();
 
-        // Ensure ownership candidate is registered before checking instance state
+        // Ensure ownership candidate is registered before any ownership check.
         self.add_to_owner_candidate_if_new(
             immutable_change.instance_handle(),
             immutable_change.ownership_strength().unwrap_or(0),
             immutable_change.writer_guid(),
         )?;
+
+        // TIME_BASED_FILTER (receive path only).
+        if apply_filter {
+            let min_separation = self.reader_min_separation();
+            if !min_separation.is_zero() {
+                if immutable_change.kind() == ChangeKind::Alive
+                    && self.is_writer_owner_of_instance(
+                        writer_guid,
+                        immutable_change.instance_handle(),
+                    )?
+                {
+                    let nanos = min_separation.as_nanos().max(0) as u64;
+                    match self.time_based_filter.on_alive_sample(
+                        &immutable_change,
+                        nanos,
+                        RtpsTime::now(),
+                    ) {
+                        FilterOutcome::Held { deliver_after } => {
+                            if let Some(delay) = deliver_after {
+                                self.schedule_tbf_timer(immutable_change.instance_handle(), delay);
+                            }
+                            return Ok((None, true));
+                        }
+                        FilterOutcome::Deliver => {}
+                    }
+                }
+                // Dispose/unregister bypass the filter; drop any held sample to keep order.
+                else if immutable_change.kind() != ChangeKind::Alive {
+                    self.time_based_filter.discard_pending(immutable_change.instance_handle());
+                }
+            }
+        }
 
         // Check ownership & update instance state
         self.update_instance_state(&immutable_change)?;
@@ -221,7 +261,7 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
             self.changes.push(immutable_change.clone());
         }
 
-        Ok(removed_change)
+        Ok((removed_change, false))
     }
 
     fn add_info_to_cache_change(&mut self, change: &mut CacheChange) -> DdsResult<()> {
@@ -410,6 +450,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
             ownership_kind,
             lifespan_timers: Arc::new(Mutex::new(HashMap::new())),
             status_callback: Arc::new(Mutex::new(None)),
+            time_based_filter: TimeBasedFilter::new(),
         }
     }
 
@@ -572,8 +613,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
     // Removes unused instances from the instance map.
     fn remove_unused_instance(&mut self) -> DdsResult<bool> {
         let mut key_to_remove: Option<InstanceHandle> = None;
-        let mut instance_map =
-            self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
+        let instance_map = self.instance_map.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
         for (instance_handle, changes) in instance_map.iter() {
             if changes.is_empty() && self.check_if_no_writers(*instance_handle)? {
@@ -582,12 +622,53 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
             }
         }
 
+        drop(instance_map);
+
         if let Some(key) = key_to_remove {
-            instance_map.remove(&key);
+            self.remove_all_instance_resources(key);
             Ok(true)
         } else {
             Ok(false)
         }
+    }
+
+    // Drop all per-instance resources: the cache index entry, the TIME_BASED_FILTER state, and
+    // the SampleInfo bookkeeping.
+    pub(crate) fn remove_all_instance_resources(&self, instance_handle: InstanceHandle) {
+        if let Ok(mut instance_map) = self.instance_map.lock() {
+            instance_map.remove(&instance_handle);
+        }
+        self.time_based_filter.remove_instance(instance_handle);
+        if let Some(data_reader) = self.data_reader.upgrade() {
+            data_reader.remove_instance_info(instance_handle);
+        }
+    }
+
+    // Read the live minimum_separation from the reader QoS (0 when unavailable).
+    fn reader_min_separation(&self) -> Duration {
+        self.data_reader
+            .upgrade()
+            .and_then(|data_reader| data_reader.get_qos().ok())
+            .map(|qos| qos.time_based_filter.minimum_separation)
+            .unwrap_or_else(|| Duration::new(0, 0))
+    }
+
+    // Schedule a one-shot timer to deliver the instance's held sample after the window elapses.
+    fn schedule_tbf_timer(&self, instance_handle: InstanceHandle, delay: std::time::Duration) {
+        let Some(data_reader) = self.data_reader.upgrade() else { return };
+        let Ok(rtps_reader) = data_reader.get_rtps_reader() else { return };
+        let reader_guid = rtps_reader.guid();
+        let timer_id =
+            TimerId::TimeBasedFilter { reader_entity_id: reader_guid.entity_id(), instance_handle };
+
+        let Ok(timer_handler) = self.get_timer_handler(reader_guid.prefix()) else { return };
+        let Ok(handler) = timer_handler.lock() else { return };
+
+        let weak_data_reader = self.data_reader.clone();
+        handler.remove_timer(timer_id);
+        handler.add_timer(timer_id, delay, false, move || {
+            deliver_held_sample(&weak_data_reader, instance_handle);
+        });
     }
 
     // Checks if there is no writer writing to this instance.
@@ -698,6 +779,37 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
                 log::error!("Failed to lock callback: {:?}", e);
             }
         }
+    }
+}
+
+// Timer callback: re-deliver the instance's held sample (no filter) through the RTPS cache.
+fn deliver_held_sample<Foo: 'static + Clone + Debug>(
+    weak_data_reader: &Weak<DataReader<Foo>>,
+    instance_handle: InstanceHandle,
+) {
+    let Some(data_reader) = weak_data_reader.upgrade() else { return };
+    let Ok(rtps_reader) = data_reader.get_rtps_reader() else { return };
+    let Ok(cache_arc) = data_reader.get_datareader_cache() else { return };
+
+    let pending = match cache_arc.lock() {
+        Ok(cache) => {
+            cache.time_based_filter.take_pending_on_timer(instance_handle, RtpsTime::now())
+        }
+        Err(_) => return,
+    };
+    let Some(change) = pending else { return };
+
+    match rtps_reader.reader_cache().lock() {
+        // Re-deliver without the filter (already decided) so it stores and notifies.
+        Ok(mut reader_cache) => match reader_cache.add_change((*change).clone(), false) {
+            Ok(Some(delivered)) => {
+                drop(reader_cache);
+                rtps_reader.on_change(delivered);
+            }
+            Ok(None) => {}
+            Err(e) => debug!("[TimeBasedFilter] Failed to deliver held sample: {:?}", e),
+        },
+        Err(e) => debug!("[TimeBasedFilter] Failed to lock reader cache: {:?}", e),
     }
 }
 
@@ -823,6 +935,41 @@ mod tests {
             .unwrap();
 
         reader
+    }
+
+    // Reclaiming an instance drops all three per-instance resources: the cache index entry,
+    // the SampleInfo bookkeeping, and the TIME_BASED_FILTER state.
+    #[test]
+    fn remove_all_instance_resources_clears_index_sample_info_and_filter() {
+        let mut qos = DataReaderQos::default();
+        qos.time_based_filter.minimum_separation = Duration::from_millis(500);
+        let reader = create_with_key_datareader(qos);
+        let handle = InstanceHandle::new([7; 16]);
+
+        // Populate all three via the filtered add path: cache index, SampleInfo state, and
+        // TIME_BASED_FILTER state.
+        let cache_arc = reader.get_datareader_cache().unwrap();
+        cache_arc
+            .lock()
+            .unwrap()
+            .add_change_with_cleanup(create_change_with_key(1, handle), true)
+            .unwrap();
+
+        assert!(cache_arc.lock().unwrap().get_instance_map().lock().unwrap().contains_key(&handle));
+        assert!(reader.get_instance_infos().unwrap().contains_key(&handle));
+        assert!(cache_arc.lock().unwrap().time_based_filter.tracks_instance(handle));
+
+        cache_arc.lock().unwrap().remove_all_instance_resources(handle);
+
+        assert!(!cache_arc
+            .lock()
+            .unwrap()
+            .get_instance_map()
+            .lock()
+            .unwrap()
+            .contains_key(&handle));
+        assert!(!reader.get_instance_infos().unwrap().contains_key(&handle));
+        assert!(!cache_arc.lock().unwrap().time_based_filter.tracks_instance(handle));
     }
 
     mod history_qos {
@@ -953,19 +1100,19 @@ mod tests {
 
             // Add 3 changes for instance 1
             assert!(datareader_cache
-                .add_change_with_cleanup(create_change_no_key(1, InstanceHandle::NIL))
+                .add_change_with_cleanup(create_change_no_key(1, InstanceHandle::NIL), false)
                 .is_ok());
             assert!(datareader_cache
-                .add_change_with_cleanup(create_change_no_key(2, InstanceHandle::NIL))
+                .add_change_with_cleanup(create_change_no_key(2, InstanceHandle::NIL), false)
                 .is_ok());
             assert!(datareader_cache
-                .add_change_with_cleanup(create_change_no_key(3, InstanceHandle::NIL))
+                .add_change_with_cleanup(create_change_no_key(3, InstanceHandle::NIL), false)
                 .is_ok());
 
             // Add 1 change for instance 2
             let result = datareader_cache
-                .add_change_with_cleanup(create_change_no_key(4, InstanceHandle::NIL));
-            assert!(result.unwrap().unwrap().sequence_number().to_i64() == 1);
+                .add_change_with_cleanup(create_change_no_key(4, InstanceHandle::NIL), false);
+            assert!(result.unwrap().0.unwrap().sequence_number().to_i64() == 1);
 
             let changes = datareader_cache.get_changes();
             assert!(changes.len() == 3);
@@ -997,18 +1144,18 @@ mod tests {
 
             // Add 3 changes for instance 1
             assert!(datareader_cache
-                .add_change_with_cleanup(create_change_no_key(1, InstanceHandle::NIL))
+                .add_change_with_cleanup(create_change_no_key(1, InstanceHandle::NIL), false)
                 .is_ok());
             assert!(datareader_cache
-                .add_change_with_cleanup(create_change_no_key(2, InstanceHandle::NIL))
+                .add_change_with_cleanup(create_change_no_key(2, InstanceHandle::NIL), false)
                 .is_ok());
             assert!(datareader_cache
-                .add_change_with_cleanup(create_change_no_key(3, InstanceHandle::NIL))
+                .add_change_with_cleanup(create_change_no_key(3, InstanceHandle::NIL), false)
                 .is_ok());
 
             // Add 1 change for instance 2
             let result = datareader_cache
-                .add_change_with_cleanup(create_change_no_key(4, InstanceHandle::NIL));
+                .add_change_with_cleanup(create_change_no_key(4, InstanceHandle::NIL), false);
             assert!(matches!(result, Err(DdsError::OutOfResources)));
         }
 
@@ -1039,15 +1186,15 @@ mod tests {
 
             // Add 2 to instance A (max_samples_per_instance reached)
             assert!(datareader_cache
-                .add_change_with_cleanup(create_change_with_key(1, instance_a))
+                .add_change_with_cleanup(create_change_with_key(1, instance_a), false)
                 .is_ok());
             assert!(datareader_cache
-                .add_change_with_cleanup(create_change_with_key(2, instance_a))
+                .add_change_with_cleanup(create_change_with_key(2, instance_a), false)
                 .is_ok());
 
             // 3rd addition should succeed with auto_remove
             assert!(datareader_cache
-                .add_change_with_cleanup(create_change_with_key(3, instance_a))
+                .add_change_with_cleanup(create_change_with_key(3, instance_a), false)
                 .is_ok());
 
             let changes = datareader_cache.get_changes();
@@ -1082,15 +1229,15 @@ mod tests {
 
             // Add 2 to instance A
             assert!(datareader_cache
-                .add_change_with_cleanup(create_change_with_key(1, instance_a))
+                .add_change_with_cleanup(create_change_with_key(1, instance_a), false)
                 .is_ok());
             assert!(datareader_cache
-                .add_change_with_cleanup(create_change_with_key(2, instance_a))
+                .add_change_with_cleanup(create_change_with_key(2, instance_a), false)
                 .is_ok());
 
             // 3rd addition should fail because auto_remove is disabled
-            let result =
-                datareader_cache.add_change_with_cleanup(create_change_with_key(3, instance_a));
+            let result = datareader_cache
+                .add_change_with_cleanup(create_change_with_key(3, instance_a), false);
             assert!(matches!(result, Err(DdsError::OutOfResources)));
         }
 
@@ -1148,8 +1295,12 @@ mod tests {
                 Some(RtpsTime::now()),
             );
 
-            assert!(datareader_cache.add_change_with_cleanup(Arc::new(change_a.clone())).is_ok());
-            assert!(datareader_cache.add_change_with_cleanup(Arc::new(change_b.clone())).is_ok());
+            assert!(datareader_cache
+                .add_change_with_cleanup(Arc::new(change_a.clone()), false)
+                .is_ok());
+            assert!(datareader_cache
+                .add_change_with_cleanup(Arc::new(change_b.clone()), false)
+                .is_ok());
 
             let change_c = CacheChange::new(
                 ChangeKind::Alive,
@@ -1164,7 +1315,8 @@ mod tests {
             );
 
             // Currently adding instance C should result in an error
-            let result = datareader_cache.add_change_with_cleanup(Arc::new(change_c.clone()));
+            let result =
+                datareader_cache.add_change_with_cleanup(Arc::new(change_c.clone()), false);
             assert!(matches!(result, Err(DdsError::OutOfResources)));
 
             // Make instance A enter NOT_ALIVE_NO_WRITERS state
@@ -1182,7 +1334,7 @@ mod tests {
 
             // Writer A unregisters instance A
             assert!(datareader_cache
-                .add_change_with_cleanup(Arc::new(change_a_unregister.clone()))
+                .add_change_with_cleanup(Arc::new(change_a_unregister.clone()), false)
                 .is_ok());
 
             // Data reader took all the samples from instance A
@@ -1190,7 +1342,7 @@ mod tests {
             assert!(datareader_cache.remove_change(Arc::new(change_a_unregister)).is_ok());
 
             // Now adding instance C should succeed via remove_unused_instance
-            assert!(datareader_cache.add_change_with_cleanup(Arc::new(change_c)).is_ok());
+            assert!(datareader_cache.add_change_with_cleanup(Arc::new(change_c), false).is_ok());
 
             let changes = datareader_cache.get_changes();
             assert_eq!(changes.len(), 2);
@@ -1221,18 +1373,18 @@ mod tests {
 
             // Add 3 samples total (max_samples reached)
             assert!(datareader_cache
-                .add_change_with_cleanup(create_change_with_key(1, instance_a))
+                .add_change_with_cleanup(create_change_with_key(1, instance_a), false)
                 .is_ok());
             assert!(datareader_cache
-                .add_change_with_cleanup(create_change_with_key(2, instance_a))
+                .add_change_with_cleanup(create_change_with_key(2, instance_a), false)
                 .is_ok());
             assert!(datareader_cache
-                .add_change_with_cleanup(create_change_with_key(3, instance_b))
+                .add_change_with_cleanup(create_change_with_key(3, instance_b), false)
                 .is_ok());
 
             // 4th addition should succeed via try_remove_oldest_change_of_all
             assert!(datareader_cache
-                .add_change_with_cleanup(create_change_with_key(4, instance_b))
+                .add_change_with_cleanup(create_change_with_key(4, instance_b), false)
                 .is_ok());
 
             let changes = datareader_cache.get_changes();
@@ -1268,18 +1420,18 @@ mod tests {
 
             // Add 3 samples total
             assert!(datareader_cache
-                .add_change_with_cleanup(create_change_with_key(1, instance_a))
+                .add_change_with_cleanup(create_change_with_key(1, instance_a), false)
                 .is_ok());
             assert!(datareader_cache
-                .add_change_with_cleanup(create_change_with_key(2, instance_a))
+                .add_change_with_cleanup(create_change_with_key(2, instance_a), false)
                 .is_ok());
             assert!(datareader_cache
-                .add_change_with_cleanup(create_change_with_key(3, instance_b))
+                .add_change_with_cleanup(create_change_with_key(3, instance_b), false)
                 .is_ok());
 
             // 4th addition should fail because auto_remove is disabled
-            let result =
-                datareader_cache.add_change_with_cleanup(create_change_with_key(4, instance_b));
+            let result = datareader_cache
+                .add_change_with_cleanup(create_change_with_key(4, instance_b), false);
             assert!(matches!(result, Err(DdsError::OutOfResources)));
         }
     }
@@ -1335,9 +1487,9 @@ mod tests {
             change_b.set_ownership_strength(Some(0));
 
             // Add owner candidates
-            datareader_cache.add_change_with_cleanup(Arc::new(change_a.clone())).unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_a.clone()), false).unwrap();
 
-            datareader_cache.add_change_with_cleanup(Arc::new(change_b.clone())).unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_b.clone()), false).unwrap();
 
             // Check ownership
             let is_owner_a = datareader_cache
@@ -1403,9 +1555,9 @@ mod tests {
             change_a.set_ownership_strength(Some(0));
             change_b.set_ownership_strength(Some(0));
 
-            datareader_cache.add_change_with_cleanup(Arc::new(change_a.clone())).unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_a.clone()), false).unwrap();
 
-            datareader_cache.add_change_with_cleanup(Arc::new(change_b.clone())).unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_b.clone()), false).unwrap();
 
             // Check ownership
             let is_owner_a = datareader_cache
@@ -1468,7 +1620,7 @@ mod tests {
             // Before writer b writes, writer a is the owner
             change_a.set_ownership_strength(Some(20)); // Weaker strength
 
-            datareader_cache.add_change_with_cleanup(Arc::new(change_a.clone())).unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_a.clone()), false).unwrap();
 
             let is_owner_a = datareader_cache
                 .is_writer_owner_of_instance(change_a.writer_guid(), change_a.instance_handle())
@@ -1476,7 +1628,7 @@ mod tests {
             assert!(is_owner_a);
 
             change_b.set_ownership_strength(Some(30)); // Stronger strength
-            datareader_cache.add_change_with_cleanup(Arc::new(change_b.clone())).unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_b.clone()), false).unwrap();
 
             // Now b is the owner
             let is_owner_b = datareader_cache
@@ -1543,7 +1695,7 @@ mod tests {
             // Before writer b writes, writer a is the owner
             change_a.set_ownership_strength(Some(20)); // Weaker strength
 
-            datareader_cache.add_change_with_cleanup(Arc::new(change_a.clone())).unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_a.clone()), false).unwrap();
 
             let is_owner_a = datareader_cache
                 .is_writer_owner_of_instance(change_a.writer_guid(), change_a.instance_handle())
@@ -1551,7 +1703,7 @@ mod tests {
             assert!(is_owner_a);
 
             change_b.set_ownership_strength(Some(30)); // Stronger strength
-            datareader_cache.add_change_with_cleanup(Arc::new(change_b.clone())).unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_b.clone()), false).unwrap();
 
             // Now b is the owner
             let is_owner_b = datareader_cache
@@ -1610,7 +1762,7 @@ mod tests {
             // Before writer b writes, writer a is the owner
             change_a.set_ownership_strength(Some(20)); // Weaker strength
 
-            datareader_cache.add_change_with_cleanup(Arc::new(change_a.clone())).unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_a.clone()), false).unwrap();
 
             let is_owner_a = datareader_cache
                 .is_writer_owner_of_instance(change_a.writer_guid(), change_a.instance_handle())
@@ -1618,7 +1770,7 @@ mod tests {
             assert!(is_owner_a);
 
             change_b.set_ownership_strength(Some(30)); // Stronger strength
-            datareader_cache.add_change_with_cleanup(Arc::new(change_b.clone())).unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_b.clone()), false).unwrap();
 
             // Now b is the owner
             let is_owner_b = datareader_cache
@@ -1637,7 +1789,7 @@ mod tests {
             );
             change_a_2.set_ownership_strength(Some(20));
 
-            let res = datareader_cache.add_change_with_cleanup(Arc::new(change_a_2));
+            let res = datareader_cache.add_change_with_cleanup(Arc::new(change_a_2), false);
             assert!(matches!(res, Err(DdsError::IllegalOperation)));
         }
 
@@ -1685,7 +1837,7 @@ mod tests {
             // Before writer b writes, writer a is the owner
             change_a.set_ownership_strength(Some(20)); // Weaker strength
 
-            datareader_cache.add_change_with_cleanup(Arc::new(change_a.clone())).unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_a.clone()), false).unwrap();
 
             let is_owner_a = datareader_cache
                 .is_writer_owner_of_instance(change_a.writer_guid(), change_a.instance_handle())
@@ -1693,7 +1845,7 @@ mod tests {
             assert!(is_owner_a);
 
             change_b.set_ownership_strength(Some(30)); // Stronger strength
-            datareader_cache.add_change_with_cleanup(Arc::new(change_b.clone())).unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_b.clone()), false).unwrap();
 
             // Now b is the owner
             let is_owner_b = datareader_cache
@@ -1712,7 +1864,7 @@ mod tests {
             );
             change_a_2.set_ownership_strength(Some(20));
 
-            let res = datareader_cache.add_change_with_cleanup(Arc::new(change_a_2));
+            let res = datareader_cache.add_change_with_cleanup(Arc::new(change_a_2), false);
             assert!(matches!(res, Err(DdsError::IllegalOperation)));
         }
 
@@ -1748,7 +1900,7 @@ mod tests {
             );
 
             change.set_ownership_strength(Some(20));
-            datareader_cache.add_change_with_cleanup(Arc::new(change.clone())).unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change.clone()), false).unwrap();
 
             let is_owner = datareader_cache
                 .is_writer_owner_of_instance(change.writer_guid(), change.instance_handle())
@@ -1766,7 +1918,9 @@ mod tests {
             );
 
             change_disposed.set_ownership_strength(Some(20));
-            datareader_cache.add_change_with_cleanup(Arc::new(change_disposed.clone())).unwrap();
+            datareader_cache
+                .add_change_with_cleanup(Arc::new(change_disposed.clone()), false)
+                .unwrap();
 
             // Verify instance state is NOT_ALIVE_DISPOSED
             let instance_info = data_reader.get_instance_infos().unwrap();
@@ -1822,10 +1976,10 @@ mod tests {
 
             // Before writer b writes, writer a is the owner
             change_a.set_ownership_strength(Some(20)); // Weaker strength
-            datareader_cache.add_change_with_cleanup(Arc::new(change_a.clone())).unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_a.clone()), false).unwrap();
 
             change_b.set_ownership_strength(Some(30)); // Stronger strength
-            datareader_cache.add_change_with_cleanup(Arc::new(change_b.clone())).unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_b.clone()), false).unwrap();
 
             // B is the owner
             let is_owner_a = datareader_cache
@@ -1849,7 +2003,7 @@ mod tests {
             change_disposed.set_ownership_strength(Some(20));
 
             // Non owner cannot dispose the instance
-            let res = datareader_cache.add_change_with_cleanup(Arc::new(change_disposed));
+            let res = datareader_cache.add_change_with_cleanup(Arc::new(change_disposed), false);
             assert!(matches!(res, Err(DdsError::IllegalOperation)));
 
             // Verify instance state is still ALIVE
@@ -1890,7 +2044,7 @@ mod tests {
             );
 
             change.set_ownership_strength(Some(20));
-            datareader_cache.add_change_with_cleanup(Arc::new(change.clone())).unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change.clone()), false).unwrap();
 
             let is_owner = datareader_cache
                 .is_writer_owner_of_instance(change.writer_guid(), change.instance_handle())
@@ -1908,7 +2062,9 @@ mod tests {
             );
 
             change_disposed.set_ownership_strength(Some(20));
-            datareader_cache.add_change_with_cleanup(Arc::new(change_disposed.clone())).unwrap();
+            datareader_cache
+                .add_change_with_cleanup(Arc::new(change_disposed.clone()), false)
+                .unwrap();
 
             // Verify instance state is NOT_ALIVE_DISPOSED
             let instance_info = data_reader.get_instance_infos().unwrap();
@@ -1928,7 +2084,7 @@ mod tests {
             );
 
             change_2.set_ownership_strength(Some(20));
-            datareader_cache.add_change_with_cleanup(Arc::new(change_2.clone())).unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_2.clone()), false).unwrap();
 
             // Verify instance state is ALIVE
             let instance_info = data_reader.get_instance_infos().unwrap();
@@ -1968,7 +2124,7 @@ mod tests {
             );
 
             change.set_ownership_strength(Some(20));
-            datareader_cache.add_change_with_cleanup(Arc::new(change.clone())).unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change.clone()), false).unwrap();
 
             let is_owner = datareader_cache
                 .is_writer_owner_of_instance(change.writer_guid(), change.instance_handle())
@@ -1986,7 +2142,9 @@ mod tests {
             );
 
             change_disposed.set_ownership_strength(Some(20));
-            datareader_cache.add_change_with_cleanup(Arc::new(change_disposed.clone())).unwrap();
+            datareader_cache
+                .add_change_with_cleanup(Arc::new(change_disposed.clone()), false)
+                .unwrap();
 
             // Verify instance state is NOT_ALIVE_DISPOSED
             let instance_info = data_reader.get_instance_infos().unwrap();
@@ -2012,7 +2170,7 @@ mod tests {
             );
 
             change_2.set_ownership_strength(Some(10));
-            let res = datareader_cache.add_change_with_cleanup(Arc::new(change_2.clone()));
+            let res = datareader_cache.add_change_with_cleanup(Arc::new(change_2.clone()), false);
             assert!(res.is_err());
 
             // Verify instance state is still NOT_ALIVE_DISPOSED
@@ -2053,7 +2211,7 @@ mod tests {
             );
 
             change.set_ownership_strength(Some(20));
-            datareader_cache.add_change_with_cleanup(Arc::new(change.clone())).unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change.clone()), false).unwrap();
 
             let is_owner = datareader_cache
                 .is_writer_owner_of_instance(change.writer_guid(), change.instance_handle())
@@ -2071,7 +2229,9 @@ mod tests {
             );
 
             change_disposed.set_ownership_strength(Some(10));
-            datareader_cache.add_change_with_cleanup(Arc::new(change_disposed.clone())).unwrap();
+            datareader_cache
+                .add_change_with_cleanup(Arc::new(change_disposed.clone()), false)
+                .unwrap();
 
             // Verify instance state is NOT_ALIVE_DISPOSED
             let instance_info = data_reader.get_instance_infos().unwrap();
@@ -2097,7 +2257,7 @@ mod tests {
             );
 
             change_2.set_ownership_strength(Some(5));
-            let res = datareader_cache.add_change_with_cleanup(Arc::new(change_2.clone()));
+            let res = datareader_cache.add_change_with_cleanup(Arc::new(change_2.clone()), false);
             assert!(res.is_ok());
 
             // Verify instance state is ALIVE now
@@ -2154,10 +2314,10 @@ mod tests {
 
             // Before writer b writes, writer a is the owner
             change_a.set_ownership_strength(Some(20)); // Weaker strength
-            datareader_cache.add_change_with_cleanup(Arc::new(change_a.clone())).unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_a.clone()), false).unwrap();
 
             change_b.set_ownership_strength(Some(30)); // Stronger strength
-            datareader_cache.add_change_with_cleanup(Arc::new(change_b.clone())).unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_b.clone()), false).unwrap();
 
             // B is the owner
             let is_owner_a = datareader_cache
@@ -2180,7 +2340,8 @@ mod tests {
             );
             change_unregistered.set_ownership_strength(Some(30));
 
-            let res = datareader_cache.add_change_with_cleanup(Arc::new(change_unregistered));
+            let res =
+                datareader_cache.add_change_with_cleanup(Arc::new(change_unregistered), false);
             assert!(res.is_ok());
 
             // Now writer A is the owner
@@ -2243,10 +2404,10 @@ mod tests {
 
             // Before writer b writes, writer a is the owner
             change_a.set_ownership_strength(Some(20)); // Weaker strength
-            datareader_cache.add_change_with_cleanup(Arc::new(change_a.clone())).unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_a.clone()), false).unwrap();
 
             change_b.set_ownership_strength(Some(30)); // Stronger strength
-            datareader_cache.add_change_with_cleanup(Arc::new(change_b.clone())).unwrap();
+            datareader_cache.add_change_with_cleanup(Arc::new(change_b.clone()), false).unwrap();
 
             // B is the owner
             let is_owner_a = datareader_cache
@@ -2279,10 +2440,10 @@ mod tests {
             change_unregistered_a.set_ownership_strength(Some(20));
             change_unregistered_b.set_ownership_strength(Some(30));
 
-            let res =
-                datareader_cache.add_change_with_cleanup(Arc::new(change_unregistered_a.clone()));
-            let res_b =
-                datareader_cache.add_change_with_cleanup(Arc::new(change_unregistered_b.clone()));
+            let res = datareader_cache
+                .add_change_with_cleanup(Arc::new(change_unregistered_a.clone()), false);
+            let res_b = datareader_cache
+                .add_change_with_cleanup(Arc::new(change_unregistered_b.clone()), false);
 
             assert!(res.is_ok());
             assert!(res_b.is_ok());
