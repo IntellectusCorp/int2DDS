@@ -316,7 +316,10 @@ impl DcpsBridge {
         self.participant.register_local_type(publication_builtin_topic_data.type_object());
 
         let mut wire_topic_data = publication_builtin_topic_data.clone();
-        if crate::common::env::get_disable_inline_type_object() {
+        if crate::common::env::get_disable_inline_type_info() {
+            wire_topic_data.set_type_identifier(None);
+            wire_topic_data.set_type_object(None);
+        } else if crate::common::env::get_disable_inline_type_object() {
             wire_topic_data.set_type_object(None);
         }
         let writer_data = DiscoveredWriterData { publication_builtin_topic_data: wire_topic_data };
@@ -470,7 +473,10 @@ impl DcpsBridge {
 
         // Create DiscoveredReaderData and serialize using SEDPMessage.
         let mut wire_topic_data = subscription_builtin_topic_data.clone();
-        if crate::common::env::get_disable_inline_type_object() {
+        if crate::common::env::get_disable_inline_type_info() {
+            wire_topic_data.set_type_identifier(None);
+            wire_topic_data.set_type_object(None);
+        } else if crate::common::env::get_disable_inline_type_object() {
             wire_topic_data.set_type_object(None);
         }
         let reader_data = DiscoveredReaderData {
