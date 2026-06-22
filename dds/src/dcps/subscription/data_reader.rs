@@ -1544,7 +1544,8 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
             let data = self.type_support.deserialize(change.data_value(), None)?;
             Ok(self.type_support.compute_key(&*data))
         } else {
-            let key_any = self.type_support.deserialize_key(change.data_value())?;
+            // Dispose/unregister carry a wire serializedKey (with encapsulation header).
+            let key_any = self.type_support.deserialize_key_payload(change.data_value())?;
             Ok(self.type_support.compute_key(&*key_any))
         }
     }
@@ -1634,12 +1635,14 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         Ok(synthetic_sample_infos)
     }
 
+    // Returns true if the instance state actually changed (a rejected no-op
+    // transition returns false), so callers can avoid synthesizing notifications.
     pub(crate) fn update_instance_state(
         &self,
         instance_handle: InstanceHandle,
         new_state: InstanceStateKind,
         cache_change: Option<&CacheChange>,
-    ) -> DdsResult<()> {
+    ) -> DdsResult<bool> {
         // Non-keyed topic doesn't have instance state
         // if instance_handle.is_nil() {
         //     return Err(DdsError::BadParameter);
@@ -1656,6 +1659,8 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
             no_writers_generation_count: 0,
             pending_notification: false,
         });
+
+        let prev_state = info.instance_state;
 
         // Update InstanceState based on change kind
         log::trace!("Updating instance state based on change kind: {:?}", new_state);
@@ -1819,7 +1824,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
             }
         }
 
-        Ok(())
+        Ok(info.instance_state != prev_state)
     }
 
     fn add_autopurge_timer(

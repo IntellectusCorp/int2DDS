@@ -221,7 +221,16 @@ impl<Foo: 'static + Clone + Debug> HistoryCache for DataReaderHistoryCache<Foo> 
         }
 
         // Check ownership & update instance state
-        self.update_instance_state(&immutable_change)?;
+        let state_changed = self.update_instance_state(&immutable_change)?;
+
+        // A dispose/unregister that doesn't change the instance state (e.g. arriving for
+        // an already-DISPOSED instance) carries no new information; don't surface it as a
+        // duplicate invalid-data sample. Alive samples always carry data, so always surface.
+        let is_alive =
+            matches!(immutable_change.kind(), ChangeKind::Alive | ChangeKind::AliveFiltered);
+        if !is_alive && !state_changed {
+            return Ok((None, false));
+        }
 
         // Check lifespan qos
         let lifespan_duration =
@@ -465,7 +474,8 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
     }
 
     // Updates the instance state based on the CacheChange kind.
-    fn update_instance_state(&self, cache_change: &CacheChange) -> DdsResult<()> {
+    // Returns true if this change actually changed the instance state.
+    fn update_instance_state(&self, cache_change: &CacheChange) -> DdsResult<bool> {
         // if cache_change.instance_handle().is_nil() {
         //     return Ok(());
         // }
@@ -476,6 +486,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
             .ok_or(DdsError::Error("DataReader has been dropped".to_string()))?;
 
         let change_kind = cache_change.kind();
+        let mut state_changed = false;
 
         match change_kind {
             ChangeKind::Alive
@@ -501,7 +512,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
                     _ => InstanceStateKind::NOT_ALIVE_DISPOSED_INSTANCE_STATE,
                 };
 
-                data_reader.update_instance_state(
+                state_changed |= data_reader.update_instance_state(
                     cache_change.instance_handle(),
                     new_state,
                     Some(cache_change),
@@ -514,20 +525,23 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
             change_kind,
             ChangeKind::NotAliveUnregistered | ChangeKind::NotAliveDisposedUnregistered
         ) {
-            self.remove_writer_from_owner_candidates(cache_change.writer_guid(), true, false)?;
+            state_changed |=
+                self.remove_writer_from_owner_candidates(cache_change.writer_guid(), true, false)?;
         }
 
-        Ok(())
+        Ok(state_changed)
     }
 
     // Removes the writer from owner candidates.
+    // Returns true if any instance's state actually changed to NOT_ALIVE_NO_WRITERS.
     pub(crate) fn remove_writer_from_owner_candidates(
         &self,
         remote_writer_guid: Guid,
         update_state: bool, // should update instance state to NOT_ALIVE_NO_WRITERS if no candidates left
         synthesize_notification: bool, // should data reader create an invalid-data sample
-    ) -> DdsResult<()> {
+    ) -> DdsResult<bool> {
         debug!("Removing writer {} from owner candidates", remote_writer_guid);
+        let mut any_changed = false;
         for mut entry in self.owner_candidates.iter_mut() {
             let writers = entry.value_mut();
             writers.retain(|owner_info| owner_info.owner_guid != remote_writer_guid);
@@ -539,12 +553,15 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
                         .data_reader
                         .upgrade()
                         .ok_or(DdsError::Error("DataReader has been dropped".to_string()))?;
-                    data_reader.update_instance_state(
+                    let state_changed = data_reader.update_instance_state(
                         *entry.key(),
                         InstanceStateKind::NOT_ALIVE_NO_WRITERS_INSTANCE_STATE,
                         None,
                     )?;
-                    if synthesize_notification {
+                    any_changed |= state_changed;
+                    // Skip the synthetic sample when the transition was rejected (e.g. the
+                    // instance is already DISPOSED): no state change, no notification.
+                    if synthesize_notification && state_changed {
                         data_reader.mark_pending_notification(*entry.key())?;
                     }
                 }
@@ -553,7 +570,7 @@ impl<Foo: 'static + Clone + Debug> DataReaderHistoryCache<Foo> {
             }
         }
 
-        Ok(())
+        Ok(any_changed)
     }
 
     // Revokes the current owner of the instance without updating instance state.
