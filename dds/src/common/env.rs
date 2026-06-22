@@ -62,6 +62,7 @@ pub fn init_from_env() {
 fn apply_cli_args_to_env() {
     fn build_command() -> Command {
         Command::new("int2dds")
+            .ignore_errors(true)
             // .disable_help_subcommand(true)
             // .arg_required_else_help(false)
             .arg(
