@@ -202,13 +202,19 @@ impl UserLogic {
                 // In case of fragment, fragment state is checked via last seq number, so
                 // use current seq number in previous heartbeat to get ack from reader for retransmitted message
                 // In case of data retransmission, decide whether to send heartbeat
-                let heartbeat_info = Some((
-                    stateful_writer.heartbeat_count(),
-                    *requested_change_sn,
-                    *requested_change_sn,
-                    false, // final_flag
-                    false, // liveliness_flag = false for retransmission
-                ));
+                let heartbeat_info = if reader_proxy.is_reliable()
+                    && !stateful_writer.disable_piggyback_heartbeat()
+                {
+                    Some((
+                        stateful_writer.heartbeat_count(),
+                        *requested_change_sn,
+                        *requested_change_sn,
+                        false, // final_flag
+                        false, // liveliness_flag = false for retransmission
+                    ))
+                } else {
+                    None
+                };
 
                 if a_change.is_fragmented() {
                     debug!(
@@ -2247,7 +2253,12 @@ impl UnicastMessageProcessor for UserLogic {
                 "Writer cache should not be empty while sending DATA_FRAG",
             )
         })?;
-        let heartbeat_info = Some((heartbeat_count, writer_sn, last_sn, false, false));
+        let heartbeat_info =
+            if reader_proxy.is_reliable() && !stateful_writer.disable_piggyback_heartbeat() {
+                Some((heartbeat_count, writer_sn, last_sn, false, false))
+            } else {
+                None
+            };
 
         let timestamp = Utc::now();
         let participant = self.get_upgraded_participant()?;
