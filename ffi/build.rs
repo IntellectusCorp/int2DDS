@@ -122,6 +122,34 @@ Int2DdsRet int2dds_dynamic_value_as_f64  (const struct Int2DdsDynamicValue *valu
         println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,lib{}.so.{}.{}", lib_name, major, minor);
     }
 
+    // macOS: the SONAME analog is the dylib install name plus compat/current
+    // versions. rustc sets none of these for a cdylib, so inject them via the
+    // linker. @rpath keeps the install name relocatable for consumers.
+    if target_os == "macos" {
+        let major = env::var("CARGO_PKG_VERSION_MAJOR").unwrap();
+        let minor = env::var("CARGO_PKG_VERSION_MINOR").unwrap();
+        let patch = env::var("CARGO_PKG_VERSION_PATCH").unwrap();
+        let lib_name = package_name.replace('-', "_");
+        println!("cargo:rustc-cdylib-link-arg=-Wl,-install_name,@rpath/lib{}.dylib", lib_name);
+        println!("cargo:rustc-cdylib-link-arg=-Wl,-compatibility_version,{}.{}", major, minor);
+        println!("cargo:rustc-cdylib-link-arg=-Wl,-current_version,{}.{}.{}", major, minor, patch);
+    }
+
+    // Windows: embed a PE VERSIONINFO resource so the DLL reports a FileVersion
+    // and ProductVersion (the SONAME analog). winresource reads CARGO_PKG_VERSION
+    // for the numeric version fields. cfg(windows) guards it to the Windows host
+    // (matching the cfg-gated build-dependency); the resource compiler (rc.exe or
+    // windres) only exists there. The DLL filename itself stays unversioned.
+    #[cfg(windows)]
+    {
+        if target_os == "windows" {
+            let mut res = winresource::WindowsResource::new();
+            res.set("ProductName", "int2dds-ffi");
+            res.set("FileDescription", "C FFI bindings for int2DDS");
+            res.compile().expect("embed Windows VERSIONINFO resource");
+        }
+    }
+
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=Cargo.toml");
 }
