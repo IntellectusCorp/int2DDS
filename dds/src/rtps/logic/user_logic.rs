@@ -2253,7 +2253,12 @@ impl UnicastMessageProcessor for UserLogic {
                 "Writer cache should not be empty while sending DATA_FRAG",
             )
         })?;
-        let heartbeat_info = Some((heartbeat_count, writer_sn, last_sn, false, false));
+        let heartbeat_info =
+            if reader_proxy.is_reliable() && !stateful_writer.disable_piggyback_heartbeat() {
+                Some((heartbeat_count, writer_sn, last_sn, false, false))
+            } else {
+                None
+            };
 
         let timestamp = Utc::now();
         let participant = self.get_upgraded_participant()?;
