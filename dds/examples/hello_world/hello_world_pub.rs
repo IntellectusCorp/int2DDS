@@ -12,7 +12,6 @@ use int2dds::{
         instance_handle::InstanceHandle,
         log::{LogLevel, LogType},
     },
-    core::time::Duration,
     domain::{domain_participant_factory::DomainParticipantFactory, qos::PARTICIPANT_QOS_DEFAULT},
     infrastructure::status::StatusMask,
     publication::{
@@ -74,14 +73,6 @@ impl DataWriterListener for PubListener {
     }
 }
 
-fn deadline_str(period: Duration) -> String {
-    if period == Duration::infinite() {
-        "INFINITE".to_string()
-    } else {
-        format!("{:?}", period)
-    }
-}
-
 /// Logs whether the effective QoS came from a profile or spec defaults.
 fn log_qos_source(factory: &DomainParticipantFactory) {
     if std::env::var("DDS_QOS_PROFILE").is_err() {
@@ -130,20 +121,14 @@ fn main() {
 
     let wqos = writer.get_qos().unwrap();
     println!(
-        "********* [publisher INFO] domain_id: {}, hostname: {:?}, topic: {}",
+        "[publisher INFO] domain_id: {}, hostname: {:?}, topic: {}",
         domain_id,
         hostname::get().unwrap(),
         TOPIC_NAME
     );
     println!(
-        "********* [publisher qos] reliability: {:?}, durability: {:?}, history: {:?}, \
-         deadline: {}, ownership: {:?}(strength: {})",
-        wqos.reliability.kind,
-        wqos.durability.kind,
-        wqos.history.kind,
-        deadline_str(wqos.deadline.period),
-        wqos.ownership.kind,
-        wqos.ownership_strength.value,
+        "[publisher qos] reliability: {:?}, durability: {:?}, history: {:?} ",
+        wqos.reliability.kind, wqos.durability.kind, wqos.history.kind
     );
 
     // Wait until a subscriber matches before publishing.

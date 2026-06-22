@@ -10,7 +10,6 @@ use int2dds::{
         env::{set_console_log_level, set_log_type},
         log::{LogLevel, LogType},
     },
-    core::time::Duration,
     domain::{domain_participant_factory::DomainParticipantFactory, qos::PARTICIPANT_QOS_DEFAULT},
     infrastructure::status::StatusMask,
     subscription::{
@@ -90,14 +89,6 @@ impl DataReaderListener for SubListener {
     }
 }
 
-fn deadline_str(period: Duration) -> String {
-    if period == Duration::infinite() {
-        "INFINITE".to_string()
-    } else {
-        format!("{:?}", period)
-    }
-}
-
 /// Logs whether the effective QoS came from a profile or spec defaults.
 fn log_qos_source(factory: &DomainParticipantFactory) {
     if std::env::var("DDS_QOS_PROFILE").is_err() {
@@ -146,19 +137,14 @@ fn main() {
 
     let rqos = reader.get_qos().unwrap();
     println!(
-        "********* [subscriber INFO] domain_id: {}, hostname: {:?}, topic: {}",
+        "[subscriber INFO] domain_id: {}, hostname: {:?}, topic: {}",
         domain_id,
         hostname::get().unwrap(),
         TOPIC_NAME
     );
     println!(
-        "********* [subscriber qos] reliability: {:?}, durability: {:?}, history: {:?}, \
-         deadline: {}, ownership: {:?}",
-        rqos.reliability.kind,
-        rqos.durability.kind,
-        rqos.history.kind,
-        deadline_str(rqos.deadline.period),
-        rqos.ownership.kind,
+        "[subscriber qos] reliability: {:?}, durability: {:?}, history: {:?}",
+        rqos.reliability.kind, rqos.durability.kind, rqos.history.kind,
     );
 
     shutdown.wait();
