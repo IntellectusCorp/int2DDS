@@ -1,14 +1,17 @@
 # Testing the `hello_world` example
 
-`hello_world` is the single, unified Hello World example. One binary runs as a
-publisher (`-P`) or subscriber (`-S`), and its QoS comes from one of two sources,
-selected automatically:
+The Hello World example ships as **two binaries** — `hello_world_pub` and
+`hello_world_sub`.
+QoS is resolved automatically via `QosKind::Default` on every entity:
 
-- **No profile (CLI args)** — quick local runs over plain UDP. QoS is built from
-  the command-line flags.
-- **Profile (`DDS_QOS_PROFILE`)** — a JSON/XML profile fully drives QoS, including
-  the transport (UDP / multicast-TTL / TCP / Hybrid). In this mode the CLI QoS
-  flags are ignored.
+- **Profile (`DDS_QOS_PROFILE`)** — when set and a profile is selected, the
+  JSON/XML profile fully drives QoS, including the transport
+  (UDP / multicast-TTL / TCP / Hybrid).
+- **Spec default** — when `DDS_QOS_PROFILE` is unset (or set but no profile is
+  selected), entities fall back to the OMG spec-default QoS.
+
+Both binaries print their effective QoS at startup, so you can confirm which
+source applied.
 
 All commands below are run from the repository root; the crate is the workspace
 member `int2dds`.
@@ -17,54 +20,42 @@ member `int2dds`.
 
 ## 1. Quick start
 
-the example runs over UDP and builds QoS from the CLI flags (default).
-Open two terminals:
+With no profile, both sides run over UDP with spec-default QoS. Open two
+terminals:
 
 ```bash
 # Terminal 1 — subscriber
-cargo run -p int2dds --example hello_world -- -S
+cargo run -p int2dds --example hello_world_sub
 
 # Terminal 2 — publisher
-cargo run -p int2dds --example hello_world -- -P
+cargo run -p int2dds --example hello_world_pub
 ```
 
-The publisher should match the subscriber and the subscriber should print
+The publisher matches the subscriber and the subscriber prints
 `Read sample: ...`.
 
-### CLI flags (args mode only)
+### CLI flags
 
 | Flag | Meaning | Default |
 | --- | --- | --- |
-| `-P` / `-S` | Run as publisher / subscriber (required) | — |
-| `-T <name>` | Topic name | `hello_world_topic` |
-| `-d <id>` | Domain id | `0` |
-| `-i <ms>` | Publish interval (publisher) | `1000` |
-| `-r` | Reliable reliability | best-effort |
-| `-t` | Transient-local durability | volatile |
-| `-k <N>` | History: `0` = keep-all, `N` = keep-last N | `1` |
-| `-f <ms>` | Deadline period | infinite |
-| `-o [strength]` | Exclusive ownership (publisher: `-o <strength>`) | shared |
-| `-p <name>` | Partition name | none |
-| `-s <bytes>` | Pad the message to this size (publisher) | none |
-
-Example — a reliable, transient-local pair on domain 5:
+| `-d` / `--domain <id>` | Domain id | `0` |
 
 ```bash
-cargo run -p int2dds --example hello_world -- -S -d 5 -r -t
-cargo run -p int2dds --example hello_world -- -P -d 5 -r -t
+# Both sides must share a domain id
+cargo run -p int2dds --example hello_world_pub -- --domain 5
+cargo run -p int2dds --example hello_world_sub -- -d 5
 ```
 
-> The default writer QoS in args mode is **best-effort** (so `-r` is a meaningful
-> toggle); this differs from the OMG-spec writer default of reliable.
+Topic name, publish interval, and all QoS now come from code/profile, not flags.
 
 ---
 
 ## 2. Profile-driven runs (`DDS_QOS_PROFILE`)
 
 Set `DDS_QOS_PROFILE` to a profile file and the example applies it. Every bundled
-file marks its profile `is_default_profile`, so `DDS_QOS_PROFILE` selects
-it. The format (JSON or XML) is auto-detected by
-file extension, so the `.json` and `.xml` files below are interchangeable.
+file marks its profile `is_default_profile`, so `DDS_QOS_PROFILE` selects it. The
+format (JSON or XML) is auto-detected by file extension, so the `.json` and
+`.xml` files below are interchangeable.
 
 Bundled profiles live under `dds/examples/hello_world/profiles/`:
 
@@ -83,8 +74,8 @@ A single file is shared by both roles:
 
 ```bash
 P=dds/examples/hello_world/profiles/udp/profile.json   # or .xml
-DDS_QOS_PROFILE=$P cargo run -p int2dds --example hello_world -- -S
-DDS_QOS_PROFILE=$P cargo run -p int2dds --example hello_world -- -P
+DDS_QOS_PROFILE=$P cargo run -p int2dds --example hello_world_sub
+DDS_QOS_PROFILE=$P cargo run -p int2dds --example hello_world_pub
 ```
 
 ### Multicast-TTL profile
@@ -95,8 +86,8 @@ routed/multi-subnet links; on a single host it behaves like UDP.
 
 ```bash
 P=dds/examples/hello_world/profiles/multicast_ttl/profile.json
-DDS_QOS_PROFILE=$P cargo run -p int2dds --example hello_world -- -S
-DDS_QOS_PROFILE=$P cargo run -p int2dds --example hello_world -- -P
+DDS_QOS_PROFILE=$P cargo run -p int2dds --example hello_world_sub
+DDS_QOS_PROFILE=$P cargo run -p int2dds --example hello_world_pub
 ```
 
 ### TCP profile (per-role files)
@@ -108,10 +99,10 @@ binds `7401`, and they dial each other on loopback.
 ```bash
 # subscriber (binds 7401)
 DDS_QOS_PROFILE=dds/examples/hello_world/profiles/tcp/sub_profile.json \
-    cargo run -p int2dds --example hello_world -- -S
+    cargo run -p int2dds --example hello_world_sub
 # publisher (binds 7400)
 DDS_QOS_PROFILE=dds/examples/hello_world/profiles/tcp/pub_profile.json \
-    cargo run -p int2dds --example hello_world -- -P
+    cargo run -p int2dds --example hello_world_pub
 ```
 
 > **Single host: enable loopback.** Pure TCP can only reach a peer at the address
@@ -129,9 +120,9 @@ per role:
 
 ```bash
 DDS_QOS_PROFILE=dds/examples/hello_world/profiles/hybrid/sub_profile.json \
-    cargo run -p int2dds --example hello_world -- -S
+    cargo run -p int2dds --example hello_world_sub
 DDS_QOS_PROFILE=dds/examples/hello_world/profiles/hybrid/pub_profile.json \
-    cargo run -p int2dds --example hello_world -- -P
+    cargo run -p int2dds --example hello_world_pub
 ```
 
 ---
@@ -162,7 +153,7 @@ sets the transport and a reliable writer/reader:
 
 ```bash
 DDS_QOS_PROFILE=/abs/path/my_profile.json \
-    cargo run -p int2dds --example hello_world -- -P
+    cargo run -p int2dds --example hello_world_pub
 ```
 
 The XML form uses the RTI/OMG `<qos_library>` / `<qos_profile>` syntax — see the
@@ -173,7 +164,7 @@ bundled `*.xml` files for a template.
 - **Mark a default profile.** Selection needs either `is_default_profile="true"`
   on a profile, **or** an explicit `DDS_DEFAULT_QOS_PROFILE=MyLib::MyProfile`.
   If neither is set, the file loads but **no profile is selected** — QoS silently
-  falls back to the spec default. The example flags this with a warning (below).
+  falls back to the spec default. The example flags this with a warning.
 - **Use absolute paths.** `DDS_QOS_PROFILE` is loaded as-is, so a relative value
   resolves against the **current working directory** (where you launched
   `cargo`), not the crate/example directory. Prefer an absolute path; a
@@ -219,5 +210,6 @@ where UDP is unavailable or a reliable, connection-oriented stream is preferred
 
 - [env.md](env.md) — environment variables and CLI overrides
   (`INT2DDS_USE_LOOPBACK_INTERFACE`, `INT2DDS_NETWORK_INTERFACE`, …).
-- [dds/examples/hello_world/hello_world.rs](../../dds/examples/hello_world/hello_world.rs) — the example source.
+- [dds/examples/hello_world/hello_world_pub.rs](../../dds/examples/hello_world/hello_world_pub.rs) — publisher source.
+- [dds/examples/hello_world/hello_world_sub.rs](../../dds/examples/hello_world/hello_world_sub.rs) — subscriber source.
 - [dds/examples/hello_world/profiles/](../../dds/examples/hello_world/profiles/) — bundled profiles (JSON + XML).
