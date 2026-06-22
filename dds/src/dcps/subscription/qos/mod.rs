@@ -117,9 +117,8 @@ impl Qos for DataReaderQos {
             // || self.durability.kind == DurabilityQosPolicyKind::Transient
             // || self.durability.kind == DurabilityQosPolicyKind::Persistent
             || self.latency_budget != LatencyBudgetQosPolicy::default()
-            // || self.liveliness != LivelinessQosPolicy::default()
-            // || self.ownership != OwnershipQosPolicy::default()
-            || self.time_based_filter != TimeBasedFilterQosPolicy::default()
+        // || self.liveliness != LivelinessQosPolicy::default()
+        // || self.ownership != OwnershipQosPolicy::default()
         // || self.reader_data_lifecycle != ReaderDataLifecycleQosPolicy::default()
         {
             return Err(DdsError::Unsupported);
