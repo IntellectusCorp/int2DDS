@@ -1,10 +1,8 @@
-//! Environment variable and command-line argument configuration.
+//! Environment variable configuration.
 //!
-//! This module provides initialization from environment variables and command-line arguments
-//! for configuring int2dds behavior, including transport type, logging, network interface
+//! This module provides initialization from environment variables for configuring
+//! int2dds behavior, including transport type, logging, network interface
 //! selection, and performance monitoring features.
-
-use clap::{Arg, ArgAction, Command, ValueHint};
 
 use crate::{
     common::log::{setting_log, LogLevel, LogType},
@@ -53,288 +51,8 @@ pub fn init_from_env() {
 
     // - TCP transport is configured per-participant via the
     //   int2dds.transport.TCPv4.* QoS properties (see dcps::infrastructure::qos_policy),
-    //   not env vars. INT2DDS_INITIAL_PEERS / INT2DDS_EXTERNAL_ADDRESS remain shared fallbacks.
-    apply_cli_args_to_env();
-
+    //   not env vars. INT2DDS_INITIAL_PEERS remain shared fallbacks.
     setting_log();
-}
-
-fn apply_cli_args_to_env() {
-    fn build_command() -> Command {
-        Command::new("int2dds")
-            // .disable_help_subcommand(true)
-            // .arg_required_else_help(false)
-            .arg(
-                Arg::new("dds_domain_id")
-                    .long("int2dds-domain-id")
-                    .value_name("ID")
-                    .help("Set DDS domain ID")
-                    .num_args(1)
-                    .value_hint(ValueHint::Other),
-            )
-            .arg(
-                Arg::new("dds_qos_profile")
-                    .long("int2dds-qos-profile")
-                    .value_name("PATH")
-                    .help("Set QoS profile JSON file path")
-                    .num_args(1)
-                    .value_hint(ValueHint::FilePath),
-            )
-            .arg(
-                Arg::new("dds_default_qos_profile")
-                    .long("int2dds-default-qos-profile")
-                    .value_name("LIB::PROFILE")
-                    .help("Set default QoS profile path \"Library::Profile\"")
-                    .num_args(1)
-                    .value_hint(ValueHint::Other),
-            )
-            .arg(
-                Arg::new("int2dds_transport")
-                    .long("int2dds-transport")
-                    .value_name("udp|tcp")
-                    .help("Set transport protocol type")
-                    .num_args(1)
-                    .value_hint(ValueHint::Other),
-            )
-            .arg(
-                Arg::new("int2dds_discovery_mode")
-                    .long("int2dds-discovery-mode")
-                    .value_name("udp|tcp|hybrid")
-                    .help("Set discovery mode")
-                    .num_args(1)
-                    .value_hint(ValueHint::Other),
-            )
-            .arg(
-                Arg::new("int2dds_log_type")
-                    .long("int2dds-log-type")
-                    .value_name("console|file|all|none")
-                    .help("Set log output type")
-                    .num_args(1),
-            )
-            .arg(
-                Arg::new("int2dds_console_log_level")
-                    .long("int2dds-console-log-level")
-                    .value_name("trace|debug|info|warn|error")
-                    .help("Set console log level")
-                    .num_args(1),
-            )
-            .arg(
-                Arg::new("int2dds_file_log_level")
-                    .long("int2dds-file-log-level")
-                    .value_name("trace|debug|info|warn|error")
-                    .help("Set file log level")
-                    .num_args(1),
-            )
-            .arg(
-                Arg::new("int2dds_thread_monitoring")
-                    .long("int2dds-thread-monitoring")
-                    .help("Enable thread monitoring")
-                    .action(ArgAction::SetTrue),
-            )
-            .arg(
-                Arg::new("int2dds_thread_monitoring_log_path")
-                    .long("int2dds-thread-monitoring-log-path")
-                    .value_name("PATH")
-                    .help("Thread monitoring log file path")
-                    .num_args(1)
-                    .value_hint(ValueHint::FilePath),
-            )
-            .arg(
-                Arg::new("int2dds_function_timing")
-                    .long("int2dds-function-timing")
-                    .help("Enable function execution time measurement")
-                    .action(ArgAction::SetTrue),
-            )
-            .arg(
-                Arg::new("int2dds_function_timing_log_path")
-                    .long("int2dds-function-timing-log-path")
-                    .value_name("PATH")
-                    .help("Function timing log file path")
-                    .num_args(1)
-                    .value_hint(ValueHint::FilePath),
-            )
-            .arg(
-                Arg::new("int2dds_extended_discovery")
-                    .long("int2dds-extended-discovery")
-                    .help("Enable extended discovery")
-                    .action(ArgAction::SetTrue),
-            )
-            .arg(
-                Arg::new("int2dds_network_interface")
-                    .long("int2dds-network-interface")
-                    .value_name("INTERFACE")
-                    .help("Network interface name to use (e.g., eth0, wlan0)")
-                    .num_args(1)
-                    .value_hint(ValueHint::Other),
-            )
-            .arg(
-                Arg::new("int2dds_network_ip")
-                    .long("int2dds-network-ip")
-                    .value_name("IP")
-                    .help("Network IP address to use (e.g., 192.168.1.100)")
-                    .num_args(1)
-                    .value_hint(ValueHint::Other),
-            )
-            .arg(
-                Arg::new("int2dds_use_loopback_interface")
-                    .long("int2dds-use-loopback-interface")
-                    .help("Enable loopback interface for discovery and endpoint communication")
-                    .action(ArgAction::SetTrue),
-            )
-            .arg(
-                Arg::new("int2dds_udp_socket_buffer")
-                    .long("int2dds-udp-socket-buffer")
-                    .value_name("SIZE")
-                    .help("UDP socket buffer size (bytes)")
-                    .num_args(1)
-                    .value_hint(ValueHint::Other),
-            )
-            .arg(
-                Arg::new("int2dds_shm_buffer_size")
-                    .long("int2dds-shm-buffer-size")
-                    .value_name("SIZE")
-                    .help("Shared memory buffer size (bytes)")
-                    .num_args(1)
-                    .value_hint(ValueHint::Other),
-            )
-            .arg(
-                Arg::new("int2dds_initial_peers")
-                    .long("int2dds-initial-peers")
-                    .value_name("PEERS")
-                    .help("Initial peers for SPDP unicast discovery (comma-separated, e.g., \"192.168.1.10:7400,192.168.1.11:7400\")")
-                    .num_args(1)
-                    .value_hint(ValueHint::Other),
-            )
-            .arg(
-                Arg::new("int2dds_external_address")
-                    .long("int2dds-external-address")
-                    .value_name("IPV4")
-                    .help("Public IPv4 advertised in SPDP for NAT/WAN traversal (bind unaffected)")
-                    .num_args(1)
-                    .value_hint(ValueHint::Other),
-            )
-            .arg(
-                Arg::new("int2dds_meta_port")
-                    .long("int2dds-meta-port")
-                    .value_name("PORT")
-                    .help("Pinned metatraffic unicast port")
-                    .num_args(1)
-                    .value_hint(ValueHint::Other),
-            )
-            .arg(
-                Arg::new("int2dds_user_port")
-                    .long("int2dds-user-port")
-                    .value_name("PORT")
-                    .help("Pinned user-traffic unicast port")
-                    .num_args(1)
-                    .value_hint(ValueHint::Other),
-            )
-            .arg(
-                Arg::new("int2dds_multicast_ttl")
-                    .long("int2dds-multicast-ttl")
-                    .value_name("TTL")
-                    .help("IPv4 multicast TTL fallback (0-255) used when PropertyQosPolicy has no multicast_ttl entry")
-                    .num_args(1)
-                    .value_hint(ValueHint::Other),
-            )
-    }
-
-    let matches = build_command()
-        .try_get_matches_from(std::env::args())
-        .unwrap_or_else(|_| build_command().get_matches_from(Vec::<String>::new()));
-
-    if let Some(v) = matches.get_one::<String>("dds_domain_id") {
-        log::info!("Environment variable set: DDS_DOMAIN_ID = {}", v);
-        unsafe { std::env::set_var("DDS_DOMAIN_ID", v) };
-    }
-    if let Some(v) = matches.get_one::<String>("dds_qos_profile") {
-        log::info!("Environment variable set: DDS_QOS_PROFILE = {}", v);
-        unsafe { std::env::set_var("DDS_QOS_PROFILE", v) };
-    }
-    if let Some(v) = matches.get_one::<String>("dds_default_qos_profile") {
-        log::info!("Environment variable set: DDS_DEFAULT_QOS_PROFILE = {}", v);
-        unsafe { std::env::set_var("DDS_DEFAULT_QOS_PROFILE", v) };
-    }
-    if let Some(v) = matches.get_one::<String>("int2dds_transport") {
-        log::info!("Environment variable set: INT2DDS_TRANSPORT = {}", v);
-        unsafe { std::env::set_var("INT2DDS_TRANSPORT", v) };
-    }
-    if let Some(v) = matches.get_one::<String>("int2dds_discovery_mode") {
-        log::info!("Environment variable set: INT2DDS_DISCOVERY_MODE = {}", v);
-        unsafe { std::env::set_var("INT2DDS_DISCOVERY_MODE", v) };
-    }
-    if let Some(v) = matches.get_one::<String>("int2dds_log_type") {
-        log::info!("Environment variable set: INT2DDS_LOG_TYPE = {}", v);
-        unsafe { std::env::set_var("INT2DDS_LOG_TYPE", v) };
-    }
-    if let Some(v) = matches.get_one::<String>("int2dds_console_log_level") {
-        log::info!("Environment variable set: INT2DDS_CONSOLE_LOG_LEVEL = {}", v);
-        unsafe { std::env::set_var("INT2DDS_CONSOLE_LOG_LEVEL", v) };
-    }
-    if let Some(v) = matches.get_one::<String>("int2dds_file_log_level") {
-        log::info!("Environment variable set: INT2DDS_FILE_LOG_LEVEL = {}", v);
-        unsafe { std::env::set_var("INT2DDS_FILE_LOG_LEVEL", v) };
-    }
-    if matches.get_flag("int2dds_thread_monitoring") {
-        log::info!("Environment variable set: INT2DDS_THREAD_MONITORING = true");
-        unsafe { std::env::set_var("INT2DDS_THREAD_MONITORING", "true") };
-    }
-    if let Some(v) = matches.get_one::<String>("int2dds_thread_monitoring_log_path") {
-        log::info!("Environment variable set: INT2DDS_THREAD_MONITORING_LOG_PATH = {}", v);
-        unsafe { std::env::set_var("INT2DDS_THREAD_MONITORING_LOG_PATH", v) };
-    }
-    if matches.get_flag("int2dds_function_timing") {
-        log::info!("Environment variable set: INT2DDS_FUNCTION_TIMING = true");
-        unsafe { std::env::set_var("INT2DDS_FUNCTION_TIMING", "true") };
-    }
-    if let Some(v) = matches.get_one::<String>("int2dds_function_timing_log_path") {
-        log::info!("Environment variable set: INT2DDS_FUNCTION_TIMING_LOG_PATH = {}", v);
-        unsafe { std::env::set_var("INT2DDS_FUNCTION_TIMING_LOG_PATH", v) };
-    }
-    if matches.get_flag("int2dds_extended_discovery") {
-        log::info!("Environment variable set: INT2DDS_EXTENDED_DISCOVERY = true");
-        unsafe { std::env::set_var("INT2DDS_EXTENDED_DISCOVERY", "true") };
-    }
-    if let Some(v) = matches.get_one::<String>("int2dds_network_interface") {
-        log::info!("Environment variable set: INT2DDS_NETWORK_INTERFACE = {}", v);
-        unsafe { std::env::set_var("INT2DDS_NETWORK_INTERFACE", v) };
-    }
-    if let Some(v) = matches.get_one::<String>("int2dds_network_ip") {
-        log::info!("Environment variable set: INT2DDS_NETWORK_IP = {}", v);
-        unsafe { std::env::set_var("INT2DDS_NETWORK_IP", v) };
-    }
-    if matches.get_flag("int2dds_use_loopback_interface") {
-        log::info!("Environment variable set: INT2DDS_USE_LOOPBACK_INTERFACE = true");
-        unsafe { std::env::set_var("INT2DDS_USE_LOOPBACK_INTERFACE", "true") };
-    }
-    if let Some(v) = matches.get_one::<String>("int2dds_udp_socket_buffer") {
-        log::info!("Environment variable set: INT2DDS_UDP_SOCKET_BUFFER = {}", v);
-        unsafe { std::env::set_var("INT2DDS_UDP_SOCKET_BUFFER", v) };
-    }
-    if let Some(v) = matches.get_one::<String>("int2dds_shm_buffer_size") {
-        log::info!("Environment variable set: INT2DDS_SHM_BUFFER_SIZE = {}", v);
-        unsafe { std::env::set_var("INT2DDS_SHM_BUFFER_SIZE", v) };
-    }
-    if let Some(v) = matches.get_one::<String>("int2dds_initial_peers") {
-        log::info!("Environment variable set: INT2DDS_INITIAL_PEERS = {}", v);
-        unsafe { std::env::set_var("INT2DDS_INITIAL_PEERS", v) };
-    }
-    if let Some(v) = matches.get_one::<String>("int2dds_multicast_ttl") {
-        log::info!("Environment variable set: INT2DDS_MULTICAST_TTL = {}", v);
-        unsafe { std::env::set_var("INT2DDS_MULTICAST_TTL", v) };
-    }
-    if let Some(v) = matches.get_one::<String>("int2dds_external_address") {
-        log::info!("Environment variable set: INT2DDS_EXTERNAL_ADDRESS = {}", v);
-        unsafe { std::env::set_var("INT2DDS_EXTERNAL_ADDRESS", v) };
-    }
-    if let Some(v) = matches.get_one::<String>("int2dds_meta_port") {
-        log::info!("Environment variable set: INT2DDS_META_PORT = {}", v);
-        unsafe { std::env::set_var("INT2DDS_META_PORT", v) };
-    }
-    if let Some(v) = matches.get_one::<String>("int2dds_user_port") {
-        log::info!("Environment variable set: INT2DDS_USER_PORT = {}", v);
-        unsafe { std::env::set_var("INT2DDS_USER_PORT", v) };
-    }
 }
 
 /// Set the DDS domain ID via environment variable
@@ -486,6 +204,14 @@ pub fn set_use_loopback_interface(enabled: bool) {
 /// Retrieving TypeObject via TypeLookup service
 pub fn get_disable_inline_type_object() -> bool {
     std::env::var("INT2DDS_DISABLE_INLINE_TYPE_OBJECT")
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false)
+}
+
+// Drop all XTypes info (TypeInformation, TypeIdV1, TypeObject) from SEDP so peers
+// match by type name only, skipping TypeObject/TypeLookup entirely.
+pub fn get_disable_inline_type_info() -> bool {
+    std::env::var("INT2DDS_DISABLE_INLINE_TYPE_INFO")
         .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
         .unwrap_or(false)
 }

@@ -1,0 +1,22 @@
+{
+    "name": "HelloWorld",
+    "qos_profiles": [
+        {
+            "name": "Pub",
+            "is_default_profile": true,
+            "domain_participant_qos": {
+                "property": {
+                    "value": [
+                        { "name": "int2dds.transport", "value": "hybrid", "propagate": false },
+                        { "name": "int2dds.transport.TCPv4.bind_port", "value": "7400", "propagate": false }
+                    ]
+                }
+            },
+            "datawriter_qos": {
+                "reliability": { "kind": "RELIABLE_RELIABILITY_QOS" },
+                "durability": { "kind": "TRANSIENT_LOCAL_DURABILITY_QOS" },
+                "history": { "kind": "KEEP_LAST_HISTORY_QOS", "depth": 10 }
+            }
+        }
+    ]
+}
