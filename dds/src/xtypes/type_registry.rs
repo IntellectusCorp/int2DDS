@@ -95,6 +95,12 @@ impl TypeRegistry {
         self.complete_objects.contains_key(hash) || self.minimal_objects.contains_key(hash)
     }
 
+    /// Directly-referenced type hashes of `obj` absent from this registry — i.e.
+    /// whether an inline TypeObject still needs a TypeLookup fetch for its members.
+    pub fn missing_direct_dependencies(&self, obj: &CompleteTypeObject) -> Vec<EquivalenceHash> {
+        referenced_hashes(obj).into_iter().filter(|h| !self.contains(h)).collect()
+    }
+
     pub fn missing_dependencies(&self, hash: &EquivalenceHash) -> Vec<EquivalenceHash> {
         match self.dependencies.get(hash) {
             Some(deps) => deps.iter().filter(|d| !self.contains(d)).cloned().collect(),
@@ -114,6 +120,28 @@ impl TypeRegistry {
                         stack.push(dep);
                     }
                 }
+            }
+        }
+        out
+    }
+
+    /// Every complete type transitively referenced by `root` (excluding `root`),
+    /// paired with the name-based `MinimalTypeId` used to reference it — the same
+    /// nested closure a derive `DdsType` advertises.
+    pub fn dependency_closure_of(
+        &self,
+        root: &CompleteTypeObject,
+    ) -> Vec<(TypeIdentifier, TypeObject)> {
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut stack = referenced_hashes(root);
+        while let Some(h) = stack.pop() {
+            if !seen.insert(h) {
+                continue;
+            }
+            if let Some(obj) = self.complete_objects.get(&h) {
+                stack.extend(referenced_hashes(obj));
+                out.push((TypeIdentifier::MinimalTypeId(h), TypeObject::Complete(obj.clone())));
             }
         }
         out
@@ -336,6 +364,29 @@ mod tests {
 
         // A leaf with no dependencies yields nothing.
         assert!(registry.transitive_dependency_hashes(&[inner_hash]).is_empty());
+    }
+
+    #[test]
+    fn dependency_closure_pairs_nested_with_minimal_id() {
+        let mut registry = TypeRegistry::new();
+        let (inner, inner_hash, outer, _outer_hash) = nested_pair();
+        registry.register_type_object(TypeObject::Complete(inner));
+
+        let closure = registry.dependency_closure_of(&outer);
+        assert_eq!(closure.len(), 1);
+        assert_eq!(closure[0].0, TypeIdentifier::MinimalTypeId(inner_hash));
+    }
+
+    #[test]
+    fn missing_direct_dependencies_tracks_registry_contents() {
+        let (inner, inner_hash, outer, _outer_hash) = nested_pair();
+
+        let empty = TypeRegistry::new();
+        assert_eq!(empty.missing_direct_dependencies(&outer), vec![inner_hash]);
+
+        let mut registry = TypeRegistry::new();
+        registry.register_type_object(TypeObject::Complete(inner));
+        assert!(registry.missing_direct_dependencies(&outer).is_empty());
     }
 
     #[test]

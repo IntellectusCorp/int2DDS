@@ -265,7 +265,7 @@ impl StatelessReader {
 
 impl Debug for StatelessReader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "StatelessReader: {:?}", self.guid)
+        write!(f, "StatelessReader: {}", self.guid)
     }
 }
 
@@ -393,7 +393,7 @@ impl Reader for StatelessReader {
     }
 
     fn on_change(&self, change: Arc<CacheChange>) {
-        log::debug!("change: {:?}", change);
+        log::debug!("change: {}", change);
 
         match self.status_callback.lock() {
             Ok(callback) => {
@@ -482,7 +482,7 @@ impl Reader for StatelessReader {
         // Find the index of the writer to remove
         let Some(idx) = writers.iter().position(|info| info.remote_writer_guid() == writer_guid)
         else {
-            debug!("Writer proxy with guid {:?} not found in matched writers", writer_guid);
+            debug!("Writer proxy with guid {} not found in matched writers", writer_guid);
             return Ok(false);
         };
 
@@ -493,7 +493,7 @@ impl Reader for StatelessReader {
         // Update subscription matched status
         self.update_subscription_matched_status(-1, InstanceHandle::from_guid(&writer_guid));
 
-        debug!("Removed writer proxy with guid {:?} from matched writers", writer_guid);
+        debug!("Removed writer proxy with guid {} from matched writers", writer_guid);
         Ok(true)
     }
 
@@ -522,7 +522,10 @@ impl Reader for StatelessReader {
         remote_writer_info.retain(|info| info.remote_writer_guid().prefix() != prefix);
         let removed = len_before - remote_writer_info.len();
 
-        debug!("Removed all unmatched remote writers from participant: {:?}", prefix);
+        debug!(
+            "Removed all unmatched remote writers from participant: {}",
+            Guid::guid_prefix_to_string(&prefix)
+        );
         debug!("Current number of matched writer: {:?}", remote_writer_info.len());
         Ok(removed)
     }

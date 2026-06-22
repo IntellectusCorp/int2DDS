@@ -758,7 +758,13 @@ INT2DDS_CDR_DEF bool int2dds_cdr_read_string_copy(Int2DdsCdrReader *r, char *buf
 }
 
 INT2DDS_CDR_DEF bool int2dds_cdr_read_seq_header(Int2DdsCdrReader *r, uint32_t *count_out) {
-    return int2dds_cdr_read_u32(r, count_out);
+    if (!int2dds_cdr_read_u32(r, count_out)) return false;
+    
+    if ((size_t)(*count_out) > int2dds_cdr_reader_remaining(r)) {
+        r->error = INT2DDS_CDR_ERR_UNDERFLOW;
+        return false;
+    }
+    return true;
 }
 
 INT2DDS_CDR_DEF bool int2dds_cdr_read_bytes(Int2DdsCdrReader *r, uint8_t *out, size_t len) {

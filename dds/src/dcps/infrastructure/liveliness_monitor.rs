@@ -71,7 +71,7 @@ impl LivelinessMonitor {
 
     // Track Writer
     pub(crate) fn track_writer(&self, guid: &Guid, lease_duration: Duration) {
-        debug!("[LivelinessMonitor] Starting to track Entity: {:?}", guid);
+        debug!("[LivelinessMonitor] Starting to track Entity: {}", guid);
         if let Ok(mut trackers) = self.writer_trackers.lock() {
             let now = Time::now();
             let was_new = trackers
@@ -79,51 +79,53 @@ impl LivelinessMonitor {
                 .is_none();
             if was_new {
                 debug!(
-                    "[LivelinessMonitor] New Entity {:?} added to tracking at {:?}. Total tracked: {}",
+                    "[LivelinessMonitor] New Entity {} added to tracking at {:?}. Total tracked: {}",
                     guid, now, trackers.len()
                 );
             } else {
                 debug!(
-                    "[LivelinessMonitor] Entity {:?} re-tracked (updated) at {:?}. Total tracked: {}",
-                    guid, now, trackers.len()
+                    "[LivelinessMonitor] Entity {} re-tracked (updated) at {:?}. Total tracked: {}",
+                    guid,
+                    now,
+                    trackers.len()
                 );
             }
         } else {
-            warn!("[LivelinessMonitor] Failed to acquire lock for tracking Entity: {:?}", guid);
+            warn!("[LivelinessMonitor] Failed to acquire lock for tracking Entity: {}", guid);
         }
     }
     pub(crate) fn update_writer(&self, guid: &Guid) {
-        trace!("[LivelinessMonitor] Rescheduling Guid: {:?}", guid);
+        trace!("[LivelinessMonitor] Rescheduling Guid: {}", guid);
         if let Ok(mut trackers) = self.writer_trackers.lock() {
             if let Some(tracker_info) = trackers.get_mut(guid) {
                 let now = Time::now();
                 let old_time = tracker_info.last_update();
                 tracker_info.update_timestamp(now);
                 debug!(
-                    "[LivelinessMonitor] Guid {:?} rescheduled - old_time: {:?}, new_time: {:?}",
+                    "[LivelinessMonitor] Guid {} rescheduled - old_time: {:?}, new_time: {:?}",
                     guid, old_time, now
                 );
             } else {
-                warn!("[LivelinessMonitor] Attempted to reschedule untracked Guid: {:?}", guid);
+                warn!("[LivelinessMonitor] Attempted to reschedule untracked Guid: {}", guid);
             }
         } else {
-            warn!("[LivelinessMonitor] Failed to acquire lock for rescheduling Guid: {:?}", guid);
+            warn!("[LivelinessMonitor] Failed to acquire lock for rescheduling Guid: {}", guid);
         }
     }
     pub(crate) fn cancel_writer(&self, guid: Guid) {
-        debug!("[LivelinessMonitor] Canceling tracking for Guid: {:?}", guid);
+        debug!("[LivelinessMonitor] Canceling tracking for Guid: {}", guid);
         if let Ok(mut trackers) = self.writer_trackers.lock() {
             if trackers.remove(&guid).is_some() {
                 debug!(
-                    "[LivelinessMonitor] Guid {:?} removed from tracking. Remaining tracked: {}",
+                    "[LivelinessMonitor] Guid {} removed from tracking. Remaining tracked: {}",
                     guid,
                     trackers.len()
                 );
             } else {
-                warn!("[LivelinessMonitor] Attempted to cancel untracked Guid: {:?}", guid);
+                warn!("[LivelinessMonitor] Attempted to cancel untracked Guid: {}", guid);
             }
         } else {
-            warn!("[LivelinessMonitor] Failed to acquire lock for canceling Guid: {:?}", guid);
+            warn!("[LivelinessMonitor] Failed to acquire lock for canceling Guid: {}", guid);
         }
     }
 
@@ -202,7 +204,7 @@ impl LivelinessMonitor {
                                 expired.push((*guid, elapsed, lease_duration));
                             } else if elapsed <= lease_duration {
                                 trace!(
-                                    "[LivelinessMontitor Thread] Entity Guid {:?} OK - elapsed: {:?}, remaining: {:?}",
+                                    "[LivelinessMontitor Thread] Entity Guid {} OK - elapsed: {:?}, remaining: {:?}",
                                     guid, elapsed, lease_duration - elapsed
                                 );
                             }
@@ -218,7 +220,7 @@ impl LivelinessMonitor {
                 let mut to_remove = Vec::new();
                 for (guid, elapsed, lease_duration) in expired_guids {
                     warn!(
-                        "[LivelinessMonitor] Entity {:?} LOST (elapsed: {:?} > lease: {:?})",
+                        "[LivelinessMonitor] Entity {} LOST (elapsed: {:?} > lease: {:?})",
                         guid, elapsed, lease_duration
                     );
                     let result = callback.as_ref()(guid);
@@ -232,7 +234,7 @@ impl LivelinessMonitor {
                     if let Ok(mut writer_trackers) = writer_trackers.lock() {
                         for guid in to_remove {
                             writer_trackers.remove(&guid);
-                            debug!("[LivelinessMonitor] Removed tracker for {:?}", guid);
+                            debug!("[LivelinessMonitor] Removed tracker for {}", guid);
                         }
                     }
                 }

@@ -181,20 +181,32 @@ impl QosProvider {
         Ok(provider)
     }
 
-    /// Loads QoS configurations from a JSON file.
+    /// Loads QoS configurations from a JSON or XML file.
     ///
-    /// Multiple files can be loaded incrementally. If a library with the same name
-    /// already exists, it will be replaced by the new one.
+    /// The format is chosen by extension (`.xml`/`.json`), falling back to sniffing
+    /// the content. Multiple files can be loaded incrementally; a library with an
+    /// existing name is replaced.
     ///
     /// # Arguments
-    /// * `path` - Path to the JSON file containing QoS configurations
+    /// * `path` - Path to the JSON or XML file containing QoS configurations
     ///
     /// # Errors
     /// Returns an error if the file cannot be read or parsed.
     pub fn load_file(&mut self, path: &Path) -> DdsResult<()> {
         let content = fs::read_to_string(path)
             .map_err(|e| DdsError::Error(format!("Failed to read QoS file: {:?}", e)))?;
-        self.load_json(&content)
+        if is_xml(path, &content) {
+            self.load_xml(&content)
+        } else {
+            self.load_json(&content)
+        }
+    }
+
+    pub(crate) fn load_xml(&mut self, xml: &str) -> DdsResult<()> {
+        for lib in super::xml::parse_qos_libraries(xml)? {
+            self.libraries.insert(lib.name.clone(), lib);
+        }
+        Ok(())
     }
 
     pub(crate) fn load_json(&mut self, json: &str) -> DdsResult<()> {
@@ -311,6 +323,15 @@ impl QosProvider {
         domain_participant_qos,
         "Retrieves a `DomainParticipantQos` from the provider. See `get_datawriter_qos` for argument details."
     );
+}
+
+// Picks XML vs JSON by extension, falling back to the first non-space character.
+fn is_xml(path: &Path, content: &str) -> bool {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) if ext.eq_ignore_ascii_case("xml") => true,
+        Some(ext) if ext.eq_ignore_ascii_case("json") => false,
+        _ => content.trim_start().starts_with('<'),
+    }
 }
 
 struct QosPath {

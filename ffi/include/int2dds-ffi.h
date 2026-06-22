@@ -8,6 +8,59 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+/**
+ * Value-kind discriminators returned by `int2dds_dynamic_value_kind`.
+ */
+#define INT2DDS_VALUE_KIND_BOOLEAN 0
+
+#define INT2DDS_VALUE_KIND_INT8 1
+
+#define INT2DDS_VALUE_KIND_INT16 2
+
+#define INT2DDS_VALUE_KIND_INT32 3
+
+#define INT2DDS_VALUE_KIND_INT64 4
+
+#define INT2DDS_VALUE_KIND_UINT8 5
+
+#define INT2DDS_VALUE_KIND_UINT16 6
+
+#define INT2DDS_VALUE_KIND_UINT32 7
+
+#define INT2DDS_VALUE_KIND_UINT64 8
+
+#define INT2DDS_VALUE_KIND_FLOAT32 9
+
+#define INT2DDS_VALUE_KIND_FLOAT64 10
+
+#define INT2DDS_VALUE_KIND_CHAR8 11
+
+#define INT2DDS_VALUE_KIND_BYTE 12
+
+#define INT2DDS_VALUE_KIND_STRING 13
+
+#define INT2DDS_VALUE_KIND_WSTRING 14
+
+#define INT2DDS_VALUE_KIND_ENUM 15
+
+#define INT2DDS_VALUE_KIND_UNION 16
+
+#define INT2DDS_VALUE_KIND_BITMASK 17
+
+#define INT2DDS_VALUE_KIND_BITSET 18
+
+#define INT2DDS_VALUE_KIND_STRUCT 19
+
+#define INT2DDS_VALUE_KIND_SEQUENCE 20
+
+#define INT2DDS_VALUE_KIND_ARRAY 21
+
+#define INT2DDS_VALUE_KIND_MAP 22
+
+#define INT2DDS_VALUE_KIND_OPTIONAL 23
+
+#define INT2DDS_VALUE_KIND_NULL 24
+
 #define INT2DDS_QOS_RELIABILITY_BEST_EFFORT 0
 
 #define INT2DDS_QOS_RELIABILITY_RELIABLE 1
@@ -223,6 +276,27 @@ typedef struct Int2DdsDataWriterQos Int2DdsDataWriterQos;
 typedef struct Int2DdsDynamicData Int2DdsDynamicData;
 
 /**
+ * Opaque handle to a dynamic DataReader (`DataReader<DynamicData>`).
+ */
+typedef struct Int2DdsDynamicDataReader Int2DdsDynamicDataReader;
+
+/**
+ * Opaque handle to a dynamic DataWriter (`DataWriter<DynamicData>`).
+ */
+typedef struct Int2DdsDynamicDataWriter Int2DdsDynamicDataWriter;
+
+/**
+ * Opaque handle wrapping an `Arc<DynamicTypeSupport>` (full dependency closure
+ * resolved). Obtain one from an XML registry or a discovered TypeObject.
+ */
+typedef struct Int2DdsDynamicTypeSupport Int2DdsDynamicTypeSupport;
+
+/**
+ * Opaque, owning handle wrapping a [`DynamicValue`].
+ */
+typedef struct Int2DdsDynamicValue Int2DdsDynamicValue;
+
+/**
  * Opaque handle to a GuardCondition
  */
 typedef struct Int2DdsGuardCondition Int2DdsGuardCondition;
@@ -322,6 +396,11 @@ typedef struct Int2DdsTypeObject Int2DdsTypeObject;
 typedef struct Int2DdsWaitSet Int2DdsWaitSet;
 
 /**
+ * Opaque handle wrapping an [`XmlTypeRegistry`].
+ */
+typedef struct Int2DdsXmlTypeRegistry Int2DdsXmlTypeRegistry;
+
+/**
  * FFI return codes
  */
 typedef int32_t Int2DdsRet;
@@ -334,6 +413,25 @@ typedef struct Int2DdsMemberInfo {
   int32_t kind;
   int32_t flags;
 } Int2DdsMemberInfo;
+
+/**
+ * FFI-safe SampleInfo returned to C callers
+ */
+typedef struct Int2DdsSampleInfo {
+  int32_t source_timestamp_sec;
+  uint32_t source_timestamp_nanosec;
+  uint32_t sample_state;
+  uint32_t view_state;
+  uint32_t instance_state;
+  uint8_t instance_handle[16];
+  uint8_t publication_handle[16];
+  int32_t disposed_generation_count;
+  int32_t no_writers_generation_count;
+  int32_t sample_rank;
+  int32_t generation_rank;
+  int32_t absolute_generation_rank;
+  bool valid_data;
+} Int2DdsSampleInfo;
 
 /**
  * C-compatible publication matched status
@@ -643,25 +741,6 @@ typedef struct Int2DdsRequestedIncompatibleTypeStatus {
    */
   int32_t total_count_change;
 } Int2DdsRequestedIncompatibleTypeStatus;
-
-/**
- * FFI-safe SampleInfo returned to C callers
- */
-typedef struct Int2DdsSampleInfo {
-  int32_t source_timestamp_sec;
-  uint32_t source_timestamp_nanosec;
-  uint32_t sample_state;
-  uint32_t view_state;
-  uint32_t instance_state;
-  uint8_t instance_handle[16];
-  uint8_t publication_handle[16];
-  int32_t disposed_generation_count;
-  int32_t no_writers_generation_count;
-  int32_t sample_rank;
-  int32_t generation_rank;
-  int32_t absolute_generation_rank;
-  bool valid_data;
-} Int2DdsSampleInfo;
 
 #define INT2DDS_RET_OK 0
 
@@ -1313,6 +1392,274 @@ Int2DdsRet int2dds_dynamic_data_get_len(const struct Int2DdsDynamicData *data,
 Int2DdsRet int2dds_dynamic_data_get_member(const struct Int2DdsDynamicData *data,
                                            const char *field_path,
                                            struct Int2DdsDynamicData **out);
+
+/**
+ * Destroy a dynamic type support handle. Safe to call with null.
+ */
+void int2dds_dynamic_type_support_destroy(struct Int2DdsDynamicTypeSupport *s);
+
+/**
+ * Register a topic backed by a dynamic type support. The support's full type
+ * closure is advertised during discovery.
+ */
+Int2DdsRet int2dds_create_topic_dynamic(const struct Int2DdsParticipant *participant,
+                                        const char *topic_name,
+                                        const struct Int2DdsDynamicTypeSupport *type_support,
+                                        const struct Int2DdsTopicQos *qos,
+                                        struct Int2DdsTopic **out);
+
+/**
+ * Create a dynamic DataWriter. Pass null `qos` to use the default.
+ */
+Int2DdsRet int2dds_create_datawriter_dynamic(const struct Int2DdsPublisher *publisher,
+                                             const struct Int2DdsTopic *topic,
+                                             const struct Int2DdsDynamicTypeSupport *type_support,
+                                             const struct Int2DdsDataWriterQos *qos,
+                                             struct Int2DdsDynamicDataWriter **out);
+
+/**
+ * Create a dynamic DataReader. Pass null `qos` to use the default.
+ */
+Int2DdsRet int2dds_create_datareader_dynamic(const struct Int2DdsSubscriber *subscriber,
+                                             const struct Int2DdsTopic *topic,
+                                             const struct Int2DdsDynamicTypeSupport *type_support,
+                                             const struct Int2DdsDataReaderQos *qos,
+                                             struct Int2DdsDynamicDataReader **out);
+
+/**
+ * Destroy a dynamic DataWriter handle. Safe to call with null.
+ */
+void int2dds_dynamic_writer_destroy(struct Int2DdsDynamicDataWriter *w);
+
+/**
+ * Destroy a dynamic DataReader handle. Safe to call with null.
+ */
+void int2dds_dynamic_reader_destroy(struct Int2DdsDynamicDataReader *r);
+
+/**
+ * Current number of DataReaders matched to this dynamic writer.
+ */
+Int2DdsRet int2dds_dynamic_writer_publication_matched_count(const struct Int2DdsDynamicDataWriter *writer,
+                                                            int32_t *out);
+
+/**
+ * Current number of DataWriters matched to this dynamic reader.
+ */
+Int2DdsRet int2dds_dynamic_reader_subscription_matched_count(const struct Int2DdsDynamicDataReader *reader,
+                                                             int32_t *out);
+
+/**
+ * Create an empty, writable DynamicData for the given type support.
+ * Populate it with the `int2dds_dynamic_data_set_*` setters, then publish via
+ * `int2dds_dynamic_writer_write`. Destroy with `int2dds_dynamic_data_destroy`.
+ */
+Int2DdsRet int2dds_dynamic_data_create(const struct Int2DdsDynamicTypeSupport *type_support,
+                                       struct Int2DdsDynamicData **out);
+
+/**
+ * Set a char8 field (given as its byte value) on a top-level field.
+ */
+Int2DdsRet int2dds_dynamic_data_set_char8(struct Int2DdsDynamicData *data,
+                                          const char *field,
+                                          uint8_t value);
+
+/**
+ * Set a string field on a top-level field. `value` must be null-terminated UTF-8.
+ */
+Int2DdsRet int2dds_dynamic_data_set_string(struct Int2DdsDynamicData *data,
+                                           const char *field,
+                                           const char *value);
+
+/**
+ * Publish a populated DynamicData sample.
+ */
+Int2DdsRet int2dds_dynamic_writer_write(const struct Int2DdsDynamicDataWriter *writer,
+                                        const struct Int2DdsDynamicData *data);
+
+/**
+ * Take the next available DynamicData sample. On success `out_data` receives a
+ * new DynamicData handle (destroy with `int2dds_dynamic_data_destroy`) and, if
+ * non-null, `out_info` receives the sample info. Returns INT2DDS_RET_NO_DATA
+ * when no valid sample is available.
+ */
+Int2DdsRet int2dds_dynamic_reader_take(const struct Int2DdsDynamicDataReader *reader,
+                                       struct Int2DdsDynamicData **out_data,
+                                       struct Int2DdsSampleInfo *out_info);
+
+/**
+ * Construct a char8 value from its byte value.
+ */
+Int2DdsRet int2dds_dynamic_value_char8(uint8_t value, struct Int2DdsDynamicValue **out);
+
+/**
+ * Construct a UTF-8 string value. `value` must be null-terminated UTF-8.
+ */
+Int2DdsRet int2dds_dynamic_value_string(const char *value, struct Int2DdsDynamicValue **out);
+
+/**
+ * Construct a wide-string value. `value` must be null-terminated UTF-8.
+ */
+Int2DdsRet int2dds_dynamic_value_wstring(const char *value, struct Int2DdsDynamicValue **out);
+
+/**
+ * Construct an enum value from its literal name and numeric value. The name may
+ * be empty when only the numeric value is known.
+ */
+Int2DdsRet int2dds_dynamic_value_enum(const char *name,
+                                      int32_t value,
+                                      struct Int2DdsDynamicValue **out);
+
+/**
+ * Construct a nested struct value by cloning a DynamicData instance.
+ */
+Int2DdsRet int2dds_dynamic_value_struct(const struct Int2DdsDynamicData *data,
+                                        struct Int2DdsDynamicValue **out);
+
+/**
+ * Construct an empty sequence value. Append elements with
+ * `int2dds_dynamic_value_push`.
+ */
+Int2DdsRet int2dds_dynamic_value_sequence(struct Int2DdsDynamicValue **out);
+
+/**
+ * Construct an empty array value. Append elements with
+ * `int2dds_dynamic_value_push`.
+ */
+Int2DdsRet int2dds_dynamic_value_array(struct Int2DdsDynamicValue **out);
+
+/**
+ * Construct an empty map value. Add entries with
+ * `int2dds_dynamic_value_map_insert`.
+ */
+Int2DdsRet int2dds_dynamic_value_map(struct Int2DdsDynamicValue **out);
+
+/**
+ * Construct a union value from a discriminator and the selected branch value.
+ * Both inputs are consumed on success.
+ */
+Int2DdsRet int2dds_dynamic_value_union(struct Int2DdsDynamicValue *discriminator,
+                                       struct Int2DdsDynamicValue *value,
+                                       struct Int2DdsDynamicValue **out);
+
+/**
+ * Append `element` to a sequence/array value. Consumes `element` on success;
+ * on error `element` is left owned by the caller.
+ */
+Int2DdsRet int2dds_dynamic_value_push(struct Int2DdsDynamicValue *collection,
+                                      struct Int2DdsDynamicValue *element);
+
+/**
+ * Insert a key/value pair into a map value. Consumes `key` and `value` on
+ * success; on error both are left owned by the caller.
+ */
+Int2DdsRet int2dds_dynamic_value_map_insert(struct Int2DdsDynamicValue *map,
+                                            struct Int2DdsDynamicValue *key,
+                                            struct Int2DdsDynamicValue *value);
+
+/**
+ * Destroy a value handle. Safe to call with null.
+ */
+void int2dds_dynamic_value_destroy(struct Int2DdsDynamicValue *value);
+
+/**
+ * Set a top-level field to `value`. Consumes `value` on a successful parse of
+ * `field` (regardless of whether the field exists); returns the field handle to
+ * the caller only when `field` is not valid UTF-8.
+ */
+Int2DdsRet int2dds_dynamic_data_set_value(struct Int2DdsDynamicData *data,
+                                          const char *field,
+                                          struct Int2DdsDynamicValue *value);
+
+/**
+ * Clone the value at a dotted/indexed `path` into a new value handle. Destroy
+ * it with `int2dds_dynamic_value_destroy`.
+ */
+Int2DdsRet int2dds_dynamic_data_get_value(const struct Int2DdsDynamicData *data,
+                                          const char *path,
+                                          struct Int2DdsDynamicValue **out);
+
+/**
+ * Report the kind of a value (one of the `INT2DDS_VALUE_KIND_*` constants).
+ */
+Int2DdsRet int2dds_dynamic_value_kind(const struct Int2DdsDynamicValue *value, int32_t *out);
+
+/**
+ * Read a char8 value as its byte value.
+ */
+Int2DdsRet int2dds_dynamic_value_as_char8(const struct Int2DdsDynamicValue *value, uint8_t *out);
+
+/**
+ * Read a string or wide-string value into `buf`.
+ */
+Int2DdsRet int2dds_dynamic_value_as_string(const struct Int2DdsDynamicValue *value,
+                                           char *buf,
+                                           uintptr_t buf_len,
+                                           uintptr_t *out_len);
+
+/**
+ * Read an enum value's literal name into `buf` and its numeric value into
+ * `out_value`.
+ */
+Int2DdsRet int2dds_dynamic_value_as_enum(const struct Int2DdsDynamicValue *value,
+                                         char *buf,
+                                         uintptr_t buf_len,
+                                         uintptr_t *out_len,
+                                         int32_t *out_value);
+
+/**
+ * Read a bitmask value's packed bits.
+ */
+Int2DdsRet int2dds_dynamic_value_as_bitmask(const struct Int2DdsDynamicValue *value, uint64_t *out);
+
+/**
+ * Read a bitset value's packed bitfields.
+ */
+Int2DdsRet int2dds_dynamic_value_as_bitset(const struct Int2DdsDynamicValue *value, uint64_t *out);
+
+/**
+ * Element count of a sequence/array/map value.
+ */
+Int2DdsRet int2dds_dynamic_value_len(const struct Int2DdsDynamicValue *value, uintptr_t *out);
+
+/**
+ * Clone the element at `index` of a sequence/array value.
+ */
+Int2DdsRet int2dds_dynamic_value_element(const struct Int2DdsDynamicValue *value,
+                                         uintptr_t index,
+                                         struct Int2DdsDynamicValue **out);
+
+/**
+ * Clone the key of the map entry at `index`.
+ */
+Int2DdsRet int2dds_dynamic_value_map_key(const struct Int2DdsDynamicValue *value,
+                                         uintptr_t index,
+                                         struct Int2DdsDynamicValue **out);
+
+/**
+ * Clone the value of the map entry at `index`.
+ */
+Int2DdsRet int2dds_dynamic_value_map_value(const struct Int2DdsDynamicValue *value,
+                                           uintptr_t index,
+                                           struct Int2DdsDynamicValue **out);
+
+/**
+ * Clone a nested struct value into a new DynamicData handle. Destroy it with
+ * `int2dds_dynamic_data_destroy`.
+ */
+Int2DdsRet int2dds_dynamic_value_as_struct(const struct Int2DdsDynamicValue *value,
+                                           struct Int2DdsDynamicData **out);
+
+/**
+ * Clone a union value's discriminator into a new value handle.
+ */
+Int2DdsRet int2dds_dynamic_value_union_discriminator(const struct Int2DdsDynamicValue *value,
+                                                     struct Int2DdsDynamicValue **out);
+
+/**
+ * Clone a union value's selected branch value into a new value handle.
+ */
+Int2DdsRet int2dds_dynamic_value_union_value(const struct Int2DdsDynamicValue *value,
+                                             struct Int2DdsDynamicValue **out);
 
 /**
  * Sets the IPv4 multicast TTL fallback via the `INT2DDS_MULTICAST_TTL`
@@ -3779,6 +4126,67 @@ Int2DdsRet int2dds_waitset_detach_datawriter(const struct Int2DdsWaitSet *waitse
  */
 Int2DdsRet int2dds_waitset_delete(struct Int2DdsWaitSet *waitset);
 
+/**
+ * Create an empty XML type registry. Destroy with
+ * `int2dds_xml_type_registry_destroy`.
+ */
+Int2DdsRet int2dds_xml_type_registry_create(struct Int2DdsXmlTypeRegistry **out);
+
+/**
+ * Create an XML type registry and load `path` into it in one step.
+ */
+Int2DdsRet int2dds_xml_type_registry_from_file(const char *path,
+                                               struct Int2DdsXmlTypeRegistry **out);
+
+/**
+ * Load additional types from an XML file into an existing registry.
+ */
+Int2DdsRet int2dds_xml_type_registry_load_file(struct Int2DdsXmlTypeRegistry *registry,
+                                               const char *path);
+
+/**
+ * Load additional types from an in-memory XML string into an existing registry.
+ */
+Int2DdsRet int2dds_xml_type_registry_load_str(struct Int2DdsXmlTypeRegistry *registry,
+                                              const char *xml);
+
+/**
+ * Look up a loaded type by name and build a dynamic type support (with its full
+ * dependency closure). Destroy the result with
+ * `int2dds_dynamic_type_support_destroy`.
+ */
+Int2DdsRet int2dds_xml_type_registry_get_type_support(const struct Int2DdsXmlTypeRegistry *registry,
+                                                      const char *name,
+                                                      struct Int2DdsDynamicTypeSupport **out);
+
+/**
+ * Look up a loaded type by name and return its top-level TypeObject for
+ * introspection. Destroy the result with `int2dds_type_object_destroy`.
+ */
+Int2DdsRet int2dds_xml_type_registry_get_type_object(const struct Int2DdsXmlTypeRegistry *registry,
+                                                     const char *name,
+                                                     struct Int2DdsTypeObject **out);
+
+/**
+ * Number of types loaded in the registry.
+ */
+Int2DdsRet int2dds_xml_type_registry_type_count(const struct Int2DdsXmlTypeRegistry *registry,
+                                                uintptr_t *out);
+
+/**
+ * Copy the fully-qualified name of the type at `index` into `buf`.
+ */
+Int2DdsRet int2dds_xml_type_registry_type_name(const struct Int2DdsXmlTypeRegistry *registry,
+                                               uintptr_t index,
+                                               char *buf,
+                                               uintptr_t buf_len,
+                                               uintptr_t *out_len);
+
+/**
+ * Destroy an XML type registry handle. Safe to call with null.
+ */
+void int2dds_xml_type_registry_destroy(struct Int2DdsXmlTypeRegistry *registry);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif  // __cplusplus
@@ -3811,5 +4219,47 @@ Int2DdsRet int2dds_dynamic_data_get_i64  (const struct Int2DdsDynamicData *data,
 Int2DdsRet int2dds_dynamic_data_get_u64  (const struct Int2DdsDynamicData *data, const char *field_path, uint64_t *out);
 Int2DdsRet int2dds_dynamic_data_get_f32  (const struct Int2DdsDynamicData *data, const char *field_path, float    *out);
 Int2DdsRet int2dds_dynamic_data_get_f64  (const struct Int2DdsDynamicData *data, const char *field_path, double   *out);
+
+/* Handle-based DynamicData primitive setters (macro-generated; manually declared). */
+Int2DdsRet int2dds_dynamic_data_set_bool (struct Int2DdsDynamicData *data, const char *field, bool     value);
+Int2DdsRet int2dds_dynamic_data_set_i8   (struct Int2DdsDynamicData *data, const char *field, int8_t   value);
+Int2DdsRet int2dds_dynamic_data_set_u8   (struct Int2DdsDynamicData *data, const char *field, uint8_t  value);
+Int2DdsRet int2dds_dynamic_data_set_i16  (struct Int2DdsDynamicData *data, const char *field, int16_t  value);
+Int2DdsRet int2dds_dynamic_data_set_u16  (struct Int2DdsDynamicData *data, const char *field, uint16_t value);
+Int2DdsRet int2dds_dynamic_data_set_i32  (struct Int2DdsDynamicData *data, const char *field, int32_t  value);
+Int2DdsRet int2dds_dynamic_data_set_u32  (struct Int2DdsDynamicData *data, const char *field, uint32_t value);
+Int2DdsRet int2dds_dynamic_data_set_i64  (struct Int2DdsDynamicData *data, const char *field, int64_t  value);
+Int2DdsRet int2dds_dynamic_data_set_u64  (struct Int2DdsDynamicData *data, const char *field, uint64_t value);
+Int2DdsRet int2dds_dynamic_data_set_f32  (struct Int2DdsDynamicData *data, const char *field, float    value);
+Int2DdsRet int2dds_dynamic_data_set_f64  (struct Int2DdsDynamicData *data, const char *field, double   value);
+
+/* DynamicValue scalar constructors (macro-generated; manually declared). */
+Int2DdsRet int2dds_dynamic_value_bool    (bool     value, struct Int2DdsDynamicValue **out);
+Int2DdsRet int2dds_dynamic_value_i8      (int8_t   value, struct Int2DdsDynamicValue **out);
+Int2DdsRet int2dds_dynamic_value_i16     (int16_t  value, struct Int2DdsDynamicValue **out);
+Int2DdsRet int2dds_dynamic_value_i32     (int32_t  value, struct Int2DdsDynamicValue **out);
+Int2DdsRet int2dds_dynamic_value_i64     (int64_t  value, struct Int2DdsDynamicValue **out);
+Int2DdsRet int2dds_dynamic_value_u8      (uint8_t  value, struct Int2DdsDynamicValue **out);
+Int2DdsRet int2dds_dynamic_value_u16     (uint16_t value, struct Int2DdsDynamicValue **out);
+Int2DdsRet int2dds_dynamic_value_u32     (uint32_t value, struct Int2DdsDynamicValue **out);
+Int2DdsRet int2dds_dynamic_value_u64     (uint64_t value, struct Int2DdsDynamicValue **out);
+Int2DdsRet int2dds_dynamic_value_f32     (float    value, struct Int2DdsDynamicValue **out);
+Int2DdsRet int2dds_dynamic_value_f64     (double   value, struct Int2DdsDynamicValue **out);
+Int2DdsRet int2dds_dynamic_value_byte    (uint8_t  value, struct Int2DdsDynamicValue **out);
+Int2DdsRet int2dds_dynamic_value_bitmask (uint64_t value, struct Int2DdsDynamicValue **out);
+Int2DdsRet int2dds_dynamic_value_bitset  (uint64_t value, struct Int2DdsDynamicValue **out);
+
+/* DynamicValue scalar extractors (macro-generated; manually declared). */
+Int2DdsRet int2dds_dynamic_value_as_bool (const struct Int2DdsDynamicValue *value, bool     *out);
+Int2DdsRet int2dds_dynamic_value_as_i8   (const struct Int2DdsDynamicValue *value, int8_t   *out);
+Int2DdsRet int2dds_dynamic_value_as_i16  (const struct Int2DdsDynamicValue *value, int16_t  *out);
+Int2DdsRet int2dds_dynamic_value_as_i32  (const struct Int2DdsDynamicValue *value, int32_t  *out);
+Int2DdsRet int2dds_dynamic_value_as_i64  (const struct Int2DdsDynamicValue *value, int64_t  *out);
+Int2DdsRet int2dds_dynamic_value_as_u8   (const struct Int2DdsDynamicValue *value, uint8_t  *out);
+Int2DdsRet int2dds_dynamic_value_as_u16  (const struct Int2DdsDynamicValue *value, uint16_t *out);
+Int2DdsRet int2dds_dynamic_value_as_u32  (const struct Int2DdsDynamicValue *value, uint32_t *out);
+Int2DdsRet int2dds_dynamic_value_as_u64  (const struct Int2DdsDynamicValue *value, uint64_t *out);
+Int2DdsRet int2dds_dynamic_value_as_f32  (const struct Int2DdsDynamicValue *value, float    *out);
+Int2DdsRet int2dds_dynamic_value_as_f64  (const struct Int2DdsDynamicValue *value, double   *out);
 
 #endif  /* INT2DDS_FFI_H */

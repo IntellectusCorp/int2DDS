@@ -1,7 +1,7 @@
 use bytes::Bytes;
 
 use crate::common::instance_handle::InstanceHandle;
-use crate::rtps::common::guid::GuidPrefix;
+use crate::rtps::common::guid::{Guid, GuidPrefix};
 use crate::rtps::common::rtps_error_code::{RtpsError, RtpsErrorCode, RtpsResult};
 use crate::rtps::common::types::DomainId;
 use crate::rtps::entities::entity::Entity;
@@ -155,8 +155,8 @@ impl DiscoveryUnicastListeningTask {
         // Ignore messages sent by myself
         if rtps_message.header.guid_prefix() == self.guid_prefix {
             debug!(
-                "[DiscoveryUnicast] Filtering out self-sent message - guid_prefix: {:?}",
-                self.guid_prefix
+                "[DiscoveryUnicast] Filtering out self-sent message - guid_prefix: {}",
+                Guid::guid_prefix_to_string(&self.guid_prefix)
             );
             return Ok(());
         }

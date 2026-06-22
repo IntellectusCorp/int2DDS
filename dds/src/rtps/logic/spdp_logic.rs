@@ -217,11 +217,12 @@ mod tests {
     use std::sync::Arc;
     use std::thread;
 
+    use crate::dcps::infrastructure::qos_policy::PropertyQosPolicy;
     use crate::rtps::common::guid::GUIDPREFIX_UNKNOWN;
     use crate::rtps::entities::participant::Participant;
     use crate::rtps::logic::spdp_logic::SpdpLogic;
     use crate::rtps::transport::plugin::TransportPluginFactory;
-    use crate::rtps::transport::{get_transport_type, socket::Socket, TransportConfig};
+    use crate::rtps::transport::{get_transport_type, socket::Socket};
     use crate::test_utils::unique_domain_id;
 
     #[test]
@@ -238,7 +239,7 @@ mod tests {
             socket.working_ips().iter().map(|ip| ip.to_string()).collect(),
             GUIDPREFIX_UNKNOWN,
             None,
-            TransportConfig::default(),
+            &PropertyQosPolicy::default(),
         )
         .expect("Failed to create transport plugin");
         socket.set_transport(Arc::from(transport));

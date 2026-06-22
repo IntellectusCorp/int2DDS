@@ -17,7 +17,7 @@ use crate::{
         },
         common::{
             entity_id::EntityId,
-            guid::{GuidPrefix, GUIDPREFIX_UNKNOWN},
+            guid::{Guid, GuidPrefix, GUIDPREFIX_UNKNOWN},
             locator::{
                 Locator, LOCATOR_ADDRESS_INVALID, LOCATOR_INVALID, LOCATOR_KIND_UDP_V4,
                 LOCATOR_PORT_INVALID,
@@ -274,7 +274,7 @@ impl MessageReceiver {
 
                 for (index, submessage) in submessages.iter().enumerate() {
                     if log_on {
-                        debug!("Processing submessage {}: {:?}", index, submessage.header);
+                        debug!("Processing submessage {}: {}", index, submessage.header);
                     }
 
                     match &submessage.body {
@@ -343,9 +343,9 @@ impl MessageReceiver {
                 if log_on {
                     debug!("Successfully extracted participant proxy data");
                     debug!(
-                        "Final SPDP data: domain_id={}, guid_prefix={:?}",
+                        "Final SPDP data: domain_id={}, guid_prefix={}",
                         domain_id,
-                        header.guid_prefix()
+                        Guid::guid_prefix_to_string(&header.guid_prefix())
                     );
                 }
 
@@ -400,7 +400,7 @@ impl MessageReceiver {
                         CommonParameterId::PidMetatrafficUnicastLocator => {
                             if log_on {
                                 debug!(
-                                    "Parameter {}: Adding metatraffic unicast locator: {:?}",
+                                    "Parameter {}: Adding metatraffic unicast locator: {}",
                                     index, rtps_locator
                                 );
                             }
@@ -409,7 +409,7 @@ impl MessageReceiver {
                         CommonParameterId::PidMetatrafficMulticastLocator => {
                             if log_on {
                                 debug!(
-                                    "Parameter {}: Adding metatraffic multicast locator: {:?}",
+                                    "Parameter {}: Adding metatraffic multicast locator: {}",
                                     index, rtps_locator
                                 );
                             }
@@ -418,7 +418,7 @@ impl MessageReceiver {
                         CommonParameterId::PidDefaultUnicastLocator => {
                             if log_on {
                                 debug!(
-                                    "Parameter {}: Adding default unicast locator: {:?}",
+                                    "Parameter {}: Adding default unicast locator: {}",
                                     index, rtps_locator
                                 );
                             }
@@ -427,7 +427,7 @@ impl MessageReceiver {
                         CommonParameterId::PidDefaultMulticastLocator => {
                             if log_on {
                                 debug!(
-                                    "Parameter {}: Adding default multicast locator: {:?}",
+                                    "Parameter {}: Adding default multicast locator: {}",
                                     index, rtps_locator
                                 );
                             }
@@ -470,13 +470,13 @@ impl MessageReceiver {
                 ParameterValue::ParticipantGuid(guid) => {
                     // let guid = self.convert_guid_prefix_to_guid(guid_prefix);
                     if log_on {
-                        debug!("Parameter {}: Setting participant GUID: {:?}", index, guid);
+                        debug!("Parameter {}: Setting participant GUID: {}", index, guid);
                     }
                     spdp_data.set_participant_guid(*guid);
                 }
                 ParameterValue::EndpointGuid(guid) => {
                     warn!(
-                        "Parameter {}: PID_ENDPOINT_GUID encountered on SPDP path, ignoring: {:?}",
+                        "Parameter {}: PID_ENDPOINT_GUID encountered on SPDP path, ignoring: {}",
                         index, guid
                     );
                 }
