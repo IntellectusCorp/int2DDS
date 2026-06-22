@@ -48,6 +48,9 @@ WORKDIR /src
 # DIST = friendly arch subdir name under ffi/dist (passed in at run time).
 # CARGO_TARGET_DIR points at an ephemeral container path so every run is a
 # clean build and the host's Windows target/ directory is never touched.
+# This image builds the glibc (gnu) targets only. musl targets use the separate
+# Alpine-based Dockerfile.musl (Alpine is musl-native, so libgcc_s is available
+# for the dynamic cdylib link — unlike ubuntu's musl-tools).
 ENV DIST=unknown \
     CARGO_TARGET_DIR=/tmp/cargo-target
 
@@ -77,8 +80,6 @@ CMD ["bash", "-lc", "\
     readelf -h \"$out/$real\" | grep -E 'Class|Machine|Type' || true; \
     echo '== embedded SONAME (should be '$son') =='; \
     readelf -d \"$out/$real\" | grep SONAME || true; \
-    echo '== dist layout =='; \
-    ls -l \"$out\" || true; \
     echo '== max GLIBC symbol version required (must be <= 2.35 for 24.04 compat) =='; \
     { objdump -T \"$out/$real\" | grep -oE 'GLIBC_[0-9.]+' | sort -V | tail -1; } || true \
     "]
