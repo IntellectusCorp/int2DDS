@@ -425,6 +425,12 @@ impl WlpLogic {
         let logic_start_time = Instant::now();
         debug!("send_participant_message_data called, duration: {:?}", duration);
 
+        if participant_message_data.kind()
+            == ParticipantMessageDataKind::AUTOMATIC_LIVELINESS_UPDATE
+        {
+            let _ = self.update_local_automatic_liveliness();
+        }
+
         // Skip ManualByParticipant when no local writer is alive
         let should_send = if participant_message_data.is_manual_liveliness() {
             self.any_asserting_alive(LivelinessQosPolicyKind::ManualByParticipant)
@@ -1275,6 +1281,21 @@ impl WlpLogic {
             .asserting_writers
             .iter()
             .filter(|entry| entry.value().qos.kind == LivelinessQosPolicyKind::ManualByParticipant)
+            .map(|entry| *entry.key())
+            .collect();
+
+        for guid in guids {
+            self.renew_asserting_writer(&guid)?;
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn update_local_automatic_liveliness(&self) -> RtpsResult<()> {
+        let guids: Vec<Guid> = self
+            .asserting_writers
+            .iter()
+            .filter(|entry| entry.value().qos.kind == LivelinessQosPolicyKind::Automatic)
             .map(|entry| *entry.key())
             .collect();
 
