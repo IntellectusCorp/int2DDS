@@ -279,7 +279,7 @@ impl DcpsBridge {
         #[allow(unused_assignments)]
         let mut writer: Option<Arc<dyn Writer + Send + Sync>> = None;
 
-        let fragment_size = crate::common::env::get_fragment_size();
+        let fragment_size = publication_builtin_topic_data.data_frag().effective_max_size();
 
         if publication_builtin_topic_data.is_reliable() {
             let _writer = StatefulWriter::new(

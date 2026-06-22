@@ -5,10 +5,10 @@
 
 use crate::{
     dcps::infrastructure::qos_policy::{
-        DataRepresentationQosPolicy, DeadlineQosPolicy, DestinationOrderQosPolicy,
-        DurabilityQosPolicy, DurabilityServiceQosPolicy, GroupDataQosPolicy,
-        LatencyBudgetQosPolicy, LifespanQosPolicy, LivelinessQosPolicy, OwnershipQosPolicy,
-        OwnershipStrengthQosPolicy, PartitionQosPolicy, PresentationQosPolicy,
+        DataFragQosPolicy, DataRepresentationQosPolicy, DeadlineQosPolicy,
+        DestinationOrderQosPolicy, DurabilityQosPolicy, DurabilityServiceQosPolicy,
+        GroupDataQosPolicy, LatencyBudgetQosPolicy, LifespanQosPolicy, LivelinessQosPolicy,
+        OwnershipQosPolicy, OwnershipStrengthQosPolicy, PartitionQosPolicy, PresentationQosPolicy,
         ReliabilityQosPolicy, ReliabilityQosPolicyKind, TopicDataQosPolicy, UserDataQosPolicy,
         WriterReliabilityExtensionQosPolicy,
     },
@@ -80,6 +80,8 @@ pub struct PublicationBuiltinTopicData {
     type_object: Option<TypeObject>,
     #[dds(non_serialized)]
     writer_reliability_extension: WriterReliabilityExtensionQosPolicy,
+    #[dds(non_serialized)]
+    data_frag: DataFragQosPolicy,
 }
 
 impl PublicationBuiltinTopicData {
@@ -119,6 +121,7 @@ impl PublicationBuiltinTopicData {
             type_identifier: None,
             type_object: None,
             writer_reliability_extension: datawriter_qos.writer_reliability_extension,
+            data_frag: datawriter_qos.data_frag,
         }
     }
 
@@ -307,6 +310,10 @@ impl PublicationBuiltinTopicData {
 
     pub fn writer_reliability_extension(&self) -> &WriterReliabilityExtensionQosPolicy {
         &self.writer_reliability_extension
+    }
+
+    pub fn data_frag(&self) -> &DataFragQosPolicy {
+        &self.data_frag
     }
 
     pub fn convert_u8_to_i32_array(data: [u8; 12]) -> [i32; 3] {

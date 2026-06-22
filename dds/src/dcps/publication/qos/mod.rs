@@ -29,13 +29,13 @@ use crate::{
     },
     infrastructure::qos_kind::QosKind,
     infrastructure::qos_policy::{
-        DataRepresentationQosPolicy, DeadlineQosPolicy, DestinationOrderQosPolicy,
-        DurabilityQosPolicy, DurabilityServiceQosPolicy, EntityFactoryQosPolicy,
-        GroupDataQosPolicy, HistoryQosPolicy, LatencyBudgetQosPolicy, LifespanQosPolicy,
-        LivelinessQosPolicy, OwnershipQosPolicy, OwnershipStrengthQosPolicy, PartitionQosPolicy,
-        PresentationQosPolicy, Qos, ReliabilityQosPolicy, ReliabilityQosPolicyKind,
-        ResourceLimitsQosPolicy, TransportPriorityQosPolicy, UserDataQosPolicy,
-        WriterDataLifecycleQosPolicy, WriterReliabilityExtensionQosPolicy,
+        DataFragQosPolicy, DataRepresentationQosPolicy, DeadlineQosPolicy,
+        DestinationOrderQosPolicy, DurabilityQosPolicy, DurabilityServiceQosPolicy,
+        EntityFactoryQosPolicy, GroupDataQosPolicy, HistoryQosPolicy, LatencyBudgetQosPolicy,
+        LifespanQosPolicy, LivelinessQosPolicy, OwnershipQosPolicy, OwnershipStrengthQosPolicy,
+        PartitionQosPolicy, PresentationQosPolicy, Qos, ReliabilityQosPolicy,
+        ReliabilityQosPolicyKind, ResourceLimitsQosPolicy, TransportPriorityQosPolicy,
+        UserDataQosPolicy, WriterDataLifecycleQosPolicy, WriterReliabilityExtensionQosPolicy,
     },
 };
 use const_default::ConstDefault;
@@ -63,6 +63,7 @@ pub struct DataWriterQos {
     pub writer_data_lifecycle: WriterDataLifecycleQosPolicy,
     pub data_representation: DataRepresentationQosPolicy,
     pub writer_reliability_extension: WriterReliabilityExtensionQosPolicy,
+    pub data_frag: DataFragQosPolicy,
 }
 
 impl Default for DataWriterQos {
@@ -88,6 +89,7 @@ impl Default for DataWriterQos {
             writer_data_lifecycle: WriterDataLifecycleQosPolicy::default(),
             data_representation: DataRepresentationQosPolicy::default(),
             writer_reliability_extension: WriterReliabilityExtensionQosPolicy::default(),
+            data_frag: DataFragQosPolicy::default(),
         }
     }
 }
@@ -114,6 +116,7 @@ impl ConstDefault for DataWriterQos {
         writer_data_lifecycle: WriterDataLifecycleQosPolicy::DEFAULT,
         data_representation: DataRepresentationQosPolicy::DEFAULT,
         writer_reliability_extension: WriterReliabilityExtensionQosPolicy::DEFAULT,
+        data_frag: DataFragQosPolicy::DEFAULT,
     };
 }
 
@@ -210,5 +213,4 @@ impl Qos for PublisherQos {
         self.entity_factory.autoenable_created_entities
     }
 }
-
 impl PublisherQos {}
