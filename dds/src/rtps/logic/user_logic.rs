@@ -44,6 +44,7 @@ use crate::rtps::messages::submessages::data::Data;
 use crate::rtps::messages::submessages::data_frag::{DataFrag, FragmentBuffer};
 use crate::rtps::messages::submessages::gap::Gap;
 use crate::rtps::messages::submessages::heartbeat::Heartbeat;
+use crate::rtps::messages::submessages::heartbeat_frag::HeartbeatFrag;
 use crate::rtps::messages::submessages::nack_frag::NackFrag;
 use crate::rtps::task::sending_handler::{MessageType, SendingHandler};
 use crate::rtps::task::user_traffic::user_unicast_listening_task::UserUnicastListeningTask;
@@ -1153,10 +1154,19 @@ impl UserLogic {
         // Update WriterProxy state - mark as Received if data was received
         if let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() {
             if let Ok(mut matched_writers) = stateful_reader.writer_proxies().lock() {
-                let writer_proxy = matched_writers
+                let writer_proxy = match matched_writers
                     .iter_mut()
                     .find(|proxy| proxy.remote_writer_guid() == remote_guid)
-                    .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
+                {
+                    Some(proxy) => proxy,
+                    None => {
+                        // The writer proxy was concurrently removed (the writer was destroyed
+                        // while this already-accepted sample was still being delivered
+                        // intra-participant). Deliver it directly instead of dropping it.
+                        drop(matched_writers);
+                        return self.add_change_to_reader_cache_and_notify(reader, vec![change]);
+                    }
+                };
 
                 // Mark the corresponding sequence number as Received
                 writer_proxy.mark_change_received(sequence_number, fragment_info);
@@ -1426,6 +1436,15 @@ impl UserLogic {
                 })?;
             if reader.matched_writer_is_matched(remote_writer_guid) {
                 matched_readers.push(reader.clone());
+            } else if remote_writer_guid.prefix() == participant.guid().prefix()
+                && participant.find_writer_from_entity_id(remote_writer_guid.entity_id()).is_none()
+            {
+                // Intra-participant directed sample whose local writer was already destroyed
+                // while this just-sent sample was still in flight. With the writer gone there
+                // is no reliable retransmit (so no duplicate is possible); deliver the
+                // already-accepted sample instead of dropping it. The matched path and
+                // cross-participant samples are unchanged.
+                matched_readers.push(reader.clone());
             }
         } else {
             matched_readers
@@ -1465,10 +1484,16 @@ impl UserLogic {
             let matched_writers = writer_proxies
                 .lock()
                 .map_err(|e| RtpsError::new(RtpsErrorCode::LockError, e.to_string()))?;
-            let writer_proxy = matched_writers
+            // If the writer proxy was concurrently removed (the writer was destroyed while
+            // this already-accepted sample is still being delivered intra-participant), keep
+            // the change's default attributes instead of dropping the sample.
+            let writer_proxy = match matched_writers
                 .iter()
                 .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
-                .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
+            {
+                Some(proxy) => proxy,
+                None => return Ok(()),
+            };
 
             // Get attributes from WriterProxy
             ownership_strength = writer_proxy.get_ownership_strength();
@@ -1855,6 +1880,98 @@ impl UnicastMessageProcessor for UserLogic {
         Ok(())
     }
 
+    fn handle_heartbeatfrag_message(
+        &mut self,
+        rtps_header: &Header,
+        heartbeat_frag: &HeartbeatFrag,
+    ) -> RtpsResult<()> {
+        let remote_writer_guid = Guid::new(rtps_header.guid_prefix(), heartbeat_frag.writer_id);
+        let matched_readers =
+            self.get_matched_readers(remote_writer_guid, heartbeat_frag.reader_id)?;
+
+        if matched_readers.is_empty() {
+            debug!(
+                "[HeartbeatFrag] No matched readers found for remote writer: {:?}, skipping.",
+                remote_writer_guid
+            );
+            return Ok(());
+        }
+
+        for reader in matched_readers {
+            let Some(stateful_reader) = reader.as_any().downcast_ref::<StatefulReader>() else {
+                continue;
+            };
+
+            let writer_proxies = stateful_reader.writer_proxies();
+            let mut matched_writers = writer_proxies.lock().map_err(|e| {
+                RtpsError::new(
+                    RtpsErrorCode::LockError,
+                    format!("Failed to acquire writer_proxies lock: {}", e),
+                )
+            })?;
+
+            let Some(writer_proxy) = matched_writers
+                .iter_mut()
+                .find(|proxy| proxy.remote_writer_guid() == remote_writer_guid)
+            else {
+                continue;
+            };
+
+            // Drop duplicate or stale announcements
+            if writer_proxy
+                .last_heartbeat_frag_count()
+                .is_some_and(|last| heartbeat_frag.count <= last)
+            {
+                continue;
+            }
+            writer_proxy.set_last_heartbeat_frag_count(heartbeat_frag.count);
+
+            // Seed fragment knowledge for this sequence number so the missing
+            // set is computable even when every DATA_FRAG of the sample was
+            // lost (the announcement carries the last available fragment).
+            writer_proxy.mark_frag_received(
+                heartbeat_frag.writer_sn,
+                heartbeat_frag.last_fragment_num,
+                std::iter::empty::<u32>(),
+            );
+
+            if !writer_proxy.still_missing_fragments(heartbeat_frag.writer_sn) {
+                continue;
+            }
+
+            let Some(missing_fragments) = writer_proxy
+                .calculate_missing_fragments(heartbeat_frag.writer_sn, heartbeat_frag.writer_sn)
+            else {
+                continue;
+            };
+
+            // Respond immediately with NACK_FRAG (zero response delay); the
+            // count check above suppresses duplicates per announcement.
+            writer_proxy.increase_nackfrag_count();
+            match MessageCreator::create_nackfrag_msg(
+                stateful_reader.guid(),
+                writer_proxy.remote_writer_guid(),
+                stateful_reader.guid().entity_id(),
+                writer_proxy.remote_writer_guid().entity_id(),
+                heartbeat_frag.writer_sn,
+                missing_fragments,
+                writer_proxy.nackfrag_count(),
+                None,
+            ) {
+                Ok(buffer) => {
+                    let locators: Vec<Locator> = writer_proxy.unicast_locator_list().to_vec();
+                    drop(matched_writers);
+                    self.send_rtps_message_to_locators(locators.iter(), &buffer)?;
+                }
+                Err(e) => {
+                    warn!("[UserLogic] Failed to create NACK_FRAG for HEARTBEAT_FRAG: {:?}", e);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn handle_acknack_message(
         &mut self,
         rtps_header: &Header,
@@ -1877,10 +1994,11 @@ impl UnicastMessageProcessor for UserLogic {
             .find(|rp| rp.remote_reader_guid() == remote_reader_guid)
             .ok_or_else(|| RtpsError::new(RtpsErrorCode::MatchedEntityNotFound, None))?;
 
-        // Preemptive ACKNACK (seqbase == 0, empty bitmap) is an explicit reset
-        // signal and bypasses the count/debounce check.
-        let is_preemptive = acknack.reader_sn_state.bitmap_base() == SequenceNumber::from_i64(0)
-            && acknack.reader_sn_state.num_bits() == 0;
+        // Preemptive ACKNACK (empty bitmap with seqbase 0 or 1) is an explicit
+        // reset signal and bypasses the count/debounce check. Some foreign RTPS
+        // stacks use base 1 for this preemptive form.
+        let is_preemptive = acknack.reader_sn_state.num_bits() == 0
+            && acknack.reader_sn_state.bitmap_base().to_i64() <= 1;
         let now = Instant::now();
 
         if !should_accept_count(
@@ -1894,9 +2012,7 @@ impl UnicastMessageProcessor for UserLogic {
             return Ok(());
         }
 
-        if acknack.reader_sn_state.bitmap_base() == SequenceNumber::from_i64(0)
-            && acknack.reader_sn_state.num_bits() == 0
-        {
+        if is_preemptive {
             drop(reader_proxies);
             self.handle_preemptive_acknack_message(rtps_header, acknack)?;
             return Ok(());

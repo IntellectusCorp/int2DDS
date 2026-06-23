@@ -131,15 +131,19 @@ impl PlCdrSerializer {
             ));
         }
 
-        // Parameter length field
-        self.write_u16(buffer, param_data.len() as u16);
+        // Align to 4-byte boundary between parameters (RTPS 2.5, Section 9.6.2.2.2):
+        // parameterLength MUST include the trailing padding (i.e. be a multiple of 4). A strict
+        // remote parser (Fast-DDS/Connext) advances by parameterLength, so an unpadded length on a
+        // variable-size parameter (USER_DATA/TOPIC_DATA/etc.) misaligns and corrupts later params.
+        let padding =
+            (PARAMETER_ALIGNMENT - (param_data.len() % PARAMETER_ALIGNMENT)) % PARAMETER_ALIGNMENT;
+
+        // Parameter length field (padded length per RTPS)
+        self.write_u16(buffer, (param_data.len() + padding) as u16);
 
         // Parameter data bytes
         buffer.extend_from_slice(&param_data);
 
-        // Align to 4-byte boundary between parameters (RTPS 2.5, Section 9.6.2)
-        let padding =
-            (PARAMETER_ALIGNMENT - (param_data.len() % PARAMETER_ALIGNMENT)) % PARAMETER_ALIGNMENT;
         if padding > 0 {
             buffer.extend(std::iter::repeat_n(0u8, padding));
         }

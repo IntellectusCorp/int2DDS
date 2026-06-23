@@ -180,8 +180,28 @@ impl<'a> DataFrag<'a> {
         let serialized_data_bytes = buffer.slice(start_pos..);
 
         // 8.3.7.3.3 Validity
-        // allow up to 3 extra bytes for RTPS submessage 4-byte alignment padding
-        let expected_data_size = (fragments_in_submessage as u32 * fragment_size as u32) as usize;
+        // allow up to 3 extra bytes for RTPS submessage 4-byte alignment padding.
+        // The last fragment range may be shorter than `fragment_size`, so bound
+        // the expected data length by `sample_size`, not only by
+        // `fragments_in_submessage * fragment_size`.
+        if fragment_starting_num == 0 || fragments_in_submessage == 0 || fragment_size == 0 {
+            return Err(RtpsError::new(
+                RtpsErrorCode::InvalidSubmessageBody,
+                "Invalid DATA_FRAG fragment numbering or size",
+            ));
+        }
+
+        let fragment_start_offset = (fragment_starting_num - 1) as usize * fragment_size as usize;
+        if fragment_start_offset >= sample_size as usize {
+            return Err(RtpsError::new(
+                RtpsErrorCode::InvalidSubmessageBody,
+                "FragmentStartingNum exceeds sample_size",
+            ));
+        }
+
+        let max_fragment_data_size = fragments_in_submessage as usize * fragment_size as usize;
+        let remaining_sample_size = sample_size as usize - fragment_start_offset;
+        let expected_data_size = std::cmp::min(max_fragment_data_size, remaining_sample_size);
         if serialized_data_bytes.len() > expected_data_size + 3 {
             return Err(RtpsError::new(
                 RtpsErrorCode::InvalidSubmessageBody,
@@ -411,6 +431,22 @@ mod tests {
         if let Err(err) = result {
             assert_eq!(err.code, RtpsErrorCode::InvalidSubmessageBody);
         }
+    }
+
+    #[test]
+    fn test_datafrag_truncates_alignment_padding_on_last_fragment() {
+        let mut datafrag = create_dummy_datafrag();
+        datafrag.fragment_starting_num = 2;
+        datafrag.fragments_in_submessage = 1;
+        datafrag.fragment_size = 3;
+        datafrag.sample_size = 5;
+        datafrag.serialized_data = SubmessagePayload::Owned(Bytes::from(vec![10, 11, 0, 0]));
+
+        let buffer = datafrag.write_to_vec_with_ctx(Endianness::BigEndian).unwrap();
+        let header = create_dummy_submessage_header(buffer.len() as u16);
+
+        let deserialized = DataFrag::deserialize(&Bytes::from(buffer), &header).unwrap();
+        assert_eq!(deserialized.serialized_data.as_slice(), &[10, 11]);
     }
 
     // total_size 5, fragment_size 2 -> 3 fragments: [_,_][_,_][_]

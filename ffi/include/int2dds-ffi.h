@@ -101,6 +101,10 @@
 
 #define INT2DDS_STATUS_REQUESTED_DEADLINE_MISSED (1 << 2)
 
+#define INT2DDS_STATUS_OFFERED_INCOMPATIBLE_TYPE (1 << 3)
+
+#define INT2DDS_STATUS_REQUESTED_INCOMPATIBLE_TYPE (1 << 4)
+
 #define INT2DDS_STATUS_OFFERED_INCOMPATIBLE_QOS (1 << 5)
 
 #define INT2DDS_STATUS_REQUESTED_INCOMPATIBLE_QOS (1 << 6)
@@ -322,6 +326,8 @@ typedef struct Int2DdsPublicationBuiltinData Int2DdsPublicationBuiltinData;
 
 typedef struct Int2DdsPublicationBuiltinTopicData Int2DdsPublicationBuiltinTopicData;
 
+typedef struct Int2DdsPublicationBuiltinTopicDataSeq Int2DdsPublicationBuiltinTopicDataSeq;
+
 /**
  * Opaque handle to a Publisher
  */
@@ -336,6 +342,10 @@ typedef struct Int2DdsPublisherQos Int2DdsPublisherQos;
  * Opaque sequence of (serialized data, SampleInfo) pairs for batch read/take
  */
 typedef struct Int2DdsSampleSeq Int2DdsSampleSeq;
+
+typedef struct Int2DdsSerializedLoan Int2DdsSerializedLoan;
+
+typedef struct Int2DdsSerializedWriteLoan Int2DdsSerializedWriteLoan;
 
 /**
  * Opaque handle to a StatusCondition
@@ -354,6 +364,8 @@ typedef struct Int2DdsSubscriber Int2DdsSubscriber;
 typedef struct Int2DdsSubscriberQos Int2DdsSubscriberQos;
 
 typedef struct Int2DdsSubscriptionBuiltinTopicData Int2DdsSubscriptionBuiltinTopicData;
+
+typedef struct Int2DdsSubscriptionBuiltinTopicDataSeq Int2DdsSubscriptionBuiltinTopicDataSeq;
 
 /**
  * Opaque handle to a Topic
@@ -533,6 +545,20 @@ typedef struct Int2DdsDataWriterListener {
   Int2DdsUserContext user_context;
 } Int2DdsDataWriterListener;
 
+/**
+ * C-compatible offered incompatible type status
+ */
+typedef struct Int2DdsOfferedIncompatibleTypeStatus {
+  /**
+   * Total cumulative count of incompatible type
+   */
+  int32_t total_count;
+  /**
+   * Change in total_count since last access
+   */
+  int32_t total_count_change;
+} Int2DdsOfferedIncompatibleTypeStatus;
+
 typedef void (*Int2DdsOnDataAvailableCallback)(struct Int2DdsDataReader *reader,
                                                Int2DdsUserContext user_context);
 
@@ -702,6 +728,20 @@ typedef struct Int2DdsDataReaderListener {
   Int2DdsUserContext user_context;
 } Int2DdsDataReaderListener;
 
+/**
+ * C-compatible requested incompatible type status
+ */
+typedef struct Int2DdsRequestedIncompatibleTypeStatus {
+  /**
+   * Total cumulative count of incompatible type
+   */
+  int32_t total_count;
+  /**
+   * Change in total_count since last access
+   */
+  int32_t total_count_change;
+} Int2DdsRequestedIncompatibleTypeStatus;
+
 #define INT2DDS_RET_OK 0
 
 #define INT2DDS_RET_ERROR 1
@@ -834,6 +874,64 @@ Int2DdsRet int2dds_datareader_get_matched_publications(const struct Int2DdsDataR
                                                        uintptr_t *count_out);
 
 /**
+ * Get the number of discovered publications currently known to a participant.
+ */
+Int2DdsRet int2dds_participant_get_discovered_publication_count(const struct Int2DdsParticipant *participant,
+                                                                uintptr_t *count_out);
+
+/**
+ * Get discovered publication data by stable snapshot index.
+ */
+Int2DdsRet int2dds_participant_get_discovered_publication_data_by_index(const struct Int2DdsParticipant *participant,
+                                                                        uintptr_t index,
+                                                                        struct Int2DdsPublicationBuiltinTopicData **data_out);
+
+/**
+ * Get the number of discovered subscriptions currently known to a participant.
+ */
+Int2DdsRet int2dds_participant_get_discovered_subscription_count(const struct Int2DdsParticipant *participant,
+                                                                 uintptr_t *count_out);
+
+/**
+ * Get discovered subscription data by stable snapshot index.
+ */
+Int2DdsRet int2dds_participant_get_discovered_subscription_data_by_index(const struct Int2DdsParticipant *participant,
+                                                                         uintptr_t index,
+                                                                         struct Int2DdsSubscriptionBuiltinTopicData **data_out);
+
+/**
+ * Collect a snapshot of discovered publications via the builtin DCPSPublication reader.
+ */
+Int2DdsRet int2dds_take_discovered_publications_snapshot(const struct Int2DdsParticipant *participant,
+                                                         int32_t timeout_ms,
+                                                         struct Int2DdsPublicationBuiltinTopicDataSeq **seq_out);
+
+Int2DdsRet int2dds_publication_builtin_topic_data_seq_len(const struct Int2DdsPublicationBuiltinTopicDataSeq *seq,
+                                                          uintptr_t *count_out);
+
+Int2DdsRet int2dds_publication_builtin_topic_data_seq_get(const struct Int2DdsPublicationBuiltinTopicDataSeq *seq,
+                                                          uintptr_t index,
+                                                          struct Int2DdsPublicationBuiltinTopicData **data_out);
+
+Int2DdsRet int2dds_publication_builtin_topic_data_seq_destroy(struct Int2DdsPublicationBuiltinTopicDataSeq *seq);
+
+/**
+ * Collect a snapshot of discovered subscriptions via the builtin DCPSSubscription reader.
+ */
+Int2DdsRet int2dds_take_discovered_subscriptions_snapshot(const struct Int2DdsParticipant *participant,
+                                                          int32_t timeout_ms,
+                                                          struct Int2DdsSubscriptionBuiltinTopicDataSeq **seq_out);
+
+Int2DdsRet int2dds_subscription_builtin_topic_data_seq_len(const struct Int2DdsSubscriptionBuiltinTopicDataSeq *seq,
+                                                           uintptr_t *count_out);
+
+Int2DdsRet int2dds_subscription_builtin_topic_data_seq_get(const struct Int2DdsSubscriptionBuiltinTopicDataSeq *seq,
+                                                           uintptr_t index,
+                                                           struct Int2DdsSubscriptionBuiltinTopicData **data_out);
+
+Int2DdsRet int2dds_subscription_builtin_topic_data_seq_destroy(struct Int2DdsSubscriptionBuiltinTopicDataSeq *seq);
+
+/**
  * Get discovered participant data for a given handle.
  * On success, `*data_out` receives a heap-allocated opaque pointer.
  * The caller must free it with `int2dds_participant_builtin_topic_data_destroy`.
@@ -889,6 +987,13 @@ Int2DdsRet int2dds_publication_builtin_topic_data_get_key(const struct Int2DdsPu
                                                           uint8_t (*key_out)[12]);
 
 /**
+ * Get the endpoint GUID from a PublicationBuiltinTopicData.
+ * `guid_out` must point to a 16-byte buffer.
+ */
+Int2DdsRet int2dds_publication_builtin_topic_data_get_endpoint_guid(const struct Int2DdsPublicationBuiltinTopicData *data,
+                                                                    uint8_t (*guid_out)[16]);
+
+/**
  * Get the participant key from a PublicationBuiltinTopicData.
  * `key_out` must point to a 12-byte buffer.
  */
@@ -916,6 +1021,89 @@ Int2DdsRet int2dds_publication_builtin_topic_data_get_type_name(const struct Int
                                                                 uintptr_t *size_out);
 
 /**
+ * Get the reliability kind from a PublicationBuiltinTopicData.
+ * `kind_out`: 0 = BEST_EFFORT, 1 = RELIABLE (matches INT2DDS_QOS_RELIABILITY_*).
+ *
+ * # Safety
+ * - `data` must be a valid PublicationBuiltinTopicData
+ * - `kind_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_publication_builtin_topic_data_get_reliability_kind(const struct Int2DdsPublicationBuiltinTopicData *data,
+                                                                       int32_t *kind_out);
+
+/**
+ * Get the durability kind from a PublicationBuiltinTopicData.
+ * `kind_out`: 0 = VOLATILE, 1 = TRANSIENT_LOCAL, 2 = TRANSIENT, 3 = PERSISTENT.
+ *
+ * # Safety
+ * - `data` must be a valid PublicationBuiltinTopicData
+ * - `kind_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_publication_builtin_topic_data_get_durability_kind(const struct Int2DdsPublicationBuiltinTopicData *data,
+                                                                      int32_t *kind_out);
+
+/**
+ * Get the liveliness kind from a PublicationBuiltinTopicData.
+ * `kind_out`: 0 = AUTOMATIC, 1 = MANUAL_BY_PARTICIPANT, 2 = MANUAL_BY_TOPIC.
+ *
+ * # Safety
+ * - `data` must be a valid PublicationBuiltinTopicData
+ * - `kind_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_publication_builtin_topic_data_get_liveliness_kind(const struct Int2DdsPublicationBuiltinTopicData *data,
+                                                                      int32_t *kind_out);
+
+/**
+ * Get the liveliness lease duration from a PublicationBuiltinTopicData.
+ * An infinite duration is reported as (0x7fffffff, 0x7fffffff).
+ *
+ * # Safety
+ * - `data` must be a valid PublicationBuiltinTopicData
+ * - `sec_out` and `nanosec_out` must be valid pointers
+ */
+Int2DdsRet int2dds_publication_builtin_topic_data_get_liveliness_lease_duration(const struct Int2DdsPublicationBuiltinTopicData *data,
+                                                                                int32_t *sec_out,
+                                                                                uint32_t *nanosec_out);
+
+/**
+ * Get the deadline period from a PublicationBuiltinTopicData.
+ * An infinite duration is reported as (0x7fffffff, 0x7fffffff).
+ *
+ * # Safety
+ * - `data` must be a valid PublicationBuiltinTopicData
+ * - `sec_out` and `nanosec_out` must be valid pointers
+ */
+Int2DdsRet int2dds_publication_builtin_topic_data_get_deadline(const struct Int2DdsPublicationBuiltinTopicData *data,
+                                                               int32_t *sec_out,
+                                                               uint32_t *nanosec_out);
+
+/**
+ * Get the lifespan duration from a PublicationBuiltinTopicData.
+ * An infinite duration is reported as (0x7fffffff, 0x7fffffff).
+ *
+ * # Safety
+ * - `data` must be a valid PublicationBuiltinTopicData
+ * - `sec_out` and `nanosec_out` must be valid pointers
+ */
+Int2DdsRet int2dds_publication_builtin_topic_data_get_lifespan(const struct Int2DdsPublicationBuiltinTopicData *data,
+                                                               int32_t *sec_out,
+                                                               uint32_t *nanosec_out);
+
+/**
+ * Get the user_data from a PublicationBuiltinTopicData.
+ * Copies up to `capacity` bytes into `buf`. `size_out` receives the actual size.
+ *
+ * # Safety
+ * - `data` must be a valid PublicationBuiltinTopicData
+ * - `buf` must be valid for `capacity` bytes, or null to query the size only
+ * - `size_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_publication_builtin_topic_data_get_user_data(const struct Int2DdsPublicationBuiltinTopicData *data,
+                                                                uint8_t *buf,
+                                                                uintptr_t capacity,
+                                                                uintptr_t *size_out);
+
+/**
  * Free a PublicationBuiltinTopicData obtained from discovery.
  */
 Int2DdsRet int2dds_publication_builtin_topic_data_destroy(struct Int2DdsPublicationBuiltinTopicData *data);
@@ -926,6 +1114,13 @@ Int2DdsRet int2dds_publication_builtin_topic_data_destroy(struct Int2DdsPublicat
  */
 Int2DdsRet int2dds_subscription_builtin_topic_data_get_key(const struct Int2DdsSubscriptionBuiltinTopicData *data,
                                                            uint8_t (*key_out)[12]);
+
+/**
+ * Get the endpoint GUID from a SubscriptionBuiltinTopicData.
+ * `guid_out` must point to a 16-byte buffer.
+ */
+Int2DdsRet int2dds_subscription_builtin_topic_data_get_endpoint_guid(const struct Int2DdsSubscriptionBuiltinTopicData *data,
+                                                                     uint8_t (*guid_out)[16]);
 
 /**
  * Get the participant key from a SubscriptionBuiltinTopicData.
@@ -950,6 +1145,77 @@ Int2DdsRet int2dds_subscription_builtin_topic_data_get_topic_name(const struct I
  * `size_out` receives the required size (including null terminator).
  */
 Int2DdsRet int2dds_subscription_builtin_topic_data_get_type_name(const struct Int2DdsSubscriptionBuiltinTopicData *data,
+                                                                 uint8_t *buf,
+                                                                 uintptr_t capacity,
+                                                                 uintptr_t *size_out);
+
+/**
+ * Get the reliability kind from a SubscriptionBuiltinTopicData.
+ * `kind_out`: 0 = BEST_EFFORT, 1 = RELIABLE (matches INT2DDS_QOS_RELIABILITY_*).
+ *
+ * # Safety
+ * - `data` must be a valid SubscriptionBuiltinTopicData
+ * - `kind_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_subscription_builtin_topic_data_get_reliability_kind(const struct Int2DdsSubscriptionBuiltinTopicData *data,
+                                                                        int32_t *kind_out);
+
+/**
+ * Get the durability kind from a SubscriptionBuiltinTopicData.
+ * `kind_out`: 0 = VOLATILE, 1 = TRANSIENT_LOCAL, 2 = TRANSIENT, 3 = PERSISTENT.
+ *
+ * # Safety
+ * - `data` must be a valid SubscriptionBuiltinTopicData
+ * - `kind_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_subscription_builtin_topic_data_get_durability_kind(const struct Int2DdsSubscriptionBuiltinTopicData *data,
+                                                                       int32_t *kind_out);
+
+/**
+ * Get the liveliness kind from a SubscriptionBuiltinTopicData.
+ * `kind_out`: 0 = AUTOMATIC, 1 = MANUAL_BY_PARTICIPANT, 2 = MANUAL_BY_TOPIC.
+ *
+ * # Safety
+ * - `data` must be a valid SubscriptionBuiltinTopicData
+ * - `kind_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_subscription_builtin_topic_data_get_liveliness_kind(const struct Int2DdsSubscriptionBuiltinTopicData *data,
+                                                                       int32_t *kind_out);
+
+/**
+ * Get the liveliness lease duration from a SubscriptionBuiltinTopicData.
+ * An infinite duration is reported as (0x7fffffff, 0x7fffffff).
+ *
+ * # Safety
+ * - `data` must be a valid SubscriptionBuiltinTopicData
+ * - `sec_out` and `nanosec_out` must be valid pointers
+ */
+Int2DdsRet int2dds_subscription_builtin_topic_data_get_liveliness_lease_duration(const struct Int2DdsSubscriptionBuiltinTopicData *data,
+                                                                                 int32_t *sec_out,
+                                                                                 uint32_t *nanosec_out);
+
+/**
+ * Get the deadline period from a SubscriptionBuiltinTopicData.
+ * An infinite duration is reported as (0x7fffffff, 0x7fffffff).
+ *
+ * # Safety
+ * - `data` must be a valid SubscriptionBuiltinTopicData
+ * - `sec_out` and `nanosec_out` must be valid pointers
+ */
+Int2DdsRet int2dds_subscription_builtin_topic_data_get_deadline(const struct Int2DdsSubscriptionBuiltinTopicData *data,
+                                                                int32_t *sec_out,
+                                                                uint32_t *nanosec_out);
+
+/**
+ * Get the user_data from a SubscriptionBuiltinTopicData.
+ * Copies up to `capacity` bytes into `buf`. `size_out` receives the actual size.
+ *
+ * # Safety
+ * - `data` must be a valid SubscriptionBuiltinTopicData
+ * - `buf` must be valid for `capacity` bytes, or null to query the size only
+ * - `size_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_subscription_builtin_topic_data_get_user_data(const struct Int2DdsSubscriptionBuiltinTopicData *data,
                                                                  uint8_t *buf,
                                                                  uintptr_t capacity,
                                                                  uintptr_t *size_out);
@@ -1470,6 +1736,20 @@ Int2DdsRet int2dds_create_participant_with_qos(const struct Int2DdsParticipantFa
                                                struct Int2DdsParticipant **participant_out);
 
 /**
+ * Get the resolved default DomainParticipant QoS (registered default ->
+ * configured default profile -> spec default), so callers can modify it (e.g.
+ * set user_data) and pass it to `int2dds_create_participant_with_qos` without
+ * losing the configured transport/discovery defaults that the bare
+ * `int2dds_create_participant` resolution chain applies.
+ *
+ * # Safety
+ * - `qos_out` must be a valid pointer to a null pointer
+ * - The returned QoS must be freed with `int2dds_participant_qos_destroy`
+ */
+Int2DdsRet int2dds_get_default_participant_qos(const struct Int2DdsParticipantFactory *_factory,
+                                               struct Int2DdsParticipantQos **qos_out);
+
+/**
  * Delete a DomainParticipant
  *
  * # Safety
@@ -1599,6 +1879,19 @@ Int2DdsRet int2dds_datawriter_set_qos(const struct Int2DdsDataWriter *writer,
  */
 Int2DdsRet int2dds_datawriter_get_qos(const struct Int2DdsDataWriter *writer,
                                       struct Int2DdsDataWriterQos **qos_out);
+
+/**
+ * Get the 16-byte RTPS GUID of a DataWriter.
+ *
+ * Writes the writer's endpoint GUID (the same value advertised over SEDP
+ * discovery as `endpoint_guid`) into `guid_out`. Read-only.
+ *
+ * # Safety
+ * - `writer` must be a valid datawriter
+ * - `guid_out` must be a valid pointer to a 16-byte buffer
+ */
+Int2DdsRet int2dds_datawriter_get_guid(const struct Int2DdsDataWriter *writer,
+                                       uint8_t (*guid_out)[16]);
 
 /**
  * Delete a Publisher
@@ -1758,6 +2051,16 @@ Int2DdsRet int2dds_datawriter_get_offered_incompatible_qos_status(const struct I
                                                                   struct Int2DdsOfferedIncompatibleQosStatus *status_out);
 
 /**
+ * Get offered incompatible type status for a DataWriter
+ *
+ * # Safety
+ * - `writer` must be a valid datawriter
+ * - `status_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_datawriter_get_offered_incompatible_type_status(const struct Int2DdsDataWriter *writer,
+                                                                   struct Int2DdsOfferedIncompatibleTypeStatus *status_out);
+
+/**
  * Delete all entities contained by a publisher
  *
  * This operation deletes all DataWriter objects contained by this Publisher.
@@ -1790,6 +2093,20 @@ Int2DdsRet int2dds_write_serialized(const struct Int2DdsDataWriter *writer,
                                     uintptr_t data_len,
                                     const uint8_t *key,
                                     uintptr_t key_len);
+
+Int2DdsRet int2dds_prepare_serialized_write(const struct Int2DdsDataWriter *writer,
+                                            uintptr_t capacity,
+                                            uint8_t **data_out,
+                                            uintptr_t *capacity_out,
+                                            struct Int2DdsSerializedWriteLoan **loan_out);
+
+Int2DdsRet int2dds_commit_serialized_write(const struct Int2DdsDataWriter *writer,
+                                           struct Int2DdsSerializedWriteLoan *loan,
+                                           uintptr_t actual_size,
+                                           const uint8_t *key,
+                                           uintptr_t key_len);
+
+Int2DdsRet int2dds_abort_serialized_write(struct Int2DdsSerializedWriteLoan *loan);
 
 /**
  * Write pre-serialized data with an explicit source timestamp.
@@ -2670,6 +2987,26 @@ Int2DdsRet int2dds_datawriter_get_statuscondition(const struct Int2DdsDataWriter
                                                   struct Int2DdsStatusCondition **condition_out);
 
 /**
+ * Get the current status change bitmask from a DataReader.
+ *
+ * # Safety
+ * - `reader` must be a valid datareader
+ * - `mask_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_datareader_get_status_changes(const struct Int2DdsDataReader *reader,
+                                                 uint32_t *mask_out);
+
+/**
+ * Get the current status change bitmask from a DataWriter.
+ *
+ * # Safety
+ * - `writer` must be a valid datawriter
+ * - `mask_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_datawriter_get_status_changes(const struct Int2DdsDataWriter *writer,
+                                                 uint32_t *mask_out);
+
+/**
  * Set the enabled statuses for a StatusCondition
  *
  * Only the statuses in the mask will trigger the condition.
@@ -2934,6 +3271,30 @@ Int2DdsRet int2dds_datareader_get_qos(const struct Int2DdsDataReader *reader,
                                       struct Int2DdsDataReaderQos **qos_out);
 
 /**
+ * Get the 16-byte RTPS GUID of a DataReader.
+ *
+ * Writes the reader's endpoint GUID (the same value advertised over SEDP
+ * discovery as `endpoint_guid`) into `guid_out`. Read-only.
+ *
+ * # Safety
+ * - `reader` must be a valid datareader
+ * - `guid_out` must be a valid pointer to a 16-byte buffer
+ */
+Int2DdsRet int2dds_datareader_get_guid(const struct Int2DdsDataReader *reader,
+                                       uint8_t (*guid_out)[16]);
+
+/**
+ * Check whether a DataReader currently has any cached samples.
+ *
+ * This is a level-triggered readiness check over the local reader cache.
+ *
+ * # Safety
+ * - `reader` must be a valid datareader
+ * - `has_data_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_datareader_has_data(const struct Int2DdsDataReader *reader, bool *has_data_out);
+
+/**
  * Delete a DataReader
  *
  * # Safety
@@ -3007,6 +3368,16 @@ Int2DdsRet int2dds_datareader_get_requested_incompatible_qos_status(const struct
                                                                     struct Int2DdsRequestedIncompatibleQosStatus *status_out);
 
 /**
+ * Get requested incompatible type status for a DataReader
+ *
+ * # Safety
+ * - `reader` must be a valid datareader
+ * - `status_out` must be a valid pointer
+ */
+Int2DdsRet int2dds_datareader_get_requested_incompatible_type_status(const struct Int2DdsDataReader *reader,
+                                                                     struct Int2DdsRequestedIncompatibleTypeStatus *status_out);
+
+/**
  * Delete all entities contained by a subscriber
  *
  * This operation deletes all DataReader objects contained by this Subscriber.
@@ -3045,6 +3416,33 @@ Int2DdsRet int2dds_take_serialized(const struct Int2DdsDataReader *reader,
                                    uintptr_t buffer_capacity,
                                    uintptr_t *actual_size_out,
                                    bool *valid_data_out);
+
+/**
+ * Take pre-serialized data and loan the returned byte slice to the caller.
+ *
+ * The returned `data_out` pointer remains valid until `loan_out` is passed to
+ * `int2dds_return_serialized_loan`. This avoids copying the payload into a
+ * caller-owned buffer for consumers that immediately deserialize the bytes.
+ *
+ * # Safety
+ * - `reader` must be a valid datareader
+ * - `data_out`, `actual_size_out`, `valid_data_out`, and `loan_out` must be valid pointers
+ * - if `*loan_out` is non-null, the caller must return it exactly once
+ */
+Int2DdsRet int2dds_take_serialized_loaned(const struct Int2DdsDataReader *reader,
+                                          const uint8_t **data_out,
+                                          uintptr_t *actual_size_out,
+                                          bool *valid_data_out,
+                                          struct Int2DdsSerializedLoan **loan_out);
+
+/**
+ * Return a serialized data loan produced by `int2dds_take_serialized_loaned`.
+ *
+ * # Safety
+ * - `loan` must be null or a pointer returned by `int2dds_take_serialized_loaned`
+ * - `loan` must not be used after this call
+ */
+Int2DdsRet int2dds_return_serialized_loan(struct Int2DdsSerializedLoan *loan);
 
 /**
  * Read pre-serialized data from a DataReader without removing from cache.
@@ -3398,6 +3796,28 @@ Int2DdsRet int2dds_create_contentfilteredtopic(const struct Int2DdsParticipant *
 Int2DdsRet int2dds_delete_contentfilteredtopic(struct Int2DdsContentFilteredTopic *cft);
 
 /**
+ * Update the expression parameters of an existing ContentFilteredTopic
+ *
+ * This updates only the parameter values for the current filter expression.
+ *
+ * # Safety
+ * - `cft` must be a valid ContentFilteredTopic created by `int2dds_create_contentfilteredtopic`
+ * - `expression_parameters` must be a valid array of null-terminated C strings, or null if count is 0
+ * - `expression_parameters_count` is the number of parameters
+ */
+Int2DdsRet int2dds_contentfilteredtopic_set_expression_parameters(struct Int2DdsContentFilteredTopic *cft,
+                                                                  const char *const *expression_parameters,
+                                                                  uintptr_t expression_parameters_count);
+
+Int2DdsRet int2dds_contentfilteredtopic_set_filter_expression(struct Int2DdsContentFilteredTopic *cft,
+                                                              const char *filter_expression,
+                                                              const char *const *expression_parameters,
+                                                              uintptr_t expression_parameters_count);
+
+Int2DdsRet int2dds_contentfilteredtopic_set_enabled(struct Int2DdsContentFilteredTopic *cft,
+                                                    bool enabled);
+
+/**
  * Create a Topic with key field metadata for compute_key() support.
  *
  * Same as int2dds_create_topic_keyed but additionally accepts key field
@@ -3526,6 +3946,19 @@ Int2DdsRet int2dds_waitset_new(struct Int2DdsWaitSet **waitset_out);
  * - INT2DDS_RET_ERROR for other errors
  */
 Int2DdsRet int2dds_waitset_wait(const struct Int2DdsWaitSet *waitset, int64_t timeout_ms);
+
+/**
+ * Wait for conditions to be triggered, with nanosecond timeout resolution.
+ *
+ * Identical to `int2dds_waitset_wait` but the timeout is given in nanoseconds so
+ * sub-millisecond waits are honored. Additive: the millisecond entry point is
+ * unchanged.
+ *
+ * # Safety
+ * - `waitset` must be a valid waitset
+ * - `timeout_ns` is the timeout in nanoseconds, or -1 for infinite
+ */
+Int2DdsRet int2dds_waitset_wait_ns(const struct Int2DdsWaitSet *waitset, int64_t timeout_ns);
 
 /**
  * Wait for conditions to be triggered and return the triggered conditions
