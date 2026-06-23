@@ -814,10 +814,9 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                 Some(timestamp.into()),
                 Box::new(move |guid, seq| {
                     on_identity_assigned(data, guid, seq);
-                    type_support
-                        .serialize(data as &dyn Any, Some(&format))
-                        .unwrap_or_default()
-                        .to_vec()
+                    let mut buf = Vec::new();
+                    let _ = type_support.serialize_into(data as &dyn Any, &mut buf, Some(&format));
+                    buf
                 }),
             );
             seq_num = change.sequence_number();
