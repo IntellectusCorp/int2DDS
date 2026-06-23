@@ -4,28 +4,29 @@ This document describes the environment variables available in int2dds.
 
 ## Environment Variables Summary
 
-| Environment Variable                 | CLI Argument                           | Description                                | Default                 |
-| ------------------------------------ | -------------------------------------- | ------------------------------------------ | ----------------------- |
-| `INT2DDS_TRANSPORT`                  | `--int2dds-transport`                  | Transport protocol (udp, tcp, hybrid, shm) | udp                     |
-| `INT2DDS_DISCOVERY_MODE`             | `--int2dds-discovery-mode`             | Discovery mode (udp, tcp, hybrid)          | udp                     |
-| `INT2DDS_LOG_TYPE`                   | `--int2dds-log-type`                   | Log output type (console, file, all, none) | none                    |
-| `INT2DDS_CONSOLE_LOG_LEVEL`          | `--int2dds-console-log-level`          | Console log level                          | info                    |
-| `INT2DDS_FILE_LOG_LEVEL`             | `--int2dds-file-log-level`             | File log level                             | info                    |
-| `INT2DDS_NETWORK_INTERFACE`          | `--int2dds-network-interface`          | Network interface name                     | auto                    |
-| `INT2DDS_NETWORK_IP`                 | `--int2dds-network-ip`                 | Network IP address                         | auto                    |
-| `INT2DDS_USE_LOOPBACK_INTERFACE`     | `--int2dds-use-loopback-interface`     | Enable loopback interface                  | false                   |
-| `INT2DDS_UDP_SOCKET_BUFFER`          | `--int2dds-udp-socket-buffer`          | UDP socket buffer size (bytes)             | OS default              |
-| `INT2DDS_FRAGMENT_SIZE`              | `--int2dds-fragment-size`              | Writer fragment size in bytes (1-65000)    | 65000                   |
-| `INT2DDS_MULTICAST_TTL`              | `--int2dds-multicast-ttl`              | IPv4 multicast TTL fallback (0-255)        | 1                       |
-| `INT2DDS_EXTENDED_DISCOVERY`         | `--int2dds-extended-discovery`         | Enable extended discovery                  | false                   |
-| `INT2DDS_INITIAL_PEERS`              | `--int2dds-initial-peers`              | Initial peer list                          | none                    |
-| `INT2DDS_THREAD_MONITORING`          | `--int2dds-thread-monitoring`          | Enable thread monitoring                   | false                   |
-| `INT2DDS_THREAD_MONITORING_LOG_PATH` | `--int2dds-thread-monitoring-log-path` | Thread monitoring log path                 | ./thread_monitoring.log |
-| `INT2DDS_FUNCTION_TIMING`            | `--int2dds-function-timing`            | Enable function timing                     | false                   |
-| `INT2DDS_FUNCTION_TIMING_LOG_PATH`   | `--int2dds-function-timing-log-path`   | Function timing log path                   | ./function_timing.log   |
-| `INT2DDS_EXTERNAL_ADDRESS`           | `--int2dds-external-address`           | Public IPv4 advertised in SPDP (NAT/WAN)   | none                    |
-| `INT2DDS_META_PORT`                  | `--int2dds-meta-port`                  | Pinned metatraffic unicast port            | RTPS standard           |
-| `INT2DDS_USER_PORT`                  | `--int2dds-user-port`                  | Pinned user-traffic unicast port           | RTPS standard           |
+| Environment Variable                 | Description                                | Default                 |
+| ------------------------------------ | ------------------------------------------ | ----------------------- |
+| `INT2DDS_TRANSPORT`                  | Transport protocol (udp, tcp, hybrid, shm) | udp                     |
+| `INT2DDS_DISCOVERY_MODE`             | Discovery mode (udp, tcp, hybrid)          | udp                     |
+| `INT2DDS_LOG_TYPE`                   | Log output type (console, file, all, none) | none                    |
+| `INT2DDS_CONSOLE_LOG_LEVEL`          | Console log level                          | info                    |
+| `INT2DDS_FILE_LOG_LEVEL`             | File log level                             | info                    |
+| `INT2DDS_NETWORK_INTERFACE`          | Network interface name                     | auto                    |
+| `INT2DDS_NETWORK_IP`                 | Network IP address                         | auto                    |
+| `INT2DDS_USE_LOOPBACK_INTERFACE`     | Enable loopback interface                  | false                   |
+| `INT2DDS_UDP_SOCKET_BUFFER`          | UDP socket buffer size (bytes)             | OS default              |
+| `INT2DDS_SHM_BUFFER_SIZE`            | Shared-memory ring buffer size (bytes)     | 1048576 (1MB)           |
+| `INT2DDS_FRAGMENT_SIZE`              | Writer fragment size in bytes (1-65000)    | 65000                   |
+| `INT2DDS_MULTICAST_TTL`              | IPv4 multicast TTL fallback (0-255)        | 1                       |
+| `INT2DDS_EXTENDED_DISCOVERY`         | Enable extended discovery                  | false                   |
+| `INT2DDS_INITIAL_PEERS`              | Initial peer list                          | none                    |
+| `INT2DDS_THREAD_MONITORING`          | Enable thread monitoring                   | false                   |
+| `INT2DDS_THREAD_MONITORING_LOG_PATH` | Thread monitoring log path                 | ./thread_monitoring.log |
+| `INT2DDS_FUNCTION_TIMING`            | Enable function timing                     | false                   |
+| `INT2DDS_FUNCTION_TIMING_LOG_PATH`   | Function timing log path                   | ./function_timing.log   |
+| `INT2DDS_EXTERNAL_ADDRESS`           | Public IPv4 advertised in SPDP (NAT/WAN)   | none                    |
+| `INT2DDS_META_PORT`                  | Pinned metatraffic unicast port            | RTPS standard           |
+| `INT2DDS_USER_PORT`                  | Pinned user-traffic unicast port           | RTPS standard           |
 
 ---
 
@@ -258,6 +259,27 @@ export INT2DDS_UDP_SOCKET_BUFFER=1048576
 cargo run --example hello_world_pub
 ```
 
+### INT2DDS_SHM_BUFFER_SIZE
+
+Sets the shared-memory transport's ring buffer size in bytes. Only applies when
+the SHM transport is in use. Default: 1048576 (1MB).
+
+#### Configuration
+
+```powershell
+# Windows PowerShell
+$env:INT2DDS_SHM_BUFFER_SIZE = "2097152"  # 2MB
+
+cargo run --example hello_world_pub
+```
+
+```bash
+# Linux/macOS
+export INT2DDS_SHM_BUFFER_SIZE=2097152
+
+cargo run --example hello_world_pub
+```
+
 ### INT2DDS_FRAGMENT_SIZE
 
 Sets the writer fragment size in bytes. Samples larger than this are split into
@@ -295,7 +317,7 @@ Explicit code or JSON-profile QoS settings always win over this fallback.
 #### Resolution order
 
 1. `property.set_multicast_ttl(N)` (code) / JSON profile entry
-2. `INT2DDS_MULTICAST_TTL` env var (or `--int2dds-multicast-ttl` CLI flag)
+2. `INT2DDS_MULTICAST_TTL` env var
 3. Default `1`
 
 #### Configuration
