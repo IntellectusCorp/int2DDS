@@ -155,6 +155,21 @@ pub trait TypeSupport: Send + Sync + 'static {
         let body = if payload.len() >= 4 { &payload[4..] } else { payload };
         self.deserialize_key(body)
     }
+
+    // Encode the key as a wire serializedKey (K-flag SerializedPayload, with a
+    // 4-byte encapsulation header) in the given representation. Default emits XCDR1
+    // CDR_BE; generated impls override to honor XCDR2.
+    fn serialize_key_payload(
+        &self,
+        data: &dyn Any,
+        _format: &SerializationFormat,
+    ) -> DdsResult<SerializedData> {
+        let key = self.serialize_key(data)?;
+        let mut payload = Vec::with_capacity(key.len() + 4);
+        payload.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // CDR_BE, no options
+        payload.extend_from_slice(&key);
+        Ok(std::sync::Arc::from(payload))
+    }
     fn compute_key(&self, data: &dyn Any) -> InstanceHandle;
     fn is_compute_key_provided(&self) -> bool;
     fn get_extensibility_kind(&self) -> crate::serialize::xcdr::ExtensibilityKind;
@@ -388,5 +403,37 @@ mod key_payload_tests {
         let decoded = ts.deserialize_key_payload(payload).unwrap();
         let decoded = decoded.downcast_ref::<KeyedShape>().unwrap();
         assert_eq!(decoded.color, "BLUE");
+    }
+
+    #[test]
+    fn serialize_key_payload_xcdr2_appendable_roundtrips() {
+        use crate::serialize::xcdr::ExtensibilityKind;
+        let ts = KeyedShape::get_type_support();
+        let shape = KeyedShape { color: "BLUE".to_string(), x: 7 };
+        let format = SerializationFormat::Xcdr {
+            extensibility_kind: ExtensibilityKind::Appendable,
+            use_delimiters: true,
+        };
+
+        let payload = ts.serialize_key_payload(&shape as &dyn Any, &format).unwrap();
+        // Appendable XCDR2 -> DELIMITED_CDR2_LE encapsulation id (0x0009).
+        assert_eq!(payload[1], 0x09);
+
+        let decoded = ts.deserialize_key_payload(&payload).unwrap();
+        assert_eq!(decoded.downcast_ref::<KeyedShape>().unwrap().color, "BLUE");
+    }
+
+    #[test]
+    fn serialize_key_payload_xcdr1_is_cdr_be() {
+        let ts = KeyedShape::get_type_support();
+        let shape = KeyedShape { color: "BLUE".to_string(), x: 7 };
+
+        let payload =
+            ts.serialize_key_payload(&shape as &dyn Any, &SerializationFormat::Cdr).unwrap();
+        // XCDR1 -> CDR_BE encapsulation header (0x0000).
+        assert_eq!(&payload[..2], &[0x00, 0x00]);
+
+        let decoded = ts.deserialize_key_payload(&payload).unwrap();
+        assert_eq!(decoded.downcast_ref::<KeyedShape>().unwrap().color, "BLUE");
     }
 }

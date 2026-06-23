@@ -125,6 +125,55 @@ fn generate_key_impls_from_fields(
                 )))
             }
         }
+
+        fn serialize_key_payload(
+            &self,
+            data: &dyn std::any::Any,
+            format: &#crate_path::dcps::topic::type_support::SerializationFormat,
+        ) -> #crate_path::dcps::core::error::DdsResult<#crate_path::rtps::common::types::SerializedData> {
+            use #crate_path::dcps::topic::type_support::{SerializationFormat, TypeSupport};
+            use #crate_path::serialize::xcdr::{ExtensibilityKind, Xcdr2Serializer, XcdrSerialize};
+            use #crate_path::serialize::BufferManager;
+
+            match format {
+                // XCDR1 CDR_BE: header + headerless big-endian key (KeyHash format).
+                SerializationFormat::Cdr => {
+                    let key = self.serialize_key(data)?;
+                    let mut payload = Vec::with_capacity(key.len() + 4);
+                    payload.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+                    payload.extend_from_slice(&key);
+                    Ok(std::sync::Arc::from(payload))
+                }
+                // XCDR2: PLAIN_CDR2 (Final) or DELIMITED_CDR2 (Appendable/Mutable) key members.
+                SerializationFormat::Xcdr { extensibility_kind, .. } => {
+                    let typed_data = data.downcast_ref::<#full_type>().ok_or_else(|| {
+                        #crate_path::dcps::core::error::DdsError::Error(
+                            "Type mismatch for key payload serialization".to_string(),
+                        )
+                    })?;
+                    let mut serializer = Xcdr2Serializer::with_capacity(true, *extensibility_kind, 64);
+                    serializer.write_encapsulation_header()
+                        .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+                    let dheader_pos = if matches!(extensibility_kind, ExtensibilityKind::Final) {
+                        None
+                    } else {
+                        Some(serializer.begin_struct()
+                            .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?)
+                    };
+                    #(
+                        XcdrSerialize::serialize_xcdr(&typed_data.#key_fields, &mut serializer)
+                            .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(
+                                format!("Failed to serialize field {}: {}", stringify!(#key_fields), e)
+                            ))?;
+                    )*
+                    if let Some(size_pos) = dheader_pos {
+                        serializer.end_struct(size_pos)
+                            .map_err(|e| #crate_path::dcps::core::error::DdsError::Error(e.to_string()))?;
+                    }
+                    Ok(std::sync::Arc::from(serializer.into_bytes().into_boxed_slice()))
+                }
+            }
+        }
     };
 
     let deserialize_key_impl = quote! {
