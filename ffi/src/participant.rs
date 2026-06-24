@@ -147,6 +147,30 @@ pub unsafe extern "C" fn int2dds_create_participant_with_qos(
     INT2DDS_RET_OK
 }
 
+/// Get the resolved default DomainParticipant QoS (registered default ->
+/// configured default profile -> spec default), so callers can modify it (e.g.
+/// set user_data) and pass it to `int2dds_create_participant_with_qos` without
+/// losing the configured transport/discovery defaults that the bare
+/// `int2dds_create_participant` resolution chain applies.
+///
+/// # Safety
+/// - `qos_out` must be a valid pointer to a null pointer
+/// - The returned QoS must be freed with `int2dds_participant_qos_destroy`
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_get_default_participant_qos(
+    _factory: *const Int2DdsParticipantFactory,
+    qos_out: *mut *mut Int2DdsParticipantQos,
+) -> Int2DdsRet {
+    check_null!(qos_out);
+
+    let factory = DomainParticipantFactory::get_instance();
+    let qos = ffi_try!(factory.get_default_participant_qos());
+    let handle = Box::new(Int2DdsParticipantQos { inner: qos });
+    *qos_out = Box::into_raw(handle);
+
+    INT2DDS_RET_OK
+}
+
 /// Delete a DomainParticipant
 ///
 /// # Safety
