@@ -424,6 +424,28 @@ mod key_payload_tests {
     }
 
     #[test]
+    fn raw_key_transcode_matches_typed_xcdr2_wire() {
+        // The raw-bytes dispose path has no typed value, so it transcodes the stored
+        // big-endian key: deserialize_key -> serialize_key_payload. The result must be
+        // byte-identical to the typed path that serializes the value directly.
+        use crate::serialize::xcdr::ExtensibilityKind;
+        let ts = KeyedShape::get_type_support();
+        let shape = KeyedShape { color: "BLUE".to_string(), x: 7 };
+        let format = SerializationFormat::Xcdr {
+            extensibility_kind: ExtensibilityKind::Appendable,
+            use_delimiters: true,
+        };
+
+        let typed_wire = ts.serialize_key_payload(&shape as &dyn Any, &format).unwrap();
+
+        let be_key = ts.serialize_key(&shape as &dyn Any).unwrap();
+        let value = ts.deserialize_key(&be_key).unwrap();
+        let transcoded_wire = ts.serialize_key_payload(&*value, &format).unwrap();
+
+        assert_eq!(&*typed_wire, &*transcoded_wire);
+    }
+
+    #[test]
     fn serialize_key_payload_xcdr1_is_cdr_be() {
         let ts = KeyedShape::get_type_support();
         let shape = KeyedShape { color: "BLUE".to_string(), x: 7 };
