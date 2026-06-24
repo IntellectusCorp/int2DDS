@@ -536,8 +536,9 @@ impl<Foo: 'static + Clone + Debug> UpdateStatus for DataReader<Foo> {
                     )
                 ) {
                     if let Ok(datareader_cache) = self.datareader_cache.lock() {
-                        datareader_cache.remove_writer_from_owner_candidates(
+                        datareader_cache.revoke_writer_ownership(
                             info.last_publication_handle().to_guid(),
+                            None,
                             true,
                             true,
                         )?;
