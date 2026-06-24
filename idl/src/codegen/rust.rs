@@ -118,8 +118,8 @@ impl<'a> RustGen<'a> {
     fn emit_enum(&mut self, e: &ResolvedEnum) {
         let rust_name = naming::to_pascal_case(&e.name);
         self.line("#[derive(DdsType)]");
-        // Preserve original IDL type name when it differs from PascalCase Rust name
-        if e.name != rust_name {
+        // Preserve the registered DDS type name when it differs from the Rust name
+        if e.qualified_name != rust_name {
             self.line(&format!("#[dds_type(type_name = \"{}\")]", e.qualified_name));
         }
         self.line("#[repr(i32)]");
@@ -137,7 +137,11 @@ impl<'a> RustGen<'a> {
     fn emit_bitmask(&mut self, b: &ResolvedBitmask) {
         let rust_name = naming::to_pascal_case(&b.name);
         self.line("#[derive(DdsType)]");
-        self.line(&format!("#[dds_type(bitmask, bit_bound = {})]", b.bit_bound));
+        let mut attrs = format!("bitmask, bit_bound = {}", b.bit_bound);
+        if b.qualified_name != rust_name {
+            attrs.push_str(&format!(", type_name = \"{}\"", b.qualified_name));
+        }
+        self.line(&format!("#[dds_type({})]", attrs));
         self.line(&format!("pub enum {} {{", rust_name));
         self.indent += 1;
         for flag in &b.flags {
@@ -155,7 +159,11 @@ impl<'a> RustGen<'a> {
     fn emit_bitset(&mut self, b: &ResolvedBitset) {
         let rust_name = naming::to_pascal_case(&b.name);
         self.line("#[derive(DdsType)]");
-        self.line("#[dds_type(bitset)]");
+        if b.qualified_name != rust_name {
+            self.line(&format!("#[dds_type(bitset, type_name = \"{}\")]", b.qualified_name));
+        } else {
+            self.line("#[dds_type(bitset)]");
+        }
         self.line(&format!("pub struct {} {{", rust_name));
         self.indent += 1;
         for f in &b.fields {
@@ -172,6 +180,9 @@ impl<'a> RustGen<'a> {
         let rust_name = naming::to_pascal_case(&u.name);
 
         self.line("#[derive(DdsType)]");
+        if u.qualified_name != rust_name {
+            self.line(&format!("#[dds_type(type_name = \"{}\")]", u.qualified_name));
+        }
 
         // Determine repr type from discriminant
         let repr = self.discriminant_repr(&u.discriminant_type);
@@ -260,8 +271,9 @@ impl<'a> RustGen<'a> {
         if self.opts.crate_path != "int2dds" {
             type_attrs.push(format!("crate_path = \"{}\"", self.opts.crate_path));
         }
-        // Preserve original IDL type name when it differs from PascalCase Rust name
-        if s.name != rust_name {
+        // Preserve the registered DDS type name when it differs from the Rust name
+        // (case conversion, module scope, or ROS2 mangling)
+        if s.qualified_name != rust_name {
             type_attrs.push(format!("type_name = \"{}\"", s.qualified_name));
         }
         match s.extensibility {

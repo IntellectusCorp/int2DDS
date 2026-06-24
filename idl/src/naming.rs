@@ -82,6 +82,41 @@ pub fn to_include_guard(filename: &str) -> String {
     stem.replace('.', "_").to_uppercase()
 }
 
+/// Mangle a qualified type name to the ROS2-over-DDS naming convention.
+/// `pkg::msg::Type` -> `pkg::msg::dds_::Type_` (scope taken from the name itself)
+/// Flat `Type` with `flat_scope` "pkg::msg" -> `pkg::msg::dds_::Type_`
+/// Flat `Type` with no `flat_scope` -> `Type`.
+pub fn ros2_type_name(qualified_name: &str, flat_scope: Option<&str>) -> String {
+    if let Some(idx) = qualified_name.rfind("::") {
+        let scope = &qualified_name[..idx];
+        let name = &qualified_name[idx + 2..];
+        format!("{}::dds_::{}_", scope, name)
+    } else if let Some(scope) = flat_scope {
+        format!("{}::dds_::{}_", scope, qualified_name)
+    } else {
+        qualified_name.to_string()
+    }
+}
+
+/// Determine the ROS2 scope (`package::kind`) to apply to flat, module-less IDL.
+/// An explicit package wins (defaulting the interface kind to `msg`). Otherwise the
+/// scope is inferred from a ROS2-standard input path `<package>/{msg,srv,action}/<file>.idl`.
+pub fn ros2_flat_scope(input_file: &str, explicit_package: Option<&str>) -> Option<String> {
+    if let Some(pkg) = explicit_package {
+        return Some(format!("{}::msg", pkg));
+    }
+    // Inspect only the trailing path segments: <package>/<kind>/<file>.idl
+    let mut rev = input_file.rsplit(['/', '\\']).filter(|s| !s.is_empty());
+    let _file = rev.next()?;
+    let kind = rev.next()?;
+    let package = rev.next()?;
+    if matches!(kind, "msg" | "srv" | "action") {
+        Some(format!("{}::{}", package, kind))
+    } else {
+        None
+    }
+}
+
 use crate::keywords;
 
 /// Target language for keyword escaping.
@@ -149,6 +184,39 @@ mod tests {
     #[test]
     fn test_include_guard() {
         assert_eq!(to_include_guard("hello_world.h"), "HELLO_WORLD_H");
+    }
+
+    #[test]
+    fn test_ros2_type_name() {
+        // Scoped name: insert dds_ before the last segment, append _
+        assert_eq!(ros2_type_name("pkg::msg::Type", None), "pkg::msg::dds_::Type_");
+        assert_eq!(ros2_type_name("a::b::c::Foo", None), "a::b::c::dds_::Foo_");
+        // Flat name with a flat scope
+        assert_eq!(ros2_type_name("Type", Some("my_pkg::msg")), "my_pkg::msg::dds_::Type_");
+        assert_eq!(ros2_type_name("Type", Some("my_pkg::srv")), "my_pkg::srv::dds_::Type_");
+        // Flat name without scope: unchanged
+        assert_eq!(ros2_type_name("Type", None), "Type");
+    }
+
+    #[test]
+    fn test_ros2_flat_scope() {
+        // Explicit package -> defaults interface kind to msg
+        assert_eq!(
+            ros2_flat_scope("HelloWorld.idl", Some("my_pkg")).as_deref(),
+            Some("my_pkg::msg")
+        );
+        // Inferred from ROS2-standard layout
+        assert_eq!(
+            ros2_flat_scope("a/b/my_pkg/msg/HelloWorld.idl", None).as_deref(),
+            Some("my_pkg::msg")
+        );
+        assert_eq!(
+            ros2_flat_scope("robot_msgs/srv/AddTwo.idl", None).as_deref(),
+            Some("robot_msgs::srv")
+        );
+        assert_eq!(ros2_flat_scope("pkg\\action\\Fib.idl", None).as_deref(), Some("pkg::action"));
+        // No package and non-standard path -> none
+        assert_eq!(ros2_flat_scope("input/HelloWorld.idl", None), None);
     }
 
     // ---- Keyword escaping tests ----
