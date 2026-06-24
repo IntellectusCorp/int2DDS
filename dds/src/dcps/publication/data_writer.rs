@@ -1465,6 +1465,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         status_guard.total_count_change = 0;
         Ok(result)
     }
+    #[allow(dead_code)]
     fn take_offered_incompatible_type_status(&self) -> DdsResult<OfferedIncompatibleTypeStatus> {
         let mut status_guard = self
             .offered_incompatible_type_status
@@ -1598,7 +1599,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
 
     fn handle_offered_incompatible_type_status(
         &self,
-        info: Arc<OfferedIncompatibleTypeStatus>,
+        _info: Arc<OfferedIncompatibleTypeStatus>,
     ) -> DdsResult<()> {
         {
             let mut status_guard = self

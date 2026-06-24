@@ -244,7 +244,7 @@ mod tests {
 
         std::thread::sleep(Duration::from_secs(5));
 
-        let mut condition = reader.get_statuscondition().unwrap();
+        let condition = reader.get_statuscondition().unwrap();
         condition.set_enabled_statuses(StatusKind::SUBSCRIPTION_MATCHED).unwrap();
         println!("condition: {:?}", condition);
 
