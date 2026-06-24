@@ -13,7 +13,6 @@
 //! The enabled statuses determine which status changes trigger the condition.
 //! Use the `INT2DDS_STATUS_*` constants to construct status masks.
 use int2dds::infrastructure::status::StatusMask;
-use std::sync::Mutex;
 
 use super::{error::*, types::*};
 
@@ -21,6 +20,8 @@ use super::{error::*, types::*};
 pub const INT2DDS_STATUS_INCONSISTENT_TOPIC: u32 = 1 << 0;
 pub const INT2DDS_STATUS_OFFERED_DEADLINE_MISSED: u32 = 1 << 1;
 pub const INT2DDS_STATUS_REQUESTED_DEADLINE_MISSED: u32 = 1 << 2;
+pub const INT2DDS_STATUS_OFFERED_INCOMPATIBLE_TYPE: u32 = 1 << 3;
+pub const INT2DDS_STATUS_REQUESTED_INCOMPATIBLE_TYPE: u32 = 1 << 4;
 pub const INT2DDS_STATUS_OFFERED_INCOMPATIBLE_QOS: u32 = 1 << 5;
 pub const INT2DDS_STATUS_REQUESTED_INCOMPATIBLE_QOS: u32 = 1 << 6;
 pub const INT2DDS_STATUS_SAMPLE_LOST: u32 = 1 << 7;
@@ -47,7 +48,6 @@ pub unsafe extern "C" fn int2dds_datareader_get_statuscondition(
     check_null!(condition_out);
 
     let reader_ref = &*reader;
-
     let status_condition = match reader_ref.inner.get_statuscondition() {
         Ok(cond) => cond,
         Err(e) => return dds_error_to_code(&e),
@@ -56,7 +56,7 @@ pub unsafe extern "C" fn int2dds_datareader_get_statuscondition(
     // Clone before .into() to preserve concrete type for set/get_enabled_statuses
     let kind = StatusConditionKind::Reader(status_condition.clone());
     let condition_handle =
-        Box::new(Int2DdsStatusCondition { inner: status_condition.into(), kind: Mutex::new(kind) });
+        Box::new(Int2DdsStatusCondition { inner: status_condition.into(), kind });
     *condition_out = Box::into_raw(condition_handle);
 
     INT2DDS_RET_OK
@@ -86,10 +86,58 @@ pub unsafe extern "C" fn int2dds_datawriter_get_statuscondition(
     // Clone before .into() to preserve concrete type for set/get_enabled_statuses
     let kind = StatusConditionKind::Writer(status_condition.clone());
     let condition_handle =
-        Box::new(Int2DdsStatusCondition { inner: status_condition.into(), kind: Mutex::new(kind) });
+        Box::new(Int2DdsStatusCondition { inner: status_condition.into(), kind });
     *condition_out = Box::into_raw(condition_handle);
 
     INT2DDS_RET_OK
+}
+
+/// Get the current status change bitmask from a DataReader.
+///
+/// # Safety
+/// - `reader` must be a valid datareader
+/// - `mask_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_get_status_changes(
+    reader: *const Int2DdsDataReader,
+    mask_out: *mut u32,
+) -> Int2DdsRet {
+    check_null!(reader);
+    check_null!(mask_out);
+
+    let reader_ref = &*reader;
+
+    match reader_ref.inner.get_status_changes() {
+        Ok(mask) => {
+            *mask_out = mask.bits();
+            INT2DDS_RET_OK
+        }
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
+/// Get the current status change bitmask from a DataWriter.
+///
+/// # Safety
+/// - `writer` must be a valid datawriter
+/// - `mask_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_get_status_changes(
+    writer: *const Int2DdsDataWriter,
+    mask_out: *mut u32,
+) -> Int2DdsRet {
+    check_null!(writer);
+    check_null!(mask_out);
+
+    let writer_ref = &*writer;
+
+    match writer_ref.inner.get_status_changes() {
+        Ok(mask) => {
+            *mask_out = mask.bits();
+            INT2DDS_RET_OK
+        }
+        Err(e) => dds_error_to_code(&e),
+    }
 }
 
 /// Set the enabled statuses for a StatusCondition
@@ -108,14 +156,7 @@ pub unsafe extern "C" fn int2dds_statuscondition_set_enabled_statuses(
 
     let condition_ref = &*condition;
     let status_mask = StatusMask::from_bits_truncate(mask);
-
-    // Access the concrete StatusCondition through the kind field
-    let mut kind = match condition_ref.kind.lock() {
-        Ok(guard) => guard,
-        Err(_) => return INT2DDS_RET_ERROR,
-    };
-
-    let result = match &mut *kind {
+    let result = match &condition_ref.kind {
         StatusConditionKind::Reader(sc) => sc.set_enabled_statuses(status_mask),
         StatusConditionKind::Writer(sc) => sc.set_enabled_statuses(status_mask),
     };
@@ -140,14 +181,7 @@ pub unsafe extern "C" fn int2dds_statuscondition_get_enabled_statuses(
     check_null!(mask_out);
 
     let condition_ref = &*condition;
-
-    // Access the concrete StatusCondition through the kind field
-    let kind = match condition_ref.kind.lock() {
-        Ok(guard) => guard,
-        Err(_) => return INT2DDS_RET_ERROR,
-    };
-
-    let result = match &*kind {
+    let result = match &condition_ref.kind {
         StatusConditionKind::Reader(sc) => sc.get_enabled_statuses(),
         StatusConditionKind::Writer(sc) => sc.get_enabled_statuses(),
     };

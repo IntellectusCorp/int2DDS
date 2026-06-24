@@ -126,6 +126,7 @@ fn validate_endpoint_compatibility<L>(
     requested: &SubscriptionBuiltinTopicData,
     offered: &PublicationBuiltinTopicData,
     update_incompatible_qos: impl Fn(&L, QosPolicyId),
+    update_incompatible_type: impl Fn(&L),
     update_inconsistent_topic: impl Fn(&L),
     who: &'static str, // for log
 ) -> RtpsResult<()> {
@@ -182,6 +183,7 @@ fn validate_endpoint_compatibility<L>(
             offered.type_identifier(),
             requested.type_identifier()
         );
+        update_incompatible_type(local);
         let err = RtpsError::new(
             RtpsErrorCode::QosIncompatible,
             format!("[Type compatibility failed :{}]", who),
@@ -634,6 +636,7 @@ impl SedpLogic {
                 &subscription_builtin_topic_data,
                 &writer.publication_builtin_topic_data()?,
                 |w, pid| w.update_offered_incompatible_qos_status(pid),
+                |w| w.update_offered_incompatible_type_status(),
                 |w| w.update_status(StatusKind::INCONSISTENT_TOPIC, None),
                 "writer->reader",
             ) {
@@ -699,6 +702,7 @@ impl SedpLogic {
             &subscription_builtin_topic_data,
             &writer.publication_builtin_topic_data()?,
             |w, pid| w.update_offered_incompatible_qos_status(pid),
+            |w| w.update_offered_incompatible_type_status(),
             |w| w.update_status(StatusKind::INCONSISTENT_TOPIC, None),
             "writer->reader",
         )?;
@@ -777,6 +781,7 @@ impl SedpLogic {
                 &subscription_builtin_topic_data,
                 &writer.publication_builtin_topic_data()?,
                 |w, pid| w.update_offered_incompatible_qos_status(pid),
+                |w| w.update_offered_incompatible_type_status(),
                 |w| w.update_status(StatusKind::INCONSISTENT_TOPIC, None),
                 "writer->reader",
             ) {
@@ -843,6 +848,7 @@ impl SedpLogic {
             &subscription_builtin_topic_data,
             &writer.publication_builtin_topic_data()?,
             |w, pid| w.update_offered_incompatible_qos_status(pid),
+            |w| w.update_offered_incompatible_type_status(),
             |w| w.update_status(StatusKind::INCONSISTENT_TOPIC, None),
             "writer->reader",
         ) {
@@ -1024,6 +1030,7 @@ impl SedpLogic {
                 &reader.subscription_builtin_topic_data()?,
                 &publication_builtin_topic_data,
                 |r, pid| r.update_requested_incompatible_qos_status(pid),
+                |r| r.update_requested_incompatible_type_status(),
                 |r| r.update_status(StatusKind::INCONSISTENT_TOPIC, None),
                 "reader->writer",
             ) {
@@ -1097,6 +1104,7 @@ impl SedpLogic {
             &reader.subscription_builtin_topic_data()?,
             &publication_builtin_topic_data,
             |r, pid| r.update_requested_incompatible_qos_status(pid),
+            |r| r.update_requested_incompatible_type_status(),
             |r| r.update_status(StatusKind::INCONSISTENT_TOPIC, None),
             "reader->writer",
         )?;
@@ -1111,6 +1119,8 @@ impl SedpLogic {
             reader.get_update_status_callback(),
         );
 
+        reader.matched_writer_add(writer_proxy);
+
         let writer_guid = endpoint_guid;
         if writer_guid.entity_id().entity_kind().is_user_defined() {
             if let Some(wlp_logic) = self.get_upgraded_participant()?.wlp_logic() {
@@ -1121,7 +1131,6 @@ impl SedpLogic {
             }
         }
 
-        reader.matched_writer_add(writer_proxy);
         self.register_preemptive_acknack_timer(
             reader,
             publication_builtin_topic_data.endpoint_guid(),
@@ -1148,6 +1157,7 @@ impl SedpLogic {
                 &reader.subscription_builtin_topic_data()?,
                 &publication_builtin_topic_data,
                 |r, pid| r.update_requested_incompatible_qos_status(pid),
+                |r| r.update_requested_incompatible_type_status(),
                 |r| r.update_status(StatusKind::INCONSISTENT_TOPIC, None),
                 "reader->writer",
             ) {
@@ -1223,6 +1233,7 @@ impl SedpLogic {
             &reader.subscription_builtin_topic_data()?,
             &publication_builtin_topic_data,
             |r, pid| r.update_requested_incompatible_qos_status(pid),
+            |r| r.update_requested_incompatible_type_status(),
             |r| r.update_status(StatusKind::INCONSISTENT_TOPIC, None),
             "reader->writer",
         )?;
@@ -2056,6 +2067,21 @@ impl UnicastMessageProcessor for SedpLogic {
             };
 
             if data.writer_id == EntityId::SEDP_BUILTIN_PUBLICATIONS_WRITER {
+                let is_termination = inline_qos_params
+                    .as_ref()
+                    .and_then(|qos| qos.get_status_info())
+                    .is_some_and(|status| status.disposed() || status.unregistered());
+                if is_termination && payload.is_empty() {
+                    if let Some(terminated_writer_guid) =
+                        inline_qos_params.as_ref().and_then(|qos| qos.get_key_hash())
+                    {
+                        participant.cleanup_remote_writer_by_guid(InstanceHandle::to_guid(
+                            &terminated_writer_guid,
+                        ))?;
+                        return Ok(());
+                    }
+                }
+
                 let writer_data = SEDPMessage::<DiscoveredWriterData>::from_serialized_payload(
                     payload.as_ref(),
                     is_big_endian,
@@ -2075,6 +2101,21 @@ impl UnicastMessageProcessor for SedpLogic {
                     inline_qos_params,
                 );
             } else if data.writer_id == EntityId::SEDP_BUILTIN_SUBSCRIPTIONS_WRITER {
+                let is_termination = inline_qos_params
+                    .as_ref()
+                    .and_then(|qos| qos.get_status_info())
+                    .is_some_and(|status| status.disposed() || status.unregistered());
+                if is_termination && payload.is_empty() {
+                    if let Some(terminated_reader_guid) =
+                        inline_qos_params.as_ref().and_then(|qos| qos.get_key_hash())
+                    {
+                        participant.cleanup_remote_reader_by_guid(InstanceHandle::to_guid(
+                            &terminated_reader_guid,
+                        ))?;
+                        return Ok(());
+                    }
+                }
+
                 let reader_data = SEDPMessage::<DiscoveredReaderData>::from_serialized_payload(
                     payload.as_ref(),
                     is_big_endian,

@@ -33,6 +33,15 @@ pub(crate) struct Data<'a> {
 }
 
 impl<'a> Data<'a> {
+    fn alignment_padding(payload_len: usize) -> u16 {
+        let rem = payload_len % 4;
+        if rem == 0 {
+            0
+        } else {
+            (4 - rem) as u16
+        }
+    }
+
     pub(crate) fn new(reader_id: EntityId, writer_id: EntityId, writer_sn: SequenceNumber) -> Self {
         Self {
             extra_flags: 0,
@@ -59,7 +68,7 @@ impl<'a> Data<'a> {
     }
 
     pub(crate) fn octets_to_next_header(&self) -> u16 {
-        2  /* extra_flags */
+        let payload_len = 2  /* extra_flags */
          + 2  /* octets_to_inline_qos */
          + 4  /* reader_id */
          + 4  /* writer_id */
@@ -70,7 +79,9 @@ impl<'a> Data<'a> {
             },
             None => 0,
          }  /* inline_qos */
-         + self.serialized_data.len() as u16
+         + self.serialized_data.len() as u16;
+
+        payload_len + Self::alignment_padding(payload_len as usize)
     }
 
     /// Set inline QoS parameter list for DATA submessage and calculate size
@@ -223,6 +234,17 @@ impl<C: Context> Writable<C> for Data<'_> {
             writer.write_value(inline_qos_list)?;
         }
         writer.write_bytes(self.serialized_data.as_slice())?;
+        let padding = Self::alignment_padding(
+            2 + 2
+                + 4
+                + 4
+                + 8
+                + self.inline_qos.as_ref().map(|q| q.length() as usize).unwrap_or(0)
+                + self.serialized_data.len(),
+        );
+        if padding > 0 {
+            writer.write_bytes(&vec![0u8; padding as usize])?;
+        }
 
         Ok(())
     }
