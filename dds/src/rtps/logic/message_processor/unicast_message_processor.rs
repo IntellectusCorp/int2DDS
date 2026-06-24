@@ -10,7 +10,7 @@ use crate::rtps::{
         submessage_header::SubmessageHeader,
         submessages::{
             ack_nack::AckNack, data::Data, data_frag::DataFrag, gap::Gap, heartbeat::Heartbeat,
-            nack_frag::NackFrag,
+            heartbeat_frag::HeartbeatFrag, nack_frag::NackFrag,
         },
     },
 };
@@ -48,6 +48,9 @@ pub(crate) trait UnicastMessageProcessor: ParticipantAccessor {
                 }
                 TypedSubmessage::NackFrag(_header, nack_frag) => {
                     self.handle_nackfrag_message(&rtps_header, nack_frag)?;
+                }
+                TypedSubmessage::HeartbeatFrag(_header, heartbeat_frag) => {
+                    self.handle_heartbeatfrag_message(&rtps_header, heartbeat_frag)?;
                 }
                 TypedSubmessage::Gap(_header, gap) => {
                     self.handle_gap_message(&rtps_header, gap)?;
@@ -101,6 +104,15 @@ pub(crate) trait UnicastMessageProcessor: ParticipantAccessor {
         _nack_frag: &NackFrag,
     ) -> RtpsResult<()> {
         trace!("Unsupported message type: NackFrag");
+        Ok(())
+    }
+
+    fn handle_heartbeatfrag_message(
+        &mut self,
+        _rtps_header: &Header,
+        _heartbeat_frag: &HeartbeatFrag,
+    ) -> RtpsResult<()> {
+        trace!("Unsupported message type: HeartbeatFrag");
         Ok(())
     }
 

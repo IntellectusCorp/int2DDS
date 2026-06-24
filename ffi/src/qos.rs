@@ -37,6 +37,31 @@ use int2dds::{
 
 use super::error::*;
 
+/// Convert a nanosecond count to a DDS Duration, treating any value whose
+/// seconds part would overflow i32 (>= 2^31 - 1 seconds, e.g. i64::MAX or a
+/// roundtripped infinite lease) as Duration::infinite(). Negative clamps to zero.
+/// This keeps get->set roundtrips of INFINITE lossless across the ns-based C API;
+/// the previous plain div/mod overflowed i32 and produced a negative duration,
+/// which made local endpoints advertise a broken QoS and reject remote vendors.
+fn ns_to_duration(ns: i64) -> Duration {
+    if ns < 0 {
+        return Duration::zero();
+    }
+    let sec = ns / 1_000_000_000;
+    if sec >= i32::MAX as i64 {
+        return Duration::infinite();
+    }
+    Duration { sec: sec as i32, nanosec: (ns % 1_000_000_000) as u32 }
+}
+
+/// Convert a DDS Duration to nanoseconds, mapping infinite to i64::MAX.
+fn duration_to_ns(d: &Duration) -> i64 {
+    if d.is_infinite() {
+        return i64::MAX;
+    }
+    d.sec as i64 * 1_000_000_000 + d.nanosec as i64
+}
+
 // QoS kinds (matching DDS spec)
 pub const INT2DDS_QOS_RELIABILITY_BEST_EFFORT: i32 = 0;
 pub const INT2DDS_QOS_RELIABILITY_RELIABLE: i32 = 1;
@@ -120,10 +145,7 @@ pub unsafe extern "C" fn int2dds_datawriter_qos_set_reliability(
     };
 
     qos_ref.inner.reliability.kind = reliability_kind;
-    qos_ref.inner.reliability.max_blocking_time = Duration {
-        sec: (max_blocking_time_ns / 1_000_000_000) as i32,
-        nanosec: (max_blocking_time_ns % 1_000_000_000) as u32,
-    };
+    qos_ref.inner.reliability.max_blocking_time = ns_to_duration(max_blocking_time_ns);
 
     INT2DDS_RET_OK
 }
@@ -286,10 +308,7 @@ pub unsafe extern "C" fn int2dds_datawriter_qos_set_lifespan(
     check_null!(qos);
 
     let qos_ref = &mut *qos;
-    qos_ref.inner.lifespan.duration = Duration {
-        sec: (duration_ns / 1_000_000_000) as i32,
-        nanosec: (duration_ns % 1_000_000_000) as u32,
-    };
+    qos_ref.inner.lifespan.duration = ns_to_duration(duration_ns);
 
     INT2DDS_RET_OK
 }
@@ -331,10 +350,7 @@ pub unsafe extern "C" fn int2dds_datawriter_qos_set_latency_budget(
     check_null!(qos);
 
     let qos_ref = &mut *qos;
-    qos_ref.inner.latency_budget.duration = Duration {
-        sec: (duration_ns / 1_000_000_000) as i32,
-        nanosec: (duration_ns % 1_000_000_000) as u32,
-    };
+    qos_ref.inner.latency_budget.duration = ns_to_duration(duration_ns);
 
     INT2DDS_RET_OK
 }
@@ -419,7 +435,7 @@ pub unsafe extern "C" fn int2dds_datawriter_qos_get_reliability(
         ReliabilityQosPolicyKind::Reliable => INT2DDS_QOS_RELIABILITY_RELIABLE,
     };
     let d = &q.inner.reliability.max_blocking_time;
-    *max_blocking_time_ns_out = d.sec as i64 * 1_000_000_000 + d.nanosec as i64;
+    *max_blocking_time_ns_out = duration_to_ns(&d);
     INT2DDS_RET_OK
 }
 
@@ -521,7 +537,7 @@ pub unsafe extern "C" fn int2dds_datawriter_qos_get_lifespan(
     check_null!(qos);
     check_null!(duration_ns_out);
     let d = &(*qos).inner.lifespan.duration;
-    *duration_ns_out = d.sec as i64 * 1_000_000_000 + d.nanosec as i64;
+    *duration_ns_out = duration_to_ns(&d);
     INT2DDS_RET_OK
 }
 
@@ -549,7 +565,7 @@ pub unsafe extern "C" fn int2dds_datawriter_qos_get_deadline(
     check_null!(qos);
     check_null!(period_ns_out);
     let d = &(*qos).inner.deadline.period;
-    *period_ns_out = d.sec as i64 * 1_000_000_000 + d.nanosec as i64;
+    *period_ns_out = duration_to_ns(&d);
     INT2DDS_RET_OK
 }
 
@@ -572,7 +588,7 @@ pub unsafe extern "C" fn int2dds_datawriter_qos_get_liveliness(
         LivelinessQosPolicyKind::ManualByTopic => INT2DDS_QOS_LIVELINESS_MANUAL_BY_TOPIC,
     };
     let d = &q.inner.liveliness.lease_duration;
-    *lease_duration_ns_out = d.sec as i64 * 1_000_000_000 + d.nanosec as i64;
+    *lease_duration_ns_out = duration_to_ns(&d);
     INT2DDS_RET_OK
 }
 
@@ -617,7 +633,7 @@ pub unsafe extern "C" fn int2dds_datawriter_qos_get_latency_budget(
     check_null!(qos);
     check_null!(duration_ns_out);
     let d = &(*qos).inner.latency_budget.duration;
-    *duration_ns_out = d.sec as i64 * 1_000_000_000 + d.nanosec as i64;
+    *duration_ns_out = duration_to_ns(&d);
     INT2DDS_RET_OK
 }
 
@@ -691,10 +707,7 @@ pub unsafe extern "C" fn int2dds_datareader_qos_set_reliability(
     };
 
     qos_ref.inner.reliability.kind = reliability_kind;
-    qos_ref.inner.reliability.max_blocking_time = Duration {
-        sec: (max_blocking_time_ns / 1_000_000_000) as i32,
-        nanosec: (max_blocking_time_ns % 1_000_000_000) as u32,
-    };
+    qos_ref.inner.reliability.max_blocking_time = ns_to_duration(max_blocking_time_ns);
 
     INT2DDS_RET_OK
 }
@@ -865,10 +878,7 @@ pub unsafe extern "C" fn int2dds_datareader_qos_set_time_based_filter(
     check_null!(qos);
 
     let qos_ref = &mut *qos;
-    qos_ref.inner.time_based_filter.minimum_separation = Duration {
-        sec: (minimum_separation_ns / 1_000_000_000) as i32,
-        nanosec: (minimum_separation_ns % 1_000_000_000) as u32,
-    };
+    qos_ref.inner.time_based_filter.minimum_separation = ns_to_duration(minimum_separation_ns);
 
     INT2DDS_RET_OK
 }
@@ -885,10 +895,7 @@ pub unsafe extern "C" fn int2dds_datareader_qos_set_latency_budget(
     check_null!(qos);
 
     let qos_ref = &mut *qos;
-    qos_ref.inner.latency_budget.duration = Duration {
-        sec: (duration_ns / 1_000_000_000) as i32,
-        nanosec: (duration_ns % 1_000_000_000) as u32,
-    };
+    qos_ref.inner.latency_budget.duration = ns_to_duration(duration_ns);
 
     INT2DDS_RET_OK
 }
@@ -932,14 +939,10 @@ pub unsafe extern "C" fn int2dds_datareader_qos_set_reader_data_lifecycle(
     check_null!(qos);
 
     let qos_ref = &mut *qos;
-    qos_ref.inner.reader_data_lifecycle.autopurge_nowriter_samples_delay = Duration {
-        sec: (autopurge_nowriter_ns / 1_000_000_000) as i32,
-        nanosec: (autopurge_nowriter_ns % 1_000_000_000) as u32,
-    };
-    qos_ref.inner.reader_data_lifecycle.autopurge_disposed_samples_delay = Duration {
-        sec: (autopurge_disposed_ns / 1_000_000_000) as i32,
-        nanosec: (autopurge_disposed_ns % 1_000_000_000) as u32,
-    };
+    qos_ref.inner.reader_data_lifecycle.autopurge_nowriter_samples_delay =
+        ns_to_duration(autopurge_nowriter_ns);
+    qos_ref.inner.reader_data_lifecycle.autopurge_disposed_samples_delay =
+        ns_to_duration(autopurge_disposed_ns);
 
     INT2DDS_RET_OK
 }
@@ -963,7 +966,7 @@ pub unsafe extern "C" fn int2dds_datareader_qos_get_reliability(
         ReliabilityQosPolicyKind::Reliable => INT2DDS_QOS_RELIABILITY_RELIABLE,
     };
     let d = &q.inner.reliability.max_blocking_time;
-    *max_blocking_time_ns_out = d.sec as i64 * 1_000_000_000 + d.nanosec as i64;
+    *max_blocking_time_ns_out = duration_to_ns(&d);
     INT2DDS_RET_OK
 }
 
@@ -1059,7 +1062,7 @@ pub unsafe extern "C" fn int2dds_datareader_qos_get_deadline(
     check_null!(qos);
     check_null!(period_ns_out);
     let d = &(*qos).inner.deadline.period;
-    *period_ns_out = d.sec as i64 * 1_000_000_000 + d.nanosec as i64;
+    *period_ns_out = duration_to_ns(&d);
     INT2DDS_RET_OK
 }
 
@@ -1081,7 +1084,7 @@ pub unsafe extern "C" fn int2dds_datareader_qos_get_liveliness(
         LivelinessQosPolicyKind::ManualByTopic => INT2DDS_QOS_LIVELINESS_MANUAL_BY_TOPIC,
     };
     let d = &q.inner.liveliness.lease_duration;
-    *lease_duration_ns_out = d.sec as i64 * 1_000_000_000 + d.nanosec as i64;
+    *lease_duration_ns_out = duration_to_ns(&d);
     INT2DDS_RET_OK
 }
 
@@ -1111,7 +1114,7 @@ pub unsafe extern "C" fn int2dds_datareader_qos_get_latency_budget(
     check_null!(qos);
     check_null!(duration_ns_out);
     let d = &(*qos).inner.latency_budget.duration;
-    *duration_ns_out = d.sec as i64 * 1_000_000_000 + d.nanosec as i64;
+    *duration_ns_out = duration_to_ns(&d);
     INT2DDS_RET_OK
 }
 
@@ -1123,7 +1126,7 @@ pub unsafe extern "C" fn int2dds_datareader_qos_get_time_based_filter(
     check_null!(qos);
     check_null!(min_separation_ns_out);
     let d = &(*qos).inner.time_based_filter.minimum_separation;
-    *min_separation_ns_out = d.sec as i64 * 1_000_000_000 + d.nanosec as i64;
+    *min_separation_ns_out = duration_to_ns(&d);
     INT2DDS_RET_OK
 }
 
@@ -1138,9 +1141,9 @@ pub unsafe extern "C" fn int2dds_datareader_qos_get_reader_data_lifecycle(
     check_null!(autopurge_disposed_ns_out);
     let q = &*qos;
     let d1 = &q.inner.reader_data_lifecycle.autopurge_nowriter_samples_delay;
-    *autopurge_nowriter_ns_out = d1.sec as i64 * 1_000_000_000 + d1.nanosec as i64;
+    *autopurge_nowriter_ns_out = duration_to_ns(&d1);
     let d2 = &q.inner.reader_data_lifecycle.autopurge_disposed_samples_delay;
-    *autopurge_disposed_ns_out = d2.sec as i64 * 1_000_000_000 + d2.nanosec as i64;
+    *autopurge_disposed_ns_out = duration_to_ns(&d2);
     INT2DDS_RET_OK
 }
 
@@ -1202,10 +1205,7 @@ pub unsafe extern "C" fn int2dds_topic_qos_set_reliability(
     };
 
     qos_ref.inner.reliability.kind = reliability_kind;
-    qos_ref.inner.reliability.max_blocking_time = Duration {
-        sec: (max_blocking_time_ns / 1_000_000_000) as i32,
-        nanosec: (max_blocking_time_ns % 1_000_000_000) as u32,
-    };
+    qos_ref.inner.reliability.max_blocking_time = ns_to_duration(max_blocking_time_ns);
 
     INT2DDS_RET_OK
 }
@@ -1276,10 +1276,7 @@ pub unsafe extern "C" fn int2dds_topic_qos_set_deadline(
     check_null!(qos);
 
     let qos_ref = &mut *qos;
-    qos_ref.inner.deadline.period = Duration {
-        sec: (period_ns / 1_000_000_000) as i32,
-        nanosec: (period_ns % 1_000_000_000) as u32,
-    };
+    qos_ref.inner.deadline.period = ns_to_duration(period_ns);
 
     INT2DDS_RET_OK
 }
@@ -1309,10 +1306,7 @@ pub unsafe extern "C" fn int2dds_topic_qos_set_liveliness(
     };
 
     qos_ref.inner.liveliness.kind = liveliness_kind;
-    qos_ref.inner.liveliness.lease_duration = Duration {
-        sec: (lease_duration_ns / 1_000_000_000) as i32,
-        nanosec: (lease_duration_ns % 1_000_000_000) as u32,
-    };
+    qos_ref.inner.liveliness.lease_duration = ns_to_duration(lease_duration_ns);
 
     INT2DDS_RET_OK
 }
@@ -1392,10 +1386,7 @@ pub unsafe extern "C" fn int2dds_topic_qos_set_lifespan(
     check_null!(qos);
 
     let qos_ref = &mut *qos;
-    qos_ref.inner.lifespan.duration = Duration {
-        sec: (duration_ns / 1_000_000_000) as i32,
-        nanosec: (duration_ns % 1_000_000_000) as u32,
-    };
+    qos_ref.inner.lifespan.duration = ns_to_duration(duration_ns);
 
     INT2DDS_RET_OK
 }
@@ -1746,10 +1737,7 @@ pub unsafe extern "C" fn int2dds_datawriter_qos_set_deadline(
     check_null!(qos);
 
     let qos_ref = &mut *qos;
-    qos_ref.inner.deadline.period = Duration {
-        sec: (period_ns / 1_000_000_000) as i32,
-        nanosec: (period_ns % 1_000_000_000) as u32,
-    };
+    qos_ref.inner.deadline.period = ns_to_duration(period_ns);
 
     INT2DDS_RET_OK
 }
@@ -1766,10 +1754,7 @@ pub unsafe extern "C" fn int2dds_datareader_qos_set_deadline(
     check_null!(qos);
 
     let qos_ref = &mut *qos;
-    qos_ref.inner.deadline.period = Duration {
-        sec: (period_ns / 1_000_000_000) as i32,
-        nanosec: (period_ns % 1_000_000_000) as u32,
-    };
+    qos_ref.inner.deadline.period = ns_to_duration(period_ns);
 
     INT2DDS_RET_OK
 }
@@ -1803,10 +1788,7 @@ pub unsafe extern "C" fn int2dds_datawriter_qos_set_liveliness(
     };
 
     qos_ref.inner.liveliness.kind = liveliness_kind;
-    qos_ref.inner.liveliness.lease_duration = Duration {
-        sec: (lease_duration_ns / 1_000_000_000) as i32,
-        nanosec: (lease_duration_ns % 1_000_000_000) as u32,
-    };
+    qos_ref.inner.liveliness.lease_duration = ns_to_duration(lease_duration_ns);
 
     INT2DDS_RET_OK
 }
@@ -1836,10 +1818,7 @@ pub unsafe extern "C" fn int2dds_datareader_qos_set_liveliness(
     };
 
     qos_ref.inner.liveliness.kind = liveliness_kind;
-    qos_ref.inner.liveliness.lease_duration = Duration {
-        sec: (lease_duration_ns / 1_000_000_000) as i32,
-        nanosec: (lease_duration_ns % 1_000_000_000) as u32,
-    };
+    qos_ref.inner.liveliness.lease_duration = ns_to_duration(lease_duration_ns);
 
     INT2DDS_RET_OK
 }

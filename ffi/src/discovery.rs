@@ -6,6 +6,8 @@
 
 use crate::error::*;
 use crate::types::{Int2DdsDataReader, Int2DdsDataWriter, Int2DdsParticipant};
+use std::collections::HashMap;
+use std::time::{Duration as StdDuration, Instant};
 
 use int2dds::common::{
     builtin::topic::{
@@ -15,6 +17,13 @@ use int2dds::common::{
     },
     instance_handle::InstanceHandle,
 };
+use int2dds::core::time::Duration;
+use int2dds::infrastructure::qos_policy::{
+    DurabilityQosPolicyKind, LivelinessQosPolicyKind, ReliabilityQosPolicyKind,
+};
+use int2dds::infrastructure::status::StatusMask;
+use int2dds::infrastructure::wait_set::WaitSet;
+use int2dds::subscription::sample_info::{InstanceStateKind, SampleStateKind, ViewStateKind};
 
 // ============================================================================
 // Opaque builtin topic data types
@@ -32,12 +41,150 @@ pub struct Int2DdsSubscriptionBuiltinTopicData {
     pub(crate) inner: SubscriptionBuiltinTopicData,
 }
 
+pub struct Int2DdsPublicationBuiltinTopicDataSeq {
+    pub(crate) items: Vec<PublicationBuiltinTopicData>,
+}
+
+pub struct Int2DdsSubscriptionBuiltinTopicDataSeq {
+    pub(crate) items: Vec<SubscriptionBuiltinTopicData>,
+}
+
 unsafe impl Send for Int2DdsParticipantBuiltinTopicData {}
 unsafe impl Sync for Int2DdsParticipantBuiltinTopicData {}
 unsafe impl Send for Int2DdsPublicationBuiltinTopicData {}
 unsafe impl Sync for Int2DdsPublicationBuiltinTopicData {}
 unsafe impl Send for Int2DdsSubscriptionBuiltinTopicData {}
 unsafe impl Sync for Int2DdsSubscriptionBuiltinTopicData {}
+unsafe impl Send for Int2DdsPublicationBuiltinTopicDataSeq {}
+unsafe impl Sync for Int2DdsPublicationBuiltinTopicDataSeq {}
+unsafe impl Send for Int2DdsSubscriptionBuiltinTopicDataSeq {}
+unsafe impl Sync for Int2DdsSubscriptionBuiltinTopicDataSeq {}
+
+fn collect_publication_snapshot(
+    participant: &Int2DdsParticipant,
+    timeout_ms: i32,
+) -> Result<Vec<PublicationBuiltinTopicData>, Int2DdsRet> {
+    let builtin_subscriber =
+        participant.inner.get_builtin_subscriber().map_err(|e| dds_error_to_code(&e))?;
+    let publication_reader = builtin_subscriber
+        .lookup_datareader::<PublicationBuiltinTopicData>("DCPSPublication")
+        .map_err(|e| dds_error_to_code(&e))?;
+
+    let mut condition =
+        publication_reader.get_statuscondition().map_err(|e| dds_error_to_code(&e))?.clone();
+    let _ = condition.set_enabled_statuses(StatusMask::DATA_AVAILABLE);
+    let wait_set = WaitSet::new();
+    let _ = wait_set.attach_condition(condition);
+
+    let deadline = if timeout_ms < 0 {
+        None
+    } else {
+        Some(Instant::now() + StdDuration::from_millis(timeout_ms as u64))
+    };
+
+    let mut by_guid: HashMap<_, PublicationBuiltinTopicData> = HashMap::new();
+    loop {
+        let _ = publication_reader.get_status_changes();
+        if let Ok(samples) = publication_reader.read(
+            1000,
+            &[SampleStateKind::ANY_SAMPLE_STATE],
+            &[ViewStateKind::ANY_VIEW_STATE],
+            &[InstanceStateKind::ALIVE_INSTANCE_STATE],
+        ) {
+            for sample in samples.iter() {
+                if let Ok(data) = sample.data() {
+                    by_guid.insert(data.endpoint_guid(), data);
+                }
+            }
+        }
+
+        match deadline {
+            None => {
+                if !by_guid.is_empty() {
+                    break;
+                }
+                let _ = wait_set.wait(Duration { sec: 0, nanosec: 200_000_000 });
+            }
+            Some(deadline) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                let remaining = deadline.saturating_duration_since(now);
+                let wait_ms = remaining.as_millis().min(200) as i32;
+                let _ = wait_set.wait(Duration {
+                    sec: wait_ms / 1000,
+                    nanosec: ((wait_ms % 1000) as u32) * 1_000_000,
+                });
+            }
+        }
+    }
+
+    Ok(by_guid.into_values().collect())
+}
+
+fn collect_subscription_snapshot(
+    participant: &Int2DdsParticipant,
+    timeout_ms: i32,
+) -> Result<Vec<SubscriptionBuiltinTopicData>, Int2DdsRet> {
+    let builtin_subscriber =
+        participant.inner.get_builtin_subscriber().map_err(|e| dds_error_to_code(&e))?;
+    let subscription_reader = builtin_subscriber
+        .lookup_datareader::<SubscriptionBuiltinTopicData>("DCPSSubscription")
+        .map_err(|e| dds_error_to_code(&e))?;
+
+    let mut condition =
+        subscription_reader.get_statuscondition().map_err(|e| dds_error_to_code(&e))?.clone();
+    let _ = condition.set_enabled_statuses(StatusMask::DATA_AVAILABLE);
+    let wait_set = WaitSet::new();
+    let _ = wait_set.attach_condition(condition);
+
+    let deadline = if timeout_ms < 0 {
+        None
+    } else {
+        Some(Instant::now() + StdDuration::from_millis(timeout_ms as u64))
+    };
+
+    let mut by_guid: HashMap<_, SubscriptionBuiltinTopicData> = HashMap::new();
+    loop {
+        let _ = subscription_reader.get_status_changes();
+        if let Ok(samples) = subscription_reader.read(
+            1000,
+            &[SampleStateKind::ANY_SAMPLE_STATE],
+            &[ViewStateKind::ANY_VIEW_STATE],
+            &[InstanceStateKind::ALIVE_INSTANCE_STATE],
+        ) {
+            for sample in samples.iter() {
+                if let Ok(data) = sample.data() {
+                    by_guid.insert(data.endpoint_guid(), data);
+                }
+            }
+        }
+
+        match deadline {
+            None => {
+                if !by_guid.is_empty() {
+                    break;
+                }
+                let _ = wait_set.wait(Duration { sec: 0, nanosec: 200_000_000 });
+            }
+            Some(deadline) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                let remaining = deadline.saturating_duration_since(now);
+                let wait_ms = remaining.as_millis().min(200) as i32;
+                let _ = wait_set.wait(Duration {
+                    sec: wait_ms / 1000,
+                    nanosec: ((wait_ms % 1000) as u32) * 1_000_000,
+                });
+            }
+        }
+    }
+
+    Ok(by_guid.into_values().collect())
+}
 
 // ============================================================================
 // Helper: convert BuiltinTopicKey ([i32; 3]) to [u8; 12] in big-endian
@@ -153,6 +300,190 @@ pub unsafe extern "C" fn int2dds_datareader_get_matched_publications(
         }
     }
 
+    INT2DDS_RET_OK
+}
+
+/// Get the number of discovered publications currently known to a participant.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_participant_get_discovered_publication_count(
+    participant: *const Int2DdsParticipant,
+    count_out: *mut usize,
+) -> Int2DdsRet {
+    check_null!(participant);
+    check_null!(count_out);
+
+    let participant_ref = &*participant;
+    let publications = ffi_try!(participant_ref.inner.get_discovered_publications());
+    *count_out = publications.len();
+    INT2DDS_RET_OK
+}
+
+/// Get discovered publication data by stable snapshot index.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_participant_get_discovered_publication_data_by_index(
+    participant: *const Int2DdsParticipant,
+    index: usize,
+    data_out: *mut *mut Int2DdsPublicationBuiltinTopicData,
+) -> Int2DdsRet {
+    check_null!(participant);
+    check_null!(data_out);
+
+    let participant_ref = &*participant;
+    let publications = ffi_try!(participant_ref.inner.get_discovered_publications());
+    let data = match publications.get(index) {
+        Some(value) => value.clone(),
+        None => return INT2DDS_RET_PRECONDITION_NOT_MET,
+    };
+
+    *data_out = Box::into_raw(Box::new(Int2DdsPublicationBuiltinTopicData { inner: data }));
+    INT2DDS_RET_OK
+}
+
+/// Get the number of discovered subscriptions currently known to a participant.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_participant_get_discovered_subscription_count(
+    participant: *const Int2DdsParticipant,
+    count_out: *mut usize,
+) -> Int2DdsRet {
+    check_null!(participant);
+    check_null!(count_out);
+
+    let participant_ref = &*participant;
+    let subscriptions = ffi_try!(participant_ref.inner.get_discovered_subscriptions());
+    *count_out = subscriptions.len();
+    INT2DDS_RET_OK
+}
+
+/// Get discovered subscription data by stable snapshot index.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_participant_get_discovered_subscription_data_by_index(
+    participant: *const Int2DdsParticipant,
+    index: usize,
+    data_out: *mut *mut Int2DdsSubscriptionBuiltinTopicData,
+) -> Int2DdsRet {
+    check_null!(participant);
+    check_null!(data_out);
+
+    let participant_ref = &*participant;
+    let subscriptions = ffi_try!(participant_ref.inner.get_discovered_subscriptions());
+    let data = match subscriptions.get(index) {
+        Some(value) => value.clone(),
+        None => return INT2DDS_RET_PRECONDITION_NOT_MET,
+    };
+
+    *data_out = Box::into_raw(Box::new(Int2DdsSubscriptionBuiltinTopicData { inner: data }));
+    INT2DDS_RET_OK
+}
+
+/// Collect a snapshot of discovered publications via the builtin DCPSPublication reader.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_take_discovered_publications_snapshot(
+    participant: *const Int2DdsParticipant,
+    timeout_ms: i32,
+    seq_out: *mut *mut Int2DdsPublicationBuiltinTopicDataSeq,
+) -> Int2DdsRet {
+    check_null!(participant);
+    check_null!(seq_out);
+
+    let participant_ref = &*participant;
+    let items = match collect_publication_snapshot(participant_ref, timeout_ms) {
+        Ok(items) => items,
+        Err(ret) => return ret,
+    };
+
+    *seq_out = Box::into_raw(Box::new(Int2DdsPublicationBuiltinTopicDataSeq { items }));
+    INT2DDS_RET_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_seq_len(
+    seq: *const Int2DdsPublicationBuiltinTopicDataSeq,
+    count_out: *mut usize,
+) -> Int2DdsRet {
+    check_null!(seq);
+    check_null!(count_out);
+    *count_out = (*seq).items.len();
+    INT2DDS_RET_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_seq_get(
+    seq: *const Int2DdsPublicationBuiltinTopicDataSeq,
+    index: usize,
+    data_out: *mut *mut Int2DdsPublicationBuiltinTopicData,
+) -> Int2DdsRet {
+    check_null!(seq);
+    check_null!(data_out);
+    let data = match (&(*seq).items).get(index) {
+        Some(item) => item.clone(),
+        None => return INT2DDS_RET_PRECONDITION_NOT_MET,
+    };
+    *data_out = Box::into_raw(Box::new(Int2DdsPublicationBuiltinTopicData { inner: data }));
+    INT2DDS_RET_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_seq_destroy(
+    seq: *mut Int2DdsPublicationBuiltinTopicDataSeq,
+) -> Int2DdsRet {
+    check_null!(seq);
+    drop(Box::from_raw(seq));
+    INT2DDS_RET_OK
+}
+
+/// Collect a snapshot of discovered subscriptions via the builtin DCPSSubscription reader.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_take_discovered_subscriptions_snapshot(
+    participant: *const Int2DdsParticipant,
+    timeout_ms: i32,
+    seq_out: *mut *mut Int2DdsSubscriptionBuiltinTopicDataSeq,
+) -> Int2DdsRet {
+    check_null!(participant);
+    check_null!(seq_out);
+
+    let participant_ref = &*participant;
+    let items = match collect_subscription_snapshot(participant_ref, timeout_ms) {
+        Ok(items) => items,
+        Err(ret) => return ret,
+    };
+
+    *seq_out = Box::into_raw(Box::new(Int2DdsSubscriptionBuiltinTopicDataSeq { items }));
+    INT2DDS_RET_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_seq_len(
+    seq: *const Int2DdsSubscriptionBuiltinTopicDataSeq,
+    count_out: *mut usize,
+) -> Int2DdsRet {
+    check_null!(seq);
+    check_null!(count_out);
+    *count_out = (*seq).items.len();
+    INT2DDS_RET_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_seq_get(
+    seq: *const Int2DdsSubscriptionBuiltinTopicDataSeq,
+    index: usize,
+    data_out: *mut *mut Int2DdsSubscriptionBuiltinTopicData,
+) -> Int2DdsRet {
+    check_null!(seq);
+    check_null!(data_out);
+    let data = match (&(*seq).items).get(index) {
+        Some(item) => item.clone(),
+        None => return INT2DDS_RET_PRECONDITION_NOT_MET,
+    };
+    *data_out = Box::into_raw(Box::new(Int2DdsSubscriptionBuiltinTopicData { inner: data }));
+    INT2DDS_RET_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_seq_destroy(
+    seq: *mut Int2DdsSubscriptionBuiltinTopicDataSeq,
+) -> Int2DdsRet {
+    check_null!(seq);
+    drop(Box::from_raw(seq));
     INT2DDS_RET_OK
 }
 
@@ -295,6 +626,21 @@ pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_key(
     INT2DDS_RET_OK
 }
 
+/// Get the endpoint GUID from a PublicationBuiltinTopicData.
+/// `guid_out` must point to a 16-byte buffer.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_endpoint_guid(
+    data: *const Int2DdsPublicationBuiltinTopicData,
+    guid_out: *mut [u8; 16],
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(guid_out);
+
+    let data_ref = &*data;
+    *guid_out = data_ref.inner.endpoint_guid().to_bytes();
+    INT2DDS_RET_OK
+}
+
 /// Get the participant key from a PublicationBuiltinTopicData.
 /// `key_out` must point to a 12-byte buffer.
 #[no_mangle]
@@ -342,6 +688,164 @@ pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_type_name(
     copy_string_to_c(&data_ref.inner.type_name(), buf, capacity, size_out)
 }
 
+/// Get the reliability kind from a PublicationBuiltinTopicData.
+/// `kind_out`: 0 = BEST_EFFORT, 1 = RELIABLE (matches INT2DDS_QOS_RELIABILITY_*).
+///
+/// # Safety
+/// - `data` must be a valid PublicationBuiltinTopicData
+/// - `kind_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_reliability_kind(
+    data: *const Int2DdsPublicationBuiltinTopicData,
+    kind_out: *mut i32,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(kind_out);
+    let data_ref = &*data;
+    *kind_out = match data_ref.inner.reliability().kind {
+        ReliabilityQosPolicyKind::BestEffort => 0,
+        ReliabilityQosPolicyKind::Reliable => 1,
+    };
+    INT2DDS_RET_OK
+}
+
+/// Get the durability kind from a PublicationBuiltinTopicData.
+/// `kind_out`: 0 = VOLATILE, 1 = TRANSIENT_LOCAL, 2 = TRANSIENT, 3 = PERSISTENT.
+///
+/// # Safety
+/// - `data` must be a valid PublicationBuiltinTopicData
+/// - `kind_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_durability_kind(
+    data: *const Int2DdsPublicationBuiltinTopicData,
+    kind_out: *mut i32,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(kind_out);
+    let data_ref = &*data;
+    *kind_out = match data_ref.inner.durability().kind {
+        DurabilityQosPolicyKind::Volatile => 0,
+        DurabilityQosPolicyKind::TransientLocal => 1,
+        DurabilityQosPolicyKind::Transient => 2,
+        DurabilityQosPolicyKind::Persistent => 3,
+    };
+    INT2DDS_RET_OK
+}
+
+/// Get the liveliness kind from a PublicationBuiltinTopicData.
+/// `kind_out`: 0 = AUTOMATIC, 1 = MANUAL_BY_PARTICIPANT, 2 = MANUAL_BY_TOPIC.
+///
+/// # Safety
+/// - `data` must be a valid PublicationBuiltinTopicData
+/// - `kind_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_liveliness_kind(
+    data: *const Int2DdsPublicationBuiltinTopicData,
+    kind_out: *mut i32,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(kind_out);
+    let data_ref = &*data;
+    *kind_out = match data_ref.inner.liveliness().kind {
+        LivelinessQosPolicyKind::Automatic => 0,
+        LivelinessQosPolicyKind::ManualByParticipant => 1,
+        LivelinessQosPolicyKind::ManualByTopic => 2,
+    };
+    INT2DDS_RET_OK
+}
+
+/// Get the liveliness lease duration from a PublicationBuiltinTopicData.
+/// An infinite duration is reported as (0x7fffffff, 0x7fffffff).
+///
+/// # Safety
+/// - `data` must be a valid PublicationBuiltinTopicData
+/// - `sec_out` and `nanosec_out` must be valid pointers
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_liveliness_lease_duration(
+    data: *const Int2DdsPublicationBuiltinTopicData,
+    sec_out: *mut i32,
+    nanosec_out: *mut u32,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(sec_out);
+    check_null!(nanosec_out);
+    let lease = (*data).inner.liveliness().lease_duration;
+    *sec_out = lease.sec;
+    *nanosec_out = lease.nanosec;
+    INT2DDS_RET_OK
+}
+
+/// Get the deadline period from a PublicationBuiltinTopicData.
+/// An infinite duration is reported as (0x7fffffff, 0x7fffffff).
+///
+/// # Safety
+/// - `data` must be a valid PublicationBuiltinTopicData
+/// - `sec_out` and `nanosec_out` must be valid pointers
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_deadline(
+    data: *const Int2DdsPublicationBuiltinTopicData,
+    sec_out: *mut i32,
+    nanosec_out: *mut u32,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(sec_out);
+    check_null!(nanosec_out);
+    let period = (*data).inner.deadline().period;
+    *sec_out = period.sec;
+    *nanosec_out = period.nanosec;
+    INT2DDS_RET_OK
+}
+
+/// Get the lifespan duration from a PublicationBuiltinTopicData.
+/// An infinite duration is reported as (0x7fffffff, 0x7fffffff).
+///
+/// # Safety
+/// - `data` must be a valid PublicationBuiltinTopicData
+/// - `sec_out` and `nanosec_out` must be valid pointers
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_lifespan(
+    data: *const Int2DdsPublicationBuiltinTopicData,
+    sec_out: *mut i32,
+    nanosec_out: *mut u32,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(sec_out);
+    check_null!(nanosec_out);
+    let duration = (*data).inner.lifespan().duration;
+    *sec_out = duration.sec;
+    *nanosec_out = duration.nanosec;
+    INT2DDS_RET_OK
+}
+
+/// Get the user_data from a PublicationBuiltinTopicData.
+/// Copies up to `capacity` bytes into `buf`. `size_out` receives the actual size.
+///
+/// # Safety
+/// - `data` must be a valid PublicationBuiltinTopicData
+/// - `buf` must be valid for `capacity` bytes, or null to query the size only
+/// - `size_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_get_user_data(
+    data: *const Int2DdsPublicationBuiltinTopicData,
+    buf: *mut u8,
+    capacity: usize,
+    size_out: *mut usize,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(size_out);
+
+    let data_ref = &*data;
+    let user_data = &data_ref.inner.user_data().value;
+
+    *size_out = user_data.len();
+    if !buf.is_null() && capacity > 0 {
+        let copy_len = std::cmp::min(user_data.len(), capacity);
+        std::ptr::copy_nonoverlapping(user_data.as_ptr(), buf, copy_len);
+    }
+
+    INT2DDS_RET_OK
+}
+
 /// Free a PublicationBuiltinTopicData obtained from discovery.
 #[no_mangle]
 pub unsafe extern "C" fn int2dds_publication_builtin_topic_data_destroy(
@@ -368,6 +872,21 @@ pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_get_key(
 
     let data_ref = &*data;
     *key_out = builtin_topic_key_to_bytes(&data_ref.inner.key().value);
+    INT2DDS_RET_OK
+}
+
+/// Get the endpoint GUID from a SubscriptionBuiltinTopicData.
+/// `guid_out` must point to a 16-byte buffer.
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_get_endpoint_guid(
+    data: *const Int2DdsSubscriptionBuiltinTopicData,
+    guid_out: *mut [u8; 16],
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(guid_out);
+
+    let data_ref = &*data;
+    *guid_out = data_ref.inner.endpoint_guid().to_bytes();
     INT2DDS_RET_OK
 }
 
@@ -416,6 +935,143 @@ pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_get_type_name(
 
     let data_ref = &*data;
     copy_string_to_c(&data_ref.inner.type_name(), buf, capacity, size_out)
+}
+
+/// Get the reliability kind from a SubscriptionBuiltinTopicData.
+/// `kind_out`: 0 = BEST_EFFORT, 1 = RELIABLE (matches INT2DDS_QOS_RELIABILITY_*).
+///
+/// # Safety
+/// - `data` must be a valid SubscriptionBuiltinTopicData
+/// - `kind_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_get_reliability_kind(
+    data: *const Int2DdsSubscriptionBuiltinTopicData,
+    kind_out: *mut i32,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(kind_out);
+    let data_ref = &*data;
+    *kind_out = match data_ref.inner.reliability().kind {
+        ReliabilityQosPolicyKind::BestEffort => 0,
+        ReliabilityQosPolicyKind::Reliable => 1,
+    };
+    INT2DDS_RET_OK
+}
+
+/// Get the durability kind from a SubscriptionBuiltinTopicData.
+/// `kind_out`: 0 = VOLATILE, 1 = TRANSIENT_LOCAL, 2 = TRANSIENT, 3 = PERSISTENT.
+///
+/// # Safety
+/// - `data` must be a valid SubscriptionBuiltinTopicData
+/// - `kind_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_get_durability_kind(
+    data: *const Int2DdsSubscriptionBuiltinTopicData,
+    kind_out: *mut i32,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(kind_out);
+    let data_ref = &*data;
+    *kind_out = match data_ref.inner.durability().kind {
+        DurabilityQosPolicyKind::Volatile => 0,
+        DurabilityQosPolicyKind::TransientLocal => 1,
+        DurabilityQosPolicyKind::Transient => 2,
+        DurabilityQosPolicyKind::Persistent => 3,
+    };
+    INT2DDS_RET_OK
+}
+
+/// Get the liveliness kind from a SubscriptionBuiltinTopicData.
+/// `kind_out`: 0 = AUTOMATIC, 1 = MANUAL_BY_PARTICIPANT, 2 = MANUAL_BY_TOPIC.
+///
+/// # Safety
+/// - `data` must be a valid SubscriptionBuiltinTopicData
+/// - `kind_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_get_liveliness_kind(
+    data: *const Int2DdsSubscriptionBuiltinTopicData,
+    kind_out: *mut i32,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(kind_out);
+    let data_ref = &*data;
+    *kind_out = match data_ref.inner.liveliness().kind {
+        LivelinessQosPolicyKind::Automatic => 0,
+        LivelinessQosPolicyKind::ManualByParticipant => 1,
+        LivelinessQosPolicyKind::ManualByTopic => 2,
+    };
+    INT2DDS_RET_OK
+}
+
+/// Get the liveliness lease duration from a SubscriptionBuiltinTopicData.
+/// An infinite duration is reported as (0x7fffffff, 0x7fffffff).
+///
+/// # Safety
+/// - `data` must be a valid SubscriptionBuiltinTopicData
+/// - `sec_out` and `nanosec_out` must be valid pointers
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_get_liveliness_lease_duration(
+    data: *const Int2DdsSubscriptionBuiltinTopicData,
+    sec_out: *mut i32,
+    nanosec_out: *mut u32,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(sec_out);
+    check_null!(nanosec_out);
+    let lease = (*data).inner.liveliness().lease_duration;
+    *sec_out = lease.sec;
+    *nanosec_out = lease.nanosec;
+    INT2DDS_RET_OK
+}
+
+/// Get the deadline period from a SubscriptionBuiltinTopicData.
+/// An infinite duration is reported as (0x7fffffff, 0x7fffffff).
+///
+/// # Safety
+/// - `data` must be a valid SubscriptionBuiltinTopicData
+/// - `sec_out` and `nanosec_out` must be valid pointers
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_get_deadline(
+    data: *const Int2DdsSubscriptionBuiltinTopicData,
+    sec_out: *mut i32,
+    nanosec_out: *mut u32,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(sec_out);
+    check_null!(nanosec_out);
+    let period = (*data).inner.deadline().period;
+    *sec_out = period.sec;
+    *nanosec_out = period.nanosec;
+    INT2DDS_RET_OK
+}
+
+/// Get the user_data from a SubscriptionBuiltinTopicData.
+/// Copies up to `capacity` bytes into `buf`. `size_out` receives the actual size.
+///
+/// # Safety
+/// - `data` must be a valid SubscriptionBuiltinTopicData
+/// - `buf` must be valid for `capacity` bytes, or null to query the size only
+/// - `size_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_subscription_builtin_topic_data_get_user_data(
+    data: *const Int2DdsSubscriptionBuiltinTopicData,
+    buf: *mut u8,
+    capacity: usize,
+    size_out: *mut usize,
+) -> Int2DdsRet {
+    check_null!(data);
+    check_null!(size_out);
+
+    let data_ref = &*data;
+    let user_data = &data_ref.inner.user_data().value;
+
+    *size_out = user_data.len();
+    if !buf.is_null() && capacity > 0 {
+        let copy_len = std::cmp::min(user_data.len(), capacity);
+        std::ptr::copy_nonoverlapping(user_data.as_ptr(), buf, copy_len);
+    }
+
+    INT2DDS_RET_OK
 }
 
 /// Free a SubscriptionBuiltinTopicData obtained from discovery.
