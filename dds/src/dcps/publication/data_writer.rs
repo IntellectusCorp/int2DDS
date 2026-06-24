@@ -649,7 +649,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         let (serialized_key, resolved_handle) =
             self.resolve_dispose_key(serialized_key, computed_handle, handle)?;
 
-        self.dispose_inner(serialized_key, resolved_handle, timestamp)
+        self.dispose_inner(serialized_key, resolved_handle, timestamp, Some(data))
     }
 
     /// Publishes a data sample to the topic.
@@ -962,7 +962,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         let (serialized_key, resolved_handle) =
             self.resolve_dispose_key(serialized_key, computed_handle, handle)?;
 
-        self.dispose_inner(serialized_key, resolved_handle, timestamp)
+        self.dispose_inner(serialized_key, resolved_handle, timestamp, None)
     }
 
     /// Unregister an instance using raw serialized key bytes.
@@ -994,7 +994,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         let (serialized_key, resolved_handle) =
             self.resolve_unregister_key(serialized_key, handle)?;
 
-        self.unregister_instance_inner(serialized_key, resolved_handle, timestamp)
+        self.unregister_instance_inner(serialized_key, resolved_handle, timestamp, None)
     }
 
     /// Lookup an instance handle from raw serialized key bytes.
@@ -1646,18 +1646,38 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         Ok(handle)
     }
 
-    /// Common logic for dispose after key resolution and handle validation.
-    // Wrap a headerless key (serialize_key output, big-endian) as a wire serializedKey
-    // SerializedPayload by prepending the CDR_BE encapsulation header. Empty stays empty
-    // so no K-flag is set for keyless changes.
-    fn key_to_wire_payload(serialized_key: &[u8]) -> Vec<u8> {
+    // Wrap a headerless big-endian key as a wire serializedKey SerializedPayload in the
+    // writer's data representation. Empty stays empty so no K-flag is set.
+    fn key_to_wire_payload(
+        &self,
+        serialized_key: &[u8],
+        typed: Option<&Foo>,
+    ) -> DdsResult<SerializedData> {
         if serialized_key.is_empty() {
-            return Vec::new();
+            return Ok(Arc::from(Vec::new()));
         }
-        let mut payload = Vec::with_capacity(serialized_key.len() + 4);
-        payload.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // CDR_BE, no options
-        payload.extend_from_slice(serialized_key);
-        payload
+        let format = {
+            let qos = self.qos.load();
+            let extensibility = self.type_support.get_extensibility_kind();
+            Self::resolve_serialization_format(&qos.data_representation.value, extensibility)?
+        };
+        match format {
+            SerializationFormat::Cdr => {
+                let mut payload = Vec::with_capacity(serialized_key.len() + 4);
+                payload.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // CDR_BE, no options
+                payload.extend_from_slice(serialized_key);
+                Ok(Arc::from(payload))
+            }
+            SerializationFormat::Xcdr { .. } => match typed {
+                // Have the value: encode the key straight to XCDR2.
+                Some(data) => self.type_support.serialize_key_payload(data as &dyn Any, &format),
+                // Only the big-endian key bytes: decode them, then re-encode as XCDR2.
+                None => {
+                    let key_any = self.type_support.deserialize_key(serialized_key)?;
+                    self.type_support.serialize_key_payload(&*key_any, &format)
+                }
+            },
+        }
     }
 
     fn dispose_inner(
@@ -1665,6 +1685,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         serialized_key: SerializedData,
         resolved_handle: InstanceHandle,
         timestamp: Time,
+        typed: Option<&Foo>,
     ) -> DdsResult<()> {
         let mut instances = self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
@@ -1692,7 +1713,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
 
         // Carry the key on the wire as a serializedKey payload (K-flag): peers without a
         // reversible KeyHash (e.g. >16-byte string keys) need it to identify the instance.
-        let wire_key = Self::key_to_wire_payload(&serialized_key);
+        let wire_key = self.key_to_wire_payload(&serialized_key, typed)?;
         self.add_change_serialized(
             ChangeKind::NotAliveDisposed,
             &wire_key,
@@ -1711,6 +1732,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
         serialized_key: SerializedData,
         resolved_handle: InstanceHandle,
         timestamp: Time,
+        typed: Option<&Foo>,
     ) -> DdsResult<()> {
         let mut instances = self.instances.lock().map_err(|e| DdsError::Error(e.to_string()))?;
 
@@ -1742,7 +1764,7 @@ impl<Foo: 'static + Clone> DataWriter<Foo> {
                 ChangeKind::NotAliveUnregistered
             };
 
-        let wire_key = Self::key_to_wire_payload(&serialized_key);
+        let wire_key = self.key_to_wire_payload(&serialized_key, typed)?;
         self.add_change_serialized(
             change_kind,
             &wire_key,
@@ -1976,7 +1998,7 @@ where
         let (serialized_key, resolved_handle) =
             self.resolve_unregister_key(serialized_key, handle)?;
 
-        self.unregister_instance_inner(serialized_key, resolved_handle, timestamp)
+        self.unregister_instance_inner(serialized_key, resolved_handle, timestamp, Some(instance))
     }
 }
 
