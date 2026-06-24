@@ -21,11 +21,11 @@ use crate::rtps::{
 
 #[derive(Debug, Clone, PartialEq, Eq, Writable)]
 pub(crate) struct HeartbeatFrag {
-    reader_id: EntityId,
-    writer_id: EntityId,
-    writer_sn: SequenceNumber,
-    last_fragment_num: FragmentNumber,
-    count: Count,
+    pub(crate) reader_id: EntityId,
+    pub(crate) writer_id: EntityId,
+    pub(crate) writer_sn: SequenceNumber,
+    pub(crate) last_fragment_num: FragmentNumber,
+    pub(crate) count: Count,
 }
 
 impl HeartbeatFrag {

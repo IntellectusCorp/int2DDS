@@ -113,12 +113,15 @@ impl ConstDefault for DataReaderQos {
 
 impl Qos for DataReaderQos {
     fn check_unsupported_policies(&self) -> DdsResult<()> {
-        if self.user_data != UserDataQosPolicy::default()
-            // || self.durability.kind == DurabilityQosPolicyKind::Transient
-            // || self.durability.kind == DurabilityQosPolicyKind::Persistent
-            || self.latency_budget != LatencyBudgetQosPolicy::default()
+        if self.latency_budget != LatencyBudgetQosPolicy::default()
+        // user_data is kept supported for ROS 2 / cross-vendor interoperability (intentionally not rejected)
+        // || self.user_data != UserDataQosPolicy::default()
+        // || self.durability.kind == DurabilityQosPolicyKind::Transient
+        // || self.durability.kind == DurabilityQosPolicyKind::Persistent
         // || self.liveliness != LivelinessQosPolicy::default()
         // || self.ownership != OwnershipQosPolicy::default()
+        // time_based_filter is now implemented, so it is supported (no longer unsupported)
+        // || self.time_based_filter != TimeBasedFilterQosPolicy::default()
         // || self.reader_data_lifecycle != ReaderDataLifecycleQosPolicy::default()
         {
             return Err(DdsError::Unsupported);

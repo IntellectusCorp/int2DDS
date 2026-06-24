@@ -569,14 +569,18 @@ impl Participant {
             }
         }
 
+        // Remove from the store first, before unmatching intra-participant readers below.
+        // While the readers are being unmatched, a just-sent in-flight sample from this writer
+        // then observes the writer as already gone (find_writer_from_entity_id == None), which
+        // lets the delivery path deliver the already-accepted sample instead of dropping it.
+        // No duplicate can result: the writer is gone, so no reliable retransmit can occur.
+        self.rtps_writer_store.remove(&topic_name, entity_id);
+
         // Unmatch with intra participant readers
         self.cleanup_resources_for_remote_writer(
             Guid::new(self.guid().prefix(), entity_id),
             &topic_name,
         )?;
-
-        // Remove from store
-        self.rtps_writer_store.remove(&topic_name, entity_id);
 
         Ok(())
     }
@@ -678,6 +682,13 @@ impl Participant {
         Ok(())
     }
 
+    pub(crate) fn cleanup_remote_reader_by_guid(&self, reader_guid: Guid) -> RtpsResult<()> {
+        self.remove_unmatched_reader_from_writer(reader_guid)?;
+        self.remove_remote_subscription_by_guid(reader_guid);
+
+        Ok(())
+    }
+
     pub(crate) fn cleanup_resources_for_remote_writer(
         &self,
         writer_guid: Guid,
@@ -704,6 +715,33 @@ impl Participant {
         }
 
         Ok(())
+    }
+
+    pub(crate) fn cleanup_remote_writer_by_guid(&self, writer_guid: Guid) -> RtpsResult<()> {
+        if writer_guid.entity_id().entity_kind().is_user_defined() {
+            if let Some(wlp_logic) = self.wlp_logic() {
+                let _ = wlp_logic.deregister_monitored_writer(writer_guid);
+            }
+        }
+
+        self.remove_unmatched_writer_from_reader(writer_guid)?;
+        self.remove_remote_publication_by_guid(writer_guid);
+
+        Ok(())
+    }
+
+    fn remove_remote_publication_by_guid(&self, writer_guid: Guid) {
+        self.remote_publications().retain(|_, endpoints| {
+            endpoints.remove(&writer_guid);
+            !endpoints.is_empty()
+        });
+    }
+
+    fn remove_remote_subscription_by_guid(&self, reader_guid: Guid) {
+        self.remote_subscriptions().retain(|_, endpoints| {
+            endpoints.remove(&reader_guid);
+            !endpoints.is_empty()
+        });
     }
 
     /// Iterate through all Readers in the Participant to find Readers matched with the Writer, then remove Writer Proxy

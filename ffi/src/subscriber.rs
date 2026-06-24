@@ -15,6 +15,7 @@
 use std::ffi::CStr;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use int2dds::{
     core::time::Duration,
     infrastructure::status::StatusMask,
@@ -25,6 +26,10 @@ use int2dds::{
 };
 
 use crate::data::Int2DdsData;
+
+pub struct Int2DdsSerializedLoan {
+    data: Bytes,
+}
 
 // Sample state masks
 pub const INT2DDS_SAMPLE_STATE_READ: u32 = 0x0001;
@@ -48,8 +53,8 @@ use super::{
     qos::{Int2DdsDataReaderQos, Int2DdsSubscriberQos},
     status::{
         Int2DdsLivelinessChangedStatus, Int2DdsRequestedDeadlineMissedStatus,
-        Int2DdsRequestedIncompatibleQosStatus, Int2DdsSampleLostStatus,
-        Int2DdsSampleRejectedStatus,
+        Int2DdsRequestedIncompatibleQosStatus, Int2DdsRequestedIncompatibleTypeStatus,
+        Int2DdsSampleLostStatus, Int2DdsSampleRejectedStatus,
     },
     types::*,
 };
@@ -740,6 +745,54 @@ pub unsafe extern "C" fn int2dds_datareader_get_qos(
     INT2DDS_RET_OK
 }
 
+/// Get the 16-byte RTPS GUID of a DataReader.
+///
+/// Writes the reader's endpoint GUID (the same value advertised over SEDP
+/// discovery as `endpoint_guid`) into `guid_out`. Read-only.
+///
+/// # Safety
+/// - `reader` must be a valid datareader
+/// - `guid_out` must be a valid pointer to a 16-byte buffer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_get_guid(
+    reader: *const Int2DdsDataReader,
+    guid_out: *mut [u8; 16],
+) -> Int2DdsRet {
+    check_null!(reader);
+    check_null!(guid_out);
+
+    let reader_ref = &*reader;
+    *guid_out = reader_ref.inner.guid().to_bytes();
+
+    INT2DDS_RET_OK
+}
+
+/// Check whether a DataReader currently has any cached samples.
+///
+/// This is a level-triggered readiness check over the local reader cache.
+///
+/// # Safety
+/// - `reader` must be a valid datareader
+/// - `has_data_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_has_data(
+    reader: *const Int2DdsDataReader,
+    has_data_out: *mut bool,
+) -> Int2DdsRet {
+    check_null!(reader);
+    check_null!(has_data_out);
+
+    let reader_ref = &*reader;
+
+    match reader_ref.inner.has_cached_data() {
+        Ok(has_data) => {
+            *has_data_out = has_data;
+            INT2DDS_RET_OK
+        }
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
 /// Delete a DataReader
 ///
 /// # Safety
@@ -916,6 +969,30 @@ pub unsafe extern "C" fn int2dds_datareader_get_requested_incompatible_qos_statu
     }
 }
 
+/// Get requested incompatible type status for a DataReader
+///
+/// # Safety
+/// - `reader` must be a valid datareader
+/// - `status_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datareader_get_requested_incompatible_type_status(
+    reader: *const Int2DdsDataReader,
+    status_out: *mut Int2DdsRequestedIncompatibleTypeStatus,
+) -> Int2DdsRet {
+    check_null!(reader);
+    check_null!(status_out);
+
+    let reader_ref = &*reader;
+
+    match reader_ref.inner.get_requested_incompatible_type_status() {
+        Ok(status) => {
+            *status_out = Int2DdsRequestedIncompatibleTypeStatus::from(&status);
+            INT2DDS_RET_OK
+        }
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
 /// Delete all entities contained by a subscriber
 ///
 /// This operation deletes all DataReader objects contained by this Subscriber.
@@ -977,7 +1054,7 @@ pub unsafe extern "C" fn int2dds_take_serialized(
 
     let reader_ref = &*reader;
 
-    let (serialized_data, sample_info) = match reader_ref.inner.take_next_serialized() {
+    let (serialized_data, sample_info) = match reader_ref.inner.take_next_serialized_bytes() {
         Ok(result) => result,
         Err(int2dds::dcps::core::error::DdsError::NoData) => {
             *valid_data_out = false;
@@ -1000,6 +1077,74 @@ pub unsafe extern "C" fn int2dds_take_serialized(
 
     std::ptr::copy_nonoverlapping(serialized_data.as_ptr(), buffer, serialized_data.len());
 
+    INT2DDS_RET_OK
+}
+
+/// Take pre-serialized data and loan the returned byte slice to the caller.
+///
+/// The returned `data_out` pointer remains valid until `loan_out` is passed to
+/// `int2dds_return_serialized_loan`. This avoids copying the payload into a
+/// caller-owned buffer for consumers that immediately deserialize the bytes.
+///
+/// # Safety
+/// - `reader` must be a valid datareader
+/// - `data_out`, `actual_size_out`, `valid_data_out`, and `loan_out` must be valid pointers
+/// - if `*loan_out` is non-null, the caller must return it exactly once
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_take_serialized_loaned(
+    reader: *const Int2DdsDataReader,
+    data_out: *mut *const u8,
+    actual_size_out: *mut usize,
+    valid_data_out: *mut bool,
+    loan_out: *mut *mut Int2DdsSerializedLoan,
+) -> Int2DdsRet {
+    check_null!(reader);
+    check_null!(data_out);
+    check_null!(actual_size_out);
+    check_null!(valid_data_out);
+    check_null!(loan_out);
+
+    *data_out = std::ptr::null();
+    *actual_size_out = 0;
+    *valid_data_out = false;
+    *loan_out = std::ptr::null_mut();
+
+    let reader_ref = &*reader;
+
+    let (serialized_data, sample_info) = match reader_ref.inner.take_next_serialized_bytes() {
+        Ok(result) => result,
+        Err(int2dds::dcps::core::error::DdsError::NoData) => {
+            return INT2DDS_RET_NO_DATA;
+        }
+        Err(e) => return dds_error_to_code(&e),
+    };
+
+    *valid_data_out = sample_info.valid_data;
+    *actual_size_out = serialized_data.len();
+
+    if !sample_info.valid_data {
+        return INT2DDS_RET_OK;
+    }
+
+    let loan = Box::new(Int2DdsSerializedLoan { data: serialized_data });
+    *data_out = loan.data.as_ptr();
+    *loan_out = Box::into_raw(loan);
+
+    INT2DDS_RET_OK
+}
+
+/// Return a serialized data loan produced by `int2dds_take_serialized_loaned`.
+///
+/// # Safety
+/// - `loan` must be null or a pointer returned by `int2dds_take_serialized_loaned`
+/// - `loan` must not be used after this call
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_return_serialized_loan(
+    loan: *mut Int2DdsSerializedLoan,
+) -> Int2DdsRet {
+    if !loan.is_null() {
+        drop(Box::from_raw(loan));
+    }
     INT2DDS_RET_OK
 }
 

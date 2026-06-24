@@ -20,8 +20,8 @@ use crate::{
     infrastructure::{
         qos_policy::{LivelinessQosPolicy, QosPolicyId, ReliabilityQosPolicyKind},
         status::{
-            OfferedIncompatibleQosStatus, PublicationMatchedStatus, QosPolicyCount, StatusInfo,
-            StatusKind,
+            OfferedIncompatibleQosStatus, OfferedIncompatibleTypeStatus, PublicationMatchedStatus,
+            QosPolicyCount, StatusInfo, StatusKind,
         },
     },
     rtps::{
@@ -68,6 +68,7 @@ pub(crate) struct StatelessWriter {
     publication_builtin_topic_data: Arc<Mutex<PublicationBuiltinTopicData>>,
     publication_matched_status: Arc<Mutex<PublicationMatchedStatus>>,
     offered_incompatible_qos_status: Arc<Mutex<OfferedIncompatibleQosStatus>>,
+    offered_incompatible_type_status: Arc<Mutex<OfferedIncompatibleTypeStatus>>,
 }
 
 impl StatelessWriter {
@@ -113,6 +114,9 @@ impl StatelessWriter {
             publication_matched_status: Arc::new(Mutex::new(PublicationMatchedStatus::default())),
             offered_incompatible_qos_status: Arc::new(Mutex::new(
                 OfferedIncompatibleQosStatus::default(),
+            )),
+            offered_incompatible_type_status: Arc::new(Mutex::new(
+                OfferedIncompatibleTypeStatus::default(),
             )),
         }
     }
@@ -227,6 +231,25 @@ impl StatelessWriter {
             }
             Err(e) => {
                 log::error!("Failed to lock offered_incompatible_qos_status: {:?}", e);
+            }
+        }
+    }
+
+    pub(crate) fn update_offered_incompatible_type_status(&self) {
+        match self.offered_incompatible_type_status.lock() {
+            Ok(mut offered_incompatible_type_status) => {
+                offered_incompatible_type_status.total_count += 1;
+                offered_incompatible_type_status.total_count_change += 1;
+
+                self.update_status(
+                    StatusKind::OFFERED_INCOMPATIBLE_TYPE,
+                    Some(Arc::new(offered_incompatible_type_status.clone())),
+                );
+
+                offered_incompatible_type_status.total_count_change = 0;
+            }
+            Err(e) => {
+                log::error!("Failed to lock offered_incompatible_type_status: {:?}", e);
             }
         }
     }

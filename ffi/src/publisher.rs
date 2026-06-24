@@ -19,10 +19,14 @@ use int2dds::{
     common::instance_handle::InstanceHandle,
     core::time::{Duration, Time},
     infrastructure::status::StatusMask,
-    publication::data_writer_listener::DataWriterListener,
+    publication::{data_writer::SerializedWriteLoan, data_writer_listener::DataWriterListener},
 };
 
 use crate::data::Int2DdsData;
+
+pub struct Int2DdsSerializedWriteLoan {
+    inner: Option<SerializedWriteLoan>,
+}
 
 use super::{
     error::*,
@@ -30,7 +34,7 @@ use super::{
     qos::{Int2DdsDataWriterQos, Int2DdsPublisherQos},
     status::{
         Int2DdsLivelinessLostStatus, Int2DdsOfferedDeadlineMissedStatus,
-        Int2DdsOfferedIncompatibleQosStatus,
+        Int2DdsOfferedIncompatibleQosStatus, Int2DdsOfferedIncompatibleTypeStatus,
     },
     types::*,
 };
@@ -233,6 +237,28 @@ pub unsafe extern "C" fn int2dds_datawriter_get_qos(
     let qos = ffi_try!(writer_ref.inner.get_qos());
     let boxed = Box::new(Int2DdsDataWriterQos { inner: qos });
     *qos_out = Box::into_raw(boxed);
+
+    INT2DDS_RET_OK
+}
+
+/// Get the 16-byte RTPS GUID of a DataWriter.
+///
+/// Writes the writer's endpoint GUID (the same value advertised over SEDP
+/// discovery as `endpoint_guid`) into `guid_out`. Read-only.
+///
+/// # Safety
+/// - `writer` must be a valid datawriter
+/// - `guid_out` must be a valid pointer to a 16-byte buffer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_get_guid(
+    writer: *const Int2DdsDataWriter,
+    guid_out: *mut [u8; 16],
+) -> Int2DdsRet {
+    check_null!(writer);
+    check_null!(guid_out);
+
+    let writer_ref = &*writer;
+    *guid_out = writer_ref.inner.guid().to_bytes();
 
     INT2DDS_RET_OK
 }
@@ -736,6 +762,30 @@ pub unsafe extern "C" fn int2dds_datawriter_get_offered_incompatible_qos_status(
     }
 }
 
+/// Get offered incompatible type status for a DataWriter
+///
+/// # Safety
+/// - `writer` must be a valid datawriter
+/// - `status_out` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_datawriter_get_offered_incompatible_type_status(
+    writer: *const Int2DdsDataWriter,
+    status_out: *mut Int2DdsOfferedIncompatibleTypeStatus,
+) -> Int2DdsRet {
+    check_null!(writer);
+    check_null!(status_out);
+
+    let writer_ref = &*writer;
+
+    match writer_ref.inner.get_offered_incompatible_type_status() {
+        Ok(status) => {
+            *status_out = Int2DdsOfferedIncompatibleTypeStatus::from(&status);
+            INT2DDS_RET_OK
+        }
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
 /// Delete all entities contained by a publisher
 ///
 /// This operation deletes all DataWriter objects contained by this Publisher.
@@ -800,6 +850,76 @@ pub unsafe extern "C" fn int2dds_write_serialized(
         Ok(()) => INT2DDS_RET_OK,
         Err(e) => dds_error_to_code(&e),
     }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_prepare_serialized_write(
+    writer: *const Int2DdsDataWriter,
+    capacity: usize,
+    data_out: *mut *mut u8,
+    capacity_out: *mut usize,
+    loan_out: *mut *mut Int2DdsSerializedWriteLoan,
+) -> Int2DdsRet {
+    check_null!(writer);
+    check_null!(data_out);
+    check_null!(capacity_out);
+    check_null!(loan_out);
+
+    *data_out = std::ptr::null_mut();
+    *capacity_out = 0;
+    *loan_out = std::ptr::null_mut();
+
+    let writer_ref = &*writer;
+    let mut loan = match writer_ref.inner.prepare_serialized_write(capacity) {
+        Ok(loan) => loan,
+        Err(e) => return dds_error_to_code(&e),
+    };
+
+    *data_out = loan.as_mut_ptr();
+    *capacity_out = loan.capacity();
+    *loan_out = Box::into_raw(Box::new(Int2DdsSerializedWriteLoan { inner: Some(loan) }));
+
+    INT2DDS_RET_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_commit_serialized_write(
+    writer: *const Int2DdsDataWriter,
+    loan: *mut Int2DdsSerializedWriteLoan,
+    actual_size: usize,
+    key: *const u8,
+    key_len: usize,
+) -> Int2DdsRet {
+    check_null!(writer);
+    check_null!(loan);
+
+    let writer_ref = &*writer;
+    let mut loan_box = Box::from_raw(loan);
+    let loan_inner = match loan_box.inner.take() {
+        Some(loan_inner) => loan_inner,
+        None => return INT2DDS_RET_ERROR,
+    };
+
+    let serialized_key = if key.is_null() || key_len == 0 {
+        None
+    } else {
+        Some(std::slice::from_raw_parts(key, key_len))
+    };
+
+    match writer_ref.inner.commit_serialized_write(loan_inner, actual_size, serialized_key) {
+        Ok(()) => INT2DDS_RET_OK,
+        Err(e) => dds_error_to_code(&e),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn int2dds_abort_serialized_write(
+    loan: *mut Int2DdsSerializedWriteLoan,
+) -> Int2DdsRet {
+    if !loan.is_null() {
+        drop(Box::from_raw(loan));
+    }
+    INT2DDS_RET_OK
 }
 
 /// Write pre-serialized data with an explicit source timestamp.
