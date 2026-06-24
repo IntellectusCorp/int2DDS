@@ -201,3 +201,39 @@ pub struct IdlModel {
     pub interfaces: Vec<ResolvedInterface>,
     pub exceptions: Vec<ResolvedException>,
 }
+
+impl IdlModel {
+    /// Iterate the qualified name of every named type in the model.
+    pub fn qualified_names(&self) -> impl Iterator<Item = &str> {
+        self.structs
+            .iter()
+            .map(|s| s.qualified_name.as_str())
+            .chain(self.enums.iter().map(|e| e.qualified_name.as_str()))
+            .chain(self.bitmasks.iter().map(|b| b.qualified_name.as_str()))
+            .chain(self.bitsets.iter().map(|b| b.qualified_name.as_str()))
+            .chain(self.unions.iter().map(|u| u.qualified_name.as_str()))
+            .chain(self.exceptions.iter().map(|e| e.qualified_name.as_str()))
+    }
+
+    /// Rewrite the qualified name of every named type through `f`.
+    pub fn map_qualified_names(&mut self, f: impl Fn(&str) -> String) {
+        for s in &mut self.structs {
+            s.qualified_name = f(&s.qualified_name);
+        }
+        for e in &mut self.enums {
+            e.qualified_name = f(&e.qualified_name);
+        }
+        for b in &mut self.bitmasks {
+            b.qualified_name = f(&b.qualified_name);
+        }
+        for b in &mut self.bitsets {
+            b.qualified_name = f(&b.qualified_name);
+        }
+        for u in &mut self.unions {
+            u.qualified_name = f(&u.qualified_name);
+        }
+        for ex in &mut self.exceptions {
+            ex.qualified_name = f(&ex.qualified_name);
+        }
+    }
+}

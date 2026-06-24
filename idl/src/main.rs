@@ -19,6 +19,8 @@ struct Args {
     default_string_bound: u32,
     string_pointer: bool,
     rpc_output: Option<String>,
+    ros2: bool,
+    ros2_package: Option<String>,
 }
 
 fn parse_args() -> Args {
@@ -37,6 +39,8 @@ fn parse_args() -> Args {
     let mut default_string_bound = 256u32;
     let mut string_pointer = false;
     let mut rpc_output = None;
+    let mut ros2 = false;
+    let mut ros2_package = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -88,6 +92,13 @@ fn parse_args() -> Args {
                 i += 1;
                 rpc_output = Some(args.get(i).cloned().unwrap_or_default());
             }
+            "--ros2" => {
+                ros2 = true;
+            }
+            "--ros2-package" => {
+                i += 1;
+                ros2_package = args.get(i).cloned();
+            }
             "-h" | "--help" => {
                 print_usage();
                 process::exit(0);
@@ -130,6 +141,8 @@ fn parse_args() -> Args {
         default_string_bound,
         string_pointer,
         rpc_output,
+        ros2,
+        ros2_package,
     }
 }
 
@@ -152,6 +165,9 @@ OPTIONS:
     --string-bound <N>        Default unbounded string size in C (default: 256)
     --string-pointer          Use char* pointers for strings (OMG standard)
     --rpc <PATH>            Generate RPC types (includes base types + RPC infrastructure)
+    --ros2                    Use ROS2-compatible DDS type naming (scope::dds_::Name_);
+                              flat IDL infers the package from a <package>/msg/File.idl path
+    --ros2-package <NAME>     Override the package for flat (module-less) IDL under --ros2
     -h, --help                Print help
     -V, --version             Print version"
     );
@@ -179,13 +195,28 @@ fn main() {
     };
 
     // Resolve
-    let model = match resolver::resolve(definitions) {
+    let mut model = match resolver::resolve(definitions) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("{}: {}", args.input_file, e);
             process::exit(1);
         }
     };
+
+    // Apply ROS2-compatible type naming (fastddsgen -typeros2 equivalent): rewrite
+    // every registered DDS type name to scope::dds_::Name_. Generated struct/field
+    // code is untouched; only the registered/TypeObject name changes.
+    if args.ros2 {
+        let flat_scope = naming::ros2_flat_scope(&args.input_file, args.ros2_package.as_deref());
+        let has_flat = model.qualified_names().any(|q| !q.contains("::"));
+        if has_flat && flat_scope.is_none() {
+            eprintln!(
+                "warning: --ros2 on module-less IDL without a package; type names left unmangled.\n\
+                 \x20        provide --ros2-package <NAME> or place the file at <package>/msg/<File>.idl"
+            );
+        }
+        model.map_qualified_names(|q| naming::ros2_type_name(q, flat_scope.as_deref()));
+    }
 
     let idl_filename = args.input_file.rsplit(['/', '\\']).next().unwrap_or(&args.input_file);
     let base_name = naming::idl_to_output_name(idl_filename);
