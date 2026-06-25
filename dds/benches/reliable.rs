@@ -100,14 +100,14 @@ fn reliable_pubsub_roundtrip(c: &mut Criterion) {
         ..DataWriterQos::default()
     });
 
-    let mut writer_condition = data_writer.get_statuscondition().unwrap().clone();
+    let writer_condition = data_writer.get_statuscondition().unwrap().clone();
     writer_condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
     let wait_set = WaitSet::new();
     wait_set.attach_condition(writer_condition).unwrap();
     wait_set.wait(Duration::infinite()).unwrap();
     data_writer.get_publication_matched_status().unwrap();
 
-    let mut reader_condition = data_reader.get_statuscondition().unwrap().clone();
+    let reader_condition = data_reader.get_statuscondition().unwrap().clone();
     reader_condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
     let wait_set = WaitSet::new();
     wait_set.attach_condition(reader_condition).unwrap();

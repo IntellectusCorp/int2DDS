@@ -482,7 +482,7 @@ mod tests {
             .unwrap();
 
         // std::thread::sleep(std::time::Duration::from_secs(2));
-        let mut condition = reader.get_statuscondition().unwrap().clone();
+        let condition = reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition).unwrap();
@@ -520,7 +520,7 @@ mod tests {
             .unwrap();
 
         // std::thread::sleep(std::time::Duration::from_secs(2));
-        let mut condition = reader.get_statuscondition().unwrap().clone();
+        let condition = reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition).unwrap();
@@ -584,10 +584,10 @@ mod tests {
             .unwrap();
 
         // Set StatusConditions with different status masks (using only actually implemented statuses)
-        let mut condition1 = reader.get_statuscondition().unwrap().clone();
+        let condition1 = reader.get_statuscondition().unwrap().clone();
         condition1.set_enabled_statuses(StatusMask::DATA_AVAILABLE).unwrap(); // trigger X
 
-        let mut condition2 = writer.get_statuscondition().unwrap().clone();
+        let condition2 = writer.get_statuscondition().unwrap().clone();
         condition2.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap(); // trigger O
 
         // Add multiple StatusConditions to WaitSet
@@ -651,10 +651,10 @@ mod tests {
             .unwrap();
 
         // Set StatusConditions with different status masks (using only actually implemented statuses)
-        let mut condition1 = reader.get_statuscondition().unwrap().clone();
+        let condition1 = reader.get_statuscondition().unwrap().clone();
         condition1.set_enabled_statuses(StatusMask::DATA_AVAILABLE).unwrap(); // trigger O
 
-        let mut condition2 = writer.get_statuscondition().unwrap().clone();
+        let condition2 = writer.get_statuscondition().unwrap().clone();
         condition2.set_enabled_statuses(StatusMask::OFFERED_INCOMPATIBLE_QOS).unwrap(); // trigger X
 
         // Add multiple StatusConditions to WaitSet
@@ -727,7 +727,7 @@ mod tests {
             .unwrap();
 
         // Set mask combining multiple statuses (using only actually implemented statuses)
-        let mut condition = reader.get_statuscondition().unwrap().clone();
+        let condition = reader.get_statuscondition().unwrap().clone();
         let combined_mask = StatusMask::SUBSCRIPTION_MATCHED
             | StatusMask::REQUESTED_INCOMPATIBLE_QOS
             | StatusMask::DATA_AVAILABLE;
@@ -822,7 +822,7 @@ mod tests {
         let wait_set = WaitSet::new();
 
         // First use: reader1's condition
-        let mut condition1 = reader1.get_statuscondition().unwrap().clone();
+        let condition1 = reader1.get_statuscondition().unwrap().clone();
         condition1.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition1.clone()).unwrap();
 
@@ -835,7 +835,7 @@ mod tests {
         assert_eq!(wait_set.get_conditions().unwrap().len(), 0);
 
         // Second use: reuse with reader2's condition (using actually implemented status)
-        let mut condition2 = reader2.get_statuscondition().unwrap().clone();
+        let condition2 = reader2.get_statuscondition().unwrap().clone();
         condition2.set_enabled_statuses(StatusMask::REQUESTED_INCOMPATIBLE_QOS).unwrap();
         wait_set.attach_condition(condition2.clone()).unwrap();
 
@@ -882,7 +882,7 @@ mod tests {
             )
             .unwrap();
 
-        let mut condition = reader.get_statuscondition().unwrap().clone();
+        let condition = reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
 
         let wait_set = WaitSet::new();
@@ -934,7 +934,7 @@ mod tests {
             )
             .unwrap();
 
-        let mut condition = reader.get_statuscondition().unwrap().clone();
+        let condition = reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
 
         let wait_set = WaitSet::new();

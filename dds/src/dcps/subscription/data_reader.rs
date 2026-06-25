@@ -653,8 +653,9 @@ impl<Foo: 'static + Clone + Debug> UpdateStatus for DataReader<Foo> {
                     )
                 ) {
                     if let Ok(datareader_cache) = self.datareader_cache.lock() {
-                        datareader_cache.remove_writer_from_owner_candidates(
+                        datareader_cache.revoke_writer_ownership(
                             info.last_publication_handle().to_guid(),
+                            None,
                             true,
                             true,
                         )?;
@@ -1310,7 +1311,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
     }
     fn handle_requested_incompatible_type_status(
         &self,
-        info: Arc<RequestedIncompatibleTypeStatus>,
+        _info: Arc<RequestedIncompatibleTypeStatus>,
     ) -> DdsResult<()> {
         {
             let mut status_guard = self
@@ -1711,7 +1712,8 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
             let data = self.type_support.deserialize(change.data_value(), None)?;
             Ok(self.type_support.compute_key(&*data))
         } else {
-            let key_any = self.type_support.deserialize_key(change.data_value())?;
+            // Dispose/unregister carry a wire serializedKey (with encapsulation header).
+            let key_any = self.type_support.deserialize_key_payload(change.data_value())?;
             Ok(self.type_support.compute_key(&*key_any))
         }
     }
@@ -1801,12 +1803,14 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
         Ok(synthetic_sample_infos)
     }
 
+    // Returns true if the instance state actually changed (a rejected no-op
+    // transition returns false), so callers can avoid synthesizing notifications.
     pub(crate) fn update_instance_state(
         &self,
         instance_handle: InstanceHandle,
         new_state: InstanceStateKind,
         cache_change: Option<&CacheChange>,
-    ) -> DdsResult<()> {
+    ) -> DdsResult<bool> {
         // Non-keyed topic doesn't have instance state
         // if instance_handle.is_nil() {
         //     return Err(DdsError::BadParameter);
@@ -1823,6 +1827,8 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
             no_writers_generation_count: 0,
             pending_notification: false,
         });
+
+        let prev_state = info.instance_state;
 
         // Update InstanceState based on change kind
         log::trace!("Updating instance state based on change kind: {:?}", new_state);
@@ -1991,7 +1997,7 @@ impl<Foo: 'static + Clone + Debug> DataReader<Foo> {
             }
         }
 
-        Ok(())
+        Ok(info.instance_state != prev_state)
     }
 
     fn add_autopurge_timer(
@@ -3979,14 +3985,14 @@ pub(crate) mod tests {
         let data1 = HelloWorld { index: 0, message: "HelloWorld".to_string() };
         let data2 = HelloWorld { index: 1, message: "HelloWorld".to_string() };
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -4089,14 +4095,14 @@ pub(crate) mod tests {
         let data1 = HelloWorld { index: 0, message: "HelloWorld".to_string() };
         let data2 = HelloWorld { index: 1, message: "HelloWorld".to_string() }; // Published by Writer
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -4210,14 +4216,14 @@ pub(crate) mod tests {
         let data1 = HelloWorld { index: 0, message: "HelloWorld".to_string() };
         let data2 = HelloWorld { index: 1, message: "HelloWorld".to_string() };
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -4328,14 +4334,14 @@ pub(crate) mod tests {
         let data1 = HelloWorld { index: 0, message: "HelloWorld".to_string() };
         let data2 = HelloWorld { index: 1, message: "HelloWorld".to_string() };
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -4447,14 +4453,14 @@ pub(crate) mod tests {
         let data1 = HelloWorld { index: 0, message: "HelloWorld".to_string() };
         let data2 = HelloWorld { index: 1, message: "HelloWorld".to_string() };
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -4550,14 +4556,14 @@ pub(crate) mod tests {
         let data1 = HelloWorld { index: 0, message: "HelloWorld".to_string() };
         let data2 = HelloWorld { index: 1, message: "HelloWorld".to_string() };
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -4704,14 +4710,14 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -4829,14 +4835,14 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -5054,14 +5060,14 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -5169,14 +5175,14 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -5299,14 +5305,14 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -5440,14 +5446,14 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -5554,14 +5560,14 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -5702,14 +5708,14 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -5835,14 +5841,14 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -5983,14 +5989,14 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
@@ -6097,14 +6103,14 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();
         writer.get_publication_matched_status().unwrap();
         wait_set.detach_condition(condition).unwrap();
-        let mut condition = data_reader.get_statuscondition().unwrap().clone();
+        let condition = data_reader.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED).unwrap();
         wait_set.attach_condition(condition.clone()).unwrap();
         wait_set.wait(Duration::infinite()).unwrap();

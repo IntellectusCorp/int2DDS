@@ -207,7 +207,7 @@ pub fn wait_for_writer_status<Foo: DdsType>(
     duration: Duration,
 ) -> Result<Vec<std::sync::Arc<dyn Condition + Send + Sync>>, int2dds::dcps::core::error::DdsError>
 {
-    let mut condition = data_writer.get_statuscondition().unwrap().clone();
+    let condition = data_writer.get_statuscondition().unwrap().clone();
     condition.set_enabled_statuses(status_mask).unwrap();
     let wait_set = WaitSet::new();
     wait_set.attach_condition(condition).unwrap();
@@ -220,7 +220,7 @@ pub fn wait_for_reader_status<Foo: DdsType>(
     duration: Duration,
 ) -> Result<Vec<std::sync::Arc<dyn Condition + Send + Sync>>, int2dds::dcps::core::error::DdsError>
 {
-    let mut condition = data_reader.get_statuscondition().unwrap().clone();
+    let condition = data_reader.get_statuscondition().unwrap().clone();
     condition.set_enabled_statuses(status_mask).unwrap();
     let wait_set = WaitSet::new();
     wait_set.attach_condition(condition).unwrap();

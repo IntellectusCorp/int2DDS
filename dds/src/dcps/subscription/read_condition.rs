@@ -285,7 +285,7 @@ mod tests {
             .create_datawriter::<HelloWorldType>(&topic, writer_qos, None, StatusMask::default())
             .unwrap();
 
-        let mut condition = writer.get_statuscondition().unwrap().clone();
+        let condition = writer.get_statuscondition().unwrap().clone();
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED).unwrap();
 
         let wait_set = WaitSet::new();
