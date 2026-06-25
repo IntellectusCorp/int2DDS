@@ -97,40 +97,40 @@ impl<'a> RustGen<'a> {
         self.model
             .structs
             .iter()
-            .any(|s| s.members.iter().any(|m| self.type_uses_wchar(&m.resolved_type)))
+            .any(|s| s.members.iter().any(|m| Self::type_uses_wchar(&m.resolved_type)))
     }
 
     fn needs_hashmap_import(&self) -> bool {
         self.model
             .structs
             .iter()
-            .any(|s| s.members.iter().any(|m| self.type_uses_map(&m.resolved_type)))
+            .any(|s| s.members.iter().any(|m| Self::type_uses_map(&m.resolved_type)))
             || self.model.unions.iter().any(|u| {
-                u.cases.iter().any(|c| self.type_uses_map(&c.member.resolved_type))
+                u.cases.iter().any(|c| Self::type_uses_map(&c.member.resolved_type))
                     || u.default_case
                         .as_ref()
-                        .is_some_and(|dc| self.type_uses_map(&dc.resolved_type))
+                        .is_some_and(|dc| Self::type_uses_map(&dc.resolved_type))
             })
     }
 
-    fn type_uses_wchar(&self, ty: &ResolvedType) -> bool {
+    fn type_uses_wchar(ty: &ResolvedType) -> bool {
         match ty {
             ResolvedType::WChar | ResolvedType::WString { .. } => true,
             ResolvedType::Sequence { element, .. } | ResolvedType::Array { element, .. } => {
-                self.type_uses_wchar(element)
+                Self::type_uses_wchar(element)
             }
             ResolvedType::Map { key, value, .. } => {
-                self.type_uses_wchar(key) || self.type_uses_wchar(value)
+                Self::type_uses_wchar(key) || Self::type_uses_wchar(value)
             }
             _ => false,
         }
     }
 
-    fn type_uses_map(&self, ty: &ResolvedType) -> bool {
+    fn type_uses_map(ty: &ResolvedType) -> bool {
         match ty {
             ResolvedType::Map { .. } => true,
             ResolvedType::Sequence { element, .. } | ResolvedType::Array { element, .. } => {
-                self.type_uses_map(element)
+                Self::type_uses_map(element)
             }
             _ => false,
         }

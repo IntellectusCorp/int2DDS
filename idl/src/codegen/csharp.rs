@@ -87,13 +87,13 @@ impl<'a> CsGen<'a> {
 
         // Bitsets
         for b in &self.model.bitsets.clone() {
-            self.emit_bitset(&b);
+            self.emit_bitset(b);
             self.line("");
         }
 
         // Unions
         for u in &self.model.unions.clone() {
-            self.emit_union(&u);
+            self.emit_union(u);
             self.line("");
         }
 
@@ -375,7 +375,7 @@ impl<'a> CsGen<'a> {
         // Properties for each case member
         for case in &u.cases {
             let prop_name = cs_ident(&case.member.name);
-            let cs_type = self.type_to_csharp(&case.member.resolved_type);
+            let cs_type = Self::type_to_csharp(&case.member.resolved_type);
             if self.needs_initializer(&case.member.resolved_type) {
                 let default = self.default_value(&case.member.resolved_type);
                 self.line(&format!(
@@ -388,7 +388,7 @@ impl<'a> CsGen<'a> {
         }
         if let Some(ref def) = u.default_case {
             let prop_name = cs_ident(&def.name);
-            let cs_type = self.type_to_csharp(&def.resolved_type);
+            let cs_type = Self::type_to_csharp(&def.resolved_type);
             if self.needs_initializer(&def.resolved_type) {
                 let default = self.default_value(&def.resolved_type);
                 self.line(&format!(
@@ -595,7 +595,7 @@ impl<'a> CsGen<'a> {
         // Properties (all members including inherited)
         for m in &all_members {
             let prop_name = cs_ident(&m.name);
-            let cs_type = self.type_to_csharp(&m.resolved_type);
+            let cs_type = Self::type_to_csharp(&m.resolved_type);
             let default = self.default_value(&m.resolved_type);
             if self.needs_initializer(&m.resolved_type) {
                 self.line(&format!(
@@ -617,7 +617,7 @@ impl<'a> CsGen<'a> {
             name: s.name.clone(),
             qualified_name: s.qualified_name.clone(),
             extensibility: s.extensibility,
-            autoid: s.autoid.clone(),
+            autoid: s.autoid,
             base_type: None,
             members: all_members.clone(),
         };
@@ -655,7 +655,7 @@ impl<'a> CsGen<'a> {
         self.indent += 1;
         for c in &self.model.constants.clone() {
             let name = naming::escape_keyword(&c.name, naming::TargetLang::CSharp);
-            let ty = self.type_to_csharp(&c.resolved_type);
+            let ty = Self::type_to_csharp(&c.resolved_type);
             let val = cs_const_value(&c.value, &c.resolved_type);
             self.line(&format!("public const {} {} = {};", ty, name, val));
         }
@@ -664,7 +664,7 @@ impl<'a> CsGen<'a> {
         self.line("");
     }
 
-    fn type_to_csharp(&self, ty: &ResolvedType) -> String {
+    fn type_to_csharp(ty: &ResolvedType) -> String {
         match ty {
             ResolvedType::Bool => "bool".to_string(),
             ResolvedType::U8 => "byte".to_string(),
@@ -682,13 +682,17 @@ impl<'a> CsGen<'a> {
             ResolvedType::String { .. } => "string".to_string(),
             ResolvedType::WString { .. } => "string".to_string(),
             ResolvedType::Sequence { element, .. } => {
-                format!("List<{}>", self.type_to_csharp(element))
+                format!("List<{}>", Self::type_to_csharp(element))
             }
             ResolvedType::Array { element, .. } => {
-                format!("{}[]", self.type_to_csharp(element))
+                format!("{}[]", Self::type_to_csharp(element))
             }
             ResolvedType::Map { key, value, .. } => {
-                format!("Dictionary<{}, {}>", self.type_to_csharp(key), self.type_to_csharp(value))
+                format!(
+                    "Dictionary<{}, {}>",
+                    Self::type_to_csharp(key),
+                    Self::type_to_csharp(value)
+                )
             }
             ResolvedType::Struct(name) => naming::to_pascal_case(name),
             ResolvedType::Enum(name) => naming::to_pascal_case(name),
@@ -737,16 +741,16 @@ impl<'a> CsGen<'a> {
             ResolvedType::String { .. } => "\"\"".to_string(),
             ResolvedType::WString { .. } => "\"\"".to_string(),
             ResolvedType::Sequence { element, .. } => {
-                format!("new List<{}>()", self.type_to_csharp(element))
+                format!("new List<{}>()", Self::type_to_csharp(element))
             }
             ResolvedType::Array { element, size } => {
-                format!("new {}[{}]", self.type_to_csharp(element), size)
+                format!("new {}[{}]", Self::type_to_csharp(element), size)
             }
             ResolvedType::Map { key, value, .. } => {
                 format!(
                     "new Dictionary<{}, {}>()",
-                    self.type_to_csharp(key),
-                    self.type_to_csharp(value)
+                    Self::type_to_csharp(key),
+                    Self::type_to_csharp(value)
                 )
             }
             ResolvedType::Struct(name) => {
@@ -1138,7 +1142,7 @@ impl<'a> CsGen<'a> {
             }
             ResolvedType::Sequence { element, .. } => {
                 let count_var = format!("_{name}Count");
-                let cs_elem = self.type_to_csharp(element);
+                let cs_elem = Self::type_to_csharp(element);
                 let non_prim = Self::is_non_primitive_element(element);
                 let size_var = format!("_{name}SeqSize");
                 let start_var = format!("_{name}SeqStart");
@@ -1159,7 +1163,7 @@ impl<'a> CsGen<'a> {
                 self.line("}");
             }
             ResolvedType::Array { element, size } => {
-                let cs_elem = self.type_to_csharp(element);
+                let cs_elem = Self::type_to_csharp(element);
                 let non_prim = Self::is_non_primitive_element(element);
                 let size_var = format!("_{name}ArrSize");
                 let start_var = format!("_{name}ArrStart");
@@ -1177,8 +1181,8 @@ impl<'a> CsGen<'a> {
             }
             ResolvedType::Map { key, value, .. } => {
                 let count_var = format!("_{name}Count");
-                let cs_key = self.type_to_csharp(key);
-                let cs_val = self.type_to_csharp(value);
+                let cs_key = Self::type_to_csharp(key);
+                let cs_val = Self::type_to_csharp(value);
                 let non_prim =
                     Self::is_non_primitive_element(key) || Self::is_non_primitive_element(value);
                 let size_var = format!("_{name}MapSize");
@@ -1270,7 +1274,7 @@ impl<'a> CsGen<'a> {
             }
             ResolvedType::Sequence { element, .. } => {
                 let count_var = format!("{var_name}Count");
-                let cs_elem = self.type_to_csharp(element);
+                let cs_elem = Self::type_to_csharp(element);
                 let non_prim = Self::is_non_primitive_element(element);
                 let size_var = format!("{var_name}SeqSize");
                 let start_var = format!("{var_name}SeqStart");
@@ -1291,7 +1295,7 @@ impl<'a> CsGen<'a> {
                 self.line("}");
             }
             ResolvedType::Array { element, size } => {
-                let cs_elem = self.type_to_csharp(element);
+                let cs_elem = Self::type_to_csharp(element);
                 let non_prim = Self::is_non_primitive_element(element);
                 let size_var = format!("{var_name}ArrSize");
                 let start_var = format!("{var_name}ArrStart");
@@ -1309,8 +1313,8 @@ impl<'a> CsGen<'a> {
             }
             ResolvedType::Map { key, value, .. } => {
                 let count_var = format!("{var_name}Count");
-                let cs_key = self.type_to_csharp(key);
-                let cs_val = self.type_to_csharp(value);
+                let cs_key = Self::type_to_csharp(key);
+                let cs_val = Self::type_to_csharp(value);
                 let non_prim =
                     Self::is_non_primitive_element(key) || Self::is_non_primitive_element(value);
                 let size_var = format!("{var_name}MapSize");

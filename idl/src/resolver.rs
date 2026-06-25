@@ -285,10 +285,7 @@ impl Resolver {
         let mut next_position: u32 = 0;
 
         for flag in &bdef.flags {
-            let position = self.extract_position(&flag.annotations)?.unwrap_or_else(|| {
-                let pos = next_position;
-                pos
-            });
+            let position = self.extract_position(&flag.annotations)?.unwrap_or(next_position);
             if position >= bit_bound {
                 return Err(ResolveError {
                     message: format!(
@@ -737,7 +734,7 @@ impl Resolver {
 
         for (i, s) in structs.iter().enumerate() {
             for m in &s.members {
-                self.collect_struct_deps(&m.resolved_type, &name_to_idx, i, &mut deps);
+                Self::collect_struct_deps(&m.resolved_type, &name_to_idx, i, &mut deps);
             }
             // base_type dependency
             if let Some(base) = &s.base_type {
@@ -780,7 +777,6 @@ impl Resolver {
     }
 
     fn collect_struct_deps(
-        &self,
         ty: &ResolvedType,
         name_to_idx: &HashMap<&str, usize>,
         from: usize,
@@ -795,11 +791,11 @@ impl Resolver {
                 }
             }
             ResolvedType::Sequence { element, .. } | ResolvedType::Array { element, .. } => {
-                self.collect_struct_deps(element, name_to_idx, from, deps);
+                Self::collect_struct_deps(element, name_to_idx, from, deps);
             }
             ResolvedType::Map { key, value, .. } => {
-                self.collect_struct_deps(key, name_to_idx, from, deps);
-                self.collect_struct_deps(value, name_to_idx, from, deps);
+                Self::collect_struct_deps(key, name_to_idx, from, deps);
+                Self::collect_struct_deps(value, name_to_idx, from, deps);
             }
             _ => {}
         }

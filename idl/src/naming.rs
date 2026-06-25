@@ -1,4 +1,4 @@
-/// Name conversion utilities for IDL code generation.
+//! Name conversion utilities for IDL code generation.
 
 /// Convert to PascalCase for Rust type names.
 /// "hello_world" -> "HelloWorld"
