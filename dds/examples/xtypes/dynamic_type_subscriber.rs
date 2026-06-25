@@ -194,7 +194,7 @@ fn main() {
     println!("Matched with publisher. Receiving data...\n");
 
     // Use WaitSet to wait for data
-    let mut data_condition = reader.get_statuscondition().unwrap().clone();
+    let data_condition = reader.get_statuscondition().unwrap().clone();
     data_condition.set_enabled_statuses(StatusMask::DATA_AVAILABLE).unwrap();
     let data_wait_set = WaitSet::new();
     data_wait_set.attach_condition(data_condition).unwrap();
