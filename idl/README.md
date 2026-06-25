@@ -65,6 +65,7 @@ OPTIONS:
     -s, --csharp <PATH>       Generate C# output to PATH
     -x, --xml <PATH>          Generate XML type representation to PATH
     -o, --output-dir <DIR>    Output directory (auto-names files)
+    -I, --include <DIR>       Add a search dir for #include resolution (repeatable)
     --crate-path <PATH>       Rust crate path (default: int2dds)
     --python-module <PATH>    Python module path (default: int2dds)
     --csharp-namespace <NS>   C# namespace (default: GeneratedTypes)
@@ -74,6 +75,7 @@ OPTIONS:
     --ros2                    Use ROS2-compatible DDS type naming (scope::dds_::Name_);
                               flat IDL infers the package from a <package>/msg/File.idl path
     --ros2-package <NAME>     Override the package for flat (module-less) IDL under --ros2
+    --ros2-kind <KIND>        Interface kind (msg|srv|action) for --ros2-package (default: msg)
     -h, --help                Print help
     -V, --version             Print version
 ```
@@ -105,6 +107,39 @@ The parser/resolver covers the IDL constructs int2DDS uses on the wire:
 | Unions           | `union U switch(long) { case 0: long a; default: ...}`|
 | Bitmask / Bitset | `@bit_bound(8) bitmask`, `bitset { bitfield<3> a; }`  |
 | Modules          | `module pkg { module msg { struct T {...}; }; };`     |
+| Constants        | `const uint8 STATUS_FIX = 0;` (literal values; emitted per target) |
+| Includes         | `#include "pkg/msg/Type.idl"` (resolved via `-I <dir>`; resolve-only) |
+
+### Includes (`#include`)
+
+`#include "pkg/msg/Type.idl"` directives are resolved (relative to the including
+file, then each `-I <dir>`) and the referenced files are loaded so cross-package
+type references resolve. They are **resolve-only**: included types and constants
+populate the symbol table but are **not** emitted into the current file's output.
+Only the types/constants declared in the input file itself are generated, so each
+file's output stays self-contained and free of duplicate or leaf-name-colliding
+definitions (e.g. `pkg_a::msg::Status` vs `pkg_b::msg::Status`). Generate each
+package's own types from its own `.idl`; references to included types are left as
+plain type names for the consuming build to provide.
+
+**Reference contract.** A member whose type comes from an included file is emitted
+as a reference to that type in the *dependency's* package, not a re-definition:
+
+- **Rust:** the field uses the full package path, e.g.
+  `pub header: std_msgs::msg::Header,`. The output compiles as-is provided the
+  consuming build exposes each dependency package at that path (one module/crate
+  per package, types at `<pkg>::<kind>::<Type>`). Serialization of the nested type
+  travels with its own `#[derive(DdsType)]`, so no extra `use` is needed.
+- **C / Python / C#:** still emit the bare leaf name for external references; the
+  consuming build must bring the dependency type (and, for C/Python, its
+  serialization helpers) into scope. Full path/import emission for these backends
+  is pending.
+
+This contract is the integration point for per-package generators such as the ROS2
+`rmw` layer, which generates each package separately and wires them together.
+
+Unresolvable includes are reported as a warning and skipped; if a missing include
+is actually referenced, resolution then fails with an `unresolved type` error.
 
 ### Annotations
 
@@ -152,7 +187,7 @@ renamed (the default is `int2dds`).
 
 ## ROS2-compatible naming (`--ros2`)
 
-`--ros2` mirrors Fast-DDS `fastddsgen -typeros2`: it rewrites the **registered DDS type
+How the `--ros2` option works: it rewrites the **registered DDS type
 name** to the ROS2-over-DDS convention `scope::dds_::Name_` so int2DDS types interoperate
 with ROS2 nodes. Only the registered/type-object name changes — struct fields and
 serialization are untouched.

@@ -1,8 +1,10 @@
+use std::path::PathBuf;
 use std::process;
 
 use int2dds_idl::codegen;
 use int2dds_idl::naming;
 use int2dds_idl::parser;
+use int2dds_idl::preprocess;
 use int2dds_idl::resolver;
 
 struct Args {
@@ -21,6 +23,8 @@ struct Args {
     rpc_output: Option<String>,
     ros2: bool,
     ros2_package: Option<String>,
+    ros2_kind: Option<String>,
+    include_dirs: Vec<PathBuf>,
 }
 
 fn parse_args() -> Args {
@@ -41,6 +45,8 @@ fn parse_args() -> Args {
     let mut rpc_output = None;
     let mut ros2 = false;
     let mut ros2_package = None;
+    let mut ros2_kind = None;
+    let mut include_dirs = Vec::new();
 
     let mut i = 1;
     while i < args.len() {
@@ -99,6 +105,16 @@ fn parse_args() -> Args {
                 i += 1;
                 ros2_package = args.get(i).cloned();
             }
+            "--ros2-kind" => {
+                i += 1;
+                ros2_kind = args.get(i).cloned();
+            }
+            "-I" | "--include" => {
+                i += 1;
+                if let Some(dir) = args.get(i) {
+                    include_dirs.push(PathBuf::from(dir));
+                }
+            }
             "-h" | "--help" => {
                 print_usage();
                 process::exit(0);
@@ -143,6 +159,8 @@ fn parse_args() -> Args {
         rpc_output,
         ros2,
         ros2_package,
+        ros2_kind,
+        include_dirs,
     }
 }
 
@@ -159,6 +177,7 @@ OPTIONS:
     -s, --csharp <PATH>       Generate C# output to PATH
     -x, --xml <PATH>          Generate XML type representation to PATH
     -o, --output-dir <DIR>    Output directory (auto-names files)
+    -I, --include <DIR>       Add a search directory for #include resolution (repeatable)
     --crate-path <PATH>       Rust crate path (default: int2dds)
     --python-module <PATH>    Python module path (default: int2dds)
     --csharp-namespace <NS>   C# namespace (default: GeneratedTypes)
@@ -168,6 +187,7 @@ OPTIONS:
     --ros2                    Use ROS2-compatible DDS type naming (scope::dds_::Name_);
                               flat IDL infers the package from a <package>/msg/File.idl path
     --ros2-package <NAME>     Override the package for flat (module-less) IDL under --ros2
+    --ros2-kind <KIND>        Interface kind (msg|srv|action) for --ros2-package (default: msg)
     -h, --help                Print help
     -V, --version             Print version"
     );
@@ -176,26 +196,46 @@ OPTIONS:
 fn main() {
     let args = parse_args();
 
-    // Read input
-    let source = match std::fs::read_to_string(&args.input_file) {
-        Ok(s) => s,
+    if let Some(kind) = &args.ros2_kind {
+        if !matches!(kind.as_str(), "msg" | "srv" | "action") {
+            eprintln!("error: --ros2-kind must be one of msg|srv|action (got '{}')", kind);
+            process::exit(1);
+        }
+    }
+
+    // Read input, resolving #include directives into a single translation unit.
+    let source = match preprocess::load_with_includes(
+        std::path::Path::new(&args.input_file),
+        &args.include_dirs,
+    ) {
+        Ok((s, missing)) => {
+            for inc in &missing {
+                eprintln!("warning: could not resolve #include \"{}\" (use -I <dir>)", inc);
+            }
+            s
+        }
         Err(e) => {
             eprintln!("error: cannot read '{}': {}", args.input_file, e);
             process::exit(1);
         }
     };
 
-    // Parse
-    let definitions = match parser::parse_idl(&source) {
+    // Parse the full translation unit (root + includes) and, separately, the root
+    // file alone. #included types resolve against the full unit but only the root
+    // file's own types/constants are emitted (resolve-only includes).
+    let parse = |src: &str| match parser::parse_idl(src) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("{}:{}", args.input_file, e);
             process::exit(1);
         }
     };
+    let all_defs = parse(&source);
+    let root_src = std::fs::read_to_string(&args.input_file).unwrap_or_else(|_| source.clone());
+    let root_defs = parse(&root_src);
 
     // Resolve
-    let mut model = match resolver::resolve(definitions) {
+    let mut model = match resolver::resolve_scoped(&root_defs, all_defs) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("{}: {}", args.input_file, e);
@@ -203,11 +243,15 @@ fn main() {
         }
     };
 
-    // Apply ROS2-compatible type naming (fastddsgen -typeros2 equivalent): rewrite
+    // Apply ROS2-compatible type naming : rewrite
     // every registered DDS type name to scope::dds_::Name_. Generated struct/field
     // code is untouched; only the registered/TypeObject name changes.
     if args.ros2 {
-        let flat_scope = naming::ros2_flat_scope(&args.input_file, args.ros2_package.as_deref());
+        let flat_scope = naming::ros2_flat_scope(
+            &args.input_file,
+            args.ros2_package.as_deref(),
+            args.ros2_kind.as_deref(),
+        );
         let has_flat = model.qualified_names().any(|q| !q.contains("::"));
         if has_flat && flat_scope.is_none() {
             eprintln!(

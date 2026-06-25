@@ -25,6 +25,17 @@ pub fn generate(model: &IdlModel, idl_filename: &str, opts: &PythonOptions) -> S
     gen.out
 }
 
+/// Render a constant value as a Python literal.
+fn py_const_value(value: &ConstValue) -> String {
+    match value {
+        ConstValue::Int(v) => v.to_string(),
+        ConstValue::Float(v) => format!("{:?}", v),
+        ConstValue::Bool(v) => if *v { "True" } else { "False" }.to_string(),
+        ConstValue::Str(v) => format!("{:?}", v),
+        ConstValue::Ident(v) => v.rsplit("::").next().unwrap_or(v).to_string(),
+    }
+}
+
 struct PyGen<'a> {
     out: String,
     opts: &'a PythonOptions,
@@ -52,6 +63,8 @@ impl<'a> PyGen<'a> {
         self.line(&format!("from {}.cdr.writer import CdrKeyWriter", module_name));
         self.line("");
         self.line("");
+
+        self.emit_constants();
 
         // Enums first (may be referenced by structs)
         for e in &self.model.enums {
@@ -562,6 +575,19 @@ impl<'a> PyGen<'a> {
         self.emit_serialize_key(s);
 
         self.indent -= 1;
+    }
+
+    fn emit_constants(&mut self) {
+        if self.model.constants.is_empty() {
+            return;
+        }
+        for c in &self.model.constants {
+            let name = naming::escape_keyword(&c.name, naming::TargetLang::Python);
+            let ty = self.type_to_python(&c.resolved_type);
+            self.line(&format!("{}: {} = {}", name, ty, py_const_value(&c.value)));
+        }
+        self.line("");
+        self.line("");
     }
 
     fn type_to_python(&self, ty: &ResolvedType) -> String {
