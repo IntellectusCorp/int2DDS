@@ -454,16 +454,16 @@ mod cdr_struct_tests {
         #[repr(u8)]
         enum MyBitmask {
             #[dds(position = 0)]
-            Flag0 = 1,
+            FLAG0 = 1,
             #[dds(position = 1)]
-            Flag1 = 2,
+            FLAG1 = 2,
             #[dds(position = 7)]
-            Flag7 = 128,
+            FLAG7 = 128,
         }
 
         #[test]
         fn test_bitmask_cdr_roundtrip() {
-            let value = MyBitmaskValue::from(MyBitmask::Flag0);
+            let value = MyBitmaskValue::from(MyBitmask::FLAG0);
             let mut serializer = CdrSerializer::new(true);
             serializer.write_encapsulation_header().unwrap();
             value.serialize_cdr(&mut serializer).unwrap();
@@ -472,18 +472,18 @@ mod cdr_struct_tests {
             let mut deserializer = CdrDeserializer::new(&bytes).unwrap();
             let result = MyBitmaskValue::deserialize_cdr(&mut deserializer).unwrap();
             assert_eq!(result, MyBitmaskValue(1));
-            assert!(result.contains(MyBitmaskValue::Flag0));
-            assert!(!result.contains(MyBitmaskValue::Flag1));
+            assert!(result.contains(MyBitmaskValue::FLAG0));
+            assert!(!result.contains(MyBitmaskValue::FLAG1));
         }
 
         #[test]
         fn test_bitmask_combined_flags() {
             let mut value = MyBitmaskValue::empty();
-            value.set(MyBitmaskValue::Flag0);
-            value.set(MyBitmaskValue::Flag7);
-            assert!(value.contains(MyBitmaskValue::Flag0));
-            assert!(!value.contains(MyBitmaskValue::Flag1));
-            assert!(value.contains(MyBitmaskValue::Flag7));
+            value.set(MyBitmaskValue::FLAG0);
+            value.set(MyBitmaskValue::FLAG7);
+            assert!(value.contains(MyBitmaskValue::FLAG0));
+            assert!(!value.contains(MyBitmaskValue::FLAG1));
+            assert!(value.contains(MyBitmaskValue::FLAG7));
             assert_eq!(value.bits(), 0b1000_0001);
 
             let mut serializer = CdrSerializer::new(true);
@@ -498,22 +498,22 @@ mod cdr_struct_tests {
 
         #[test]
         fn test_bitmask_bitwise_ops() {
-            let a = MyBitmaskValue::from(MyBitmask::Flag0);
-            let b = MyBitmaskValue::from(MyBitmask::Flag1);
+            let a = MyBitmaskValue::from(MyBitmask::FLAG0);
+            let b = MyBitmaskValue::from(MyBitmask::FLAG1);
             let combined = a | b;
-            assert!(combined.contains(MyBitmaskValue::Flag0));
-            assert!(combined.contains(MyBitmaskValue::Flag1));
+            assert!(combined.contains(MyBitmaskValue::FLAG0));
+            assert!(combined.contains(MyBitmaskValue::FLAG1));
             assert_eq!(combined.bits(), 0b11);
 
-            let masked = combined & MyBitmaskValue::from(MyBitmask::Flag0);
-            assert!(masked.contains(MyBitmaskValue::Flag0));
-            assert!(!masked.contains(MyBitmaskValue::Flag1));
+            let masked = combined & MyBitmaskValue::from(MyBitmask::FLAG0);
+            assert!(masked.contains(MyBitmaskValue::FLAG0));
+            assert!(!masked.contains(MyBitmaskValue::FLAG1));
         }
 
         #[test]
         fn test_bitmask_xcdr_roundtrip() {
             let value =
-                MyBitmaskValue::from(MyBitmask::Flag1) | MyBitmaskValue::from(MyBitmask::Flag7);
+                MyBitmaskValue::from(MyBitmask::FLAG1) | MyBitmaskValue::from(MyBitmask::FLAG7);
 
             let mut serializer = XcdrSerializer::new(true, ExtensibilityKind::Final);
             serializer.write_encapsulation_header().unwrap();
