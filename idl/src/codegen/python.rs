@@ -338,13 +338,13 @@ impl<'a> PyGen<'a> {
         // Fields for each case member
         for case in &u.cases {
             let field_name = naming::escape_keyword(&case.member.name, naming::TargetLang::Python);
-            let py_type = self.type_to_python(&case.member.resolved_type);
+            let py_type = Self::type_to_python(&case.member.resolved_type);
             let default = self.default_value(&case.member.resolved_type);
             self.line(&format!("{}: {} = {}", field_name, py_type, default));
         }
         if let Some(ref def) = u.default_case {
             let field_name = naming::escape_keyword(&def.name, naming::TargetLang::Python);
-            let py_type = self.type_to_python(&def.resolved_type);
+            let py_type = Self::type_to_python(&def.resolved_type);
             let default = self.default_value(&def.resolved_type);
             self.line(&format!("{}: {} = {}", field_name, py_type, default));
         }
@@ -492,7 +492,7 @@ impl<'a> PyGen<'a> {
             let field_name = naming::escape_keyword(&case.member.name, naming::TargetLang::Python);
             // emit_read_field assigns to a local variable; we need to assign to obj.field
             // So generate: tmp = read; obj.field = tmp
-            let tmp_name = format!("_v");
+            let tmp_name = "_v".to_string();
             self.emit_read_field(&case.member.resolved_type, &tmp_name);
             self.line(&format!("obj.{} = _v", field_name));
             self.indent -= 1;
@@ -505,7 +505,7 @@ impl<'a> PyGen<'a> {
             }
             self.indent += 1;
             let field_name = naming::escape_keyword(&def.name, naming::TargetLang::Python);
-            let tmp_name = format!("_v");
+            let tmp_name = "_v".to_string();
             self.emit_read_field(&def.resolved_type, &tmp_name);
             self.line(&format!("obj.{} = _v", field_name));
             self.indent -= 1;
@@ -549,7 +549,7 @@ impl<'a> PyGen<'a> {
         // Fields (including inherited from base structs)
         for m in &all_members {
             let field_name = naming::escape_keyword(&m.name, naming::TargetLang::Python);
-            let py_type = self.type_to_python(&m.resolved_type);
+            let py_type = Self::type_to_python(&m.resolved_type);
             let default = self.default_value(&m.resolved_type);
             self.line(&format!("{}: {} = {}", field_name, py_type, default));
         }
@@ -583,14 +583,14 @@ impl<'a> PyGen<'a> {
         }
         for c in &self.model.constants {
             let name = naming::escape_keyword(&c.name, naming::TargetLang::Python);
-            let ty = self.type_to_python(&c.resolved_type);
+            let ty = Self::type_to_python(&c.resolved_type);
             self.line(&format!("{}: {} = {}", name, ty, py_const_value(&c.value)));
         }
         self.line("");
         self.line("");
     }
 
-    fn type_to_python(&self, ty: &ResolvedType) -> String {
+    fn type_to_python(ty: &ResolvedType) -> String {
         match ty {
             ResolvedType::Bool => "bool".to_string(),
             ResolvedType::U8 | ResolvedType::I8 => "int".to_string(),
@@ -601,17 +601,17 @@ impl<'a> PyGen<'a> {
             ResolvedType::Char => "str".to_string(),
             ResolvedType::String { .. } => "str".to_string(),
             ResolvedType::Sequence { element, .. } => {
-                format!("list[{}]", self.type_to_python(element))
+                format!("list[{}]", Self::type_to_python(element))
             }
             ResolvedType::Array { element, .. } => {
-                format!("list[{}]", self.type_to_python(element))
+                format!("list[{}]", Self::type_to_python(element))
             }
             ResolvedType::Struct(name) => format!("\"{}\"", name),
             ResolvedType::Enum(name) => name.clone(),
             ResolvedType::WChar => "str".to_string(),
             ResolvedType::WString { .. } => "str".to_string(),
             ResolvedType::Map { key, value, .. } => {
-                format!("dict[{}, {}]", self.type_to_python(key), self.type_to_python(value))
+                format!("dict[{}, {}]", Self::type_to_python(key), Self::type_to_python(value))
             }
             ResolvedType::Bitmask(name) => name.clone(),
         }

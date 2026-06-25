@@ -32,7 +32,8 @@ module sensor_msgs { module msg {
     )
     .unwrap();
 
-    let (source, missing) = preprocess::load_with_includes(&imu, &[root.clone()]).unwrap();
+    let (source, missing) =
+        preprocess::load_with_includes(&imu, std::slice::from_ref(&root)).unwrap();
     assert!(missing.is_empty(), "unexpected missing includes: {:?}", missing);
 
     let defs = parser::parse_idl(&source).expect("parse");
@@ -72,7 +73,8 @@ module sensor_msgs { module msg {
     )
     .unwrap();
 
-    let (merged, _missing) = preprocess::load_with_includes(&imu, &[root.clone()]).unwrap();
+    let (merged, _missing) =
+        preprocess::load_with_includes(&imu, std::slice::from_ref(&root)).unwrap();
     let all_defs = parser::parse_idl(&merged).expect("parse all");
     let root_src = fs::read_to_string(&imu).unwrap();
     let root_defs = parser::parse_idl(&root_src).expect("parse root");
@@ -115,7 +117,7 @@ fn test_include_cycle_terminates() {
     fs::write(root.join("B.idl"), "#include \"A.idl\"\nstruct B { long b; };\n").unwrap();
 
     let (source, missing) =
-        preprocess::load_with_includes(&root.join("A.idl"), &[root.clone()]).unwrap();
+        preprocess::load_with_includes(&root.join("A.idl"), std::slice::from_ref(&root)).unwrap();
     assert!(missing.is_empty());
     let defs = parser::parse_idl(&source).expect("parse");
     let model = resolver::resolve(defs).expect("resolve");
