@@ -70,7 +70,7 @@ fn collect_publication_snapshot(
         .lookup_datareader::<PublicationBuiltinTopicData>("DCPSPublication")
         .map_err(|e| dds_error_to_code(&e))?;
 
-    let mut condition =
+    let condition =
         publication_reader.get_statuscondition().map_err(|e| dds_error_to_code(&e))?.clone();
     let _ = condition.set_enabled_statuses(StatusMask::DATA_AVAILABLE);
     let wait_set = WaitSet::new();
@@ -133,7 +133,7 @@ fn collect_subscription_snapshot(
         .lookup_datareader::<SubscriptionBuiltinTopicData>("DCPSSubscription")
         .map_err(|e| dds_error_to_code(&e))?;
 
-    let mut condition =
+    let condition =
         subscription_reader.get_statuscondition().map_err(|e| dds_error_to_code(&e))?.clone();
     let _ = condition.set_enabled_statuses(StatusMask::DATA_AVAILABLE);
     let wait_set = WaitSet::new();

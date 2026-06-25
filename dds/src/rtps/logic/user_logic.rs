@@ -430,9 +430,11 @@ impl UserLogic {
                                 &mut send_buffer,
                             ) {
                                 Ok(true) => {
-                                    writer.increase_heartbeat_count();
-                                    if !reader_proxy.is_first_hb_sent() {
-                                        reader_proxy.set_first_hb_sent();
+                                    if !writer.disable_piggyback_heartbeat() {
+                                        writer.increase_heartbeat_count();
+                                        if !reader_proxy.is_first_hb_sent() {
+                                            reader_proxy.set_first_hb_sent();
+                                        }
                                     }
                                 }
                                 Err(e) if e.code == RtpsErrorCode::PeerDisconnected => {
@@ -505,9 +507,11 @@ impl UserLogic {
                             .release(send_buffer);
                         match send_result {
                             Ok(()) => {
-                                writer.increase_heartbeat_count();
-                                if !reader_proxy.is_first_hb_sent() {
-                                    reader_proxy.set_first_hb_sent();
+                                if !writer.disable_piggyback_heartbeat() {
+                                    writer.increase_heartbeat_count();
+                                    if !reader_proxy.is_first_hb_sent() {
+                                        reader_proxy.set_first_hb_sent();
+                                    }
                                 }
                             }
                             Err(e) if e.code == RtpsErrorCode::PeerDisconnected => {
