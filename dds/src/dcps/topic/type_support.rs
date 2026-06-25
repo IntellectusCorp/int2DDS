@@ -147,6 +147,29 @@ pub trait TypeSupport: Send + Sync + 'static {
     // Key handling
     fn serialize_key(&self, data: &dyn Any) -> DdsResult<SerializedData>;
     fn deserialize_key(&self, serialized_key: &[u8]) -> DdsResult<Box<dyn Any + Send + Sync>>;
+
+    // Decode a wire serializedKey (K-flag SerializedPayload, with encapsulation header)
+    // into the key value. Default strips the 4-byte header and decodes big-endian;
+    // generated impls override to read endianness from the header.
+    fn deserialize_key_payload(&self, payload: &[u8]) -> DdsResult<Box<dyn Any + Send + Sync>> {
+        let body = if payload.len() >= 4 { &payload[4..] } else { payload };
+        self.deserialize_key(body)
+    }
+
+    // Encode the key as a wire serializedKey (K-flag SerializedPayload, with a
+    // 4-byte encapsulation header) in the given representation. Default emits XCDR1
+    // CDR_BE; generated impls override to honor XCDR2.
+    fn serialize_key_payload(
+        &self,
+        data: &dyn Any,
+        _format: &SerializationFormat,
+    ) -> DdsResult<SerializedData> {
+        let key = self.serialize_key(data)?;
+        let mut payload = Vec::with_capacity(key.len() + 4);
+        payload.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // CDR_BE, no options
+        payload.extend_from_slice(&key);
+        Ok(std::sync::Arc::from(payload))
+    }
     fn compute_key(&self, data: &dyn Any) -> InstanceHandle;
     fn is_compute_key_provided(&self) -> bool;
     fn get_extensibility_kind(&self) -> crate::serialize::xcdr::ExtensibilityKind;
@@ -315,4 +338,124 @@ mod keyhash_tests {
     // ============================================================================
     // LC 6/7 EMHEADER Optimization Tests
     // ============================================================================
+}
+
+#[cfg(test)]
+#[allow(unused_imports)]
+mod key_payload_tests {
+    // Dispose/unregister samples carry the key as a K-flag SerializedPayload (CDR
+    // with a 4-byte encapsulation header), not the headerless KeyHash bytes.
+    // deserialize_key_payload reads representation/endianness from the wire header.
+    use super::*;
+    use std::any::Any;
+
+    #[derive(DdsType)]
+    #[dds_type(crate_path = "int2dds", extensibility = "Appendable")]
+    struct KeyedShape {
+        #[dds(key)]
+        color: String,
+        x: i32,
+    }
+
+    #[test]
+    fn deserialize_key_payload_roundtrip_big_endian() {
+        let ts = KeyedShape::get_type_support();
+        let shape = KeyedShape { color: "BLUE".to_string(), x: 7 };
+
+        // serialize_key is headerless big-endian; wrap it as a wire serializedKey.
+        let key = ts.serialize_key(&shape as &dyn Any).unwrap();
+        let mut payload = vec![0x00, 0x00, 0x00, 0x00]; // CDR_BE encapsulation header
+        payload.extend_from_slice(&key);
+
+        let decoded = ts.deserialize_key_payload(&payload).unwrap();
+        let decoded = decoded.downcast_ref::<KeyedShape>().unwrap();
+        assert_eq!(decoded.color, "BLUE");
+    }
+
+    #[test]
+    fn deserialize_key_payload_xcdr2_delimited_le_wire() {
+        // CoreDX-style dispose serializedKey for "BLUE" under XCDR2: DELIMITED_CDR2_LE
+        // header (0x0009), single struct DHEADER, then the key members.
+        let ts = KeyedShape::get_type_support();
+        let payload: &[u8] = &[
+            0x00, 0x09, 0x00, 0x00, // DELIMITED_CDR2_LE encapsulation header
+            0x09, 0x00, 0x00, 0x00, // DHEADER: object size = 9 bytes
+            0x05, 0x00, 0x00, 0x00, // string length 5 (little-endian)
+            0x42, 0x4c, 0x55, 0x45, 0x00, // "BLUE\0"
+        ];
+
+        let decoded = ts.deserialize_key_payload(payload).unwrap();
+        let decoded = decoded.downcast_ref::<KeyedShape>().unwrap();
+        assert_eq!(decoded.color, "BLUE");
+    }
+
+    #[test]
+    fn deserialize_key_payload_little_endian_wire() {
+        // Cyclone/OpenDDS XCDR1 dispose serializedKey for "BLUE": CDR_LE header,
+        // little-endian string length 5, then "BLUE\0".
+        let ts = KeyedShape::get_type_support();
+        let payload: &[u8] = &[
+            0x00, 0x01, 0x00, 0x03, // CDR_LE encapsulation header
+            0x05, 0x00, 0x00, 0x00, // string length 5 (little-endian)
+            0x42, 0x4c, 0x55, 0x45, 0x00, // "BLUE\0"
+        ];
+
+        let decoded = ts.deserialize_key_payload(payload).unwrap();
+        let decoded = decoded.downcast_ref::<KeyedShape>().unwrap();
+        assert_eq!(decoded.color, "BLUE");
+    }
+
+    #[test]
+    fn serialize_key_payload_xcdr2_appendable_roundtrips() {
+        use crate::serialize::xcdr::ExtensibilityKind;
+        let ts = KeyedShape::get_type_support();
+        let shape = KeyedShape { color: "BLUE".to_string(), x: 7 };
+        let format = SerializationFormat::Xcdr {
+            extensibility_kind: ExtensibilityKind::Appendable,
+            use_delimiters: true,
+        };
+
+        let payload = ts.serialize_key_payload(&shape as &dyn Any, &format).unwrap();
+        // Appendable XCDR2 -> DELIMITED_CDR2_LE encapsulation id (0x0009).
+        assert_eq!(payload[1], 0x09);
+
+        let decoded = ts.deserialize_key_payload(&payload).unwrap();
+        assert_eq!(decoded.downcast_ref::<KeyedShape>().unwrap().color, "BLUE");
+    }
+
+    #[test]
+    fn raw_key_transcode_matches_typed_xcdr2_wire() {
+        // The raw-bytes dispose path has no typed value, so it transcodes the stored
+        // big-endian key: deserialize_key -> serialize_key_payload. The result must be
+        // byte-identical to the typed path that serializes the value directly.
+        use crate::serialize::xcdr::ExtensibilityKind;
+        let ts = KeyedShape::get_type_support();
+        let shape = KeyedShape { color: "BLUE".to_string(), x: 7 };
+        let format = SerializationFormat::Xcdr {
+            extensibility_kind: ExtensibilityKind::Appendable,
+            use_delimiters: true,
+        };
+
+        let typed_wire = ts.serialize_key_payload(&shape as &dyn Any, &format).unwrap();
+
+        let be_key = ts.serialize_key(&shape as &dyn Any).unwrap();
+        let value = ts.deserialize_key(&be_key).unwrap();
+        let transcoded_wire = ts.serialize_key_payload(&*value, &format).unwrap();
+
+        assert_eq!(&*typed_wire, &*transcoded_wire);
+    }
+
+    #[test]
+    fn serialize_key_payload_xcdr1_is_cdr_be() {
+        let ts = KeyedShape::get_type_support();
+        let shape = KeyedShape { color: "BLUE".to_string(), x: 7 };
+
+        let payload =
+            ts.serialize_key_payload(&shape as &dyn Any, &SerializationFormat::Cdr).unwrap();
+        // XCDR1 -> CDR_BE encapsulation header (0x0000).
+        assert_eq!(&payload[..2], &[0x00, 0x00]);
+
+        let decoded = ts.deserialize_key_payload(&payload).unwrap();
+        assert_eq!(decoded.downcast_ref::<KeyedShape>().unwrap().color, "BLUE");
+    }
 }
