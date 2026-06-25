@@ -87,6 +87,10 @@ pub fn to_include_guard(filename: &str) -> String {
 /// Flat `Type` with `flat_scope` "pkg::msg" -> `pkg::msg::dds_::Type_`
 /// Flat `Type` with no `flat_scope` -> `Type`.
 pub fn ros2_type_name(qualified_name: &str, flat_scope: Option<&str>) -> String {
+    // Idempotent: an already-mangled `scope::dds_::Name_` is returned unchanged.
+    if is_ros2_mangled(qualified_name) {
+        return qualified_name.to_string();
+    }
     if let Some(idx) = qualified_name.rfind("::") {
         let scope = &qualified_name[..idx];
         let name = &qualified_name[idx + 2..];
@@ -98,12 +102,28 @@ pub fn ros2_type_name(qualified_name: &str, flat_scope: Option<&str>) -> String 
     }
 }
 
+/// Whether a qualified name already follows the ROS2-over-DDS shape `…::dds_::Name_`.
+fn is_ros2_mangled(name: &str) -> bool {
+    match name.rfind("::") {
+        Some(idx) => {
+            let scope = &name[..idx];
+            let leaf = &name[idx + 2..];
+            leaf.ends_with('_') && (scope == "dds_" || scope.ends_with("::dds_"))
+        }
+        None => false,
+    }
+}
+
 /// Determine the ROS2 scope (`package::kind`) to apply to flat, module-less IDL.
 /// An explicit package wins (defaulting the interface kind to `msg`). Otherwise the
 /// scope is inferred from a ROS2-standard input path `<package>/{msg,srv,action}/<file>.idl`.
-pub fn ros2_flat_scope(input_file: &str, explicit_package: Option<&str>) -> Option<String> {
+pub fn ros2_flat_scope(
+    input_file: &str,
+    explicit_package: Option<&str>,
+    explicit_kind: Option<&str>,
+) -> Option<String> {
     if let Some(pkg) = explicit_package {
-        return Some(format!("{}::msg", pkg));
+        return Some(format!("{}::{}", pkg, explicit_kind.unwrap_or("msg")));
     }
     // Inspect only the trailing path segments: <package>/<kind>/<file>.idl
     let mut rev = input_file.rsplit(['/', '\\']).filter(|s| !s.is_empty());
@@ -114,6 +134,37 @@ pub fn ros2_flat_scope(input_file: &str, explicit_package: Option<&str>) -> Opti
         Some(format!("{}::{}", package, kind))
     } else {
         None
+    }
+}
+
+/// Inverse of [`ros2_type_name`] for an already-mangled name: strip the inserted
+/// `dds_` scope and trailing `_`. `pkg::msg::dds_::Type_` -> `pkg::msg::Type`.
+/// Names that are not in the mangled shape are returned unchanged. Used to compare
+/// member references (never mangled) against a type's `qualified_name` (mangled
+/// under `--ros2`).
+pub fn ros2_unmangle(name: &str) -> String {
+    if let Some(idx) = name.rfind("::dds_::") {
+        let scope = &name[..idx];
+        let leaf = &name[idx + "::dds_::".len()..];
+        let leaf = leaf.strip_suffix('_').unwrap_or(leaf);
+        return format!("{}::{}", scope, leaf);
+    }
+    name.to_string()
+}
+
+/// Rust path reference for an external (cross-package, `#include`d) type.
+/// `std_msgs::msg::Header` -> `std_msgs::msg::Header`: scope segments are kept
+/// verbatim and only the leaf is PascalCased, so the reference points at the
+/// dependency's own generated type instead of a bare (possibly colliding) leaf.
+/// The consuming build must expose each package's types at that path.
+pub fn rust_external_path(qualified: &str) -> String {
+    let mut parts: Vec<&str> = qualified.split("::").filter(|s| !s.is_empty()).collect();
+    match parts.pop() {
+        Some(leaf) if !parts.is_empty() => {
+            format!("{}::{}", parts.join("::"), to_pascal_case(leaf))
+        }
+        Some(leaf) => to_pascal_case(leaf),
+        None => qualified.to_string(),
     }
 }
 
@@ -199,24 +250,59 @@ mod tests {
     }
 
     #[test]
+    fn test_ros2_type_name_idempotent() {
+        // Re-mangling an already-mangled name is a no-op.
+        assert_eq!(ros2_type_name("pkg::msg::dds_::Type_", None), "pkg::msg::dds_::Type_");
+        assert_eq!(ros2_type_name("a::b::c::dds_::Foo_", None), "a::b::c::dds_::Foo_");
+        // A name that merely ends with '_' (no `dds_` scope) is NOT considered mangled.
+        assert_eq!(ros2_type_name("pkg::msg::Foo_", None), "pkg::msg::dds_::Foo__");
+    }
+
+    #[test]
+    fn test_ros2_unmangle() {
+        assert_eq!(ros2_unmangle("pkg::msg::dds_::Type_"), "pkg::msg::Type");
+        assert_eq!(ros2_unmangle("a::b::c::dds_::Foo_"), "a::b::c::Foo");
+        // Round-trips with ros2_type_name for scoped names.
+        assert_eq!(ros2_unmangle(&ros2_type_name("pkg::msg::Type", None)), "pkg::msg::Type");
+        // Not in mangled shape -> unchanged.
+        assert_eq!(ros2_unmangle("pkg::msg::Type"), "pkg::msg::Type");
+        assert_eq!(ros2_unmangle("Type"), "Type");
+    }
+
+    #[test]
+    fn test_rust_external_path() {
+        assert_eq!(rust_external_path("std_msgs::msg::Header"), "std_msgs::msg::Header");
+        assert_eq!(rust_external_path("pkg::msg::sensor_data"), "pkg::msg::SensorData");
+        assert_eq!(rust_external_path("Header"), "Header");
+    }
+
+    #[test]
     fn test_ros2_flat_scope() {
         // Explicit package -> defaults interface kind to msg
         assert_eq!(
-            ros2_flat_scope("HelloWorld.idl", Some("my_pkg")).as_deref(),
+            ros2_flat_scope("HelloWorld.idl", Some("my_pkg"), None).as_deref(),
             Some("my_pkg::msg")
+        );
+        // Explicit package + explicit kind
+        assert_eq!(
+            ros2_flat_scope("AddTwo.idl", Some("my_pkg"), Some("srv")).as_deref(),
+            Some("my_pkg::srv")
         );
         // Inferred from ROS2-standard layout
         assert_eq!(
-            ros2_flat_scope("a/b/my_pkg/msg/HelloWorld.idl", None).as_deref(),
+            ros2_flat_scope("a/b/my_pkg/msg/HelloWorld.idl", None, None).as_deref(),
             Some("my_pkg::msg")
         );
         assert_eq!(
-            ros2_flat_scope("robot_msgs/srv/AddTwo.idl", None).as_deref(),
+            ros2_flat_scope("robot_msgs/srv/AddTwo.idl", None, None).as_deref(),
             Some("robot_msgs::srv")
         );
-        assert_eq!(ros2_flat_scope("pkg\\action\\Fib.idl", None).as_deref(), Some("pkg::action"));
+        assert_eq!(
+            ros2_flat_scope("pkg\\action\\Fib.idl", None, None).as_deref(),
+            Some("pkg::action")
+        );
         // No package and non-standard path -> none
-        assert_eq!(ros2_flat_scope("input/HelloWorld.idl", None), None);
+        assert_eq!(ros2_flat_scope("input/HelloWorld.idl", None, None), None);
     }
 
     // ---- Keyword escaping tests ----

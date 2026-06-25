@@ -33,6 +33,17 @@ pub fn generate(model: &IdlModel, idl_filename: &str, opts: &COptions) -> String
     gen.out
 }
 
+/// Render a constant value as a C `#define` body.
+fn c_const_value(value: &ConstValue) -> String {
+    match value {
+        ConstValue::Int(v) => v.to_string(),
+        ConstValue::Float(v) => format!("{:?}", v),
+        ConstValue::Bool(v) => v.to_string(),
+        ConstValue::Str(v) => format!("{:?}", v),
+        ConstValue::Ident(v) => v.rsplit("::").next().unwrap_or(v).to_string(),
+    }
+}
+
 struct CGen<'a> {
     out: String,
     opts: &'a COptions,
@@ -54,6 +65,8 @@ impl<'a> CGen<'a> {
         }
 
         self.raw("\n#include \"int2dds_cdr.h\"\n\n");
+
+        self.emit_constants();
 
         // Enums first (may be referenced by structs)
         for e in &self.model.enums {
@@ -492,6 +505,18 @@ impl<'a> CGen<'a> {
         } else {
             self.type_to_c_declaration(&m.resolved_type, &escaped)
         }
+    }
+
+    /// IDL constants map to `#define` (classic OMG IDL-to-C mapping).
+    fn emit_constants(&mut self) {
+        if self.model.constants.is_empty() {
+            return;
+        }
+        for c in &self.model.constants {
+            let name = naming::escape_keyword(&c.name, naming::TargetLang::C);
+            self.raw(&format!("#define {} {}\n", name, c_const_value(&c.value)));
+        }
+        self.raw("\n");
     }
 
     fn type_to_c_declaration(&self, ty: &ResolvedType, name: &str) -> String {

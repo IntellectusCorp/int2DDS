@@ -36,6 +36,20 @@ fn cs_ident(name: &str) -> String {
     naming::escape_keyword(&naming::to_pascal_case(name), naming::TargetLang::CSharp)
 }
 
+/// Render a constant value as a C# literal (float constants need an `f` suffix).
+fn cs_const_value(value: &ConstValue, ty: &ResolvedType) -> String {
+    match value {
+        ConstValue::Int(v) => v.to_string(),
+        ConstValue::Float(v) => match ty {
+            ResolvedType::F32 => format!("{:?}f", v),
+            _ => format!("{:?}", v),
+        },
+        ConstValue::Bool(v) => v.to_string(),
+        ConstValue::Str(v) => format!("{:?}", v),
+        ConstValue::Ident(v) => v.rsplit("::").next().unwrap_or(v).to_string(),
+    }
+}
+
 struct CsGen<'a> {
     out: String,
     opts: &'a CSharpOptions,
@@ -56,6 +70,8 @@ impl<'a> CsGen<'a> {
         self.line(&format!("namespace {}", self.opts.namespace));
         self.line("{");
         self.indent += 1;
+
+        self.emit_constants();
 
         // Enums first (may be referenced by structs)
         for e in &self.model.enums.clone() {
@@ -627,6 +643,25 @@ impl<'a> CsGen<'a> {
 
         self.indent -= 1;
         self.line("}");
+    }
+
+    /// IDL constants are grouped into a `static class Constants` (C# consts need a type).
+    fn emit_constants(&mut self) {
+        if self.model.constants.is_empty() {
+            return;
+        }
+        self.line("public static class Constants");
+        self.line("{");
+        self.indent += 1;
+        for c in &self.model.constants.clone() {
+            let name = naming::escape_keyword(&c.name, naming::TargetLang::CSharp);
+            let ty = self.type_to_csharp(&c.resolved_type);
+            let val = cs_const_value(&c.value, &c.resolved_type);
+            self.line(&format!("public const {} {} = {};", ty, name, val));
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.line("");
     }
 
     fn type_to_csharp(&self, ty: &ResolvedType) -> String {
