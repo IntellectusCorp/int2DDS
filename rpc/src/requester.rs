@@ -338,13 +338,13 @@ impl<TReq: DdsRpcType, TRep: DdsRpcType> ServiceProxy for Requester<TReq, TRep> 
     }
 
     fn wait_for_service(&self) -> DdsRpcResult<()> {
-        let mut condition = self.writer()?.get_statuscondition()?;
+        let condition = self.writer()?.get_statuscondition()?;
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED)?;
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition)?;
         wait_set.wait(int2dds::dcps::core::time::Duration::infinite())?;
 
-        let mut condition = self.reader()?.get_statuscondition()?;
+        let condition = self.reader()?.get_statuscondition()?;
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED)?;
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition)?;
@@ -356,13 +356,13 @@ impl<TReq: DdsRpcType, TRep: DdsRpcType> ServiceProxy for Requester<TReq, TRep> 
     fn wait_for_service_timeout(&self, timeout: Duration) -> DdsRpcResult<()> {
         let dds_timeout = int2dds::dcps::core::time::Duration::try_from(timeout)?;
 
-        let mut condition = self.writer()?.get_statuscondition()?;
+        let condition = self.writer()?.get_statuscondition()?;
         condition.set_enabled_statuses(StatusMask::PUBLICATION_MATCHED)?;
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition)?;
         wait_set.wait(dds_timeout)?;
 
-        let mut condition = self.reader()?.get_statuscondition()?;
+        let condition = self.reader()?.get_statuscondition()?;
         condition.set_enabled_statuses(StatusMask::SUBSCRIPTION_MATCHED)?;
         let wait_set = WaitSet::new();
         wait_set.attach_condition(condition)?;
